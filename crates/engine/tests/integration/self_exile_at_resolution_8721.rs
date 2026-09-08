@@ -36,6 +36,7 @@
 //! the failure is the rider tail-drop and not the self-exile machinery.
 
 use engine::game::scenario::{GameScenario, P0};
+use engine::types::ability::{Effect, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastOfferKind, WaitingFor};
 use engine::types::phase::Phase;
@@ -51,7 +52,11 @@ const SINS_OF_THE_PAST_ORACLE: &str =
 without paying its mana cost. If that spell would be put into your graveyard, exile it \
 instead. Exile Sins of the Past.";
 
-/// Invoke Calamity. `FreeCastFromZones` head + the same rider + self-exile.
+/// Invoke Calamity. Prints the same three parts as Sins of the Past, but lowers
+/// DIFFERENTLY — measured, not assumed: the head is `FreeCastFromZones` and its
+/// graveyard redirect is a FIELD on that effect (`graveyard_replacement: Exile`),
+/// not a `ChangeZone { ParentTarget }` rider node. So its `sub_ability` is the
+/// self-exile itself, and the rider branch cannot see it at all.
 const INVOKE_CALAMITY_ORACLE: &str =
     "You may cast up to two instant and/or sorcery spells with total mana value 6 or less \
 from your graveyard and/or hand without paying their mana costs. If those spells would be \
@@ -119,13 +124,19 @@ fn a_self_exile_after_a_cast_from_zone_rider_exiles_the_resolved_spell() {
     );
 }
 
-/// CR 608.2c + issue #8721: the `FreeCastFromZones` neighbour. Same rider and
-/// same trailing self-exile in the AST, but a different head effect — and it was
-/// ALREADY green before this fix, because the rider branch this fix changes is
-/// gated on `Effect::CastFromZone` and never sees it. So this test is not a
-/// proof of the fix; it is the boundary marker that pins the neighbouring head
-/// against a future widening of that gate. Counter-probe: neutralizing the fix
-/// leaves this test green.
+/// CR 608.2c + issue #323: the third route to a trailing self-exile, and it was
+/// ALREADY green before this fix. Not a proof of the fix — counter-probe:
+/// neutralizing the fix leaves this test green.
+///
+/// CORRECTED after review, because the first version of this comment claimed
+/// more than the AST holds. Invoke Calamity carries NO rider sub-ability: its
+/// redirect rides `FreeCastFromZones { graveyard_replacement: Exile }` as a
+/// field, so `graveyard_destination_rider` returns `None` for its `SelfRef`
+/// sub-ability whatever head gate is used. That means this test canNOT serve as
+/// a boundary marker against widening the `Effect::CastFromZone` gate — widening
+/// it would change nothing here. What it does pin is the self-exile itself
+/// travelling the generic chain drain under a third head effect, which is worth
+/// having and is all it is offered as.
 #[test]
 fn a_self_exile_after_a_free_cast_from_zones_rider_exiles_the_resolved_spell() {
     let mut scenario = GameScenario::new_n_player(2, 42);
@@ -341,17 +352,239 @@ return it to the battlefield (front face up).";
     }
     runner.advance_until_stack_empty();
 
-    // Reach guard: the head must have resolved at all.
+    // REACH GUARD, and it is the parsed SHAPE rather than a game outcome.
+    //
+    // The obvious guard does not work here, and the reason is worth recording:
+    // `fodder`'s zone cannot serve, because the scenario PLACES it in the
+    // graveyard — `Zone::Graveyard` is its starting value, so asserting it says
+    // nothing about whether anything ran. A casting permission on `fodder`
+    // cannot serve either: MEASURED, it is empty after resolution. This chapter
+    // grants a BLANKET permission ("instant and sorcery spells from any
+    // graveyard") with no chosen target, so no permission is stamped on any
+    // individual card — unlike Sins of the Past, which targets one.
+    //
+    // What does discriminate is the lowering. This test only means anything if
+    // the text reached the branch as a `CastFromZone` head carrying a rider and
+    // a tail that CHAINS A SECOND LINK — that shape is the whole subject. A
+    // future parser change that lowers the chapter to `Effect::Unimplemented`,
+    // or that flattens the tail to a single link, would otherwise leave the
+    // assertion below green while testing nothing.
+    let head = runner.state().objects[&source]
+        .abilities
+        .first()
+        .expect("the stand-in sorcery must carry its parsed chapter ability")
+        .clone();
+    assert!(
+        matches!(&*head.effect, Effect::CastFromZone { .. }),
+        "reach guard: the chapter text must lower to a CastFromZone head, or this test \
+         exercises nothing; got {:?}",
+        head.effect
+    );
+    let rider = head
+        .sub_ability
+        .as_deref()
+        .expect("reach guard: the head must carry the graveyard-destination rider");
+    assert!(
+        matches!(
+            &*rider.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "reach guard: the rider must be the graveyard-destination rider the branch consumes; \
+         got {:?}",
+        rider.effect
+    );
+    let tail = rider
+        .sub_ability
+        .as_deref()
+        .expect("reach guard: the rider must carry the trailing \"Exile this Saga\" instruction");
+    assert!(
+        tail.sub_ability.is_some(),
+        "reach guard: the tail must chain a SECOND link (\"then return it\") — a single-link \
+         tail is a different case and would make this boundary test vacuous"
+    );
+    // Not a reach guard (see above) — `fodder` only has to still be castable for
+    // the grant to mean anything, which is why it is in the graveyard at all.
     assert_eq!(
         runner.state().objects[&fodder].zone,
         Zone::Graveyard,
-        "reach guard: the granted card stays in the graveyard, so the head ran and its rider \
-         was consumed as metadata"
+        "the rider is consumed as metadata, so the granted card is not moved by it"
     );
     assert_eq!(
         runner.state().objects[&source].zone,
         Zone::Graveyard,
         "a multi-link tail is not run at all: half of \"Exile this Saga, then return it\" \
          would strand the source in exile (CR 400.7 — the moved card is a new object)"
+    );
+}
+
+/// Issue #8721, review of PR #8749: the SECOND scope boundary — the tail's
+/// effect must be a family this change has runtime evidence for.
+///
+/// Six corpus cards hang a `SequentialSibling` tail behind a `CastFromZone`
+/// graveyard rider, and their tails are four different effects that read four
+/// different pieces of state. Two of them — Invasion of Alara
+/// (`PutAtLibraryPosition`) and Finale of Promise (`CopySpell`) — could not be
+/// driven to their tail in any scenario, so #8749 leaves them exactly as they
+/// are on main rather than changing them unmeasured.
+///
+/// A STAND-IN, and said plainly: the sorcery below is a synthetic composite
+/// built for this test, not any printed card. Its first two sentences are Sins
+/// of the Past verbatim (`client/public/card-data.json`), so the head and rider
+/// are the real shapes; the third sentence is written to lower to a
+/// `PutAtLibraryPosition` tail whose target is OBSERVABLE — which Invasion of
+/// Alara's own `ExiledBySource` tail is not, and which is exactly why the real
+/// card could not serve here. MEASURED: it lowers to `CastFromZone` + rider +
+/// single-link `PutAtLibraryPosition`, so it clears the last-link rule and is
+/// stopped by the family allowlist alone.
+///
+/// Counter-probe: dropping `tail_family_has_runtime_evidence` from the filter
+/// chain turns this red — `bait` leaves the graveyard for the library.
+#[test]
+fn a_tail_whose_family_has_no_runtime_evidence_is_not_run() {
+    const PUT_AT_LIBRARY_TAIL_STAND_IN: &str =
+        "Until end of turn, you may cast target instant or sorcery card from your graveyard \
+without paying its mana cost. If that spell would be put into your graveyard, exile it \
+instead. Put target creature card from a graveyard on the bottom of its owner's library.";
+
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Library Tail Stand-In",
+            false,
+            PUT_AT_LIBRARY_TAIL_STAND_IN,
+        )
+        .id();
+    let fodder = scenario
+        .add_spell_to_graveyard(P0, "Graveyard Fodder", true)
+        .id();
+    let bait = scenario
+        .add_creature_to_graveyard(P0, "Library Bait", 2, 2)
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Reach guard on the SHAPE: this test means nothing unless the stand-in
+    // reaches the branch as a `CastFromZone` head whose rider carries a
+    // single-link `PutAtLibraryPosition` tail. Asserted before resolution, so a
+    // parser change that alters the lowering fails here rather than silently
+    // making the outcome assertion vacuous.
+    let head = runner.state().objects[&spell]
+        .abilities
+        .first()
+        .expect("the stand-in must carry its parsed ability")
+        .clone();
+    assert!(
+        matches!(&*head.effect, Effect::CastFromZone { .. }),
+        "reach guard: the stand-in must lower to a CastFromZone head; got {:?}",
+        head.effect
+    );
+    let rider = head
+        .sub_ability
+        .as_deref()
+        .expect("reach guard: the head must carry the graveyard-destination rider");
+    assert!(
+        matches!(
+            &*rider.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "reach guard: the rider must be the one the branch consumes; got {:?}",
+        rider.effect
+    );
+    let tail = rider
+        .sub_ability
+        .as_deref()
+        .expect("reach guard: the rider must carry a tail");
+    assert!(
+        matches!(&*tail.effect, Effect::PutAtLibraryPosition { .. }),
+        "reach guard: the tail must be the family under test; got {:?}",
+        tail.effect
+    );
+    assert!(
+        tail.sub_ability.is_none(),
+        "reach guard: the tail must be single-link, so the LAST-LINK rule cannot be what \
+         stops it — the family allowlist has to be the only thing standing in the way"
+    );
+
+    let outcome = runner.cast(spell).target_objects(&[fodder]).resolve();
+
+    assert_eq!(
+        outcome.state().objects[&bait].zone,
+        Zone::Graveyard,
+        "a tail whose effect family has no test that fails when the branch is reverted must \
+         not be run: Invasion of Alara and Finale of Promise keep their main behaviour until \
+         that measurement exists (issue #8750)"
+    );
+    assert_eq!(
+        outcome.state().objects[&fodder].zone,
+        Zone::Graveyard,
+        "the rider stays permission metadata either way"
+    );
+
+    // POSITIVE TWIN, and it is what makes the assertion above mean something.
+    //
+    // `bait` starts in the graveyard, so "still in the graveyard" is also what a
+    // tail that ran but bound NOTHING would leave behind — the assertion alone
+    // cannot tell the allowlist apart from a dead target. The twin removes that
+    // reading: the same stand-in, the same third-sentence target wording, only
+    // the tail's EFFECT swapped for an allowlisted `ChangeZone`. It moves the
+    // same object. So the target binds, the branch is reached, and the single
+    // difference between the two halves is the family allowlist.
+    let mut twin = GameScenario::new_n_player(2, 42);
+    twin.at_phase(Phase::PreCombatMain);
+    let twin_spell = twin
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Change Zone Tail Stand-In",
+            false,
+            "Until end of turn, you may cast target instant or sorcery card from your \
+graveyard without paying its mana cost. If that spell would be put into your graveyard, \
+exile it instead. Exile target creature card from a graveyard.",
+        )
+        .id();
+    let twin_fodder = twin
+        .add_spell_to_graveyard(P0, "Graveyard Fodder", true)
+        .id();
+    let twin_bait = twin
+        .add_creature_to_graveyard(P0, "Library Bait", 2, 2)
+        .id();
+
+    let mut twin_runner = twin.build();
+    let twin_head = twin_runner.state().objects[&twin_spell]
+        .abilities
+        .first()
+        .expect("the twin stand-in must carry its parsed ability")
+        .clone();
+    let twin_tail = twin_head
+        .sub_ability
+        .as_deref()
+        .and_then(|rider| rider.sub_ability.as_deref())
+        .expect("reach guard: the twin's rider must carry a tail");
+    assert!(
+        matches!(&*twin_tail.effect, Effect::ChangeZone { .. }),
+        "reach guard: the twin's tail must be an ALLOWLISTED family, or it proves nothing \
+         about the allowlist; got {:?}",
+        twin_tail.effect
+    );
+
+    let twin_outcome = twin_runner
+        .cast(twin_spell)
+        .target_objects(&[twin_fodder])
+        .resolve();
+    assert_eq!(
+        twin_outcome.state().objects[&twin_bait].zone,
+        Zone::Exile,
+        "the twin's allowlisted tail DOES run and DOES bind this target — so the negative \
+         assertion above measures the allowlist, not a tail that binds nothing"
     );
 }

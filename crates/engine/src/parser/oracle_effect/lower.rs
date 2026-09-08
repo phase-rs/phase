@@ -6747,8 +6747,15 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
     (text, None)
 }
 
-/// CR 603.7 + CR 608.2g (issue #8721): the cast-permission back-reference gate — "if you cast
+/// CR 603.7 (issue #8721): the cast-permission back-reference gate — "if you cast
 /// a spell this way, …" / "when you cast that spell, …".
+///
+/// CR 608.2g is the CONTRAST rule here, not an authority for this lowering, and
+/// an earlier version of this header cited it as though it were: 608.2g governs
+/// an effect that "specifically instructs or allows a player to cast a spell
+/// during resolution", which is precisely what this class is NOT. If a member of
+/// it ever lowered to that shape, the delayed trigger would be created after its
+/// own event and never fire (CR 603.7a).
 ///
 /// The consequent is gated on a cast that HAS NOT HAPPENED when the granting
 /// ability resolves: in every case measured over the full-corpus parse dump the

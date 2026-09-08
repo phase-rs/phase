@@ -113,6 +113,22 @@ pub fn resolve(
     // `bind_contextual_filter_to_condition` call below and degrades identically,
     // so it is gated here too. It is listed second because it also carries an
     // `or_trigger`, whose filters go through the same rewrite.
+    //
+    // WHAT THIS STILL DOES NOT COVER, measured and stated because the obvious
+    // reading of the guard is that it does: only a bare `ParentTarget` is
+    // rejected. `TargetFilter::ParentTargetSlot { index }` degrades the same way
+    // — `concrete_parent_target_filter` falls back to `Any` for an out-of-range
+    // slot — and is NOT rejected. MEASURED over the corpus, exactly one card
+    // carries a `ParentTargetSlot` in a delayed-trigger filter: Stolen Uniform
+    // (`WhenNextEvent { ChangesController, valid_card: ParentTargetSlot { 1 } }`),
+    // and no `WheneverEvent` carries one at all.
+    //
+    // This PR does not change that card in either direction. Before it,
+    // `WhenNextEvent` reached no guard whatsoever and always installed; after it,
+    // the guard can only ever refuse MORE, and it does not refuse a slot. So the
+    // gap is pre-existing and untouched here rather than opened here — repairing
+    // it means testing whether the slot is in range, which changes a card outside
+    // #8721's class and needs its own measurement (filed).
     let over_fire_prone_triggers: Vec<&crate::types::ability::TriggerDefinition> = match &condition
     {
         DelayedTriggerCondition::WheneverEvent { trigger, .. } => vec![trigger.as_ref()],
@@ -123,7 +139,28 @@ pub fn resolve(
         } => std::iter::once(trigger.as_ref())
             .chain(or_trigger.as_deref())
             .collect(),
-        _ => Vec::new(),
+        // Enumerated rather than wildcarded (CLAUDE.md: "prefer exhaustive
+        // `match` over fallback defaults"), so a future variant must make this
+        // decision instead of inheriting a silent skip.
+        //
+        // These return nothing because this guard reads `TriggerDefinition`
+        // filter slots and they carry none — NOT because they are safe. Said
+        // plainly, because an earlier version of this comment claimed they were:
+        // the four `filter: TargetFilter` variants below go through the SAME
+        // `bind_parent_target_filter` call and degrade a bare `ParentTarget` to
+        // `TargetFilter::Any` identically. MEASURED over the corpus, 79 such
+        // filters exist across 76 cards (29 `WhenDies`, 38 `WhenDiesOrExiled`,
+        // 10 `WhenLeavesPlayFiltered`, 2 `WhenEntersBattlefield`). Whether any of
+        // them can reach this call with an empty `ability.targets` is UNMEASURED.
+        // It is not a regression — these arms skip the guard on main too — and it
+        // is out of scope for #8721, which is why they stay `Vec::new()` here.
+        DelayedTriggerCondition::AtNextPhase { .. }
+        | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+        | DelayedTriggerCondition::WhenLeavesPlay { .. }
+        | DelayedTriggerCondition::WhenDies { .. }
+        | DelayedTriggerCondition::WhenLeavesPlayFiltered { .. }
+        | DelayedTriggerCondition::WhenEntersBattlefield { .. }
+        | DelayedTriggerCondition::WhenDiesOrExiled { .. } => Vec::new(),
     };
     if !over_fire_prone_triggers.is_empty() {
         let references_empty_parent = ability.targets.is_empty()
@@ -1385,7 +1422,16 @@ mod tests {
     ///
     /// Both directions, because either half alone is trivially satisfiable: a
     /// guard that refuses everything passes the first assertion, one that refuses
-    /// nothing passes the second.
+    /// nothing passes the second. Both directions run over BOTH conditions —
+    /// an earlier version ran the positive control on `WhenNextEvent` only, which
+    /// a guard refusing every `WheneverEvent` unconditionally would still pass.
+    ///
+    /// Not covered, and named rather than implied: the `or_trigger` slot that
+    /// this arm also feeds through the same rewrite. MEASURED over the corpus, no
+    /// `WhenNextEvent.or_trigger` carries a `ParentTarget` or `ParentTargetSlot`
+    /// filter — 59 `WhenNextEvent` conditions exist, 5 carry an `or_trigger`, and
+    /// none of those 5 uses either filter — so there is nothing to drive it with
+    /// today.
     #[test]
     fn the_over_fire_guard_covers_both_delayed_conditions() {
         fn condition(next: bool) -> DelayedTriggerCondition {
@@ -1435,31 +1481,35 @@ mod tests {
         }
 
         // Positive control: the same condition WITH a chosen target installs, so
-        // the guard is not simply refusing everything.
-        let mut state = GameState::new_two_player(42);
-        let ability = ResolvedAbility::new(
-            Effect::CreateDelayedTrigger {
-                condition: condition(true),
-                effect: Box::new(AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::Draw {
-                        count: QuantityExpr::Fixed { value: 1 },
-                        target: TargetFilter::Controller,
-                    },
-                )),
-                uses_tracked_set: false,
-            },
-            vec![crate::types::ability::TargetRef::Object(ObjectId(9))],
-            ObjectId(1),
-            PlayerId(0),
-        );
-        let mut events = Vec::new();
-        resolve(&mut state, &ability, &mut events).expect("resolution must not error");
-        assert_eq!(
-            state.delayed_triggers.len(),
-            1,
-            "a chosen target binds ParentTarget to that object, so the trigger installs"
-        );
+        // the guard is not simply refusing everything. Over BOTH conditions, or
+        // a guard that refuses every `WheneverEvent` outright would pass.
+        for next in [false, true] {
+            let mut state = GameState::new_two_player(42);
+            let ability = ResolvedAbility::new(
+                Effect::CreateDelayedTrigger {
+                    condition: condition(next),
+                    effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    )),
+                    uses_tracked_set: false,
+                },
+                vec![crate::types::ability::TargetRef::Object(ObjectId(9))],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).expect("resolution must not error");
+            assert_eq!(
+                state.delayed_triggers.len(),
+                1,
+                "next={next}: a chosen target binds ParentTarget to that object, so the trigger \
+             installs"
+            );
+        }
     }
 
     /// V15 — CR 701.17c: a delayed trigger snapshotting a mill's

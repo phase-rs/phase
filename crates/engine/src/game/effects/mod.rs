@@ -11436,6 +11436,41 @@ fn is_bound_attach_remainder_for(pending: &PendingContinuation, ability: &Resolv
         && remaining.iter().all(|target| selected.contains(target))
 }
 
+/// Issue #8721: which tail effects the `CastFromZone` graveyard-rider branch is
+/// allowed to resolve.
+///
+/// MEASURED over the full corpus (`client/public/card-data.json`, 35804
+/// entries): 50 `CastFromZone` heads consume a graveyard-destination rider, and
+/// exactly six of them hang a `SequentialSibling` tail behind it. Those six
+/// tails are FOUR different effects, and they do not read the same state — a
+/// `ChangeZone` reads only the object it names, while `CopySpell` reads the
+/// resolution's tracked spell sets and `PutAtLibraryPosition` reads the set
+/// exiled by the source. A runtime result measured for one is therefore not
+/// evidence for another.
+///
+/// So this is an allowlist of the families driven end-to-end by a test, not a
+/// judgement that the others are wrong:
+///
+/// - `ChangeZone` — Sins of the Past, driven in
+///   `self_exile_at_resolution_8721::a_self_exile_after_a_cast_from_zone_rider_exiles_the_resolved_spell`.
+///   (The Great Work's tail is also `ChangeZone` but chains a second link, and
+///   is excluded one step earlier by the last-link rule.)
+/// - `CreateDelayedTrigger` — Helmut Zemo, driven in
+///   `cast_this_way_gate_8721::zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast`.
+///
+/// Absent on purpose: `PutAtLibraryPosition` (Invasion of Alara) and `CopySpell`
+/// (Finale of Promise). Both are single-link tails, so the rule above would
+/// admit them, but neither could be driven to its tail in a `GameScenario` —
+/// their behaviour stays exactly as it is on main until that measurement exists
+/// (issue #8750). Adding a variant here without a test that fails when the
+/// branch is reverted is the mistake this list was introduced to prevent.
+fn tail_family_has_runtime_evidence(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChangeZone { .. } | Effect::CreateDelayedTrigger { .. }
+    )
+}
+
 /// One full pass of an ability's resolution chain — the parent effect (with its
 /// `repeat_for` count loop) and the entire `sub_ability` chain. This is one
 /// "process" for the purposes of "repeat this process" (CR 608.2c). Extracted
@@ -13722,30 +13757,65 @@ fn resolve_chain_body(
             matches!(&ability.effect, Effect::CastFromZone { .. })
                 && cast_from_zone::graveyard_destination_rider(sub).is_some();
         if direct_cast_from_zone_graveyard_rider {
-            // CR 608.2c: the RIDER is metadata, but the chain does not end with
-            // it. Whatever the parser hung after the rider as a
-            // `SequentialSibling` is a further printed instruction of this same
-            // spell — "Exile ~." (Sins of the Past), "…put the other cards on
-            // the bottom…" (Invasion of Alara) — and CR 608.2c requires it to be
-            // followed in the order written. Take that tail for EVERY head that
-            // consumes the rider, not only the per-opponent fanout; the decision
-            // left is WHEN it runs, never WHETHER (issue #8721).
+            // The RIDER is metadata, but the chain does not end with it.
+            // Whatever the parser hung after the rider as a `SequentialSibling`
+            // is a further printed instruction of this same spell — "Exile ~."
+            // (Sins of the Past) — and until #8721 it was dropped for every head
+            // except the per-opponent fanout, whose branch this replaces. This is
+            // not a rules subtlety: the instruction was never executed at all.
             //
-            // SCOPE, and the reason is a measurement rather than taste: the tail
-            // must be the LAST link. A tail that itself chains further
-            // instructions is not covered here, because running only its first
-            // link can leave the object worse off than dropping the whole tail
-            // did. The Great Work is the one corpus member of that shape
-            // ("Exile this Saga, THEN return it to the battlefield"): measured on
-            // a stand-in, the exile runs and the return does not, so the source
-            // ends in exile where before it reached the graveyard. That second
-            // `SelfRef` fails because CR 400.7 makes the moved object a new one —
-            // a separate defect with its own unit of work (issue filed).
+            // SCOPE — two restrictions, both measured, both narrower than the
+            // printed text alone would justify:
+            //
+            //  1. The tail must be the LAST link. Running only the first link of
+            //     a chained tail can leave the object worse off than dropping the
+            //     whole tail did. The Great Work is the one corpus member of that
+            //     shape ("Exile this Saga, THEN return it to the battlefield"):
+            //     measured on a stand-in, the exile runs and the return does not,
+            //     so the source ends in exile where before it reached the
+            //     graveyard. The second `SelfRef` binds nothing because CR 400.7
+            //     makes the moved card a new object (issue #8750).
+            //
+            //  2. The tail's effect must be one this change has RUNTIME evidence
+            //     for — see `tail_family_has_runtime_evidence`.
+            //
+            // A hand-pick `CastFromZone` (Kellan, the Kid) stashes the WHOLE
+            // ability — rider and tail included — as its own `EffectZoneChoice`
+            // continuation, and the resume feeds that stashed head into
+            // `complete_hand_pick_cast_from_zone`, which requires it to still be
+            // an `Effect::CastFromZone` (issue #5945). Taking the tail out of the
+            // chain at all would break that, so the extraction is skipped
+            // wholesale for that state rather than merely re-timed. MEASURED: no
+            // corpus member of the rider class is a private-zone pick, so this
+            // guards a shape rather than a card. The dedicated hand-pick guard
+            // ~45 lines below computes the same three conjuncts; this branch
+            // returns before reaching it, which is why they are spelled out
+            // twice. If either changes, this is the site to re-read.
+            let hand_pick_continuation_is_active = waits_for_resolution_choice(&state.waiting_for)
+                && state.active_ability_continuation().is_some()
+                && state.active_ability_continuation() != pending_continuation_before.as_ref();
+            // The per-opponent fanout (Diluvian Primordial) is the ONE head that
+            // already ran its tail before #8721, and `diluvian_primordial_6754`
+            // pins that — including a tail effect (`Draw`) that no restriction
+            // below would admit. So it keeps exactly the behaviour it had; the
+            // restrictions apply only to the heads #8721 newly covers. MEASURED
+            // over the corpus: no fanout head carries a tail at all, so this
+            // exemption preserves a tested shape rather than a shipping card.
+            let is_per_opponent_fanout =
+                crate::game::ability_utils::is_per_opponent_target_fanout(ability);
+            let tail_is_in_scope = |tail: &ResolvedAbility| {
+                if is_per_opponent_fanout {
+                    return true;
+                }
+                !hand_pick_continuation_is_active
+                    && tail.sub_ability.is_none()
+                    && tail_family_has_runtime_evidence(&tail.effect)
+            };
             let mut direct_sequential_tail = sub
                 .sub_ability
                 .as_deref()
                 .filter(|tail| tail.sub_link == SubAbilityLink::SequentialSibling)
-                .filter(|tail| tail.sub_ability.is_none())
+                .filter(|tail| tail_is_in_scope(tail))
                 .cloned();
             if let Some(tail) = direct_sequential_tail.as_mut() {
                 if should_propagate_parent_targets(ability, tail) {
@@ -13753,43 +13823,20 @@ fn resolve_chain_body(
                 }
                 apply_parent_chain_context(tail, ability, effect_context_object.as_ref(), state);
             }
-            // CR 608.2c: the head may have parked its own resolution before the
-            // tail can run. Two shapes do: the per-opponent fanout opens a
-            // `FreeCastWindow` (Diluvian Primordial), and a hand-pick
-            // `CastFromZone` installs its own `EffectZoneChoice` continuation
-            // (Kellan, the Kid — the same state the hand-pick guard further
-            // down reads, which this branch returns before reaching). Running
-            // the tail inline in either case would resolve it against a state
-            // the player has not decided yet, so park it behind that head.
-            //
-            // The second disjunct is spelled out rather than shared. The
-            // hand-pick `CastFromZone` guard ~45 lines below computes the same
-            // three conjuncts. `continuation_installed_by_this_effect` further
-            // down computes only the last two and pairs
-            // `waits_for_resolution_choice` per use site — NEGATED for the
-            // generic skip, absent for `PayCost`, present for `Explore` — so it
-            // is a near-twin, not a twin. If either changes, this is the site to
-            // re-read.
-            //
-            // MEASURED, and said plainly: neither disjunct is reached by any test
-            // in this PR, and no corpus member of the rider class is a
-            // private-zone pick, so this is unreached precaution rather than
-            // measured design. Should the second disjunct ever fire, its
-            // `prepend_to_pending_continuation` is the very move the hand-pick
-            // guard below exists to prevent (issue #5945) — that conflict has to
-            // be settled before it can be relied on.
-            let head_parked_its_own_resolution =
-                matches!(
+            // The head may have parked its own resolution before the tail can
+            // run: the per-opponent fanout opens a `FreeCastWindow` (Diluvian
+            // Primordial), which is the state the pre-#8721 branch already
+            // handled here. Resolving the tail inline against a window the player
+            // has not answered yet would read a state that does not exist, so
+            // park it behind that head instead.
+            if let Some(tail) = direct_sequential_tail {
+                if matches!(
                     state.waiting_for,
                     WaitingFor::CastOffer {
                         kind: CastOfferKind::FreeCastWindow { .. },
                         ..
                     }
-                ) || (waits_for_resolution_choice(&state.waiting_for)
-                    && state.active_ability_continuation().is_some()
-                    && state.active_ability_continuation() != pending_continuation_before.as_ref());
-            if let Some(tail) = direct_sequential_tail {
-                if head_parked_its_own_resolution {
+                ) {
                     prepend_to_pending_continuation(state, tail);
                 } else {
                     resolve_ability_chain(state, &tail, events, depth + 1)?;
@@ -16508,6 +16555,66 @@ fn resolve_add_pending_enters_modifications(
 mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
+
+    /// Issue #8721 / review of PR #8749: the rider-tail allowlist is a POLICY
+    /// pin, not behaviour coverage — it asserts that the branch admits only the
+    /// tail families some integration test drives end to end, and it is meant to
+    /// go red when a variant is added without one.
+    ///
+    /// The four effects below are the lowered tails of the four corpus cards that
+    /// reach the branch with a single-link tail, taken from
+    /// `client/public/card-data.json` — ABRIDGED to the fields that identify the
+    /// variant, the rest supplied by serde defaults. Said plainly, because an
+    /// earlier version of this comment called them verbatim: only Invasion of
+    /// Alara's is complete. That is enough for what is asserted here, since
+    /// `tail_family_has_runtime_evidence` reads the enum discriminant and
+    /// nothing else — but nobody should read these as full card shapes.
+    #[test]
+    fn the_rider_tail_allowlist_admits_only_the_families_a_test_drives() {
+        fn effect(json: &str) -> Effect {
+            serde_json::from_str(json).expect("tail effect lifted from card-data.json must parse")
+        }
+
+        // Sins of the Past — driven in
+        // `self_exile_at_resolution_8721::a_self_exile_after_a_cast_from_zone_rider_exiles_the_resolved_spell`.
+        let sins_of_the_past = effect(
+            r#"{"type":"ChangeZone","origin":null,"destination":"Exile","target":{"type":"SelfRef"}}"#,
+        );
+        // Helmut Zemo, Mastermind — driven in
+        // `cast_this_way_gate_8721::zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast`.
+        let helmut_zemo = effect(
+            r#"{"type":"CreateDelayedTrigger","condition":{"type":"WhenNextEvent","trigger":{"mode":"SpellCast","valid_card":{"type":"ParentTarget"},"valid_target":{"type":"Controller"}},"or_trigger":null},"effect":{"kind":"Spell","effect":{"type":"PutCounter","counter_type":"P1P1","count":{"type":"Fixed","value":1},"target":{"type":"SelfRef"}}},"uses_tracked_set":false}"#,
+        );
+        // Invasion of Alara — reaches the branch, but could not be driven to its
+        // tail in a `GameScenario`, so its behaviour must stay as it is on main.
+        let invasion_of_alara = effect(
+            r#"{"type":"PutAtLibraryPosition","target":{"type":"ExiledBySource"},"count":{"type":"Ref","qty":{"type":"CardsExiledBySource"}},"position":{"type":"Bottom"}}"#,
+        );
+        // Finale of Promise — likewise, and its `TrackedSetFiltered` target reads
+        // resolution state that no zone-move measurement can stand in for.
+        let finale_of_promise = effect(
+            r#"{"type":"CopySpell","target":{"type":"TrackedSetFiltered","id":0,"filter":{"type":"Typed","type_filters":["Card"],"controller":null,"properties":[]}},"retarget":{"type":"MayChooseNewTargets"}}"#,
+        );
+
+        assert!(
+            tail_family_has_runtime_evidence(&sins_of_the_past),
+            "ChangeZone is driven end to end and must stay in the allowlist"
+        );
+        assert!(
+            tail_family_has_runtime_evidence(&helmut_zemo),
+            "CreateDelayedTrigger is driven end to end and must stay in the allowlist"
+        );
+        assert!(
+            !tail_family_has_runtime_evidence(&invasion_of_alara),
+            "PutAtLibraryPosition has no test that fails when the branch is reverted — \
+             admitting it would change Invasion of Alara on an unmeasured path (issue #8750)"
+        );
+        assert!(
+            !tail_family_has_runtime_evidence(&finale_of_promise),
+            "CopySpell has no test that fails when the branch is reverted — admitting it \
+             would change Finale of Promise on an unmeasured path (issue #8750)"
+        );
+    }
 
     #[test]
     fn resolution_window_batch_reaches_a_chained_consumer() {

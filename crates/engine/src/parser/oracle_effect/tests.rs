@@ -62005,6 +62005,39 @@ fn a_cast_this_way_gate_defers_a_consequence_but_never_a_casting_property() {
          spell this way, you cast it without paying its mana cost.",
         AbilityKind::Spell,
     );
+    // REACH GUARD for the negative assertion below. Without it the assertion also
+    // passes when the sentence never lowered at all, which would make it green
+    // for the wrong reason.
+    //
+    // MEASURED, and NOT the obvious "no `Unimplemented` anywhere": this chain
+    // legitimately carries two, for "An opponent separates those cards into two
+    // piles" and "play lands" — neither is the sentence under test. What has to
+    // be present is the CONSEQUENT itself, and it lowers to the free-cast
+    // property of the granted cast: `CastFromZone { target: ParentTarget,
+    // without_paying_mana_cost: true }`. That is exactly the shape
+    // `consequent_is_a_property_of_the_granted_cast` admits, so this guard fails
+    // if the discriminator ever stops seeing it.
+    fn carries_the_free_cast_property(def: &AbilityDefinition) -> bool {
+        fn walk(def: &AbilityDefinition) -> bool {
+            if let Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                ..
+            } = &*def.effect
+            {
+                return true;
+            }
+            def.sub_ability.as_deref().is_some_and(walk)
+                || def.else_ability.as_deref().is_some_and(walk)
+        }
+        walk(def)
+    }
+    assert!(
+        carries_the_free_cast_property(&property),
+        "reach guard: \"you cast it without paying its mana cost\" must still lower to the \
+         free-cast property of the granted cast, or the negative assertion below proves \
+         nothing"
+    );
     assert!(
         !wraps_a_spell_cast_delayed_trigger(&property),
         "\"you cast it without paying its mana cost\" describes HOW the cast happens \

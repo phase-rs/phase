@@ -214,6 +214,11 @@ fn zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast() {
 /// coverage ("when you cast that spell" takes the same branch as "if you cast a
 /// spell this way") plus the reach guard, and it will start discriminating once
 /// that X binding is repaired. It is kept for that, not offered as evidence.
+///
+/// Where the evidence for this effect family actually lives, so nobody has to
+/// go looking: `zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast`
+/// is the `CreateDelayedTrigger` tail driven end to end, and it is what turns
+/// red when the rider-tail branch is reverted.
 #[test]
 fn ogre_battlecaster_does_not_pump_on_the_grant_alone() {
     let mut scenario = GameScenario::new_n_player(2, 42);
