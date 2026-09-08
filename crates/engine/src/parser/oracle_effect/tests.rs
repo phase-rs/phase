@@ -14798,13 +14798,14 @@ fn real_targeted_opponent_hand_shuffle_cards_preserve_full_parent_target_chain()
             }
         ));
         let search = hand_move.sub_ability.as_deref().expect("opponent search");
-        assert!(matches!(
-            search.effect.as_ref(),
-            Effect::SearchLibrary {
-                target_player: Some(TargetFilter::ParentTarget),
-                ..
-            }
-        ));
+        let Effect::SearchLibrary { target_player, .. } = search.effect.as_ref() else {
+            panic!("{card_name} must search the chosen opponent's library, got {:?}", search.effect);
+        };
+        assert_eq!(
+            target_player.as_ref(),
+            Some(&TargetFilter::ParentTarget),
+            "{card_name} must search the outer target's library, got {target_player:?}"
+        );
         let put_one = search.sub_ability.as_deref().expect("search result move");
         assert!(matches!(
             put_one.effect.as_ref(),
@@ -14815,15 +14816,19 @@ fn real_targeted_opponent_hand_shuffle_cards_preserve_full_parent_target_chain()
             }
         ));
         let put_rest = put_one.sub_ability.as_deref().expect("tracked-set return");
-        assert!(matches!(
-            put_rest.effect.as_ref(),
-            Effect::ChangeZoneAll {
-                origin: Some(Zone::Exile),
-                destination: Zone::Hand,
-                target: TargetFilter::TrackedSet { .. },
-                ..
-            }
-        ));
+        assert!(
+            matches!(
+                put_rest.effect.as_ref(),
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Exile),
+                    destination: Zone::Hand,
+                    target: TargetFilter::TrackedSet { .. },
+                    ..
+                }
+            ),
+            "{card_name} must return every searched card, got {:?}",
+            put_rest.effect
+        );
         let shuffle = put_rest.sub_ability.as_deref().expect("opponent shuffle");
         assert!(matches!(
             shuffle.effect.as_ref(),
