@@ -629,13 +629,7 @@ pub fn try_resolve_quantity_in_source_context(
 pub fn quantity_is_cast_stable_for_pre_cast(expr: &QuantityExpr) -> bool {
     match expr {
         QuantityExpr::Fixed { .. } => true,
-        QuantityExpr::Ref {
-            qty: QuantityRef::StartingLifeTotal,
-        } => true,
-        QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCount { filter },
-        } => target_filter_is_property_free_population(filter),
-        QuantityExpr::Ref { .. } => false,
+        QuantityExpr::Ref { qty } => quantity_ref_is_cast_stable_for_pre_cast(qty),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -654,59 +648,19 @@ pub fn quantity_is_cast_stable_for_pre_cast(expr: &QuantityExpr) -> bool {
     }
 }
 
-/// Returns whether resolving `expr` reads a spell-cast journal that a newly
-/// finalized cast can change.
-pub fn quantity_expr_uses_cast_history(expr: &QuantityExpr) -> bool {
-    match expr {
-        QuantityExpr::Fixed { .. } => false,
-        QuantityExpr::Ref { qty } => quantity_ref_uses_cast_history(qty),
-        QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::UpTo { max: inner }
-        | QuantityExpr::Power {
-            exponent: inner, ..
-        } => quantity_expr_uses_cast_history(inner),
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-            exprs.iter().any(quantity_expr_uses_cast_history)
-        }
-        QuantityExpr::Difference { left, right } => {
-            quantity_expr_uses_cast_history(left) || quantity_expr_uses_cast_history(right)
-        }
-    }
-}
-
-/// Returns whether resolving `qty` reads a spell-cast journal that a newly
-/// finalized cast can change.
-pub fn quantity_ref_uses_cast_history(qty: &QuantityRef) -> bool {
+/// Returns whether a quantity reference can remain unchanged by an ordinary
+/// cast whose only permitted board interaction is pure mana production.
+///
+/// This is the reference-level companion to
+/// [`quantity_is_cast_stable_for_pre_cast`]. Callers that already hold a
+/// `QuantityRef` use it directly; expression consumers should use the
+/// expression authority above.
+pub fn quantity_ref_is_cast_stable_for_pre_cast(qty: &QuantityRef) -> bool {
     match qty {
-        QuantityRef::SpellsCastThisTurn { .. } | QuantityRef::SpellsCastThisGame { .. } => true,
-        QuantityRef::PropertyAggregate(aggregate) => {
-            card_type_set_source_uses_cast_history(aggregate.source())
-        }
-        QuantityRef::DistinctCardTypes { source }
-        | QuantityRef::DistinctSubtypes { source, .. }
-        | QuantityRef::DistinctColorsAmong { source } => {
-            card_type_set_source_uses_cast_history(source)
-        }
+        QuantityRef::StartingLifeTotal => true,
+        QuantityRef::ObjectCount { filter } => target_filter_is_property_free_population(filter),
         _ => false,
     }
-}
-
-fn card_type_set_source_uses_cast_history(source: &CardTypeSetSource) -> bool {
-    let mut uses_cast_history = false;
-    let complete =
-        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
-            uses_cast_history |= matches!(
-                leaf,
-                CardTypeSetSource::TurnJournal {
-                    journal: TurnJournalKind::SpellsCast,
-                    ..
-                }
-            );
-        });
-    uses_cast_history || !complete
 }
 
 fn quantity_expr_is_source_context_previewable(
@@ -8343,7 +8297,7 @@ mod tests {
     }
 
     #[test]
-    fn cast_stable_quantity_rejects_nonbattlefield_and_spell_ledger_reads() {
+    fn cast_stable_quantity_rejects_zone_hand_journal_and_snapshot_reads() {
         let battlefield_creatures = QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount {
                 filter: TargetFilter::Typed(TypedFilter::creature()),
@@ -8371,6 +8325,20 @@ mod tests {
                 filter: None,
             },
         };
+        let graveyard_cards = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Graveyard,
+                card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                scope: CountScope::Controller,
+                filter: None,
+            },
+        };
+        let prior_effect_snapshot = QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: DamageChannel::Total,
+                aggregate: AggregateFunction::Sum,
+            },
+        };
 
         assert!(quantity_is_cast_stable_for_pre_cast(&battlefield_creatures));
         assert!(
@@ -8379,6 +8347,10 @@ mod tests {
         );
         assert!(!quantity_is_cast_stable_for_pre_cast(&hand_count));
         assert!(!quantity_is_cast_stable_for_pre_cast(&spell_ledger));
+        assert!(!quantity_is_cast_stable_for_pre_cast(&graveyard_cards));
+        assert!(!quantity_is_cast_stable_for_pre_cast(
+            &prior_effect_snapshot
+        ));
     }
 
     /// Row 18, resolver half. CR 400.1 + CR 109.2: `visit_characteristic_source`'s
