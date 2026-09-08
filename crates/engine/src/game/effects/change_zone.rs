@@ -565,6 +565,22 @@ fn append_effect_resolved_after_counter_pause(
     );
 }
 
+fn publish_finalized_owner_library_subjects(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    objects: &[ObjectId],
+) {
+    let participants = super::prospective_subject_participants(state, ability, objects);
+    super::publish_tracked_set_for_resolution(
+        state,
+        ability,
+        super::TrackedSetPublicationInput::FinalizedSubjects {
+            objects,
+            participants: &participants,
+        },
+    );
+}
+
 /// CR 614.12a + CR 614.13a: capture the battlefield immediately before a
 /// known single Devour entry. Both deterministic single-entry paths call this
 /// before `move_to_zone`, so the entrant cannot appear in its own sacrifice
@@ -805,6 +821,13 @@ pub fn resolve(
         targeted_objects
     };
 
+    if !targeted_objects.is_empty() {
+        // CR 701.24c-e + CR 400.3: freeze the prospective owner population
+        // after target legality is known and before any replacement can redirect
+        // a member away from the library.
+        publish_finalized_owner_library_subjects(state, ability, &targeted_objects);
+    }
+
     if targeted_objects.is_empty() {
         // CR 115.6: "Up to one target" — if the player chose zero targets during
         // targeting, the effect resolves doing nothing. Don't fall through to the
@@ -936,6 +959,9 @@ pub fn resolve(
             &scan_zones,
             dest_zone,
         );
+        // CR 701.24d-e: retain an explicitly designated typed player even when
+        // the source zone supplies zero eligible cards.
+        publish_finalized_owner_library_subjects(state, ability, &[]);
 
         let (choice_count, min_count, choice_up_to) =
             resolution_choice_cardinality(state, ability, eligible.len(), up_to);
@@ -972,6 +998,7 @@ pub fn resolve(
         {
             let index = state.rng.random_range(0..eligible.len());
             let chosen = eligible[index];
+            publish_finalized_owner_library_subjects(state, ability, &[chosen]);
             capture_devour_snapshot_before_single_entry(state, chosen, dest_zone);
             let per_obj_enter_counters = enter_with_counters_for_object(
                 state,
@@ -1057,6 +1084,7 @@ pub fn resolve(
 
         if eligible.len() == 1 && !choice_up_to && choice_count == 1 {
             let chosen = eligible[0];
+            publish_finalized_owner_library_subjects(state, ability, &[chosen]);
             capture_devour_snapshot_before_single_entry(state, chosen, dest_zone);
             let per_obj_enter_counters = enter_with_counters_for_object(
                 state,
@@ -2062,6 +2090,11 @@ pub fn resolve_all(
     } else {
         matching
     };
+
+    // CR 701.24c-e + CR 400.3: a mass owner-library shuffle publishes the full
+    // matched population, including typed empty-set participants, before order
+    // choices or the first zone-change replacement can run.
+    publish_finalized_owner_library_subjects(state, ability, &matching);
 
     // Clean up consumed tracked set after scanning.
     if let TargetFilter::TrackedSet { id } = &effective_filter {
