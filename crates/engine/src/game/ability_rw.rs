@@ -4982,6 +4982,7 @@ fn rw_effect(
             enters_attacking: _,
             face_down_profile: _,
             library_position: _,
+            library_shuffle: _,
             random_order: _,
         } => {
             let (mut p, sc) = mem(target, *origin, *destination);

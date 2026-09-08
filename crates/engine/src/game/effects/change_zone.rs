@@ -5,8 +5,8 @@ use crate::game::game_object::AttachTarget;
 use crate::game::zones;
 use crate::types::ability::{
     ControllerRef, Duration, Effect, EffectError, EffectKind, EffectResolutionResult, FilterProp,
-    LibraryPosition, OpponentMayScope, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
-    TargetFilter, TargetRef, TargetSelectionMode, TypeFilter, TypedFilter,
+    LibraryPosition, MassLibraryShuffleMode, OpponentMayScope, QuantityExpr, ResolvedAbility,
+    TargetChoiceTiming, TargetFilter, TargetRef, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -1836,6 +1836,7 @@ pub fn resolve_all(
         enters_attacking,
         enter_with_counters,
         effect_library_position,
+        library_shuffle,
         random_order,
     ) = match &ability.effect {
         Effect::ChangeZoneAll {
@@ -1848,6 +1849,7 @@ pub fn resolve_all(
             enter_with_counters,
             face_down_profile: _,
             library_position,
+            library_shuffle,
             random_order,
         } => {
             let scan_zones = change_zone_all_origin_zones(state, *origin, target);
@@ -1872,6 +1874,7 @@ pub fn resolve_all(
                 *enters_attacking,
                 resolved_counters,
                 library_position.clone(),
+                *library_shuffle,
                 *random_order,
             )
         }
@@ -1879,21 +1882,21 @@ pub fn resolve_all(
     };
     let origin_zone = origin_zones[0];
 
-    // CR 701.24a + CR 701.24d: `lower_change_zone_all_to_library` represents
-    // “shuffle [a set] into [a] library” as one or more mass moves followed by
-    // one terminal Shuffle. The generic zone-delivery tail normally shuffles
-    // every object that enters a library without an explicit placement, which
-    // would turn a single instruction into one shuffle per moved card plus the
-    // terminal shuffle. Carry a transient bottom placement through each member
-    // move to suppress that generic tail; the terminal Shuffle immediately
-    // randomizes the complete library, so this intermediate placement is not a
-    // player-visible ordering instruction.
-    let library_move_has_terminal_shuffle = dest_zone == Zone::Library
+    // CR 701.24a + CR 701.24d: Parser-produced “shuffle [a set] into [a]
+    // library” operations mark their mass-move component explicitly. The generic
+    // zone-delivery tail normally shuffles every member that enters a library
+    // without a placement, so use a transient bottom placement only for that
+    // exact operation and reserve the one randomization for its terminal Shuffle.
+    // This mode is data, not an inferred relationship between arbitrary runtime
+    // continuation chains; explicit printed placement remains authoritative.
+    let member_library_placement = if dest_zone == Zone::Library
         && effect_library_position.is_none()
-        && mass_library_move_has_terminal_shuffle(ability);
-    let member_library_placement = library_move_has_terminal_shuffle
-        .then_some(LibraryPosition::Bottom)
-        .or(effect_library_position.clone());
+        && matches!(library_shuffle, MassLibraryShuffleMode::TerminalShuffle)
+    {
+        Some(LibraryPosition::Bottom)
+    } else {
+        effect_library_position.clone()
+    };
 
     // CR 400.6 + CR 400.3: `TargetFilter::Controller` / player-anaphor filters
     // in a mass zone-change reference a *player*, not a set of objects. Such
@@ -2258,7 +2261,7 @@ pub fn resolve_all(
                         track_exiled_by_source,
                         moved_count: Some(moved_count + i32::from(entry_target_choice)),
                         face_down_profile: face_down_profile.clone(),
-                        library_placement: effect_library_position.clone(),
+                        library_placement: member_library_placement.clone(),
                         // CR 614.12: mass zone moves carry no moved-object type gate.
                         enters_modified_if: None,
                         enter_attached_to: None,
@@ -2317,7 +2320,7 @@ pub fn resolve_all(
                         // resumed members of a paused face-down mass return enter
                         // face down.
                         face_down_profile: face_down_profile.clone(),
-                        library_placement: effect_library_position.clone(),
+                        library_placement: member_library_placement.clone(),
                         // CR 614.12: mass zone moves carry no moved-object type gate.
                         enters_modified_if: None,
                         enter_attached_to: None,
@@ -2362,25 +2365,6 @@ pub fn resolve_all(
     });
 
     Ok(())
-}
-
-/// True for the intrinsic `ChangeZoneAll → … → Shuffle` continuation emitted
-/// for a mass “shuffle [zone] into [library]” instruction. An intervening
-/// instruction deliberately breaks the match: it owns its own sequencing and
-/// must not change the ordinary library-move delivery behavior.
-fn mass_library_move_has_terminal_shuffle(ability: &ResolvedAbility) -> bool {
-    let mut next = ability.sub_ability.as_deref();
-    while let Some(sub) = next {
-        match &sub.effect {
-            Effect::ChangeZoneAll {
-                destination: Zone::Library,
-                ..
-            } => next = sub.sub_ability.as_deref(),
-            Effect::Shuffle { .. } => return true,
-            _ => return false,
-        }
-    }
-    false
 }
 
 fn owner_scoped_nonbattlefield_mass_filter(
@@ -3520,6 +3504,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -3912,6 +3897,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -4921,6 +4907,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -4974,6 +4961,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -5066,6 +5054,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -5142,6 +5131,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -5210,6 +5200,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -5286,6 +5277,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -5321,6 +5313,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -5397,6 +5390,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -5503,6 +5497,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -5932,6 +5927,7 @@ mod tests {
                     enter_with_counters: vec![],
                     face_down_profile: None,
                     library_position: None,
+                    library_shuffle: Default::default(),
                     random_order: false,
                 },
                 vec![],
@@ -6338,6 +6334,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: Some(LibraryPosition::Bottom),
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -6426,6 +6423,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: Some(LibraryPosition::Bottom),
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -7535,6 +7533,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -7674,6 +7673,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -7728,6 +7728,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -7838,6 +7839,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             // Parent target supplies the "that name" referent.
@@ -7939,6 +7941,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![TargetRef::Object(seed)],
@@ -8075,6 +8078,7 @@ mod tests {
                     enter_with_counters: vec![],
                     face_down_profile: None,
                     library_position: None,
+                    library_shuffle: Default::default(),
                     random_order: false,
                 },
                 vec![TargetRef::Object(seed)],
@@ -8284,6 +8288,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -8354,6 +8359,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -8438,6 +8444,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -8522,6 +8529,7 @@ mod tests {
                     cause: crate::types::ability::FaceDownCause::Manifest,
                 }),
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -8599,6 +8607,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -8672,6 +8681,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -8713,6 +8723,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: Some(FaceDownProfile::vanilla_2_2()),
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -9340,6 +9351,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -9380,6 +9392,197 @@ mod tests {
         assert!(state.objects[&shock_b].tapped);
         assert_eq!(state.players[0].life, life_before);
         assert!(state.active_change_zone_frame().is_none());
+    }
+
+    /// CR 614.12 + CR 701.24a + CR 701.24d: a parser-emitted mass “shuffle
+    /// [set] into [library]” move that parks on per-member replacement choices
+    /// retains its terminal-shuffle placement through every resume. The member
+    /// moves must not auto-shuffle, leaving exactly the one terminal Shuffle.
+    fn paused_terminal_mass_library_shuffle_events(cant_shuffle: bool) -> Vec<GameEvent> {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, MassLibraryShuffleMode, ReplacementDefinition,
+            ReplacementMode,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let first = create_object(
+            &mut state,
+            CardId(9501),
+            PlayerId(0),
+            "First graveyard card".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(9502),
+            PlayerId(0),
+            "Second graveyard card".to_string(),
+            Zone::Graveyard,
+        );
+        let replacement_source = create_object(
+            &mut state,
+            CardId(9503),
+            PlayerId(0),
+            "Optional library redirect".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&replacement_source)
+            .expect("replacement source exists")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::Any,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    ))
+                    .destination_zone(Zone::Library),
+            );
+        if cant_shuffle {
+            state
+                .objects
+                .get_mut(&replacement_source)
+                .expect("replacement source exists")
+                .static_definitions
+                .push(
+                    StaticDefinition::new(StaticMode::Other("CantShuffle".to_string())).affected(
+                        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                    ),
+                );
+        }
+
+        let mass_move = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Library,
+                target: TargetFilter::Any,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                random_order: false,
+            },
+            vec![],
+            ObjectId(9500),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &mass_move, &mut events).expect("first member pauses");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert_eq!(
+            state
+                .active_change_zone_frame()
+                .and_then(|frame| frame.pending.as_ref())
+                .and_then(|pending| pending.library_placement.clone()),
+            Some(LibraryPosition::Bottom),
+            "the first replacement pause must retain terminal-shuffle suppression"
+        );
+
+        let first_resume = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+            .expect("decline first optional replacement");
+        events.extend(first_resume.events);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert_eq!(
+            state
+                .active_change_zone_frame()
+                .and_then(|frame| frame.pending.as_ref())
+                .and_then(|pending| pending.library_placement.clone()),
+            Some(LibraryPosition::Bottom),
+            "the second replacement pause must retain terminal-shuffle suppression"
+        );
+
+        let second_resume =
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+                .expect("decline second optional replacement");
+        events.extend(second_resume.events);
+        assert_eq!(state.objects[&first].zone, Zone::Library);
+        assert_eq!(state.objects[&second].zone, Zone::Library);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )),
+            "the mass members must not auto-shuffle before the terminal instruction"
+        );
+
+        let terminal_shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(9500),
+            PlayerId(0),
+        );
+        crate::game::effects::shuffle::resolve(&mut state, &terminal_shuffle, &mut events)
+            .expect("terminal shuffle resolves");
+        events
+    }
+
+    #[test]
+    fn paused_mass_library_shuffle_has_one_terminal_shuffle() {
+        let events = paused_terminal_mass_library_shuffle_events(false);
+        let shuffled_players: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                    ..
+                } => Some(*player_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            shuffled_players,
+            vec![PlayerId(0)],
+            "two paused member moves followed by one terminal Shuffle must emit one shuffle"
+        );
+    }
+
+    #[test]
+    fn paused_mass_library_shuffle_respects_cant_shuffle() {
+        let events = paused_terminal_mass_library_shuffle_events(true);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )),
+            "CantShuffle suppresses the terminal Shuffle and the paused member moves"
+        );
     }
 
     /// Helper: replicates the shock-land-in-library scaffolding used across
