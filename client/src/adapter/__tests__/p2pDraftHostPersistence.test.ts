@@ -241,6 +241,52 @@ describe("P2PDraftHost persistence disposal", () => {
   });
 
   it.each([
+    ["array", ["direct-array-private-cube-sentinel"]],
+    ["number", 73],
+    ["boolean", true],
+  ])("drops a direct inline %s session from the public backup without changing IndexedDB", async (
+    _shape,
+    draftSessionJson,
+  ) => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("", { status: 200 }));
+    globalThis.fetch = fetchMock;
+
+    try {
+      const host = new P2PDraftHost(
+        { id: "host-peer" } as never,
+        () => () => {},
+        { type: "Cube", data: { cube_list_text: "Secret cube" } } as never,
+        "Premier",
+        8,
+        "Host",
+        "Swiss",
+        "Casual",
+        undefined,
+        undefined,
+        undefined,
+        "https://phase.example",
+      );
+      const privateHost = host as unknown as BackupHost;
+      privateHost.draftCode = "ABC123";
+      const snapshot = { draftSessionJson, publicNote: "retain this outer field" };
+
+      await privateHost.uploadBackupSnapshot(snapshot);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [, requestInit] = fetchMock.mock.calls[0]!;
+      const request = JSON.parse(requestInit?.body as string);
+      const publicSnapshot = JSON.parse(request.snapshot_json);
+      expect(publicSnapshot.draftSessionJson).toBeUndefined();
+      expect(JSON.stringify(publicSnapshot)).not.toContain("direct-array-private-cube-sentinel");
+      expect(publicSnapshot.publicNote).toBe("retain this outer field");
+      expect(snapshot.draftSessionJson).toBe(draftSessionJson);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it.each([
     ["serialized", JSON.stringify({ booster_pack_pool: ["Nested cube"] })],
     ["object", { booster_pack_pool: ["Nested cube"] }],
     ["null", null],

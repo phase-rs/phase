@@ -129,7 +129,8 @@ fn redact_nested_draft_session_json(obj: &mut Map<String, Value>) {
             redact_draft_session_object(nested_obj);
             false
         }
-        Some(_) => false,
+        Some(Value::Null) => false,
+        Some(_) => true,
     };
     if remove_serialized_non_record {
         obj.remove(DRAFT_SESSION_JSON_KEY);
@@ -506,15 +507,36 @@ mod tests {
     }
 
     #[test]
-    fn redact_p2p_backup_snapshot_secrets_leaves_non_session_shapes_alone() {
-        // A `draftSessionJson` that is neither a string nor an object carries no
-        // session to redact; it must pass through rather than error.
-        let raw = serde_json::json!({ "draftSessionJson": 7, "draftStarted": true });
+    fn redact_p2p_backup_snapshot_secrets_keeps_null_draft_session() {
+        let raw = serde_json::json!({ "draftSessionJson": null, "draftStarted": true });
         let redacted =
             redact_p2p_backup_snapshot_secrets(&raw.to_string()).expect("valid snapshot");
         let parsed: Value = serde_json::from_str(&redacted).unwrap();
-        assert_eq!(parsed["draftSessionJson"], 7);
+        assert!(parsed["draftSessionJson"].is_null());
         assert_eq!(parsed["draftStarted"], true);
+    }
+
+    #[test]
+    fn redact_p2p_backup_snapshot_secrets_drops_direct_inline_non_record_sessions() {
+        for (shape, draft_session_json) in [
+            (
+                "array",
+                serde_json::json!(["direct-array-private-cube-sentinel"]),
+            ),
+            ("number", serde_json::json!(73)),
+            ("boolean", serde_json::json!(true)),
+        ] {
+            let raw = serde_json::json!({
+                "draftSessionJson": draft_session_json,
+                "public_note": "retain this outer field"
+            });
+            let redacted = redact_p2p_backup_snapshot_secrets(&raw.to_string()).unwrap();
+            let public: Value = serde_json::from_str(&redacted).unwrap();
+
+            assert!(public.get("draftSessionJson").is_none(), "{shape}");
+            assert!(!redacted.contains("direct-array-private-cube-sentinel"));
+            assert_eq!(public["public_note"], "retain this outer field", "{shape}");
+        }
     }
 
     #[test]

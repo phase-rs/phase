@@ -133,6 +133,8 @@ function redactDraftSessionPoolAndChaos(snapshot: Record<string, unknown>): void
     }
   } else if (isJsonRecord(draftSessionJson)) {
     redactDraftSessionObject(draftSessionJson);
+  } else if (draftSessionJson !== null) {
+    delete snapshot.draftSessionJson;
   }
 }
 
