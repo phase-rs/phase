@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -73,6 +73,26 @@ describe("GameListItem", () => {
     // The whole entry travels to the join handler: the row's authority is
     // what the join must open on.
     expect(onJoin).toHaveBeenCalledWith(row);
+  });
+
+  it("confirms a sandbox game in-app before joining", async () => {
+    const user = userEvent.setup();
+    const onJoin = vi.fn();
+    const sandbox = entry(officialSource, { ...baseGame, is_sandbox: true });
+
+    render(<GameListItem entry={sandbox} onJoin={onJoin} />);
+
+    await user.click(screen.getByRole("button", { name: /Join/ }));
+
+    expect(onJoin).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("heading", {
+      name: "This game allows debug actions. Use for testing — not a competitive match.",
+    }).parentElement;
+    expect(dialog).not.toBeNull();
+
+    await user.click(within(dialog!).getByRole("button", { name: "Join" }));
+
+    expect(onJoin).toHaveBeenCalledWith(sandbox);
   });
 
   it("renders the listing source beside the row", () => {
