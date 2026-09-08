@@ -1810,21 +1810,76 @@ pub fn mark_simultaneous_departure_records(
     }
 }
 
+/// CR 603.10a + CR 704.5d/e: where an object stands relative to the battlefield,
+/// for producers and observers that must decide whether it *left*.
+///
+/// Object-side counterpart of `BattlefieldDepartureSourceContext` (the record-side
+/// authority). Callers pass ids verified on the battlefield immediately before the
+/// move being classified, so `DepartedCeased` is only ever reached via a real
+/// departure.
+///
+/// NOT for forward-looking eligibility gates ("is this permanent on the battlefield
+/// right now, so I may tap / equip / sacrifice it"). Those have no departure event
+/// and no last-known-information fallback: for them an absent id means "no such
+/// object" and must be REJECTED, whereas `has_departed()` would answer `true`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BattlefieldResidency {
+    /// Still on the battlefield: the reachable cause is any destruction
+    /// replacement that leaves the permanent on the battlefield — CR 701.19a/b
+    /// regeneration, CR 702.89a umbra armor, CR 122.1c shield counters — so an
+    /// id its producer had already verified on the battlefield survives the
+    /// move being classified.
+    ///
+    /// CR 704.5n's "becomes unattached ... remains on the battlefield" is named
+    /// here only for contrast; it is NOT a producer this function observes.
+    /// `sba::check_unattached_equipment` clears `attached_to` and emits
+    /// `GameEvent::Unattached` with no zone move, so an unattached Equipment
+    /// gets no battlefield-origin `ZoneChanged`, never enters a producer's
+    /// departure id list, and is therefore never passed to this function.
+    Remained,
+    /// Left the battlefield and still exists in another zone.
+    DepartedPresent,
+    /// Left the battlefield and then ceased to exist — CR 704.5d (token) or
+    /// CR 704.5e (copy of a card). CR 111.7's parenthetical is why this still
+    /// counts as a departure: applicable triggered abilities trigger *before* a
+    /// token ceases to exist, and CR 608.2h keeps the departure record as the
+    /// authority for what it was.
+    DepartedCeased,
+}
+
+impl BattlefieldResidency {
+    /// CR 603.10a: did this object leave the battlefield in the event being classified?
+    pub(crate) fn has_departed(self) -> bool {
+        matches!(self, Self::DepartedPresent | Self::DepartedCeased)
+    }
+}
+
+/// CR 603.10a + CR 704.5d/e: the single authority for "has this object left the
+/// battlefield". `state.objects` no longer holds an object that ceased, so absence
+/// must read as a departure, not as a survival.
+pub(crate) fn battlefield_residency(state: &GameState, id: ObjectId) -> BattlefieldResidency {
+    match state.objects.get(&id) {
+        Some(obj) if obj.zone == Zone::Battlefield => BattlefieldResidency::Remained,
+        Some(_) => BattlefieldResidency::DepartedPresent,
+        None => BattlefieldResidency::DepartedCeased,
+    }
+}
+
 /// CR 603.10a: Filter `ids` to those whose object has actually left the
 /// battlefield (now resides in some other zone). Producers that accumulate a
 /// candidate ID list — bounce, change-zone, sacrifice, destroy — pass that list
 /// through this filter before `mark_simultaneous_departures` so that a member
 /// which never actually departed (regenerated, sacrifice-prevented, bounce
 /// guarded out) is excluded from every survivor's `co_departed` group.
+///
+/// CR 704.5d/e: an id absent from `state.objects` **ceased to exist** after
+/// departing, which is a departure, not a survival — CR 111.7's parenthetical says
+/// applicable triggered abilities trigger before a token ceases. Callers pass ids
+/// verified on the battlefield immediately before the move being classified.
 pub fn departed_subset(state: &GameState, ids: &[ObjectId]) -> Vec<ObjectId> {
     ids.iter()
         .copied()
-        .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .is_some_and(|o| o.zone != Zone::Battlefield)
-        })
+        .filter(|&id| battlefield_residency(state, id).has_departed())
         .collect()
 }
 
@@ -1832,6 +1887,15 @@ pub fn departed_subset(state: &GameState, ids: &[ObjectId]) -> Vec<ObjectId> {
 /// sweep that does not expose an explicit ID list (e.g. `sacrifice_unchosen`
 /// internal loops). Collects every battlefield-origin `ZoneChanged` in `slice`
 /// whose object is now off-battlefield, then groups them as co-departed.
+///
+/// CR 704.3 + CR 704.5d: this runs at the END of an SBA iteration, after the
+/// CR 704.5d sweep has removed ceased tokens, so residency — not raw presence — is
+/// the only correct question. Two consequences, both measured: a 2-member group
+/// containing a ceased token collapses below `mark_simultaneous_departures`'
+/// `len() < 2` floor and is never stamped **at all**; and because that function
+/// *assigns* `co_departed` rather than merging, under-counting here *overwrites*
+/// correct groups stamped by earlier sub-sweeps, breaking the mutual-record
+/// relation the CR 603.10a observer arm requires.
 pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent]) {
     let departed: Vec<ObjectId> = slice
         .iter()
@@ -1840,13 +1904,7 @@ pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent])
                 object_id,
                 from: Some(Zone::Battlefield),
                 ..
-            } if state
-                .objects
-                .get(object_id)
-                .is_some_and(|o| o.zone != Zone::Battlefield) =>
-            {
-                Some(*object_id)
-            }
+            } if battlefield_residency(state, *object_id).has_departed() => Some(*object_id),
             _ => None,
         })
         .collect();

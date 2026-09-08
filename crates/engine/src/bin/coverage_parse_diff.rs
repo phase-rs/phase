@@ -963,6 +963,7 @@ mod tests {
     /// the fixture matches.
     fn card(name: &str, oracle: &str, parse_details: &[ParsedItem]) -> CardCoverageResult {
         CardCoverageResult {
+            card_face_key: None,
             card_name: name.to_string(),
             set_code: String::new(),
             supported: true,

@@ -1672,24 +1672,77 @@ pub(crate) fn battlefield_departure_trigger_source_context(
         return BattlefieldDepartureSourceContext::Malformed;
     };
 
-    if *object_id != record.object_id
-        || *from != record.from_zone
-        || *to != record.to_zone
-        || *from != Some(Zone::Battlefield)
-    {
+    if *object_id != record.object_id || *from != record.from_zone || *to != record.to_zone {
+        return BattlefieldDepartureSourceContext::Malformed;
+    }
+
+    battlefield_departure_source_context_from_record(record)
+}
+
+/// CR 400.7 + CR 603.10a + CR 608.2h: the authority state of a departure
+/// record's own source context, read from the record alone.
+///
+/// The record-only half of [`battlefield_departure_trigger_source_context`],
+/// which now delegates here after its event↔record cross-check. A caller that
+/// reads `state.zone_changes_this_turn` has a record but no event, so the
+/// cross-check is vacuous for it; every record-intrinsic rule — the departure
+/// must be battlefield-origin, and the context must name this record's own
+/// object observed in the battlefield zone — still applies, and lives here so
+/// the two entry points can never drift apart.
+///
+/// `Absent` (a legacy/deserialized record with no context) and `Malformed` (a
+/// context present but incoherent) are both fail-closed for every caller.
+pub(crate) fn battlefield_departure_source_context_from_record(
+    record: &ZoneChangeRecord,
+) -> BattlefieldDepartureSourceContext<'_> {
+    if record.from_zone != Some(Zone::Battlefield) {
         return BattlefieldDepartureSourceContext::Malformed;
     }
 
     match record.trigger_source_context() {
         None => BattlefieldDepartureSourceContext::Absent,
         Some(context)
-            if context.identity.reference.object_id == *object_id
+            if context.identity.reference.object_id == record.object_id
                 && context.identity.expected_zone == Zone::Battlefield =>
         {
             BattlefieldDepartureSourceContext::Present(context)
         }
         Some(_) => BattlefieldDepartureSourceContext::Malformed,
     }
+}
+
+/// CR 704.5d/e + CR 608.2i: the departure row that is the authority for an
+/// object which has CEASED to exist — the single authority for that selection.
+///
+/// The LAST battlefield-origin row for `object_id` this turn, and only if no
+/// later row of any kind names it. CR 704.5d/e: a ceased object cannot move
+/// again, so its terminal departure must be the last row naming it. A later row
+/// means the ledger disagrees with the caller's "this object has ceased"
+/// premise, and the answer is REFUSED rather than guessed.
+///
+/// That second guard is defence in depth — no producer can write such a row
+/// today, and `next_object_id` is monotonic so a retired id is never reissued —
+/// which is why it carries no test. It is stated once, here, rather than
+/// re-derived at each seam: the rule is rules-bearing, and two copies would have
+/// to change in lockstep with nothing linking them.
+///
+/// `None` for no row at all, which every caller must treat as fail-closed.
+/// `zone_changes_this_turn` is cleared at turn start, so a departure recorded on
+/// an earlier turn also yields `None` — the per-turn ceiling every ledger
+/// consumer shares.
+pub(crate) fn terminal_battlefield_departure_row(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<&ZoneChangeRecord> {
+    let index = state.zone_changes_this_turn.iter().rposition(|change| {
+        change.object_id == object_id && change.from_zone == Some(Zone::Battlefield)
+    })?;
+    state
+        .zone_changes_this_turn
+        .iter()
+        .skip(index + 1)
+        .all(|later| later.object_id != object_id)
+        .then(|| &state.zone_changes_this_turn[index])
 }
 
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an

@@ -340,6 +340,7 @@ mod granted_sunburst_5337;
 mod graveyard_to_hand_activation_zone;
 mod greater_good_activation;
 mod green_suns_zenith_regression;
+mod griffin_guide_ceased_token_co_departure;
 mod griffin_rider_conditional_self_buff;
 mod grimdancer_two_counter_entry_choice;
 mod grubs_command_tracked_set_filter;
@@ -1574,4 +1575,5 @@ mod zhulodok_double_cascade;
 
 mod context_ref_slot_hygiene;
 mod exchange_control_of_a_spell;
+mod exploit_ceased_exploiter_lki;
 mod ripple_reveal_choice_interaction;

@@ -375,6 +375,10 @@ fn public_gap_details(gaps: &[CoverageGap]) -> Vec<GapDetail> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CardCoverageResult {
+    /// Internal provenance for associating duplicate printed names with their
+    /// authoritative database face. Coverage JSON remains byte-compatible.
+    #[serde(skip)]
+    pub card_face_key: Option<String>,
     pub card_name: String,
     pub set_code: String,
     pub supported: bool,
@@ -6519,6 +6523,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             .unwrap_or_default();
 
         cards.push(CardCoverageResult {
+            card_face_key: Some(key.to_owned()),
             card_name: face.name.clone(),
             set_code: String::new(),
             supported,
