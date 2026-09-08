@@ -8995,22 +8995,11 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
     }
 }
 
-fn change_zone_all_to_library_effect(origins: Vec<Zone>) -> Effect {
+fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
     Effect::ChangeZoneAll {
-        origin: None,
+        origin: Some(origin),
         destination: Zone::Library,
-        target: TargetFilter::Or {
-            filters: origins
-                .into_iter()
-                .map(|zone| {
-                    TargetFilter::Typed(TypedFilter {
-                        type_filters: vec![],
-                        controller: Some(ControllerRef::You),
-                        properties: vec![FilterProp::InZone { zone }],
-                    })
-                })
-                .collect(),
-        },
+        target: TargetFilter::Controller,
         enters_under: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
@@ -9023,11 +9012,28 @@ fn change_zone_all_to_library_effect(origins: Vec<Zone>) -> Effect {
 }
 
 fn lower_change_zone_all_to_library(origins: Vec<Zone>) -> ParsedEffectClause {
-    assert!(
-        !origins.is_empty(),
-        "ChangeZoneAllToLibrary must have at least one origin"
-    );
-    with_shuffle_sub_ability(change_zone_all_to_library_effect(origins))
+    let (first, rest) = origins
+        .split_first()
+        .expect("ChangeZoneAllToLibrary must have at least one origin");
+
+    let mut tail: Option<Box<AbilityDefinition>> = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Shuffle {
+            target: TargetFilter::Controller,
+        },
+    )));
+    for origin in rest.iter().rev().copied() {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            change_zone_all_to_library_effect(origin),
+        );
+        def.sub_ability = tail;
+        tail = Some(Box::new(def));
+    }
+
+    let mut clause = parsed_clause(change_zone_all_to_library_effect(*first));
+    clause.sub_ability = tail;
+    clause
 }
 
 pub(super) fn parse_destroy_ast(
