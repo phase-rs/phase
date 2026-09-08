@@ -150,6 +150,7 @@
     "connectionLost": "Utracono połączenie z lobby. Sprawdź adres serwera.",
     "aborted": "To żądanie zostało anulowane.",
     "unsupported": "Żądanie zostało wysłane, ale ten serwer jest zbyt stary, aby je potwierdzić. Sprawdź turniej przed ponowną próbą.",
+    "incompatible": "Nieobsługiwane przez ten serwer: {{message}}",
     "notFound": "Nie ma turnieju o tym kodzie."
   }
 }

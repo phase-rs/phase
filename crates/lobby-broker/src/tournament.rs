@@ -1354,6 +1354,13 @@ impl TournamentMeta {
 /// targets. [`PairingOutcome::Bye`] and [`PairingOutcome::Forfeit`] are
 /// server-assigned and never reach this function: the reporting path only ever
 /// carries a [`PodOutcome`].
+///
+/// This owns the outcome-SHAPE rules (winner membership, dropped-player guard,
+/// and the per-`MatchType` game-win tally). The orthogonal bracket-advancement
+/// rule — a single-elimination pairing may not be reported as a draw, because
+/// [`TournamentPairing::winner`] is `None` for a draw and the bracket could not
+/// advance — is enforced by the caller [`TournamentManager::report_result`],
+/// which is the layer that knows the event's [`BracketShape`].
 pub fn validate_match_result(
     pairing: &TournamentPairing,
     result: &PodOutcome,
@@ -2289,6 +2296,20 @@ impl TournamentManager {
             &meta.players,
             meta.match_type,
         )?;
+        // A single-elimination bracket advances by seeding the next round from
+        // this round's winners, and `TournamentPairing::winner()` is `None` for
+        // a draw — so a drawn elimination pairing would resolve with no one to
+        // advance, stalling the bracket. MTR single-elimination matches are
+        // always played to a winner, so reject a draw here rather than accept a
+        // result the bracket cannot use. Swiss and pods keep draws (a Swiss draw
+        // is a legal 1-point-each result; `validate_match_result` owns the
+        // outcome-shape rules, this owns the bracket-advancement rule).
+        if meta.bracket == BracketShape::SingleElimination && matches!(outcome, PodOutcome::Draw) {
+            return Err(format!(
+                "Pairing {pairing_id} is in a single-elimination bracket and cannot be reported \
+                 as a draw - it must produce a winner to advance"
+            ));
+        }
         meta.pairings[index].outcome = Some(PairingOutcome::Reported(outcome));
         meta.last_activity_at = now;
         Ok(())
@@ -4026,6 +4047,77 @@ mod tests {
         );
         join_n(&mut solo, "SE1", SINGLE_ELIMINATION_MIN_PLAYERS - 1, &env);
         assert!(solo.generate_pairings("SE1", &env).is_err());
+    }
+
+    #[test]
+    fn single_elimination_rejects_a_draw_and_advances_the_reported_winner() {
+        // A draw has no winner (`TournamentPairing::winner()` is `None`), so a
+        // single-elimination bracket could never seed the next round from it.
+        // The draw report is refused and the pairing stays unresolved; a
+        // decisive report is accepted and advances the winner to round 2.
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        create(
+            &mut mgr,
+            "SE",
+            MatchArity::HEAD_TO_HEAD,
+            BracketShape::SingleElimination,
+            &env,
+        );
+        join_n(&mut mgr, "SE", 4, &env);
+        mgr.generate_pairings("SE", &env).expect("round 1");
+
+        let round_one: Vec<(PairingId, Vec<String>)> = mgr
+            .get("SE")
+            .expect("t")
+            .pairings
+            .iter()
+            .map(|p| (p.id, p.players.clone()))
+            .collect();
+        assert_eq!(round_one.len(), 2);
+
+        // A draw is refused for a single-elimination pairing, and the pairing is
+        // left unresolved so nothing can advance from it.
+        let first_id = round_one[0].0;
+        let err = mgr
+            .report_result("SE", first_id, PodOutcome::Draw, &env)
+            .expect_err("single-elimination cannot accept a draw");
+        assert!(err.contains("single-elimination"), "{err}");
+        assert!(mgr
+            .get("SE")
+            .expect("t")
+            .pairing(first_id)
+            .expect("p")
+            .outcome
+            .is_none());
+
+        // A decisive result is accepted; round 2 is seeded from the winners.
+        for (id, seats) in &round_one {
+            mgr.report_result(
+                "SE",
+                *id,
+                PodOutcome::Decisive {
+                    winner: seats[0].clone(),
+                    game_wins: bo3(&seats[0], 2, &seats[1], 0),
+                },
+                &env,
+            )
+            .expect("decisive report advances the bracket");
+        }
+        mgr.generate_pairings("SE", &env).expect("round 2");
+        let round_two: Vec<Vec<String>> = mgr
+            .get("SE")
+            .expect("t")
+            .pairings
+            .iter()
+            .filter(|p| p.round == 2)
+            .map(|p| p.players.clone())
+            .collect();
+        assert_eq!(
+            round_two,
+            vec![vec![round_one[0].1[0].clone(), round_one[1].1[0].clone()]],
+            "the two round-1 winners meet in round 2"
+        );
     }
 
     /// A 5/6/7-player single-elimination field — squarely inside MTR

@@ -143,6 +143,13 @@ const AUTHORED_LITERALS = [
     // floor must stay a literal so re-deriving it from the current version
     // fails this check instead of silently pinning the client forever.
     "MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING",
+    // The client-only send-path floor for per-event `match_type`. Frozen at the
+    // version that introduced it, for the same reason as the two floors above:
+    // deriving it from the current version would, at the next lobby bump,
+    // silently start refusing v8 brokers that honor `match_type` perfectly. It
+    // has no shared Rust constant to mirror, so unlike the ack/scoring floors it
+    // is not additionally value-pinned by an EXPECTED_* assertion below.
+    "MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE",
     "MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL",
     "PROTOCOL_VERSION",
   ]],

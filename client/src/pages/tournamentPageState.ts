@@ -42,6 +42,7 @@ import type {
 import type {
   GatedTournamentRpcResult,
   TournamentCredential,
+  TournamentIncompatible,
   TournamentRole,
 } from "../stores/multiplayerStore";
 
@@ -484,11 +485,16 @@ export type FailureLabel =
   | { readonly key: "errors.connectionLost" }
   | { readonly key: "errors.aborted" }
   | { readonly key: "errors.unsupported" }
+  | { readonly key: "errors.incompatible"; readonly message: string }
   | { readonly key: "errors.serverRejected"; readonly message: string };
 
-/** The failure half of a gated action's result — also total over an ungated one. */
+/**
+ * The failure half of a gated action's result — also total over an ungated one,
+ * plus the locally-produced {@link TournamentIncompatible} that `createTournament`
+ * can return before sending.
+ */
 type TournamentFailure = Extract<
-  GatedTournamentRpcResult<unknown>,
+  GatedTournamentRpcResult<unknown> | TournamentIncompatible,
   { ok: false }
 >;
 
@@ -548,6 +554,12 @@ export function failureLabel(failure: TournamentFailure): FailureLabel {
   }
   if (failure.reason === "aborted") return { key: "errors.aborted" };
   if (failure.reason === "unsupported") return { key: "errors.unsupported" };
+  // Locally-produced, pre-send refusal: the target broker cannot honor the
+  // requested match structure. Its `message` names the version gap, so pass it
+  // through the same way `serverRejected` does.
+  if (failure.reason === "incompatible") {
+    return { key: "errors.incompatible", message: failure.message };
+  }
   const unreachable: never = failure.reason;
   return unreachable;
 }

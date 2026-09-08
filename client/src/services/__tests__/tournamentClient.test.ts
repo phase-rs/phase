@@ -17,6 +17,7 @@ import {
   endTournamentOver,
   getTournamentOver,
   joinTournamentOver,
+  matchTypeNeedsCapability,
   reportMatchResultOver,
   startTournamentRoundOver,
   subscribeTournamentsOver,
@@ -351,6 +352,22 @@ const UNCORRELATED = HELPERS.filter((helper) => !helper.gated);
 // ---------------------------------------------------------------------------
 // A. Request frames byte-match the Rust literals (matrix row 4)
 // ---------------------------------------------------------------------------
+
+describe("matchTypeNeedsCapability", () => {
+  it("flags only Bo1 at head-to-head as needing the v8 capability", () => {
+    // The single case a pre-v8 broker would silently replace: Bo1 head-to-head
+    // (it would run as Bo3). Everything else already matches a pre-v8 default
+    // or is refused by the broker outright.
+    expect(matchTypeNeedsCapability(2, "Bo1")).toBe(true);
+    expect(matchTypeNeedsCapability(2, "Bo3")).toBe(false);
+    expect(matchTypeNeedsCapability(2, null)).toBe(false);
+    expect(matchTypeNeedsCapability(2, undefined)).toBe(false);
+    // Pods never carry Bo1-at-head-to-head; a pre-v8 broker already defaults
+    // them to single-game, so nothing to gate.
+    expect(matchTypeNeedsCapability(4, "Bo1")).toBe(false);
+    expect(matchTypeNeedsCapability(4, null)).toBe(false);
+  });
+});
 
 describe("tournament request frames", () => {
   it.each(HELPERS)(

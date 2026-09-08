@@ -150,6 +150,7 @@
     "connectionLost": "Ligação ao lobby perdida. Verifica o endereço do servidor.",
     "aborted": "Esse pedido foi cancelado.",
     "unsupported": "O pedido foi enviado, mas este servidor é demasiado antigo para o confirmar. Verifica o torneio antes de tentares de novo.",
+    "incompatible": "Não suportado por este servidor: {{message}}",
     "notFound": "Nenhum torneio com esse código."
   }
 }

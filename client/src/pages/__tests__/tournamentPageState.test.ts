@@ -484,6 +484,14 @@ describe("failureLabel", () => {
       { ok: false, reason: "unsupported", message: "cannot confirm" },
       "errors.unsupported",
     ],
+    // The locally-produced refusal `createTournament` returns when the broker's
+    // lobby protocol is too old to honor the requested match structure. Like
+    // `rejected` it carries a passthrough message (naming the version gap).
+    [
+      "an incompatible broker",
+      { ok: false, reason: "incompatible", neededLobbyVersion: 8, message: "needs v8" },
+      "errors.incompatible",
+    ],
   ];
 
   it.each(cases)("maps %s to %s", (_label, failure, key) => {
@@ -499,11 +507,15 @@ describe("failureLabel", () => {
     expect(label).toEqual({ key: "errors.serverRejected", message });
   });
 
-  // Exactly one arm carries an interpolation variable, so a consumer's
-  // `"message" in label` narrowing is total.
-  it("attaches a message to the rejection arm and to no other", () => {
+  // Two arms carry an interpolation variable — the broker's rejection text and
+  // the local incompatibility message — and no others, so a consumer's
+  // `"message" in label` narrowing stays total.
+  it("attaches a message to the rejection and incompatible arms and to no other", () => {
     const withMessage = cases.filter(([, failure]) => "message" in failureLabel(failure));
-    expect(withMessage.map(([, , key]) => key)).toEqual(["errors.serverRejected"]);
+    expect(withMessage.map(([, , key]) => key)).toEqual([
+      "errors.serverRejected",
+      "errors.incompatible",
+    ]);
   });
 
   it("maps the two not_authorized roles to different keys", () => {

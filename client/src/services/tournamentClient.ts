@@ -563,6 +563,26 @@ export interface CreateTournamentRequest {
   matchType?: MatchType | null;
 }
 
+/**
+ * Whether a `CreateTournament` request needs lobby protocol
+ * `MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE` to be honored — i.e. it selects a match
+ * structure a pre-v8 broker would silently replace with the arity default.
+ *
+ * The single such case is **Bo1 at head-to-head**: a pre-v8 broker ignores
+ * `match_type` and runs a head-to-head event as Bo3. Every other selection
+ * either already matches the default a pre-v8 broker applies (Bo3 head-to-head,
+ * and `Bo1`/`null` for pods) or is refused by the broker on its own (an explicit
+ * `Bo3` at a non-head-to-head arity), so none needs the capability gate. This
+ * encodes only that one capability boundary, not the broker's full default table
+ * — the broker stays the single authority for defaulting.
+ */
+export function matchTypeNeedsCapability(
+  arity: MatchArity,
+  matchType: MatchType | null | undefined,
+): boolean {
+  return arity === 2 && matchType === "Bo1";
+}
+
 /** `CreateTournament` → `TournamentCreated` (point reply, carries the token). */
 export function createTournamentOver(
   socket: PhaseSocket,

@@ -150,6 +150,7 @@
     "connectionLost": "Connessione alla lobby persa. Controlla l'indirizzo del server.",
     "aborted": "Quella richiesta è stata annullata.",
     "unsupported": "La richiesta è stata inviata, ma questo server è troppo vecchio per confermarla. Controlla il torneo prima di riprovare.",
+    "incompatible": "Non supportato da questo server: {{message}}",
     "notFound": "Nessun torneo con quel codice."
   }
 }
