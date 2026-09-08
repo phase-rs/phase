@@ -210,6 +210,12 @@ export interface DraftMatchDeckPayload {
   opponent: DraftDeckPayload;
   ai_decks: DraftDeckPayload[];
   /**
+   * The host-only original cube multiset used to reconstruct in-game boosters.
+   * It must never be published on `DraftPlayerView`: clients receive it only
+   * through the typed match payload builders that need to start the game.
+   */
+  booster_pack_pool?: string[] | null;
+  /**
    * Every set whose draft boosters these decks' draft CONTAINED, supplied
    * verbatim from `DraftPlayerView.draft_set_codes`, populated by
    * `filter_for_player`.  CR 903.13f(3): a draft that contained Commander

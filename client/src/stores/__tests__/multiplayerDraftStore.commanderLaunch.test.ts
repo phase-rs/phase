@@ -1153,6 +1153,29 @@ describe("multiplayerDraftStore Commander launch", () => {
     expect(transport.hostRoomSignals).toHaveLength(2);
   });
 
+  it("does not construct a host adapter when cancellation lands in the deferred booster source accessor", async () => {
+    await installCompletedPod(commanderView(4));
+    let releasePool!: (pool: string[] | null) => void;
+    boosterPackPoolForGame.mockImplementationOnce(
+      () => new Promise<string[] | null>((resolve) => { releasePool = resolve; }),
+    );
+
+    const launching = useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
+    await vi.waitFor(() => expect(boosterPackPoolForGame).toHaveBeenCalledTimes(1));
+
+    // The accessor has already yielded, but no adapter exists yet. A final
+    // abort check after its await is the ownership fence that prevents this
+    // continuation from creating an unreachable host adapter.
+    await useMultiplayerDraftStore.getState().cancelCommanderLaunch();
+    releasePool(["Private cube source"]);
+    await launching;
+
+    expect(P2PHostAdapter).not.toHaveBeenCalled();
+    expect(transport.hostDestroy).toHaveBeenCalledTimes(1);
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useMultiplayerDraftStore.getState().error).toBeNull();
+  });
+
   /**
    * A failure AFTER the launches are sent leaves the host with an error banner
    * AND — before this — a launch state nothing could clear, because

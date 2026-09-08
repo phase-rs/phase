@@ -1982,6 +1982,11 @@ export const useMultiplayerDraftStore = create<
       // PURE — sends nothing, and synthesizes every seat's deck exactly once.
       const decks = await hostAdapter.commanderSeatDecks(launchView, localSeat);
 
+      // The host-only source accessor may yield. It must settle before the
+      // final abort check and synchronous constructor below, otherwise a cancel
+      // landing during this await could create an adapter no handle owns.
+      const boosterPackPool = await hostAdapter.boosterPackPoolForGame();
+
       // INVARIANT, not a hope: a non-null `handle.adapter` means
       // `cancelCommanderLaunch` can reach the adapter. Rechecking here is what
       // establishes it — without this, a cancel landing during deck assembly
@@ -2010,7 +2015,7 @@ export const useMultiplayerDraftStore = create<
           // wire's required-nullable one; it is not `?? []`, which would assert
           // "the draft contained zero sets" where the host knows the answer.
           draft_set_codes: launchView.draft_set_codes ?? null,
-          booster_pack_pool: await hostAdapter.boosterPackPoolForGame(),
+          booster_pack_pool: boosterPackPool,
         },
         host.peer,
         host.onGuestConnected,
