@@ -1456,6 +1456,7 @@ mod tests {
 
     use super::*;
     use crate::config::AiConfig;
+    use crate::policies::effect_classify::targeted_player_impact_in_with_bound_parent_target;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::ability_utils::build_resolved_from_def;
     use engine::game::combat::AttackTarget;
@@ -1935,6 +1936,44 @@ mod tests {
             search_depth: crate::policies::context::SearchDepth::Root,
         };
         exact_pending_player_impact(&ctx, &target)
+    }
+
+    fn live_targeted_impacts(state: &GameState, player: PlayerId) -> (Option<f64>, Option<f64>) {
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(player)),
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let source = ctx.source_object();
+        let effects = ctx.effects();
+        (
+            targeted_player_impact(&ctx, player),
+            targeted_player_impact_in_with_bound_parent_target(
+                state,
+                source.map(|object| object.controller),
+                source.map(|object| object.id),
+                &effects,
+                player,
+                player,
+            ),
+        )
     }
 
     fn assert_live_target_action_advances(state: &GameState, action: GameAction) {
@@ -3307,24 +3346,34 @@ mod tests {
         )
         .sub_ability(discard);
         cast_live_targeting_definition(&mut state, CardId(100), "Draw then discard", definition);
-        let self_action = GameAction::ChooseTarget {
-            target: Some(TargetRef::Player(PlayerId(0))),
-        };
-        let opponent_action = GameAction::ChooseTarget {
-            target: Some(TargetRef::Player(PlayerId(1))),
-        };
-
-        assert!(matches!(
-            live_target_verdict(&state, self_action.clone()),
-            PolicyVerdict::Reject { ref reason }
-                if reason.kind == "anti_self_harm_wrong_player_target"
-        ));
-        assert!(matches!(
-            live_target_verdict(&state, opponent_action.clone()),
-            PolicyVerdict::Score { .. }
-        ));
-        assert_live_target_action_advances(&state, self_action);
-        assert_live_target_action_advances(&state, opponent_action);
+        for (player, is_self) in [(PlayerId(0), true), (PlayerId(1), false)] {
+            for bulk in [false, true] {
+                let action = if bulk {
+                    GameAction::SelectTargets {
+                        targets: vec![TargetRef::Player(player)],
+                    }
+                } else {
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(player)),
+                    }
+                };
+                let verdict = live_target_verdict(&state, action.clone());
+                if is_self {
+                    assert_eq!(
+                        reject_kind(&verdict),
+                        Some("anti_self_harm_wrong_player_target"),
+                        "the real cast's Draw/ParentTarget Discard chain rejects self for {action:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        score_delta(&verdict),
+                        4.8,
+                        "the real cast's Draw/ParentTarget Discard chain keeps its exact opponent score for {action:?}"
+                    );
+                }
+                assert_live_target_action_advances(&state, action);
+            }
+        }
     }
 
     #[test]
@@ -3650,36 +3699,50 @@ mod tests {
             unreachable!("the real cast installs target selection");
         };
         target_slots.push(target_slots[0].clone());
-        for action in [
-            GameAction::ChooseTarget {
-                target: Some(TargetRef::Player(PlayerId(0))),
-            },
-            GameAction::SelectTargets {
-                targets: vec![TargetRef::Player(PlayerId(0))],
-            },
-        ] {
+        for (player, is_self) in [(PlayerId(0), true), (PlayerId(1), false)] {
+            let choose = GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(player)),
+            };
             assert_eq!(
-                live_exact_target_impact(&state, TargetRef::Player(PlayerId(0))),
+                live_exact_target_impact(&state, TargetRef::Player(player)),
                 None,
                 "multiple slots must be unavailable to the exact-impact classifier"
             );
-            let verdict = live_target_verdict(&state, action.clone());
-            assert_eq!(
-                score_delta(&verdict),
-                LIVE_CAST_SELF_TARGET_BAND,
-                "multiple slots retain the beneficial fallback"
-            );
-            if matches!(action, GameAction::ChooseTarget { .. }) {
-                assert_live_target_action_advances(&state, action);
+            let verdict = live_target_verdict(&state, choose.clone());
+            if is_self {
+                assert_eq!(
+                    score_delta(&verdict),
+                    LIVE_CAST_SELF_TARGET_BAND,
+                    "multiple slots retain the beneficial self fallback"
+                );
             } else {
-                let error = engine::game::apply_as_current(&mut state.clone(), action)
-                    .expect_err("one bulk target cannot satisfy two required target slots");
-                assert!(
-                    matches!(error, engine::game::EngineError::InvalidAction(ref message)
-                        if message == "Expected between 2 and 2 targets, got 1"),
-                    "the real reducer must reject an incomplete bulk declaration: {error:?}"
+                assert_eq!(
+                    reject_kind(&verdict),
+                    Some("anti_self_harm_wrong_player_target"),
+                    "multiple slots retain the beneficial opponent rejection"
                 );
             }
+            assert_live_target_action_advances(&state, choose);
+
+            let bulk = GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(player)],
+            };
+            let bulk_verdict = live_target_verdict(&state, bulk.clone());
+            if is_self {
+                assert_eq!(score_delta(&bulk_verdict), LIVE_CAST_SELF_TARGET_BAND);
+            } else {
+                assert_eq!(
+                    reject_kind(&bulk_verdict),
+                    Some("anti_self_harm_wrong_player_target")
+                );
+            }
+            let error = engine::game::apply_as_current(&mut state.clone(), bulk)
+                .expect_err("one bulk target cannot satisfy two required target slots");
+            assert!(
+                matches!(error, engine::game::EngineError::InvalidAction(ref message)
+                    if message == "Expected between 2 and 2 targets, got 1"),
+                "the real reducer must reject an incomplete bulk declaration: {error:?}"
+            );
         }
     }
 
@@ -3696,7 +3759,7 @@ mod tests {
         let discard = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::ParentTarget,
                 filter: None,
                 selection: CardSelectionMode::Chosen,
@@ -3739,36 +3802,56 @@ mod tests {
         selection
             .selected_slots
             .push(Some(TargetRef::Player(PlayerId(1))));
-        for action in [
-            GameAction::ChooseTarget {
-                target: Some(TargetRef::Player(PlayerId(0))),
-            },
-            GameAction::SelectTargets {
-                targets: vec![TargetRef::Player(PlayerId(0))],
-            },
-        ] {
-            let verdict = live_target_verdict(&state, action.clone());
+        let (unbound, incorrectly_bound) = live_targeted_impacts(&state, PlayerId(0));
+        assert_eq!(
+            unbound,
+            Some(1.4),
+            "the later slot remains unbound: Draw(1) plus independent GainLife(1)"
+        );
+        assert_eq!(
+            incorrectly_bound,
+            Some(-1.6),
+            "temporarily binding ParentTarget would reverse the later-slot direction"
+        );
+        for (player, is_self) in [(PlayerId(0), true), (PlayerId(1), false)] {
+            let choose = GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(player)),
+            };
             assert_eq!(
-                live_exact_target_impact(&state, TargetRef::Player(PlayerId(0))),
+                live_exact_target_impact(&state, TargetRef::Player(player)),
                 None,
                 "the selected root and later independent slot must be unavailable to exact impact"
             );
-            assert_eq!(
-                score_delta(&verdict),
-                LIVE_CAST_SELF_TARGET_BAND,
-                "the later independent GainLife slot retains unbound beneficial fallback"
-            );
-            if matches!(action, GameAction::ChooseTarget { .. }) {
-                assert_live_target_action_advances(&state, action);
+            let verdict = live_target_verdict(&state, choose.clone());
+            if is_self {
+                assert_eq!(score_delta(&verdict), LIVE_CAST_SELF_TARGET_BAND);
             } else {
-                let error = engine::game::apply_as_current(&mut state.clone(), action)
-                    .expect_err("one bulk target cannot satisfy two required target slots");
-                assert!(
-                    matches!(error, engine::game::EngineError::InvalidAction(ref message)
-                        if message == "Expected between 2 and 2 targets, got 1"),
-                    "the real reducer must reject an incomplete bulk declaration: {error:?}"
+                assert_eq!(
+                    reject_kind(&verdict),
+                    Some("anti_self_harm_wrong_player_target")
                 );
             }
+            assert_live_target_action_advances(&state, choose);
+
+            let bulk = GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(player)],
+            };
+            let bulk_verdict = live_target_verdict(&state, bulk.clone());
+            if is_self {
+                assert_eq!(score_delta(&bulk_verdict), LIVE_CAST_SELF_TARGET_BAND);
+            } else {
+                assert_eq!(
+                    reject_kind(&bulk_verdict),
+                    Some("anti_self_harm_wrong_player_target")
+                );
+            }
+            let error = engine::game::apply_as_current(&mut state.clone(), bulk)
+                .expect_err("one bulk target cannot satisfy two required target slots");
+            assert!(
+                matches!(error, engine::game::EngineError::InvalidAction(ref message)
+                    if message == "Expected between 2 and 2 targets, got 1"),
+                "the real reducer must reject an incomplete bulk declaration: {error:?}"
+            );
         }
     }
 

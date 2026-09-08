@@ -875,10 +875,7 @@ pub(crate) fn exact_pending_player_impact(
         return None;
     }
 
-    let Some(mut impact) = exact_pending_node_impact(root, true, ctx.state, source_controller)?
-    else {
-        return None;
-    };
+    let mut impact = exact_pending_node_impact(root, true, ctx.state, source_controller)??;
     let mut node: &ResolvedAbility = root;
     while let Some(next) = node.sub_ability.as_deref() {
         if next.sub_link != SubAbilityLink::ContinuationStep
@@ -2203,15 +2200,7 @@ mod live_quantity_targeting_tests {
         let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
             unreachable!("the exact fixture installs a live pending cast");
         };
-        pending_cast.object_id = different_existing_source;
-        assert_eq!(
-            exact_pending_impact_from_live_state(&state, TargetRef::Player(PlayerId(1))),
-            None,
-            "two existing source ids still must match before exact source-context resolution"
-        );
-        let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
-            unreachable!("the source-mismatch fixture remains live");
-        };
+        pending_cast.object_id = source;
         pending_cast.ability.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
@@ -2221,9 +2210,23 @@ mod live_quantity_targeting_tests {
                 unless_filter: None,
             },
             Vec::new(),
-            different_existing_source,
+            source,
             PlayerId(0),
         )));
+        assert_eq!(
+            exact_pending_impact_from_live_state(&state, TargetRef::Player(PlayerId(1))),
+            Some(1.0),
+            "the matching fixed continuation reaches the child-source provenance guard"
+        );
+        let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
+            unreachable!("the matched fixed-child fixture remains live");
+        };
+        pending_cast
+            .ability
+            .sub_ability
+            .as_mut()
+            .expect("the matched chain retains its fixed child")
+            .source_id = different_existing_source;
         assert_eq!(
             exact_pending_impact_from_live_state(&state, TargetRef::Player(PlayerId(1))),
             None,
@@ -2660,6 +2663,12 @@ mod live_quantity_targeting_tests {
             "target_choice_timing",
             |node: &mut ResolvedAbility| {
                 node.target_choice_timing = TargetChoiceTiming::Resolution;
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!(
+            "selected_mode_labels",
+            |node: &mut ResolvedAbility| {
+                node.selected_mode_labels.push("selected mode".to_string());
             }
         );
         assert_ineligible_on_root_and_fixed_child!(
