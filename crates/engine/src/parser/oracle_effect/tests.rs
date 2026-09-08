@@ -14535,19 +14535,7 @@ fn compound_parent_target_shuffle_hand_and_graveyard_keeps_player_scope() {
 }
 
 fn targeted_zone_move_tree_has_unimplemented(def: &AbilityDefinition) -> bool {
-    matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
-        || def
-            .sub_ability
-            .as_deref()
-            .is_some_and(targeted_zone_move_tree_has_unimplemented)
-        || def
-            .else_ability
-            .as_deref()
-            .is_some_and(targeted_zone_move_tree_has_unimplemented)
-        || def
-            .mode_abilities
-            .iter()
-            .any(targeted_zone_move_tree_has_unimplemented)
+    crate::parser::oracle::has_unimplemented(def)
 }
 
 fn assert_targeted_graveyard_shuffle_shape<'a>(
