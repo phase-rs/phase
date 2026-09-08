@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, cleanup } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { PlayerSummary, TournamentPairingView } from "../../../adapter/types";
+import type { MatchType, PlayerSummary, TournamentPairingView } from "../../../adapter/types";
 import { ReportResultDialog } from "../ReportResultDialog";
 import { expectCatalogValuePresent, expectNoRawKeyPaths } from "./tournamentTestUtils";
 
@@ -16,16 +16,14 @@ const duoSeats: PlayerSummary[] = [
 ];
 
 /**
- * The hostile fixture behind F1: a **two-seat** pairing in an **arity-3**
- * tournament. `MatchArity::short_pod_size` is `arity - 1`
- * (`crates/lobby-broker/src/tournament.rs:123-126`), and `partition_round` at
- * five entrants and three seats yields one 3-seat pod plus this one. The
- * broker's `validate_match_result` branches on `players.len() == 2`, so this
- * pairing REQUIRES a game-wins tally even though the tournament's arity is 3.
- * A dialog gated on the tournament arity would submit an empty map here and be
- * refused every time.
+ * A **two-seat** pairing. Whether it carries a game-wins tally is decided by
+ * the event's resolved `match_type` passed to the dialog, NOT by seat count:
+ * a `Bo3` head-to-head event enters a tally, a `Bo1` event (head-to-head or a
+ * short two-seat pod) enters none. The tests below render it with an explicit
+ * `matchType` per case; the helpers default to `Bo3` (the tally path) for the
+ * entry-state, focus and copy tests that need the inputs present.
  */
-const shortPodAtArityThree: TournamentPairingView = {
+const twoSeatPairing: TournamentPairingView = {
   id: 7,
   round: 1,
   players: duoSeats,
@@ -45,7 +43,7 @@ const fullPodAtArityThree: TournamentPairingView = {
 
 /**
  * The hostile fixture behind V33b: a **later round's** pairing that shares
- * exactly **one** seat with `shortPodAtArityThree` (Ann).
+ * exactly **one** seat with `twoSeatPairing` (Ann).
  *
  * One shared seat is all it takes, and it is not an exotic arrangement — it is
  * what every multi-round tournament produces for every player. That single
@@ -66,19 +64,28 @@ const annVersusCidNextRound: TournamentPairingView = {
   outcome: null,
 };
 
-function dialogFor(pairing: TournamentPairingView, onSubmit: () => void) {
+function dialogFor(
+  pairing: TournamentPairingView,
+  onSubmit: () => void,
+  matchType: MatchType = "Bo3",
+) {
   return (
     <ReportResultDialog
       isOpen
       pairing={pairing}
+      matchType={matchType}
       onSubmit={onSubmit}
       onCancel={vi.fn()}
     />
   );
 }
 
-function renderDialog(pairing: TournamentPairingView, onSubmit = vi.fn()) {
-  const result = render(dialogFor(pairing, onSubmit));
+function renderDialog(
+  pairing: TournamentPairingView,
+  matchType: MatchType = "Bo3",
+  onSubmit = vi.fn(),
+) {
+  const result = render(dialogFor(pairing, onSubmit, matchType));
   return { ...result, onSubmit };
 }
 
@@ -87,17 +94,49 @@ function submitButton() {
 }
 
 describe("ReportResultDialog", () => {
-  // V22 — the gate is the pairing's seat count, never the tournament's arity.
-  it("shows game-wins inputs for a two-seat pairing in an arity-3 tournament", () => {
-    renderDialog(shortPodAtArityThree);
+  // V22 — the gate is the event's resolved match type, not the pairing's seat
+  // count. A Bo3 head-to-head event enters a per-game tally.
+  it("shows game-wins inputs for a Bo3 head-to-head event", () => {
+    renderDialog(twoSeatPairing, "Bo3");
 
     expect(screen.getByLabelText("Game wins for Ann")).toBeInTheDocument();
     expect(screen.getByLabelText("Game wins for Bob")).toBeInTheDocument();
     expect(screen.getByText("Game wins")).toBeInTheDocument();
   });
 
-  it("shows no game-wins inputs for a three-seat pod", () => {
-    renderDialog(fullPodAtArityThree);
+  // The regression: a two-seat Bo1 event enters NO tally. A dialog gated on seat
+  // count (as before ⓪) would render inputs here and submit a nonempty tally
+  // the broker rejects for every Bo1 result, making a Bo1 event unreportable.
+  it("shows no game-wins inputs for a Bo1 head-to-head event", () => {
+    renderDialog(twoSeatPairing, "Bo1");
+
+    expect(screen.queryByLabelText("Game wins for Ann")).not.toBeInTheDocument();
+    expect(screen.queryByText("Game wins")).not.toBeInTheDocument();
+  });
+
+  it("submits a Bo1 head-to-head result with an empty tally", () => {
+    const { onSubmit } = renderDialog(twoSeatPairing, "Bo1");
+
+    fireEvent.click(screen.getByLabelText("Ann"));
+    fireEvent.click(screen.getByRole("button", { name: "Submit Result" }));
+
+    // The broker accepts exactly this for a Bo1 event; a nonempty map is refused.
+    expect(onSubmit).toHaveBeenCalledWith({
+      Decisive: { winner: "ann", game_wins: {} },
+    });
+  });
+
+  // A pre-v8 broker sends no match_type; there the dialog falls back to the
+  // pairing's seat count, so a two-seat pairing still enters a tally.
+  it("falls back to seat count when the broker sends no match_type", () => {
+    renderDialog(twoSeatPairing, undefined);
+
+    expect(screen.getByLabelText("Game wins for Ann")).toBeInTheDocument();
+    expect(screen.getByText("Game wins")).toBeInTheDocument();
+  });
+
+  it("shows no game-wins inputs for a three-seat Bo1 pod", () => {
+    renderDialog(fullPodAtArityThree, "Bo1");
 
     expect(screen.queryByLabelText("Game wins for Cid")).not.toBeInTheDocument();
     expect(screen.queryByText("Game wins")).not.toBeInTheDocument();
@@ -106,7 +145,7 @@ describe("ReportResultDialog", () => {
   // V23 — a pod submits an empty tally, and the winner is the seat's
   // `player_key`, never its display name.
   it("submits a pod result with an empty tally and the winner's player key", () => {
-    const { onSubmit } = renderDialog(fullPodAtArityThree);
+    const { onSubmit } = renderDialog(fullPodAtArityThree, "Bo1");
 
     fireEvent.click(screen.getByLabelText("Dee"));
     fireEvent.click(screen.getByRole("button", { name: "Submit Result" }));
@@ -117,7 +156,7 @@ describe("ReportResultDialog", () => {
   });
 
   it("submits a head-to-head result with the entered tally in seat order", () => {
-    const { onSubmit } = renderDialog(shortPodAtArityThree);
+    const { onSubmit } = renderDialog(twoSeatPairing);
 
     fireEvent.click(screen.getByLabelText("Ann"));
     fireEvent.change(screen.getByLabelText("Game wins for Ann"), {
@@ -135,7 +174,7 @@ describe("ReportResultDialog", () => {
 
   // V24 — the unit variant crosses the wire as the bare string.
   it("submits a draw as the bare string", () => {
-    const { onSubmit } = renderDialog(shortPodAtArityThree);
+    const { onSubmit } = renderDialog(twoSeatPairing);
 
     fireEvent.click(screen.getByLabelText("Draw"));
     fireEvent.click(screen.getByRole("button", { name: "Submit Result" }));
@@ -147,7 +186,7 @@ describe("ReportResultDialog", () => {
   // `validate_match_result` alone. An inconsistent submission must reach the
   // wire rather than being caught here.
   it("submits an inconsistent tally without pre-rejecting it", () => {
-    const { onSubmit } = renderDialog(shortPodAtArityThree);
+    const { onSubmit } = renderDialog(twoSeatPairing);
 
     fireEvent.click(screen.getByLabelText("Ann"));
     fireEvent.change(screen.getByLabelText("Game wins for Ann"), {
@@ -169,7 +208,7 @@ describe("ReportResultDialog", () => {
    * acknowledgement, so it is a `dialog` and not an `alertdialog`.
    */
   it("is a dialog, not an alertdialog", () => {
-    renderDialog(shortPodAtArityThree);
+    renderDialog(twoSeatPairing);
 
     expect(screen.getByRole("dialog")).toHaveAttribute("aria-modal", "true");
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
@@ -179,7 +218,8 @@ describe("ReportResultDialog", () => {
     render(
       <ReportResultDialog
         isOpen={false}
-        pairing={shortPodAtArityThree}
+        pairing={twoSeatPairing}
+        matchType="Bo3"
         onSubmit={vi.fn()}
         onCancel={vi.fn()}
       />,
@@ -193,7 +233,8 @@ describe("ReportResultDialog", () => {
     render(
       <ReportResultDialog
         isOpen
-        pairing={shortPodAtArityThree}
+        pairing={twoSeatPairing}
+        matchType="Bo3"
         onSubmit={vi.fn()}
         onCancel={onCancel}
       />,
@@ -207,7 +248,8 @@ describe("ReportResultDialog", () => {
     render(
       <ReportResultDialog
         isOpen
-        pairing={shortPodAtArityThree}
+        pairing={twoSeatPairing}
+        matchType="Bo3"
         onSubmit={vi.fn()}
         onCancel={vi.fn()}
         submitting
@@ -219,7 +261,7 @@ describe("ReportResultDialog", () => {
 
   // V26 — every user-visible string routes through `t()`.
   it("routes all copy through the tournament catalog", () => {
-    const { container } = renderDialog(shortPodAtArityThree);
+    const { container } = renderDialog(twoSeatPairing);
 
     expectNoRawKeyPaths(container);
     expectCatalogValuePresent(container, "Report Result");
@@ -240,7 +282,7 @@ describe("ReportResultDialog", () => {
     // V33a — swapping to a pod strands a winner who is not one of its seats.
     it("clears a head-to-head result when the pairing becomes a three-seat pod", () => {
       const onSubmit = vi.fn();
-      const { rerender } = render(dialogFor(shortPodAtArityThree, onSubmit));
+      const { rerender } = render(dialogFor(twoSeatPairing, onSubmit));
 
       fireEvent.click(screen.getByLabelText("Ann"));
       fireEvent.change(screen.getByLabelText("Game wins for Ann"), {
@@ -253,7 +295,7 @@ describe("ReportResultDialog", () => {
       // after the swap is satisfiable by a dialog that never accepted input.
       expect(submitButton()).toBeEnabled();
 
-      rerender(dialogFor(fullPodAtArityThree, onSubmit));
+      rerender(dialogFor(fullPodAtArityThree, onSubmit, "Bo1"));
 
       // Ann is not a seat of this pod, so nothing shows as chosen — and the
       // submit affordance must agree with what the organizer can see.
@@ -280,7 +322,7 @@ describe("ReportResultDialog", () => {
     // new pairing, so nothing downstream rejects it.
     it("carries no winner or tally into a different head-to-head pairing", () => {
       const onSubmit = vi.fn();
-      const { rerender } = render(dialogFor(shortPodAtArityThree, onSubmit));
+      const { rerender } = render(dialogFor(twoSeatPairing, onSubmit));
 
       fireEvent.click(screen.getByLabelText("Ann"));
       fireEvent.change(screen.getByLabelText("Game wins for Ann"), {

@@ -10,7 +10,7 @@ use crate::eval::evaluate_creature;
 use crate::features::DeckFeatures;
 
 use super::activation::turn_only;
-use super::context::{collect_ability_effects, PolicyContext};
+use super::context::{collect_ability_effects, collect_resolved_abilities, PolicyContext};
 use super::effect_classify::{effect_polarity, is_spell_beneficial, EffectPolarity};
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 
@@ -250,13 +250,17 @@ pub(crate) fn assess_spell_impact(state: &GameState, entry: &StackEntry) -> f64 
 
             let mut score = mv * 0.3;
 
-            let effects = entry
+            let abilities = entry
                 .ability()
-                .map(|a| collect_ability_effects(a))
+                .map(collect_resolved_abilities)
                 .unwrap_or_default();
-            for effect in effects {
-                score += match effect {
-                    Effect::ExtraTurn { .. } => 5.0,
+            for ability in abilities {
+                score += match &ability.effect {
+                    Effect::ExtraTurn { count, .. } => {
+                        engine::game::quantity::resolve_quantity_with_targets(state, count, ability)
+                            .max(0) as f64
+                            * 5.0
+                    }
                     Effect::DestroyAll { .. }
                     | Effect::DamageAll { .. }
                     | Effect::ChangeZoneAll { .. } => 4.0,
@@ -375,7 +379,9 @@ mod tests {
     use crate::config::AiConfig;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::{BounceSelection, EffectKind, ResolvedAbility, TargetFilter};
+    use engine::types::ability::{
+        BounceSelection, EffectKind, QuantityRef, ResolvedAbility, TargetFilter,
+    };
     use engine::types::card_type::CoreType;
     use engine::types::game_state::{
         GameState, PendingCast, StackEntry, StackEntryKind, TargetEffectDetail,
@@ -434,6 +440,96 @@ mod tests {
             source_rider: None,
             countered_spell_zone: None,
         }
+    }
+
+    fn extra_turn(count: QuantityExpr) -> Effect {
+        Effect::ExtraTurn {
+            target: TargetFilter::Controller,
+            count,
+        }
+    }
+
+    #[test]
+    fn spell_impact_values_each_extra_turn_and_uses_the_owning_node_context() {
+        let mut state = make_state();
+        let unrelated_id = push_spell(&mut state, PlayerId(1), 0, Effect::NoOp, vec![]);
+        let unrelated = state
+            .stack
+            .iter()
+            .find(|entry| entry.id == unrelated_id)
+            .unwrap();
+        assert_eq!(assess_spell_impact(&state, unrelated), 0.0);
+
+        let one_id = push_spell(
+            &mut state,
+            PlayerId(1),
+            0,
+            extra_turn(QuantityExpr::Fixed { value: 1 }),
+            vec![],
+        );
+        let one = state.stack.iter().find(|entry| entry.id == one_id).unwrap();
+        assert_eq!(assess_spell_impact(&state, one), 5.0);
+
+        let two_id = push_spell(
+            &mut state,
+            PlayerId(1),
+            0,
+            extra_turn(QuantityExpr::Fixed { value: 2 }),
+            vec![],
+        );
+        let two = state.stack.iter().find(|entry| entry.id == two_id).unwrap();
+        assert_eq!(assess_spell_impact(&state, two), 8.0);
+
+        let source_card_id = CardId(state.next_object_id);
+        let source_id = create_object(
+            &mut state,
+            source_card_id,
+            PlayerId(1),
+            "Context Spell".into(),
+            Zone::Stack,
+        );
+        let mut root = ResolvedAbility::new(Effect::NoOp, vec![], source_id, PlayerId(1));
+        root.chosen_x = Some(1);
+        let mut child = ResolvedAbility::new(
+            extra_turn(QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            }),
+            vec![],
+            source_id,
+            PlayerId(1),
+        );
+        child.chosen_x = Some(2);
+        root.sub_ability = Some(Box::new(child));
+        let mut root_one = root.clone();
+        root_one
+            .sub_ability
+            .as_mut()
+            .expect("dynamic child")
+            .chosen_x = Some(1);
+        let entry = StackEntry {
+            id: ObjectId(state.next_object_id),
+            source_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                ability: Some(Box::new(root)),
+                card_id: CardId(state.next_object_id),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        };
+        assert_eq!(assess_spell_impact(&state, &entry), 8.0);
+        let one_entry = StackEntry {
+            id: ObjectId(state.next_object_id + 1),
+            source_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                ability: Some(Box::new(root_one)),
+                card_id: CardId(state.next_object_id + 1),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        };
+        assert_eq!(assess_spell_impact(&state, &one_entry), 5.0);
     }
 
     /// Sibling of [`push_stack_entry`] for multiplayer counter fixtures: the entry

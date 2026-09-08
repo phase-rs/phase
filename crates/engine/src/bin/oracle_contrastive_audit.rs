@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -66,9 +66,39 @@ impl Status {
 
 #[derive(Clone, Debug)]
 struct Mutation {
-    family: &'static str,
-    direction: &'static str,
+    kind: MutationKind,
     text: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MutationKind {
+    LifeYouToTargetOpponent,
+    LifeTargetOpponentToYou,
+    TokenOneToTwo,
+    TokenTwoToOne,
+    DestroyCreatureToNontoken,
+    DestroyNontokenToCreature,
+}
+
+impl MutationKind {
+    fn family(self) -> &'static str {
+        match self {
+            Self::LifeYouToTargetOpponent | Self::LifeTargetOpponentToYou => FAMILIES[0],
+            Self::TokenOneToTwo | Self::TokenTwoToOne => FAMILIES[1],
+            Self::DestroyCreatureToNontoken | Self::DestroyNontokenToCreature => FAMILIES[2],
+        }
+    }
+
+    fn direction(self) -> &'static str {
+        match self {
+            Self::LifeYouToTargetOpponent => "you_to_target_opponent",
+            Self::LifeTargetOpponentToYou => "target_opponent_to_you",
+            Self::TokenOneToTwo => "one_to_two",
+            Self::TokenTwoToOne => "two_to_one",
+            Self::DestroyCreatureToNontoken => "creature_to_nontoken",
+            Self::DestroyNontokenToCreature => "nontoken_to_creature",
+        }
+    }
 }
 
 #[derive(Default, Serialize)]
@@ -134,8 +164,7 @@ fn recognize_life(text: &str) -> Option<Mutation> {
         all_consuming(delimited(tag("You gain "), decimal, tag(" life."))).parse(text)
     {
         return Some(Mutation {
-            family: FAMILIES[0],
-            direction: "you_to_target_opponent",
+            kind: MutationKind::LifeYouToTargetOpponent,
             text: format!("Target opponent gains {amount} life."),
         });
     }
@@ -147,8 +176,7 @@ fn recognize_life(text: &str) -> Option<Mutation> {
     .parse(text)
     .ok()?;
     Some(Mutation {
-        family: FAMILIES[0],
-        direction: "target_opponent_to_you",
+        kind: MutationKind::LifeTargetOpponentToYou,
         text: format!("You gain {amount} life."),
     })
 }
@@ -201,8 +229,7 @@ fn recognize_token(text: &str) -> Option<Mutation> {
     if let Ok((_, description)) = singular(text) {
         if description_is_single_token(description) {
             return Some(Mutation {
-                family: FAMILIES[1],
-                direction: "one_to_two",
+                kind: MutationKind::TokenOneToTwo,
                 text: format!("Create two {description} tokens."),
             });
         }
@@ -210,8 +237,7 @@ fn recognize_token(text: &str) -> Option<Mutation> {
     }
     let (_, description) = plural(text).ok()?;
     description_is_single_token(description).then(|| Mutation {
-        family: FAMILIES[1],
-        direction: "two_to_one",
+        kind: MutationKind::TokenTwoToOne,
         text: format!("Create a {description} token."),
     })
 }
@@ -228,14 +254,12 @@ fn recognize_destroy(text: &str) -> Option<Mutation> {
     let (_, qualified) = all_consuming(sentence).parse(text).ok()?;
     if qualified == "Destroy target creature." {
         Some(Mutation {
-            family: FAMILIES[2],
-            direction: "creature_to_nontoken",
+            kind: MutationKind::DestroyCreatureToNontoken,
             text: "Destroy target nontoken creature.".to_string(),
         })
     } else {
         Some(Mutation {
-            family: FAMILIES[2],
-            direction: "nontoken_to_creature",
+            kind: MutationKind::DestroyNontokenToCreature,
             text: "Destroy target creature.".to_string(),
         })
     }
@@ -247,16 +271,22 @@ fn recognize_mutation(text: &str) -> Option<Mutation> {
         .or_else(|| recognize_destroy(text))
 }
 
-fn carriers(face: &CardFace, family: &str) -> Vec<Effect> {
+fn carriers(face: &CardFace, kind: MutationKind) -> Vec<Effect> {
     let mut found = Vec::new();
     for ability in &face.abilities {
         let _ = visit_ability_def(ability, &mut |effect| {
-            let relevant = matches!(
-                (family, effect),
-                ("life_recipient_v1", Effect::GainLife { .. })
-                    | ("token_count_article_two_v1", Effect::Token { .. })
-                    | ("destroy_nontoken_v1", Effect::Destroy { .. })
-            );
+            let relevant = match kind {
+                MutationKind::LifeYouToTargetOpponent | MutationKind::LifeTargetOpponentToYou => {
+                    matches!(effect, Effect::GainLife { .. })
+                }
+                MutationKind::TokenOneToTwo | MutationKind::TokenTwoToOne => {
+                    matches!(effect, Effect::Token { .. })
+                }
+                MutationKind::DestroyCreatureToNontoken
+                | MutationKind::DestroyNontokenToCreature => {
+                    matches!(effect, Effect::Destroy { .. })
+                }
+            };
             if relevant {
                 found.push(effect.clone());
             }
@@ -266,7 +296,7 @@ fn carriers(face: &CardFace, family: &str) -> Vec<Effect> {
     found
 }
 
-fn compare_life(base: &Effect, mutant: &Effect, direction: &str) -> Status {
+fn compare_life(base: &Effect, mutant: &Effect, kind: MutationKind) -> Status {
     let (
         Effect::GainLife {
             amount: base_amount,
@@ -308,10 +338,15 @@ fn compare_life(base: &Effect, mutant: &Effect, direction: &str) -> Status {
     else {
         return Status::UncheckableCarrierCount;
     };
-    let expected = match direction {
-        "you_to_target_opponent" => !base_is_opponent && mutant_is_opponent,
-        "target_opponent_to_you" => base_is_opponent && !mutant_is_opponent,
-        _ => return Status::UncheckableCarrierCount,
+    let expected = match kind {
+        MutationKind::LifeYouToTargetOpponent => !base_is_opponent && mutant_is_opponent,
+        MutationKind::LifeTargetOpponentToYou => base_is_opponent && !mutant_is_opponent,
+        MutationKind::TokenOneToTwo
+        | MutationKind::TokenTwoToOne
+        | MutationKind::DestroyCreatureToNontoken
+        | MutationKind::DestroyNontokenToCreature => {
+            unreachable!("classify dispatches only life mutations to compare_life")
+        }
     };
     if !expected {
         return Status::ProjectionChangedElsewhere;
@@ -331,7 +366,7 @@ fn compare_life(base: &Effect, mutant: &Effect, direction: &str) -> Status {
     }
 }
 
-fn compare_token(base: &Effect, mutant: &Effect, direction: &str) -> Status {
+fn compare_token(base: &Effect, mutant: &Effect, kind: MutationKind) -> Status {
     let (
         Effect::Token {
             count: base_count, ..
@@ -356,10 +391,15 @@ fn compare_token(base: &Effect, mutant: &Effect, direction: &str) -> Status {
     else {
         return Status::UncheckableCarrierCount;
     };
-    let (base_expected, mutant_expected) = match direction {
-        "one_to_two" => (1, 2),
-        "two_to_one" => (2, 1),
-        _ => return Status::UncheckableCarrierCount,
+    let (base_expected, mutant_expected) = match kind {
+        MutationKind::TokenOneToTwo => (1, 2),
+        MutationKind::TokenTwoToOne => (2, 1),
+        MutationKind::LifeYouToTargetOpponent
+        | MutationKind::LifeTargetOpponentToYou
+        | MutationKind::DestroyCreatureToNontoken
+        | MutationKind::DestroyNontokenToCreature => {
+            unreachable!("classify dispatches only token mutations to compare_token")
+        }
     };
     if *base_value != base_expected || *mutant_value != mutant_expected {
         return Status::ProjectionChangedElsewhere;
@@ -379,7 +419,7 @@ fn compare_token(base: &Effect, mutant: &Effect, direction: &str) -> Status {
     }
 }
 
-fn compare_destroy(base: &Effect, mutant: &Effect, direction: &str) -> Status {
+fn compare_destroy(base: &Effect, mutant: &Effect, kind: MutationKind) -> Status {
     let (
         Effect::Destroy {
             target: base_target,
@@ -414,10 +454,15 @@ fn compare_destroy(base: &Effect, mutant: &Effect, direction: &str) -> Status {
     if base_target == mutant_target {
         return Status::SemanticCollision;
     }
-    let expected = match direction {
-        "creature_to_nontoken" => base_non_tokens == 0 && mutant_non_tokens == 1,
-        "nontoken_to_creature" => base_non_tokens == 1 && mutant_non_tokens == 0,
-        _ => false,
+    let expected = match kind {
+        MutationKind::DestroyCreatureToNontoken => base_non_tokens == 0 && mutant_non_tokens == 1,
+        MutationKind::DestroyNontokenToCreature => base_non_tokens == 1 && mutant_non_tokens == 0,
+        MutationKind::LifeYouToTargetOpponent
+        | MutationKind::LifeTargetOpponentToYou
+        | MutationKind::TokenOneToTwo
+        | MutationKind::TokenTwoToOne => {
+            unreachable!("classify dispatches only destroy mutations to compare_destroy")
+        }
     };
     if !expected {
         return Status::ProjectionChangedElsewhere;
@@ -445,8 +490,7 @@ fn compare_destroy(base: &Effect, mutant: &Effect, direction: &str) -> Status {
 fn classify(
     base_face: &CardFace,
     mutant_face: &CardFace,
-    family: &str,
-    direction: &str,
+    kind: MutationKind,
 ) -> (Status, Vec<String>, Vec<String>, ProjectionPair) {
     let base_gaps = card_face_gaps(base_face);
     let mutant_gaps = card_face_gaps(mutant_face);
@@ -467,8 +511,8 @@ fn classify(
             (true, true) => None,
         },
     );
-    let base = carriers(base_face, family);
-    let mutant = carriers(mutant_face, family);
+    let base = carriers(base_face, kind);
+    let mutant = carriers(mutant_face, kind);
     let projections = ProjectionPair {
         base_carrier_count: base.len(),
         mutant_carrier_count: mutant.len(),
@@ -479,11 +523,16 @@ fn classify(
         if base.len() != 1 || mutant.len() != 1 {
             return Status::UncheckableCarrierCount;
         }
-        match family {
-            "life_recipient_v1" => compare_life(&base[0], &mutant[0], direction),
-            "token_count_article_two_v1" => compare_token(&base[0], &mutant[0], direction),
-            "destroy_nontoken_v1" => compare_destroy(&base[0], &mutant[0], direction),
-            _ => unreachable!("closed family list"),
+        match kind {
+            MutationKind::LifeYouToTargetOpponent | MutationKind::LifeTargetOpponentToYou => {
+                compare_life(&base[0], &mutant[0], kind)
+            }
+            MutationKind::TokenOneToTwo | MutationKind::TokenTwoToOne => {
+                compare_token(&base[0], &mutant[0], kind)
+            }
+            MutationKind::DestroyCreatureToNontoken | MutationKind::DestroyNontokenToCreature => {
+                compare_destroy(&base[0], &mutant[0], kind)
+            }
         }
     });
     (status, base_gaps, mutant_gaps, projections)
@@ -540,7 +589,7 @@ fn audit(input: &Path, input_label: String) -> Result<Report, Box<dyn Error>> {
                 continue;
             };
             for family in FAMILIES {
-                if family != mutation.family {
+                if family != mutation.kind.family() {
                     *census
                         .get_mut(family)
                         .unwrap()
@@ -549,7 +598,7 @@ fn audit(input: &Path, input_label: String) -> Result<Report, Box<dyn Error>> {
                         .or_default() += 1;
                 }
             }
-            let family_census = census.get_mut(mutation.family).unwrap();
+            let family_census = census.get_mut(mutation.kind.family()).unwrap();
             family_census.grammar_matches += 1;
             let oracle_id = face.identifiers.scryfall_oracle_id.clone();
             let base_face = build_oracle_face(&face, oracle_id.clone());
@@ -557,18 +606,14 @@ fn audit(input: &Path, input_label: String) -> Result<Report, Box<dyn Error>> {
             mutated_card.text = Some(mutation.text.clone());
             let mutant_face = build_oracle_face(&mutated_card, oracle_id.clone());
             family_census.attempted += 1;
-            let (status, base_gaps, mutant_gaps, projections) = classify(
-                &base_face,
-                &mutant_face,
-                mutation.family,
-                mutation.direction,
-            );
+            let (status, base_gaps, mutant_gaps, projections) =
+                classify(&base_face, &mutant_face, mutation.kind);
             results.push(AuditResult {
                 atomic_key: atomic_key.clone(),
                 face_name: face.face_name.clone().unwrap_or_else(|| face.name.clone()),
                 oracle_id,
-                family: mutation.family,
-                direction: mutation.direction,
+                family: mutation.kind.family(),
+                direction: mutation.kind.direction(),
                 original_text: text.to_string(),
                 mutated_text: mutation.text,
                 byte_span: ByteSpan {
@@ -655,6 +700,69 @@ fn resolve_input(spelling: &str) -> (PathBuf, String) {
     (input, input_label)
 }
 
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    if let Some(same) = same_file_identity(left, right) {
+        return same;
+    }
+
+    fn resolved(path: &Path) -> Option<PathBuf> {
+        if let Ok(canonical) = fs::canonicalize(path) {
+            return Some(canonical);
+        }
+        let parent = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        Some(fs::canonicalize(parent).ok()?.join(path.file_name()?))
+    }
+
+    matches!((resolved(left), resolved(right)), (Some(left), Some(right)) if left == right)
+}
+
+fn write_report_atomic(path: &Path, rendered: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "output has no file name")
+    })?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        process::id()
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(rendered)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &Path, right: &Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    let left = fs::metadata(left).ok()?;
+    let right = fs::metadata(right).ok()?;
+    Some(left.dev() == right.dev() && left.ino() == right.ino())
+}
+
+#[cfg(windows)]
+fn same_file_identity(left: &Path, right: &Path) -> Option<bool> {
+    same_file::is_same_file(left, right).ok()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file_identity(_left: &Path, _right: &Path) -> Option<bool> {
+    None
+}
+
 fn run() -> Result<(), Box<dyn Error>> {
     let mut stdout = std::io::stdout();
     run_with_args(env::args().skip(1), &mut stdout)
@@ -665,9 +773,15 @@ fn run_with_args(
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn Error>> {
     let (input, input_label, output) = arguments_from(args).map_err(std::io::Error::other)?;
+    if output
+        .as_deref()
+        .is_some_and(|path| paths_refer_to_same_file(&input, path))
+    {
+        return Err("output path must not overwrite the input corpus".into());
+    }
     let rendered = render_report(&audit(&input, input_label)?)?;
     if let Some(path) = output {
-        fs::write(path, rendered)?;
+        write_report_atomic(&path, &rendered)?;
     } else {
         stdout.write_all(&rendered)?;
     }
@@ -759,6 +873,47 @@ mod tests {
     }
 
     #[test]
+    fn mutation_kinds_preserve_report_labels() {
+        let cases = [
+            (
+                MutationKind::LifeYouToTargetOpponent,
+                "life_recipient_v1",
+                "you_to_target_opponent",
+            ),
+            (
+                MutationKind::LifeTargetOpponentToYou,
+                "life_recipient_v1",
+                "target_opponent_to_you",
+            ),
+            (
+                MutationKind::TokenOneToTwo,
+                "token_count_article_two_v1",
+                "one_to_two",
+            ),
+            (
+                MutationKind::TokenTwoToOne,
+                "token_count_article_two_v1",
+                "two_to_one",
+            ),
+            (
+                MutationKind::DestroyCreatureToNontoken,
+                "destroy_nontoken_v1",
+                "creature_to_nontoken",
+            ),
+            (
+                MutationKind::DestroyNontokenToCreature,
+                "destroy_nontoken_v1",
+                "nontoken_to_creature",
+            ),
+        ];
+
+        for (kind, family, direction) in cases {
+            assert_eq!(kind.family(), family);
+            assert_eq!(kind.direction(), direction);
+        }
+    }
+
+    #[test]
     fn production_angels_mercy_reaches_an_exact_life_projection() {
         let mut base = raw_card("You gain 7 life.");
         base.name = "Angel's Mercy".to_string();
@@ -776,8 +931,7 @@ mod tests {
         let (status, _, _, projections) = classify(
             &base_face,
             &mutant_face,
-            "life_recipient_v1",
-            "you_to_target_opponent",
+            MutationKind::LifeYouToTargetOpponent,
         );
         assert_eq!(status, Status::ChangedAsRequired);
         assert!(projections.base.is_some());
@@ -791,13 +945,7 @@ mod tests {
         mutant.text = Some(mutation.text);
         let base_face = build_oracle_face(&base, Some("fixture-oracle-id".to_string()));
         let mutant_face = build_oracle_face(&mutant, Some("fixture-oracle-id".to_string()));
-        classify(
-            &base_face,
-            &mutant_face,
-            mutation.family,
-            mutation.direction,
-        )
-        .0
+        classify(&base_face, &mutant_face, mutation.kind).0
     }
 
     #[test]
@@ -827,30 +975,17 @@ mod tests {
             classify(
                 &unsupported,
                 &unsupported,
-                "life_recipient_v1",
-                "you_to_target_opponent"
+                MutationKind::LifeYouToTargetOpponent,
             )
             .0,
             Status::BothUnsupported
         );
         assert_eq!(
-            classify(
-                &unsupported,
-                &clean,
-                "life_recipient_v1",
-                "you_to_target_opponent"
-            )
-            .0,
+            classify(&unsupported, &clean, MutationKind::LifeYouToTargetOpponent,).0,
             Status::BaseUnsupported
         );
         assert_eq!(
-            classify(
-                &clean,
-                &unsupported,
-                "life_recipient_v1",
-                "you_to_target_opponent"
-            )
-            .0,
+            classify(&clean, &unsupported, MutationKind::LifeYouToTargetOpponent,).0,
             Status::MutantUnsupported
         );
 
@@ -865,30 +1000,17 @@ mod tests {
             classify(
                 &diagnostic,
                 &diagnostic,
-                "life_recipient_v1",
-                "you_to_target_opponent"
+                MutationKind::LifeYouToTargetOpponent,
             )
             .0,
             Status::BothDiagnostic
         );
         assert_eq!(
-            classify(
-                &diagnostic,
-                &clean,
-                "life_recipient_v1",
-                "you_to_target_opponent"
-            )
-            .0,
+            classify(&diagnostic, &clean, MutationKind::LifeYouToTargetOpponent,).0,
             Status::BaseDiagnostic
         );
         assert_eq!(
-            classify(
-                &clean,
-                &diagnostic,
-                "life_recipient_v1",
-                "you_to_target_opponent"
-            )
-            .0,
+            classify(&clean, &diagnostic, MutationKind::LifeYouToTargetOpponent,).0,
             Status::MutantDiagnostic
         );
     }
@@ -908,11 +1030,19 @@ mod tests {
             player: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
         };
         assert_eq!(
-            compare_life(&controller, &controller, "you_to_target_opponent"),
+            compare_life(
+                &controller,
+                &controller,
+                MutationKind::LifeYouToTargetOpponent,
+            ),
             Status::SemanticCollision
         );
         assert_eq!(
-            compare_life(&controller, &opponent, "you_to_target_opponent"),
+            compare_life(
+                &controller,
+                &opponent,
+                MutationKind::LifeYouToTargetOpponent,
+            ),
             Status::ChangedAsRequired
         );
 
@@ -920,7 +1050,7 @@ mod tests {
             compare_life(
                 &controller,
                 &opponent_wrong_amount,
-                "you_to_target_opponent"
+                MutationKind::LifeYouToTargetOpponent,
             ),
             Status::ProjectionChangedElsewhere
         );
@@ -932,7 +1062,7 @@ mod tests {
             compare_life(
                 &controller,
                 &unsupported_opponent_shape,
-                "you_to_target_opponent"
+                MutationKind::LifeYouToTargetOpponent,
             ),
             Status::UncheckableCarrierCount
         );
@@ -942,13 +1072,7 @@ mod tests {
     fn zero_and_multiple_carriers_are_uncheckable_after_clean_gates() {
         let empty = CardFace::default();
         assert_eq!(
-            classify(
-                &empty,
-                &empty,
-                "life_recipient_v1",
-                "you_to_target_opponent"
-            )
-            .0,
+            classify(&empty, &empty, MutationKind::LifeYouToTargetOpponent).0,
             Status::UncheckableCarrierCount
         );
         let mut multiple = empty.clone();
@@ -969,13 +1093,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            classify(
-                &multiple,
-                &multiple,
-                "life_recipient_v1",
-                "you_to_target_opponent"
-            )
-            .0,
+            classify(&multiple, &multiple, MutationKind::LifeYouToTargetOpponent,).0,
             Status::UncheckableCarrierCount
         );
     }
@@ -992,7 +1110,11 @@ mod tests {
         let unqualified = destroy(vec![]);
         let duplicate = destroy(vec![FilterProp::NonToken, FilterProp::NonToken]);
         assert_eq!(
-            compare_destroy(&unqualified, &duplicate, "creature_to_nontoken"),
+            compare_destroy(
+                &unqualified,
+                &duplicate,
+                MutationKind::DestroyCreatureToNontoken,
+            ),
             Status::UncheckableCarrierCount
         );
     }
@@ -1011,7 +1133,10 @@ mod tests {
             ],
             ..CardFace::default()
         };
-        assert_eq!(carriers(&face, "life_recipient_v1").len(), 3);
+        assert_eq!(
+            carriers(&face, MutationKind::LifeYouToTargetOpponent).len(),
+            3
+        );
     }
 
     #[test]
@@ -1068,6 +1193,79 @@ mod tests {
         assert!(!rendered.contains("timestamp"));
         first_report.results.reverse();
         assert_ne!(render_report(&first_report).unwrap(), second_bytes);
+    }
+
+    #[test]
+    fn output_aliases_are_rejected_without_modifying_the_corpus() {
+        let directory = tempfile::tempdir().unwrap();
+        let corpus = directory.path().join("AtomicCards.json");
+        let original = br#"{"data":{}}"#;
+        fs::write(&corpus, original).unwrap();
+
+        let run_with_output = |output: &Path| {
+            let mut unused_stdout = Vec::new();
+            run_with_args(
+                vec![
+                    corpus.to_string_lossy().into_owned(),
+                    "--output".to_string(),
+                    output.to_string_lossy().into_owned(),
+                ],
+                &mut unused_stdout,
+            )
+            .unwrap_err()
+            .to_string()
+        };
+
+        assert!(run_with_output(&corpus).contains("must not overwrite the input corpus"));
+        assert_eq!(fs::read(&corpus).unwrap(), original);
+
+        let nested = directory.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        let dot_dot_alias = nested.join("..").join("AtomicCards.json");
+        assert!(run_with_output(&dot_dot_alias).contains("must not overwrite the input corpus"));
+        assert_eq!(fs::read(&corpus).unwrap(), original);
+
+        #[cfg(unix)]
+        {
+            let symlink = directory.path().join("symlink.json");
+            std::os::unix::fs::symlink(&corpus, &symlink).unwrap();
+            assert!(run_with_output(&symlink).contains("must not overwrite the input corpus"));
+            assert_eq!(fs::read(&corpus).unwrap(), original);
+
+            let hard_link = directory.path().join("hard-link.json");
+            fs::hard_link(&corpus, &hard_link).unwrap();
+            assert!(run_with_output(&hard_link).contains("must not overwrite the input corpus"));
+            assert_eq!(fs::read(&corpus).unwrap(), original);
+        }
+
+        assert!(!paths_refer_to_same_file(
+            &corpus,
+            &directory.path().join("new-report.json")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_output_replaces_a_raced_symlink_without_modifying_the_corpus() {
+        let directory = tempfile::tempdir().unwrap();
+        let corpus = directory.path().join("AtomicCards.json");
+        let output = directory.path().join("report.json");
+        let original = br#"{"data":{}}"#;
+        fs::write(&corpus, original).unwrap();
+        fs::write(&output, b"old report").unwrap();
+
+        assert!(!paths_refer_to_same_file(&corpus, &output));
+        fs::remove_file(&output).unwrap();
+        std::os::unix::fs::symlink(&corpus, &output).unwrap();
+
+        write_report_atomic(&output, b"new report\n").unwrap();
+
+        assert_eq!(fs::read(&corpus).unwrap(), original);
+        assert_eq!(fs::read(&output).unwrap(), b"new report\n");
+        assert!(!fs::symlink_metadata(&output)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]

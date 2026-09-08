@@ -494,6 +494,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         // CR 732.2: a halted-resolution notification produces no trigger keys.
         GameEvent::GameStarted
         | GameEvent::HiddenSearchViewed { .. }
+        | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::ResolutionHalted { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
@@ -1173,6 +1174,12 @@ pub fn ensure_ready(state: &mut GameState) {
 /// keys hit, plus the `unclassified` bucket. Caller dedups against the
 /// per-event `registered_this_event` set as usual.
 pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[ObjectId; 16]> {
+    // CR 500.7: creating an extra turn adds it directly after the specified
+    // turn. `ExtraTurnCreated` is internal accounting for that insertion, not
+    // a triggerable game event, so it must not reach catch-all definitions.
+    if matches!(event, GameEvent::ExtraTurnCreated { .. }) {
+        return SmallVec::new();
+    }
     let mut out: SmallVec<[ObjectId; 16]> = SmallVec::new();
     out.extend(state.trigger_index.unclassified.iter().copied());
     let keys = keys_from_event(event, state);
@@ -1359,6 +1366,37 @@ mod tests {
     }
 
     #[test]
+    fn extra_turn_creation_does_not_route_unclassified_candidates() {
+        let mut state = GameState::new_two_player(42);
+        let watcher = ObjectId(99);
+        state.objects.insert(
+            watcher,
+            GameObject::new(
+                watcher,
+                CardId(99),
+                PlayerId(0),
+                "Always Watcher".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.trigger_index.add(
+            watcher,
+            &[TriggerDefinition::new(TriggerMode::Always)],
+            false,
+        );
+        assert!(state.trigger_index.unclassified.contains(&watcher));
+
+        let candidates = candidates_for_event(
+            &state,
+            &GameEvent::ExtraTurnCreated {
+                player_id: PlayerId(0),
+                anchor: PlayerId(1),
+            },
+        );
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
     fn cumulative_upkeep_emits_upkeep_phase_key() {
         let def = TriggerDefinition::new(TriggerMode::PayCumulativeUpkeep);
         let (keys, _) = keys_from_trigger_def(&def);
@@ -1382,6 +1420,28 @@ mod tests {
             &state,
         );
         assert!(event_keys.contains(&TriggerEventKey::PhaseIn));
+    }
+
+    #[test]
+    fn extra_turn_creation_is_trigger_inert() {
+        let state = GameState::new_two_player(42);
+        let creation_keys = keys_from_event(
+            &GameEvent::ExtraTurnCreated {
+                player_id: PlayerId(0),
+                anchor: PlayerId(1),
+            },
+            &state,
+        );
+        assert!(creation_keys.is_empty());
+
+        let turn_started_keys = keys_from_event(
+            &GameEvent::TurnStarted {
+                player_id: PlayerId(0),
+                turn_number: 2,
+            },
+            &state,
+        );
+        assert!(turn_started_keys.contains(&TriggerEventKey::TurnStarted));
     }
 
     #[test]

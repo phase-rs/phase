@@ -371,11 +371,49 @@ fn handle_opponent_may_choice_inner(
     state.cost_payment_failed_flag = false;
 
     if accept {
-        if let Some(mut frame) = state.active_optional_effect_frame().cloned() {
-            let mut ability = frame.ability;
+        if let Some(frame) = state.active_optional_effect_frame().cloned() {
+            let mut ability = frame.ability.clone();
+            // CR 608.2c: "their" in an accepted any-player instruction binds
+            // to the player who accepted across the complete local chain.
+            // `controller` remains the controller of the resolving ability.
+            ability.set_scoped_player_recursive(promptee);
+            ability.context.accepting_player = Some(promptee);
+
+            // CR 608.2d: a player cannot accept an exact resolution-time
+            // selection they cannot make. This query deliberately recognizes
+            // only counted `their graveyard` exile instructions; every
+            // adjacent optional effect stays on the established path below.
+            if crate::game::effects::change_zone::exact_scoped_graveyard_exile_is_infeasible(
+                state, &ability,
+            ) == Some(true)
+            {
+                if let Some((&next, rest)) = remaining.split_first() {
+                    state.waiting_for = WaitingFor::OpponentMayChoice {
+                        player: next,
+                        source_id,
+                        description,
+                        remaining: rest.to_vec(),
+                    };
+                    return Ok(state.waiting_for.clone());
+                }
+
+                state
+                    .take_active_optional_effect_frame()
+                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                    .expect("cloned optional-effect frame remains active until final decision");
+                set_active_priority(state);
+                resolve_all_declined_opponent_may(state, &frame.ability, events)?;
+                resume_pending_continuation_if_priority(state, events)?;
+                super::triggers::collect_and_drain_observer_triggers_if_settled(
+                    state,
+                    events,
+                    events_before,
+                );
+                return Ok(state.waiting_for.clone());
+            }
+
             ability.optional = false;
             ability.optional_for = None;
-            ability.context.accepting_player = Some(promptee);
 
             let target_selection = match &ability.effect {
                 // CR 701.21a (sacrifice) / CR 701.26a (tap): an optional
@@ -458,10 +496,6 @@ fn handle_opponent_may_choice_inner(
                 if !remaining.is_empty() {
                     let next = remaining[0];
                     let rest = remaining[1..].to_vec();
-                    frame.ability = ability;
-                    state
-                        .replace_active_optional_effect_frame(frame)
-                        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                     state.waiting_for = WaitingFor::OpponentMayChoice {
                         player: next,
                         source_id,

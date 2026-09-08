@@ -144,6 +144,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         // never narrated (`should_exclude_event` drops it).
         GameEvent::Milled { .. }
         | GameEvent::HiddenSearchViewed { .. }
+        | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::Mutated { .. }
         | GameEvent::Augmented { .. }
@@ -294,6 +295,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::HiddenSearchViewed { .. }
         | GameEvent::CreatureExploited { .. }
         | GameEvent::TurnStarted { .. }
+        | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::Mutated { .. }
@@ -453,6 +455,9 @@ fn should_exclude_event(event: &GameEvent, state: &GameState) -> bool {
         // can observe it; the player already saw the chapter ability itself
         // resolve. Same low-signal bookkeeping class as StackResolved.
         GameEvent::SagaChapterAbilityResolved { .. } => true,
+        // CR 500.7: queue insertion is low-signal bookkeeping. The resolving
+        // instruction and eventual `TurnStarted` event carry the narrative.
+        GameEvent::ExtraTurnCreated { .. } => true,
         // `handle_empty_attackers` emits this bookkeeping event so the combat
         // pipeline can advance uniformly, but no creature attacked. It must
         // not be narrated as an attack against the default defender.
@@ -535,6 +540,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::MulliganStarted => LogCategory::Game,
 
         GameEvent::TurnStarted { .. }
+        | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
         | GameEvent::PriorityPassed { .. } => LogCategory::Turn,
 
@@ -694,6 +700,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
     match event {
         GameEvent::GameStarted => vec![text("Game started")],
         GameEvent::HiddenSearchViewed { .. } => vec![],
+        GameEvent::ExtraTurnCreated { .. } => vec![],
         // CR 701.17a + CR 400.2: never narrated — the library departure it
         // reports is hidden information (`should_exclude_event` drops it).
         GameEvent::Milled { .. } => vec![],
@@ -1514,6 +1521,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::CreatureExploited {
             exploiter,
             sacrificed,
+            ..
         } => vec![
             card_seg(state, *exploiter),
             text(" exploits "),
@@ -1896,6 +1904,30 @@ mod tests {
             cast_mana_value: None,
         };
         assert!(!should_exclude_event(&cast, &state));
+    }
+
+    #[test]
+    fn extra_turn_creation_is_excluded_but_turn_start_is_visible() {
+        let state = GameState::new_two_player(42);
+        let creation = GameEvent::ExtraTurnCreated {
+            player_id: PlayerId(1),
+            anchor: PlayerId(0),
+        };
+        let turn_started = GameEvent::TurnStarted {
+            player_id: PlayerId(1),
+            turn_number: 2,
+        };
+
+        assert_eq!(importance(&creation), LogImportance::Detail);
+        assert_eq!(tone(&creation), LogTone::Neutral);
+        assert_eq!(categorize(&creation), LogCategory::Turn);
+        assert!(should_exclude_event(&creation, &state));
+        assert!(format_segments(&creation, &state).is_empty());
+        assert!(resolve_log_entries(&[creation], &state, &state).is_empty());
+        assert_eq!(
+            resolve_log_entries(&[turn_started], &state, &state).len(),
+            1
+        );
     }
 
     #[test]

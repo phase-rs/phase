@@ -2,6 +2,7 @@ import type {
   BracketShape,
   GameFormat,
   MatchArity,
+  MatchType,
   PairingId,
   PodOutcome,
   ScoringPolicy,
@@ -553,6 +554,40 @@ export interface CreateTournamentRequest {
    * lobby protocol 7; ignored by a pre-v7 broker.
    */
   format?: GameFormat | null;
+  /**
+   * The match structure (Bo1 / Bo3). `null`/omitted resolves to the arity
+   * default (Bo3 head-to-head, Bo1 for pods). `Bo3` is head-to-head only — the
+   * broker rejects it at any other arity. Additive in lobby protocol 8; ignored
+   * by a pre-v8 broker.
+   */
+  matchType?: MatchType | null;
+}
+
+/**
+ * Whether a `CreateTournament` request needs lobby protocol
+ * `MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE` to be honored — i.e. it selects a match
+ * structure a pre-v8 broker would silently apply DIFFERENTLY from a v8 broker.
+ *
+ * A pre-v8 broker discards `match_type` and applies the arity default: Bo3 for
+ * head-to-head, Bo1 for pods. So a request needs the capability exactly when its
+ * explicit `match_type` differs from that default:
+ * - **Bo1 head-to-head** — a pre-v8 broker runs it as Bo3.
+ * - **Bo3 pod** (any non-head-to-head arity) — a v8 broker *rejects* it (Bo3 is
+ *   head-to-head only), but a pre-v8 broker silently makes an arity-default Bo1
+ *   pod. Either way the organizer must not get a silent Bo1 pod.
+ *
+ * A selection that matches the pre-v8 default (Bo3 head-to-head, `Bo1`/`null`
+ * pods) is honored identically by both, so it is never gated. This encodes only
+ * the pre-v8 default boundary as a capability check; the broker stays the single
+ * authority for actually resolving and validating the structure.
+ */
+export function matchTypeNeedsCapability(
+  arity: MatchArity,
+  matchType: MatchType | null | undefined,
+): boolean {
+  if (matchType == null) return false;
+  const preV8Default: MatchType = arity === 2 ? "Bo3" : "Bo1";
+  return matchType !== preV8Default;
 }
 
 /** `CreateTournament` → `TournamentCreated` (point reply, carries the token). */
@@ -573,6 +608,7 @@ export function createTournamentOver(
         total_rounds: req.totalRounds ?? null,
         plus_rounds: req.plusRounds ?? null,
         format: req.format ?? null,
+        match_type: req.matchType ?? null,
       },
     },
     matchReply<TournamentCreatedReply>("TournamentCreated", null),

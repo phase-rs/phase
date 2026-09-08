@@ -34,7 +34,10 @@ import {
 } from "../multiplayerStore";
 import { openPhaseSocket, withReconnect } from "../../services/openPhaseSocket";
 import { SERVER_PRESETS } from "../../services/serverDetection";
-import { LOBBY_PROTOCOL_VERSION } from "../../adapter/ws-adapter";
+import {
+  LOBBY_PROTOCOL_VERSION,
+  MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE,
+} from "../../adapter/ws-adapter";
 import type {
   TournamentSummary,
   TournamentView,
@@ -607,6 +610,93 @@ describe("tournament credentials", () => {
     expect(result.ok).toBe(true);
     expect(store().tournamentCredentials.ZZZ?.organizerToken).toBe("org-zzz");
     expect(Object.keys(store().tournamentCredentials)).toEqual(["ZZZ"]);
+  });
+
+  it("refuses a Bo1 head-to-head create on a pre-v8 broker, sending nothing", async () => {
+    const fake = makeFakeSocket();
+    // A broker one version below the one that introduced `match_type`: it would
+    // discard the field and silently run the event as Bo3.
+    fake.socket.serverInfo.lobbyProtocolVersion =
+      MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE - 1;
+    primeSocket(fake);
+
+    const pending = store().createTournament({
+      name: "Single-Game Bracket",
+      arity: 2,
+      scoring: { win_points: 3, draw_points: 1, loss_points: 0 },
+      bracket: "SingleElimination",
+      matchType: "Bo1",
+    });
+    await flush();
+    // The whole point of the gate: no frame goes out, so no surprise Bo3 event
+    // is created on the broker.
+    expect(fake.tally("CreateTournament")).toBe(0);
+
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("incompatible");
+      // A typed field the UI reads instead of parsing the English message.
+      expect(
+        (result as { neededLobbyVersion?: number }).neededLobbyVersion,
+      ).toBe(MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE);
+    }
+    // A refusal never mints a credential.
+    expect(Object.keys(store().tournamentCredentials)).toEqual([]);
+  });
+
+  it("still sends a create whose structure matches the pre-v8 default", async () => {
+    const fake = makeFakeSocket();
+    fake.socket.serverInfo.lobbyProtocolVersion =
+      MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE - 1;
+    primeSocket(fake);
+
+    // An explicit Bo3 head-to-head matches what a pre-v8 broker would default
+    // to, so it is NOT gated — the frame goes out.
+    const pending = store().createTournament({
+      name: "Bo3 Night",
+      arity: 2,
+      scoring: { win_points: 3, draw_points: 1, loss_points: 0 },
+      bracket: "Swiss",
+      matchType: "Bo3",
+    });
+    await flush();
+    expect(fake.tally("CreateTournament")).toBe(1);
+    fake.deliver("TournamentCreated", {
+      code: "BBB",
+      organizer_token: "org-bbb",
+      view: viewFor("BBB"),
+    });
+    expect((await pending).ok).toBe(true);
+  });
+
+  it("refuses a pod Bo3 create on a pre-v8 broker, sending nothing", async () => {
+    const fake = makeFakeSocket();
+    fake.socket.serverInfo.lobbyProtocolVersion =
+      MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE - 1;
+    primeSocket(fake);
+
+    // Bo3 at a pod arity differs from the pre-v8 default (Bo1 pods). A v8 broker
+    // rejects it; a pre-v8 broker would silently make a Bo1 pod. Either way the
+    // organizer must not get a silent structure — refuse before sending.
+    const pending = store().createTournament({
+      name: "Pod Bo3",
+      arity: 4,
+      scoring: { win_points: 3, draw_points: 1, loss_points: 0 },
+      bracket: "Swiss",
+      matchType: "Bo3",
+    });
+    await flush();
+    expect(fake.tally("CreateTournament")).toBe(0);
+
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("incompatible");
+      expect(
+        (result as { neededLobbyVersion?: number }).neededLobbyVersion,
+      ).toBe(MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE);
+    }
   });
 
   it("files a join's player token and the player key it actually sent", async () => {

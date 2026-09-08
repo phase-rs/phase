@@ -265,8 +265,17 @@ pub struct StageComparison {
     pub candidate_equal: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollapseKind {
+    AlreadyEqualAtInput,
+    FirstFalseToTrue,
+    NoCollapse,
+    EarliestLossUnresolved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Collapse {
-    pub kind: String,
+    pub kind: CollapseKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<TraceStage>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -274,10 +283,22 @@ pub struct Collapse {
     pub non_monotonic: bool,
 }
 
+impl Collapse {
+    pub fn earliest_loss_unresolved(self) -> Self {
+        debug_assert_eq!(self.kind, CollapseKind::FirstFalseToTrue);
+        Self {
+            kind: CollapseKind::EarliestLossUnresolved,
+            from: None,
+            to: None,
+            non_monotonic: self.non_monotonic,
+        }
+    }
+}
+
 pub fn classify_collapse(stages: &[StageComparison]) -> Collapse {
     if stages.first().is_some_and(|s| s.candidate_equal) {
         return Collapse {
-            kind: "already_equal_at_input".into(),
+            kind: CollapseKind::AlreadyEqualAtInput,
             from: None,
             to: None,
             non_monotonic: stages.iter().any(|s| !s.candidate_equal),
@@ -286,15 +307,19 @@ pub fn classify_collapse(stages: &[StageComparison]) -> Collapse {
     let first = stages
         .windows(2)
         .find(|w| !w[0].candidate_equal && w[1].candidate_equal);
-    let (kind, from, to) = first.map_or(("no_collapse", None, None), |w| {
-        ("first_false_to_true", Some(w[0].stage), Some(w[1].stage))
+    let (kind, from, to) = first.map_or((CollapseKind::NoCollapse, None, None), |w| {
+        (
+            CollapseKind::FirstFalseToTrue,
+            Some(w[0].stage),
+            Some(w[1].stage),
+        )
     });
     let non_monotonic = first.is_some_and(|w| {
         let start = stages.iter().position(|s| s.stage == w[1].stage).unwrap();
         stages[start + 1..].iter().any(|s| !s.candidate_equal)
     });
     Collapse {
-        kind: kind.into(),
+        kind,
         from,
         to,
         non_monotonic,
@@ -381,7 +406,30 @@ mod tests {
             mk(TraceStage::DocumentIr, false),
         ];
         let collapse = classify_collapse(&stages);
-        assert_eq!(collapse.kind, "first_false_to_true");
+        assert_eq!(collapse.kind, CollapseKind::FirstFalseToTrue);
+        assert_eq!(
+            serde_json::to_value(&collapse).unwrap()["kind"],
+            "first_false_to_true"
+        );
         assert!(collapse.non_monotonic);
+    }
+
+    #[test]
+    fn unresolved_collapse_has_no_resolved_endpoints() {
+        let collapse = Collapse {
+            kind: CollapseKind::FirstFalseToTrue,
+            from: Some(TraceStage::DocumentIr),
+            to: Some(TraceStage::RawLoweredIr),
+            non_monotonic: false,
+        }
+        .earliest_loss_unresolved();
+
+        assert_eq!(collapse.kind, CollapseKind::EarliestLossUnresolved);
+        assert_eq!(collapse.from, None);
+        assert_eq!(collapse.to, None);
+        let value = serde_json::to_value(collapse).unwrap();
+        assert_eq!(value["kind"], "earliest_loss_unresolved");
+        assert!(value.get("from").is_none());
+        assert!(value.get("to").is_none());
     }
 }

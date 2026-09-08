@@ -1,7 +1,13 @@
 import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { BracketShape, GameFormat, MatchArity, ScoringPolicy } from "../../adapter/types";
+import type {
+  BracketShape,
+  GameFormat,
+  MatchArity,
+  MatchType,
+  ScoringPolicy,
+} from "../../adapter/types";
 import type { CreateTournamentRequest } from "../../services/tournamentClient";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { defaultScoringForArity } from "../../pages/tournamentPageState";
@@ -36,6 +42,7 @@ export function CreateTournamentForm({
   const arityHintId = useId();
   const bracketId = useId();
   const formatId = useId();
+  const matchTypeId = useId();
   const roundsId = useId();
   const plusRoundsId = useId();
   const plusRoundsHintId = useId();
@@ -48,6 +55,12 @@ export function CreateTournamentForm({
   const [bracket, setBracket] = useState<BracketShape>("Swiss");
   /** Empty string means "no format named" — the wire's `format: null`. */
   const [format, setFormat] = useState<GameFormat | "">("");
+  /**
+   * The head-to-head match structure. Best-of-three is inherently 2-player, so a
+   * pod (arity !== 2) always submits Bo1 regardless of this control (which is
+   * disabled there). See `podForcesBo1`.
+   */
+  const [matchType, setMatchType] = useState<MatchType>("Bo3");
   /** Empty string means "Automatic" — the wire's `total_rounds: null`. */
   const [roundsInput, setRoundsInput] = useState("");
   /**
@@ -105,6 +118,11 @@ export function CreateTournamentForm({
           // `""` is the "no format named" choice; everything else is a
           // `GameFormat` submitted verbatim.
           format: format === "" ? null : format,
+          // Bo3 is inherently 2-player. For a pod we send `null` and let the
+          // broker resolve the arity default (single-game per MSTR) rather than
+          // duplicate that rule here; the disabled selector below is a UI
+          // affordance only. Head-to-head sends the organizer's explicit choice.
+          matchType: arity === 2 ? matchType : null,
         });
       }}
       className="flex flex-col gap-4 rounded-xl border border-white/10 bg-black/20 p-4"
@@ -177,6 +195,25 @@ export function CreateTournamentForm({
               {meta.label}
             </option>
           ))}
+        </select>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <label htmlFor={matchTypeId} className="text-xs text-gray-400">
+          {t("create.matchTypeLabel")}
+        </label>
+        {/* Best-of-three is inherently 2-player; a pod is always single-game
+            (MSTR), which the broker enforces — so the control is disabled and
+            reads Bo1 at any arity other than head-to-head. */}
+        <select
+          id={matchTypeId}
+          value={arity === 2 ? matchType : "Bo1"}
+          disabled={arity !== 2}
+          onChange={(event) => setMatchType(event.target.value as MatchType)}
+          className="rounded-[6px] border border-white/10 bg-black/30 px-3 py-2 text-sm text-gray-100 disabled:opacity-50"
+        >
+          <option value="Bo3">{t("create.matchTypeBo3")}</option>
+          <option value="Bo1">{t("create.matchTypeBo1")}</option>
         </select>
       </div>
 

@@ -3135,7 +3135,9 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
-    use crate::types::resolution::{ResolutionFrame, ResolutionStateWire};
+    use crate::types::resolution::{
+        ResolutionFrame, ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION,
+    };
     use crate::types::zones::Zone;
 
     fn make_counter_ability(effect: Effect, target: ObjectId) -> ResolvedAbility {
@@ -5387,10 +5389,11 @@ mod tests {
 
     /// CR 616.1 + CR 122.5: a selected CounterMoves queue remains the sole
     /// runtime owner while each move's add stage chooses among noncommuting
-    /// counter replacements. The queue re-parks for every prompt and v2 restores
-    /// that real prompt boundary before production replacement actions resume it.
+    /// counter replacements. The queue re-parks for every prompt and the
+    /// current wire restores that real prompt boundary before production
+    /// replacement actions resume it.
     #[test]
-    fn counter_moves_queue_reparks_and_roundtrips_v2_at_replacement_choice() {
+    fn counter_moves_queue_reparks_and_roundtrips_current_wire_at_replacement_choice() {
         let mut state = GameState::new_two_player(42);
         let source_id = create_object(
             &mut state,
@@ -5455,11 +5458,14 @@ mod tests {
         );
 
         let saved = serde_json::to_value(ResolutionStateWire::from_game_state(state))
-            .expect("paused CounterMoves prompt serializes as v2");
-        assert_eq!(saved["resolution_state_version"], 2);
+            .expect("paused CounterMoves prompt serializes through the current wire");
+        assert_eq!(
+            saved["resolution_state_version"],
+            RESOLUTION_STATE_WIRE_VERSION
+        );
         assert!(saved.get("pending_counter_moves").is_none());
         let restored: ResolutionStateWire =
-            serde_json::from_value(saved).expect("v2 CounterMoves prompt restores");
+            serde_json::from_value(saved).expect("current CounterMoves prompt restores");
         let mut state = restored.into_game_state();
 
         for _ in 0..8 {
@@ -5499,10 +5505,11 @@ mod tests {
 
     /// CR 107.1c + CR 608.2h + CR 616.1: the production counter-removal choice
     /// parks its selected tail in CounterRemovals while each removal offers its
-    /// applicable optional replacement. v2 restores that real replacement prompt
-    /// before the production actions finish the queue and stamp its total.
+    /// applicable optional replacement. The current wire restores that real
+    /// replacement prompt before the production actions finish the queue and
+    /// stamp its total.
     #[test]
-    fn counter_removals_queue_reparks_and_roundtrips_v2_at_replacement_choice() {
+    fn counter_removals_queue_reparks_and_roundtrips_current_wire_at_replacement_choice() {
         let mut state = GameState::new_two_player(42);
         let source_id = create_object(
             &mut state,
@@ -5578,11 +5585,14 @@ mod tests {
         );
 
         let saved = serde_json::to_value(ResolutionStateWire::from_game_state(state))
-            .expect("paused CounterRemovals prompt serializes as v2");
-        assert_eq!(saved["resolution_state_version"], 2);
+            .expect("paused CounterRemovals prompt serializes through the current wire");
+        assert_eq!(
+            saved["resolution_state_version"],
+            RESOLUTION_STATE_WIRE_VERSION
+        );
         assert!(saved.get("pending_counter_removals").is_none());
         let restored: ResolutionStateWire =
-            serde_json::from_value(saved).expect("v2 CounterRemovals prompt restores");
+            serde_json::from_value(saved).expect("current CounterRemovals prompt restores");
         let mut state = restored.into_game_state();
 
         for replacement_index in 0..8 {
@@ -5817,10 +5827,10 @@ mod tests {
     /// CR 122.1 + CR 616.1: the production multi-target counter-addition
     /// resolver parks its remaining recipients and completion in CounterAdditions
     /// while each recipient's placement chooses among noncommuting replacements.
-    /// v2 restores that real prompt before production replacement actions finish
-    /// the queue.
+    /// The current wire restores that real prompt before production replacement
+    /// actions finish the queue.
     #[test]
-    fn counter_additions_queue_reparks_and_roundtrips_v2_at_replacement_choice() {
+    fn counter_additions_queue_reparks_and_roundtrips_current_wire_at_replacement_choice() {
         let mut state = GameState::new_two_player(42);
         install_noncommuting_counter_replacements(&mut state);
         let first = create_object(
@@ -5868,11 +5878,14 @@ mod tests {
         );
 
         let saved = serde_json::to_value(ResolutionStateWire::from_game_state(state))
-            .expect("paused CounterAdditions prompt serializes as v2");
-        assert_eq!(saved["resolution_state_version"], 2);
+            .expect("paused CounterAdditions prompt serializes through the current wire");
+        assert_eq!(
+            saved["resolution_state_version"],
+            RESOLUTION_STATE_WIRE_VERSION
+        );
         assert!(saved.get("pending_counter_additions").is_none());
         let restored: ResolutionStateWire =
-            serde_json::from_value(saved).expect("v2 CounterAdditions prompt restores");
+            serde_json::from_value(saved).expect("current CounterAdditions prompt restores");
         let mut state = restored.into_game_state();
 
         for _ in 0..8 {

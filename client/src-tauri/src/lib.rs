@@ -3,6 +3,8 @@ use tauri::{Manager, WebviewWindowBuilder};
 
 mod audio_probe;
 mod host_platform;
+#[cfg(desktop)]
+mod lan;
 #[cfg(target_os = "linux")]
 mod media_stack;
 mod migration;
@@ -65,6 +67,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             audio_probe::audio_boot_health,
             host_platform::host_platform,
@@ -79,7 +82,16 @@ pub fn run() {
             native_engine::stop_native_engine,
             native_bridge::connect_native_engine,
             native_bridge::native_engine_bridge_send,
-            native_bridge::native_engine_bridge_close
+            native_bridge::native_engine_bridge_close,
+            lan::lan_capabilities,
+            lan::start_lan_server,
+            lan::lan_server_status,
+            lan::stop_lan_server,
+            lan::discover_lan_servers,
+            native_bridge::authorize_lan_server,
+            native_bridge::connect_lan_server,
+            native_bridge::lan_bridge_send,
+            native_bridge::lan_bridge_close
         ]);
 
     #[cfg(mobile)]
@@ -127,6 +139,7 @@ pub fn run() {
                 let builder =
                     WebviewWindowBuilder::from_config(app, main_config)?.on_navigation(|_| {
                         native_engine::abort_native_engine_bridges_on_navigation();
+                        native_bridge::abort_lan_bridges();
                         true
                     });
                 #[cfg(target_os = "windows")]
@@ -145,6 +158,8 @@ pub fn run() {
     app.run(|app, event| {
         #[cfg(desktop)]
         if let tauri::RunEvent::Exit = event {
+            native_bridge::abort_lan_bridges();
+            let _ = native_engine::stop_lan_server_sync();
             native_engine::stop_native_engine_on_exit(app);
         }
         #[cfg(mobile)]
@@ -745,6 +760,7 @@ mod tests {
                 "process:allow-exit",
                 "process:allow-restart",
                 "updater:default",
+                "allow-lan",
             ])
         );
         for capability in [common_local, common_remote] {
@@ -753,6 +769,7 @@ mod tests {
             assert!(!permissions.contains("process:allow-exit"));
             assert!(!permissions.contains("process:allow-restart"));
             assert!(!permissions.contains("updater:default"));
+            assert!(!permissions.contains("allow-lan"));
         }
         for required in [
             "allow-host-platform",

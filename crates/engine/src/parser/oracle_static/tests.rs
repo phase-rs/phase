@@ -30613,7 +30613,13 @@ fn ichormoon_gauntlet_grants_loyalty_abilities_to_planeswalkers() {
         grants[1].cost
     );
     assert!(
-        matches!(*grants[1].effect, Effect::ExtraTurn { .. }),
+        matches!(
+            *grants[1].effect,
+            Effect::ExtraTurn {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+            }
+        ),
         "second grant effect should be ExtraTurn, got {:?}",
         grants[1].effect
     );

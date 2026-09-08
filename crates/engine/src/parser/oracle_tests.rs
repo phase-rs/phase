@@ -13,6 +13,37 @@ use crate::types::ability::{
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::triggers::AttackTargetFilter;
 
+#[test]
+fn teferi_master_of_time_minus_ten_preserves_two_extra_turns() {
+    let oracle = "You may activate loyalty abilities of Teferi on any player's turn any time you could cast an instant.\n\
+[+1]: Draw a card, then discard a card.\n\
+[−3]: Target creature you don't control phases out. (Treat it and anything attached to it as though they don't exist until its controller's next turn.)\n\
+[−10]: Take two extra turns after this one.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Teferi, Master of Time",
+        &[],
+        &["Planeswalker".into()],
+        &["Teferi".into()],
+    );
+    let minus_ten = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(&ability.cost, Some(AbilityCost::Loyalty { amount: -10 })))
+        .expect("Teferi's -10 loyalty ability parses");
+    assert!(matches!(
+        minus_ten.effect.as_ref(),
+        Effect::ExtraTurn {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 2 },
+        }
+    ));
+    assert!(!matches!(
+        minus_ten.effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+}
+
 /// CR 607.2d + CR 614.1c: only an as-enters replacement whose separate static
 /// reads `IsChosenCardType` is promoted from its locally-labeled list.
 #[test]

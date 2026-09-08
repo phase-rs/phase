@@ -10327,11 +10327,15 @@ fn record_announced_sacrifice(
 /// CR 701.21a: Derive terminal sacrifice bookkeeping from the actual events,
 /// not from attempts. This includes an event delivered by the replacement
 /// response immediately before the pending queue is drained.
+// The boxed records are cloned directly from `ZoneChanged` and moved into
+// `CreatureExploited`; retaining that allocation avoids an unbox/rebox copy at
+// this handoff.
+#[allow(clippy::vec_box)]
 fn record_sacrifice_batch_events(
     completion: &mut PendingPlayerScopeSacrificeCompletion,
     events: &[GameEvent],
-) -> Vec<ObjectId> {
-    let mut completed = Vec::new();
+) -> Vec<Box<ZoneChangeRecord>> {
+    let mut completed: Vec<Box<ZoneChangeRecord>> = Vec::new();
     for event in events {
         match event {
             GameEvent::PermanentSacrificed { object_id, .. }
@@ -10339,7 +10343,6 @@ fn record_sacrifice_batch_events(
                     && !completion.sacrificed.contains(object_id) =>
             {
                 completion.sacrificed.push(*object_id);
-                completed.push(*object_id);
                 if !completion.zone_changed.contains(object_id) {
                     completion.zone_changed.push(*object_id);
                 }
@@ -10357,7 +10360,6 @@ fn record_sacrifice_batch_events(
                 // announced sacrifice's terminal result.
                 if !completion.sacrificed.contains(object_id) {
                     completion.sacrificed.push(*object_id);
-                    completed.push(*object_id);
                 }
                 if !completion.zone_changed.contains(object_id) {
                     completion.zone_changed.push(*object_id);
@@ -10370,6 +10372,17 @@ fn record_sacrifice_batch_events(
                         .departed_zone_change_indices
                         .push(record.turn_zone_change_index);
                 }
+                // CR 603.2g + CR 702.110b: only the actual announced
+                // battlefield departure proves the creature was sacrificed as
+                // exploit resolved. `PermanentSacrificed` bookkeeping alone
+                // cannot fabricate the victim snapshot.
+                if !completion.followed_up_sacrifices.contains(object_id)
+                    && !completed
+                        .iter()
+                        .any(|completed_record| completed_record.object_id == *object_id)
+                {
+                    completed.push(record.clone());
+                }
             }
             _ => {}
         }
@@ -10381,16 +10394,18 @@ fn record_sacrifice_batch_events(
 /// follow-up only after the sacrifice event has completed. The completion ledger
 /// survives a replacement choice, so a resumed event is neither skipped nor
 /// emitted twice.
+#[allow(clippy::vec_box)]
 fn emit_sacrifice_batch_follow_ups(
     completion: &mut PendingPlayerScopeSacrificeCompletion,
-    completed: Vec<ObjectId>,
+    completed: Vec<Box<ZoneChangeRecord>>,
     events: &mut Vec<GameEvent>,
 ) {
     let Some(follow_up) = completion.follow_up.clone() else {
         return;
     };
 
-    for sacrificed in completed {
+    for record in completed {
+        let sacrificed = record.object_id;
         if completion.followed_up_sacrifices.contains(&sacrificed) {
             continue;
         }
@@ -10399,6 +10414,7 @@ fn emit_sacrifice_batch_follow_ups(
                 events.push(GameEvent::CreatureExploited {
                     exploiter,
                     sacrificed,
+                    record,
                 });
             }
         }
@@ -16471,6 +16487,128 @@ mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
 
+    fn real_sacrifice_events() -> (ObjectId, ObjectId, Vec<GameEvent>, Box<ZoneChangeRecord>) {
+        let mut state = GameState::new_two_player(42);
+        let exploiter = create_object(
+            &mut state,
+            CardId(91),
+            PlayerId(0),
+            "Exploit source".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = create_object(
+            &mut state,
+            CardId(92),
+            PlayerId(0),
+            "Exploit victim".to_string(),
+            Zone::Battlefield,
+        );
+        let victim_object = state.objects.get_mut(&victim).expect("victim exists");
+        victim_object.card_types.core_types.push(CoreType::Creature);
+        victim_object.base_card_types = victim_object.card_types.clone();
+        victim_object.is_token = true;
+        victim_object.controller = PlayerId(0);
+        victim_object.owner = PlayerId(1);
+
+        let mut events = Vec::new();
+        let outcome = crate::game::sacrifice::sacrifice_permanent(
+            &mut state,
+            victim,
+            PlayerId(0),
+            &mut events,
+        )
+        .expect("fixture sacrifice succeeds");
+        assert!(matches!(
+            outcome,
+            crate::game::sacrifice::SacrificeOutcome::Complete
+        ));
+        let record = events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id, record, ..
+                } if *object_id == victim => Some(record.clone()),
+                _ => None,
+            })
+            .expect("successful sacrifice emits its departure record");
+        (exploiter, victim, events, record)
+    }
+
+    fn exploit_completion(
+        exploiter: ObjectId,
+        victim: ObjectId,
+    ) -> PendingPlayerScopeSacrificeCompletion {
+        PendingPlayerScopeSacrificeCompletion {
+            announced: vec![victim],
+            follow_up: Some(PendingPlayerScopeSacrificeFollowUp::Exploit { exploiter }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn exploit_follow_up_uses_the_actual_departure_record_once_in_any_event_order() {
+        let (exploiter, victim, sacrifice_events, expected_record) = real_sacrifice_events();
+
+        for events in [sacrifice_events.clone(), {
+            let mut reversed = sacrifice_events.clone();
+            reversed.reverse();
+            reversed
+        }] {
+            let mut completion = exploit_completion(exploiter, victim);
+            let completed = record_sacrifice_batch_events(&mut completion, &events);
+            let mut emitted = Vec::new();
+            emit_sacrifice_batch_follow_ups(&mut completion, completed, &mut emitted);
+            assert_eq!(completion.sacrificed, vec![victim]);
+            assert_eq!(emitted.len(), 1);
+            assert!(matches!(
+                &emitted[0],
+                GameEvent::CreatureExploited {
+                    exploiter: event_exploiter,
+                    sacrificed,
+                    record,
+                } if *event_exploiter == exploiter
+                    && *sacrificed == victim
+                    && record == &expected_record
+            ));
+
+            let completed = record_sacrifice_batch_events(&mut completion, &events);
+            emit_sacrifice_batch_follow_ups(&mut completion, completed, &mut emitted);
+            assert_eq!(
+                emitted.len(),
+                1,
+                "repeated scans must not duplicate an exploit follow-up"
+            );
+        }
+    }
+
+    #[test]
+    fn exploit_follow_up_requires_an_announced_battlefield_departure_record() {
+        let (exploiter, victim, sacrifice_events, _) = real_sacrifice_events();
+        let permanent_sacrificed = sacrifice_events
+            .iter()
+            .find(|event| matches!(event, GameEvent::PermanentSacrificed { .. }))
+            .cloned()
+            .expect("successful sacrifice emits bookkeeping");
+
+        let mut completion = exploit_completion(exploiter, victim);
+        let completed = record_sacrifice_batch_events(
+            &mut completion,
+            std::slice::from_ref(&permanent_sacrificed),
+        );
+        let mut emitted = Vec::new();
+        emit_sacrifice_batch_follow_ups(&mut completion, completed, &mut emitted);
+        assert_eq!(completion.sacrificed, vec![victim]);
+        assert!(
+            emitted.is_empty(),
+            "bookkeeping without an actual departure cannot prove exploit"
+        );
+
+        let mut unannounced = exploit_completion(exploiter, ObjectId(victim.0 + 1));
+        let completed = record_sacrifice_batch_events(&mut unannounced, &sacrifice_events);
+        emit_sacrifice_batch_follow_ups(&mut unannounced, completed, &mut emitted);
+        assert!(emitted.is_empty());
+    }
+
     #[test]
     fn resolution_window_batch_reaches_a_chained_consumer() {
         let window = || {
@@ -16634,7 +16772,9 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::player::{PlayerCounterKind, PlayerId};
-    use crate::types::resolution::{OptionalEffectFrame, ResolutionStateWire};
+    use crate::types::resolution::{
+        OptionalEffectFrame, ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION,
+    };
     use crate::types::statics::CastFrequency;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -18401,14 +18541,19 @@ mod tests {
         ));
         state.current_trigger_event = None;
 
-        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
-            .expect("real optional-effect prompt serializes as v2");
-        assert_eq!(v2["resolution_state_version"], 2);
-        assert!(v2.get("pending_optional_effect").is_none());
-        assert!(v2.get("pending_optional_trigger_event").is_none());
-        assert!(v2.get("pending_optional_trigger_match_count").is_none());
-        state = serde_json::from_value::<ResolutionStateWire>(v2)
-            .expect("real optional-effect prompt round-trips through the v2 wire")
+        let current = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("real optional-effect prompt serializes through the current wire");
+        assert_eq!(
+            current["resolution_state_version"],
+            RESOLUTION_STATE_WIRE_VERSION
+        );
+        assert!(current.get("pending_optional_effect").is_none());
+        assert!(current.get("pending_optional_trigger_event").is_none());
+        assert!(current
+            .get("pending_optional_trigger_match_count")
+            .is_none());
+        state = serde_json::from_value::<ResolutionStateWire>(current)
+            .expect("real optional-effect prompt round-trips through the current wire")
             .into_game_state();
 
         crate::game::engine::apply(

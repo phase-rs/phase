@@ -3921,8 +3921,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             ));
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::ExtraTurn { target } => {
+        Effect::ExtraTurn { target, count } => {
             d.push(("player".into(), fmt_target(target)));
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                d.push(("count".into(), fmt_quantity(count)));
+            }
         }
         Effect::GrantExtraLoyaltyActivations { amount, target } => {
             d.push(("amount".into(), fmt_quantity(amount)));
@@ -14584,6 +14587,44 @@ mod tests {
             rarities: Default::default(),
             attraction_lights: vec![],
         }
+    }
+
+    #[test]
+    fn extra_turn_coverage_distinguishes_default_one_from_fixed_two() {
+        fn parsed_card(name: &str, oracle: &str) -> CardCoverageResult {
+            let parsed =
+                crate::parser::parse_oracle_text(oracle, name, &[], &["Sorcery".to_string()], &[]);
+            let mut face = make_face();
+            face.name = name.to_string();
+            face.oracle_text = Some(oracle.to_string());
+            face.abilities = parsed.abilities;
+            coverage_result_for_face(face)
+        }
+
+        let warp = parsed_card(
+            "Time Warp",
+            "Target player takes an extra turn after this one.",
+        );
+        let stretch = parsed_card(
+            "Time Stretch",
+            "Target player takes two extra turns after this one.",
+        );
+        let warp_effect = warp
+            .parse_details
+            .iter()
+            .find(|item| item.label == "ExtraTurn")
+            .expect("Time Warp coverage contains ExtraTurn");
+        let stretch_effect = stretch
+            .parse_details
+            .iter()
+            .find(|item| item.label == "ExtraTurn")
+            .expect("Time Stretch coverage contains ExtraTurn");
+        assert!(!warp_effect.details.iter().any(|(key, _)| key == "count"));
+        assert!(stretch_effect
+            .details
+            .iter()
+            .any(|(key, value)| key == "count" && value == "2"));
+        assert_ne!(warp_effect.details, stretch_effect.details);
     }
 
     fn build_test_ability_item(def: &AbilityDefinition) -> ParsedItem {

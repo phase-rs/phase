@@ -36,6 +36,100 @@ fn assert_tracked_mana_value_source(def: &AbilityDefinition, expected: TrackedAn
     ));
 }
 
+fn assert_attachment_chain_has_no_unimplemented(def: &AbilityDefinition) {
+    let mut current = Some(def);
+    while let Some(ability) = current {
+        assert!(
+            !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. }),
+            "attachment chain must lower every clause: {def:#?}"
+        );
+        current = ability.sub_ability.as_deref();
+    }
+}
+
+fn assert_grip_of_phyresis_chain(text: &str) {
+    let parsed = parse_oracle_text(
+        text,
+        "Typed Attachment Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "one spell chain expected: {text}"
+    );
+    let root = parsed.abilities.first().expect("spell ability");
+    assert_attachment_chain_has_no_unimplemented(root);
+    let Effect::GainControl {
+        target: TargetFilter::Typed(filter),
+    } = root.effect.as_ref()
+    else {
+        panic!(
+            "chain must first gain control of target Equipment: {:?}",
+            root.effect
+        );
+    };
+    assert_eq!(filter.get_subtype(), Some("Equipment"));
+    assert_eq!(
+        filter,
+        &TypedFilter::default().subtype("Equipment".to_string()),
+        "Gain control must keep the exact target Equipment filter: {text}"
+    );
+    let token = root
+        .sub_ability
+        .as_deref()
+        .expect("Germ token follows control");
+    let Effect::Token {
+        name,
+        power: PtValue::Fixed(0),
+        toughness: PtValue::Fixed(0),
+        colors,
+        types,
+        ..
+    } = token.effect.as_ref()
+    else {
+        panic!(
+            "chain must create a 0/0 black Phyrexian Germ: {:?}",
+            token.effect
+        );
+    };
+    assert_eq!(name, "Phyrexian Germ");
+    assert_eq!(colors, &vec![crate::types::mana::ManaColor::Black]);
+    assert_eq!(
+        types,
+        &vec![
+            "Creature".to_string(),
+            "Phyrexian".to_string(),
+            "Germ".to_string(),
+        ]
+    );
+    let attach = token
+        .sub_ability
+        .as_deref()
+        .expect("Attach follows Germ token");
+    assert_eq!(
+        attach.effect.as_ref(),
+        &Effect::Attach {
+            attachment: TargetFilter::ParentTarget,
+            target: TargetFilter::LastCreated,
+        },
+        "attachment and recipient provenance must be exact: {text}"
+    );
+    assert!(
+        attach.sub_ability.is_none(),
+        "Attach must be the chain tail: {text}"
+    );
+}
+
+#[test]
+fn grip_of_phyresis_exact_oracle_lowers_gain_control_token_attach_chain() {
+    assert_grip_of_phyresis_chain(
+        "Gain control of target Equipment, then create a 0/0 black Phyrexian Germ creature token and attach that Equipment to it.",
+    );
+}
+
 fn nested_batch_aggregate() -> PropertyAggregate {
     PropertyAggregate::new(
         AggregateFunction::Sum,
@@ -9298,11 +9392,11 @@ fn for_each_pump_other_controlled_creature_with_keyword_production_path() {
 /// creature ... for each <dynamic>" (Urborg Justice). The "for each" path
 /// intercepts before the fixed-count `inject_subject_target` Sacrifice arm,
 /// so without `thread_for_each_subject` rebinding the controller, YOU
-/// sacrificed instead of the targeted opponent. Both the `TargetPlayer`
+/// sacrificed instead of the targeted opponent. Both the `TargetOpponent`
 /// scope AND the dynamic `ZoneChangeCountThisTurn` count must survive.
 /// Regression guard: revert either edit and the controller is `None`.
 #[test]
-fn for_each_sacrifice_target_opponent_dynamic_count_binds_target_player() {
+fn for_each_sacrifice_target_opponent_dynamic_count_binds_target_opponent() {
     let e = parse_effect(
         "Target opponent sacrifices a creature of their choice for each creature put \
              into your graveyard from the battlefield this turn.",
@@ -9311,8 +9405,8 @@ fn for_each_sacrifice_target_opponent_dynamic_count_binds_target_player() {
         Effect::Sacrifice { target, count, .. } => {
             assert_eq!(
                 target_filter_controller_ref(&target),
-                Some(ControllerRef::TargetPlayer),
-                "sacrificed-creature filter must be scoped to TargetPlayer, got {target:?}"
+                Some(ControllerRef::TargetOpponent),
+                "sacrificed-creature filter must be scoped to TargetOpponent, got {target:?}"
             );
             assert!(
                 matches!(
@@ -9362,13 +9456,13 @@ fn for_each_sacrifice_target_player_counters_on_source_binds_target_player() {
 
 /// CR 115.1a/c + CR 701.21a: Din of the Fireherd leading leg — "Target
 /// opponent sacrifices a creature for each black creature you control, then
-/// ...". The first sacrifice leg must bind `TargetPlayer` with its dynamic
+/// ...". The first sacrifice leg must bind `TargetOpponent` with its dynamic
 /// `ObjectCount` count. (The "then sacrifices a land" continuation is an
 /// implicit-subject continuation handled by a separate compound path; see
 /// the deviations note — its land filter is a pre-existing controller gap
 /// out of scope of this AST-only for-each fix.)
 #[test]
-fn for_each_sacrifice_din_first_leg_binds_target_player() {
+fn for_each_sacrifice_din_first_leg_binds_target_opponent() {
     let sorcery = vec!["Sorcery".to_string()];
     let pa = crate::parser::parse_oracle_text(
         "Target opponent sacrifices a creature for each black creature you control, \
@@ -9386,8 +9480,8 @@ fn for_each_sacrifice_din_first_leg_binds_target_player() {
         Effect::Sacrifice { target, count, .. } => {
             assert_eq!(
                 target_filter_controller_ref(target),
-                Some(ControllerRef::TargetPlayer),
-                "Din first leg must scope to TargetPlayer, got {target:?}"
+                Some(ControllerRef::TargetOpponent),
+                "Din first leg must scope to TargetOpponent, got {target:?}"
             );
             assert!(
                 matches!(
@@ -14004,7 +14098,7 @@ fn targeted_player_subject_carries_to_conjugated_predicates() {
     };
     assert_eq!(
         target_filter_controller_ref(target),
-        Some(ControllerRef::TargetPlayer)
+        Some(ControllerRef::TargetOpponent)
     );
 
     // CR 601.2c (#2344): the single "target opponent" is chosen once at
@@ -31862,7 +31956,8 @@ fn extra_turn_controller() {
     assert!(matches!(
         e,
         Effect::ExtraTurn {
-            target: TargetFilter::Controller
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
         }
     ));
 }
@@ -31877,9 +31972,112 @@ fn extra_turn_imperative() {
     assert!(matches!(
         clause.effect,
         Effect::ExtraTurn {
-            target: TargetFilter::Controller
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
         }
     ));
+}
+
+#[test]
+fn extra_turn_fixed_cardinal_and_subject_are_preserved() {
+    let one = parse_effect("Target player takes an extra turn after this one.");
+    assert!(matches!(
+        one,
+        Effect::ExtraTurn {
+            target: TargetFilter::Player,
+            count: QuantityExpr::Fixed { value: 1 },
+        }
+    ));
+
+    let two = parse_effect("Target player takes two extra turns after this one.");
+    assert!(matches!(
+        two,
+        Effect::ExtraTurn {
+            target: TargetFilter::Player,
+            count: QuantityExpr::Fixed { value: 2 },
+        }
+    ));
+}
+
+#[test]
+fn extra_turn_grammar_is_all_consuming_and_does_not_shadow_initiative() {
+    assert!(matches!(
+        parse_imperative_effect(
+            "take two extra turns after this one",
+            &mut ParseContext::default(),
+        )
+        .effect,
+        Effect::ExtraTurn {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 2 },
+        }
+    ));
+    assert!(matches!(
+        parse_effect("Take the initiative."),
+        Effect::TakeTheInitiative
+    ));
+    assert!(matches!(
+        parse_imperative_effect(
+            "take two extra turns after this one and draw a card",
+            &mut ParseContext::default(),
+        )
+        .effect,
+        Effect::Unimplemented { .. }
+    ));
+}
+
+#[test]
+fn extra_turn_count_rejects_values_above_i32_max() {
+    assert!(matches!(
+        parse_effect("Target player takes 2147483647 extra turns after this one."),
+        Effect::ExtraTurn {
+            count: QuantityExpr::Fixed { value: i32::MAX },
+            ..
+        }
+    ));
+    assert!(matches!(
+        parse_imperative_effect(
+            "take 2147483648 extra turns after this one",
+            &mut ParseContext::default(),
+        )
+        .effect,
+        Effect::Unimplemented { .. }
+    ));
+}
+
+#[test]
+fn ral_zarek_coin_result_shell_preserves_singular_extra_turn_count() {
+    let def = parse_effect_chain(
+        "Flip five coins. Take an extra turn after this one for each coin that comes up heads.",
+        AbilityKind::Activated,
+    );
+    let Effect::FlipCoins {
+        count,
+        win_effect: Some(win_effect),
+        lose_effect: None,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected FlipCoins, got {:?}", def.effect);
+    };
+    assert_eq!(count, &QuantityExpr::Fixed { value: 5 });
+    assert!(matches!(
+        win_effect.effect.as_ref(),
+        Effect::ExtraTurn {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+        }
+    ));
+}
+
+#[test]
+fn coin_heads_quantifier_uses_the_final_for_each_clause() {
+    assert_eq!(
+        strip_trailing_coin_heads_quantifier(
+            "For each player, draw a card for each coin that comes up heads."
+        ),
+        Some("For each player, draw a card")
+    );
 }
 
 #[test]
@@ -40499,26 +40697,28 @@ fn inject_subject_target_copy_token_owner() {
     }
 }
 
-/// CR 115.1 + CR 701.21a: Edict parity — "target player sacrifices a
-/// creature" must scope the sacrificed-creature filter to
-/// `ControllerRef::TargetPlayer`, identical to "target opponent sacrifices".
-/// Regression guard for the dropped-controller misparse (#552 / Diabolic
-/// Edict / Chainer's Edict / Geth's Verdict): "target player" lowers to the
-/// unit `TargetFilter::Player`, which `player_filter_as_controller_ref`
-/// previously did not recognize, leaving `controller: None`.
+/// CR 115.1 + CR 701.21a: Edict subjects retain their player-target
+/// restriction. Diabolic Edict can target any player, while Cruel Edict can
+/// target only an opponent.
 #[test]
-fn target_player_sacrifices_scopes_controller_to_target_player() {
-    for text in [
-        "target player sacrifices a creature",
-        "target opponent sacrifices a creature",
+fn targeted_player_sacrifice_preserves_target_scope() {
+    for (text, expected) in [
+        (
+            "Target player sacrifices a creature of their choice.",
+            ControllerRef::TargetPlayer,
+        ),
+        (
+            "Target opponent sacrifices a creature of their choice.",
+            ControllerRef::TargetOpponent,
+        ),
     ] {
-        let clause = parse_effect_clause(text, &mut ParseContext::default());
-        match &clause.effect {
+        let effect = parse_effect(text);
+        match &effect {
             Effect::Sacrifice { target, .. } => {
                 assert_eq!(
                     target_filter_controller_ref(target),
-                    Some(ControllerRef::TargetPlayer),
-                    "{text:?} must scope the sacrificed filter to TargetPlayer, got {0:?}",
+                    Some(expected),
+                    "{text:?} must preserve its player target restriction, got {0:?}",
                     target
                 );
             }

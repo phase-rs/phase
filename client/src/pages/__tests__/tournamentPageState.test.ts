@@ -484,6 +484,15 @@ describe("failureLabel", () => {
       { ok: false, reason: "unsupported", message: "cannot confirm" },
       "errors.unsupported",
     ],
+    // The locally-produced refusal `createTournament` returns when the broker's
+    // lobby protocol is too old to honor the requested match structure. Unlike
+    // `rejected`, it carries a TYPED `needed` version, not an English message,
+    // so each locale renders its own sentence.
+    [
+      "an incompatible broker",
+      { ok: false, reason: "incompatible", neededLobbyVersion: 8, message: "needs v8" },
+      "errors.incompatible",
+    ],
   ];
 
   it.each(cases)("maps %s to %s", (_label, failure, key) => {
@@ -499,11 +508,26 @@ describe("failureLabel", () => {
     expect(label).toEqual({ key: "errors.serverRejected", message });
   });
 
-  // Exactly one arm carries an interpolation variable, so a consumer's
-  // `"message" in label` narrowing is total.
+  // Exactly one arm carries a passthrough `message` (the broker's rejection
+  // text); the incompatible arm carries a typed `needed` instead, so a
+  // consumer's `"message" in label` narrowing stays total.
   it("attaches a message to the rejection arm and to no other", () => {
     const withMessage = cases.filter(([, failure]) => "message" in failureLabel(failure));
     expect(withMessage.map(([, , key]) => key)).toEqual(["errors.serverRejected"]);
+  });
+
+  // The incompatible arm surfaces the STRUCTURED required version for i18n
+  // interpolation, never the store's English message — so the rendered sentence
+  // is fully localizable.
+  it("carries a typed needed version on the incompatible arm, not a message", () => {
+    const label = failureLabel({
+      ok: false,
+      reason: "incompatible",
+      neededLobbyVersion: 8,
+      message: "needs v8",
+    });
+    expect(label).toEqual({ key: "errors.incompatible", needed: 8 });
+    expect("message" in label).toBe(false);
   });
 
   it("maps the two not_authorized roles to different keys", () => {

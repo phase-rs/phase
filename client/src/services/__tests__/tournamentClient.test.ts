@@ -17,6 +17,7 @@ import {
   endTournamentOver,
   getTournamentOver,
   joinTournamentOver,
+  matchTypeNeedsCapability,
   reportMatchResultOver,
   startTournamentRoundOver,
   subscribeTournamentsOver,
@@ -285,7 +286,7 @@ const HELPERS: HelperCase[] = [
         opts,
       ),
     frame:
-      '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":3,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":3,"plus_rounds":null,"format":null}}',
+      '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":3,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":3,"plus_rounds":null,"format":null,"match_type":null}}',
     gated: false,
     reply: CREATED_REPLY,
   },
@@ -352,6 +353,26 @@ const UNCORRELATED = HELPERS.filter((helper) => !helper.gated);
 // A. Request frames byte-match the Rust literals (matrix row 4)
 // ---------------------------------------------------------------------------
 
+describe("matchTypeNeedsCapability", () => {
+  it("flags any explicit structure that differs from the pre-v8 arity default", () => {
+    // Pre-v8 default: Bo3 head-to-head, Bo1 pods. A request needs the v8
+    // capability exactly when its explicit match_type differs from that default.
+    // Head-to-head (arity 2): Bo1 differs (would run as Bo3) → gated.
+    expect(matchTypeNeedsCapability(2, "Bo1")).toBe(true);
+    // Head-to-head Bo3 matches the default → not gated.
+    expect(matchTypeNeedsCapability(2, "Bo3")).toBe(false);
+    // Pod (arity >2): Bo3 differs — a v8 broker rejects it, a pre-v8 broker
+    // would silently make a Bo1 pod → gated.
+    expect(matchTypeNeedsCapability(4, "Bo3")).toBe(true);
+    // Pod Bo1 matches the default → not gated.
+    expect(matchTypeNeedsCapability(4, "Bo1")).toBe(false);
+    // An omitted structure is never gated: the broker resolves the default.
+    expect(matchTypeNeedsCapability(2, null)).toBe(false);
+    expect(matchTypeNeedsCapability(2, undefined)).toBe(false);
+    expect(matchTypeNeedsCapability(4, null)).toBe(false);
+  });
+});
+
 describe("tournament request frames", () => {
   it.each(HELPERS)(
     "$name puts the exact protocol.rs literal on the wire",
@@ -394,7 +415,7 @@ describe("tournament request frames", () => {
 
     // `Option<u32>` with `#[serde(default)]` and no `skip_serializing_if`.
     expect(ws.send).toHaveBeenCalledWith(
-      '{"type":"CreateTournament","data":{"name":"Friday Night","arity":4,"scoring":{"win_points":7,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":null,"plus_rounds":null,"format":null}}',
+      '{"type":"CreateTournament","data":{"name":"Friday Night","arity":4,"scoring":{"win_points":7,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":null,"plus_rounds":null,"format":null,"match_type":null}}',
     );
 
     controller.abort();
@@ -421,7 +442,32 @@ describe("tournament request frames", () => {
     );
 
     expect(ws.send).toHaveBeenCalledWith(
-      '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":3,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":null,"plus_rounds":2,"format":"Commander"}}',
+      '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":3,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":null,"plus_rounds":2,"format":"Commander","match_type":null}}',
+    );
+
+    controller.abort();
+    await expect(promise).resolves.toMatchObject({ ok: false, reason: "aborted" });
+  });
+
+  // Protocol v8: the match structure rides the frame as `match_type`.
+  it("puts match_type on the wire when supplied", async () => {
+    const ws = new MockWebSocket();
+    const controller = new AbortController();
+    const promise = createTournamentOver(
+      makePhaseSocket(ws),
+      {
+        name: "Friday Night",
+        arity: 2,
+        scoring: { win_points: 3, draw_points: 1, loss_points: 0 },
+        bracket: "SingleElimination",
+        totalRounds: null,
+        matchType: "Bo1",
+      },
+      { signal: controller.signal },
+    );
+
+    expect(ws.send).toHaveBeenCalledWith(
+      '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":3,"draw_points":1,"loss_points":0},"bracket":"SingleElimination","total_rounds":null,"plus_rounds":null,"format":null,"match_type":"Bo1"}}',
     );
 
     controller.abort();

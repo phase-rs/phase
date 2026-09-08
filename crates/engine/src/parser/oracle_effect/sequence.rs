@@ -2860,9 +2860,11 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // CR 301.5b + CR 608.2c: these attach forms are imperative game actions,
     // not noun-phrase continuations. Keep the matcher narrow so name-based
     // chains like "put counters on it and attach Fractal Harness to it" stay
-    // available to the token-counter attach rewriter.
+    // available to the token-counter attach rewriter. "That Equipment" is the
+    // selected-object anaphor used by Grip of Phyresis.
     .or(alt((
         value((), tag("attach this equipment ")),
+        value((), tag("attach that equipment ")),
         value((), tag("attach an equipment that was attached ")),
     )))
     .or(alt((
@@ -9926,6 +9928,26 @@ mod tests {
         assert!(starts_bare_and_clause(
             "attach an Equipment that was attached to ~ to that creature"
         ));
+    }
+
+    #[test]
+    fn bare_and_starts_equipment_attachment_anaphors_but_not_other_attachment_forms() {
+        for clause in ["attach this Equipment to it", "attach that Equipment to it"] {
+            assert!(starts_bare_and_clause(clause), "must split: {clause}");
+        }
+        for clause in [
+            "attach ~ to it",
+            "attach this Aura to it",
+            "attach that Aura to it",
+            "attach this Fortification to it",
+            "attach that Fortification to it",
+            "attach Fractal Harness to it",
+        ] {
+            assert!(
+                !starts_bare_and_clause(clause),
+                "must preserve specialized/non-Equipment route: {clause}"
+            );
+        }
     }
 
     #[test]

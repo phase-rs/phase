@@ -17672,11 +17672,17 @@ pub enum Effect {
         profile: Option<FaceDownProfile>,
     },
     /// CR 500.7: Take an extra turn after this one. The target determines who
-    /// takes the extra turn (usually Controller for "take an extra turn").
-    /// Extra turns are stored as a LIFO stack — most recently created taken first.
+    /// takes the extra turn (usually Controller for "take an extra turn"). `count`
+    /// defaults to one for legacy serialized effects. Extra turns are stored as a
+    /// LIFO stack — most recently created taken first.
     ExtraTurn {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
+        #[serde(
+            default = "default_quantity_one",
+            skip_serializing_if = "is_default_quantity_one"
+        )]
+        count: QuantityExpr,
     },
     /// CR 606.3: Grant the resolved target player the right to activate each of
     /// their planeswalkers' loyalty abilities `amount` additional times this
@@ -18151,6 +18157,10 @@ fn default_player_filter_controller() -> PlayerFilter {
 
 fn default_quantity_one() -> QuantityExpr {
     QuantityExpr::Fixed { value: 1 }
+}
+
+fn is_default_quantity_one(quantity: &QuantityExpr) -> bool {
+    matches!(quantity, QuantityExpr::Fixed { value: 1 })
 }
 
 fn default_duration_until_end_of_turn() -> Duration {
@@ -21228,6 +21238,9 @@ impl Effect {
             Effect::GrantExtraLoyaltyActivations { amount, .. } => {
                 f(amount);
             }
+            Effect::ExtraTurn { count, .. } => {
+                f(count);
+            }
             Effect::SkipNextTurn { count, .. } => {
                 f(count);
             }
@@ -21410,7 +21423,6 @@ impl Effect {
             | Effect::ManifestDread
             | Effect::TurnFaceUp { .. }
             | Effect::TurnFaceDown { .. }
-            | Effect::ExtraTurn { .. }
             | Effect::Double { .. }
             | Effect::RuntimeHandled { .. }
             | Effect::Specialize
@@ -21480,6 +21492,7 @@ impl Effect {
             | Effect::ChooseDrawnThisTurnPayOrTopdeck { count, .. }
             | Effect::Manifest { count, .. }
             | Effect::Cloak { count, .. }
+            | Effect::ExtraTurn { count, .. }
             | Effect::SkipNextTurn { count, .. }
             | Effect::SkipNextStep { count, .. }
             | Effect::AdditionalPhase { count, .. }
@@ -21589,7 +21602,6 @@ impl Effect {
             | Effect::Goad { .. }
             | Effect::Detain { .. }
             | Effect::SetRoomDoorLock { .. }
-            | Effect::ExtraTurn { .. }
             | Effect::Transform { .. }
             | Effect::FlipPermanent { .. }
             | Effect::RevealTop { .. }
@@ -21744,6 +21756,7 @@ impl Effect {
             | Effect::ChooseDrawnThisTurnPayOrTopdeck { count, .. }
             | Effect::Manifest { count, .. }
             | Effect::Cloak { count, .. }
+            | Effect::ExtraTurn { count, .. }
             | Effect::SkipNextTurn { count, .. }
             | Effect::SkipNextStep { count, .. }
             | Effect::AdditionalPhase { count, .. }
@@ -21853,7 +21866,6 @@ impl Effect {
             | Effect::Goad { .. }
             | Effect::Detain { .. }
             | Effect::SetRoomDoorLock { .. }
-            | Effect::ExtraTurn { .. }
             | Effect::Transform { .. }
             | Effect::FlipPermanent { .. }
             | Effect::RevealTop { .. }
@@ -34620,6 +34632,61 @@ mod tests {
                 scope: ObjectScope::Target,
             }
         );
+    }
+
+    #[test]
+    fn extra_turn_quantity_serde_is_backward_compatible() {
+        let legacy: Effect = serde_json::from_str(r#"{"type":"ExtraTurn"}"#).unwrap();
+        assert!(matches!(
+            &legacy,
+            Effect::ExtraTurn {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+            }
+        ));
+        let legacy_json = serde_json::to_value(&legacy).unwrap();
+        assert!(legacy_json.get("count").is_none());
+
+        let two = Effect::ExtraTurn {
+            target: TargetFilter::Player,
+            count: QuantityExpr::Fixed { value: 2 },
+        };
+        let json = serde_json::to_value(&two).unwrap();
+        assert_eq!(json["count"]["value"], serde_json::json!(2));
+        assert_eq!(serde_json::from_value::<Effect>(json).unwrap(), two);
+
+        let dynamic = Effect::ExtraTurn {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            },
+        };
+        let dynamic_json = serde_json::to_value(&dynamic).unwrap();
+        assert!(dynamic_json.get("count").is_some());
+        assert_eq!(
+            serde_json::from_value::<Effect>(dynamic_json).unwrap(),
+            dynamic
+        );
+    }
+
+    #[test]
+    fn extra_turn_quantity_is_reached_by_all_generic_authorities() {
+        let mut effect = Effect::ExtraTurn {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            },
+        };
+        let dynamic = effect.count_expr().cloned().unwrap();
+        let mut visited = Vec::new();
+        effect.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
+        assert_eq!(visited, vec![dynamic]);
+
+        *effect.count_expr_mut().unwrap() = QuantityExpr::Fixed { value: 2 };
+        assert_eq!(effect.count_expr(), Some(&QuantityExpr::Fixed { value: 2 }));
+        visited.clear();
+        effect.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
+        assert_eq!(visited, vec![QuantityExpr::Fixed { value: 2 }]);
     }
 
     #[test]

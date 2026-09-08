@@ -4606,7 +4606,18 @@ fn visibility_for_node(node: &OracleNodeIr) -> PayloadVisibility {
         OracleNodeIr::Trigger(TriggerNodeIr::Assembled { .. }) => {
             PayloadVisibility::AssembledOrPrelowered
         }
-        _ => PayloadVisibility::NativeIr,
+        OracleNodeIr::Spell(_)
+        | OracleNodeIr::Trigger(TriggerNodeIr::Parsed(_))
+        | OracleNodeIr::Static(_)
+        | OracleNodeIr::Replacement(_)
+        | OracleNodeIr::Keyword(_)
+        | OracleNodeIr::Modal(_)
+        | OracleNodeIr::AdditionalCost(_)
+        | OracleNodeIr::CastingRestriction(_)
+        | OracleNodeIr::CastingOption(_)
+        | OracleNodeIr::SolveCondition(_)
+        | OracleNodeIr::StriveCost(_)
+        | OracleNodeIr::RelationSynthesis(_) => PayloadVisibility::NativeIr,
     }
 }
 
