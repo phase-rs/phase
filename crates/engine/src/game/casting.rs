@@ -19801,6 +19801,67 @@ fn player_may_begin_activating(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivationStructuralEligibility {
+    Eligible,
+    WrongActivator,
+    NinjutsuFamily,
+    WrongZone(Zone),
+}
+
+/// CR 113.6 + CR 113.6b + CR 602.2: Classifies the immutable source-zone and activator
+/// prerequisites shared by activation legality and pre-cast payoff discovery.
+/// This deliberately runs before mutable restrictions, targets, and costs: a
+/// currently false restriction may be the payoff of the spell being assessed.
+fn activation_structural_eligibility(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_def: &AbilityDefinition,
+) -> ActivationStructuralEligibility {
+    let Some(obj) = state.objects.get(&source_id) else {
+        return ActivationStructuralEligibility::WrongActivator;
+    };
+
+    // CR 602.2 + CR 108.4a: use controller_or_owner so off-zone cards and
+    // command-zone emblems retain their respective activation authorities.
+    if !player_may_begin_activating(
+        state,
+        player,
+        obj.controller_or_owner(),
+        ability_def.activator_filter.as_ref(),
+    ) {
+        return ActivationStructuralEligibility::WrongActivator;
+    }
+    // CR 702.49a: Ninjutsu is an activated ability with a dedicated
+    // GameAction::ActivateNinjutsu route, never the generic ActivateAbility route.
+    if super::keywords::is_ninjutsu_family_marker_ability(ability_def) {
+        return ActivationStructuralEligibility::NinjutsuFamily;
+    }
+    // CR 113.6 + CR 113.6b: activated abilities default to functioning only
+    // on the battlefield unless their definition names another activation zone.
+    let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
+    if obj.zone != required_zone {
+        return ActivationStructuralEligibility::WrongZone(required_zone);
+    }
+    ActivationStructuralEligibility::Eligible
+}
+
+/// CR 113.6 + CR 113.6b + CR 602.2: Public structural activation predicate for consumers
+/// that must discover possible activated-ability payoffs without evaluating
+/// mutable restrictions, targets, or costs.
+pub fn activation_source_and_activator_are_structurally_eligible(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_def: &AbilityDefinition,
+) -> bool {
+    matches!(
+        activation_structural_eligibility(state, player, source_id, ability_def),
+        ActivationStructuralEligibility::Eligible
+    )
+}
+
 /// CR 602.5 + CR 118.3: what the activation gate was asked to decide.
 ///
 /// The gate has one body and two consumers. `Legality` is enforcement: it
@@ -19915,20 +19976,10 @@ pub(crate) fn activation_verdict(
     else {
         return ActivationVerdict::Illegal;
     };
-    // CR 602.2 + CR 108.4a: the permission reference point is the source's
-    // controller, or its owner when it has none — this gate runs ahead of the
-    // `activation_zone` check below, so it sees hand / graveyard / exile sources.
-    if !player_may_begin_activating(
-        state,
-        player,
-        obj.controller_or_owner(),
-        ability_def.activator_filter.as_ref(),
+    if !matches!(
+        activation_structural_eligibility(state, player, source_id, &ability_def),
+        ActivationStructuralEligibility::Eligible
     ) {
-        return ActivationVerdict::Illegal;
-    }
-    // CR 702.49: Ninjutsu-family marker abilities are not normal activated
-    // abilities — they must route through `GameAction::ActivateNinjutsu`.
-    if super::keywords::is_ninjutsu_family_marker_ability(&ability_def) {
         return ActivationVerdict::Illegal;
     }
 
@@ -19940,11 +19991,6 @@ pub(crate) fn activation_verdict(
         return ActivationVerdict::Illegal;
     }
 
-    // CR 602.1: Check activation zone — default to battlefield.
-    let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
-    if obj.zone != required_zone {
-        return ActivationVerdict::Illegal;
-    }
     // CR 701.35a: Detained permanents' activated abilities can't be activated.
     if !obj.detained_by.is_empty() {
         return ActivationVerdict::Illegal;
@@ -20416,10 +20462,9 @@ pub fn handle_activate_ability(
     ability_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let obj = state
-        .objects
-        .get(&source_id)
-        .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+    if !state.objects.contains_key(&source_id) {
+        return Err(EngineError::InvalidAction("Object not found".to_string()));
+    }
 
     // CR 602.2: Only players permitted by `activator_filter` may begin activation.
     let Some(mut ability_def) = activation_ability_definition(state, source_id, ability_index)
@@ -20428,32 +20473,23 @@ pub fn handle_activate_ability(
             "Invalid ability index".to_string(),
         ));
     };
-    // CR 602.2 + CR 108.4a: the permission reference point is the source's
-    // controller, or its owner when it has none — this gate runs ahead of the
-    // `activation_zone` check below, so it sees hand / graveyard / exile sources.
-    if !player_may_begin_activating(
-        state,
-        player,
-        obj.controller_or_owner(),
-        ability_def.activator_filter.as_ref(),
-    ) {
-        return Err(EngineError::NotYourPriority);
-    }
-    // CR 702.49: Ninjutsu-family marker abilities must not use the generic
-    // activated-ability stack path — mana is only paid in `activate_ninjutsu`.
-    if super::keywords::is_ninjutsu_family_marker_ability(&ability_def) {
-        return Err(EngineError::InvalidAction(
-            "Ninjutsu-family abilities must be activated via ActivateNinjutsu (CR 702.49)"
-                .to_string(),
-        ));
-    }
-    // CR 602.1: Check activation zone — default to battlefield.
-    let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
-    if obj.zone != required_zone {
-        return Err(EngineError::InvalidAction(format!(
-            "Object is not in the correct zone (expected {:?})",
-            required_zone
-        )));
+    match activation_structural_eligibility(state, player, source_id, &ability_def) {
+        ActivationStructuralEligibility::Eligible => {}
+        ActivationStructuralEligibility::WrongActivator => {
+            return Err(EngineError::NotYourPriority)
+        }
+        ActivationStructuralEligibility::NinjutsuFamily => {
+            return Err(EngineError::InvalidAction(
+                "Ninjutsu-family abilities must be activated via ActivateNinjutsu (CR 702.49)"
+                    .to_string(),
+            ));
+        }
+        ActivationStructuralEligibility::WrongZone(required_zone) => {
+            return Err(EngineError::InvalidAction(format!(
+                "Object is not in the correct zone (expected {:?})",
+                required_zone
+            )));
+        }
     }
 
     // CR 702.170b + CR 116.2k + CR 602.1c: Plot is a SPECIAL ACTION, not the

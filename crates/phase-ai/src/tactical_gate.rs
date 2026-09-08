@@ -5,6 +5,7 @@ use engine::ai_support::{
     TargetedExchangeVerdict,
 };
 use engine::game::casting::{
+    activated_ability_definitions, activation_source_and_activator_are_structurally_eligible,
     cast_spell_face_choice_available, effective_spell_cost,
     for_each_structurally_selectable_alternate_spell_payload,
     has_potentially_authorizing_object_cast_permission, spell_cost_is_payable_from_pool,
@@ -420,6 +421,13 @@ fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
     let Some(object) = ctx.state.objects.get(object_id) else {
         return false;
     };
+    // CR 117.1b + CR 602.2a: an already-announced ability can read the cast
+    // ledger at resolution after its source has left the relevant zone. The
+    // narrow proof does not simulate those payloads, so any nonempty stack
+    // fails open.
+    if !ctx.state.stack.is_empty() {
+        return false;
+    }
     if object.zone != Zone::Hand
         || object.controller != ctx.ai_player
         || object.owner != ctx.ai_player
@@ -575,6 +583,25 @@ fn cast_has_relevant_payoff(
                 || castable_spells.contains(&object.id))
                 && spell_identity_is_available_to_caster(state, caster, object)
                 && object_has_cast_unstable_consumer(state, caster, object, candidate_spell)
+        })
+        || state.objects.values().any(|object| {
+            // Do not inspect a hidden opponent card's definitions. The identity
+            // guard must precede runtime grants and every ability metadata read.
+            spell_identity_is_available_to_caster(state, caster, object)
+                && !matches!(object.zone, Zone::Battlefield | Zone::Stack)
+                && candidate_spell != Some(object.id)
+                && activated_ability_definitions(state, object.id)
+                    .into_iter()
+                    .any(|(_, definition)| {
+                        definition.kind == AbilityKind::Activated
+                            && activation_source_and_activator_are_structurally_eligible(
+                                state,
+                                caster,
+                                object.id,
+                                &definition,
+                            )
+                            && ability_has_cast_unstable_consumer(&definition)
+                    })
         })
         || active_replacements(state).any(|(_, object, replacement)| {
             object.zone == Zone::Command
@@ -1745,6 +1772,50 @@ mod tests {
         try_resolve_quantity_in_source_context(state, amount, object.controller, harvest)
     }
 
+    fn spells_cast_this_turn() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            },
+        }
+    }
+
+    fn cast_history_activation(zone: Zone) -> AbilityDefinition {
+        let mut definition = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: spells_cast_this_turn(),
+                target: TargetFilter::Controller,
+            },
+        );
+        definition.activation_zone = Some(zone);
+        definition
+            .activation_restrictions
+            .push(ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::QuantityComparison {
+                    lhs: spells_cast_this_turn(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                }),
+            });
+        definition
+    }
+
+    fn issued_activation(state: &GameState, source_id: ObjectId, ability_index: usize) -> bool {
+        engine::ai_support::candidate_actions(state)
+            .iter()
+            .any(|candidate| {
+                matches!(
+                    candidate.action,
+                    GameAction::ActivateAbility {
+                        source_id: candidate_source,
+                        ability_index: candidate_index,
+                    } if candidate_source == source_id && candidate_index == ability_index
+                )
+            })
+    }
+
     fn zero_cast_is_retained(state: &GameState, spell: ObjectId) -> bool {
         let issued = engine::ai_support::candidate_actions(state);
         assert!(issued.iter().any(|candidate| {
@@ -2679,6 +2750,345 @@ mod tests {
             !zero_cast_is_retained(&state, congregate),
             "removing only the dynamic permission restores known-zero rejection"
         );
+    }
+
+    #[test]
+    fn zero_cast_graveyard_activated_payoff_is_noncastable_and_uses_the_production_activation() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let source = create_object(
+            &mut state,
+            CardId(91_865),
+            P0,
+            "Graveyard activation payoff".to_string(),
+            Zone::Graveyard,
+        );
+        create_object(
+            &mut state,
+            CardId(91_866),
+            P0,
+            "Graveyard payoff draw".to_string(),
+            Zone::Library,
+        );
+        Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source)
+                .expect("graveyard source exists")
+                .abilities,
+        )
+        .push(cast_history_activation(Zone::Graveyard));
+
+        assert!(
+            !spell_objects_available_to_cast(&state, P0).contains(&source),
+            "the graveyard source has no casting permission"
+        );
+        assert!(
+            !issued_activation(&state, source, 0),
+            "the production activation authority rejects the false spell-count restriction"
+        );
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "the structurally available graveyard ability makes the zero cast fail open"
+        );
+
+        let mut without_payoff = state.clone();
+        Arc::make_mut(
+            &mut without_payoff
+                .objects
+                .get_mut(&source)
+                .expect("graveyard source exists")
+                .abilities,
+        )
+        .clear();
+        assert!(
+            !zero_cast_is_retained(&without_payoff, congregate),
+            "removing only the nonfunctioning graveyard ability restores rejection"
+        );
+
+        let mut wrong_zone = state.clone();
+        Arc::make_mut(
+            &mut wrong_zone
+                .objects
+                .get_mut(&source)
+                .expect("graveyard source exists")
+                .abilities,
+        )[0]
+        .activation_zone = Some(Zone::Exile);
+        assert!(
+            !zero_cast_is_retained(&wrong_zone, congregate),
+            "changing only the activation zone makes the retained graveyard metadata nonfunctioning"
+        );
+
+        let mut runner = GameRunner::from_state(state);
+        runner.cast(congregate).target_player(P0).resolve();
+        assert!(
+            issued_activation(runner.state(), source, 0),
+            "the engine issues the graveyard activation after recording the setup cast"
+        );
+        runner
+            .activate(source, 0)
+            .resolve()
+            .assert_hand_drawn(P0, 1);
+    }
+
+    #[test]
+    fn zero_cast_command_emblem_activation_is_discovered_through_runtime_authority() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        state.format_config.command_zone = true;
+        create_object(
+            &mut state,
+            CardId(91_867),
+            P0,
+            "Command emblem payoff draw".to_string(),
+            Zone::Library,
+        );
+        let emblem = engine::game::effects::create_emblem::grant_emblem(
+            &mut state,
+            P0,
+            Vec::new(),
+            Vec::new(),
+            vec![cast_history_activation(Zone::Command)],
+        );
+
+        assert!(
+            !issued_activation(&state, emblem, 0),
+            "the command emblem's false restriction blocks activation before the cast"
+        );
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a command-zone emblem installed through grant_emblem is a payoff consumer"
+        );
+
+        let mut without_payoff = state.clone();
+        Arc::make_mut(
+            &mut without_payoff
+                .objects
+                .get_mut(&emblem)
+                .expect("emblem exists")
+                .abilities,
+        )
+        .clear();
+        assert!(
+            !zero_cast_is_retained(&without_payoff, congregate),
+            "removing only the command activation restores rejection"
+        );
+
+        let mut runner = GameRunner::from_state(state);
+        runner.cast(congregate).target_player(P0).resolve();
+        assert!(
+            issued_activation(runner.state(), emblem, 0),
+            "the engine issues the command-zone activation after the setup cast"
+        );
+        runner
+            .activate(emblem, 0)
+            .resolve()
+            .assert_hand_drawn(P0, 1);
+    }
+
+    #[test]
+    fn zero_cast_hand_activation_is_discovered_while_its_spell_is_listed_but_not_castable() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let source = create_object(
+            &mut state,
+            CardId(91_868),
+            P0,
+            "Casting-blocked hand activation payoff".to_string(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(91_869),
+            P0,
+            "Hand payoff draw".to_string(),
+            Zone::Library,
+        );
+        {
+            let object = state.objects.get_mut(&source).expect("hand source exists");
+            object.card_types.core_types.push(CoreType::Instant);
+            object.abilities = Arc::new(vec![
+                AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+                cast_history_activation(Zone::Hand),
+            ]);
+            object
+                .casting_restrictions
+                .push(CastingRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::QuantityComparison {
+                        lhs: spells_cast_this_turn(),
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }),
+                });
+        }
+
+        // Preservation control: spell availability includes cards in hand;
+        // `can_cast_object_now` separately applies the casting restriction.
+        assert!(
+            spell_objects_available_to_cast(&state, P0).contains(&source),
+            "the hand source remains in spell availability despite its casting restriction"
+        );
+        assert!(
+            !engine::game::casting::can_cast_object_now(&state, P0, source),
+            "the sibling spell is blocked by its casting restriction"
+        );
+        assert!(
+            !issued_activation(&state, source, 1),
+            "the activation restriction is false before the setup cast"
+        );
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "the noncastable hand source's activated payoff retains the zero cast"
+        );
+
+        let mut without_payoff = state.clone();
+        without_payoff.objects.remove(&source);
+        without_payoff.players[P0.0 as usize]
+            .hand
+            .retain(|object_id| *object_id != source);
+        assert!(
+            !zero_cast_is_retained(&without_payoff, congregate),
+            "removing only the casting-blocked hand source restores rejection"
+        );
+
+        let mut runner = GameRunner::from_state(state);
+        runner.cast(congregate).target_player(P0).resolve();
+        assert!(
+            issued_activation(runner.state(), source, 1),
+            "the engine issues the now-legal hand activation"
+        );
+        runner
+            .activate(source, 1)
+            .resolve()
+            .assert_hand_drawn(P0, 1);
+    }
+
+    #[test]
+    fn off_zone_activated_payoff_respects_identity_and_owner_controls() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let opponent_source = create_object(
+            &mut state,
+            CardId(91_870),
+            P1,
+            "Opponent graveyard activation".to_string(),
+            Zone::Graveyard,
+        );
+        Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&opponent_source)
+                .expect("opponent source exists")
+                .abilities,
+        )
+        .push(cast_history_activation(Zone::Graveyard));
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "a visible opponent-owned source is not a payoff P0 may activate"
+        );
+
+        assert!(
+            !state.viewer_knows_card_identity(P0, opponent_source),
+            "the visible-zone fixture must not seed P0 with remembered opponent identity"
+        );
+        Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&opponent_source)
+                .expect("opponent source exists")
+                .abilities,
+        )[0]
+        .activator_filter = Some(PlayerFilter::All);
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a visible opponent source explicitly activatable by P0 is a payoff consumer"
+        );
+
+        state
+            .objects
+            .get_mut(&opponent_source)
+            .expect("opponent source exists")
+            .face_down = true;
+        assert!(
+            !spell_identity_is_available_to_caster(&state, P0, &state.objects[&opponent_source]),
+            "the viewer cannot inspect the hidden opponent source's identity"
+        );
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "hidden opponent activated metadata cannot affect P0's hard rejection"
+        );
+    }
+
+    #[test]
+    fn zero_cast_fails_open_for_a_production_sacrificed_activation_on_the_stack() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let source = create_object(
+            &mut state,
+            CardId(91_871),
+            P0,
+            "Sacrificial draw activation".to_string(),
+            Zone::Battlefield,
+        );
+        create_object(
+            &mut state,
+            CardId(91_872),
+            P0,
+            "Stack payoff draw".to_string(),
+            Zone::Library,
+        );
+        let mut draw = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: spells_cast_this_turn(),
+                target: TargetFilter::Controller,
+            },
+        );
+        draw.cost = Some(AbilityCost::Sacrifice(
+            engine::types::ability::SacrificeCost::count(TargetFilter::SelfRef, 1),
+        ));
+        Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source)
+                .expect("sacrificial source exists")
+                .abilities,
+        )
+        .push(draw);
+
+        assert!(issued_activation(&state, source, 0));
+        let mut runner = GameRunner::from_state(state);
+        let activation = engine::ai_support::candidate_actions(runner.state())
+            .into_iter()
+            .find(|candidate| {
+                matches!(
+                    candidate.action,
+                    GameAction::ActivateAbility {
+                        source_id,
+                        ability_index: 0,
+                    } if source_id == source
+                )
+            })
+            .expect("the engine issues the sacrificial activation")
+            .action;
+        runner
+            .act(activation)
+            .expect("production activation succeeds");
+        assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
+        assert!(!runner.state().stack.is_empty());
+        assert!(
+            zero_cast_is_retained(runner.state(), congregate),
+            "an activated ability already on the stack may read the later cast ledger"
+        );
+
+        let mut empty_stack = runner.state().clone();
+        empty_stack.stack.clear();
+        assert!(
+            !zero_cast_is_retained(&empty_stack, congregate),
+            "without the source or its announced stack ability, rejection is restored"
+        );
+
+        runner
+            .cast(congregate)
+            .target_player(P0)
+            .resolve()
+            .assert_hand_drawn(P0, 1);
     }
 
     #[test]
