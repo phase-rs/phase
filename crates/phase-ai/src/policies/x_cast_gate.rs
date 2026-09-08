@@ -290,12 +290,12 @@ fn prove_modal_root_at_x_zero(
             }
         } else if let Some(quantity) = effect_quantity(effect) {
             if quantity.contains_x() {
-                Some((
-                    XDependency::XDependent,
-                    quantity_is_proven_zero_at_x_zero(quantity)
-                        .then_some(ZeroProof::ProvenZero)
-                        .unwrap_or(ZeroProof::Meaningful),
-                ))
+                let zero_proof = if quantity_is_proven_zero_at_x_zero(quantity) {
+                    ZeroProof::ProvenZero
+                } else {
+                    ZeroProof::Meaningful
+                };
+                Some((XDependency::XDependent, zero_proof))
             } else {
                 None
             }

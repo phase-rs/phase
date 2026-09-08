@@ -6856,7 +6856,7 @@ mod tests {
     fn add_drown_in_dreams(state: &mut GameState, owner: PlayerId) -> ObjectId {
         let id = create_object(
             state,
-            CardId(15_448_052_799_362_826_34),
+            CardId(1_544_805_279_936_282_634),
             owner,
             "Drown in Dreams".to_string(),
             Zone::Hand,
