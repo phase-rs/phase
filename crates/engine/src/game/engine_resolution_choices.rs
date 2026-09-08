@@ -120,7 +120,7 @@ fn legacy_mass_library_order_prompt_is_current(
         destination: Zone::Library,
         origin,
         library_position: Some(position),
-        library_shuffle: Default::default(),
+        library_shuffle: _,
         random_order: false,
         target,
         ..
@@ -5520,7 +5520,7 @@ pub(super) fn handle_resolution_choice(
                             Effect::ChangeZoneAll {
                                 destination: Zone::Library,
                                 library_position: Some(position),
-                                library_shuffle: Default::default(),
+                                library_shuffle: _,
                                 random_order: false,
                                 ..
                             } if library_position.as_ref() == Some(position)

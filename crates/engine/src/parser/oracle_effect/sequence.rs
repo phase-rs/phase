@@ -4779,6 +4779,7 @@ pub(super) fn apply_clause_continuation(
                             enter_with_counters: vec![],
                             face_down_profile: None,
                             library_position,
+                            library_shuffle: Default::default(),
                             random_order: matches!(rest_order, DigRestOrder::Random),
                         },
                     ));
@@ -5139,7 +5140,7 @@ pub(super) fn apply_clause_continuation(
                     Effect::ChangeZoneAll {
                         face_down_profile: fdp @ Some(_),
                         library_position: None,
-                        library_shuffle: Default::default(),
+                        library_shuffle: _,
                         random_order: false,
                         ..
                     }

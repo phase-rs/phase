@@ -3104,6 +3104,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             enter_with_counters,
             face_down_profile,
             library_position,
+            library_shuffle: _,
             random_order,
         } => {
             if let Some(o) = origin {

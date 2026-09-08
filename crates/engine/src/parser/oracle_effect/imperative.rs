@@ -7638,6 +7638,7 @@ pub(super) fn parse_put_ast(
                 target,
                 enter_tapped,
                 library_position,
+                library_shuffle: _,
                 random_order,
                 ..
             } => {
@@ -7801,6 +7802,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position,
+                library_shuffle: Default::default(),
                 random_order,
             }
         }
@@ -13165,6 +13167,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 // position (set only when the primary destination is a library
                 // pile); randomness for the primary is routed above.
                 library_position,
+                library_shuffle: Default::default(),
                 random_order: primary_random,
             };
             let complement = Effect::ChangeZoneAll {
@@ -17679,7 +17682,7 @@ mod tests {
                 enter_with_counters: _,
                 face_down_profile: None,
                 library_position: None,
-                library_shuffle: Default::default(),
+                library_shuffle: _,
                 random_order: false,
             } => {
                 assert_eq!(origin, None);

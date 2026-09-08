@@ -38423,6 +38423,7 @@ fn try_parse_put_zone_change_parts(
                         enter_with_counters: vec![],
                         face_down_profile: None,
                         library_position,
+                        library_shuffle: Default::default(),
                         random_order,
                     },
                     choice_count,

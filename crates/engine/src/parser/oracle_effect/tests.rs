@@ -9011,7 +9011,7 @@ fn effect_exile_target_player_graveyard_is_change_zone_all() {
                     enter_with_counters: _,
                     face_down_profile: None,
                     library_position: None,
-                    library_shuffle: Default::default(),
+                    library_shuffle: _,
                     random_order: false,
                 }
             ),
@@ -9212,7 +9212,7 @@ fn effect_put_exiled_with_this_artifact_into_graveyard() {
                 enter_with_counters: _,
                 face_down_profile: None,
                 library_position: None,
-                library_shuffle: Default::default(),
+                library_shuffle: _,
                 random_order: false,
             }
         ),
@@ -21199,7 +21199,7 @@ fn reveal_partition_graveyard_primary_random_rest_to_library_bottom() {
         destination: rest_dest,
         target: rest_target,
         library_position: rest_pos,
-        library_shuffle: Default::default(),
+        library_shuffle: _,
         random_order: rest_random,
         ..
     } = &*rest.effect
@@ -21260,7 +21260,7 @@ fn reveal_partition_hand_primary_any_order_rest_to_library_bottom() {
     let Effect::ChangeZoneAll {
         destination: rest_dest,
         library_position: rest_pos,
-        library_shuffle: Default::default(),
+        library_shuffle: _,
         random_order: rest_random,
         ..
     } = &*rest.effect
