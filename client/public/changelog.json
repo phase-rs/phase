@@ -1,6 +1,22 @@
 {
   "entries": [
     {
+      "id": 207,
+      "date": "2026-09-07",
+      "title": "Hazel doubles down on Squirrels",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "localization",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Barbarian Class, Pixie Guide, and Wyll now roll extra dice and ignore the lowest rolls, including when these effects stack\n\n🛠️ Cards That Now Work Right\n• Hazel of the Rootbloom makes two copies of a Squirrel token, and its tap-tokens mana ability accepts your chosen X without rejecting payment or looping at zero\n• Shuri, Wakandan Inventor copies onto the artifact you choose instead of onto Shuri; the same fix helps True Polymorph, Shapesharer, and other copy effects\n• Ultron preserves an artifact creature token’s copied power and toughness instead of making every copy 2/2\n• Flare of Faith gives its Human target +3/+3 and indestructible; Thieving Skydiver checks the stolen artifact for its Equipment rider\n• Swords to Plowshares does nothing when its only target becomes illegal, including no life gain\n• Runo Stromkirk, Delver of Secrets, and Sidequest: Catch a Fish can transform after an accepted reveal. Runo checks the creature’s mana value; declining a qualifying reveal still has a known bug\n• Gale’s Redirection and Stolen Goods let you use their free casts during the stated window instead of forcing an immediate cast\n• Faunsbane Troll and Ronin require an attached Aura or Equipment for their sacrifice costs; Malevolent Noble accepts an artifact or another creature. Transmutation Font is now marked unsupported rather than allowing three identically named tokens\n\n⚔️ Combat & Gameplay\n• Declaring attackers is much faster on large creature boards, with less work spent checking combat taxes and updating effects that affect one permanent\n• Resolve All keeps AI seats committed to passing while the stack clears\n• Loop shortcuts can now confirm counts between the previewed samples instead of leaving Confirm disabled\n\n🖥️ Interface\n• Hover or tap a dungeon name to see the dungeon card, your current room, and the next reachable rooms — including opponents’ progress\n• The game log stays visible beside the board, skips empty combat entries, and keeps clearer combat and turn context\n• Exported authoritative game states can be imported again, with clearer errors for malformed files\n• Linux AppImage builds now include the audio decoder packages needed by the bundled sounds\n• Cloud backups stop carrying generated feed data; metagame feeds have been refreshed\n\n🌍 Localization\n• Updated game-log filters, die-roll choices, and tournament controls across the supported locales\n\n🤖 AI\n• Multiplayer AI makes better threat comparisons when choosing opponents and combat targets\n\n🌐 Multiplayer\n• Enable Tournaments under Settings → Experimental to show it in navigation. Organizers can add a game-format label and choose automatic round counts plus extra rounds\n• Deck admission honors host-configurable format rules, and games with more than two seats default to Free-for-All when no format is specified",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1546683740615348274"
+    },
+    {
       "id": 206,
       "date": "2026-09-06",
       "title": "Esix makes creature copies",
