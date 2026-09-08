@@ -14538,13 +14538,7 @@ fn great_aurora_keeps_move_shuffle_draw_inside_each_player_iteration() {
             target: TargetFilter::ScopedPlayer
         }
     ));
-    assert!(matches!(
-        shuffle.player_scope,
-        Some(PlayerFilter::TrackedSetPossessor {
-            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
-            ..
-        })
-    ));
+    assert_eq!(shuffle.player_scope, None);
     let draw = shuffle.sub_ability.as_deref().expect("per-player draw");
     assert!(matches!(
         draw.effect.as_ref(),
@@ -14555,6 +14549,7 @@ fn great_aurora_keeps_move_shuffle_draw_inside_each_player_iteration() {
             target: TargetFilter::ScopedPlayer,
         }
     ));
+    assert_eq!(draw.player_scope, None);
     assert_eq!(draw.sub_link, SubAbilityLink::ContinuationStep);
 }
 

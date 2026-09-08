@@ -30712,22 +30712,35 @@ fn normalize_all_player_library_shuffle_chain(def: &mut AbilityDefinition) {
     };
 
     // CR 608.2c + CR 121.1: The Great Aurora class keeps "then draws
-    // that many" in the same per-player shuffle instruction. This pass runs
-    // after the full chain is assembled, so bind that continuation here rather
-    // than in the clause-local subject injector.
-    if let Some(draw) = shuffle.sub_ability.as_deref_mut() {
-        if let Effect::Draw {
-            count:
-                QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount,
-                },
-            target,
-        } = &mut *draw.effect
-        {
-            if matches!(target, TargetFilter::Controller | TargetFilter::Any) {
-                *target = TargetFilter::ScopedPlayer;
-            }
-        }
+    // that many" in the same per-player shuffle instruction. Its compound
+    // population has no single origin and the subject injector copies that
+    // population filter onto the draw. Bind the move, shuffle, and draw to the
+    // enclosing All iteration instead of starting fresh nested iterations.
+    let keeps_draw_in_outer_iteration = origin.is_none()
+        && matches!(move_target, TargetFilter::Or { .. })
+        && shuffle.sub_ability.as_deref().is_some_and(|draw| {
+            matches!(
+                &*draw.effect,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    target,
+                } if matches!(target, TargetFilter::Controller | TargetFilter::Any | TargetFilter::ScopedPlayer)
+                    || target == move_target
+            )
+        });
+    if keeps_draw_in_outer_iteration {
+        shuffle.player_scope = None;
+        let draw = shuffle
+            .sub_ability
+            .as_deref_mut()
+            .expect("compound all-player shuffle draw checked above");
+        let Effect::Draw { target, .. } = &mut *draw.effect else {
+            unreachable!("compound all-player shuffle draw checked above");
+        };
+        *target = TargetFilter::ScopedPlayer;
+        draw.player_scope = None;
     }
 
     if *origin != Some(Zone::Hand) {
@@ -32804,6 +32817,11 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     let mut def = lower_effect_chain_ir(&ir.body);
     attach_die_result_branches_before_finalization(&mut def, &ir.die_results);
     finalize_effect_chain(&mut def);
+    // CR 608.2c + CR 121.1: finalization can assemble the Great Aurora class's
+    // owner-shuffle continuation after the assembly-time player-scope rewrite.
+    // Reapply the same narrow structural normalizer here, where the whole
+    // Move→Shuffle→Draw chain is stable.
+    normalize_all_player_library_shuffle_chain(&mut def);
     apply_owner_library_reveal_anchor_from_text(&mut def, &ir.source_text);
     // CR 608.2c: a root the chain cannot describe (it has no previous boundary).
     if let Some(sub_link) = ir.shell.sub_link {

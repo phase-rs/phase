@@ -338,6 +338,7 @@ mod granted_bloodthirst_5802;
 mod granted_storm_snapshot;
 mod granted_sunburst_5337;
 mod graveyard_to_hand_activation_zone;
+mod great_aurora_owner_shuffle;
 mod greater_good_activation;
 mod green_suns_zenith_regression;
 mod griffin_guide_ceased_token_co_departure;
