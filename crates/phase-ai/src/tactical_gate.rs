@@ -25,7 +25,7 @@ use engine::types::ability::{
     CastingRestriction, ContinuousModification, CostCategory, Effect, ParsedCondition, PtValue,
     StaticCondition, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
-use engine::types::ability_visit::visit_ability_def;
+use engine::types::ability_visit::{visit_ability_def, visit_replacement, visit_static};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastPaymentMode, DayNight, GameState, WaitingFor};
@@ -470,17 +470,10 @@ fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
         return false;
     }
 
-    if has_relevant_functioning_trigger(ctx.state, *object_id) {
-        return false;
-    }
-    if cast_history_has_relevant_payoff(ctx.state, ctx.ai_player) {
-        return false;
-    }
-
     let Some(facts) = ctx.cast_facts() else {
         return false;
     };
-    facts.cost_mode == CastCostMode::Printed
+    let direct_effect_is_known_zero = facts.cost_mode == CastCostMode::Printed
         && facts.immediate_etb_triggers.is_empty()
         && facts.immediate_replacements.is_empty()
         && facts.primary_effects.len() == 1
@@ -493,7 +486,18 @@ fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
                 true,
                 false,
             )
-        })
+        });
+    if !direct_effect_is_known_zero {
+        return false;
+    }
+
+    if has_relevant_functioning_trigger(ctx.state, *object_id)
+        || cast_history_has_relevant_payoff(ctx.state, ctx.ai_player)
+    {
+        return false;
+    }
+
+    true
 }
 
 /// Returns whether recording this cast changes a currently available
@@ -535,12 +539,7 @@ fn cast_history_has_relevant_payoff(state: &GameState, caster: PlayerId) -> bool
                     .into_iter()
                     .filter_map(|spell| state.objects.get(&spell))
                     .filter(|object| spell_identity_is_available_to_caster(state, caster, object))
-                    .any(|object| {
-                        object
-                            .keywords
-                            .iter()
-                            .any(|keyword| matches!(keyword, Keyword::Surge(_)))
-                    })
+                    .any(|object| object_has_surge_keyword(state, object))
             });
 
     // The casting authority includes hand, permission-backed exile/graveyard/
@@ -553,26 +552,21 @@ fn cast_history_has_relevant_payoff(state: &GameState, caster: PlayerId) -> bool
     enables_surge
         || state.objects.values().any(|object| {
             (matches!(object.zone, Zone::Battlefield | Zone::Stack)
-                || castable_spells.contains(&object.id)
-                    && spell_identity_is_available_to_caster(state, caster, object))
-                && object_uses_cast_history_quantity(object)
-        })
-        || castable_spells.iter().any(|object_id| {
-            state.objects.get(object_id).is_some_and(|object| {
-                spell_identity_is_available_to_caster(state, caster, object)
-                    && object
-                        .static_definitions
-                        .as_slice()
-                        .iter()
-                        .any(|definition| {
-                            matches!(definition.affected, Some(TargetFilter::SelfRef))
-                                && definition.active_zones.contains(&object.zone)
-                                && static_cost_modifier_uses_cast_history(definition)
-                        })
-            })
+                || castable_spells.contains(&object.id))
+                && spell_identity_is_available_to_caster(state, caster, object)
+                && object_uses_cast_history_quantity(state, object)
         })
         || game_functioning_statics(state)
-            .any(|(_, definition)| static_cost_modifier_uses_cast_history(definition))
+            .any(|(_, definition)| static_definition_uses_cast_history(definition))
+}
+
+fn object_has_surge_keyword(
+    state: &GameState,
+    object: &engine::game::game_object::GameObject,
+) -> bool {
+    engine::game::off_zone_characteristics::effective_off_zone_keywords(state, object.id)
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Surge(_)))
 }
 
 fn spell_identity_is_available_to_caster(
@@ -580,9 +574,9 @@ fn spell_identity_is_available_to_caster(
     caster: PlayerId,
     object: &engine::game::game_object::GameObject,
 ) -> bool {
-    object.zone.is_public()
-        || object.zone == Zone::Hand && object.owner == caster
-        || state.viewer_knows_card_identity(caster, object.id)
+    state.viewer_knows_card_identity(caster, object.id)
+        || !object.face_down
+            && (object.zone.is_public() || object.zone == Zone::Hand && object.owner == caster)
 }
 
 fn ability_uses_cast_history_quantity(definition: &AbilityDefinition) -> bool {
@@ -614,7 +608,10 @@ fn ability_uses_cast_history_quantity(definition: &AbilityDefinition) -> bool {
         || ability_effect_uses_cast_history_quantity(definition)
 }
 
-fn object_uses_cast_history_quantity(object: &engine::game::game_object::GameObject) -> bool {
+fn object_uses_cast_history_quantity(
+    state: &GameState,
+    object: &engine::game::game_object::GameObject,
+) -> bool {
     object
         .casting_restrictions
         .iter()
@@ -623,6 +620,22 @@ fn object_uses_cast_history_quantity(object: &engine::game::game_object::GameObj
             .abilities
             .iter()
             .any(ability_uses_cast_history_quantity)
+        || object
+            .static_definitions
+            .as_slice()
+            .iter()
+            .any(static_definition_uses_cast_history)
+        || engine::game::off_zone_characteristics::effective_off_zone_keywords(state, object.id)
+            .iter()
+            .any(keyword_uses_cast_history)
+        || object
+            .replacement_definitions
+            .iter()
+            .any(replacement_definition_uses_cast_history)
+}
+
+fn keyword_uses_cast_history(keyword: &Keyword) -> bool {
+    matches!(keyword, Keyword::Storm | Keyword::Surge(_))
 }
 
 fn ability_effect_uses_cast_history_quantity(definition: &AbilityDefinition) -> bool {
@@ -688,17 +701,51 @@ fn parsed_condition_uses_cast_history(condition: &ParsedCondition) -> bool {
     }
 }
 
-fn static_cost_modifier_uses_cast_history(definition: &StaticDefinition) -> bool {
-    let StaticMode::ModifyCost { dynamic_count, .. } = &definition.mode else {
-        return false;
-    };
-    dynamic_count
+fn static_definition_uses_cast_history(definition: &StaticDefinition) -> bool {
+    definition
+        .condition
         .as_ref()
-        .is_some_and(quantity_ref_uses_cast_history)
+        .is_some_and(static_condition_uses_cast_history)
         || definition
-            .condition
+            .per_player_condition
             .as_ref()
-            .is_some_and(static_condition_uses_cast_history)
+            .is_some_and(parsed_condition_uses_cast_history)
+        || static_mode_uses_cast_history(&definition.mode)
+        || definition
+            .modifications
+            .iter()
+            .any(continuous_modification_uses_cast_history)
+        || effects_visited_by(effect_uses_cast_history_quantity, |visit| {
+            visit_static(definition, visit)
+        })
+}
+
+fn continuous_modification_uses_cast_history(modification: &ContinuousModification) -> bool {
+    match modification {
+        ContinuousModification::GrantStaticAbility { definition } => {
+            static_definition_uses_cast_history(definition)
+        }
+        ContinuousModification::SetDynamicPower { value }
+        | ContinuousModification::SetDynamicToughness { value }
+        | ContinuousModification::SetPowerDynamic { value }
+        | ContinuousModification::SetToughnessDynamic { value }
+        | ContinuousModification::AddDynamicPower { value }
+        | ContinuousModification::AddDynamicToughness { value }
+        | ContinuousModification::AddDynamicKeyword { value, .. } => {
+            quantity_expr_uses_cast_history(value)
+        }
+        _ => false,
+    }
+}
+
+fn static_mode_uses_cast_history(mode: &StaticMode) -> bool {
+    match mode {
+        StaticMode::ModifyCost { dynamic_count, .. }
+        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => dynamic_count
+            .as_ref()
+            .is_some_and(quantity_ref_uses_cast_history),
+        _ => false,
+    }
 }
 
 fn static_condition_uses_cast_history(condition: &StaticCondition) -> bool {
@@ -712,6 +759,56 @@ fn static_condition_uses_cast_history(condition: &StaticCondition) -> bool {
         StaticCondition::Not { condition } => static_condition_uses_cast_history(condition),
         _ => false,
     }
+}
+
+fn replacement_definition_uses_cast_history(
+    definition: &engine::types::ability::ReplacementDefinition,
+) -> bool {
+    definition.runtime_execute.is_some()
+        || definition
+            .condition
+            .as_ref()
+            .is_some_and(replacement_condition_uses_cast_history)
+        || effects_visited_by(effect_uses_cast_history_quantity, |visit| {
+            visit_replacement(definition, visit)
+        })
+}
+
+fn replacement_condition_uses_cast_history(
+    condition: &engine::types::ability::ReplacementCondition,
+) -> bool {
+    match condition {
+        engine::types::ability::ReplacementCondition::And { conditions } => conditions
+            .iter()
+            .any(replacement_condition_uses_cast_history),
+        engine::types::ability::ReplacementCondition::UnlessQuantity { lhs, rhs, .. }
+        | engine::types::ability::ReplacementCondition::OnlyIfQuantity { lhs, rhs, .. } => {
+            quantity_expr_uses_cast_history(lhs) || quantity_expr_uses_cast_history(rhs)
+        }
+        _ => false,
+    }
+}
+
+fn effect_uses_cast_history_quantity(effect: &Effect) -> ControlFlow<()> {
+    let mut uses_cast_history = false;
+    effect.for_each_quantity_expr(&mut |quantity| {
+        uses_cast_history |= quantity_expr_uses_cast_history(quantity);
+    });
+    if uses_cast_history {
+        ControlFlow::Break(())
+    } else {
+        ControlFlow::Continue(())
+    }
+}
+
+fn effects_visited_by<F>(
+    mut visit_effect: F,
+    visit_definitions: impl FnOnce(&mut F) -> ControlFlow<()>,
+) -> bool
+where
+    F: FnMut(&Effect) -> ControlFlow<()>,
+{
+    visit_definitions(&mut visit_effect).is_break()
 }
 
 fn payment_population_is_stable(state: &GameState, caster: PlayerId, spell_id: ObjectId) -> bool {
@@ -945,10 +1042,11 @@ fn has_relevant_functioning_trigger(state: &GameState, spell_id: ObjectId) -> bo
         matches!(
             object.zone,
             Zone::Hand | Zone::Graveyard | Zone::Exile | Zone::Stack | Zone::Command
-        ) && active_trigger_definitions(state, object).any(|active| {
-            trigger_definition_functions_in_zone(active.definition, object.zone)
-                && !trigger_is_proven_irrelevant(spell, active.definition)
-        })
+        ) && spell_identity_is_available_to_caster(state, spell.controller, object)
+            && active_trigger_definitions(state, object).any(|active| {
+                trigger_definition_functions_in_zone(active.definition, object.zone)
+                    && !trigger_is_proven_irrelevant(spell, active.definition)
+            })
     })
 }
 
@@ -2437,6 +2535,19 @@ mod tests {
         face
     }
 
+    fn hidden_spell_cast_trigger_face() -> CardFace {
+        let mut face = CardFace {
+            name: "Hidden spell-cast trigger".to_string(),
+            mana_cost: ManaCost::generic(1),
+            ..Default::default()
+        };
+        face.triggers.push(
+            engine::types::ability::TriggerDefinition::new(TriggerMode::SpellCast)
+                .trigger_zones(vec![Zone::Hand]),
+        );
+        face
+    }
+
     #[test]
     fn hidden_sampled_cast_history_identity_cannot_change_zero_cast_support() {
         let (mut state, congregate) = funded_zero_congregate_state();
@@ -2492,6 +2603,325 @@ mod tests {
             sampled_support,
             HashSet::from([false]),
             "hidden opponent identities must not change hard zero-cast candidate support"
+        );
+    }
+
+    #[test]
+    fn hidden_sampled_trigger_identity_cannot_change_zero_cast_support() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let hidden = create_object(
+            &mut state,
+            CardId(91_705),
+            P1,
+            "Hidden slot".to_string(),
+            Zone::Hand,
+        );
+        state.players[P1.0 as usize].hand.push_back(hidden);
+        state.deck_pools.push(PlayerDeckPool {
+            player: P1,
+            current_main: Arc::new(vec![
+                DeckEntry {
+                    card: hidden_spell_cast_trigger_face(),
+                    count: 1,
+                },
+                DeckEntry {
+                    card: CardFace {
+                        name: "Hidden triggerless card".to_string(),
+                        mana_cost: ManaCost::generic(1),
+                        ..Default::default()
+                    },
+                    count: 1,
+                },
+            ]),
+            ..Default::default()
+        });
+
+        let mut sampled_identities = HashSet::new();
+        let mut sampled_support = HashSet::new();
+        for seed in 0..64 {
+            let mut rng = ChaCha20Rng::seed_from_u64(seed);
+            let sampled = determinize_opponents(&state, P0, &mut rng);
+            sampled_identities.insert(
+                sampled
+                    .objects
+                    .get(&hidden)
+                    .expect("sampled hidden slot exists")
+                    .name
+                    .clone(),
+            );
+            sampled_support.insert(zero_cast_is_retained(&sampled, congregate));
+        }
+
+        assert!(
+            sampled_identities.contains("Hidden spell-cast trigger")
+                && sampled_identities.contains("Hidden triggerless card"),
+            "the paired samples must reach both hidden trigger shapes"
+        );
+        assert_eq!(
+            sampled_support,
+            HashSet::from([false]),
+            "unknown opponent trigger definitions must not decide zero-cast support"
+        );
+    }
+
+    #[test]
+    fn hidden_face_down_cast_restriction_cannot_change_zero_cast_support() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let payoff = create_object(
+            &mut state,
+            CardId(91_706),
+            P1,
+            "Public cast-history restriction".to_string(),
+            Zone::Battlefield,
+        );
+        state.battlefield.push_back(payoff);
+        state
+            .objects
+            .get_mut(&payoff)
+            .expect("cast-history restriction source exists")
+            .casting_restrictions
+            .push(CastingRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::SpellsCastThisTurn {
+                            scope: CountScope::Controller,
+                            filter: None,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                }),
+            });
+
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "the face-up public counterpart reaches the zero-direct-effect gate"
+        );
+
+        engine::game::morph::apply_face_down_creature_characteristics(
+            state
+                .objects
+                .get_mut(&payoff)
+                .expect("cast-history restriction source exists"),
+            &engine::types::ability::FaceDownProfile::vanilla_2_2(),
+        );
+
+        assert!(
+            state.objects[&payoff]
+                .casting_restrictions
+                .iter()
+                .any(casting_restriction_uses_cast_history),
+            "face-down application leaves non-characteristic casting metadata intact"
+        );
+        assert!(
+            !spell_identity_is_available_to_caster(&state, P0, &state.objects[&payoff]),
+            "the opponent's face-down permanent has no public identity for the caster"
+        );
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "unknown face-down metadata cannot decide zero-cast candidate support"
+        );
+    }
+
+    #[test]
+    fn zero_cast_storm_payoff_is_paired_and_copies_after_the_prior_cast() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let grapeshot = create_object(
+            &mut state,
+            CardId(91_706),
+            P0,
+            "Grapeshot".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&grapeshot).expect("Grapeshot exists");
+            object.card_types.core_types.push(CoreType::Sorcery);
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Red],
+            };
+            object.keywords.push(Keyword::Storm);
+            object.base_keywords.push(Keyword::Storm);
+            Arc::make_mut(&mut object.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Player,
+                    damage_source: None,
+                    excess: None,
+                },
+            ));
+        }
+        state.players[P0.0 as usize].hand.push_back(grapeshot);
+        for _ in 0..2 {
+            state.add_mana_to_pool(P0, ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
+        }
+
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a castable Storm spell makes the known-zero cast strategically relevant"
+        );
+
+        let mut without_prior_cast = engine::game::scenario::GameRunner::from_state(state.clone());
+        without_prior_cast
+            .cast(grapeshot)
+            .target_player(P1)
+            .resolve();
+        assert_eq!(
+            without_prior_cast.state().players[P1.0 as usize].life,
+            19,
+            "Storm has no copy before the first spell"
+        );
+
+        let mut with_prior_cast = engine::game::scenario::GameRunner::from_state(state);
+        with_prior_cast.cast(congregate).target_player(P0).resolve();
+        with_prior_cast.cast(grapeshot).target_player(P1).resolve();
+        assert_eq!(
+            with_prior_cast.state().players[P1.0 as usize].life,
+            18,
+            "the real Storm resolver copies Grapeshot after the prior zero cast"
+        );
+    }
+
+    #[test]
+    fn zero_land_harvest_enables_a_non_cost_static_payoff() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let harvest = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Bountiful Harvest",
+                false,
+                "You gain 1 life for each land you control.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        let figment = scenario.add_creature(P0, "Haunting Figment", 2, 2).id();
+        let blocker = scenario.add_creature(P1, "Blocker", 2, 2).id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 4));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Green, 1));
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        let mut static_definition = StaticDefinition::new(StaticMode::CantBeBlocked);
+        static_definition.condition = Some(StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                        ],
+                    }),
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        });
+        let figment_object = state.objects.get_mut(&figment).expect("Figment exists");
+        figment_object
+            .static_definitions
+            .push(static_definition.clone());
+        figment_object.base_static_definitions = Arc::new(vec![static_definition]);
+
+        assert!(
+            zero_cast_is_retained(state, harvest),
+            "a zero-land Harvest can enable a functioning non-cost static"
+        );
+        assert!(
+            engine::game::combat::can_block_pair(state, blocker, figment),
+            "the static is inactive before the first spell"
+        );
+
+        runner.cast(harvest).resolve();
+        assert!(
+            !engine::game::combat::can_block_pair(runner.state(), blocker, figment),
+            "the production static authority makes Figment unblockable after Harvest"
+        );
+    }
+
+    #[test]
+    fn zero_cast_enables_a_castable_etb_replacement_counter_payoff() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let harvest = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Bountiful Harvest",
+                false,
+                "You gain 1 life for each land you control.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        let master = scenario
+            .add_creature_to_hand(P0, "Effortless Master", 2, 2)
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 6));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Green, 1));
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        let replacement =
+            engine::types::ability::ReplacementDefinition::new(ReplacementEvent::Moved)
+                .destination_zone(Zone::Battlefield)
+                .valid_card(TargetFilter::SelfRef)
+                .condition(
+                    engine::types::ability::ReplacementCondition::OnlyIfQuantity {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::SpellsCastThisTurn {
+                                scope: CountScope::Controller,
+                                filter: None,
+                            },
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 2 },
+                        active_player_req: None,
+                    },
+                )
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 2 },
+                        target: TargetFilter::SelfRef,
+                    },
+                ));
+        let master_object = state.objects.get_mut(&master).expect("Master exists");
+        master_object.base_replacement_definitions = Arc::new(vec![replacement.clone()]);
+        master_object.replacement_definitions = vec![replacement].into();
+
+        assert!(
+            zero_cast_is_retained(state, harvest),
+            "a castable replacement whose quantity condition changes must retain Harvest"
+        );
+
+        let mut without_prior_cast = engine::game::scenario::GameRunner::from_state(state.clone());
+        let baseline = without_prior_cast.cast(master).resolve();
+        assert_eq!(
+            baseline.counters(master, CounterType::Plus1Plus1),
+            0,
+            "the second-spell replacement is inactive for the first spell"
+        );
+
+        runner.cast(harvest).resolve();
+        let payoff = runner.cast(master).resolve();
+        assert_eq!(
+            payoff.counters(master, CounterType::Plus1Plus1),
+            2,
+            "the production replacement pipeline adds both counters after Harvest"
         );
     }
 
