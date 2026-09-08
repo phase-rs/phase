@@ -9298,11 +9298,11 @@ fn for_each_pump_other_controlled_creature_with_keyword_production_path() {
 /// creature ... for each <dynamic>" (Urborg Justice). The "for each" path
 /// intercepts before the fixed-count `inject_subject_target` Sacrifice arm,
 /// so without `thread_for_each_subject` rebinding the controller, YOU
-/// sacrificed instead of the targeted opponent. Both the `TargetPlayer`
+/// sacrificed instead of the targeted opponent. Both the `TargetOpponent`
 /// scope AND the dynamic `ZoneChangeCountThisTurn` count must survive.
 /// Regression guard: revert either edit and the controller is `None`.
 #[test]
-fn for_each_sacrifice_target_opponent_dynamic_count_binds_target_player() {
+fn for_each_sacrifice_target_opponent_dynamic_count_binds_target_opponent() {
     let e = parse_effect(
         "Target opponent sacrifices a creature of their choice for each creature put \
              into your graveyard from the battlefield this turn.",
@@ -9311,8 +9311,8 @@ fn for_each_sacrifice_target_opponent_dynamic_count_binds_target_player() {
         Effect::Sacrifice { target, count, .. } => {
             assert_eq!(
                 target_filter_controller_ref(&target),
-                Some(ControllerRef::TargetPlayer),
-                "sacrificed-creature filter must be scoped to TargetPlayer, got {target:?}"
+                Some(ControllerRef::TargetOpponent),
+                "sacrificed-creature filter must be scoped to TargetOpponent, got {target:?}"
             );
             assert!(
                 matches!(
@@ -40499,26 +40499,28 @@ fn inject_subject_target_copy_token_owner() {
     }
 }
 
-/// CR 115.1 + CR 701.21a: Edict parity — "target player sacrifices a
-/// creature" must scope the sacrificed-creature filter to
-/// `ControllerRef::TargetPlayer`, identical to "target opponent sacrifices".
-/// Regression guard for the dropped-controller misparse (#552 / Diabolic
-/// Edict / Chainer's Edict / Geth's Verdict): "target player" lowers to the
-/// unit `TargetFilter::Player`, which `player_filter_as_controller_ref`
-/// previously did not recognize, leaving `controller: None`.
+/// CR 115.1 + CR 701.21a: Edict subjects retain their player-target
+/// restriction. Diabolic Edict can target any player, while Cruel Edict can
+/// target only an opponent.
 #[test]
-fn target_player_sacrifices_scopes_controller_to_target_player() {
-    for text in [
-        "target player sacrifices a creature",
-        "target opponent sacrifices a creature",
+fn targeted_player_sacrifice_preserves_target_scope() {
+    for (text, expected) in [
+        (
+            "Target player sacrifices a creature of their choice.",
+            ControllerRef::TargetPlayer,
+        ),
+        (
+            "Target opponent sacrifices a creature of their choice.",
+            ControllerRef::TargetOpponent,
+        ),
     ] {
-        let clause = parse_effect_clause(text, &mut ParseContext::default());
-        match &clause.effect {
+        let effect = parse_effect(text);
+        match &effect {
             Effect::Sacrifice { target, .. } => {
                 assert_eq!(
                     target_filter_controller_ref(target),
-                    Some(ControllerRef::TargetPlayer),
-                    "{text:?} must scope the sacrificed filter to TargetPlayer, got {0:?}",
+                    Some(expected),
+                    "{text:?} must preserve its player target restriction, got {0:?}",
                     target
                 );
             }
