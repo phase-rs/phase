@@ -10669,6 +10669,7 @@ pub(crate) fn drain_pending_discard_batch(
                 remaining_count,
                 paused_card,
                 chooser,
+                ..
             } = discard::discard_at_random(
                 state,
                 discard::RandomDiscardRequest {

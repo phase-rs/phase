@@ -126,7 +126,7 @@ fn populated_state() -> GameState {
     // Safe for `boxed_abilities_round_trip_through_serde`: `GameState`'s manual
     // `PartialEq` deliberately excludes this field, so an intentionally-dropped
     // skipped field cannot make the round-trip equality assertion red.
-    state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume {
+    state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume::Chosen {
         player: P0,
         pending: PendingCast::new(
             ObjectId(704),

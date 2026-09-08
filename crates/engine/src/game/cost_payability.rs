@@ -328,6 +328,53 @@ impl AbilityCost {
         ability_index: usize,
     ) -> bool {
         match self {
+            AbilityCost::Discard {
+                count,
+                filter,
+                self_scope,
+                ..
+            } => {
+                let reserved = state
+                    .pending_cast
+                    .as_ref()
+                    .filter(|pending| pending.ability.controller == player)
+                    .and_then(|pending| {
+                        pending
+                            .deferred_random_discard_cost
+                            .as_ref()
+                            .map(|cost| (pending.object_id, cost.count))
+                    });
+                if reserved.is_none() {
+                    return self.is_payable(state, player, source);
+                }
+                let (pending_spell, reserved_count) = reserved.expect("checked reservation");
+                let Some(p) = state.players.get(player.0 as usize) else {
+                    return false;
+                };
+                if self_scope.is_source_card() {
+                    return p.hand.contains(&source)
+                        && p.hand
+                            .iter()
+                            .filter(|&&id| id != source && id != pending_spell)
+                            .count()
+                            >= reserved_count;
+                }
+                let resolved =
+                    super::quantity::resolve_quantity(state, count, player, source).max(0) as usize;
+                let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
+                let ctx = FilterContext::from_source(state, source);
+                p.hand
+                    .iter()
+                    .filter(|&&id| {
+                        id != source
+                            && id != pending_spell
+                            && effective_filter
+                                .as_ref()
+                                .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
+                    })
+                    .count()
+                    >= resolved + reserved_count
+            }
             AbilityCost::Mana { cost } => {
                 let excluded_sources = std::collections::HashSet::from([source]);
                 super::casting::can_pay_ability_mana_cost_after_auto_tap_excluding(

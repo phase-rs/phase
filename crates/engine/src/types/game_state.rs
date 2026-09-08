@@ -6836,6 +6836,10 @@ pub struct PendingCast {
     pub declared_mana_additions: Vec<ManaCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_cost: Option<AbilityCost>,
+    /// CR 601.2h: Random cost elements are paid after every nonrandom element.
+    /// Presence also reserves this many hand cards through the mana window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_random_discard_cost: Option<DeferredRandomDiscardCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_ability_index: Option<usize>,
     /// CR 606.3: Loyalty activation history is recorded only after the loyalty
@@ -7438,13 +7442,40 @@ pub struct RandomDiscardUnlessPaymentResume {
 /// choice. The object at `paused_at_index` completes during
 /// `handle_replacement_choice`; resumption starts with the following object.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingDiscardForCostResume {
-    pub player: PlayerId,
-    pub pending: PendingCast,
-    pub chosen: Vec<ObjectId>,
-    /// Index into `chosen` whose move was paused; that move completes during
-    /// `handle_replacement_choice` before this resume runs.
-    pub paused_at_index: usize,
+pub enum PendingDiscardForCostResume {
+    Chosen {
+        player: PlayerId,
+        pending: PendingCast,
+        chosen: Vec<ObjectId>,
+        /// Index into `chosen` whose move was paused; that move completes during
+        /// `handle_replacement_choice` before this resume runs.
+        paused_at_index: usize,
+    },
+    /// CR 601.2h + CR 701.9b + CR 616.1: A random cost discard paused after
+    /// its selected card entered the replacement pipeline. The narrowed cursor
+    /// prevents the settled pick from being selected or paid twice.
+    Random {
+        player: PlayerId,
+        pending: PendingCast,
+        remaining_eligible: Vec<ObjectId>,
+        remaining_count: usize,
+        paused_pick: RandomDiscardCostPick,
+    },
+}
+
+/// CR 400.7j + CR 608.2k: Identity and public characteristics captured before
+/// a randomly selected cost card leaves its owner's hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RandomDiscardCostPick {
+    pub occurrence: ObjectIncarnationRef,
+    pub snapshot: CostPaidObjectSnapshot,
+}
+
+/// The single supported random hand-discard leaf, reserved while every
+/// nonrandom component of the same cost is paid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredRandomDiscardCost {
+    pub count: usize,
 }
 
 impl PendingCast {
@@ -7463,6 +7494,7 @@ impl PendingCast {
             base_cost: None,
             declared_mana_additions: Vec::new(),
             activation_cost: None,
+            deferred_random_discard_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -34313,6 +34345,7 @@ mod tests {
                 base_cost: None,
                 declared_mana_additions: Vec::new(),
                 activation_cost: None,
+                deferred_random_discard_cost: None,
                 activation_ability_index: None,
                 pending_loyalty_activation_player: None,
                 target_constraints: vec![],
@@ -34743,6 +34776,7 @@ mod tests {
             base_cost: None,
             declared_mana_additions: Vec::new(),
             activation_cost: None,
+            deferred_random_discard_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
