@@ -9,7 +9,8 @@ use futures_util::{
     future::{AbortHandle, AbortRegistration, Abortable},
     SinkExt, StreamExt,
 };
-use tauri::ipc::Channel;
+use tauri::{ipc::Channel, WebviewWindow};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_tungstenite::{
     connect_async,
@@ -240,6 +241,79 @@ async fn run_bridge(
 struct LanBridges {
     next_id: u64,
     bridges: BTreeMap<u64, BridgeHandle>,
+    consent: LanConsent,
+}
+
+#[derive(Default)]
+struct LanConsent {
+    generation: u64,
+    targets: BTreeMap<LanTarget, ConsentDecision>,
+}
+
+#[derive(PartialEq)]
+enum ConsentDecision {
+    Pending,
+    Allowed,
+    Denied,
+}
+
+type LanTarget = (String, String, String);
+
+fn consent_error() -> NativeEngineBridgeError {
+    NativeEngineBridgeError::Connect {
+        detail: "LAN connection requires native approval for this server".into(),
+    }
+}
+
+impl LanConsent {
+    fn begin(&mut self, target: &LanTarget) -> Result<Option<u64>, NativeEngineBridgeError> {
+        match self.targets.get(target) {
+            Some(ConsentDecision::Allowed) => Ok(None),
+            Some(ConsentDecision::Pending | ConsentDecision::Denied) => Err(consent_error()),
+            None => {
+                self.targets
+                    .insert(target.clone(), ConsentDecision::Pending);
+                Ok(Some(self.generation))
+            }
+        }
+    }
+
+    fn finish(
+        &mut self,
+        target: LanTarget,
+        generation: u64,
+        allowed: bool,
+    ) -> Result<(), NativeEngineBridgeError> {
+        if generation != self.generation {
+            return Err(consent_error());
+        }
+        self.targets.insert(
+            target,
+            if allowed {
+                ConsentDecision::Allowed
+            } else {
+                ConsentDecision::Denied
+            },
+        );
+        if allowed {
+            Ok(())
+        } else {
+            Err(consent_error())
+        }
+    }
+
+    fn require(&self, target: &LanTarget) -> Result<(), NativeEngineBridgeError> {
+        if self.targets.get(target) == Some(&ConsentDecision::Allowed) {
+            Ok(())
+        } else {
+            Err(consent_error())
+        }
+    }
+
+    fn clear(&mut self) {
+        self.generation += 1;
+        self.targets.clear();
+    }
 }
 
 static LAN_BRIDGES: OnceLock<Mutex<LanBridges>> = OnceLock::new();
@@ -289,13 +363,57 @@ fn lan_request(url: &str, origin: &str) -> Result<Request<()>, NativeEngineBridg
     Ok(request)
 }
 
+fn invoking_lan_target(
+    window: &WebviewWindow,
+    url: &str,
+) -> Result<LanTarget, NativeEngineBridgeError> {
+    let origin = window
+        .url()
+        .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
+        .origin()
+        .ascii_serialization();
+    let endpoint = lan_endpoint(url)?;
+    // Validate the real webview origin, including the production alias mapping.
+    lan_request(&endpoint, &origin)?;
+    Ok((window.label().to_owned(), origin, endpoint))
+}
+
+#[tauri::command]
+pub async fn authorize_lan_server(
+    window: WebviewWindow,
+    url: String,
+) -> Result<(), NativeEngineBridgeError> {
+    let target = invoking_lan_target(&window, &url)?;
+    let generation = lan_bridges()
+        .lock()
+        .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
+        .consent
+        .begin(&target)?;
+    let Some(generation) = generation else {
+        return Ok(());
+    };
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    window.dialog()
+        .message(format!("{} wants to connect to {} on your local network. Allow this server for this page session?", target.1, target.2))
+        .title("Allow LAN server connection?")
+        .buttons(MessageDialogButtons::OkCancelCustom("Allow".into(), "Cancel".into()))
+        .show(move |allowed| { let _ = sender.send(allowed); });
+    let allowed = receiver.await.unwrap_or(false);
+    lan_bridges()
+        .lock()
+        .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
+        .consent
+        .finish(target, generation, allowed)
+}
+
 #[tauri::command]
 pub async fn connect_lan_server(
+    window: WebviewWindow,
     url: String,
-    origin: String,
     on_event: Channel<BridgeEvent>,
 ) -> Result<u64, NativeEngineBridgeError> {
-    let request = lan_request(&url, &origin)?;
+    let target = invoking_lan_target(&window, &url)?;
+    let request = lan_request(&target.2, &target.1)?;
     let (outbound, receiver) = mpsc::unbounded_channel();
     let (abort, registration) = AbortHandle::new_pair();
     let dial_abort = abort.clone();
@@ -304,6 +422,7 @@ pub async fn connect_lan_server(
         let mut state = lan_bridges()
             .lock()
             .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?;
+        state.consent.require(&target)?;
         state.next_id = state
             .next_id
             .checked_add(1)
@@ -380,6 +499,7 @@ pub fn lan_bridge_close(id: u64) -> Result<(), NativeEngineBridgeError> {
 
 pub(crate) fn abort_lan_bridges() {
     if let Ok(mut state) = lan_bridges().lock() {
+        state.consent.clear();
         for (_, bridge) in std::mem::take(&mut state.bridges) {
             bridge.abort();
         }
@@ -389,6 +509,67 @@ pub(crate) fn abort_lan_bridges() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lan_consent_requires_approval_for_each_window_origin_and_endpoint() {
+        let mut consent = LanConsent::default();
+        let target = (
+            "main".into(),
+            "https://phase-rs.dev".into(),
+            "ws://192.168.1.2:9374/ws".into(),
+        );
+        assert!(consent.require(&target).is_err());
+        let generation = consent.begin(&target).unwrap().unwrap();
+        assert!(consent.require(&target).is_err());
+        assert!(consent.begin(&target).is_err());
+        consent.finish(target.clone(), generation, true).unwrap();
+        consent.require(&target).unwrap();
+        assert_eq!(consent.begin(&target).unwrap(), None);
+        for other in [
+            ("other".into(), target.1.clone(), target.2.clone()),
+            (
+                target.0.clone(),
+                "https://preview.phase-rs.dev".into(),
+                target.2.clone(),
+            ),
+            (
+                target.0.clone(),
+                target.1.clone(),
+                "ws://192.168.1.3:9374/ws".into(),
+            ),
+            (
+                target.0.clone(),
+                target.1.clone(),
+                "ws://192.168.1.2:9375/ws".into(),
+            ),
+        ] {
+            assert!(consent.require(&other).is_err());
+        }
+        consent.clear();
+        assert!(consent.require(&target).is_err());
+    }
+
+    #[test]
+    fn navigation_invalidates_pending_lan_consent_and_rejection_is_cached() {
+        let mut consent = LanConsent::default();
+        let target = (
+            "main".into(),
+            "https://phase-rs.dev".into(),
+            "ws://127.0.0.1:9374/ws".into(),
+        );
+        let old_generation = consent.begin(&target).unwrap().unwrap();
+        consent.clear();
+        let generation = consent.begin(&target).unwrap().unwrap();
+        assert!(consent
+            .finish(target.clone(), old_generation, true)
+            .is_err());
+        assert!(consent.require(&target).is_err());
+        assert!(consent.finish(target.clone(), generation, false).is_err());
+        assert!(consent.require(&target).is_err());
+        assert!(consent.begin(&target).is_err());
+        consent.clear();
+        assert!(consent.begin(&target).unwrap().is_some());
+    }
 
     #[test]
     fn lan_endpoint_accepts_only_explicit_private_or_loopback_ipv4() {

@@ -6,7 +6,7 @@ import {
   type ServerInfo,
 } from "../adapter/ws-adapter";
 import { supportsGzipEnvelope, type WireFormat } from "../network/wireEnvelope";
-import { canUseLanBridge, initializeLanCapabilities, isLanEndpoint } from "./lan";
+import { authorizeLanServer, canUseLanBridge, initializeLanCapabilities, isLanEndpoint } from "./lan";
 import { NativeEngineSocket } from "./nativeEngineSocket";
 import { GzipEnvelopeSocket } from "./gzipEnvelopeSocket";
 
@@ -132,12 +132,17 @@ export function openPhaseSocket(
   opts: OpenOptions<PhaseSocketTransport> = {},
 ): Promise<PhaseSocket<PhaseSocketTransport>> {
   if (!opts.socketFactory && isLanEndpoint(wsUrl)) {
-    return initializeLanCapabilities().then(() => openPhaseSocket(wsUrl, {
-      ...opts,
-      socketFactory: (url) => canUseLanBridge(url)
-        ? new NativeEngineSocket({ type: "lan", url, origin: window.location.origin })
-        : new WebSocket(url),
-    }));
+    return initializeLanCapabilities().then(async () => {
+      const useLanBridge = canUseLanBridge(wsUrl);
+      if (opts.signal?.aborted) throw new HandshakeError("aborted", "Handshake aborted before start");
+      if (useLanBridge) await authorizeLanServer(wsUrl);
+      return openPhaseSocket(wsUrl, {
+        ...opts,
+        socketFactory: (url) => useLanBridge
+          ? new NativeEngineSocket({ type: "lan", url, origin: window.location.origin })
+          : new WebSocket(url),
+      });
+    });
   }
   const { signal, timeoutMs = 5000, surface = "full" } = opts;
 

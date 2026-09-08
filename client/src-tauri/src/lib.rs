@@ -67,6 +67,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             audio_probe::audio_boot_health,
             host_platform::host_platform,
@@ -87,6 +88,7 @@ pub fn run() {
             lan::lan_server_status,
             lan::stop_lan_server,
             lan::discover_lan_servers,
+            native_bridge::authorize_lan_server,
             native_bridge::connect_lan_server,
             native_bridge::lan_bridge_send,
             native_bridge::lan_bridge_close

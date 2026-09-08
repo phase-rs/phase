@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const lanGate = vi.hoisted(() => ({ supported: false, probe: vi.fn() }));
+const lanGate = vi.hoisted(() => ({ supported: false, probe: vi.fn(), authorize: vi.fn() }));
 vi.mock("../../services/nativeEngineSocket", () => ({ NativeEngineSocket: class { constructor() { return new MockWebSocket("native-lan"); } } }));
 vi.mock("../../services/lan", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../services/lan")>(),
   initializeLanCapabilities: lanGate.probe,
+  authorizeLanServer: lanGate.authorize,
   canUseLanBridge: () => lanGate.supported,
 }));
 
@@ -2104,6 +2105,7 @@ it("waits for the first LAN capability probe before rejecting an HTTPS manual jo
   Object.defineProperty(window, "location", { configurable: true, value: { ...originalLocation, protocol: "https:" } });
   let release!: () => void;
   lanGate.supported = false;
+  lanGate.authorize.mockReset().mockResolvedValue(undefined);
   lanGate.probe.mockImplementation(() => new Promise<boolean>((resolve) => {
     release = () => { lanGate.supported = true; resolve(true); };
   }));
@@ -2116,7 +2118,10 @@ it("waits for the first LAN capability probe before rejecting an HTTPS manual jo
   lanGate.probe.mockResolvedValue(true);
   try {
     await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
-    const socket = await completeHandshake(manual);
+    expect(lanGate.authorize).toHaveBeenCalledExactlyOnceWith("ws://192.168.1.2:9374/ws");
+    const socket = MockWebSocket.last!;
+    socket.dispatchSynthetic("message", SERVER_HELLO);
+    await vi.waitFor(() => expect(socket.send).toHaveBeenCalledWith(expect.stringContaining('"type":"JoinGameWithPassword"')));
     socket.dispatchSynthetic("message", JSON.stringify({ type: "GameStarted", data: { state: createMockState(), your_player: 0 } }));
     await expect(initialized).resolves.toBeUndefined();
   } finally {

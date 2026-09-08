@@ -77,3 +77,7 @@ export async function discoverLanServers(): Promise<DiscoveredLanServer[]> {
   return [...new Map(results.filter((server) => isLanEndpoint(server.url))
     .map((server) => [new URL(server.url).href, server])).values()];
 }
+
+export function authorizeLanServer(url: string): Promise<void> {
+  return invokeLan("authorize_lan_server", { url: normalizeLanEndpoint(url) ?? url });
+}
