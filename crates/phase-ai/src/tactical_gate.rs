@@ -5729,6 +5729,41 @@ mod tests {
     }
 
     #[test]
+    fn zero_cast_static_granted_source_state_gate_is_conservative() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let mut granted = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp);
+        granted
+            .activation_restrictions
+            .push(ActivationRestriction::IsSolved);
+        let mut static_definition = StaticDefinition::new(StaticMode::CantBeBlocked);
+        static_definition.modifications = vec![ContinuousModification::GrantAbility {
+            definition: Box::new(granted),
+        }];
+        let source =
+            add_battlefield_static_for_controller(&mut state, 91_351, P0, static_definition);
+
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "the active static's source-state activation gate reaches the production zero-cast census"
+        );
+
+        let modifications = &mut state
+            .objects
+            .get_mut(&source)
+            .expect("static source remains")
+            .static_definitions[0]
+            .modifications;
+        let ContinuousModification::GrantAbility { definition } = &mut modifications[0] else {
+            panic!("fixture has one granted definition");
+        };
+        **definition = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp);
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the source-state gate restores known-zero rejection"
+        );
+    }
+
+    #[test]
     fn zero_effect_fold_requires_recognized_nonempty_componentwise_zero() {
         let mut scenario = GameScenario::new();
         let source = scenario.add_creature(P0, "Source", 1, 1).id();

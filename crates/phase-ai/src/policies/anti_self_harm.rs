@@ -2099,11 +2099,17 @@ mod tests {
 
     fn assert_live_target_action_advances(state: &GameState, action: GameAction) {
         let mut state = state.clone();
-        let WaitingFor::TargetSelection { selection, .. } = &state.waiting_for else {
+        let WaitingFor::TargetSelection {
+            selection,
+            target_slots,
+            ..
+        } = &state.waiting_for
+        else {
             unreachable!("the fixture starts at a live target selection");
         };
         let prior_slot = selection.current_slot;
         let prior_selected_count = selection.selected_slots.len();
+        let prior_slot_count = target_slots.len();
         if matches!(action, GameAction::ChooseTarget { .. }) {
             assert!(
                 engine::ai_support::candidate_actions(&state)
@@ -2114,7 +2120,12 @@ mod tests {
         }
         engine::game::apply_as_current(&mut state, action)
             .expect("the real reducer accepts the one-element target action");
-        if let WaitingFor::TargetSelection { selection, .. } = &state.waiting_for {
+        if prior_slot_count == 1 {
+            assert!(
+                !matches!(&state.waiting_for, WaitingFor::TargetSelection { .. }),
+                "the real reducer must complete a single-slot target selection"
+            );
+        } else if let WaitingFor::TargetSelection { selection, .. } = &state.waiting_for {
             assert!(
                 selection.current_slot > prior_slot
                     || selection.selected_slots.len() > prior_selected_count,
@@ -2745,9 +2756,10 @@ mod tests {
         parse_oracle_text(oracle_text, card_name, &keywords, &types, &[]).abilities
     }
 
-    /// Put `definition` on the stack as an AI-controlled spell, offer
-    /// `legal_targets` at the current slot and return the policy verdict for
-    /// `candidate_target`.
+    /// Stage `definition` at a target-selection prompt as an AI-controlled
+    /// spell, keeping its object in Hand as the production cast pipeline does
+    /// until `finalize_cast` moves it to Stack. Offer `legal_targets` at the
+    /// current slot and return the policy verdict for `candidate_target`.
     fn target_verdict_for_definition(
         state: &mut GameState,
         card_name: &str,

@@ -875,7 +875,15 @@ pub(crate) fn exact_pending_player_impact(
         return None;
     }
 
-    let mut impact = exact_pending_node_impact(root, true, ctx.state, source_controller)??;
+    let ExactPendingNodeContribution::Impact(mut impact) = exact_pending_node_impact(
+        root,
+        ExactPendingNodeRole::Root,
+        ctx.state,
+        source_controller,
+    )?
+    else {
+        return None;
+    };
     let mut node: &ResolvedAbility = root;
     while let Some(next) = node.sub_ability.as_deref() {
         if next.sub_link != SubAbilityLink::ContinuationStep
@@ -884,10 +892,14 @@ pub(crate) fn exact_pending_player_impact(
         {
             return None;
         }
-        if let Some(contribution) =
-            exact_pending_node_impact(next, false, ctx.state, source_controller)?
-        {
-            impact += contribution;
+        match exact_pending_node_impact(
+            next,
+            ExactPendingNodeRole::Continuation,
+            ctx.state,
+            source_controller,
+        )? {
+            ExactPendingNodeContribution::Impact(contribution) => impact += contribution,
+            ExactPendingNodeContribution::Independent => {}
         }
         node = next;
     }
@@ -965,12 +977,24 @@ fn is_exact_root_player_selector(filter: &TargetFilter) -> bool {
     )
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ExactPendingNodeRole {
+    Root,
+    Continuation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ExactPendingNodeContribution {
+    Impact(f64),
+    Independent,
+}
+
 fn exact_pending_node_impact(
     node: &ResolvedAbility,
-    root: bool,
+    role: ExactPendingNodeRole,
     state: &GameState,
     source_controller: PlayerId,
-) -> Option<Option<f64>> {
+) -> Option<ExactPendingNodeContribution> {
     let (quantity, coefficient, filter, discard_is_simple) = match &node.effect {
         Effect::Draw { count, target } => (count, 1.25, target, true),
         Effect::Discard {
@@ -998,27 +1022,33 @@ fn exact_pending_node_impact(
         return None;
     }
 
-    if root {
-        if !is_exact_root_player_selector(filter) {
-            return None;
-        }
-    } else {
-        match filter {
-            TargetFilter::Controller => return Some(None),
+    match role {
+        ExactPendingNodeRole::Root if !is_exact_root_player_selector(filter) => return None,
+        ExactPendingNodeRole::Root => {}
+        ExactPendingNodeRole::Continuation => match filter {
+            TargetFilter::Controller => return Some(ExactPendingNodeContribution::Independent),
             TargetFilter::ParentTarget => {}
             _ => return None,
-        }
+        },
     }
 
-    let value = if root {
-        try_resolve_quantity_in_source_context(state, quantity, source_controller, node.source_id)?
-    } else {
-        let QuantityExpr::Fixed { value } = quantity else {
-            return None;
-        };
-        *value
+    let value = match role {
+        ExactPendingNodeRole::Root => try_resolve_quantity_in_source_context(
+            state,
+            quantity,
+            source_controller,
+            node.source_id,
+        )?,
+        ExactPendingNodeRole::Continuation => {
+            let QuantityExpr::Fixed { value } = quantity else {
+                return None;
+            };
+            *value
+        }
     };
-    Some(Some(f64::from(value.max(0)) * coefficient))
+    Some(ExactPendingNodeContribution::Impact(
+        f64::from(value.max(0)) * coefficient,
+    ))
 }
 
 /// Returns the player filter that is bound by target selection, if this effect
@@ -1873,6 +1903,52 @@ mod live_quantity_targeting_tests {
             source,
             PlayerId(0),
         )
+    }
+
+    #[test]
+    fn exact_pending_node_contributions_keep_zero_independent_and_unsupported_distinct() {
+        let mut state = GameState::new_two_player(7);
+        let source = hand_source(&mut state, 409);
+        assert_eq!(
+            exact_pending_node_impact(
+                &direct_draw(source, QuantityExpr::Fixed { value: 0 }),
+                ExactPendingNodeRole::Root,
+                &state,
+                PlayerId(0),
+            ),
+            Some(ExactPendingNodeContribution::Impact(0.0)),
+            "a zero root quantity is an exact owned contribution, not an independent rider"
+        );
+
+        let independent = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            exact_pending_node_impact(
+                &independent,
+                ExactPendingNodeRole::Continuation,
+                &state,
+                PlayerId(0),
+            ),
+            Some(ExactPendingNodeContribution::Independent),
+            "a controller continuation is independent of the selected player"
+        );
+        assert_eq!(
+            exact_pending_node_impact(
+                &ResolvedAbility::new(Effect::NoOp, Vec::new(), source, PlayerId(0)),
+                ExactPendingNodeRole::Continuation,
+                &state,
+                PlayerId(0),
+            ),
+            None,
+            "unsupported continuations leave the whole exact preview unavailable"
+        );
     }
 
     #[test]

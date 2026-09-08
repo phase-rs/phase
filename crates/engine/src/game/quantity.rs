@@ -964,13 +964,32 @@ fn activation_restriction_is_cast_stable_for_pre_cast(
     restriction: &crate::types::ability::ActivationRestriction,
 ) -> bool {
     match restriction {
+        // Timing and activation-count gates cannot change while the tactical
+        // gate considers the same priority action. They have no deferred
+        // quantity, filter, or source-characteristic read to preserve here.
+        crate::types::ability::ActivationRestriction::AsSorcery
+        | crate::types::ability::ActivationRestriction::AsInstant
+        | crate::types::ability::ActivationRestriction::DuringYourTurn
+        | crate::types::ability::ActivationRestriction::DuringYourUpkeep
+        | crate::types::ability::ActivationRestriction::DuringCombat
+        | crate::types::ability::ActivationRestriction::BeforeAttackersDeclared
+        | crate::types::ability::ActivationRestriction::BeforeCombatDamage
+        | crate::types::ability::ActivationRestriction::OnlyOnceEachTurn
+        | crate::types::ability::ActivationRestriction::OnlyOnce
+        | crate::types::ability::ActivationRestriction::MaxTimesEachTurn { .. }
+        | crate::types::ability::ActivationRestriction::MatchesCardCastTiming => true,
         crate::types::ability::ActivationRestriction::RequiresCondition {
             condition: Some(condition),
         } => parsed_condition_is_cast_stable_for_pre_cast(condition),
-        crate::types::ability::ActivationRestriction::RequiresCondition { condition: None } => {
-            false
-        }
-        _ => true,
+        crate::types::ability::ActivationRestriction::RequiresCondition { condition: None } => true,
+        // Source designations, levels, and counter thresholds are independent
+        // state readers. This proof admits only modeled restrictions so a new
+        // state-dependent gate cannot silently make a known-zero cast vanish.
+        crate::types::ability::ActivationRestriction::IsSolved
+        | crate::types::ability::ActivationRestriction::SourceIsHarnessed
+        | crate::types::ability::ActivationRestriction::ClassLevelIs { .. }
+        | crate::types::ability::ActivationRestriction::LevelCounterRange { .. }
+        | crate::types::ability::ActivationRestriction::CounterThreshold { .. } => false,
     }
 }
 
@@ -8779,9 +8798,9 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, ChoiceValue,
-        Comparator, ControllerRef, CountScope, DamageChannel, DamageKindFilter, DevotionColors,
-        Duration, Effect, FilterProp, KickerVariant, ModalSelectionCondition,
+        AbilityCondition, AbilityDefinition, AbilityKind, ActivationRestriction, AggregateFunction,
+        ChoiceValue, Comparator, ControllerRef, CountScope, DamageChannel, DamageKindFilter,
+        DevotionColors, Duration, Effect, FilterProp, KickerVariant, ModalSelectionCondition,
         ModalSelectionConstraint, ObjectProperty, ObjectScope, PlayerRelation, RepeatContinuation,
         SharedQuality, StaticCondition, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
         TypedFilter,
@@ -9074,6 +9093,35 @@ mod tests {
             !ability_definition_is_cast_stable_for_pre_cast(&definition),
             "unmodelled conditions fail open rather than being silently treated as stable"
         );
+
+        definition.condition = None;
+        definition.activation_restrictions =
+            vec![ActivationRestriction::RequiresCondition { condition: None }];
+        assert!(
+            ability_definition_is_cast_stable_for_pre_cast(&definition),
+            "an empty RequiresCondition has no state payload to make the proof unstable"
+        );
+
+        for restriction in [
+            ActivationRestriction::IsSolved,
+            ActivationRestriction::SourceIsHarnessed,
+            ActivationRestriction::ClassLevelIs { level: 2 },
+            ActivationRestriction::LevelCounterRange {
+                minimum: 1,
+                maximum: Some(3),
+            },
+            ActivationRestriction::CounterThreshold {
+                counters: CounterMatch::Any,
+                minimum: 1,
+                maximum: Some(3),
+            },
+        ] {
+            definition.activation_restrictions = vec![restriction];
+            assert!(
+                !ability_definition_is_cast_stable_for_pre_cast(&definition),
+                "source-state activation restrictions must remain conservative"
+            );
+        }
     }
 
     #[test]

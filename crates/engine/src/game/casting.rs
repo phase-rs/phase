@@ -3303,6 +3303,10 @@ fn object_may_enter_cast_path(obj: &GameObject) -> bool {
 /// true. This keeps analysis consumers bound to the casting authority's zone,
 /// grantee, land, and companion-grant boundaries without predicting a later
 /// game state.
+///
+/// CR 601.2a + CR 608.2g: This mirrors the zone-specific ordinary-cast
+/// admission boundary while retaining a separately stamped permission to cast
+/// during the resolution of an effect.
 pub fn has_potentially_authorizing_object_cast_permission(
     obj: &GameObject,
     player: PlayerId,
@@ -3318,9 +3322,24 @@ pub fn has_potentially_authorizing_object_cast_permission(
                 | CastingPermission::WarpExile { .. }
                 | CastingPermission::Plotted { .. }
                 | CastingPermission::Foretold { .. } => obj.owner == player,
-                CastingPermission::ExileWithAltCost { granted_to, .. }
-                | CastingPermission::ExileWithAltAbilityCost { granted_to, .. } => {
+                CastingPermission::ExileWithAltCost {
+                    granted_to,
+                    resolution_cleanup,
+                    ..
+                } => {
                     exile_alt_cost_permission_grants_to_player(player, *granted_to)
+                        // `castable_from_current_zone` admits this timed grant
+                        // from graveyard only through its owner-scoped branch.
+                        // Exile has a distinct nonowner grant path, while a
+                        // cast-during-resolution grant carries its own
+                        // zone-independent admission authority.
+                        && (obj.zone == Zone::Exile
+                            || resolution_cleanup.is_some()
+                            || obj.owner == player)
+                }
+                CastingPermission::ExileWithAltAbilityCost { granted_to, .. } => {
+                    exile_alt_cost_permission_grants_to_player(player, *granted_to)
+                        && (obj.zone == Zone::Exile || obj.owner == player)
                 }
                 CastingPermission::PlayFromExile {
                     granted_to,
@@ -22857,10 +22876,13 @@ mod tests;
 /// fact removed.
 #[cfg(test)]
 mod castable_zone_authority_tests {
-    use super::{cast_permissions_name_their_grantee, castable_from_current_zone};
+    use super::{
+        cast_permissions_name_their_grantee, castable_from_current_zone,
+        has_potentially_authorizing_object_cast_permission,
+    };
     use crate::game::game_object::GameObject;
     use crate::types::ability::{
-        CardPlayMode, CastingPermission, ExileGrantCostProvenance, StaticDefinition,
+        AbilityCost, CardPlayMode, CastingPermission, ExileGrantCostProvenance, StaticDefinition,
     };
     use crate::types::game_state::GameState;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -22945,6 +22967,132 @@ mod castable_zone_authority_tests {
             cast_permissions_name_their_grantee(&granteed),
             "PAIRED POSITIVE: the same permission naming a grantee passes — the field is the \
              only difference between this arm and the one above"
+        );
+    }
+
+    #[test]
+    fn potential_alt_cost_authority_matches_graveyard_and_exile_admission() {
+        let mut state = GameState::new_two_player(7);
+        let id = card(&mut state, 1, PlayerId(1), Zone::Graveyard);
+        let mut granted = state.objects[&id].clone();
+        granted.casting_permissions = vec![CastingPermission::ExileWithAltCost {
+            source_id: None,
+            cost: ManaCost::default(),
+            cost_provenance: ExileGrantCostProvenance::Alternative,
+            cast_transformed: false,
+            constraint: None,
+            granted_to: None,
+            resolution_cleanup: None,
+            duration: None,
+            graveyard_replacement: None,
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission: None,
+        }];
+
+        assert!(
+            !has_potentially_authorizing_object_cast_permission(&granted, PlayerId(0)),
+            "the public tactical predicate must not authorize a nonowner's graveyard card"
+        );
+        assert!(
+            !castable_from_current_zone(&state, &granted, PlayerId(0), None),
+            "paired production admission rejects the same nonowner graveyard card"
+        );
+        assert!(has_potentially_authorizing_object_cast_permission(
+            &granted,
+            PlayerId(1)
+        ));
+        assert!(
+            castable_from_current_zone(&state, &granted, PlayerId(1), None),
+            "paired positive: the owner may consume the same unnamed graveyard grant"
+        );
+
+        {
+            let CastingPermission::ExileWithAltCost { granted_to, .. } =
+                &mut granted.casting_permissions[0]
+            else {
+                unreachable!("fixture contains an alt-cost permission");
+            };
+            *granted_to = Some(PlayerId(0));
+        }
+        assert!(
+            !has_potentially_authorizing_object_cast_permission(&granted, PlayerId(0)),
+            "a named standing graveyard grant remains owner-scoped"
+        );
+        assert!(
+            !castable_from_current_zone(&state, &granted, PlayerId(0), None),
+            "paired production admission rejects the same named standing grant"
+        );
+        {
+            let CastingPermission::ExileWithAltCost {
+                resolution_cleanup, ..
+            } = &mut granted.casting_permissions[0]
+            else {
+                unreachable!("fixture still contains an alt-cost permission");
+            };
+            *resolution_cleanup = Some(crate::types::ability::ResolutionCastCleanup {
+                source_id: ObjectId(2),
+                exiled_misses: Vec::new(),
+                reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+            });
+        }
+        assert!(
+            has_potentially_authorizing_object_cast_permission(&granted, PlayerId(0)),
+            "a named cast-during-resolution grant remains potentially authorizing in graveyard"
+        );
+        assert!(
+            castable_from_current_zone(&state, &granted, PlayerId(0), None),
+            "paired production admission preserves the zone-independent resolution grant"
+        );
+
+        let CastingPermission::ExileWithAltCost {
+            granted_to,
+            resolution_cleanup,
+            ..
+        } = &mut granted.casting_permissions[0]
+        else {
+            unreachable!("fixture still contains an alt-cost permission");
+        };
+        *granted_to = None;
+        *resolution_cleanup = None;
+        granted.zone = Zone::Exile;
+        assert!(
+            has_potentially_authorizing_object_cast_permission(&granted, PlayerId(0)),
+            "the nonowner exile grant remains potentially authorizing"
+        );
+        assert!(
+            castable_from_current_zone(&state, &granted, PlayerId(0), None),
+            "paired production admission preserves the existing unnamed Exile route"
+        );
+
+        granted.zone = Zone::Graveyard;
+        granted.casting_permissions = vec![CastingPermission::ExileWithAltAbilityCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            constraint: None,
+            granted_to: Some(PlayerId(0)),
+            duration: None,
+            source_id: None,
+        }];
+        assert!(
+            !has_potentially_authorizing_object_cast_permission(&granted, PlayerId(0)),
+            "the non-mana standing grant shares the ordinary graveyard owner boundary"
+        );
+        assert!(
+            !castable_from_current_zone(&state, &granted, PlayerId(0), None),
+            "paired production admission rejects the same nonowner non-mana graveyard grant"
+        );
+
+        granted.zone = Zone::Exile;
+        assert!(
+            has_potentially_authorizing_object_cast_permission(&granted, PlayerId(0)),
+            "the non-mana Exile grant preserves its named-grantee route"
+        );
+        assert!(
+            castable_from_current_zone(&state, &granted, PlayerId(0), None),
+            "paired production admission preserves the non-mana Exile grant"
         );
     }
 
