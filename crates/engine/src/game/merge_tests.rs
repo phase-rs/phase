@@ -1185,7 +1185,7 @@ mod cast_pipeline {
     use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
-    use crate::types::resolution::ResolutionStateWire;
+    use crate::types::resolution::{ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION};
     use crate::types::zones::Zone;
 
     const P0: PlayerId = PlayerId(0);
@@ -1424,12 +1424,15 @@ mod cast_pipeline {
         );
         assert!(state.active_mutate_merge_frame().is_some());
 
-        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
-            .expect("actual mutate-merge prompt serializes through the v2 wire boundary");
-        assert_eq!(v2["resolution_state_version"], 2);
-        assert!(v2.get("pending_mutate_merge").is_none());
+        let current = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("actual mutate-merge prompt serializes through the current wire boundary");
+        assert_eq!(
+            current["resolution_state_version"],
+            RESOLUTION_STATE_WIRE_VERSION
+        );
+        assert!(current.get("pending_mutate_merge").is_none());
         let restored: ResolutionStateWire =
-            serde_json::from_value(v2).expect("actual mutate-merge prompt restores from v2");
+            serde_json::from_value(current).expect("actual mutate-merge prompt restores");
         state = restored.into_game_state();
         assert!(state.active_mutate_merge_frame().is_some());
 

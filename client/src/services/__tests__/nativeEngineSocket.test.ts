@@ -73,7 +73,7 @@ describe("NativeEngineSocket", () => {
     expect(socket.readyState).toBe(NativeEngineSocket.CONNECTING);
     await vi.waitFor(() => expect(socket.readyState).toBe(NativeEngineSocket.CLOSED));
 
-    expect(events).toEqual(["error", "close"]);
+    await vi.waitFor(() => expect(events).toEqual(["error", "close"]));
     expect(channelConstructMock).not.toHaveBeenCalled();
     expect(invokeMock).not.toHaveBeenCalled();
   });
@@ -158,7 +158,7 @@ describe("NativeEngineSocket", () => {
     emitChannelEvent({ type: "closed", code: 1006, reason: "read failed" });
     emitChannelEvent({ type: "closed", code: 1006, reason: "duplicate" });
 
-    expect(events).toEqual(["error", "close"]);
+    await vi.waitFor(() => expect(events).toEqual(["error", "close"]));
     expect(socket.readyState).toBe(NativeEngineSocket.CLOSED);
   });
 
@@ -180,7 +180,7 @@ describe("NativeEngineSocket", () => {
     emitChannelEvent({ type: "closed", code: 1000, reason: "normal" });
     emitChannelEvent({ type: "closed", code: 1000, reason: "duplicate" });
 
-    expect(onceListener).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(onceListener).toHaveBeenCalledTimes(1));
     expect(removedListener).not.toHaveBeenCalled();
     expect(
       (
@@ -190,4 +190,39 @@ describe("NativeEngineSocket", () => {
       ).closeListeners.has(onceListener),
     ).toBe(false);
   });
+});
+
+it("routes LAN lifecycle and a close-before-connect race to the independent bridge", async () => {
+  const connection = deferred<number>();
+  invokeMock.mockImplementation((command: string) => command === "connect_lan_server" ? connection.promise : Promise.resolve());
+  const socket = new NativeEngineSocket({ type: "lan", url: "ws://192.168.1.2:9374/ws", origin: "https://phase-rs.dev" });
+  socket.close();
+  await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("connect_lan_server", {
+    url: "ws://192.168.1.2:9374/ws", origin: "https://phase-rs.dev", onEvent: expect.any(ChannelMock),
+  }));
+  connection.resolve(42);
+  await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("lan_bridge_close", { id: 42 }));
+  emitChannelEvent({ type: "closed", code: 1000, reason: "" });
+  expect(socket.readyState).toBe(NativeEngineSocket.CLOSED);
+  expect(invokeMock).not.toHaveBeenCalledWith("native_engine_bridge_close", expect.anything());
+});
+
+it("sends LAN text frames and delivers buffered hello without a binary surface", async () => {
+  invokeMock.mockResolvedValue(42);
+  const socket = new NativeEngineSocket({ type: "lan", url: "ws://10.0.0.2:9374/ws", origin: "https://phase-rs.dev" });
+  await vi.waitFor(() => expect(socket.readyState).toBe(NativeEngineSocket.OPEN));
+  socket.send("hello");
+  await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("lan_bridge_send", { id: 42, text: "hello" }));
+  expect("binaryType" in socket).toBe(false);
+  socket.close();
+});
+
+
+it("restores a stored LAN URL's default port in the native payload", async () => {
+  invokeMock.mockResolvedValue(42);
+  const socket = new NativeEngineSocket({ type: "lan", url: "ws://192.168.1.2/ws", origin: "https://phase-rs.dev" });
+  await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("connect_lan_server", {
+    url: "ws://192.168.1.2:80/ws", origin: "https://phase-rs.dev", onEvent: expect.any(ChannelMock),
+  }));
+  socket.close();
 });

@@ -54,6 +54,9 @@
     "lossPointsLabel": "Défaite",
     "formatLabel": "Format",
     "formatNone": "Non spécifié",
+    "matchTypeLabel": "Match",
+    "matchTypeBo3": "Deux manches gagnantes",
+    "matchTypeBo1": "Manche unique",
     "plusRoundsLabel": "Rondes supplémentaires",
     "plusRoundsHint": "Ajoutées au nombre de rondes automatique (Suisse plus N). Ne s'applique que si Rondes est laissé automatique.",
     "submit": "Créer le tournoi",
@@ -147,6 +150,7 @@
     "connectionLost": "Connexion au lobby perdue. Vérifiez l'adresse du serveur.",
     "aborted": "Cette requête a été annulée.",
     "unsupported": "La requête a été envoyée, mais ce serveur est trop ancien pour la confirmer. Vérifiez le tournoi avant de réessayer.",
+    "incompatible": "Ce serveur est trop ancien pour cette structure de match (il faut le protocole de lobby {{needed}}). Rien n’a été envoyé.",
     "notFound": "Aucun tournoi avec ce code."
   }
 }

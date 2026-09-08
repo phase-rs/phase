@@ -16,8 +16,9 @@ use engine::types::ability::AbilityCondition;
 #[cfg(test)]
 use engine::types::ability::DelayedTriggerPlayerBinding;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, EffectScope,
-    QuantityExpr, ReplacementMode, TapStateChange, TargetFilter, TargetRef,
+    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, DelayedTriggerCondition,
+    Effect, EffectScope, QuantityExpr, ReplacementMode, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
@@ -28,6 +29,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, WardCost};
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
+use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 use crate::card_value::intrinsic_value;
@@ -265,7 +267,8 @@ fn effect_grants_ai_extra_turn(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::ExtraTurn {
-            target: TargetFilter::Controller
+            target: TargetFilter::Controller,
+            count: _,
         }
     )
 }
@@ -1012,7 +1015,15 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
 
     let effects = ctx.effects();
 
-    let controller_delta = if object.controller == ctx.ai_player {
+    let effective_controller = if beneficial
+        && gain_control_target_has_ai_beneficiary(ctx)
+        && players::is_opponent(ctx.state, ctx.ai_player, object.controller)
+    {
+        ctx.ai_player
+    } else {
+        object.controller
+    };
+    let controller_delta = if effective_controller == ctx.ai_player {
         if beneficial {
             1.0
         } else {
@@ -1040,7 +1051,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
         })
     {
         if object.tapped {
-            score += if object.controller == ctx.ai_player {
+            score += if effective_controller == ctx.ai_player {
                 ctx.penalties().untap_own_tapped_bonus
             } else {
                 ctx.penalties().untap_opponent_tapped_penalty
@@ -1394,8 +1405,108 @@ fn pump_taps_blocker_penalty(ctx: &PolicyContext<'_>) -> f64 {
     -(5.0 * creatures_tapped as f64)
 }
 
-/// Extract the fixed damage amount from the pending spell's DealDamage effect.
-/// Returns None for variable damage or non-damage spells.
+fn gain_control_target_has_ai_beneficiary(ctx: &PolicyContext<'_>) -> bool {
+    let WaitingFor::TriggerTargetSelection {
+        target_slots,
+        selection,
+        ..
+    } = &ctx.decision.waiting_for
+    else {
+        return false;
+    };
+    if selection.current_slot != 0
+        || !selection.selected_slots.is_empty()
+        || target_slots.len() != 1
+        || target_slots
+            .get(selection.current_slot)
+            .is_none_or(|slot| slot.effect_kind != engine::types::ability::EffectKind::GainControl)
+    {
+        return false;
+    }
+
+    let Some(trigger) = ctx.state.pending_trigger.as_deref() else {
+        return false;
+    };
+    let root = &trigger.ability;
+    let Effect::GainControl { target } = &root.effect else {
+        return false;
+    };
+    if matches!(target, TargetFilter::SelfRef)
+        || root.original_controller.unwrap_or(root.controller) != ctx.ai_player
+        || !is_unbranched_resolved_ability(root)
+    {
+        return false;
+    }
+
+    let mut saw_supported_rider = false;
+    let mut next = root.sub_ability.as_deref();
+    while let Some(ability) = next {
+        if ability.sub_link != SubAbilityLink::SequentialSibling
+            || !is_unbranched_resolved_ability(ability)
+        {
+            return false;
+        }
+        match &ability.effect {
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            } => saw_supported_rider = true,
+            Effect::GenericEffect {
+                static_abilities,
+                target: None,
+                end_cost: None,
+                ..
+            } if has_supported_post_control_static_riders(static_abilities) => {
+                saw_supported_rider = true;
+            }
+            _ => return false,
+        }
+        next = ability.sub_ability.as_deref();
+    }
+
+    saw_supported_rider
+}
+
+fn is_unbranched_resolved_ability(ability: &engine::types::ability::ResolvedAbility) -> bool {
+    ability.else_ability.is_none()
+        && ability.condition.is_none()
+        && !ability.optional
+        && ability.optional_player.is_none()
+        && ability.optional_for.is_none()
+        && !ability.optional_targeting
+        && ability.modal.is_none()
+        && ability.mode_abilities.is_empty()
+        && ability.repeat_for.is_none()
+}
+
+fn has_supported_post_control_static_riders(
+    static_abilities: &[engine::types::ability::StaticDefinition],
+) -> bool {
+    !static_abilities.is_empty()
+        && static_abilities.iter().all(|static_ability| {
+            static_ability.mode == StaticMode::Continuous
+                && static_ability.affected == Some(TargetFilter::ParentTarget)
+                && static_ability.condition.is_none()
+                && static_ability.per_player_condition.is_none()
+                && static_ability.affected_zone.is_none()
+                && static_ability.effect_zone.is_none()
+                && static_ability.active_zones.is_empty()
+                && !static_ability.characteristic_defining
+                && static_ability.source_controller.is_none()
+                && static_ability.source_object.is_none()
+                && !static_ability.modifications.is_empty()
+                && static_ability.modifications.iter().all(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste
+                        } | ContinuousModification::AddSubtype { .. }
+                    )
+                })
+        })
+}
+
 /// Returns true if `object_id` is the source of an activated ability whose cost
 /// includes sacrificing itself. Targeting such an object is wasteful because the
 /// source will be gone before the ability resolves.
@@ -1429,6 +1540,8 @@ fn cost_includes_sacrifice_self(cost: &AbilityCost) -> bool {
     }
 }
 
+/// Extract the fixed damage amount from the pending spell's DealDamage effect.
+/// Returns None for variable damage or non-damage spells.
 fn extract_damage_amount(effects: &[&Effect]) -> Option<i32> {
     effects.iter().find_map(|effect| match effect {
         Effect::DealDamage {
@@ -1444,8 +1557,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::config::AiConfig;
-    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use crate::choose_action_with_session_diagnostic;
+    use crate::config::{create_config, AiConfig, AiDifficulty, Platform};
+    use crate::policies::registry::PolicyRegistry;
+    use crate::session::AiSession;
+    use engine::ai_support::{
+        ActionMetadata, AiDecisionContext, AiDecisionContract, CandidateAction, TacticalClass,
+    };
     use engine::game::ability_utils::build_resolved_from_def;
     use engine::game::combat::AttackTarget;
     use engine::game::zones::create_object;
@@ -1453,11 +1571,12 @@ mod tests {
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, AdditionalCostRepeatability,
         BounceSelection, CardSelectionMode, ContinuousModification, ControllerRef,
-        DiscardSelfScope, EffectKind, FilterProp, ModalChoice, PtValue, QuantityModification,
-        QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost, StaticCondition,
-        StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
-        UnlessPayScaling,
+        DiscardSelfScope, Duration, EffectKind, FilterProp, ModalChoice, OpponentMayScope, PtValue,
+        QuantityModification, QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost,
+        StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter, TriggerConstraint,
+        TriggerDefinition, TypeFilter, TypedFilter, UnlessPayScaling,
     };
+    use engine::types::format::FormatConfig;
     use engine::types::game_state::{
         CastingVariant, GameState, PendingCast, TargetEffectDetail, TargetSelectionProgress,
         TargetSelectionSlot, WaitingFor,
@@ -1470,6 +1589,8 @@ mod tests {
     use engine::types::statics::StaticMode;
     use engine::types::triggers::{AttackTargetFilter, TriggerMode};
     use engine::types::zones::Zone;
+    use rand::rngs::SmallRng;
+    use rand::SeedableRng;
 
     fn make_state() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -5003,6 +5124,523 @@ mod tests {
         );
     }
 
+    fn recruiter_target_selection_state(
+        mut state: GameState,
+        primary_target_controller: PlayerId,
+        extra_target_controller: Option<PlayerId>,
+        include_untap: bool,
+        rider: Option<AbilityDefinition>,
+        expected_target_slots: usize,
+        configure_root: impl FnOnce(&mut AbilityDefinition),
+    ) -> (GameState, ObjectId, ObjectId, Option<ObjectId>) {
+        state.phase = Phase::Untap;
+        let source = add_creature(&mut state, PlayerId(0), "Coercive Recruiter", 4, 4);
+        let opponent = add_creature(&mut state, primary_target_controller, "Opponent Bear", 5, 5);
+        let extra_target = extra_target_controller
+            .map(|controller| add_creature(&mut state, controller, "Additional target", 3, 3));
+        state.objects.get_mut(&source).unwrap().tapped = true;
+        state.objects.get_mut(&opponent).unwrap().tapped = true;
+        if let Some(extra_target) = extra_target {
+            state.objects.get_mut(&extra_target).unwrap().tapped = true;
+        }
+
+        let creature = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        let mut recruiter = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GainControl { target: creature },
+        );
+        recruiter.duration = Some(Duration::UntilEndOfTurn);
+
+        if include_untap {
+            let mut untap = AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::SetTapState {
+                    target: TargetFilter::ParentTarget,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                },
+            );
+            untap.sub_link = SubAbilityLink::SequentialSibling;
+
+            if let Some(mut rider) = rider {
+                rider.sub_link = SubAbilityLink::SequentialSibling;
+                untap.sub_ability = Some(Box::new(rider));
+            }
+            recruiter.sub_ability = Some(Box::new(untap));
+        } else {
+            assert!(rider.is_none(), "a root-only fixture has no rider");
+        }
+        configure_root(&mut recruiter);
+
+        let trigger = TriggerDefinition::new(TriggerMode::Phase)
+            .execute(recruiter)
+            .phase(Phase::Upkeep)
+            .constraint(TriggerConstraint::OnlyDuringYourTurn)
+            .trigger_zones(vec![Zone::Battlefield]);
+        let source_object = state.objects.get_mut(&source).unwrap();
+        source_object.trigger_definitions.push(trigger.clone());
+        Arc::make_mut(&mut source_object.base_trigger_definitions).push(trigger);
+        source_object.materialize_base_trigger_definitions();
+        let mut events = Vec::new();
+        engine::game::turns::auto_advance(&mut state, &mut events);
+        engine::game::apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        let WaitingFor::TriggerTargetSelection {
+            target_slots,
+            selection,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "the engine must surface the Recruiter target prompt, got {:?}; phase={:?}; stack={}; trigger_defs={}; events={events:?}",
+                state.waiting_for,
+                state.phase,
+                state.stack.len(),
+                state.objects[&source].trigger_definitions.len(),
+            );
+        };
+        assert_eq!(target_slots.len(), expected_target_slots);
+        assert_eq!(selection.current_slot, 0);
+        assert_eq!(target_slots[0].effect_kind, EffectKind::GainControl);
+
+        let contract = AiDecisionContract::issue(&state, PlayerId(0));
+        let friendly_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(source)),
+        };
+        let opponent_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(opponent)),
+        };
+        assert!(contract.contains_action(&state, &friendly_action));
+        assert!(contract.contains_action(&state, &opponent_action));
+        if let Some(extra_target) = extra_target {
+            assert!(contract.contains_action(
+                &state,
+                &GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(extra_target)),
+                },
+            ));
+        }
+
+        (state, source, opponent, extra_target)
+    }
+
+    fn anti_self_harm_registry_verdict_for_target(
+        state: &GameState,
+        target: ObjectId,
+    ) -> (bool, PolicyVerdict) {
+        let config = AiConfig::default();
+        let target_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        };
+        let decision =
+            engine::ai_support::build_decision_context_for_semantic_owner(state, PlayerId(0));
+        let candidate = decision
+            .candidates
+            .iter()
+            .find(|candidate| candidate.action == target_action)
+            .expect("the engine decision context carries the target action");
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let beneficial = is_spell_beneficial(&ctx);
+        let verdict = PolicyRegistry::default()
+            .verdicts(&ctx)
+            .into_iter()
+            .find_map(|(id, verdict)| (id == PolicyId::AntiSelfHarm).then_some(verdict))
+            .expect("the registry reaches AntiSelfHarm for the target decision");
+        (beneficial, verdict)
+    }
+
+    fn recruiter_haste_subtype_rider() -> AbilityDefinition {
+        let mut rider = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste,
+                        },
+                        ContinuousModification::AddSubtype {
+                            subtype: "Pirate".to_string(),
+                        },
+                    ])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+        );
+        rider.duration = Some(Duration::UntilEndOfTurn);
+        rider
+    }
+
+    #[test]
+    fn coercive_recruiter_public_chooser_exposes_pre_control_beneficiary_scoring() {
+        let (state, source, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(recruiter_haste_subtype_rider()),
+            1,
+            |_| {},
+        );
+        let friendly_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(source)),
+        };
+        let opponent_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(opponent)),
+        };
+
+        // The phase wrapper is only the engine-authoritative way to build the
+        // trigger's push-first target prompt. It is a normalized scoring witness,
+        // not a replay of the report's PreCombatMain board.
+        let mut config = create_config(AiDifficulty::VeryEasy, Platform::Native);
+        config.temperature = 0.01;
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(beneficial);
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta > 0.0
+        ));
+        let session = AiSession::arc_from_game(&state);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let selection =
+            choose_action_with_session_diagnostic(&state, PlayerId(0), &config, &mut rng, &session);
+        let receipt = selection
+            .receipt
+            .expect("the public chooser must retain its ranked target receipt");
+        let friendly_candidate = receipt
+            .candidates
+            .iter()
+            .find(|candidate| candidate.action == friendly_action)
+            .expect("the engine issued the friendly Recruiter target");
+        let opponent_candidate = receipt
+            .candidates
+            .iter()
+            .find(|candidate| candidate.action == opponent_action)
+            .expect("the engine issued the opponent Recruiter target");
+
+        assert!(
+            opponent_candidate.is_top_ranked,
+            "the Recruiter chain must value its opponent target for the AI after control changes: friendly={friendly_candidate:?}, opponent={opponent_candidate:?}"
+        );
+        assert_eq!(selection.action, Some(opponent_action));
+    }
+
+    #[test]
+    fn gain_control_empty_static_rider_keeps_existing_opponent_score() {
+        let empty_rider = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GenericEffect {
+                static_abilities: Vec::new(),
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+        );
+        let (state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(empty_rider),
+            1,
+            |_| {},
+        );
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(
+            beneficial,
+            "the supported Untap prefix establishes polarity"
+        );
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_empty_static_modifications_keep_existing_opponent_score() {
+        let empty_modifications = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GenericEffect {
+                static_abilities: vec![
+                    StaticDefinition::continuous().affected(TargetFilter::ParentTarget)
+                ],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+        );
+        let (state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(empty_modifications),
+            1,
+            |_| {},
+        );
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(
+            beneficial,
+            "the supported Untap prefix establishes polarity"
+        );
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_chooser_without_recipient_keeps_existing_opponent_score() {
+        let (mut state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(recruiter_haste_subtype_rider()),
+            1,
+            |_| {},
+        );
+        state
+            .pending_trigger
+            .as_mut()
+            .expect("the engine target prompt retains its pending trigger")
+            .ability
+            .original_controller = Some(PlayerId(1));
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(
+            beneficial,
+            "the slot polarity is independent of the recipient"
+        );
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_second_target_slot_keeps_existing_opponent_score() {
+        let mut rider = recruiter_haste_subtype_rider();
+        let mut second_target = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GainControl {
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            },
+        );
+        second_target.sub_link = SubAbilityLink::SequentialSibling;
+        rider.sub_ability = Some(Box::new(second_target));
+        let (state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(rider),
+            2,
+            |_| {},
+        );
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(beneficial);
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_alternate_branch_keeps_existing_opponent_score() {
+        let (state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(recruiter_haste_subtype_rider()),
+            1,
+            |root| {
+                root.else_ability = Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::NoOp,
+                )));
+            },
+        );
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(beneficial);
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
+    #[test]
+    fn unbranched_resolved_ability_rejects_optional_player_and_opponent_scopes() {
+        let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(1), PlayerId(0));
+        assert!(is_unbranched_resolved_ability(&ability));
+
+        ability.optional_player = Some(TargetFilter::Any);
+        assert!(!is_unbranched_resolved_ability(&ability));
+
+        ability.optional_player = None;
+        ability.optional_for = Some(OpponentMayScope::AnyOpponent);
+        assert!(!is_unbranched_resolved_ability(&ability));
+    }
+
+    #[test]
+    fn root_only_gain_control_keeps_existing_opponent_score() {
+        let (state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            false,
+            None,
+            1,
+            |_| {},
+        );
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(
+            !beneficial,
+            "bare GainControl must retain its existing non-beneficial polarity"
+        );
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta > 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_team_target_only_corrects_actual_opponent() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        let (state, _, opponent, teammate) = recruiter_target_selection_state(
+            state,
+            PlayerId(2),
+            Some(PlayerId(1)),
+            true,
+            Some(recruiter_haste_subtype_rider()),
+            1,
+            |_| {},
+        );
+        let teammate = teammate.expect("the engine issued the teammate target");
+        assert!(engine::game::players::is_opponent(
+            &state,
+            PlayerId(0),
+            PlayerId(2)
+        ));
+        assert!(!engine::game::players::is_opponent(
+            &state,
+            PlayerId(0),
+            PlayerId(1)
+        ));
+
+        let (opponent_beneficial, opponent_verdict) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        let (teammate_beneficial, teammate_verdict) =
+            anti_self_harm_registry_verdict_for_target(&state, teammate);
+        assert!(opponent_beneficial && teammate_beneficial);
+        assert!(matches!(
+            opponent_verdict,
+            PolicyVerdict::Score { delta, .. } if delta > 0.0
+        ));
+        assert!(matches!(
+            teammate_verdict,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_currently_ai_controlled_stolen_target_keeps_existing_score() {
+        let (mut state, _, stolen, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(recruiter_haste_subtype_rider()),
+            1,
+            |_| {},
+        );
+        let stolen_object = state.objects.get_mut(&stolen).unwrap();
+        stolen_object.base_controller = Some(PlayerId(1));
+        stolen_object.controller = PlayerId(0);
+        assert_eq!(stolen_object.owner, PlayerId(1));
+        assert_eq!(stolen_object.base_controller, Some(PlayerId(1)));
+        assert_eq!(stolen_object.controller, PlayerId(0));
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, stolen);
+        assert!(beneficial);
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta > 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_nonsequential_parent_target_rider_keeps_existing_opponent_score() {
+        let (state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(recruiter_haste_subtype_rider()),
+            1,
+            |root| {
+                root.sub_ability
+                    .as_mut()
+                    .expect("fixture has the ParentTarget rider")
+                    .sub_link = SubAbilityLink::ContinuationStep;
+            },
+        );
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(beneficial, "the ParentTarget Untap establishes polarity");
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_conditional_root_keeps_existing_opponent_score() {
+        let (state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(recruiter_haste_subtype_rider()),
+            1,
+            |root| root.condition = Some(AbilityCondition::IsYourTurn),
+        );
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(beneficial);
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
     #[test]
     fn noncreature_ward_target_scores_lower_than_unwarded_equivalent() {
         let mut state = make_state();
@@ -5807,6 +6445,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::ExtraTurn {
                 target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
             },
         );
         if let Some(condition) = self_loss_condition {

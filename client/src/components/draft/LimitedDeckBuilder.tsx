@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "framer-motion";
 
@@ -48,6 +48,7 @@ import { DraftWorkspace } from "./workspace/DraftWorkspace";
 import { useDraftWorkspaceDrag } from "./workspace/useDraftWorkspaceDrag";
 import type { DraftWorkspaceState } from "./workspace/types";
 import {
+  DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX,
   type DraftWorkspacePreferences,
   type ResponsiveDraftLayout,
 } from "./workspace/workspacePreferences";
@@ -1141,6 +1142,8 @@ function WorkspaceDeckBuilder({
   const displayedSubmissionError = submissionError ?? localSubmissionError;
   const dragController = useDraftWorkspaceDrag({
     enabled: !interactionLocked,
+    workspaceProjectionEnabled: responsiveLayout === "desktop",
+    retainLastValidWorkspaceTarget: true,
     readPickInteraction: () => DECKBUILDING_INTERACTION,
     subscribePickInteraction: () => () => {},
     onDrop: (request) => ({
@@ -1278,14 +1281,79 @@ function WorkspaceDeckBuilder({
   const landControls = poolChangesEnabled ? (
     landPicker(t("limitedDeck.addLands"))
   ) : null;
+  const suggestDeckVisible = editableController?.onAutoSuggestDeck !== undefined;
+  const suggestDeckEnabled = suggestDeckVisible && !interactionLocked;
+  const suggestDeckControl = suggestDeckVisible ? (
+    <button
+      type="button"
+      onClick={() => void editableController?.onAutoSuggestDeck?.()}
+      disabled={!suggestDeckEnabled}
+      className={menuButtonClass({
+        tone: "emerald",
+        size: "sm",
+        disabled: !suggestDeckEnabled,
+        className: "w-full",
+      })}
+    >
+      {t("limitedDeck.suggestDeck")}
+    </button>
+  ) : null;
+  const deckStatsControl = responsiveLayout === "desktop" ? (
+    <PopoverMenu
+      ariaLabel={t("limitedDeck.deckStats")}
+      variant="dialog"
+      menuWidthPx={640}
+      renderTrigger={({ ref, open, toggle }) => (
+        <button
+          ref={ref}
+          type="button"
+          aria-expanded={open}
+          aria-haspopup="dialog"
+          onClick={toggle}
+          className={menuButtonClass({ tone: "neutral", size: "xs" })}
+        >
+          {t("limitedDeck.deckStats")}
+        </button>
+      )}
+    >
+      {() => (
+        <div data-deck-stats-overlay className="grid max-h-[min(76vh,720px)] gap-5 overflow-y-auto p-4">
+          <ManaCurve pool={pool} cards={spellNames} colorDistribution={colorDistribution} />
+          <DeckStatistics
+            cards={deckCards}
+            virtualCardNames={deckVirtualBasics.map((card) => card.name)}
+          />
+        </div>
+      )}
+    </PopoverMenu>
+  ) : null;
+  const desktopDeckControls = responsiveLayout === "desktop" ? (
+    <div data-desktop-deck-controls className="ml-auto grid min-w-0 grid-cols-[auto_auto_minmax(0,1fr)] items-center gap-1">
+      {landControls}
+      {deckStatsControl}
+      {suggestDeckControl}
+    </div>
+  ) : landControls;
 
   const compactLandControls = landPicker(
     (phoneLayout || tabletLayout) ? t("limitedDeck.addLands") : t("limitedDeck.lands"),
     phoneLayout || tabletLayout,
   );
-  const suggestDeckAvailable = suggestionsEnabled
-    && editableController?.onAutoSuggestDeck !== undefined
-    && !interactionLocked;
+  const desktopSubmitControl = (
+    <button
+      type="button"
+      onClick={() => void handleSubmit()}
+      disabled={!deckValid || isSubmitting}
+      className={menuButtonClass({
+        tone: "emerald",
+        size: "md",
+        disabled: !deckValid || isSubmitting,
+        className: "w-full",
+      })}
+    >
+      {t("limitedDeck.submitDeck")}
+    </button>
+  );
   const submissionAlert = displayedSubmissionError && (
     <p
       role="alert"
@@ -1303,7 +1371,7 @@ function WorkspaceDeckBuilder({
       preferences={preferences}
       interactionLocked={interactionLocked}
       dragController={dragController}
-      deckControls={landControls}
+      deckControls={desktopDeckControls}
       compactDeckControls={compactLandControls}
       responsiveLayout={responsiveLayout}
       responsiveContext="builder"
@@ -1389,6 +1457,9 @@ function WorkspaceDeckBuilder({
   return (
     <div
       data-responsive-builder-layout={responsiveLayout}
+      style={{
+        "--collapsed-sideboard-card-width": `${DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX}px`,
+      } as CSSProperties}
       className={phoneLayout
         ? "flex h-[calc(100dvh_-_4rem)] min-h-0 flex-col gap-4 overflow-hidden pb-[67px]"
         : tabletLayout
@@ -1405,12 +1476,24 @@ function WorkspaceDeckBuilder({
         onDismiss={() => handleHover(null)}
       />
       {!phoneLayout && (
-        <div className="flex items-center gap-2">
-          <div className="min-w-0 flex-1">
-            <DeckStatus spells={spellNames.length} lands={totalLands} min={minDeckSize} />
-          </div>
-          {tabletLayout && compactCommanderControls}
+        <>
+        <div
+          data-desktop-deck-status-actions={responsiveLayout === "desktop" ? "" : undefined}
+          className={responsiveLayout === "desktop"
+            ? "grid grid-cols-[minmax(0,1fr)_minmax(0,calc(var(--collapsed-sideboard-card-width)_+_2px))] gap-[clamp(4px,1vw,16px)]"
+            : "flex items-center gap-2"}
+        >
+          <DeckStatus
+            spells={spellNames.length}
+            lands={totalLands}
+            min={minDeckSize}
+            className={responsiveLayout === "desktop" || tabletLayout ? "w-full flex-1" : undefined}
+          />
+          {responsiveLayout === "desktop" && desktopSubmitControl}
+          {tabletLayout && <div className="ml-auto">{compactCommanderControls}</div>}
         </div>
+        {responsiveLayout === "desktop" && !designationRequired && submissionAlert}
+        </>
       )}
 
       {tabletLayout ? (
@@ -1432,7 +1515,9 @@ function WorkspaceDeckBuilder({
               <>
                 <div
                   data-tablet-landscape-builder-row
-                  className="grid grid-cols-[minmax(0,45fr)_minmax(0,15fr)_minmax(0,20fr)_minmax(0,20fr)] gap-2"
+                  className={`grid ${suggestDeckVisible
+                    ? "grid-cols-[minmax(0,45fr)_minmax(0,15fr)_minmax(0,20fr)_minmax(0,20fr)]"
+                    : "grid-cols-[minmax(0,55fr)_minmax(0,20fr)_minmax(0,25fr)]"} gap-2`}
                 >
                   <div data-tablet-landscape-builder-slot="curve" className="min-w-0">
                     <ManaCurve
@@ -1448,23 +1533,23 @@ function WorkspaceDeckBuilder({
                   >
                     <AverageManaCost cards={deckCards} />
                   </div>
-                  <div data-tablet-landscape-builder-slot="suggest" className="min-w-0">
-                    <button
-                      type="button"
-                      disabled={!suggestDeckAvailable}
-                      onClick={suggestDeckAvailable
-                        ? () => void editableController?.onAutoSuggestDeck?.()
-                        : undefined}
-                      className={menuButtonClass({
-                        tone: "neutral",
-                        size: "sm",
-                        disabled: !suggestDeckAvailable,
-                        className: "w-full",
-                      })}
-                    >
-                      {t("limitedDeck.suggestDeck")}
-                    </button>
-                  </div>
+                  {suggestDeckVisible && (
+                    <div data-tablet-landscape-builder-slot="suggest" className="min-w-0">
+                      <button
+                        type="button"
+                        onClick={() => void editableController?.onAutoSuggestDeck?.()}
+                        disabled={!suggestDeckEnabled}
+                        className={menuButtonClass({
+                          tone: "emerald",
+                          size: "sm",
+                          disabled: !suggestDeckEnabled,
+                          className: "w-full",
+                        })}
+                      >
+                        {t("limitedDeck.suggestDeck")}
+                      </button>
+                    </div>
+                  )}
                   <div data-tablet-landscape-builder-slot="submit" className="min-w-0">
                     <button
                       type="button"
@@ -1494,22 +1579,22 @@ function WorkspaceDeckBuilder({
                   </section>
                 </div>
                 {submissionAlert && <div className="mt-2">{submissionAlert}</div>}
-                <div data-tablet-builder-actions className="mt-2 grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    disabled={!suggestDeckAvailable}
-                    onClick={suggestDeckAvailable
-                      ? () => void editableController?.onAutoSuggestDeck?.()
-                      : undefined}
-                    className={menuButtonClass({
-                      tone: "neutral",
-                      size: "sm",
-                      disabled: !suggestDeckAvailable,
-                      className: "w-full",
-                    })}
-                  >
-                    {t("limitedDeck.suggestDeck")}
-                  </button>
+                <div data-tablet-builder-actions className={`mt-2 grid ${suggestDeckVisible ? "grid-cols-2" : "grid-cols-1"} gap-2`}>
+                  {suggestDeckVisible && (
+                    <button
+                      type="button"
+                      onClick={() => void editableController?.onAutoSuggestDeck?.()}
+                      disabled={!suggestDeckEnabled}
+                      className={menuButtonClass({
+                        tone: "emerald",
+                        size: "sm",
+                        disabled: !suggestDeckEnabled,
+                        className: "w-full",
+                      })}
+                    >
+                      {t("limitedDeck.suggestDeck")}
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => void handleSubmit()}
@@ -1552,48 +1637,13 @@ function WorkspaceDeckBuilder({
             </aside>
           )}
 
-          {!phoneLayout && (
+          {!phoneLayout && designationRequired && (
           <div
             data-desktop-builder-analysis
             className="flex w-full min-w-[220px] flex-[1.25] flex-col gap-6 overflow-y-auto xl:w-auto"
           >
             {commanderControls}
-            {suggestionsEnabled && editableController?.onAutoSuggestDeck && (
-              <section>
-                <button
-                  type="button"
-                  onClick={() => void editableController.onAutoSuggestDeck?.()}
-                  className={menuButtonClass({ tone: "neutral", size: "sm", className: "w-full" })}
-                >
-                  {t("limitedDeck.suggestDeck")}
-                </button>
-              </section>
-            )}
-
-            <section>
-              <ManaCurve pool={pool} cards={spellNames} colorDistribution={colorDistribution} />
-            </section>
-
-            <section className="flex flex-col gap-4">
-              <DeckStatistics
-                cards={deckCards}
-                virtualCardNames={deckVirtualBasics.map((card) => card.name)}
-              />
-              <button
-                type="button"
-                onClick={() => void handleSubmit()}
-                disabled={!deckValid || isSubmitting}
-                className={menuButtonClass({
-                  tone: "emerald",
-                  size: "md",
-                  disabled: !deckValid || isSubmitting,
-                  className: "w-full",
-                })}
-              >
-                {t("limitedDeck.submitDeck")}
-              </button>
-              {submissionAlert}
-            </section>
+            {submissionAlert}
           </div>
           )}
         </div>
@@ -1642,7 +1692,7 @@ function WorkspaceDeckBuilder({
 
 // ── Deck status bar ─────────────────────────────────────────────────────
 
-function DeckStatus({ spells, lands, min }: { spells: number; lands: number; min: number }) {
+function DeckStatus({ spells, lands, min, className }: { spells: number; lands: number; min: number; className?: string }) {
   const { t } = useTranslation("draft");
   const total = spells + lands;
   const valid = total >= min;
@@ -1650,7 +1700,7 @@ function DeckStatus({ spells, lands, min }: { spells: number; lands: number; min
   const pct = Math.min(100, (total / min) * 100);
 
   return (
-    <div data-deck-status className="rounded-[16px] border border-white/10 bg-black/18 px-4 py-3 backdrop-blur-md">
+    <div data-deck-status className={`rounded-[16px] border border-white/10 bg-black/18 px-4 py-3 backdrop-blur-md ${className ?? ""}`}>
       <div className="flex items-baseline justify-between">
         <span className="text-sm font-medium text-white">
           {total} <span className="text-white/40">{t("limitedDeck.cardCount", { min })}</span>

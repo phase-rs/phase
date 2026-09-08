@@ -12,6 +12,17 @@ const multiplayerServers = resolveMultiplayerServerUrls((name) => process.env[na
  * any test whose import graph reaches a `import("@wasm/...")` fails at
  * transform time. The stub also lets vi.mock("@wasm/engine", factory) work.
  */
+function isCoverageExplicitlyDisabledArgv(argv: readonly string[]): boolean {
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] === "--") break;
+    if (argv[index] === "--coverage.enabled=false") return true;
+    if (argv[index] === "--coverage.enabled" && argv[index + 1] === "false") return true;
+  }
+  return false;
+}
+
+const coverageExplicitlyDisabled = isCoverageExplicitlyDisabledArgv(process.argv);
+
 function wasmStubPlugin(): Plugin {
   const artifacts: Record<string, string> = {
     "@wasm/engine": path.resolve(__dirname, "src/wasm/engine_wasm.js"),
@@ -64,6 +75,7 @@ export default defineConfig({
     __DRAFT_POOLS_URL__: JSON.stringify("/draft-pools.json"),
     __DECKS_URL__: JSON.stringify("/decks.json"),
     __CARD_DATA_URL__: JSON.stringify("/card-data.json"),
+      __CARD_DATA_META_URL__: JSON.stringify("/card-data-meta.json"),
     __CARD_DATA_LOCALE_URL_TEMPLATE__: JSON.stringify("/card-data.{lng}.json"),
     __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__: JSON.stringify("/scryfall-images.v2.{lng}.json"),
     __CHANGELOG_URL__: JSON.stringify("/changelog.json"),
@@ -89,6 +101,7 @@ export default defineConfig({
     setupFiles: ["src/test-setup.ts"],
     pool: "threads",
     coverage: {
+      enabled: !coverageExplicitlyDisabled,
       provider: "v8",
       reporter: ["text", "lcov"],
       include: ["src/**/*.{ts,tsx}"],

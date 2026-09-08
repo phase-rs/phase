@@ -7,11 +7,14 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 
+import type { DraftCardInstance } from "../../../adapter/draft-adapter";
 import { useDraftCardFace } from "../DraftCardFace.tsx";
 import type { WorkspaceCardEntryModel } from "./workspacePlacement";
 import type {
   DraftWorkspaceDragController,
+  WorkspaceDragOrigin,
   WorkspaceDragSource,
+  WorkspaceDragPreviewImage,
 } from "./useDraftWorkspaceDrag";
 
 const STACK_EXPOSED_WIDTH_RATIO = 0.16;
@@ -24,6 +27,8 @@ export interface WorkspaceCardDragCapability {
     card: WorkspaceCardEntryModel,
     width: number,
     height: number,
+    previewImage: WorkspaceDragPreviewImage,
+    origin: WorkspaceDragOrigin,
   ): WorkspaceDragSource;
 }
 
@@ -45,6 +50,33 @@ export interface WorkspaceCardProps {
   ): void;
   drag?: WorkspaceCardDragCapability;
   stackStyle?: CSSProperties;
+  dragHidden?: boolean;
+}
+
+export interface WorkspaceDragProjection {
+  readonly card: DraftCardInstance;
+  readonly sourceInstanceId: string;
+  readonly column: number;
+  readonly row: number | null;
+  readonly origin: WorkspaceDragOrigin;
+  readonly previewImage?: WorkspaceDragPreviewImage;
+}
+
+export function WorkspaceDragProjectionSlot({ sourceInstanceId, stackIndex, placementStyle }: {
+  sourceInstanceId: string;
+  stackIndex: number;
+  placementStyle?: CSSProperties;
+}) {
+  return (
+    <div
+      aria-hidden="true"
+      data-drag-projection-slot={sourceInstanceId}
+      className="pointer-events-none relative min-w-0 invisible"
+      style={placementStyle ?? { marginTop: stackIndex === 0 ? undefined : "-123.3442622951%" }}
+    >
+      <span className="block aspect-[488/680] w-full" />
+    </div>
+  );
 }
 
 export function WorkspaceCard({
@@ -59,9 +91,10 @@ export function WorkspaceCard({
   onKeyDown,
   drag,
   stackStyle,
+  dragHidden = false,
 }: WorkspaceCardProps) {
   const { t } = useTranslation("draft");
-  const { src, isLoading, displayName, hasAlternateFace, toggleFace } = useDraftCardFace(
+  const { src, displayName, hasAlternateFace, toggleFace, advanceFailedSource } = useDraftCardFace(
     card.image.cardName,
     card.image.sourcePrinting,
   );
@@ -74,8 +107,10 @@ export function WorkspaceCard({
 
   return (
     <div
-      className={`relative min-w-0 ${hoverRevealed ? "z-10" : ""}`}
-      style={stackStyle ?? { marginTop: stackIndex === 0 ? undefined : "-123.3442622951%" }}
+      className={`${dragHidden ? "pointer-events-none absolute inset-x-0 top-0 w-full opacity-0" : "relative"} min-w-0 ${hoverRevealed ? "z-10" : ""}`}
+      style={dragHidden
+        ? { ...(stackStyle ?? {}), marginTop: undefined }
+        : stackStyle ?? { marginTop: stackIndex === 0 ? undefined : "-123.3442622951%" }}
       data-instance-id={card.instanceId}
     >
       <button
@@ -119,7 +154,8 @@ export function WorkspaceCard({
         onPointerDown={(event) => {
           if (drag !== undefined) {
             const rect = event.currentTarget.getBoundingClientRect();
-            const source = drag.makeSource(card, rect.width, rect.height);
+            const origin = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+            const source = drag.makeSource(card, rect.width, rect.height, { src, alt: displayName }, origin);
             if (drag.touchDragEnabled) {
               drag.controller.handleWorkspacePointerDown(event, source, true);
             } else {
@@ -136,16 +172,21 @@ export function WorkspaceCard({
         onPointerCancel={drag?.controller.handlePointerCancel}
         onLostPointerCapture={drag?.controller.handleLostPointerCapture}
       >
-        {isLoading || src === null ? (
+        {src === null ? (
           <span className="flex aspect-[488/680] items-start px-2 py-1 text-xs text-white/80">
             {card.name}
           </span>
         ) : (
           <img
+            key={src}
             src={src}
             alt={displayName}
             draggable={card.image.draggable}
             className="aspect-[488/680] w-full object-cover"
+            onError={(event) => {
+              const failedSrc = event.currentTarget.getAttribute("src");
+              if (failedSrc !== null) advanceFailedSource?.(failedSrc);
+            }}
           />
         )}
       </button>

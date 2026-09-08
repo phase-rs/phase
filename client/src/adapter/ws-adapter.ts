@@ -1,3 +1,4 @@
+import { initializeLanCapabilities, isLanEndpoint } from "../services/lan";
 import type {
   AbilityBlockEntry,
   EngineAdapter,
@@ -208,6 +209,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 69 — GameEvent gained the tagged variant ExtraTurnCreated { player_id,
+ *      anchor }. Event-bearing full-server frames can now carry that tag, so
+ *      the exact handshake must refuse v68 peers that do not share the variant
+ *      contract. P2P moves in lockstep; lobby messages are unchanged.
  * 68 — PendingManaAbility.chosen_tappers changed from Vec<ObjectId> to
  *      Option<Vec<ObjectId>> (#8698), so an ANSWERED zero-tapper selection of
  *      the CR 107.3a X-sentinel form (X=0) is distinguishable from a selection
@@ -459,7 +464,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 68;
+export const PROTOCOL_VERSION = 69;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -489,6 +494,16 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * twice for GameState-only changes and the derived lobby window went disjoint
  * from the deployed broker's.
  *
+ * 8 — Tournament match structure. CreateTournament gains `match_type` (Bo1 /
+ *     Bo3), optional (`#[serde(default)]`); `None` resolves to the arity default
+ *     (Bo3 head-to-head, Bo1 for pods — single-game per MSTR), preserving pre-8
+ *     behaviour. TournamentSummary gains the resolved `match_type`, server →
+ *     client. This lets a 2-player event be Bo1 (e.g. single-game single
+ *     elimination). Purely ADDITIVE, so MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+ *     stays at 2 and no client-side floor is needed: a client's `match_type`
+ *     reaching a pre-8 broker deserializes away (the event runs the default
+ *     structure — a silent capability loss, not a parse error), and a pre-8
+ *     broker's summary omitting it is inert against a `JSON.parse` client.
  * 7 — Tournament game-format label and an "automatic + N" round option. Two
  *     fields added to CreateTournament, both optional (`#[serde(default)]`):
  *     `format` (a GameFormat display label, mirroring the one a LobbyGame
@@ -554,7 +569,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 7;
+export const LOBBY_PROTOCOL_VERSION = 8;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
@@ -622,6 +637,27 @@ export const MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK = 5;
  * `TournamentSummary.scoring`.
  */
 export const MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING = 6;
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` that honors a per-event `match_type`
+ * (Bo1 / Bo3) on `CreateTournament`.
+ *
+ * Below this, a broker discards `match_type` as an unknown field and applies the
+ * arity default (Bo3 head-to-head, Bo1 pods). That silent substitution is
+ * harmless when the request already matches the default, but it turns an
+ * explicit **Bo1 head-to-head** choice into a Bo3 event with no signal — so the
+ * send path refuses that one request (see `matchTypeNeedsCapability` /
+ * `createTournament`) rather than let an organizer receive a structure they did
+ * not pick.
+ *
+ * Unlike the two floors above, this is a CLIENT-side send-path floor with no
+ * shared Rust constant to mirror, so it is deliberately NOT registered in
+ * `scripts/check-protocol-version.mjs`. Frozen at 8 (the version that introduced
+ * `match_type`) and, like the others, written as a bare literal rather than
+ * derived from `LOBBY_PROTOCOL_VERSION`, so a future bump cannot silently drag
+ * it forward and start refusing v8 brokers.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE = 8;
 
 /** Identity advertised by the server in its `ServerHello`. */
 export interface ServerInfo {
@@ -954,50 +990,60 @@ export class WebSocketAdapter implements EngineAdapter {
       this.initResolve = resolve;
       this.initReject = reject;
 
-      if (!this.isNativeSocket() && !isValidWebSocketUrl(this.serverUrl)) {
-        reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
-        this.initResolve = null;
-        this.initReject = null;
-        return;
-      }
+      const initializeConnection = async () => {
+        if (!this.isNativeSocket() && isLanEndpoint(this.serverUrl)) {
+          await initializeLanCapabilities();
+          if (this.disposed) {
+            throw new AdapterError("WS_CLOSED", "Adapter disposed before initialization completed", true);
+          }
+        }
 
-      // A ws:// target from an HTTPS page is blocked by the browser before the
-      // handshake — surface why instead of letting it fail as "unreachable".
-      const blockReason = this.isNativeSocket()
-        ? null
-        : mixedContentBlockReason(this.serverUrl);
-      if (blockReason) {
-        reject(new AdapterError("WS_ERROR", blockReason, false));
-        this.initResolve = null;
-        this.initReject = null;
-        return;
-      }
+        if (!this.isNativeSocket() && !isValidWebSocketUrl(this.serverUrl)) {
+          reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
+          this.initResolve = null;
+          this.initReject = null;
+          return;
+        }
 
-      this.seedNativeReconnectSession();
-      const setupFrame =
-        this.options.nativeAi
-          ? this.nativeAiSetupFrame(this.options.nativeAi)
-          : this.options.nativePregame
-            ? this.nativePregameSetupFrame(this.options.nativePregame)
-          : this.mode === "host"
-          ? { type: "CreateGame", data: { deck: this.deckData } }
-          : this.mode === "spectate"
-            ? { type: "SpectatorJoin", data: { game_code: this.joinGameCode! } }
-            : {
-                type: "JoinGameWithPassword",
-                data: {
-                  game_code: this.joinGameCode!,
-                  deck: this.deckData,
-                  display_name: this.displayName,
-                  password: this.joinPassword ?? null,
-                  reservation_token: this.reservationToken ?? null,
-                },
-              };
+        // A ws:// target from an HTTPS page is blocked by the browser before the
+        // handshake — surface why instead of letting it fail as "unreachable".
+        const blockReason = this.isNativeSocket()
+          ? null
+          : mixedContentBlockReason(this.serverUrl);
+        if (blockReason) {
+          reject(new AdapterError("WS_ERROR", blockReason, false));
+          this.initResolve = null;
+          this.initReject = null;
+          return;
+        }
 
-      this.attachSocket(setupFrame).catch(() => {
-        // `attachSocket` emits reject via initReject; swallow the
-        // rejection here so it doesn't surface as an unhandled promise.
-      });
+        this.seedNativeReconnectSession();
+        const setupFrame =
+          this.options.nativeAi
+            ? this.nativeAiSetupFrame(this.options.nativeAi)
+            : this.options.nativePregame
+              ? this.nativePregameSetupFrame(this.options.nativePregame)
+            : this.mode === "host"
+            ? { type: "CreateGame", data: { deck: this.deckData } }
+            : this.mode === "spectate"
+              ? { type: "SpectatorJoin", data: { game_code: this.joinGameCode! } }
+              : {
+                  type: "JoinGameWithPassword",
+                  data: {
+                    game_code: this.joinGameCode!,
+                    deck: this.deckData,
+                    display_name: this.displayName,
+                    password: this.joinPassword ?? null,
+                    reservation_token: this.reservationToken ?? null,
+                  },
+                };
+
+        this.attachSocket(setupFrame).catch(() => {
+          // `attachSocket` emits reject via initReject; swallow the
+          // rejection here so it doesn't surface as an unhandled promise.
+        });
+      };
+      void initializeConnection().catch((error: Error) => this.rejectInitialization(error));
     });
   }
 

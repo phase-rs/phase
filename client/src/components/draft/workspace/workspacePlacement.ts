@@ -152,7 +152,7 @@ export function normalizeWorkspaceForBoardGeometry(
       ? 0
       : Number.isInteger(placement.row) && placement.row >= 0 && placement.row < 2
         ? placement.row
-        : resolvedRow(instanceId, effective, poolGroups);
+        : resolveWorkspaceRow(instanceId, effective, poolGroups);
     const stackKey = `${placement.zone}:${column}:${row}`;
     destinations.set(instanceId, { zone: placement.zone, column, row });
     stacks.set(stackKey, [...(stacks.get(stackKey) ?? []), instanceId]);
@@ -443,7 +443,7 @@ function columnSetColor(column: number): DraftPoolGroupKind {
   return COLUMN_COLOR_ORDER[column] ?? "colorless";
 }
 
-function resolvedRow(
+export function resolveWorkspaceRow(
   instanceId: string,
   preferences: DraftBoardPreferences,
   groups: DraftPoolGroups,
@@ -625,7 +625,7 @@ export function rebuildWorkspaceZoneRows(
   let changed = false;
 
   for (const [instanceId, placement] of entries) {
-    const row = resolvedRow(instanceId, preferences, poolGroups);
+    const row = resolveWorkspaceRow(instanceId, preferences, poolGroups);
     const stackKey = `${placement.column}:${row}`;
     const order = nextOrders.get(stackKey) ?? 0;
     nextOrders.set(stackKey, order + 1);
@@ -779,19 +779,13 @@ export function appendWorkspaceInstanceToResolvedDestination(
   });
 }
 
-export function moveWorkspaceInstance(
-  state: DraftWorkspaceState,
-  pool: readonly DraftCardInstance[],
+export function normalizeWorkspaceMoveTarget(
+  instanceId: string,
   poolGroups: DraftPoolGroups,
   preferences: Readonly<Record<DraftZone, DraftBoardPreferences>>,
-  instanceId: string,
-  target: WorkspaceMoveTarget,
-): DraftWorkspaceState {
-  if (target.zone !== "deck" && target.zone !== "sideboard") return state;
-  const isKnown = pool.some((card) => card.instance_id === instanceId)
-    || state.virtualBasics.some((basic) => basic.instanceId === instanceId);
-  if (!isKnown || state.placements[instanceId] === undefined) return state;
-
+  target: Pick<WorkspaceMoveTarget, "zone" | "column" | "row">,
+): ResolvedWorkspaceDestination | null {
+  if (target.zone !== "deck" && target.zone !== "sideboard") return null;
   const destinationPreferences = clampedPreferences(
     preferences[target.zone],
     poolGroups.workspace_capabilities,
@@ -801,22 +795,38 @@ export function moveWorkspaceInstance(
     || target.column < 0
     || target.column >= destinationPreferences.columnCount
   ) {
-    return state;
+    return null;
   }
+  const row = target.row ?? resolveWorkspaceRow(instanceId, destinationPreferences, poolGroups);
+  const rowCount = destinationPreferences.rows === "two" ? 2 : 1;
+  if (!Number.isInteger(row) || row < 0 || row >= rowCount) return null;
+  return { zone: target.zone, column: target.column, row };
+}
 
-  const destinationRow = target.row ?? resolvedRow(instanceId, destinationPreferences, poolGroups);
-  const destinationRowCount = destinationPreferences.rows === "two" ? 2 : 1;
+export function moveWorkspaceInstance(
+  state: DraftWorkspaceState,
+  pool: readonly DraftCardInstance[],
+  poolGroups: DraftPoolGroups,
+  preferences: Readonly<Record<DraftZone, DraftBoardPreferences>>,
+  instanceId: string,
+  target: WorkspaceMoveTarget,
+): DraftWorkspaceState {
+  const isKnown = pool.some((card) => card.instance_id === instanceId)
+    || state.virtualBasics.some((basic) => basic.instanceId === instanceId);
+  if (!isKnown || state.placements[instanceId] === undefined) return state;
+  const destination = normalizeWorkspaceMoveTarget(instanceId, poolGroups, preferences, target);
+  if (destination === null) return state;
+  const source = state.placements[instanceId];
   if (
-    !Number.isInteger(destinationRow)
-    || destinationRow < 0
-    || destinationRow >= destinationRowCount
+    target.beforeInstanceId === null
+    && source.zone === destination.zone
+    && source.column === destination.column
+    && source.row === destination.row
   ) {
     return state;
   }
   return orderWorkspaceInstanceAtResolvedDestination(state, pool, instanceId, {
-    zone: target.zone,
-    column: target.column,
-    row: destinationRow,
+    ...destination,
     beforeInstanceId: target.beforeInstanceId,
   });
 }

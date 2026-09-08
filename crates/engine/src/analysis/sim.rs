@@ -23,7 +23,7 @@
 use crate::analysis::resource::{ResourceVector, TriggerKind};
 use crate::game::engine::EngineError;
 use crate::game::scenario::GameRunner;
-use crate::types::ability::{EffectKind, TargetRef};
+use crate::types::ability::TargetRef;
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, PlayerActionKind};
@@ -86,14 +86,11 @@ pub fn accumulate_events(acc: &mut ResourceVector, events: &[GameEvent]) {
             // counted here.
             GameEvent::SpellCast { .. } => acc.casts_this_step += 1,
 
-            // CR 500.7: an EXTRA turn is created when `Effect::ExtraTurn` resolves
-            // and pushes onto `state.extra_turns` (one resolve == one turn). The
-            // creation event — not `TurnStarted`, which also fires on every natural
-            // turn — is what keeps ordinary turn progression off this axis.
-            GameEvent::EffectResolved {
-                kind: EffectKind::ExtraTurn,
-                ..
-            } => acc.extra_turns += 1,
+            // CR 500.7: emitted once per successful extra-turn queue insertion.
+            // `TurnStarted` also covers natural turns, while `EffectResolved`
+            // counts completed instructions and therefore cannot represent
+            // insertion cardinality.
+            GameEvent::ExtraTurnCreated { .. } => acc.extra_turns += 1,
 
             // CR 603.6a / CR 603.6c: battlefield zone changes drive the ETB / LTB /
             // dies / landfall trigger axes. The `ZoneChangeRecord` carries the
@@ -258,6 +255,7 @@ fn splice_event_fed(target: &mut ResourceVector, events: &ResourceVector) {
 mod tests {
     use super::*;
     use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::EffectKind;
     use crate::types::game_state::{CastPaymentMode, WaitingFor, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::phase::Phase;
@@ -318,10 +316,9 @@ mod tests {
             GameEvent::PhaseChanged {
                 phase: Phase::BeginCombat,
             },
-            GameEvent::EffectResolved {
-                kind: EffectKind::ExtraTurn,
-                source_id: ObjectId(9),
-                subject: None,
+            GameEvent::ExtraTurnCreated {
+                player_id: PlayerId(0),
+                anchor: PlayerId(1),
             },
             // ETB of a land == landfall + etb.
             zone_change(Some(Zone::Hand), Zone::Battlefield, vec![CoreType::Land]),
@@ -641,8 +638,8 @@ mod tests {
     /// Drive a probe through a natural turn rollover via `PassPriority`. The raw
     /// runner event stream MUST contain a natural `TurnStarted` (asserted below) —
     /// the OLD arm counted that, so against the deleted code `delta.extra_turns`
-    /// would be >= 1. With the fix it is 0, because no `EffectResolved{ExtraTurn}`
-    /// (a creation signal) ever fired — only a natural turn began.
+    /// would be >= 1. With the fix it is 0, because no `ExtraTurnCreated` event
+    /// fired — only a natural turn began.
     #[test]
     fn natural_next_turn_is_not_extra_turn() {
         let mut scenario = GameScenario::new();
@@ -682,14 +679,32 @@ mod tests {
         );
     }
 
-    /// P1 — the extra-turn axis is fed by the `EffectResolved{ExtraTurn}`
-    /// CREATION event, and ONLY that kind. Discriminates the `kind` match: a
-    /// different `EffectKind` (here `DealDamage`) must not touch `extra_turns`.
+    /// P1 — the extra-turn axis is fed once per committed queue insertion, not
+    /// once per instruction completion.
     #[test]
     fn extra_turn_creation_feeds_axis() {
         let mut acc = ResourceVector::default();
         accumulate_events(
             &mut acc,
+            &[
+                GameEvent::ExtraTurnCreated {
+                    player_id: PlayerId(0),
+                    anchor: PlayerId(0),
+                },
+                GameEvent::ExtraTurnCreated {
+                    player_id: PlayerId(1),
+                    anchor: PlayerId(0),
+                },
+            ],
+        );
+        assert_eq!(
+            acc.extra_turns, 2,
+            "each ExtraTurnCreated event feeds the extra-turns axis"
+        );
+
+        let mut completed_instruction = ResourceVector::default();
+        accumulate_events(
+            &mut completed_instruction,
             &[GameEvent::EffectResolved {
                 kind: EffectKind::ExtraTurn,
                 source_id: ObjectId(7),
@@ -697,14 +712,13 @@ mod tests {
             }],
         );
         assert_eq!(
-            acc.extra_turns, 1,
-            "an ExtraTurn creation event feeds the extra-turns axis"
+            completed_instruction.extra_turns, 0,
+            "an ExtraTurn instruction completion without an insertion must not feed the axis"
         );
 
-        // A different EffectKind must NOT increment the axis (kind discrimination).
-        let mut other = ResourceVector::default();
+        let mut unrelated = ResourceVector::default();
         accumulate_events(
-            &mut other,
+            &mut unrelated,
             &[GameEvent::EffectResolved {
                 kind: EffectKind::DealDamage,
                 source_id: ObjectId(7),
@@ -712,8 +726,8 @@ mod tests {
             }],
         );
         assert_eq!(
-            other.extra_turns, 0,
-            "a non-ExtraTurn EffectResolved must not feed the extra-turns axis"
+            unrelated.extra_turns, 0,
+            "an unrelated event must not feed the extra-turns axis"
         );
     }
 

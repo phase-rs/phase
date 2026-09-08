@@ -52,6 +52,253 @@ describe("useCardImage", () => {
     vi.unstubAllGlobals();
   });
 
+  it("bounds presentation cache entries while retaining recently used values", async () => {
+    const { BoundedCache } = await import("../useCardImage");
+    const cache = new BoundedCache<string, string>(2);
+
+    cache.set("first", "first value");
+    cache.set("second", "second value");
+    expect(cache.get("first")).toBe("first value");
+    cache.set("third", "third value");
+
+    expect(cache.get("second")).toBeUndefined();
+    expect(cache.get("first")).toBe("first value");
+    expect(cache.get("third")).toBe("third value");
+  });
+
+  it("hydrates an identical warmed request with its source on the first render", async () => {
+    mockNoRemoteScryfall();
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => "0",
+        subscribe: () => () => {},
+        resolve: vi.fn().mockResolvedValue({ revision: "0", sources: installedSources("/warm-card.jpg") }),
+      },
+    }));
+
+    const { useCardImage } = await import("../useCardImage");
+    const warmed = renderHook(() => useCardImage("Warm Card"));
+    await waitFor(() => expect(warmed.result.current.src).toBe("/warm-card.jpg"));
+    warmed.unmount();
+
+    const { result } = renderHook(() => useCardImage("Warm Card"));
+    expect(result.current.src).toBe("/warm-card.jpg");
+  });
+
+  it("shares the current source-art presentation after invalidation", async () => {
+    const sourceImage = "https://img.example/source.jpg";
+    const getCardPrintings = vi.fn().mockResolvedValue([{
+      id: "source-printing",
+      set: "tst",
+      collector_number: "1",
+      faces: [{ normal: sourceImage }],
+    }]);
+    vi.doMock("../../services/scryfall.ts", () => ({
+      deriveImageUrl: (url: string) => url,
+      fetchCardImageAsset: vi.fn(),
+      fetchCardImageAssetByOracleId: vi.fn().mockResolvedValue({
+        src: "https://img.example/default.jpg",
+        isRotated: false,
+        semantic: { oracleId: "oracle-shared", faceIndex: 0, alias: "shared card" },
+      }),
+      fetchTokenImageAssetByRef: vi.fn(),
+      fetchTokenImageUrl: vi.fn(),
+      findPrintingById: vi.fn(),
+      getCardPrintings,
+      imageUrlSize: vi.fn(() => null),
+      isCardImageFlipLayoutSync: vi.fn(() => false),
+      isCardImageRotatedSync: vi.fn(() => false),
+      isLocaleArtReady: vi.fn(() => true),
+      loadLocaleArt: vi.fn(),
+      resolveFaceIndexSync: vi.fn(() => null),
+      resolveOracleIdSync: vi.fn(() => null),
+      resolvePrintingImageUrl: vi.fn((printing) => printing.faces[0].normal),
+    }));
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => "0",
+        subscribe: () => () => {},
+        resolve: vi.fn(async ({ allowRemote, remote }: { allowRemote: boolean; remote?: { src: string } }) => ({
+          revision: "0",
+          sources: allowRemote
+            ? [{ kind: "remote" as const, src: remote!.src }, { kind: "fallback" as const, src: null }]
+            : [{ kind: "fallback" as const, src: null }],
+        })),
+      },
+    }));
+
+    const { useCardImage } = await import("../useCardImage");
+    const options = {
+      oracleId: "oracle-shared",
+      sourcePrinting: { setCode: "TST", collectorNumber: "1" },
+    };
+    const warmed = renderHook(() => useCardImage("Shared Card", options));
+    await waitFor(() => expect(warmed.result.current.src).toBe(sourceImage));
+
+    const sibling = renderHook(() => useCardImage("Shared Card", options));
+    expect(sibling.result.current.src).toBe(sourceImage);
+    expect(getCardPrintings).toHaveBeenCalled();
+  });
+
+  it("keeps a matching presentation visible across refresh, but removes a failed seed before fresh sources resolve", async () => {
+    let resolvePrintings: ((printings: Array<{
+      id: string;
+      faces: Array<{ normal: string }>;
+    }>) => void) | undefined;
+    let resolveFreshSources: ((result: {
+      revision: string;
+      sources: Array<{ kind: "remote"; src: string } | { kind: "fallback"; src: null }>;
+    }) => void) | undefined;
+    let remoteResolutionCount = 0;
+    const getCardPrintings = vi.fn(() => new Promise<Array<{
+      id: string;
+      faces: Array<{ normal: string }>;
+    }>>((resolve) => {
+      resolvePrintings = resolve;
+    }));
+    vi.doMock("../../services/scryfall.ts", () => ({
+      deriveImageUrl: (url: string) => url,
+      fetchCardImageAsset: vi.fn(),
+      fetchCardImageAssetByOracleId: vi.fn().mockResolvedValue({
+        src: "seed.jpg",
+        isRotated: false,
+        semantic: { oracleId: "oracle-seed", faceIndex: 0, alias: "seed card" },
+      }),
+      fetchTokenImageAssetByRef: vi.fn(),
+      fetchTokenImageUrl: vi.fn(),
+      findPrintingById: vi.fn(),
+      getCardPrintings,
+      imageUrlSize: vi.fn(() => null),
+      isCardImageFlipLayoutSync: vi.fn(() => false),
+      isCardImageRotatedSync: vi.fn(() => false),
+      isLocaleArtReady: vi.fn(() => true),
+      loadLocaleArt: vi.fn(),
+      resolveFaceIndexSync: vi.fn(() => null),
+      resolveOracleIdSync: vi.fn(() => null),
+      resolvePrintingImageUrl: vi.fn((printing) => printing.faces[0].normal),
+    }));
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => "0",
+        subscribe: () => () => {},
+        resolve: vi.fn(({ allowRemote }: { allowRemote: boolean }) => {
+          if (!allowRemote) {
+            return Promise.resolve({
+              revision: "0",
+              sources: [{ kind: "fallback" as const, src: null }],
+            });
+          }
+          remoteResolutionCount += 1;
+          if (remoteResolutionCount === 1) {
+            return Promise.resolve({
+              revision: "0",
+              sources: [
+                { kind: "remote" as const, src: "seed.jpg" },
+                { kind: "fallback" as const, src: null },
+              ],
+            });
+          }
+          return new Promise((resolve) => {
+            resolveFreshSources = resolve;
+          });
+        }),
+      },
+    }));
+
+    const { useCardImage } = await import("../useCardImage.ts");
+    const options = {
+      oracleId: "oracle-seed",
+      faceName: "Seed Card",
+      scryfallId: "printing-seed",
+    };
+    const warmed = renderHook(() => useCardImage("Seed Card", options));
+    await waitFor(() => expect(warmed.result.current.src).toBe("seed.jpg"));
+
+    await act(async () => resolvePrintings?.([{
+      id: "printing-seed",
+      faces: [{ normal: "fresh.jpg" }],
+    }]));
+    await waitFor(() => expect(remoteResolutionCount).toBe(2));
+    expect(warmed.result.current.src).toBe("seed.jpg");
+    expect(warmed.result.current.isLoading).toBe(true);
+
+    warmed.unmount();
+    const refreshed = renderHook(() => useCardImage("Seed Card", options));
+    expect(refreshed.result.current.src).toBe("seed.jpg");
+    expect(refreshed.result.current.isLoading).toBe(true);
+    await waitFor(() => expect(remoteResolutionCount).toBe(3));
+
+    act(() => refreshed.result.current.advanceFailedSource?.("seed.jpg"));
+    expect(refreshed.result.current.src).toBeNull();
+    expect(refreshed.result.current.isLoading).toBe(true);
+
+    await act(async () => resolveFreshSources?.({
+      revision: "0",
+      sources: [
+        { kind: "remote", src: "seed.jpg" },
+        { kind: "remote", src: "successor.jpg" },
+        { kind: "fallback", src: null },
+      ],
+    }));
+    await waitFor(() => expect(refreshed.result.current.src).toBe("successor.jpg"));
+  });
+
+  it("does not reuse a warmed presentation for a different face request", async () => {
+    mockNoRemoteScryfall();
+    const resolve = vi.fn()
+      .mockResolvedValueOnce({ revision: "0", sources: installedSources("/front-card.jpg") })
+      .mockResolvedValueOnce({ revision: "0", sources: installedSources("/back-card.jpg") });
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => "0",
+        subscribe: () => () => {},
+        resolve,
+      },
+    }));
+
+    const { useCardImage } = await import("../useCardImage");
+    const { result, rerender } = renderHook(
+      ({ faceIndex }: { faceIndex: number }) => useCardImage("Two Faces", { faceIndex }),
+      { initialProps: { faceIndex: 0 } },
+    );
+    await waitFor(() => expect(result.current.src).toBe("/front-card.jpg"));
+
+    rerender({ faceIndex: 1 });
+    expect(result.current.src).toBeNull();
+    await waitFor(() => expect(result.current.src).toBe("/back-card.jpg"));
+  });
+
+  it("retains_failed_sources_when_hydrating_a_warmed_fallback_presentation", async () => {
+    mockNoRemoteScryfall();
+    const resolve = vi.fn().mockResolvedValue({
+      revision: "0",
+      sources: [
+        ...installedSources("/failed-primary.jpg").slice(0, 1),
+        ...installedSources("/fallback-card.jpg").slice(0, 1),
+        { kind: "fallback" as const, src: null },
+      ],
+    });
+    vi.doMock("../../services/visualPacks/repository.ts", () => ({
+      visualPackRepository: {
+        currentRevision: () => "0",
+        subscribe: () => () => {},
+        resolve,
+      },
+    }));
+
+    const { useCardImage } = await import("../useCardImage");
+    const warmed = renderHook(() => useCardImage("Fallback Card"));
+    await waitFor(() => expect(warmed.result.current.src).toBe("/failed-primary.jpg"));
+    act(() => warmed.result.current.advanceFailedSource?.("/failed-primary.jpg"));
+    expect(warmed.result.current.src).toBe("/fallback-card.jpg");
+    warmed.unmount();
+
+    const { result } = renderHook(() => useCardImage("Fallback Card"));
+    expect(result.current.src).toBe("/fallback-card.jpg");
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.src).toBe("/fallback-card.jpg"));
+  });
+
   it("uses imported source printing art by default when no art chain is configured", async () => {
     vi.doMock("../../services/visualPacks/repository.ts", () => ({
       visualPackRepository: {
@@ -546,6 +793,7 @@ describe("useCardImage", () => {
     const resolvesBeforeRevision = resolve.mock.calls.length;
     revision = "2";
     act(() => revisionListener?.());
+    expect(result.current.src).toBeNull();
     await waitFor(() => expect(result.current.src).toBe("http://visual-pack.localhost/installed-2"));
     expect(resolve.mock.calls.length).toBeGreaterThan(resolvesBeforeRevision);
   });
@@ -924,6 +1172,7 @@ describe("useCardImage", () => {
 
     await waitFor(() => expect(result.current.src).toBe("source-row"));
     rerender({ sourcePrinting: undefined });
+  expect(result.current.src).toBeNull();
     await waitFor(() => expect(result.current.src).toBe("primary-row"));
     useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
   });

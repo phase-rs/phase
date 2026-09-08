@@ -848,6 +848,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::EquippedBy => parts.push("equipped by self".into()),
             FilterProp::AttachedToSource => parts.push("attached to self".into()),
             FilterProp::AttachedToRecipient => parts.push("attached to it".into()),
+            FilterProp::AttachedToPlayer { player } => {
+                parts.push(format!("attached to {}", fmt_controller(player)))
+            }
             FilterProp::Unpaired => parts.push("unpaired".into()),
             FilterProp::HasAttachment {
                 kind,
@@ -3928,8 +3931,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             ));
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::ExtraTurn { target } => {
+        Effect::ExtraTurn { target, count } => {
             d.push(("player".into(), fmt_target(target)));
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                d.push(("count".into(), fmt_quantity(count)));
+            }
         }
         Effect::GrantExtraLoyaltyActivations { amount, target } => {
             d.push(("amount".into(), fmt_quantity(amount)));
@@ -9940,7 +9946,14 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
 /// Walk an ability definition tree, visiting all nested `AbilityDefinition`s including
 /// those embedded in compound effects (`FlipCoin`, `RollDie`, `GrantAbility`, etc.).
 /// Returns `true` if the predicate returns `true` for any node in the tree.
-fn ability_tree_any(def: &AbilityDefinition, pred: &impl Fn(&AbilityDefinition) -> bool) -> bool {
+///
+/// `pub(crate)`: also the single-authority walker `PerpetualGrantModification::try_from`
+/// (`types/ability.rs`) reuses to reject a `GrantAbility` whose nested tree contains
+/// `Effect::Unimplemented` -- never reimplement tree-walking at that call site.
+pub(crate) fn ability_tree_any(
+    def: &AbilityDefinition,
+    pred: &impl Fn(&AbilityDefinition) -> bool,
+) -> bool {
     if pred(def) {
         return true;
     }
@@ -14631,6 +14644,44 @@ mod tests {
             rarities: Default::default(),
             attraction_lights: vec![],
         }
+    }
+
+    #[test]
+    fn extra_turn_coverage_distinguishes_default_one_from_fixed_two() {
+        fn parsed_card(name: &str, oracle: &str) -> CardCoverageResult {
+            let parsed =
+                crate::parser::parse_oracle_text(oracle, name, &[], &["Sorcery".to_string()], &[]);
+            let mut face = make_face();
+            face.name = name.to_string();
+            face.oracle_text = Some(oracle.to_string());
+            face.abilities = parsed.abilities;
+            coverage_result_for_face(face)
+        }
+
+        let warp = parsed_card(
+            "Time Warp",
+            "Target player takes an extra turn after this one.",
+        );
+        let stretch = parsed_card(
+            "Time Stretch",
+            "Target player takes two extra turns after this one.",
+        );
+        let warp_effect = warp
+            .parse_details
+            .iter()
+            .find(|item| item.label == "ExtraTurn")
+            .expect("Time Warp coverage contains ExtraTurn");
+        let stretch_effect = stretch
+            .parse_details
+            .iter()
+            .find(|item| item.label == "ExtraTurn")
+            .expect("Time Stretch coverage contains ExtraTurn");
+        assert!(!warp_effect.details.iter().any(|(key, _)| key == "count"));
+        assert!(stretch_effect
+            .details
+            .iter()
+            .any(|(key, value)| key == "count" && value == "2"));
+        assert_ne!(warp_effect.details, stretch_effect.details);
     }
 
     fn build_test_ability_item(def: &AbilityDefinition) -> ParsedItem {

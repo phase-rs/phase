@@ -2624,7 +2624,36 @@ pub(super) fn parse_subject_application(
         .parse(after_prefix)
         .is_ok()
         {
-            let (filter, _) = parse_target_with_ctx(target_text, ctx);
+            let (filter, rest) = parse_target_with_ctx(target_text, ctx);
+            // CR 115.1d (issue #8581): "any number of target players other
+            // than that player" (Curse of Surveillance) is not silently
+            // dropped here. The plural-noun coordinated-player arm inside
+            // `parse_target_with_ctx` matches the singular "player" tag
+            // against "players", so `rest` routinely carries a benign
+            // leftover "s" even on the fully-supported "any number of target
+            // players"/"target creatures" shapes (see
+            // `parse_subject_any_number_of_target_players`) -- a bare
+            // non-empty-rest guard would fail those too. The actual signal
+            // for an unexpressed exclusion is that leftover, once the "s"
+            // pluralization artifact is stripped, starting with "other than
+            // " -- the one shape this arm cannot express (no player-scoped
+            // counterpart to `FilterProp::Another` exists yet). Failing
+            // closed here (returning None) sends the caller back to
+            // Effect::unimplemented instead of reporting a bare
+            // target=player as fully supported. The general "exclude the
+            // enchanted/reference player from a player-targeted count" shape
+            // is tracked separately (issue #8581); this guard only refuses to
+            // fabricate a wrong AST for it.
+            if (
+                opt(nom::character::complete::char::<_, OracleError<'_>>('s')),
+                multispace0,
+                tag("other than "),
+            )
+                .parse(rest)
+                .is_ok()
+            {
+                return None;
+            }
             let mut application = subject_filter_application(filter, true)?;
             application.multi_target = Some(MultiTargetSpec::unlimited(0));
             return Some(application);

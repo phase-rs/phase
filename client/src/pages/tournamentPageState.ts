@@ -42,6 +42,7 @@ import type {
 import type {
   GatedTournamentRpcResult,
   TournamentCredential,
+  TournamentIncompatible,
   TournamentRole,
 } from "../stores/multiplayerStore";
 
@@ -484,11 +485,16 @@ export type FailureLabel =
   | { readonly key: "errors.connectionLost" }
   | { readonly key: "errors.aborted" }
   | { readonly key: "errors.unsupported" }
+  | { readonly key: "errors.incompatible"; readonly needed: number }
   | { readonly key: "errors.serverRejected"; readonly message: string };
 
-/** The failure half of a gated action's result — also total over an ungated one. */
+/**
+ * The failure half of a gated action's result — also total over an ungated one,
+ * plus the locally-produced {@link TournamentIncompatible} that `createTournament`
+ * can return before sending.
+ */
 type TournamentFailure = Extract<
-  GatedTournamentRpcResult<unknown>,
+  GatedTournamentRpcResult<unknown> | TournamentIncompatible,
   { ok: false }
 >;
 
@@ -548,6 +554,13 @@ export function failureLabel(failure: TournamentFailure): FailureLabel {
   }
   if (failure.reason === "aborted") return { key: "errors.aborted" };
   if (failure.reason === "unsupported") return { key: "errors.unsupported" };
+  // Locally-produced, pre-send refusal: the target broker cannot honor the
+  // requested match structure. Carry the TYPED required version, not the
+  // store's English `message`, so each locale renders its own sentence with
+  // `{{needed}}` interpolated — the same posture as `not_authorized`'s `role`.
+  if (failure.reason === "incompatible") {
+    return { key: "errors.incompatible", needed: failure.neededLobbyVersion };
+  }
   const unreachable: never = failure.reason;
   return unreachable;
 }

@@ -1311,7 +1311,7 @@ pub(super) fn handle_unless_payment(
                         },
                         events,
                     ) {
-                        crate::game::effects::discard::RandomDiscardOutcome::Completed => {}
+                        crate::game::effects::discard::RandomDiscardOutcome::Completed { .. } => {}
                         // CR 616.1: a replacement effect parked a choice. Unlike
                         // the chosen-discard sibling there is no
                         // `WardDiscardChoice` re-prompt loop to own the
@@ -1323,15 +1323,7 @@ pub(super) fn handle_unless_payment(
                         crate::game::effects::discard::RandomDiscardOutcome::NeedsReplacementChoice {
                             remaining_eligible,
                             remaining_count,
-                            // Effect-layer field: the parked EFFECT batch stamps
-                            // the paused card's terminal `Discarded`. A cost
-                            // payment publishes no such ledger, so this caller
-                            // has nothing to do with it.
-                            paused_card: _,
-                            // Likewise effect-layer: `discard_at_random` already
-                            // set `waiting_for` from this seat, and this caller
-                            // never re-parks, so it has no prompt to keep in step.
-                            chooser: _,
+                            ..
                         } => {
                             state.pending_cost_move_resume =
                                 Some(PendingCostMoveResume::RandomDiscardUnlessPayment(Box::new(
@@ -2587,13 +2579,11 @@ pub(super) fn resume_random_discard_unless_payment(
             },
             events,
         ) {
-            crate::game::effects::discard::RandomDiscardOutcome::Completed => {}
+            crate::game::effects::discard::RandomDiscardOutcome::Completed { .. } => {}
             crate::game::effects::discard::RandomDiscardOutcome::NeedsReplacementChoice {
                 remaining_eligible,
                 remaining_count,
-                // Effect-layer fields — see the sibling site above.
-                paused_card: _,
-                chooser: _,
+                ..
             } => {
                 state.pending_cost_move_resume =
                     Some(PendingCostMoveResume::RandomDiscardUnlessPayment(Box::new(

@@ -54,6 +54,9 @@
     "lossPointsLabel": "Derrota",
     "formatLabel": "Formato",
     "formatNone": "Não especificado",
+    "matchTypeLabel": "Partida",
+    "matchTypeBo3": "Melhor de três",
+    "matchTypeBo1": "Jogo único",
     "plusRoundsLabel": "Rodadas extras",
     "plusRoundsHint": "Adicionadas à contagem automática de rodadas (Suíço mais N). Aplica-se apenas quando Rodadas fica automático.",
     "submit": "Criar torneio",
@@ -147,6 +150,7 @@
     "connectionLost": "Ligação ao lobby perdida. Verifica o endereço do servidor.",
     "aborted": "Esse pedido foi cancelado.",
     "unsupported": "O pedido foi enviado, mas este servidor é demasiado antigo para o confirmar. Verifica o torneio antes de tentares de novo.",
+    "incompatible": "Este servidor é muito antigo para essa estrutura de partida (precisa do protocolo de lobby {{needed}}). Nada foi enviado.",
     "notFound": "Nenhum torneio com esse código."
   }
 }

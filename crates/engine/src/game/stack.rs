@@ -5205,6 +5205,64 @@ mod tests {
     }
 
     #[test]
+    fn oversized_extra_turn_effect_settles_without_allocating_turns_or_events() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Oversized extra turns".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ExtraTurn {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed {
+                    value: crate::game::effects::extra_turn::MAX_EXTRA_TURNS_PER_RESOLUTION + 1,
+                },
+            },
+            Vec::new(),
+            source_id,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: source_id,
+            source_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(Box::new(ability)),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let mut events = Vec::new();
+
+        resolve_top(&mut state, &mut events);
+
+        assert!(state.extra_turns.is_empty());
+        assert!(state.stack.is_empty());
+        assert_eq!(state.objects[&source_id].zone, Zone::Graveyard);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ExtraTurnCreated { .. })));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: crate::types::ability::EffectKind::ExtraTurn,
+                ..
+            }
+        )));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::StackResolved { object_id } if *object_id == source_id))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn stack_spell_copy_has_no_cast_occurrence_and_writes_no_cast_record() {
         let mut state = setup();
         let source_id = ObjectId(70);

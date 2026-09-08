@@ -18399,6 +18399,121 @@ pub(crate) fn find_non_self_discard(
     }
 }
 
+/// Complete classifier for the measured random hand-discard cost class.
+/// Exactly one unfiltered `Random` leaf is supported. Multiple random leaves,
+/// a random leaf mixed with a chosen hand-discard leaf, filtered random
+/// discard, and random source-card discard fail before any cost mutation.
+pub(crate) fn single_random_hand_discard_cost(
+    cost: &AbilityCost,
+) -> Result<Option<&QuantityExpr>, &'static str> {
+    fn visit<'a>(
+        cost: &'a AbilityCost,
+        random: &mut Vec<&'a QuantityExpr>,
+        chosen_hand: &mut usize,
+        invalid_random: &mut bool,
+        unresolved_one_of_with_hand_discard: &mut bool,
+    ) {
+        fn contains_from_hand_discard(cost: &AbilityCost) -> bool {
+            match cost {
+                AbilityCost::Discard {
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                    ..
+                } => true,
+                AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                    costs.iter().any(contains_from_hand_discard)
+                }
+                _ => false,
+            }
+        }
+
+        match cost {
+            AbilityCost::Discard {
+                count,
+                filter,
+                selection: CardSelectionMode::Random,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            } => {
+                *invalid_random |= filter.is_some();
+                random.push(count);
+            }
+            AbilityCost::Discard {
+                selection: CardSelectionMode::Random,
+                ..
+            } => *invalid_random = true,
+            AbilityCost::Discard {
+                selection: CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                ..
+            } => *chosen_hand += 1,
+            AbilityCost::Composite { costs } => {
+                for cost in costs {
+                    visit(
+                        cost,
+                        random,
+                        chosen_hand,
+                        invalid_random,
+                        unresolved_one_of_with_hand_discard,
+                    );
+                }
+            }
+            // An unresolved disjunction is a declaration choice, not a set of
+            // simultaneous leaves. Its selected branch replaces this node
+            // before payment and is classified on re-entry. A random sibling
+            // cannot be extracted first when any branch could later add a hand
+            // discard: that would bypass the mixed-leaf guard after partially
+            // committing the cost.
+            AbilityCost::OneOf { costs } => {
+                *unresolved_one_of_with_hand_discard |=
+                    costs.iter().any(contains_from_hand_discard);
+            }
+            _ => {}
+        }
+    }
+
+    let mut random = Vec::new();
+    let mut chosen_hand = 0;
+    let mut invalid_random = false;
+    let mut unresolved_one_of_with_hand_discard = false;
+    visit(
+        cost,
+        &mut random,
+        &mut chosen_hand,
+        &mut invalid_random,
+        &mut unresolved_one_of_with_hand_discard,
+    );
+    match random.as_slice() {
+        [] if !invalid_random => Ok(None),
+        [count] if !invalid_random && chosen_hand == 0 && !unresolved_one_of_with_hand_discard => {
+            Ok(Some(*count))
+        }
+        _ => Err("Unsupported mixed, multiple, or filtered random discard cost"),
+    }
+}
+
+/// Remove the one random hand-discard leaf already accepted by
+/// [`single_random_hand_discard_cost`], preserving every nonrandom sibling.
+pub(crate) fn remove_random_hand_discard_cost(cost: AbilityCost) -> Option<AbilityCost> {
+    match cost {
+        AbilityCost::Discard {
+            selection: CardSelectionMode::Random,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            ..
+        } => None,
+        AbilityCost::Composite { costs } => {
+            let costs = costs
+                .into_iter()
+                .filter_map(remove_random_hand_discard_cost)
+                .collect::<Vec<_>>();
+            match costs.len() {
+                0 => None,
+                1 => costs.into_iter().next(),
+                _ => Some(AbilityCost::Composite { costs }),
+            }
+        }
+        other => Some(other),
+    }
+}
+
 /// CR 601.2h + CR 701.9a: Resolve a non-self "discard" cost leg into its interactive requirement.
 ///
 /// - `Ok(None)`  => there is no `FromHand` discard leg, OR the resolved count is 0. A zero-card
@@ -20823,6 +20938,14 @@ pub fn handle_activate_ability(
                     )?
                 {
                     return Ok(waiting_for);
+                }
+                if pending_interactive.deferred_random_discard_cost.is_some() {
+                    return casting_costs::finish_pending_cost_or_cast(
+                        state,
+                        player,
+                        pending_interactive,
+                        events,
+                    );
                 }
             }
 

@@ -8155,6 +8155,17 @@ pub(crate) fn has_member_driven_repeat_after_hydration(
     has_member_driven_repeat(&ability_with_event_context_targets(state, ability))
 }
 
+/// CR 608.2c + CR 608.2d + CR 603.12a: these repeat shapes apply an
+/// optional instruction independently to every iteration, rather than once to
+/// the whole ability. Keep this as the single structural exclusion for both
+/// the up-front prompt and the early infeasibility auto-decline: the latter
+/// must not decide the root from only its first bound member.
+fn optionality_is_per_iteration(state: &GameState, ability: &ResolvedAbility) -> bool {
+    has_kind_driven_repeat(ability)
+        || has_member_driven_repeat_after_hydration(state, ability)
+        || is_repeated_optional_payment(ability)
+}
+
 /// CR 608.2d: "A player can't choose an impossible option." An optional effect
 /// whose only reachable outcome is a no-op must not be offered as a "you may"
 /// prompt at all. Each arm below proves infeasibility through its authoritative
@@ -8182,6 +8193,12 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         // `OptionalEffectPerformed` rider) must be suppressed (Sun Droplet #4776).
         Effect::RemoveCounter { .. } => {
             counters::remove_counter_optional_is_infeasible(state, ability)
+        }
+        // CR 122.5 + CR 608.2d: hydrate event-context targets before asking the
+        // move resolver's feasibility authority, exactly as resolution does.
+        Effect::MoveCounters { .. } => {
+            let effective = hydrate_event_context_targets(state, ability);
+            counters::move_counters_optional_is_infeasible(state, effective.as_ref())
         }
         // CR 608.2d + CR 122.1: an optional exact counter-removal selection
         // cannot be accepted unless every required permanent is selectable.
@@ -8409,10 +8426,7 @@ pub(crate) fn upfront_optional_gate(
     }
     // CR 608.2c + CR 608.2d + CR 603.12a: the three shapes that SUPPRESS the single up-front
     // gate and fire optionality per iteration instead.
-    if has_kind_driven_repeat(ability)
-        || has_member_driven_repeat_after_hydration(state, ability)
-        || is_repeated_optional_payment(ability)
-    {
+    if optionality_is_per_iteration(state, ability) {
         return None;
     }
     let infeasible = match feasibility {
@@ -10598,11 +10612,15 @@ fn record_announced_sacrifice(
 /// CR 701.21a: Derive terminal sacrifice bookkeeping from the actual events,
 /// not from attempts. This includes an event delivered by the replacement
 /// response immediately before the pending queue is drained.
+// The boxed records are cloned directly from `ZoneChanged` and moved into
+// `CreatureExploited`; retaining that allocation avoids an unbox/rebox copy at
+// this handoff.
+#[allow(clippy::vec_box)]
 fn record_sacrifice_batch_events(
     completion: &mut PendingPlayerScopeSacrificeCompletion,
     events: &[GameEvent],
-) -> Vec<ObjectId> {
-    let mut completed = Vec::new();
+) -> Vec<Box<ZoneChangeRecord>> {
+    let mut completed: Vec<Box<ZoneChangeRecord>> = Vec::new();
     for event in events {
         match event {
             GameEvent::PermanentSacrificed { object_id, .. }
@@ -10610,7 +10628,6 @@ fn record_sacrifice_batch_events(
                     && !completion.sacrificed.contains(object_id) =>
             {
                 completion.sacrificed.push(*object_id);
-                completed.push(*object_id);
                 if !completion.zone_changed.contains(object_id) {
                     completion.zone_changed.push(*object_id);
                 }
@@ -10628,7 +10645,6 @@ fn record_sacrifice_batch_events(
                 // announced sacrifice's terminal result.
                 if !completion.sacrificed.contains(object_id) {
                     completion.sacrificed.push(*object_id);
-                    completed.push(*object_id);
                 }
                 if !completion.zone_changed.contains(object_id) {
                     completion.zone_changed.push(*object_id);
@@ -10641,6 +10657,17 @@ fn record_sacrifice_batch_events(
                         .departed_zone_change_indices
                         .push(record.turn_zone_change_index);
                 }
+                // CR 603.2g + CR 702.110b: only the actual announced
+                // battlefield departure proves the creature was sacrificed as
+                // exploit resolved. `PermanentSacrificed` bookkeeping alone
+                // cannot fabricate the victim snapshot.
+                if !completion.followed_up_sacrifices.contains(object_id)
+                    && !completed
+                        .iter()
+                        .any(|completed_record| completed_record.object_id == *object_id)
+                {
+                    completed.push(record.clone());
+                }
             }
             _ => {}
         }
@@ -10652,16 +10679,18 @@ fn record_sacrifice_batch_events(
 /// follow-up only after the sacrifice event has completed. The completion ledger
 /// survives a replacement choice, so a resumed event is neither skipped nor
 /// emitted twice.
+#[allow(clippy::vec_box)]
 fn emit_sacrifice_batch_follow_ups(
     completion: &mut PendingPlayerScopeSacrificeCompletion,
-    completed: Vec<ObjectId>,
+    completed: Vec<Box<ZoneChangeRecord>>,
     events: &mut Vec<GameEvent>,
 ) {
     let Some(follow_up) = completion.follow_up.clone() else {
         return;
     };
 
-    for sacrificed in completed {
+    for record in completed {
+        let sacrificed = record.object_id;
         if completion.followed_up_sacrifices.contains(&sacrificed) {
             continue;
         }
@@ -10670,6 +10699,7 @@ fn emit_sacrifice_batch_follow_ups(
                 events.push(GameEvent::CreatureExploited {
                     exploiter,
                     sacrificed,
+                    record,
                 });
             }
         }
@@ -10940,6 +10970,7 @@ pub(crate) fn drain_pending_discard_batch(
                 remaining_count,
                 paused_card,
                 chooser,
+                ..
             } = discard::discard_at_random(
                 state,
                 discard::RandomDiscardRequest {
@@ -12589,7 +12620,12 @@ fn resolve_chain_body(
         }
     }
 
-    let optional_is_infeasible = ability.optional && optional_effect_is_infeasible(state, ability);
+    // Per-iteration optionality must reach the rebound singleton ability before
+    // feasibility is decided. In particular, the root's first member can have
+    // no committable counter move while a later member remains offerable.
+    let optional_is_infeasible = ability.optional
+        && !optionality_is_per_iteration(state, ability)
+        && optional_effect_is_infeasible(state, ability);
 
     // CR 608.2c + CR 608.2d: An infeasible optional cast/play instruction or
     // exact object selection does not happen. Route either outcome through the existing
@@ -12606,6 +12642,7 @@ fn resolve_chain_body(
     let auto_decline_infeasible_optional = matches!(
         &ability.effect,
         Effect::CastFromZone { .. }
+            | Effect::MoveCounters { .. }
             | Effect::ChooseObjectsIntoTrackedSet {
                 cardinality: Some(ObjectSelectionCardinality::Exactly { .. }),
                 ..
@@ -16747,6 +16784,128 @@ mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
 
+    fn real_sacrifice_events() -> (ObjectId, ObjectId, Vec<GameEvent>, Box<ZoneChangeRecord>) {
+        let mut state = GameState::new_two_player(42);
+        let exploiter = create_object(
+            &mut state,
+            CardId(91),
+            PlayerId(0),
+            "Exploit source".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = create_object(
+            &mut state,
+            CardId(92),
+            PlayerId(0),
+            "Exploit victim".to_string(),
+            Zone::Battlefield,
+        );
+        let victim_object = state.objects.get_mut(&victim).expect("victim exists");
+        victim_object.card_types.core_types.push(CoreType::Creature);
+        victim_object.base_card_types = victim_object.card_types.clone();
+        victim_object.is_token = true;
+        victim_object.controller = PlayerId(0);
+        victim_object.owner = PlayerId(1);
+
+        let mut events = Vec::new();
+        let outcome = crate::game::sacrifice::sacrifice_permanent(
+            &mut state,
+            victim,
+            PlayerId(0),
+            &mut events,
+        )
+        .expect("fixture sacrifice succeeds");
+        assert!(matches!(
+            outcome,
+            crate::game::sacrifice::SacrificeOutcome::Complete
+        ));
+        let record = events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id, record, ..
+                } if *object_id == victim => Some(record.clone()),
+                _ => None,
+            })
+            .expect("successful sacrifice emits its departure record");
+        (exploiter, victim, events, record)
+    }
+
+    fn exploit_completion(
+        exploiter: ObjectId,
+        victim: ObjectId,
+    ) -> PendingPlayerScopeSacrificeCompletion {
+        PendingPlayerScopeSacrificeCompletion {
+            announced: vec![victim],
+            follow_up: Some(PendingPlayerScopeSacrificeFollowUp::Exploit { exploiter }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn exploit_follow_up_uses_the_actual_departure_record_once_in_any_event_order() {
+        let (exploiter, victim, sacrifice_events, expected_record) = real_sacrifice_events();
+
+        for events in [sacrifice_events.clone(), {
+            let mut reversed = sacrifice_events.clone();
+            reversed.reverse();
+            reversed
+        }] {
+            let mut completion = exploit_completion(exploiter, victim);
+            let completed = record_sacrifice_batch_events(&mut completion, &events);
+            let mut emitted = Vec::new();
+            emit_sacrifice_batch_follow_ups(&mut completion, completed, &mut emitted);
+            assert_eq!(completion.sacrificed, vec![victim]);
+            assert_eq!(emitted.len(), 1);
+            assert!(matches!(
+                &emitted[0],
+                GameEvent::CreatureExploited {
+                    exploiter: event_exploiter,
+                    sacrificed,
+                    record,
+                } if *event_exploiter == exploiter
+                    && *sacrificed == victim
+                    && record == &expected_record
+            ));
+
+            let completed = record_sacrifice_batch_events(&mut completion, &events);
+            emit_sacrifice_batch_follow_ups(&mut completion, completed, &mut emitted);
+            assert_eq!(
+                emitted.len(),
+                1,
+                "repeated scans must not duplicate an exploit follow-up"
+            );
+        }
+    }
+
+    #[test]
+    fn exploit_follow_up_requires_an_announced_battlefield_departure_record() {
+        let (exploiter, victim, sacrifice_events, _) = real_sacrifice_events();
+        let permanent_sacrificed = sacrifice_events
+            .iter()
+            .find(|event| matches!(event, GameEvent::PermanentSacrificed { .. }))
+            .cloned()
+            .expect("successful sacrifice emits bookkeeping");
+
+        let mut completion = exploit_completion(exploiter, victim);
+        let completed = record_sacrifice_batch_events(
+            &mut completion,
+            std::slice::from_ref(&permanent_sacrificed),
+        );
+        let mut emitted = Vec::new();
+        emit_sacrifice_batch_follow_ups(&mut completion, completed, &mut emitted);
+        assert_eq!(completion.sacrificed, vec![victim]);
+        assert!(
+            emitted.is_empty(),
+            "bookkeeping without an actual departure cannot prove exploit"
+        );
+
+        let mut unannounced = exploit_completion(exploiter, ObjectId(victim.0 + 1));
+        let completed = record_sacrifice_batch_events(&mut unannounced, &sacrifice_events);
+        emit_sacrifice_batch_follow_ups(&mut unannounced, completed, &mut emitted);
+        assert!(emitted.is_empty());
+    }
+
     #[test]
     fn resolution_window_batch_reaches_a_chained_consumer() {
         let window = || {
@@ -16886,8 +17045,9 @@ mod tests {
         CardPredicateChoice, CastingPermission, ChoiceType, ChoiceValue, Chooser, ChosenAttribute,
         ChosenCounterCountCondition, Comparator, ContinuousModification, ControllerRef,
         DamageChannel, DelayedTriggerCondition, Duration, EffectKind, EffectScope, FilterProp,
-        ManaSpendPermission, ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue,
-        QuantityExpr, QuantityRef, SpellContext, StaticDefinition, SubAbilityLink, TapStateChange,
+        ManaSpendPermission, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter,
+        PlayerScope, PtValue, QuantityExpr, QuantityModification, QuantityRef,
+        ReplacementDefinition, SpellContext, StaticDefinition, SubAbilityLink, TapStateChange,
         TargetFilter, TargetRef, TargetSelectionMode, TriggerDefinition, TypeFilter, TypedFilter,
         UnlessPayModifier, UntilCondition, ZoneOwner,
     };
@@ -16910,7 +17070,10 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::player::{PlayerCounterKind, PlayerId};
-    use crate::types::resolution::{OptionalEffectFrame, ResolutionStateWire};
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::resolution::{
+        OptionalEffectFrame, ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION,
+    };
     use crate::types::statics::CastFrequency;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -18191,6 +18354,382 @@ mod tests {
         ability
     }
 
+    fn optional_stack_target_counter_move(
+        source_id: ObjectId,
+        targets: Vec<TargetRef>,
+    ) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::MoveCounters {
+                source: TargetFilter::Any,
+                counter_type: Some(CounterType::Plus1Plus1),
+                count: Some(QuantityExpr::Fixed { value: 1 }),
+                mode: crate::types::ability::CounterTransferMode::Move,
+                selection: crate::types::ability::CounterMoveSelection::StackTarget,
+                target: TargetFilter::Any,
+            },
+            targets,
+            source_id,
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability
+    }
+
+    /// CR 603.5 + CR 608.2d + CR 122.5: Tidus's two target slots may legally
+    /// name the same creature, but that makes the optional counter move
+    /// impossible. The resolver must therefore auto-decline it without a
+    /// prompt while retaining the normal prompt for a distinct, counter-bearing
+    /// sibling and routing the impossible branch through its printed else tail.
+    #[test]
+    fn optional_tidus_move_suppresses_only_impossible_prompt_and_runs_else() {
+        let mut state = GameState::new_two_player(42);
+        let tidus = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tidus, Yuna's Guardian".to_string(),
+            Zone::Battlefield,
+        );
+        let sibling = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Tidus's Ally".to_string(),
+            Zone::Battlefield,
+        );
+        let start_life = state.players[0].life;
+
+        let mut impossible = optional_stack_target_counter_move(
+            tidus,
+            vec![TargetRef::Object(tidus), TargetRef::Object(tidus)],
+        );
+        let mut else_ability =
+            optional_gain_life(tidus, PlayerId(0), 1).condition(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::EffectOutcome {
+                    signal: EffectOutcomeSignal::OptionalEffectPerformed,
+                }),
+            });
+        else_ability.optional = false;
+        impossible.else_ability = Some(Box::new(else_ability));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &impossible, &mut events, 0)
+            .expect("an impossible optional move auto-declines");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "same-object Tidus move must not offer an accept prompt"
+        );
+        assert_eq!(
+            state.players[0].life,
+            start_life + 1,
+            "the auto-decline must preserve the explicit else continuation"
+        );
+
+        state
+            .objects
+            .get_mut(&tidus)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        let feasible = optional_stack_target_counter_move(
+            tidus,
+            vec![TargetRef::Object(tidus), TargetRef::Object(sibling)],
+        );
+        resolve_ability_chain(&mut state, &feasible, &mut events, 0)
+            .expect("a feasible Tidus move resolves to the may gate");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "a distinct destination with a counter source must remain offerable"
+        );
+    }
+
+    /// CR 608.2b + CR 608.2d: target legality remains owned by the existing
+    /// validation seam. Once a target changes controller or incarnation, the
+    /// feasibility probe sees only the validated slots and suppresses a move
+    /// that can no longer commit.
+    #[test]
+    fn optional_move_counter_feasibility_uses_validated_target_slots() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let destination = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Counter Destination".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [source, destination] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        let controlled_creature = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+        let mut ability = optional_stack_target_counter_move(
+            source,
+            vec![TargetRef::Object(source), TargetRef::Object(destination)],
+        );
+        let Effect::MoveCounters { target, .. } = &mut ability.effect else {
+            unreachable!("test constructs MoveCounters");
+        };
+        *target = controlled_creature;
+        ability.selected_target_incarnations = vec![
+            ObjectIncarnationRef::from_object(&state.objects[&source]),
+            ObjectIncarnationRef::from_object(&state.objects[&destination]),
+        ];
+
+        assert!(!optional_effect_is_infeasible(&state, &ability));
+        state.objects.get_mut(&destination).unwrap().controller = PlayerId(1);
+        let controller_changed =
+            crate::game::ability_utils::validate_targets_in_chain(&state, &ability);
+        assert_eq!(controller_changed.targets, vec![TargetRef::Object(source)]);
+        assert!(optional_effect_is_infeasible(&state, &controller_changed));
+
+        state.objects.get_mut(&destination).unwrap().controller = PlayerId(0);
+        state.objects.get_mut(&destination).unwrap().incarnation += 1;
+        let stale_incarnation =
+            crate::game::ability_utils::validate_targets_in_chain(&state, &ability);
+        assert_eq!(stale_incarnation.targets, vec![TargetRef::Object(source)]);
+        assert!(optional_effect_is_infeasible(&state, &stale_incarnation));
+    }
+
+    /// CR 603.2 + CR 608.2d: feasibility must hydrate the same event-context
+    /// target carrier as production resolution before resolving a quantity that
+    /// reads that target. Without the explicit hydration in
+    /// `optional_effect_is_infeasible`, the count reads zero from empty targets,
+    /// auto-declines, and runs the else branch instead of reaching this prompt.
+    #[test]
+    fn optional_move_counter_feasibility_hydrates_target_dependent_quantity() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let destination = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Triggered Destination".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+        state
+            .objects
+            .get_mut(&destination)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        state.current_trigger_event = Some(GameEvent::CounterAdded {
+            object_id: destination,
+            counter_type: CounterType::Plus1Plus1,
+            count: 1,
+            actor: PlayerId(0),
+        });
+        let mut ability = ResolvedAbility::new(
+            Effect::MoveCounters {
+                source: TargetFilter::SelfRef,
+                counter_type: Some(CounterType::Plus1Plus1),
+                count: Some(QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Target,
+                        counter_type: Some(CounterType::Plus1Plus1),
+                    },
+                }),
+                mode: crate::types::ability::CounterTransferMode::Move,
+                selection: crate::types::ability::CounterMoveSelection::StackTarget,
+                target: TargetFilter::TriggeringSource,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.optional = true;
+        let start_life = state.players[0].life;
+        let mut else_ability = optional_gain_life(source, PlayerId(0), 1);
+        else_ability.optional = false;
+        else_ability.condition = Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        });
+        ability.else_ability = Some(Box::new(else_ability));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("hydrated target-dependent counter move reaches its may gate");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "the hydrated event target makes the dynamic move offerable"
+        );
+        assert_eq!(
+            state.players[0].life, start_life,
+            "the else branch must not run while the hydrated move is offered"
+        );
+    }
+
+    /// CR 608.2c + CR 608.2d + CR 122.5: an optional member-driven move must
+    /// decide feasibility after each member is rebound. The first member is the
+    /// source itself (an impossible same-object move), but the second is a
+    /// distinct counter-bearing source/destination pair and remains offerable.
+    #[test]
+    fn optional_member_move_declines_only_impossible_member_and_reaches_later_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let source = reflexive_test_creature(&mut state, PlayerId(0), "Counter Source");
+        let destination = reflexive_test_creature(&mut state, PlayerId(0), "Later Destination");
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::MoveCounters {
+                source: TargetFilter::SelfRef,
+                counter_type: Some(CounterType::Plus1Plus1),
+                count: Some(QuantityExpr::Fixed { value: 1 }),
+                mode: crate::types::ability::CounterTransferMode::Move,
+                selection: crate::types::ability::CounterMoveSelection::StackTarget,
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(source)],
+            source,
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        });
+        let start_life = state.players[0].life;
+        let mut tail = optional_gain_life(source, PlayerId(0), 1);
+        tail.optional = false;
+        tail.sub_link = SubAbilityLink::SequentialSibling;
+        ability.sub_ability = Some(Box::new(tail));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("member-driven move resolves its first member");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "the later distinct member must still receive its own may prompt"
+        );
+        assert_eq!(
+            state.players[0].life,
+            start_life + 1,
+            "the impossible first member must retain its sequential continuation"
+        );
+
+        crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .expect("accepting the later member resolves its move");
+        assert!(
+            !state.objects[&source]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "the later feasible member must move the source counter"
+        );
+        assert_eq!(
+            state.objects[&destination]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1),
+            "the later distinct destination must receive the moved counter"
+        );
+        assert_eq!(
+            state.players[0].life,
+            start_life + 2,
+            "the later accepted member must preserve its own sequential continuation"
+        );
+    }
+
+    /// CR 614.6 + CR 608.2d + CR 122.5: counter replacement legality is not
+    /// predicted by the structural optional probe. A destination that prevents
+    /// counters still receives the production-shaped may prompt; replacement
+    /// handling remains the counter resolver's responsibility after acceptance.
+    #[test]
+    fn optional_move_with_counter_prevention_remains_offerable() {
+        let mut state = GameState::new_two_player(42);
+        let source = reflexive_test_creature(&mut state, PlayerId(0), "Counter Source");
+        let destination = reflexive_test_creature(&mut state, PlayerId(0), "No Counters");
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        let mut prevention = ReplacementDefinition::new(ReplacementEvent::AddCounter);
+        prevention.valid_card = Some(TargetFilter::SelfRef);
+        prevention.quantity_modification = Some(QuantityModification::Prevent);
+        state
+            .objects
+            .get_mut(&destination)
+            .unwrap()
+            .replacement_definitions
+            .push(prevention);
+
+        let ability = optional_stack_target_counter_move(
+            source,
+            vec![TargetRef::Object(source), TargetRef::Object(destination)],
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("replacement-sensitive counter move reaches its may gate");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "counter-placement prevention must fail open instead of suppressing the may"
+        );
+        crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .expect("accepting the replacement-sensitive move resolves through its pipeline");
+        assert_eq!(
+            state.objects[&source]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1),
+            "the blocked move must leave the source counter in place"
+        );
+        assert!(
+            !state.objects[&destination]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "the replacement must prevent the destination counter placement"
+        );
+    }
+
     #[test]
     fn repeat_for_tracked_set_marks_ability_as_referencing_tracked_set() {
         // Issue #740 (Seasoned Pyromancer): "for each nonland card discarded this
@@ -18677,14 +19216,19 @@ mod tests {
         ));
         state.current_trigger_event = None;
 
-        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
-            .expect("real optional-effect prompt serializes as v2");
-        assert_eq!(v2["resolution_state_version"], 2);
-        assert!(v2.get("pending_optional_effect").is_none());
-        assert!(v2.get("pending_optional_trigger_event").is_none());
-        assert!(v2.get("pending_optional_trigger_match_count").is_none());
-        state = serde_json::from_value::<ResolutionStateWire>(v2)
-            .expect("real optional-effect prompt round-trips through the v2 wire")
+        let current = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("real optional-effect prompt serializes through the current wire");
+        assert_eq!(
+            current["resolution_state_version"],
+            RESOLUTION_STATE_WIRE_VERSION
+        );
+        assert!(current.get("pending_optional_effect").is_none());
+        assert!(current.get("pending_optional_trigger_event").is_none());
+        assert!(current
+            .get("pending_optional_trigger_match_count")
+            .is_none());
+        state = serde_json::from_value::<ResolutionStateWire>(current)
+            .expect("real optional-effect prompt round-trips through the current wire")
             .into_game_state();
 
         crate::game::engine::apply(
