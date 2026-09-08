@@ -1,5 +1,9 @@
-use engine::game::turn_control;
-use engine::types::ability::Effect;
+use engine::ai_support::current_target_selection_targets;
+use engine::game::combat::get_valid_block_targets;
+use engine::game::{players, turn_control};
+use engine::types::ability::{
+    ContinuousModification, Duration, Effect, StaticDefinition, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, StackEntry, WaitingFor};
@@ -13,7 +17,9 @@ use crate::features::DeckFeatures;
 use super::activation::turn_only;
 use super::context::{collect_ability_effects, PolicyContext};
 use super::effect_classify::{extract_target_filter, targets_creatures_only};
-use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
+use super::registry::{
+    DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy, STRONG_MAX,
+};
 use super::stack_awareness::{
     assess_spell_impact, foreign_counter_target_of_ai, COUNTER_BREAK_EVEN_IMPACT,
     COUNTER_IMPACT_THRESHOLD,
@@ -54,6 +60,7 @@ impl TacticalPolicy for EffectTimingPolicy {
             DecisionKind::PlayLand,
             DecisionKind::CastSpell,
             DecisionKind::ActivateAbility,
+            DecisionKind::SelectTarget,
         ]
     }
 
@@ -67,11 +74,188 @@ impl TacticalPolicy for EffectTimingPolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
+        if matches!(
+            ctx.decision.waiting_for,
+            WaitingFor::TargetSelection { .. }
+                | WaitingFor::TriggerTargetSelection { .. }
+                | WaitingFor::MultiTargetSelection { .. }
+                | WaitingFor::CopyRetarget { .. }
+                | WaitingFor::RetargetChoice { .. }
+                | WaitingFor::DistributeAmong { .. }
+                | WaitingFor::MoveCountersDistribution { .. }
+                | WaitingFor::RemoveCountersChoice { .. }
+        ) {
+            return match &ctx.candidate.action {
+                GameAction::ChooseTarget {
+                    target: Some(target),
+                } => evasion_target_verdict(ctx, target),
+                _ => PolicyVerdict::neutral(PolicyReason::new(
+                    "effect_timing_unsupported_target_selection",
+                )),
+            };
+        }
+
         PolicyVerdict::Score {
             delta: self.score(ctx),
             reason: PolicyReason::new("effect_timing_score"),
         }
     }
+}
+
+/// Scores only an ordinary, one-slot activated ability that grants its creature
+/// target bare, until-end-of-turn unblockability.
+fn evasion_target_verdict(ctx: &PolicyContext<'_>, target: &TargetRef) -> PolicyVerdict {
+    if !is_single_target_unblockable_activation(ctx)
+        || !matches!(ctx.state.phase, Phase::DeclareAttackers)
+        || prompt_has_team_defender(ctx.state)
+    {
+        return PolicyVerdict::neutral(PolicyReason::new("effect_timing_evasion_target_na"));
+    }
+
+    let TargetRef::Object(target_id) = target else {
+        return PolicyVerdict::neutral(PolicyReason::new("effect_timing_evasion_target_na"));
+    };
+    if declared_pair_blockable(ctx.state, *target_id) {
+        return PolicyVerdict::neutral(PolicyReason::new(
+            "effect_timing_pair_blockable_evasion_target",
+        ));
+    }
+
+    if current_target_selection_targets(ctx.state)
+        .into_iter()
+        .flatten()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(*id),
+            _ => None,
+        })
+        .any(|sibling| declared_pair_blockable(ctx.state, sibling))
+    {
+        PolicyVerdict::strong(
+            -STRONG_MAX,
+            PolicyReason::new("effect_timing_futile_evasion_target"),
+        )
+    } else {
+        PolicyVerdict::neutral(PolicyReason::new(
+            "effect_timing_no_pair_blockable_evasion_target",
+        ))
+    }
+}
+
+fn is_single_target_unblockable_activation(ctx: &PolicyContext<'_>) -> bool {
+    let WaitingFor::TargetSelection {
+        pending_cast,
+        target_slots,
+        selection,
+        ..
+    } = &ctx.decision.waiting_for
+    else {
+        return false;
+    };
+    if pending_cast.activation_ability_index.is_none()
+        || pending_cast.activation_cost.is_none()
+        || !matches!(target_slots.as_slice(), [_])
+        || selection.current_slot != 0
+        || target_slots[0].optional
+        || target_slots[0].chooser.is_some()
+        || !matches!(
+            pending_cast.ability.kind,
+            engine::types::ability::AbilityKind::Activated
+        )
+        || pending_cast.ability.condition.is_some()
+        || pending_cast.ability.optional_targeting
+        || pending_cast.ability.optional
+        || pending_cast.ability.optional_player.is_some()
+        || pending_cast.ability.optional_for.is_some()
+        || pending_cast.ability.multi_target.is_some()
+        || !pending_cast.ability.target_constraints.is_empty()
+    {
+        return false;
+    }
+
+    let effects = collect_ability_effects(&pending_cast.ability);
+    let [Effect::GenericEffect {
+        static_abilities,
+        duration: Some(Duration::UntilEndOfTurn),
+        target: Some(_),
+        end_cost: None,
+    }] = effects.as_slice()
+    else {
+        return false;
+    };
+    targets_creatures_only(effects[0])
+        && extract_target_filter(effects[0]).is_some()
+        && matches!(static_abilities.as_slice(), [static_ability] if bare_cant_be_blocked(static_ability))
+}
+
+/// Ignores display text, but rejects every non-default field that changes a
+/// static definition's applicability or semantics.
+fn bare_cant_be_blocked(static_ability: &StaticDefinition) -> bool {
+    matches!(
+        static_ability,
+        StaticDefinition {
+            mode: engine::types::statics::StaticMode::CantBeBlocked,
+            affected: Some(engine::types::ability::TargetFilter::ParentTarget),
+            modifications,
+            condition: None,
+            per_player_condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones,
+            characteristic_defining: false,
+            attack_defended: None,
+            source_controller: None,
+            source_object: None,
+            bypass_beneficiary: None,
+            protection_does_not_remove: None,
+            room_door: None,
+            ..
+        } if active_zones.is_empty()
+            && matches!(
+                modifications.as_slice(),
+                [ContinuousModification::AddStaticMode {
+                    mode: engine::types::statics::StaticMode::CantBeBlocked,
+                }]
+            )
+    )
+}
+
+/// CR 805.10d: a defending team declares blockers together, so the ordinary
+/// blocker map's exact-controller relation is insufficient when a live teammate
+/// could also block. `teammates` excludes the queried player and dead teammates.
+fn prompt_has_team_defender(state: &GameState) -> bool {
+    let Some(combat) = state.combat.as_ref() else {
+        return false;
+    };
+    current_target_selection_targets(state)
+        .into_iter()
+        .flatten()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(*id),
+            _ => None,
+        })
+        .filter_map(|target_id| {
+            combat
+                .attackers
+                .iter()
+                .find(|attacker| attacker.object_id == target_id)
+        })
+        .any(|attacker| !players::teammates(state, attacker.defending_player).is_empty())
+}
+
+/// CR 509.1a-b: in a non-team game, this records only whether at least one
+/// blocker/attacker pair is currently legal, not a complete blocker declaration.
+fn declared_pair_blockable(
+    state: &GameState,
+    target_id: engine::types::identifiers::ObjectId,
+) -> bool {
+    state.combat.as_ref().is_some_and(|combat| {
+        combat
+            .attackers
+            .iter()
+            .any(|attacker| attacker.object_id == target_id)
+    }) && get_valid_block_targets(state)
+        .values()
+        .any(|targets| targets.contains(&target_id))
 }
 
 fn score_action_shape(ctx: &PolicyContext<'_>) -> f64 {
@@ -347,18 +531,474 @@ fn combat_trick_score(ctx: &PolicyContext<'_>) -> f64 {
 mod tests {
     use super::*;
     use crate::config::AiConfig;
-    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::ai_support::{
+        build_decision_context, ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass,
+    };
+    use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
+    use engine::game::scenario::{GameScenario, P0};
     use engine::game::zones::create_object;
-    use engine::types::ability::{ResolvedAbility, TargetFilter, TargetRef};
+    use engine::types::ability::{
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification,
+        ControllerRef, Duration, MultiTargetSpec, ResolvedAbility, StaticDefinition, TargetFilter,
+        TargetRef, TypeFilter, TypedFilter,
+    };
     use engine::types::format::FormatConfig;
-    use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
+    use engine::types::game_state::{
+        GameState, PendingCast, StackEntryKind, TargetEffectDetail, TargetSelectionProgress,
+        TargetSelectionSlot, WaitingFor,
+    };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::ManaCost;
     use engine::types::player::PlayerId;
+    use engine::types::statics::StaticMode;
     use engine::types::zones::Zone;
+    use rand::rngs::SmallRng;
+    use rand::SeedableRng;
 
     /// The AI's seat in the counterspell fixtures; every other seat is foreign.
     const AI: PlayerId = PlayerId(1);
+
+    fn cant_be_blocked_ability(
+        affected: TargetFilter,
+        target: Option<TargetFilter>,
+        cost: AbilityCost,
+    ) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::CantBeBlocked)
+                    .affected(affected)
+                    .modifications(vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantBeBlocked,
+                    }])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target,
+                end_cost: None,
+            },
+        )
+        .cost(cost)
+    }
+
+    fn whirler_ability() -> AbilityDefinition {
+        cant_be_blocked_ability(
+            TargetFilter::ParentTarget,
+            Some(TargetFilter::Typed(TypedFilter::creature())),
+            AbilityCost::TapCreatures {
+                requirement: engine::types::ability::TapCreaturesRequirement::Count { count: 2 },
+                filter: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+                ),
+            },
+        )
+    }
+
+    fn effect_timing_verdict(
+        state: &GameState,
+        candidate: &CandidateAction,
+        config: &AiConfig,
+    ) -> PolicyVerdict {
+        let decision = build_decision_context(state);
+        let context = crate::context::AiContext::empty(&config.weights);
+        crate::policies::registry::PolicyRegistry::shared()
+            .verdicts(&PolicyContext {
+                state,
+                decision: &decision,
+                candidate,
+                ai_player: P0,
+                config,
+                context: &context,
+                cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
+            })
+            .into_iter()
+            .find_map(|(id, verdict)| (id == PolicyId::EffectTiming).then_some(verdict))
+            .expect("EffectTimingPolicy must be registered for this production decision")
+    }
+
+    fn creature(state: &mut GameState, controller: PlayerId, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
+    }
+
+    fn install_whirler_prompt(state: &mut GameState, source: ObjectId, targets: Vec<ObjectId>) {
+        let mut ability = ResolvedAbility::new(*whirler_ability().effect, Vec::new(), source, P0);
+        ability.kind = AbilityKind::Activated;
+        let legal_targets: Vec<_> = targets.into_iter().map(TargetRef::Object).collect();
+        let mut pending = PendingCast::new(source, CardId(99), ability, ManaCost::zero());
+        pending.activation_ability_index = Some(0);
+        pending.activation_cost = Some(AbilityCost::Tap);
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: P0,
+            pending_cast: Box::new(pending),
+            target_slots: vec![TargetSelectionSlot {
+                legal_targets: legal_targets.clone(),
+                optional: false,
+                chooser: None,
+                effect_kind: engine::types::ability::EffectKind::GenericEffect,
+                effect_detail: TargetEffectDetail::None,
+            }],
+            mode_labels: Vec::new(),
+            selection: TargetSelectionProgress {
+                current_slot: 0,
+                selected_slots: Vec::new(),
+                current_legal_targets: legal_targets,
+            },
+        };
+    }
+
+    fn declared_attacker(object_id: ObjectId, defender: PlayerId) -> AttackerInfo {
+        AttackerInfo {
+            object_id,
+            defending_player: defender,
+            attack_target: AttackTarget::Player(defender),
+            blocked: false,
+            band_id: None,
+        }
+    }
+
+    fn target_candidate(target: ObjectId) -> CandidateAction {
+        CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Target),
+        }
+    }
+
+    #[test]
+    fn whirler_rogue_prefers_the_tapped_declared_blockable_attacker() {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature(P0, "Whirler Rogue", 2, 2)
+            .with_ability_definition(whirler_ability())
+            .id();
+        let futile = scenario.add_creature(P0, "Tapped Sick Sibling", 3, 3).id();
+        let useful = scenario.add_creature(P0, "Declared Attacker", 3, 3).id();
+        let blocker = scenario
+            .add_creature(PlayerId(1), "Ready Blocker", 2, 2)
+            .id();
+        scenario
+            .add_creature(P0, "Thopter Payment One", 1, 1)
+            .as_artifact();
+        scenario
+            .add_creature(P0, "Thopter Payment Two", 1, 1)
+            .as_artifact();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        let futile_object = state.objects.get_mut(&futile).unwrap();
+        futile_object.tapped = true;
+        futile_object.summoning_sick = true;
+        runner.advance_to_phase(Phase::DeclareAttackers);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ));
+        runner
+            .act(GameAction::DeclareAttackers {
+                attacks: vec![(useful, AttackTarget::Player(PlayerId(1)))],
+                bands: Vec::new(),
+            })
+            .expect("reach guard: declared attacker must be engine-legal");
+        let state = runner.state();
+        assert!(
+            state.objects[&useful].tapped,
+            "declaring an attacker must tap it"
+        );
+        assert!(state.objects[&futile].tapped && state.objects[&futile].summoning_sick);
+        assert!(state.combat.as_ref().is_some_and(|combat| {
+            combat
+                .attackers
+                .iter()
+                .any(|attacker| attacker.object_id == useful)
+        }));
+        assert!(
+            engine::game::combat::get_valid_block_targets(state)
+                .get(&blocker)
+                .is_some_and(|targets| targets.contains(&useful)),
+            "reach guard: the engine must identify the declared attacker as blockable"
+        );
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
+        let state = runner.state();
+        let WaitingFor::TargetSelection {
+            pending_cast,
+            selection,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("Whirler Rogue's ordinary activation must reach TargetSelection");
+        };
+        assert_eq!(
+            pending_cast.activation_ability_index,
+            Some(0),
+            "reach guard: target prompt must retain the activated-ability index"
+        );
+        assert!(selection
+            .current_legal_targets
+            .contains(&TargetRef::Object(futile)));
+        assert!(selection
+            .current_legal_targets
+            .contains(&TargetRef::Object(useful)));
+
+        let config = AiConfig::default();
+        let mut rng = SmallRng::seed_from_u64(0);
+        assert_eq!(
+            crate::choose_action(state, P0, &config, &mut rng),
+            Some(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(useful)),
+            }),
+            "the production chooser must rank Whirler Rogue's blockable declared attacker above a futile sibling"
+        );
+        let futile_candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(futile)),
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Target),
+        };
+        assert!(matches!(
+            effect_timing_verdict(state, &futile_candidate, &config),
+            PolicyVerdict::Score { delta, reason }
+                if delta < 0.0 && reason.kind == "effect_timing_futile_evasion_target"
+        ));
+    }
+
+    #[test]
+    fn declared_pair_blockability_uses_the_blockers_actual_defender() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.phase = Phase::DeclareAttackers;
+        let attacker = creature(&mut state, P0, "Attacker");
+        let right_defender_blocker = creature(&mut state, PlayerId(1), "Right Blocker");
+        let wrong_defender_blocker = creature(&mut state, PlayerId(2), "Wrong Blocker");
+        state.combat = Some(CombatState {
+            attackers: vec![declared_attacker(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        let targets = get_valid_block_targets(&state);
+        assert!(targets
+            .get(&right_defender_blocker)
+            .is_some_and(|targets| targets.contains(&attacker)));
+        assert!(targets
+            .get(&wrong_defender_blocker)
+            .is_none_or(|targets| !targets.contains(&attacker)));
+        assert!(declared_pair_blockable(&state, attacker));
+    }
+
+    #[test]
+    fn team_defender_prompt_stands_down_despite_a_mapped_sibling() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.phase = Phase::DeclareAttackers;
+        let source = creature(&mut state, P0, "Source");
+        let mapped = creature(&mut state, P0, "Mapped Attacker");
+        let futile = creature(&mut state, P0, "Futile Target");
+        let defender_blocker = creature(&mut state, PlayerId(2), "Defender Blocker");
+        let teammate_blocker = creature(&mut state, PlayerId(3), "Teammate Blocker");
+        state.combat = Some(CombatState {
+            attackers: vec![declared_attacker(mapped, PlayerId(2))],
+            ..Default::default()
+        });
+        install_whirler_prompt(&mut state, source, vec![futile, mapped]);
+
+        assert!(players::teammates(&state, PlayerId(2)).contains(&PlayerId(3)));
+        assert!(get_valid_block_targets(&state)
+            .get(&defender_blocker)
+            .is_some_and(|targets| targets.contains(&mapped)));
+        assert!(engine::game::combat::validate_blockers_for_player(
+            &state,
+            PlayerId(3),
+            &[(teammate_blocker, mapped)],
+        )
+        .is_ok());
+        assert!(matches!(
+            effect_timing_verdict(&state, &target_candidate(futile), &AiConfig::default()),
+            PolicyVerdict::Score { delta: 0.0, reason }
+                if reason.kind == "effect_timing_evasion_target_na"
+        ));
+    }
+
+    #[test]
+    fn pair_blockable_candidate_is_neutral_when_menace_makes_a_sibling_coupled() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::DeclareAttackers;
+        let source = creature(&mut state, P0, "Source");
+        let chosen = creature(&mut state, P0, "Chosen Attacker");
+        let menace = creature(&mut state, P0, "Menace Attacker");
+        state
+            .objects
+            .get_mut(&menace)
+            .unwrap()
+            .keywords
+            .push(Keyword::Menace);
+        let blocker = creature(&mut state, PlayerId(1), "Only Blocker");
+        state.combat = Some(CombatState {
+            attackers: vec![
+                declared_attacker(chosen, PlayerId(1)),
+                declared_attacker(menace, PlayerId(1)),
+            ],
+            ..Default::default()
+        });
+        install_whirler_prompt(&mut state, source, vec![chosen, menace]);
+
+        assert!(get_valid_block_targets(&state)
+            .get(&blocker)
+            .is_some_and(|targets| targets.contains(&chosen) && targets.contains(&menace)));
+        assert!(engine::game::combat::validate_blockers_for_player(
+            &state,
+            PlayerId(1),
+            &[(blocker, menace)],
+        )
+        .is_err());
+        assert!(matches!(
+            effect_timing_verdict(&state, &target_candidate(chosen), &AiConfig::default()),
+            PolicyVerdict::Score { delta: 0.0, reason }
+                if reason.kind == "effect_timing_pair_blockable_evasion_target"
+        ));
+    }
+
+    #[test]
+    fn unsupported_target_selection_cannot_leak_an_old_removal_score() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        let source = creature(&mut state, P0, "Removal Source");
+        let victim = creature(&mut state, PlayerId(1), "Removal Victim");
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+            Vec::new(),
+            source,
+            P0,
+        );
+        let targets = vec![TargetRef::Object(victim)];
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: P0,
+            pending_cast: Box::new(PendingCast::new(
+                source,
+                CardId(100),
+                ability,
+                ManaCost::zero(),
+            )),
+            target_slots: vec![TargetSelectionSlot {
+                legal_targets: targets.clone(),
+                optional: true,
+                chooser: None,
+                effect_kind: engine::types::ability::EffectKind::Destroy,
+                effect_detail: TargetEffectDetail::None,
+            }],
+            mode_labels: Vec::new(),
+            selection: TargetSelectionProgress {
+                current_slot: 0,
+                selected_slots: Vec::new(),
+                current_legal_targets: targets,
+            },
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget { target: None },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Target),
+        };
+        let config = AiConfig::default();
+        let decision = build_decision_context(&state);
+        let context = crate::context::AiContext::empty(&config.weights);
+        assert!(
+            EffectTimingPolicy.score(&PolicyContext {
+                state: &state,
+                decision: &decision,
+                candidate: &candidate,
+                ai_player: P0,
+                config: &config,
+                context: &context,
+                cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
+            }) > 0.0,
+            "reach guard: the pre-SelectTarget timing score must be nonzero"
+        );
+        assert!(matches!(
+            effect_timing_verdict(&state, &candidate, &config),
+            PolicyVerdict::Score { delta: 0.0, reason }
+                if reason.kind == "effect_timing_unsupported_target_selection"
+        ));
+    }
+
+    fn whirler_prompt_is_classified(
+        edit: impl FnOnce(&mut PendingCast, &mut TargetSelectionSlot),
+    ) -> bool {
+        let mut state = GameState::new_two_player(42);
+        let source = creature(&mut state, P0, "Source");
+        let target = creature(&mut state, P0, "Target");
+        install_whirler_prompt(&mut state, source, vec![target]);
+        let WaitingFor::TargetSelection {
+            pending_cast,
+            target_slots,
+            ..
+        } = &mut state.waiting_for
+        else {
+            unreachable!("fixture installs an ordinary target prompt");
+        };
+        edit(pending_cast, &mut target_slots[0]);
+
+        let candidate = target_candidate(target);
+        let decision = build_decision_context(&state);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        is_single_target_unblockable_activation(&PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        })
+    }
+
+    #[test]
+    fn whirler_classifier_rejects_root_and_static_contract_variants() {
+        assert!(whirler_prompt_is_classified(|_, _| {}));
+        assert!(!whirler_prompt_is_classified(|pending, _| {
+            pending.ability.condition = Some(AbilityCondition::EventOutcomeWon);
+        }));
+        assert!(!whirler_prompt_is_classified(|pending, _| {
+            pending.ability.optional = true;
+        }));
+        assert!(!whirler_prompt_is_classified(|pending, _| {
+            pending.ability.optional_targeting = true;
+        }));
+        assert!(!whirler_prompt_is_classified(|pending, _| {
+            pending.ability.multi_target = Some(MultiTargetSpec::fixed(1, 1));
+        }));
+        assert!(!whirler_prompt_is_classified(|_, slot| {
+            slot.chooser = Some(PlayerId(1));
+        }));
+        assert!(!whirler_prompt_is_classified(|pending, _| {
+            let Effect::GenericEffect {
+                static_abilities, ..
+            } = &mut pending.ability.effect
+            else {
+                unreachable!("fixture installs a GenericEffect");
+            };
+            static_abilities[0].affected_zone = Some(Zone::Graveyard);
+        }));
+    }
 
     fn counter_effect() -> Effect {
         Effect::Counter {
