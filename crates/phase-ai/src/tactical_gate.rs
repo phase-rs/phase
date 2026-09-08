@@ -26,7 +26,7 @@ use engine::types::ability::{
 use engine::types::ability_visit::visit_ability_def;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, DayNight, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaSourcePenalty, ManaType};
@@ -471,6 +471,9 @@ fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
     if has_relevant_functioning_trigger(ctx.state, *object_id) {
         return false;
     }
+    if cast_history_has_relevant_payoff(ctx.state, ctx.ai_player) {
+        return false;
+    }
 
     let Some(facts) = ctx.cast_facts() else {
         return false;
@@ -489,6 +492,52 @@ fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
                 false,
             )
         })
+}
+
+/// Returns whether recording this cast changes a currently available
+/// cast-history consequence. This remains a narrow fail-open check rather than
+/// a projection of later game state.
+fn cast_history_has_relevant_payoff(state: &GameState, caster: PlayerId) -> bool {
+    let casts_this_turn = state
+        .spells_cast_this_turn_by_player
+        .get(&caster)
+        .map_or(0, |spells| spells.len());
+
+    // CR 502.2: an active player's zero-to-one Day cast prevents the
+    // Day-to-Night transition, while Night's one-to-two cast causes Day.
+    if caster == state.active_player
+        && matches!(
+            (state.day_night, casts_this_turn),
+            (Some(DayNight::Day), 0) | (Some(DayNight::Night), 1)
+        )
+    {
+        return true;
+    }
+
+    // CR 702.117a: the cast can make a held Surge spell available to its
+    // caster or teammate when none of them has cast a spell this turn yet.
+    casts_this_turn == 0
+        && engine::game::players::teammates(state, caster)
+            .into_iter()
+            .chain(std::iter::once(caster))
+            .all(|player| {
+                state
+                    .spells_cast_this_turn_by_player
+                    .get(&player)
+                    .is_none_or(|spells| spells.is_empty())
+            })
+        && std::iter::once(caster)
+            .chain(engine::game::players::teammates(state, caster))
+            .any(|player| {
+                state.players[player.0 as usize].hand.iter().any(|spell| {
+                    state.objects.get(spell).is_some_and(|object| {
+                        object
+                            .keywords
+                            .iter()
+                            .any(|keyword| matches!(keyword, Keyword::Surge(_)))
+                    })
+                })
+            })
 }
 
 fn payment_population_is_stable(state: &GameState, caster: PlayerId, spell_id: ObjectId) -> bool {
@@ -1966,6 +2015,81 @@ mod tests {
             .target_player(P0)
             .resolve();
         outcome.assert_life_delta(P0, 2);
+    }
+
+    #[test]
+    fn zero_cast_day_night_thresholds_are_paired() {
+        for (day_night, prior_casts) in [(DayNight::Day, 0), (DayNight::Night, 1)] {
+            let (mut state, congregate) = funded_zero_congregate_state();
+            state.day_night = Some(day_night);
+            if prior_casts > 0 {
+                state.spells_cast_this_turn_by_player.insert(
+                    P0,
+                    engine::im::Vector::from(vec![Default::default()]),
+                );
+            }
+            assert_eq!(
+                state
+                    .spells_cast_this_turn_by_player
+                    .get(&P0)
+                    .map_or(0, |spells| spells.len()),
+                prior_casts,
+                "the fixture reaches the {day_night:?} cast-history threshold"
+            );
+            assert!(
+                zero_cast_is_retained(&state, congregate),
+                "a zero cast that changes the {day_night:?} transition must remain available"
+            );
+
+            state.day_night = None;
+            assert!(
+                !zero_cast_is_retained(&state, congregate),
+                "removing only the day/night threshold restores known-zero rejection"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_cast_surge_payoff_is_paired() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let surge = create_object(
+            &mut state,
+            CardId(91_700),
+            P0,
+            "Surge payoff".to_string(),
+            Zone::Hand,
+        );
+        let surge_object = state
+            .objects
+            .get_mut(&surge)
+            .expect("Surge payoff exists in hand");
+        surge_object.card_types.core_types.push(CoreType::Instant);
+        surge_object
+            .keywords
+            .push(Keyword::Surge(ManaCost::generic(1)));
+        surge_object
+            .base_keywords
+            .push(Keyword::Surge(ManaCost::generic(1)));
+        state.players[P0.0 as usize].hand.push_back(surge);
+
+        assert!(
+            state
+                .spells_cast_this_turn_by_player
+                .get(&P0)
+                .is_none_or(|spells| spells.is_empty()),
+            "the Surge payoff is not already enabled by a prior cast"
+        );
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a zero cast that enables the held Surge spell must remain available"
+        );
+
+        state.players[P0.0 as usize].hand.retain(|id| *id != surge);
+        state.objects.remove(&surge);
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the Surge payoff restores known-zero rejection"
+        );
     }
 
     fn zero_gain_definition() -> AbilityDefinition {
