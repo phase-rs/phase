@@ -375,6 +375,12 @@
           "markdownDescription": "Allows the frontend to read the shell host platform."
         },
         {
+          "description": "Allows first-party desktop content to explicitly host, discover, and connect to private LAN servers.",
+          "type": "string",
+          "const": "allow-lan",
+          "markdownDescription": "Allows first-party desktop content to explicitly host, discover, and connect to private LAN servers."
+        },
+        {
           "description": "Allows first-party remote content to mark a successful remote load.",
           "type": "string",
           "const": "allow-mark-remote-load-ok",

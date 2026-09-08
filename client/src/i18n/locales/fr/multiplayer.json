@@ -1,4 +1,22 @@
 {
+  "lan": {
+    "title": "Réseau local",
+    "guidance": "Saisissez une adresse de serveur pour rejoindre manuellement. Les pages HTTPS nécessitent un serveur wss:// sécurisé ; utilisez l’application de bureau pour les adresses ws:// locales.",
+    "unavailable": "L’hébergement et la recherche LAN nécessitent une application de bureau à jour.",
+    "checking": "Vérification de la prise en charge LAN…",
+    "start": "Démarrer l’hébergement LAN",
+    "stop": "Arrêter l’hébergement LAN",
+    "scan": "Rechercher des serveurs LAN",
+    "pending": "Opération en cours…",
+    "running": "L’hébergement LAN est actif. Partagez une adresse avec les joueurs de votre réseau.",
+    "empty": "Aucun serveur LAN trouvé. Vérifiez que l’hôte est actif sur le même réseau, puis réessayez.",
+    "add": "Ajouter le serveur",
+    "copy": "Copier l’adresse",
+    "copied": "Adresse copiée",
+    "error": "Échec de l’opération LAN. {{detail}}",
+    "added": "Serveur ajouté. Utilisez un serveur dédié lorsque sa connexion est compatible et prête.",
+    "originUnavailable": "L’hébergement LAN n’est pas disponible pour cette version ou origine de l’application."
+  },
   "concedeDialog": {
     "title": "Concéder la partie ?",
     "game": {
@@ -206,6 +224,7 @@
     "invalidJoinServer": "L'adresse de serveur de ce code n'est pas valide."
   },
   "hostSetup": {
+    "dedicatedUnavailable": "Aucun serveur dédié n’est disponible pour le moment. Vous pouvez héberger une partie en P2P.",
     "hostDirectMatch": "Héberger un match direct",
     "hostMatch": "Héberger un match",
     "p2pNotice": "Mode pair-à-pair. Cette salle connecte les joueurs directement au lieu de tourner sur un serveur.",

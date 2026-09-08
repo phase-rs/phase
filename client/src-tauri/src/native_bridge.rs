@@ -1,3 +1,10 @@
+use std::{
+    collections::BTreeMap,
+    net::Ipv4Addr,
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
+
 use futures_util::{
     future::{AbortHandle, AbortRegistration, Abortable},
     SinkExt, StreamExt,
@@ -91,7 +98,15 @@ pub async fn connect_native_engine(
         // NativeEngineSocket also queues Channel callbacks until its invoke resolves,
         // which preserves the WebSocket open-before-message contract at the JS boundary.
         tokio::task::yield_now().await;
-        forward_bridge(bridge_id, socket, receiver, registration, on_event).await;
+        forward_bridge(
+            bridge_id,
+            socket,
+            receiver,
+            registration,
+            on_event,
+            native_engine::remove_native_engine_bridge,
+        )
+        .await;
     });
 
     Ok(bridge_id)
@@ -148,6 +163,7 @@ async fn forward_bridge(
     outbound: UnboundedReceiver<Message>,
     registration: AbortRegistration,
     on_event: Channel<BridgeEvent>,
+    remove: fn(u64),
 ) {
     let result = Abortable::new(run_bridge(socket, outbound, on_event.clone()), registration).await;
     let (error, close) = match result {
@@ -160,7 +176,7 @@ async fn forward_bridge(
     }
     let (code, reason) = close.unwrap_or((1006, String::new()));
     let _ = on_event.send(BridgeEvent::Closed { code, reason });
-    native_engine::remove_native_engine_bridge(bridge_id);
+    remove(bridge_id);
 }
 
 async fn run_bridge(
@@ -220,9 +236,219 @@ async fn run_bridge(
     (error, close)
 }
 
+#[derive(Default)]
+struct LanBridges {
+    next_id: u64,
+    bridges: BTreeMap<u64, BridgeHandle>,
+}
+
+static LAN_BRIDGES: OnceLock<Mutex<LanBridges>> = OnceLock::new();
+
+fn lan_bridges() -> &'static Mutex<LanBridges> {
+    LAN_BRIDGES.get_or_init(|| Mutex::new(LanBridges::default()))
+}
+
+// Parse the authority as an IPv4 literal before constructing a URL. This
+// intentionally excludes DNS, URL-parser legacy numeric hosts, credentials,
+// alternate paths and every ambiguous normalization accepted by browsers.
+fn lan_endpoint(url: &str) -> Result<String, NativeEngineBridgeError> {
+    let invalid = || NativeEngineBridgeError::Connect {
+        detail: "expected ws://private-or-loopback-IPv4:port/ws".into(),
+    };
+    let authority = url
+        .strip_prefix("ws://")
+        .and_then(|rest| rest.strip_suffix("/ws"))
+        .ok_or_else(invalid)?;
+    let (host, port) = authority.split_once(':').ok_or_else(invalid)?;
+    let ip: Ipv4Addr = host.parse().map_err(|_| invalid())?;
+    let port: u16 = port.parse().map_err(|_| invalid())?;
+    if !(ip.is_private() || ip.is_loopback()) || port == 0 {
+        return Err(invalid());
+    }
+    Ok(format!("ws://{ip}:{port}/ws"))
+}
+
+fn lan_request(url: &str, origin: &str) -> Result<Request<()>, NativeEngineBridgeError> {
+    let origin = match origin {
+        "https://phase-rs.dev" | "https://app.phase-rs.dev" => "https://phase-rs.dev",
+        "https://preview.phase-rs.dev" => "https://preview.phase-rs.dev",
+        _ => {
+            return Err(NativeEngineBridgeError::Connect {
+                detail: "unsupported LAN client origin".into(),
+            })
+        }
+    };
+    let mut request = lan_endpoint(url)?.into_client_request().map_err(|error| {
+        NativeEngineBridgeError::Connect {
+            detail: error.to_string(),
+        }
+    })?;
+    request
+        .headers_mut()
+        .insert(ORIGIN, HeaderValue::from_static(origin));
+    Ok(request)
+}
+
+#[tauri::command]
+pub async fn connect_lan_server(
+    url: String,
+    origin: String,
+    on_event: Channel<BridgeEvent>,
+) -> Result<u64, NativeEngineBridgeError> {
+    let request = lan_request(&url, &origin)?;
+    let (outbound, receiver) = mpsc::unbounded_channel();
+    let (abort, registration) = AbortHandle::new_pair();
+    let dial_abort = abort.clone();
+    // Register before awaiting so navigation prevents a pending dial from becoming an active bridge.
+    let id = {
+        let mut state = lan_bridges()
+            .lock()
+            .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?;
+        state.next_id = state
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| NativeEngineBridgeError::internal("LAN bridge IDs exhausted"))?;
+        let id = state.next_id;
+        state.bridges.insert(id, BridgeHandle::new(abort, outbound));
+        id
+    };
+    let connection = tokio::time::timeout(Duration::from_secs(5), connect_async(request)).await;
+    let socket = match connection {
+        Ok(Ok((socket, _))) if !dial_abort.is_aborted() => socket,
+        other => {
+            remove_lan_bridge(id);
+            let detail = match other {
+                Err(_) => "LAN connection timed out".to_owned(),
+                Ok(Err(error)) => error.to_string(),
+                Ok(Ok(_)) => "LAN connection cancelled".to_owned(),
+            };
+            return Err(NativeEngineBridgeError::Connect { detail });
+        }
+    };
+    tauri::async_runtime::spawn(async move {
+        tokio::task::yield_now().await;
+        forward_bridge(
+            id,
+            socket,
+            receiver,
+            registration,
+            on_event,
+            remove_lan_bridge,
+        )
+        .await;
+    });
+    Ok(id)
+}
+
+fn remove_lan_bridge(id: u64) {
+    if let Ok(mut state) = lan_bridges().lock() {
+        state.bridges.remove(&id);
+    }
+}
+
+#[tauri::command]
+pub fn lan_bridge_send(id: u64, text: String) -> Result<(), NativeEngineBridgeError> {
+    let sender = lan_bridges()
+        .lock()
+        .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
+        .bridges
+        .get(&id)
+        .map(BridgeHandle::outbound)
+        .ok_or_else(|| NativeEngineBridgeError::UnknownBridge {
+            detail: format!("LAN bridge {id} is not open"),
+        })?;
+    sender
+        .send(Message::Text(text.into()))
+        .map_err(|error| NativeEngineBridgeError::Send {
+            detail: error.to_string(),
+        })
+}
+
+#[tauri::command]
+pub fn lan_bridge_close(id: u64) -> Result<(), NativeEngineBridgeError> {
+    let bridge = lan_bridges()
+        .lock()
+        .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
+        .bridges
+        .remove(&id)
+        .ok_or_else(|| NativeEngineBridgeError::UnknownBridge {
+            detail: format!("LAN bridge {id} is not open"),
+        })?;
+    bridge.abort();
+    Ok(())
+}
+
+pub(crate) fn abort_lan_bridges() {
+    if let Ok(mut state) = lan_bridges().lock() {
+        for (_, bridge) in std::mem::take(&mut state.bridges) {
+            bridge.abort();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lan_endpoint_accepts_only_explicit_private_or_loopback_ipv4() {
+        for url in [
+            "ws://10.1.2.3:1234/ws",
+            "ws://172.16.0.1:9374/ws",
+            "ws://192.168.1.2:80/ws",
+            "ws://127.0.0.1:4321/ws",
+        ] {
+            assert_eq!(lan_endpoint(url).unwrap(), url);
+        }
+        for url in [
+            "ws://8.8.8.8:1234/ws",
+            "ws://0.0.0.0:1234/ws",
+            "ws://224.0.0.1:1234/ws",
+            "ws://169.254.1.2:1234/ws",
+            "ws://172.32.0.1:1234/ws",
+            "ws://localhost:1234/ws",
+            "ws://2130706433:1234/ws",
+            "ws://127.1:1234/ws",
+            "ws://[::1]:1234/ws",
+            "wss://192.168.1.2:1234/ws",
+            "ws://user@192.168.1.2:1234/ws",
+            "ws://192.168.1.2:1234/ws?x",
+            "ws://192.168.1.2:1234/ws#x",
+            "ws://192.168.1.2:1234/admin",
+            "ws://192.168.1.2:0/ws",
+            "ws://192.168.1.2:1234/../ws",
+        ] {
+            assert!(lan_endpoint(url).is_err(), "accepted {url}");
+        }
+        assert_eq!(
+            lan_request("ws://192.168.1.2:1234/ws", "https://app.phase-rs.dev")
+                .unwrap()
+                .headers()[ORIGIN],
+            "https://phase-rs.dev"
+        );
+        assert!(lan_request("ws://192.168.1.2:1234/ws", "https://untrusted.example").is_err());
+    }
+
+    #[test]
+    fn solo_navigation_registry_cleanup_does_not_close_lan_bridge() {
+        let (outbound, mut receiver) = mpsc::unbounded_channel();
+        let (abort, _) = AbortHandle::new_pair();
+        let id = {
+            let mut state = lan_bridges().lock().unwrap();
+            state.next_id += 1;
+            let id = state.next_id;
+            state.bridges.insert(id, BridgeHandle::new(abort, outbound));
+            id
+        };
+        native_engine::abort_native_engine_bridges_on_navigation();
+        lan_bridge_send(id, "still open".into()).unwrap();
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            Message::Text("still open".into())
+        );
+        lan_bridge_close(id).unwrap();
+        assert!(lan_bridge_send(id, "closed".into()).is_err());
+    }
 
     #[test]
     fn bridge_events_use_camel_case_discriminants() {

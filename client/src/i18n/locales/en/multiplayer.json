@@ -1,4 +1,22 @@
 {
+  "lan": {
+    "title": "Local network",
+    "guidance": "Enter a server address to join manually. HTTPS browser pages require a secure wss:// server; use the desktop app for local ws:// addresses.",
+    "unavailable": "LAN hosting and discovery require a current desktop app.",
+    "checking": "Checking desktop LAN support…",
+    "start": "Start LAN hosting",
+    "stop": "Stop LAN hosting",
+    "scan": "Find LAN servers",
+    "pending": "Working…",
+    "running": "LAN hosting is running. Share an address with players on your network.",
+    "empty": "No LAN servers found. Check that the host is running on the same network, then try again.",
+    "add": "Add server",
+    "copy": "Copy address",
+    "copied": "Address copied",
+    "error": "LAN operation failed. {{detail}}",
+    "added": "Server added. Use Dedicated server once its connection is compatible and ready.",
+    "originUnavailable": "LAN hosting is unavailable for this app version or origin."
+  },
   "concedeDialog": {
     "title": "Concede Game?",
     "game": {
@@ -206,6 +224,7 @@
     "invalidJoinServer": "That join code's server address isn't valid."
   },
   "hostSetup": {
+    "dedicatedUnavailable": "No dedicated server is available right now. You can host using P2P.",
     "hostDirectMatch": "Host Direct Match",
     "hostMatch": "Host Match",
     "p2pNotice": "Your device runs the game. Keep the app open and stay connected. You can list your game in the lobby.",

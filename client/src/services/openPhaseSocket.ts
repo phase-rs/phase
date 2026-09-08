@@ -6,6 +6,8 @@ import {
   type ServerInfo,
 } from "../adapter/ws-adapter";
 import { supportsGzipEnvelope, type WireFormat } from "../network/wireEnvelope";
+import { canUseLanBridge, initializeLanCapabilities, isLanEndpoint } from "./lan";
+import { NativeEngineSocket } from "./nativeEngineSocket";
 import { GzipEnvelopeSocket } from "./gzipEnvelopeSocket";
 
 /**
@@ -56,7 +58,8 @@ export interface OpenOptions<T extends PhaseSocketTransport = WebSocket> {
   timeoutMs?: number;
   /**
    * Creates the transport used for the handshake. Omitted callers retain the
-   * browser's direct `new WebSocket(url)` behavior.
+   * default transport: desktop LAN IPC for supported local endpoints, otherwise
+   * the browser WebSocket. Explicit factories always take precedence.
    */
   socketFactory?: PhaseSocketFactory<T>;
   /**
@@ -128,6 +131,14 @@ export function openPhaseSocket(
   wsUrl: string,
   opts: OpenOptions<PhaseSocketTransport> = {},
 ): Promise<PhaseSocket<PhaseSocketTransport>> {
+  if (!opts.socketFactory && isLanEndpoint(wsUrl)) {
+    return initializeLanCapabilities().then(() => openPhaseSocket(wsUrl, {
+      ...opts,
+      socketFactory: (url) => canUseLanBridge(url)
+        ? new NativeEngineSocket({ type: "lan", url, origin: window.location.origin })
+        : new WebSocket(url),
+    }));
+  }
   const { signal, timeoutMs = 5000, surface = "full" } = opts;
 
   return new Promise<PhaseSocket<PhaseSocketTransport>>((resolve, reject) => {

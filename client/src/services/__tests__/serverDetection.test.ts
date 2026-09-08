@@ -1,3 +1,8 @@
+import { canUseLanBridge } from "../lan";
+vi.mock("../lan", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lan")>(),
+  canUseLanBridge: vi.fn(() => false),
+}));
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -230,4 +235,19 @@ describe("mixedContentBlockReason", () => {
     setPageProtocol("https:");
     expect(mixedContentBlockReason("wss://play.example.com/ws")).toBeNull();
   });
+});
+
+
+it("exempts only a confirmed native LAN route from HTTPS mixed content", () => {
+  const originalLocation = window.location;
+  Object.defineProperty(window, "location", { configurable: true, value: { ...originalLocation, protocol: "https:" } });
+  try {
+    vi.mocked(canUseLanBridge).mockReturnValue(true);
+    expect(mixedContentBlockReason("ws://192.168.1.2:9374/ws")).toBeNull();
+    vi.mocked(canUseLanBridge).mockReturnValue(false);
+    expect(mixedContentBlockReason("ws://192.168.1.2:9374/ws")).toMatch(/HTTPS/);
+  } finally {
+    vi.mocked(canUseLanBridge).mockReturnValue(false);
+    Object.defineProperty(window, "location", { configurable: true, value: originalLocation });
+  }
 });

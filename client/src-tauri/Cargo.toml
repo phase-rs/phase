@@ -25,6 +25,8 @@ tauri-plugin-process = "2"
 time = { version = "=0.3.47", features = ["parsing"] }
 reqwest = { version = "0.13", default-features = false, features = ["brotli", "rustls"] }
 minisign-verify = "0.2.5"
+mdns-sd = "0.21.3"
+if-addrs = "0.15"
 sha2 = "0.10"
 semver = "1"
 tauri-plugin-single-instance = "2"

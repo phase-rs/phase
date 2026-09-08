@@ -178,13 +178,9 @@ function MultiplayerPageContent({
   const chosenConnectionMode = useMultiplayerStore((s) => s.connectionMode);
   const setConnectionMode = useMultiplayerStore((s) => s.setConnectionMode);
   const setHostingServer = useMultiplayerStore((s) => s.setHostingServer);
-  // The mode in force. An explicit choice WINS; the `hostingServer`-derived
-  // expression is the hydration fallback, reached only on a first run or a
-  // blob persisted before the connection switch existed — a user whose anchor
-  // is the `null` direct-codes sentinel must still boot into P2P. It is a
-  // migration default, not a competing writer.
+  // A lobby address says nothing about dedicated hosting availability.
   const connectionMode: ConnectionMode =
-    chosenConnectionMode ?? (hostingServer !== null ? "server" : "p2p");
+    chosenConnectionMode ?? "p2p";
   // HostSetup mirrors its in-flight format into the store on every change,
   // so reading it here lets both the deck-picker filter and the live
   // compatibility check react to the user's format choice without any
@@ -597,7 +593,10 @@ function MultiplayerPageContent({
   // Host setup complete → execute immediately if deck exists, otherwise prompt
   const handleHostSetupComplete = useCallback(
     async (settings: HostSettings, serverUrl: string | null): Promise<boolean> => {
-      const action: PendingAction = { type: "host", settings, connectionMode, serverUrl };
+      const action: PendingAction = {
+        type: "host", settings, serverUrl,
+        connectionMode: serverUrl === null ? "p2p" : "server",
+      };
       if (activeDeckName) {
         return executeAction(action);
       }
@@ -605,7 +604,7 @@ function MultiplayerPageContent({
       setView("deck-select");
       return true;
     },
-    [connectionMode, activeDeckName, executeAction],
+    [activeDeckName, executeAction],
   );
 
   // Navigate to draft setup page. The multiplayer draft page handles its

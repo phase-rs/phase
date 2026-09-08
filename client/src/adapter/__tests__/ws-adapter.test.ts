@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const lanGate = vi.hoisted(() => ({ supported: false, probe: vi.fn() }));
+vi.mock("../../services/nativeEngineSocket", () => ({ NativeEngineSocket: class { constructor() { return new MockWebSocket("native-lan"); } } }));
+vi.mock("../../services/lan", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/lan")>(),
+  initializeLanCapabilities: lanGate.probe,
+  canUseLanBridge: () => lanGate.supported,
+}));
+
 import {
   NativeEngineVersionMismatchError,
   PROTOCOL_VERSION,
@@ -2088,4 +2096,31 @@ describe("WebSocketAdapter", () => {
       });
     });
   });
+});
+
+
+it("waits for the first LAN capability probe before rejecting an HTTPS manual join", async () => {
+  const originalLocation = window.location;
+  Object.defineProperty(window, "location", { configurable: true, value: { ...originalLocation, protocol: "https:" } });
+  let release!: () => void;
+  lanGate.supported = false;
+  lanGate.probe.mockImplementation(() => new Promise<boolean>((resolve) => {
+    release = () => { lanGate.supported = true; resolve(true); };
+  }));
+  const manual = new WebSocketAdapter("ws://192.168.1.2:9374/ws", "join", { main_deck: [], sideboard: [] }, "ABC123");
+  MockWebSocket.last = null;
+  const initialized = manual.initialize();
+  // The adapter must not reject on mixed content while capability is unknown.
+  release();
+  // The transport's probe shares the resolved capability in production.
+  lanGate.probe.mockResolvedValue(true);
+  try {
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+    const socket = await completeHandshake(manual);
+    socket.dispatchSynthetic("message", JSON.stringify({ type: "GameStarted", data: { state: createMockState(), your_player: 0 } }));
+    await expect(initialized).resolves.toBeUndefined();
+  } finally {
+    manual.dispose(); lanGate.supported = false;
+    Object.defineProperty(window, "location", { configurable: true, value: originalLocation });
+  }
 });

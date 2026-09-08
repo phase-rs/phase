@@ -1,3 +1,4 @@
+import { initializeLanCapabilities, isLanEndpoint } from "../services/lan";
 import type {
   AbilityBlockEntry,
   EngineAdapter,
@@ -950,6 +951,12 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   async initialize(): Promise<void> {
+    if (!this.isNativeSocket() && isLanEndpoint(this.serverUrl)) {
+      await initializeLanCapabilities();
+      if (this.disposed) {
+        throw new AdapterError("WS_CLOSED", "Adapter disposed before initialization completed", true);
+      }
+    }
     return new Promise<void>((resolve, reject) => {
       this.initResolve = resolve;
       this.initReject = reject;

@@ -1,5 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const { lanSupported, probeLan, invokeLan, channelListener } = vi.hoisted(() => ({
+  lanSupported: vi.fn(), probeLan: vi.fn(), invokeLan: vi.fn(),
+  channelListener: { current: null as null | ((event: unknown) => void) },
+}));
+vi.mock("../lan", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lan")>(),
+  canUseLanBridge: lanSupported, initializeLanCapabilities: probeLan,
+}));
+vi.mock("../platform", () => ({ isDesktopTauri: () => true }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: invokeLan,
+  Channel: class { constructor(callback: (event: unknown) => void) { channelListener.current = callback; } },
+}));
+
 import {
   HandshakeError,
   openPhaseSocket,
@@ -61,6 +75,8 @@ function helloFrame(
 }
 
 beforeEach(() => {
+  lanSupported.mockReturnValue(false); probeLan.mockResolvedValue(false);
+  invokeLan.mockResolvedValue(41); channelListener.current = null;
   MockWebSocket.instances = [];
   vi.stubGlobal("WebSocket", MockWebSocket);
 });
@@ -449,5 +465,41 @@ describe("withReconnect", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+
+describe("LAN default transport", () => {
+  it("selects native IPC after its capability probe and negotiates text only", async () => {
+    lanSupported.mockReturnValue(true); probeLan.mockResolvedValue(true);
+    const pending = openPhaseSocket("ws://192.168.1.2:9374/ws");
+    await vi.waitFor(() => expect(channelListener.current).not.toBeNull());
+    channelListener.current?.({ type: "message", text: helloFrame({ wire_formats: ["GzipEnvelopeV1"] }) });
+    const socket = await pending;
+    expect(MockWebSocket.instances).toHaveLength(0);
+    expect(invokeLan).toHaveBeenCalledWith("connect_lan_server", expect.objectContaining({ url: "ws://192.168.1.2:9374/ws" }));
+    expect(invokeLan).toHaveBeenCalledWith("lan_bridge_send", {
+      id: 41, text: expect.stringContaining('"wire_formats":[]'),
+    });
+    socket.close();
+  });
+
+  it("keeps an explicit factory authoritative for a LAN address", async () => {
+    lanSupported.mockReturnValue(true);
+    const factory = vi.fn((url: string) => new MockWebSocket(url) as unknown as WebSocket);
+    const pending = openPhaseSocket("ws://192.168.1.2:9374/ws", { socketFactory: factory });
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame());
+    (await pending).close();
+    expect(factory).toHaveBeenCalledOnce();
+    expect(channelListener.current).toBeNull();
+  });
+
+  it("keeps browser and old-shell LAN connections on WebSocket", async () => {
+    const pending = openPhaseSocket("ws://192.168.1.2:9374/ws");
+    await vi.waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    MockWebSocket.instances[0].deliverMessage(helloFrame());
+    (await pending).close();
+    expect(channelListener.current).toBeNull();
   });
 });

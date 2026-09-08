@@ -1,3 +1,4 @@
+import { canUseLanBridge } from "./lan";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
@@ -180,6 +181,7 @@ export function formatJoinShare(code: string, publicUrl: string): string | null 
  * undefined) nothing is blocked.
  */
 export function mixedContentBlockReason(serverAddress: string): string | null {
+  if (canUseLanBridge(serverAddress)) return null;
   const url = parseWebSocketUrl(serverAddress);
   if (!url || url.protocol !== "ws:") {
     return null;
