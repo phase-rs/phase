@@ -838,7 +838,7 @@ fn ensure_native_engine_sync(
         &files.games_db(&key),
         &files.log_directory(),
         &files.startup_log(),
-        port,
+        ServerMode::Solo(port),
         &spawn_plan.arguments,
     )?;
     if let Err(error) = wait_for_health(&client, port, &mut child) {
@@ -962,7 +962,7 @@ pub(crate) fn start_lan_server_sync(
         &database,
         &logs,
         &logs.join("server-startup.log"),
-        port,
+        ServerMode::Lan(port),
         &arguments,
     )?;
     let mut running = RunningLan {
@@ -1757,13 +1757,18 @@ fn reserve_port() -> Result<u16, NativeEngineError> {
         })
 }
 
+enum ServerMode {
+    Solo(u16),
+    Lan(u16),
+}
+
 fn spawn_server(
     binary: &Path,
     data_directory: &Path,
     games_db: &Path,
     log_directory: &Path,
     startup_log: &Path,
-    port: u16,
+    mode: ServerMode,
     arguments: &[String],
 ) -> Result<(Child, ChildStdin), NativeEngineError> {
     fs::create_dir_all(log_directory).map_err(NativeEngineError::storage)?;
@@ -1773,6 +1778,9 @@ fn spawn_server(
         .truncate(true)
         .open(startup_log)
         .map_err(NativeEngineError::storage)?;
+    let port = match mode {
+        ServerMode::Solo(port) | ServerMode::Lan(port) => port,
+    };
     let mut command = Command::new(binary);
     command
         .env("PORT", port.to_string())
@@ -1788,7 +1796,7 @@ fn spawn_server(
         // server that exits before `/health` is diagnosable without a console.
         .stderr(Stdio::from(startup_log));
 
-    if arguments.iter().any(|arg| arg == "--public-url") {
+    if matches!(mode, ServerMode::Lan(_)) {
         command
             .env_remove("PHASE_SINGLE_USER")
             .env_remove("PHASE_LOBBY_ONLY")

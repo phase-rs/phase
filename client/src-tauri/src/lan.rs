@@ -7,8 +7,9 @@ use std::{
 
 use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::Serialize;
-use tauri::AppHandle;
+use tauri::{AppHandle, WebviewWindow};
 
+use crate::native_bridge::{authorize_lan_operation, LanOperation};
 use crate::native_engine;
 use crate::native_engine_contract::{NativeEngineError, NativeEngineIntent, NativeEngineKey};
 
@@ -157,10 +158,17 @@ pub fn lan_capabilities() -> LanCapabilities {
 #[tauri::command]
 pub async fn start_lan_server(
     app: AppHandle,
+    window: WebviewWindow,
     key: NativeEngineKey,
     intent: NativeEngineIntent,
 ) -> Result<LanServerStatus, NativeEngineError> {
+    let approval = authorize_lan_operation(&window, LanOperation::StartHosting)
+        .await
+        .map_err(|error| lan_error(format!("{error:?}")))?;
     tauri::async_runtime::spawn_blocking(move || {
+        approval
+            .require_current()
+            .map_err(|error| lan_error(format!("{error:?}")))?;
         native_engine::start_lan_server_sync(&app, key, intent)
     })
     .await
@@ -175,17 +183,35 @@ pub async fn lan_server_status() -> Result<LanServerStatus, NativeEngineError> {
 }
 
 #[tauri::command]
-pub async fn stop_lan_server() -> Result<(), NativeEngineError> {
-    tauri::async_runtime::spawn_blocking(native_engine::stop_lan_server_sync)
+pub async fn stop_lan_server(window: WebviewWindow) -> Result<(), NativeEngineError> {
+    let approval = authorize_lan_operation(&window, LanOperation::StopHosting)
         .await
-        .map_err(lan_error)?
+        .map_err(|error| lan_error(format!("{error:?}")))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        approval
+            .require_current()
+            .map_err(|error| lan_error(format!("{error:?}")))?;
+        native_engine::stop_lan_server_sync()
+    })
+    .await
+    .map_err(lan_error)?
 }
 
 #[tauri::command]
-pub async fn discover_lan_servers() -> Result<Vec<DiscoveredServer>, NativeEngineError> {
-    tauri::async_runtime::spawn_blocking(discover_sync)
+pub async fn discover_lan_servers(
+    window: WebviewWindow,
+) -> Result<Vec<DiscoveredServer>, NativeEngineError> {
+    let approval = authorize_lan_operation(&window, LanOperation::Discover)
         .await
-        .map_err(lan_error)?
+        .map_err(|error| lan_error(format!("{error:?}")))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        approval
+            .require_current()
+            .map_err(|error| lan_error(format!("{error:?}")))?;
+        discover_sync()
+    })
+    .await
+    .map_err(lan_error)?
 }
 
 fn collect_service(

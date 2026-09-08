@@ -132,15 +132,30 @@ export function openPhaseSocket(
   opts: OpenOptions<PhaseSocketTransport> = {},
 ): Promise<PhaseSocket<PhaseSocketTransport>> {
   if (!opts.socketFactory && isLanEndpoint(wsUrl)) {
-    return initializeLanCapabilities().then(async () => {
-      const useLanBridge = canUseLanBridge(wsUrl);
-      if (opts.signal?.aborted) throw new HandshakeError("aborted", "Handshake aborted before start");
-      if (useLanBridge) await authorizeLanServer(wsUrl);
-      return openPhaseSocket(wsUrl, {
-        ...opts,
-        socketFactory: (url) => useLanBridge
-          ? new NativeEngineSocket({ type: "lan", url, origin: window.location.origin })
-          : new WebSocket(url),
+    return new Promise<PhaseSocket<PhaseSocketTransport>>((resolve, reject) => {
+      const { signal } = opts;
+      const onAbort = () => reject(new HandshakeError("aborted", "Handshake aborted"));
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const preflight = async () => {
+        await initializeLanCapabilities();
+        if (signal?.aborted) return;
+        const useLanBridge = canUseLanBridge(wsUrl);
+        if (useLanBridge) await authorizeLanServer(wsUrl);
+        if (signal?.aborted) return;
+        // The handshake installs its own abort listener synchronously.
+        resolve(openPhaseSocket(wsUrl, {
+          ...opts,
+          socketFactory: (url) => useLanBridge
+            ? new NativeEngineSocket({ type: "lan", url, origin: window.location.origin })
+            : new WebSocket(url),
+        }));
+      };
+      void preflight().catch(reject).finally(() => {
+        signal?.removeEventListener("abort", onAbort);
       });
     });
   }

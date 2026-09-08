@@ -951,60 +951,64 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   async initialize(): Promise<void> {
-    if (!this.isNativeSocket() && isLanEndpoint(this.serverUrl)) {
-      await initializeLanCapabilities();
-      if (this.disposed) {
-        throw new AdapterError("WS_CLOSED", "Adapter disposed before initialization completed", true);
-      }
-    }
     return new Promise<void>((resolve, reject) => {
       this.initResolve = resolve;
       this.initReject = reject;
 
-      if (!this.isNativeSocket() && !isValidWebSocketUrl(this.serverUrl)) {
-        reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
-        this.initResolve = null;
-        this.initReject = null;
-        return;
-      }
+      const initializeConnection = async () => {
+        if (!this.isNativeSocket() && isLanEndpoint(this.serverUrl)) {
+          await initializeLanCapabilities();
+          if (this.disposed) {
+            throw new AdapterError("WS_CLOSED", "Adapter disposed before initialization completed", true);
+          }
+        }
 
-      // A ws:// target from an HTTPS page is blocked by the browser before the
-      // handshake — surface why instead of letting it fail as "unreachable".
-      const blockReason = this.isNativeSocket()
-        ? null
-        : mixedContentBlockReason(this.serverUrl);
-      if (blockReason) {
-        reject(new AdapterError("WS_ERROR", blockReason, false));
-        this.initResolve = null;
-        this.initReject = null;
-        return;
-      }
+        if (!this.isNativeSocket() && !isValidWebSocketUrl(this.serverUrl)) {
+          reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
+          this.initResolve = null;
+          this.initReject = null;
+          return;
+        }
 
-      this.seedNativeReconnectSession();
-      const setupFrame =
-        this.options.nativeAi
-          ? this.nativeAiSetupFrame(this.options.nativeAi)
-          : this.options.nativePregame
-            ? this.nativePregameSetupFrame(this.options.nativePregame)
-          : this.mode === "host"
-          ? { type: "CreateGame", data: { deck: this.deckData } }
-          : this.mode === "spectate"
-            ? { type: "SpectatorJoin", data: { game_code: this.joinGameCode! } }
-            : {
-                type: "JoinGameWithPassword",
-                data: {
-                  game_code: this.joinGameCode!,
-                  deck: this.deckData,
-                  display_name: this.displayName,
-                  password: this.joinPassword ?? null,
-                  reservation_token: this.reservationToken ?? null,
-                },
-              };
+        // A ws:// target from an HTTPS page is blocked by the browser before the
+        // handshake — surface why instead of letting it fail as "unreachable".
+        const blockReason = this.isNativeSocket()
+          ? null
+          : mixedContentBlockReason(this.serverUrl);
+        if (blockReason) {
+          reject(new AdapterError("WS_ERROR", blockReason, false));
+          this.initResolve = null;
+          this.initReject = null;
+          return;
+        }
 
-      this.attachSocket(setupFrame).catch(() => {
-        // `attachSocket` emits reject via initReject; swallow the
-        // rejection here so it doesn't surface as an unhandled promise.
-      });
+        this.seedNativeReconnectSession();
+        const setupFrame =
+          this.options.nativeAi
+            ? this.nativeAiSetupFrame(this.options.nativeAi)
+            : this.options.nativePregame
+              ? this.nativePregameSetupFrame(this.options.nativePregame)
+            : this.mode === "host"
+            ? { type: "CreateGame", data: { deck: this.deckData } }
+            : this.mode === "spectate"
+              ? { type: "SpectatorJoin", data: { game_code: this.joinGameCode! } }
+              : {
+                  type: "JoinGameWithPassword",
+                  data: {
+                    game_code: this.joinGameCode!,
+                    deck: this.deckData,
+                    display_name: this.displayName,
+                    password: this.joinPassword ?? null,
+                    reservation_token: this.reservationToken ?? null,
+                  },
+                };
+
+        this.attachSocket(setupFrame).catch(() => {
+          // `attachSocket` emits reject via initReject; swallow the
+          // rejection here so it doesn't surface as an unhandled promise.
+        });
+      };
+      void initializeConnection().catch((error: Error) => this.rejectInitialization(error));
     });
   }
 

@@ -240,7 +240,7 @@ async fn run_bridge(
 #[derive(Default)]
 struct LanBridges {
     next_id: u64,
-    bridges: BTreeMap<u64, BridgeHandle>,
+    bridges: BTreeMap<u64, LanBridge>,
     consent: LanConsent,
 }
 
@@ -257,11 +257,51 @@ enum ConsentDecision {
     Denied,
 }
 
-type LanTarget = (String, String, String);
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct LanClient {
+    window: String,
+    origin: String,
+}
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum LanOperation {
+    Connect(String),
+    Discover,
+    StartHosting,
+    StopHosting,
+}
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct LanTarget {
+    client: LanClient,
+    operation: LanOperation,
+}
+
+struct LanBridge {
+    client: LanClient,
+    handle: BridgeHandle,
+}
+
+pub(crate) struct LanAuthorization {
+    target: LanTarget,
+    generation: u64,
+}
+
+impl LanAuthorization {
+    pub(crate) fn require_current(&self) -> Result<(), NativeEngineBridgeError> {
+        let state = lan_bridges()
+            .lock()
+            .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?;
+        if state.consent.generation != self.generation {
+            return Err(consent_error());
+        }
+        state.consent.require(&self.target)
+    }
+}
 
 fn consent_error() -> NativeEngineBridgeError {
     NativeEngineBridgeError::Connect {
-        detail: "LAN connection requires native approval for this server".into(),
+        detail: "LAN operation requires native approval for this page session".into(),
     }
 }
 
@@ -342,8 +382,8 @@ fn lan_endpoint(url: &str) -> Result<String, NativeEngineBridgeError> {
     Ok(format!("ws://{ip}:{port}/ws"))
 }
 
-fn lan_request(url: &str, origin: &str) -> Result<Request<()>, NativeEngineBridgeError> {
-    let origin = match origin {
+fn lan_origin(origin: &str) -> Result<&'static str, NativeEngineBridgeError> {
+    Ok(match origin {
         "https://phase-rs.dev" | "https://app.phase-rs.dev" => "https://phase-rs.dev",
         "https://preview.phase-rs.dev" => "https://preview.phase-rs.dev",
         _ => {
@@ -351,7 +391,11 @@ fn lan_request(url: &str, origin: &str) -> Result<Request<()>, NativeEngineBridg
                 detail: "unsupported LAN client origin".into(),
             })
         }
-    };
+    })
+}
+
+fn lan_request(url: &str, origin: &str) -> Result<Request<()>, NativeEngineBridgeError> {
+    let origin = lan_origin(origin)?;
     let mut request = lan_endpoint(url)?.into_client_request().map_err(|error| {
         NativeEngineBridgeError::Connect {
             detail: error.to_string(),
@@ -363,19 +407,73 @@ fn lan_request(url: &str, origin: &str) -> Result<Request<()>, NativeEngineBridg
     Ok(request)
 }
 
-fn invoking_lan_target(
-    window: &WebviewWindow,
-    url: &str,
-) -> Result<LanTarget, NativeEngineBridgeError> {
+fn invoking_lan_client(window: &WebviewWindow) -> Result<LanClient, NativeEngineBridgeError> {
     let origin = window
         .url()
         .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
         .origin()
         .ascii_serialization();
-    let endpoint = lan_endpoint(url)?;
-    // Validate the real webview origin, including the production alias mapping.
-    lan_request(&endpoint, &origin)?;
-    Ok((window.label().to_owned(), origin, endpoint))
+    lan_origin(&origin)?;
+    Ok(LanClient {
+        window: window.label().to_owned(),
+        origin,
+    })
+}
+
+pub(crate) async fn authorize_lan_operation(
+    window: &WebviewWindow,
+    operation: LanOperation,
+) -> Result<LanAuthorization, NativeEngineBridgeError> {
+    let target = LanTarget {
+        client: invoking_lan_client(window)?,
+        operation,
+    };
+    let (pending, generation) = {
+        let mut state = lan_bridges()
+            .lock()
+            .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?;
+        (state.consent.begin(&target)?, state.consent.generation)
+    };
+    if pending.is_some() {
+        let action = match &target.operation {
+            LanOperation::Connect(endpoint) => {
+                format!("connect to {endpoint} on your local network")
+            }
+            LanOperation::Discover => "search your local network for phase.rs servers".into(),
+            LanOperation::StartHosting => {
+                "start and advertise a game server accessible on your local network".into()
+            }
+            LanOperation::StopHosting => {
+                "stop your local game server and disconnect its players".into()
+            }
+        };
+        let network_notice = match &target.operation {
+            LanOperation::Connect(_) | LanOperation::StartHosting => " LAN traffic is unencrypted: others on the network can read game passwords and reconnect tokens. Use only a trusted LAN.",
+            LanOperation::Discover | LanOperation::StopHosting => "",
+        };
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        window
+            .dialog()
+            .message(format!(
+                "{} wants to {action}. Allow this operation for this page session?{network_notice}",
+                target.client.origin
+            ))
+            .title("Allow LAN operation?")
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Allow".into(),
+                "Cancel".into(),
+            ))
+            .show(move |allowed| {
+                let _ = sender.send(allowed);
+            });
+        let allowed = receiver.await.unwrap_or(false);
+        lan_bridges()
+            .lock()
+            .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
+            .consent
+            .finish(target.clone(), generation, allowed)?;
+    }
+    Ok(LanAuthorization { target, generation })
 }
 
 #[tauri::command]
@@ -383,27 +481,9 @@ pub async fn authorize_lan_server(
     window: WebviewWindow,
     url: String,
 ) -> Result<(), NativeEngineBridgeError> {
-    let target = invoking_lan_target(&window, &url)?;
-    let generation = lan_bridges()
-        .lock()
-        .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
-        .consent
-        .begin(&target)?;
-    let Some(generation) = generation else {
-        return Ok(());
-    };
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    window.dialog()
-        .message(format!("{} wants to connect to {} on your local network. Allow this server for this page session?", target.1, target.2))
-        .title("Allow LAN server connection?")
-        .buttons(MessageDialogButtons::OkCancelCustom("Allow".into(), "Cancel".into()))
-        .show(move |allowed| { let _ = sender.send(allowed); });
-    let allowed = receiver.await.unwrap_or(false);
-    lan_bridges()
-        .lock()
-        .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
-        .consent
-        .finish(target, generation, allowed)
+    authorize_lan_operation(&window, LanOperation::Connect(lan_endpoint(&url)?))
+        .await?
+        .require_current()
 }
 
 #[tauri::command]
@@ -412,8 +492,13 @@ pub async fn connect_lan_server(
     url: String,
     on_event: Channel<BridgeEvent>,
 ) -> Result<u64, NativeEngineBridgeError> {
-    let target = invoking_lan_target(&window, &url)?;
-    let request = lan_request(&target.2, &target.1)?;
+    let endpoint = lan_endpoint(&url)?;
+    let client = invoking_lan_client(&window)?;
+    let request = lan_request(&endpoint, &client.origin)?;
+    let target = LanTarget {
+        client: client.clone(),
+        operation: LanOperation::Connect(endpoint),
+    };
     let (outbound, receiver) = mpsc::unbounded_channel();
     let (abort, registration) = AbortHandle::new_pair();
     let dial_abort = abort.clone();
@@ -428,7 +513,13 @@ pub async fn connect_lan_server(
             .checked_add(1)
             .ok_or_else(|| NativeEngineBridgeError::internal("LAN bridge IDs exhausted"))?;
         let id = state.next_id;
-        state.bridges.insert(id, BridgeHandle::new(abort, outbound));
+        state.bridges.insert(
+            id,
+            LanBridge {
+                client,
+                handle: BridgeHandle::new(abort, outbound),
+            },
+        );
         id
     };
     let connection = tokio::time::timeout(Duration::from_secs(5), connect_async(request)).await;
@@ -465,43 +556,71 @@ fn remove_lan_bridge(id: u64) {
     }
 }
 
-#[tauri::command]
-pub fn lan_bridge_send(id: u64, text: String) -> Result<(), NativeEngineBridgeError> {
-    let sender = lan_bridges()
-        .lock()
-        .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
-        .bridges
-        .get(&id)
-        .map(BridgeHandle::outbound)
-        .ok_or_else(|| NativeEngineBridgeError::UnknownBridge {
-            detail: format!("LAN bridge {id} is not open"),
-        })?;
-    sender
-        .send(Message::Text(text.into()))
-        .map_err(|error| NativeEngineBridgeError::Send {
-            detail: error.to_string(),
-        })
+impl LanBridges {
+    fn owned_bridge(
+        &self,
+        id: u64,
+        client: &LanClient,
+    ) -> Result<&LanBridge, NativeEngineBridgeError> {
+        self.bridges
+            .get(&id)
+            .filter(|bridge| &bridge.client == client)
+            .ok_or_else(|| NativeEngineBridgeError::UnknownBridge {
+                detail: format!("LAN bridge {id} is not open for this page"),
+            })
+    }
+
+    fn send(
+        &self,
+        id: u64,
+        client: &LanClient,
+        text: String,
+    ) -> Result<(), NativeEngineBridgeError> {
+        self.owned_bridge(id, client)?
+            .handle
+            .outbound()
+            .send(Message::Text(text.into()))
+            .map_err(|error| NativeEngineBridgeError::Send {
+                detail: error.to_string(),
+            })
+    }
+
+    fn close(&mut self, id: u64, client: &LanClient) -> Result<(), NativeEngineBridgeError> {
+        self.owned_bridge(id, client)?;
+        if let Some(bridge) = self.bridges.remove(&id) {
+            bridge.handle.abort();
+        }
+        Ok(())
+    }
 }
 
 #[tauri::command]
-pub fn lan_bridge_close(id: u64) -> Result<(), NativeEngineBridgeError> {
-    let bridge = lan_bridges()
+pub fn lan_bridge_send(
+    window: WebviewWindow,
+    id: u64,
+    text: String,
+) -> Result<(), NativeEngineBridgeError> {
+    let client = invoking_lan_client(&window)?;
+    lan_bridges()
         .lock()
         .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
-        .bridges
-        .remove(&id)
-        .ok_or_else(|| NativeEngineBridgeError::UnknownBridge {
-            detail: format!("LAN bridge {id} is not open"),
-        })?;
-    bridge.abort();
-    Ok(())
+        .send(id, &client, text)
+}
+
+#[tauri::command]
+pub fn lan_bridge_close(window: WebviewWindow, id: u64) -> Result<(), NativeEngineBridgeError> {
+    let client = invoking_lan_client(&window)?;
+    lan_bridges()
+        .lock()
+        .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
+        .close(id, &client)
 }
 
 pub(crate) fn abort_lan_bridges() {
     if let Ok(mut state) = lan_bridges().lock() {
         state.consent.clear();
         for (_, bridge) in std::mem::take(&mut state.bridges) {
-            bridge.abort();
+            bridge.handle.abort();
         }
     }
 }
@@ -510,14 +629,20 @@ pub(crate) fn abort_lan_bridges() {
 mod tests {
     use super::*;
 
+    fn test_client() -> LanClient {
+        LanClient {
+            window: "main".into(),
+            origin: "https://phase-rs.dev".into(),
+        }
+    }
+
     #[test]
-    fn lan_consent_requires_approval_for_each_window_origin_and_endpoint() {
+    fn lan_consent_requires_approval_for_each_window_origin_and_operation() {
         let mut consent = LanConsent::default();
-        let target = (
-            "main".into(),
-            "https://phase-rs.dev".into(),
-            "ws://192.168.1.2:9374/ws".into(),
-        );
+        let target = LanTarget {
+            client: test_client(),
+            operation: LanOperation::Connect("ws://192.168.1.2:9374/ws".into()),
+        };
         assert!(consent.require(&target).is_err());
         let generation = consent.begin(&target).unwrap().unwrap();
         assert!(consent.require(&target).is_err());
@@ -525,50 +650,129 @@ mod tests {
         consent.finish(target.clone(), generation, true).unwrap();
         consent.require(&target).unwrap();
         assert_eq!(consent.begin(&target).unwrap(), None);
-        for other in [
-            ("other".into(), target.1.clone(), target.2.clone()),
-            (
-                target.0.clone(),
-                "https://preview.phase-rs.dev".into(),
-                target.2.clone(),
-            ),
-            (
-                target.0.clone(),
-                target.1.clone(),
-                "ws://192.168.1.3:9374/ws".into(),
-            ),
-            (
-                target.0.clone(),
-                target.1.clone(),
-                "ws://192.168.1.2:9375/ws".into(),
-            ),
+        for client in [
+            LanClient {
+                window: "other".into(),
+                ..test_client()
+            },
+            LanClient {
+                origin: "https://preview.phase-rs.dev".into(),
+                ..test_client()
+            },
         ] {
-            assert!(consent.require(&other).is_err());
+            assert!(consent
+                .require(&LanTarget {
+                    client,
+                    operation: target.operation.clone()
+                })
+                .is_err());
+        }
+        for operation in [
+            LanOperation::Connect("ws://192.168.1.3:9374/ws".into()),
+            LanOperation::Connect("ws://192.168.1.2:9375/ws".into()),
+            LanOperation::Discover,
+            LanOperation::StartHosting,
+            LanOperation::StopHosting,
+        ] {
+            assert!(consent
+                .require(&LanTarget {
+                    client: test_client(),
+                    operation
+                })
+                .is_err());
         }
         consent.clear();
         assert!(consent.require(&target).is_err());
     }
 
     #[test]
-    fn navigation_invalidates_pending_lan_consent_and_rejection_is_cached() {
-        let mut consent = LanConsent::default();
-        let target = (
-            "main".into(),
-            "https://phase-rs.dev".into(),
-            "ws://127.0.0.1:9374/ws".into(),
+    fn navigation_invalidates_every_pending_operation_and_rejection_is_cached() {
+        for operation in [
+            LanOperation::Connect("ws://127.0.0.1:9374/ws".into()),
+            LanOperation::Discover,
+            LanOperation::StartHosting,
+            LanOperation::StopHosting,
+        ] {
+            let mut consent = LanConsent::default();
+            let target = LanTarget {
+                client: test_client(),
+                operation,
+            };
+            let old_generation = consent.begin(&target).unwrap().unwrap();
+            consent.clear();
+            let generation = consent.begin(&target).unwrap().unwrap();
+            assert!(consent
+                .finish(target.clone(), old_generation, true)
+                .is_err());
+            assert!(consent.require(&target).is_err());
+            assert!(consent.finish(target.clone(), generation, false).is_err());
+            assert!(consent.require(&target).is_err());
+            assert!(consent.begin(&target).is_err());
+            consent.clear();
+            assert!(consent.begin(&target).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn discovery_and_hosting_approval_never_grants_connection_access() {
+        for operation in [
+            LanOperation::Discover,
+            LanOperation::StartHosting,
+            LanOperation::StopHosting,
+        ] {
+            let mut consent = LanConsent::default();
+            let target = LanTarget {
+                client: test_client(),
+                operation,
+            };
+            let generation = consent.begin(&target).unwrap().unwrap();
+            consent.finish(target.clone(), generation, true).unwrap();
+            consent.require(&target).unwrap();
+            assert!(consent
+                .require(&LanTarget {
+                    client: test_client(),
+                    operation: LanOperation::Connect("ws://127.0.0.1:9374/ws".into())
+                })
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn bridge_send_and_close_require_the_owning_window_and_origin() {
+        let mut state = LanBridges::default();
+        let (outbound, mut receiver) = mpsc::unbounded_channel();
+        let (abort, _) = AbortHandle::new_pair();
+        state.bridges.insert(
+            1,
+            LanBridge {
+                client: test_client(),
+                handle: BridgeHandle::new(abort.clone(), outbound),
+            },
         );
-        let old_generation = consent.begin(&target).unwrap().unwrap();
-        consent.clear();
-        let generation = consent.begin(&target).unwrap().unwrap();
-        assert!(consent
-            .finish(target.clone(), old_generation, true)
-            .is_err());
-        assert!(consent.require(&target).is_err());
-        assert!(consent.finish(target.clone(), generation, false).is_err());
-        assert!(consent.require(&target).is_err());
-        assert!(consent.begin(&target).is_err());
-        consent.clear();
-        assert!(consent.begin(&target).unwrap().is_some());
+        for client in [
+            LanClient {
+                window: "other".into(),
+                ..test_client()
+            },
+            LanClient {
+                origin: "https://preview.phase-rs.dev".into(),
+                ..test_client()
+            },
+        ] {
+            assert!(state.send(1, &client, "forbidden".into()).is_err());
+            assert!(state.close(1, &client).is_err());
+            assert_eq!(state.bridges.len(), 1);
+            assert!(!abort.is_aborted());
+            assert!(receiver.try_recv().is_err());
+        }
+        state.send(1, &test_client(), "allowed".into()).unwrap();
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            Message::Text("allowed".into())
+        );
+        state.close(1, &test_client()).unwrap();
+        assert!(state.bridges.is_empty());
+        assert!(abort.is_aborted());
     }
 
     #[test]
@@ -618,17 +822,35 @@ mod tests {
             let mut state = lan_bridges().lock().unwrap();
             state.next_id += 1;
             let id = state.next_id;
-            state.bridges.insert(id, BridgeHandle::new(abort, outbound));
+            state.bridges.insert(
+                id,
+                LanBridge {
+                    client: test_client(),
+                    handle: BridgeHandle::new(abort, outbound),
+                },
+            );
             id
         };
         native_engine::abort_native_engine_bridges_on_navigation();
-        lan_bridge_send(id, "still open".into()).unwrap();
+        lan_bridges()
+            .lock()
+            .unwrap()
+            .send(id, &test_client(), "still open".into())
+            .unwrap();
         assert_eq!(
             receiver.try_recv().unwrap(),
             Message::Text("still open".into())
         );
-        lan_bridge_close(id).unwrap();
-        assert!(lan_bridge_send(id, "closed".into()).is_err());
+        lan_bridges()
+            .lock()
+            .unwrap()
+            .close(id, &test_client())
+            .unwrap();
+        assert!(lan_bridges()
+            .lock()
+            .unwrap()
+            .send(id, &test_client(), "closed".into())
+            .is_err());
     }
 
     #[test]

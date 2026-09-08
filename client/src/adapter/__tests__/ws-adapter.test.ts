@@ -2129,3 +2129,30 @@ it("waits for the first LAN capability probe before rejecting an HTTPS manual jo
     Object.defineProperty(window, "location", { configurable: true, value: originalLocation });
   }
 });
+
+
+it.each(["resolve", "reject"] as const)("disposes during a pending LAN probe before its late %s", async (completion) => {
+  let complete!: () => void;
+  const probe = new Promise<boolean>((resolve, reject) => {
+    complete = () => completion === "resolve" ? resolve(true) : reject(new Error("Late probe failure"));
+  });
+  lanGate.probe.mockReset().mockReturnValue(probe);
+  lanGate.authorize.mockReset();
+  const manual = new WebSocketAdapter("ws://192.168.1.2:9374/ws", "join", { main_deck: [], sideboard: [] }, "ABC123");
+  MockWebSocket.last = null;
+  const rejection = trackRejection(manual.initialize());
+  manual.dispose();
+  try {
+    expect(await rejection()).toMatchObject({
+      code: "WS_CLOSED",
+      message: "Adapter disposed before initialization completed",
+    });
+    complete();
+    await probe.catch(() => {});
+    expect(MockWebSocket.last).toBeNull();
+    expect(lanGate.authorize).not.toHaveBeenCalled();
+    expect(lanGate.probe).toHaveBeenCalledOnce();
+  } finally {
+    lanGate.probe.mockReset().mockResolvedValue(false);
+  }
+});

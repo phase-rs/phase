@@ -492,17 +492,38 @@ describe("LAN default transport", () => {
     }
   });
 
-  it("never opens a socket when aborted while native approval is pending", async () => {
+  it.each(["resolve", "reject"] as const)("aborts a pending capability probe before its late %s", async (completion) => {
+    lanSupported.mockReturnValue(true);
+    let complete!: () => void;
+    const probe = new Promise<boolean>((resolve, reject) => {
+      complete = () => completion === "resolve" ? resolve(true) : reject(new Error("Late probe failure"));
+    });
+    probeLan.mockReturnValue(probe);
+    const controller = new AbortController();
+    const pending = openPhaseSocket("ws://192.168.1.2:9374/ws", { signal: controller.signal });
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ kind: "aborted" });
+    complete();
+    await probe.catch(() => {});
+    expect(authorizeLan).not.toHaveBeenCalled();
+    expect(channelListener.current).toBeNull();
+    expect(MockWebSocket.instances).toHaveLength(0);
+  });
+
+  it.each(["resolve", "reject"] as const)("aborts pending native approval before its late %s", async (completion) => {
     lanSupported.mockReturnValue(true); probeLan.mockResolvedValue(true);
-    let approve!: () => void;
-    authorizeLan.mockImplementation(() => new Promise<void>((resolve) => { approve = resolve; }));
+    let complete!: () => void;
+    const approval = new Promise<void>((resolve, reject) => {
+      complete = () => completion === "resolve" ? resolve() : reject(new Error("Late approval failure"));
+    });
+    authorizeLan.mockReturnValue(approval);
     const controller = new AbortController();
     const pending = openPhaseSocket("ws://192.168.1.2:9374/ws", { signal: controller.signal });
     await vi.waitFor(() => expect(authorizeLan).toHaveBeenCalledOnce());
     controller.abort();
-    const rejected = expect(pending).rejects.toMatchObject({ kind: "aborted" });
-    approve();
-    await rejected;
+    await expect(pending).rejects.toMatchObject({ kind: "aborted" });
+    complete();
+    await approval.catch(() => {});
     expect(channelListener.current).toBeNull();
     expect(MockWebSocket.instances).toHaveLength(0);
   });
