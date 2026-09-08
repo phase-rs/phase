@@ -13,8 +13,8 @@ use engine::game::casting::{
 };
 use engine::game::combat::AttackTarget;
 use engine::game::functioning_abilities::{
-    active_trigger_definitions, battlefield_active_triggers, game_active_statics,
-    game_functioning_statics,
+    active_replacements, active_trigger_definitions, battlefield_active_triggers,
+    game_active_statics, game_functioning_statics,
 };
 use engine::game::quantity::{
     ability_definition_has_only_unbound_variable_quantities_for_pre_cast,
@@ -576,6 +576,15 @@ fn cast_has_relevant_payoff(
                 && spell_identity_is_available_to_caster(state, caster, object)
                 && object_has_cast_unstable_consumer(state, caster, object, candidate_spell)
         })
+        || active_replacements(state).any(|(_, object, replacement)| {
+            object.zone == Zone::Command
+                && !replacement.is_consumed
+                && spell_identity_is_available_to_caster(state, caster, object)
+        })
+        || state
+            .pending_damage_replacements
+            .iter()
+            .any(|replacement| !replacement.is_consumed)
         || state.objects.values().any(|object| {
             spell_identity_is_available_to_caster(state, caster, object)
                 && has_potentially_authorizing_object_cast_permission(object, caster)
@@ -816,7 +825,7 @@ fn payment_population_is_stable(state: &GameState, caster: PlayerId, spell_id: O
                         .get(&selection.source.object_id)
                         .and_then(|object| object.abilities.get(index))
                         .and_then(|ability| ability.cost.as_ref())
-                        .is_none_or(tap_untap_only_cost)
+                        .is_none_or(tap_only_cost)
                 })
         })
 }
@@ -870,10 +879,10 @@ fn mana_cost_has_x(cost: &engine::types::mana::ManaCost) -> bool {
     )
 }
 
-fn tap_untap_only_cost(cost: &AbilityCost) -> bool {
+fn tap_only_cost(cost: &AbilityCost) -> bool {
     match cost {
-        AbilityCost::Tap | AbilityCost::Untap => true,
-        AbilityCost::Composite { costs } => costs.iter().all(tap_untap_only_cost),
+        AbilityCost::Tap => true,
+        AbilityCost::Composite { costs } => costs.iter().all(tap_only_cost),
         _ => false,
     }
 }
@@ -1837,7 +1846,6 @@ mod tests {
             .expect("hook source exists")
             .trigger_definitions
             .push(engine::types::ability::TriggerDefinition::new(mode));
-        state.battlefield.push_back(source);
         source
     }
 
@@ -1855,14 +1863,6 @@ mod tests {
             .expect("trigger source exists")
             .trigger_definitions
             .push(definition);
-        match zone {
-            Zone::Battlefield => state.battlefield.push_back(source),
-            Zone::Hand => state.players[P0.0 as usize].hand.push_back(source),
-            Zone::Graveyard => state.players[P0.0 as usize].graveyard.push_back(source),
-            Zone::Command => state.command_zone.push_back(source),
-            Zone::Stack => {}
-            _ => unreachable!("fixture supports the trigger scan zones only"),
-        }
         source
     }
 
@@ -1889,7 +1889,6 @@ mod tests {
             .expect("static producer exists")
             .static_definitions
             .push(definition);
-        state.battlefield.push_back(source);
         source
     }
 
@@ -1978,7 +1977,6 @@ mod tests {
                 ],
             }),
         );
-        state.battlefield.push_back(slagheap);
         slagheap
     }
 
@@ -2015,7 +2013,6 @@ mod tests {
             )
             .cost(AbilityCost::Tap),
         );
-        state.battlefield.push_back(source);
         source
     }
 
@@ -2047,7 +2044,6 @@ mod tests {
             )
             .cost(AbilityCost::Tap),
         );
-        state.battlefield.push_back(source);
         source
     }
 
@@ -2148,7 +2144,6 @@ mod tests {
                 engine::types::ability::SacrificeCost::count(TargetFilter::SelfRef, 1),
             )),
         );
-        state.battlefield.push_back(source);
         source
     }
 
@@ -2384,7 +2379,6 @@ mod tests {
         surge_object
             .base_keywords
             .push(Keyword::Surge(ManaCost::generic(1)));
-        state.players[P0.0 as usize].hand.push_back(surge);
 
         assert!(
             state
@@ -2494,7 +2488,6 @@ mod tests {
             "Option consumer".to_string(),
             Zone::Hand,
         );
-        state.players[P0.0 as usize].hand.push_back(option_spell);
         let option_draw = create_object(
             &mut state,
             CardId(91_864),
@@ -2502,7 +2495,6 @@ mod tests {
             "Option draw witness".to_string(),
             Zone::Library,
         );
-        state.players[P0.0 as usize].library.push_back(option_draw);
         {
             let option_object = state
                 .objects
@@ -2593,7 +2585,6 @@ mod tests {
             "Permission consumer".to_string(),
             Zone::Exile,
         );
-        state.exile.push_back(permission_spell);
         {
             let permission_object = state
                 .objects
@@ -2742,7 +2733,6 @@ mod tests {
             "Held face witness".to_string(),
             Zone::Hand,
         );
-        state.players[P0.0 as usize].hand.push_back(held);
         {
             let object = state.objects.get_mut(&held).expect("held witness exists");
             object.card_types.core_types.push(CoreType::Instant);
@@ -2833,7 +2823,6 @@ mod tests {
             "Typed Adventure payload".to_string(),
             Zone::Hand,
         );
-        state.players[P0.0 as usize].hand.push_back(adventure);
         {
             let object = state
                 .objects
@@ -2852,7 +2841,6 @@ mod tests {
             "Typed Omen payload".to_string(),
             Zone::Hand,
         );
-        state.players[P0.0 as usize].hand.push_back(omen);
         {
             let object = state.objects.get_mut(&omen).expect("Omen payload exists");
             object.card_types.core_types.push(CoreType::Enchantment);
@@ -2868,7 +2856,6 @@ mod tests {
             "Typed MTMTE payload".to_string(),
             Zone::Hand,
         );
-        state.players[P0.0 as usize].hand.push_back(mtmte);
         {
             let object = state.objects.get_mut(&mtmte).expect("MTMTE payload exists");
             object.card_types.core_types.push(CoreType::Creature);
@@ -2885,7 +2872,6 @@ mod tests {
             "Typed Disturb payload".to_string(),
             Zone::Graveyard,
         );
-        state.players[P0.0 as usize].graveyard.push_back(disturb);
         {
             let object = state
                 .objects
@@ -2958,7 +2944,6 @@ mod tests {
             "Fuse payoff draw".to_string(),
             Zone::Library,
         );
-        state.players[P0.0 as usize].library.push_back(draw);
         let fuse = create_object(
             &mut state,
             CardId(91_866),
@@ -2966,7 +2951,6 @@ mod tests {
             "Typed Fuse witness".to_string(),
             Zone::Hand,
         );
-        state.players[P0.0 as usize].hand.push_back(fuse);
         {
             let object = state.objects.get_mut(&fuse).expect("Fuse witness exists");
             object.card_types.core_types.push(CoreType::Instant);
@@ -3057,7 +3041,6 @@ mod tests {
             "Cleave payoff draw".to_string(),
             Zone::Library,
         );
-        state.players[P0.0 as usize].library.push_back(draw);
         let cleave = create_object(
             &mut state,
             CardId(91_867),
@@ -3065,7 +3048,6 @@ mod tests {
             "Typed Cleave witness".to_string(),
             Zone::Hand,
         );
-        state.players[P0.0 as usize].hand.push_back(cleave);
         {
             let object = state
                 .objects
@@ -3130,7 +3112,6 @@ mod tests {
             "Filtered exile consumer".to_string(),
             Zone::Exile,
         );
-        state.exile.push_back(consumer);
         let filtered_draw = create_object(
             &mut state,
             CardId(91_865),
@@ -3138,9 +3119,6 @@ mod tests {
             "Filtered permission draw witness".to_string(),
             Zone::Library,
         );
-        state.players[P0.0 as usize]
-            .library
-            .push_back(filtered_draw);
         {
             let object = state.objects.get_mut(&consumer).expect("consumer exists");
             object.card_types.core_types.push(CoreType::Instant);
@@ -3337,7 +3315,6 @@ mod tests {
             "Hidden slot".to_string(),
             Zone::Hand,
         );
-        state.players[P1.0 as usize].hand.push_back(hidden);
         state.deck_pools.push(PlayerDeckPool {
             player: P1,
             current_main: Arc::new(vec![
@@ -3395,7 +3372,6 @@ mod tests {
             "Hidden slot".to_string(),
             Zone::Hand,
         );
-        state.players[P1.0 as usize].hand.push_back(hidden);
         state.deck_pools.push(PlayerDeckPool {
             player: P1,
             current_main: Arc::new(vec![
@@ -3453,7 +3429,6 @@ mod tests {
             "Public cast-history restriction".to_string(),
             Zone::Battlefield,
         );
-        state.battlefield.push_back(payoff);
         state
             .objects
             .get_mut(&payoff)
@@ -4068,7 +4043,6 @@ mod tests {
                 },
             ));
         }
-        state.players[P0.0 as usize].hand.push_back(grapeshot);
         for _ in 0..2 {
             state.add_mana_to_pool(P0, ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
         }
@@ -4316,7 +4290,6 @@ mod tests {
             .get_mut(&source)
             .expect("zone-count source exists");
         Arc::make_mut(&mut object.abilities).push(activation);
-        state.battlefield.push_back(source);
 
         assert!(
             object_has_cast_unstable_consumer(&state, P0, &state.objects[&source], None),
@@ -4377,7 +4350,6 @@ mod tests {
             )
             .cost(AbilityCost::Tap),
         );
-        state.battlefield.push_back(source);
 
         let ability = &state.objects[&source].abilities[0];
         assert!(
@@ -4806,6 +4778,303 @@ mod tests {
         )
     }
 
+    fn zero_controller_gain_definition() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 0 },
+                player: TargetFilter::Controller,
+            },
+        )
+    }
+
+    fn moved_exile_then_draw_replacement(spell: ObjectId) -> ReplacementDefinition {
+        let mut redirect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: Vec::new(),
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        );
+        redirect.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )));
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Graveyard)
+            .valid_card(TargetFilter::SpecificObject { id: spell })
+            .execute(redirect)
+    }
+
+    fn add_zero_controller_gain_spell(
+        scenario: &mut GameScenario,
+        name: &str,
+        mana_cost: ManaCost,
+    ) -> ObjectId {
+        scenario
+            .add_spell_to_hand(P0, name, true)
+            .with_mana_cost(mana_cost)
+            .with_ability_definition(zero_controller_gain_definition())
+            .id()
+    }
+
+    fn add_mana_creature_with_cost(scenario: &mut GameScenario, cost: AbilityCost) -> ObjectId {
+        scenario
+            .add_creature(P0, "Mana-cost witness", 1, 1)
+            .with_ability_definition(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(cost),
+            )
+            .id()
+    }
+
+    #[test]
+    fn zero_cast_moved_replacements_in_command_and_floating_stores_are_paired() {
+        let mut command_scenario = GameScenario::new();
+        command_scenario.at_phase(Phase::PreCombatMain);
+        let command_spell = add_zero_controller_gain_spell(
+            &mut command_scenario,
+            "Command replacement witness",
+            ManaCost::zero(),
+        );
+        command_scenario.with_library_top(P0, &["Command replacement draw"]);
+        let mut command_runner = command_scenario.build();
+        let command_state = command_runner.state_mut();
+        command_state.active_player = P0;
+        command_state.priority_player = P0;
+        command_state.waiting_for = WaitingFor::Priority { player: P0 };
+        let emblem = create_object(
+            command_state,
+            CardId(91_240),
+            P0,
+            "Command replacement emblem".to_string(),
+            Zone::Command,
+        );
+        let emblem_object = command_state
+            .objects
+            .get_mut(&emblem)
+            .expect("command emblem exists");
+        emblem_object.is_emblem = true;
+        emblem_object.replacement_definitions =
+            vec![moved_exile_then_draw_replacement(command_spell)].into();
+
+        assert!(
+            active_replacements(command_state).any(|(_, object, _)| object.id == emblem),
+            "reach guard: the shared functioning-replacement authority recognizes the emblem"
+        );
+        assert!(
+            zero_cast_is_retained(command_state, command_spell),
+            "a functioning command-zone replacement keeps the engine-issued zero cast"
+        );
+
+        let mut nonfunctioning_command = command_state.clone();
+        nonfunctioning_command
+            .objects
+            .get_mut(&emblem)
+            .expect("command object remains present")
+            .is_emblem = false;
+        assert!(
+            !active_replacements(&nonfunctioning_command).any(|(_, object, _)| object.id == emblem),
+            "reach guard: a non-emblem command-zone object is not functioning"
+        );
+        assert!(
+            !zero_cast_is_retained(&nonfunctioning_command, command_spell),
+            "a nonfunctioning command-zone replacement cannot defeat the known-zero proof"
+        );
+
+        let mut without_command_replacement = command_state.clone();
+        without_command_replacement
+            .objects
+            .get_mut(&emblem)
+            .expect("command emblem remains present")
+            .replacement_definitions
+            .clear();
+        assert!(
+            !zero_cast_is_retained(&without_command_replacement, command_spell),
+            "removing only the command replacement restores rejection"
+        );
+
+        // CR 614.1a: the mandatory replacement redirects the spell's stack-to-graveyard move.
+        let command_outcome = command_runner.cast(command_spell).resolve();
+        command_outcome.assert_zone(&[command_spell], Zone::Exile);
+        command_outcome.assert_hand_drawn(P0, 1);
+
+        let mut floating_scenario = GameScenario::new();
+        floating_scenario.at_phase(Phase::PreCombatMain);
+        let floating_spell = add_zero_controller_gain_spell(
+            &mut floating_scenario,
+            "Floating replacement witness",
+            ManaCost::zero(),
+        );
+        let install = floating_scenario
+            .add_spell_to_hand(P0, "Install floating replacement", true)
+            .with_mana_cost(ManaCost::zero())
+            .with_ability(Effect::AddTargetReplacement {
+                replacement: Box::new(moved_exile_then_draw_replacement(floating_spell)),
+                target: TargetFilter::None,
+            })
+            .id();
+        floating_scenario.with_library_top(P0, &["Floating replacement draw"]);
+        let mut floating_runner = floating_scenario.build();
+        let floating_state = floating_runner.state_mut();
+        floating_state.active_player = P0;
+        floating_state.priority_player = P0;
+        floating_state.waiting_for = WaitingFor::Priority { player: P0 };
+        floating_runner.cast(install).resolve();
+        assert!(
+            floating_runner
+                .state()
+                .pending_damage_replacements
+                .iter()
+                .any(|replacement| !replacement.is_consumed),
+            "reach guard: the production AddTargetReplacement None route installed a live floating replacement"
+        );
+        assert!(
+            zero_cast_is_retained(floating_runner.state(), floating_spell),
+            "an unconsumed floating replacement keeps the engine-issued zero cast"
+        );
+
+        let mut consumed_floating = floating_runner.state().clone();
+        consumed_floating.pending_damage_replacements[0].is_consumed = true;
+        assert!(
+            !zero_cast_is_retained(&consumed_floating, floating_spell),
+            "a consumed floating replacement cannot defeat the known-zero proof"
+        );
+
+        let mut without_floating = floating_runner.state().clone();
+        without_floating.pending_damage_replacements.clear();
+        assert!(
+            !zero_cast_is_retained(&without_floating, floating_spell),
+            "removing only the floating replacement restores rejection"
+        );
+
+        let floating_outcome = floating_runner.cast(floating_spell).resolve();
+        floating_outcome.assert_zone(&[floating_spell], Zone::Exile);
+        floating_outcome.assert_hand_drawn(P0, 1);
+    }
+
+    #[test]
+    fn zero_cast_untap_mana_cost_is_retained_and_paid_through_the_reducer() {
+        assert!(tap_only_cost(&AbilityCost::Tap));
+        assert!(
+            !tap_only_cost(&AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Composite {
+                        costs: vec![AbilityCost::Untap],
+                    }
+                ],
+            }),
+            "a nested untap cost is not tap-only"
+        );
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = add_zero_controller_gain_spell(
+            &mut scenario,
+            "Untap payment witness",
+            ManaCost::generic(1),
+        );
+        let untap_source = add_mana_creature_with_cost(&mut scenario, AbilityCost::Untap);
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        state.objects[&untap_source].tapped = true;
+
+        let issued = engine::ai_support::candidate_actions(runner.state());
+        assert!(
+            cast_is_retained_from_issued(runner.state(), spell, issued.clone()),
+            "a tapped {Q} source makes the engine-issued Auto cast strategically relevant"
+        );
+        let cast = issued
+            .into_iter()
+            .find_map(|candidate| match candidate.action {
+                action @ GameAction::CastSpell {
+                    object_id,
+                    payment_mode: CastPaymentMode::Auto,
+                    ..
+                } if object_id == spell => Some(action),
+                _ => None,
+            })
+            .expect("the engine must issue the Auto cast before the gate evaluates it");
+        runner.act(cast).expect("the Auto cast must enter payment");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaPayment { .. }
+        ));
+
+        let payment = engine::ai_support::candidate_actions(runner.state())
+            .into_iter()
+            .find(|candidate| {
+                matches!(
+                    &candidate.action,
+                    GameAction::ActivateManaSource { selection }
+                        if selection.source.object_id == untap_source
+                )
+            })
+            .map(|candidate| candidate.action)
+            .expect("the engine must offer the tapped {Q} source in the live payment domain");
+        // CR 107.6 + CR 601.2h: paying {Q} untaps the source while completing the cast.
+        runner
+            .act(payment)
+            .expect("the engine-issued {Q} payment action must be accepted");
+        assert!(
+            !runner.state().objects[&untap_source].tapped,
+            "paying the untap cost improves the source's board state"
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("the produced mana must finalize the pending cast");
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+
+        let mut tap_control_scenario = GameScenario::new();
+        tap_control_scenario.at_phase(Phase::PreCombatMain);
+        let tap_control_spell = add_zero_controller_gain_spell(
+            &mut tap_control_scenario,
+            "Tap payment control",
+            ManaCost::generic(1),
+        );
+        add_mana_creature_with_cost(&mut tap_control_scenario, AbilityCost::Tap);
+        let mut tap_control_runner = tap_control_scenario.build();
+        let tap_control_state = tap_control_runner.state_mut();
+        tap_control_state.active_player = P0;
+        tap_control_state.priority_player = P0;
+        tap_control_state.waiting_for = WaitingFor::Priority { player: P0 };
+        assert!(
+            !zero_cast_is_retained(tap_control_runner.state(), tap_control_spell),
+            "an ordinary tap-only source leaves the no-payoff zero cast rejected"
+        );
+    }
+
     fn add_battlefield_metadata_consumer(
         state: &mut GameState,
         card_id: u64,
@@ -4826,7 +5095,6 @@ mod tests {
                 .abilities,
         )
         .push(definition);
-        state.battlefield.push_back(object_id);
         object_id
     }
 
@@ -5228,7 +5496,6 @@ mod tests {
         let swamp_object = state.objects.get_mut(&swamp).expect("Swamp exists");
         swamp_object.card_types.core_types.push(CoreType::Land);
         swamp_object.card_types.subtypes.push("Swamp".to_string());
-        state.battlefield.push_back(swamp);
         assert!(
             zero_cast_is_retained(state, mind_sludge),
             "the same production candidate remains when its unrestricted Discard is positive"
@@ -5699,7 +5966,6 @@ mod tests {
             .expect("Prowess source exists");
         object.card_types.core_types.push(CoreType::Creature);
         object.keywords.push(Keyword::Prowess);
-        state.battlefield.push_back(prowess);
 
         assert!(
             zero_cast_is_retained(&state, congregate),
