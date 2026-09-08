@@ -17014,6 +17014,38 @@ mod tests {
     // CR 702.110b: `match_exploited` scopes the exploiter via `valid_card` /
     // `valid_source` rather than hard-coding `exploiter == source`.
 
+    fn exploit_event_from_real_departure(
+        state: &GameState,
+        exploiter: ObjectId,
+        sacrificed: ObjectId,
+    ) -> GameEvent {
+        let mut departure_state = state.clone();
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut departure_state,
+            sacrificed,
+            Zone::Graveyard,
+            &mut events,
+        );
+        let record = events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Battlefield),
+                    record,
+                    ..
+                } if *object_id == sacrificed => Some(record.clone()),
+                _ => None,
+            })
+            .expect("the fixture's real battlefield departure emits a record");
+        GameEvent::CreatureExploited {
+            exploiter,
+            sacrificed,
+            record,
+        }
+    }
+
     #[test]
     fn exploited_self_ref_matches_self_exploit() {
         let mut state = setup();
@@ -17027,10 +17059,7 @@ mod tests {
         let mut trigger = make_trigger(TriggerMode::Exploited);
         trigger.valid_card = Some(TargetFilter::SelfRef);
 
-        let event = GameEvent::CreatureExploited {
-            exploiter: source,
-            sacrificed: source,
-        };
+        let event = exploit_event_from_real_departure(&state, source, source);
 
         assert!(match_exploited(
             &event,
@@ -17060,10 +17089,7 @@ mod tests {
         let mut trigger = make_trigger(TriggerMode::Exploited);
         trigger.valid_card = Some(TargetFilter::SelfRef);
 
-        let event = GameEvent::CreatureExploited {
-            exploiter: other,
-            sacrificed: other,
-        };
+        let event = exploit_event_from_real_departure(&state, other, other);
 
         assert!(!match_exploited(
             &event,
@@ -17105,10 +17131,7 @@ mod tests {
             TypedFilter::creature().controller(ControllerRef::You),
         ));
 
-        let event = GameEvent::CreatureExploited {
-            exploiter: other,
-            sacrificed: other,
-        };
+        let event = exploit_event_from_real_departure(&state, other, other);
 
         assert!(match_exploited(
             &event,
@@ -17132,10 +17155,7 @@ mod tests {
         assert!(trigger.valid_card.is_none());
         assert!(trigger.valid_source.is_none());
 
-        let event = GameEvent::CreatureExploited {
-            exploiter: source,
-            sacrificed: source,
-        };
+        let event = exploit_event_from_real_departure(&state, source, source);
 
         assert!(match_exploited(
             &event,
@@ -17184,12 +17204,26 @@ mod tests {
             .push(CoreType::Creature);
 
         // Real zone-change pipeline: snapshots LKI and strips the graveyard object.
-        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+        let mut departure_events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            source,
+            Zone::Graveyard,
+            &mut departure_events,
+        );
         assert!(state.lki_cache.contains_key(&source));
 
+        let record = departure_events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged { record, .. } => Some(record.clone()),
+                _ => None,
+            })
+            .expect("the self-sacrifice fixture emits a departure record");
         let event = GameEvent::CreatureExploited {
             exploiter: source,
             sacrificed: source,
+            record,
         };
 
         let mut you = make_trigger(TriggerMode::Exploited);
@@ -17251,7 +17285,8 @@ mod tests {
         }
 
         // Real zone-change pipeline: snapshots LKI on battlefield exit.
-        crate::game::zones::move_to_zone(&mut state, token, Zone::Graveyard, &mut Vec::new());
+        let mut departure_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, token, Zone::Graveyard, &mut departure_events);
         assert!(state.lki_cache.contains_key(&token));
         // CR 111.7: the token ceases to exist — purged from `state.objects` before the
         // exploit trigger's filter is evaluated.
@@ -17264,9 +17299,17 @@ mod tests {
 
         // The token exploited ITSELF: it is both the exploiter (subject) and the trigger's
         // own source (context).
+        let record = departure_events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged { record, .. } => Some(record.clone()),
+                _ => None,
+            })
+            .expect("the token self-sacrifice fixture emits a departure record");
         let event = GameEvent::CreatureExploited {
             exploiter: token,
             sacrificed: token,
+            record,
         };
 
         let mut you = make_trigger(TriggerMode::Exploited);

@@ -1670,10 +1670,14 @@ pub enum GameEvent {
         is_mana_ability: bool,
     },
 
-    /// CR 702.110: A creature exploited another creature (sacrificed via exploit ETB).
+    /// CR 702.110b + CR 603.10a + CR 400.7: A creature exploited another
+    /// creature. `exploiter` identifies the actor, while `record` preserves the
+    /// sacrificed victim's exact pre-departure characteristics for later
+    /// trigger matching after the victim has become a new object.
     CreatureExploited {
         exploiter: ObjectId,
         sacrificed: ObjectId,
+        record: Box<ZoneChangeRecord>,
     },
     /// CR 122.1: A player's energy counter total changed.
     EnergyChanged {

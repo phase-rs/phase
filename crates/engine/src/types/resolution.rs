@@ -3908,7 +3908,9 @@ const LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS: &[&str] = &[
 /// This adapter is the persistence seam between v1's legacy-only payloads and
 /// v2's typed frames. v1 decoding converts migrated family payloads into the
 /// runtime stack; v2 decoding restores those frames directly while retaining
-/// legacy slots solely for unmigrated families.
+/// legacy slots solely for unmigrated families. Both supported versions refuse
+/// `CreatureExploited` events that predate authoritative victim records; the
+/// version distinguishes frame layouts and cannot safely synthesize event facts.
 #[derive(Debug, Clone)]
 pub struct ResolutionStateWire {
     state: GameState,
@@ -3980,7 +3982,9 @@ impl ResolutionStateWire {
         // `ResolutionStateWire` is a public persistence boundary in its own
         // right. Its historic-shape preparation and raw-state materialization
         // both belong to `GameStateDecode`; no wire branch gets a private
-        // `GameState` serde shortcut.
+        // `GameState` serde shortcut. Historical externally tagged exploit
+        // events are recognized there only to produce the same incompatibility
+        // diagnostic; this adapter does not add support for that event codec.
         GameStateDecode::prepare_resolution_wire(&mut value, decode_mode)?;
         let additional_live_event_roots = match decode_mode {
             GameStateDecodeMode::ResolutionWireV1 => LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS,
@@ -5251,6 +5255,111 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::{EtbTapState, Zone};
     use std::collections::VecDeque;
+
+    fn state_with_recorded_exploit_event() -> (GameState, GameEvent) {
+        let mut state = GameState::new_two_player(42);
+        let exploiter = crate::game::zones::create_object(
+            &mut state,
+            CardId(80),
+            PlayerId(0),
+            "Exploit source".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = crate::game::zones::create_object(
+            &mut state,
+            CardId(81),
+            PlayerId(0),
+            "Exploit victim".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&victim)
+            .expect("victim exists")
+            .is_token = true;
+        let mut departure_events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            victim,
+            Zone::Graveyard,
+            &mut departure_events,
+        );
+        let record = departure_events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id, record, ..
+                } if *object_id == victim => Some(record.clone()),
+                _ => None,
+            })
+            .expect("the fixture emits an authoritative departure record");
+        let exploit = GameEvent::CreatureExploited {
+            exploiter,
+            sacrificed: victim,
+            record,
+        };
+        state.deferred_entry_events = vec![exploit.clone()];
+        (state, exploit)
+    }
+
+    fn v1_wire_value(state: GameState) -> Value {
+        let mut value = serde_json::to_value(state).expect("state serializes");
+        let object = value.as_object_mut().expect("state is an object");
+        object.remove("resolution_stack");
+        object.insert(
+            "resolution_state_version".to_string(),
+            Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION),
+        );
+        value
+    }
+
+    #[test]
+    fn exploit_victim_record_survives_v1_and_v2_resolution_wires() {
+        let (state, expected) = state_with_recorded_exploit_event();
+        let wires = [
+            v1_wire_value(state.clone()),
+            ResolutionStateWire::from_game_state(state)
+                .to_value()
+                .expect("v2 wire serializes"),
+        ];
+
+        for wire in wires {
+            let restored: ResolutionStateWire =
+                serde_json::from_value(wire).expect("complete exploit evidence restores");
+            assert_eq!(
+                restored.game_state().deferred_entry_events,
+                vec![expected.clone()]
+            );
+        }
+    }
+
+    #[test]
+    fn v1_and_v2_resolution_wires_reject_recordless_exploit_events() {
+        let (state, _) = state_with_recorded_exploit_event();
+        let mut wires = [
+            v1_wire_value(state.clone()),
+            ResolutionStateWire::from_game_state(state)
+                .to_value()
+                .expect("v2 wire serializes"),
+        ];
+
+        for wire in &mut wires {
+            wire["deferred_entry_events"][0]["data"]
+                .as_object_mut()
+                .expect("event data is an object")
+                .remove("record");
+            let error = serde_json::from_value::<ResolutionStateWire>(wire.clone())
+                .expect_err("recordless exploit evidence must refuse the full wire")
+                .to_string();
+            assert!(
+                error.contains(
+                    "CreatureExploited snapshot lacks authoritative victim record; restore a save that contains the exploit departure record"
+                ),
+                "{error}"
+            );
+            assert!(error.contains("$.deferred_entry_events[0].data"), "{error}");
+        }
+    }
 
     #[test]
     fn removed_batched_repeated_payment_snapshot_is_detected() {

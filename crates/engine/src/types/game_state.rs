@@ -19797,6 +19797,78 @@ pub(crate) enum GameStateDecodeMode {
 /// restore caller from silently becoming a second compatibility boundary.
 pub(crate) struct GameStateDecode;
 
+const LEGACY_EXPLOIT_EVENT_EVIDENCE_ERROR: &str =
+    "CreatureExploited snapshot lacks authoritative victim record; restore a save that contains the exploit departure record";
+
+fn reject_legacy_exploit_event_evidence(value: &serde_json::Value) -> Result<(), String> {
+    fn reject(path: &str, reason: &str) -> Result<(), String> {
+        Err(format!(
+            "{LEGACY_EXPLOIT_EVENT_EVIDENCE_ERROR} at {path}: {reason}"
+        ))
+    }
+
+    fn validate_event_data(data: &serde_json::Value, path: &str) -> Result<(), String> {
+        let Some(data) = data.as_object() else {
+            return reject(path, "event data is not an object");
+        };
+        let Some(record) = data.get("record") else {
+            return reject(path, "record is missing");
+        };
+        let Some(record) = record.as_object() else {
+            return reject(path, "record must be an object");
+        };
+        match record.get("is_token") {
+            None => return reject(path, "record.is_token is missing"),
+            Some(value) if !value.is_boolean() => {
+                return reject(path, "record.is_token must be a boolean");
+            }
+            Some(_) => {}
+        }
+        if let (Some(sacrificed), Some(object_id)) = (
+            data.get("sacrificed").and_then(serde_json::Value::as_u64),
+            record.get("object_id").and_then(serde_json::Value::as_u64),
+        ) {
+            if sacrificed != object_id {
+                return reject(path, "record.object_id disagrees with event.sacrificed");
+            }
+        }
+        Ok(())
+    }
+
+    fn visit(value: &serde_json::Value, path: &str) -> Result<(), String> {
+        match value {
+            serde_json::Value::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    visit(value, &format!("{path}[{index}]"))?;
+                }
+            }
+            serde_json::Value::Object(object) => {
+                if object.get("type").and_then(serde_json::Value::as_str)
+                    == Some("CreatureExploited")
+                {
+                    let Some(data) = object.get("data") else {
+                        return reject(path, "event data is missing");
+                    };
+                    validate_event_data(data, &format!("{path}.data"))?;
+                }
+                if let Some(data) = object.get("CreatureExploited") {
+                    validate_event_data(data, &format!("{path}.CreatureExploited"))?;
+                }
+                for (key, value) in object {
+                    visit(value, &format!("{path}.{key}"))?;
+                }
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+        Ok(())
+    }
+
+    visit(value, "$")
+}
+
 impl GameStateDecode {
     pub(crate) fn decode_persisted_resolution_state(
         mut value: serde_json::Value,
@@ -19846,6 +19918,7 @@ impl GameStateDecode {
         mut value: serde_json::Value,
         mode: GameStateDecodeMode,
     ) -> Result<GameState, String> {
+        reject_legacy_exploit_event_evidence(&value)?;
         reject_legacy_raw_prompt_authority(&value)?;
         if !matches!(mode, GameStateDecodeMode::DirectCurrentRaw) {
             migrate_legacy_delayed_trigger_provenance(&mut value)?;
@@ -19891,6 +19964,7 @@ impl GameStateDecode {
             mode,
             GameStateDecodeMode::ResolutionWireV1 | GameStateDecodeMode::ResolutionWireV2
         ));
+        reject_legacy_exploit_event_evidence(value)?;
         reject_legacy_raw_prompt_authority(value)?;
         migrate_legacy_delayed_trigger_provenance(value)?;
         migrate_legacy_trigger_firing_carriers(
@@ -27730,6 +27804,162 @@ mod tests {
     };
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
     use crate::types::triggers::TriggerMode;
+
+    fn state_with_recorded_exploit() -> (GameState, GameEvent) {
+        let mut state = GameState::new_two_player(42);
+        let exploiter = create_object(
+            &mut state,
+            CardId(70),
+            PlayerId(0),
+            "Exploit source".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = create_object(
+            &mut state,
+            CardId(71),
+            PlayerId(1),
+            "Exploit victim".to_string(),
+            Zone::Battlefield,
+        );
+        let victim_object = state.objects.get_mut(&victim).expect("victim exists");
+        victim_object.controller = PlayerId(0);
+        victim_object.card_types.core_types.push(CoreType::Creature);
+        victim_object.base_card_types = victim_object.card_types.clone();
+        victim_object.is_token = true;
+
+        let mut departure_events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            victim,
+            Zone::Graveyard,
+            &mut departure_events,
+        );
+        let record = departure_events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id, record, ..
+                } if *object_id == victim => Some(record.clone()),
+                _ => None,
+            })
+            .expect("the fixture emits an authoritative departure record");
+        let exploit = GameEvent::CreatureExploited {
+            exploiter,
+            sacrificed: victim,
+            record,
+        };
+        state.deferred_entry_events = vec![exploit.clone()];
+        (state, exploit)
+    }
+
+    #[test]
+    fn recorded_exploit_round_trips_through_current_and_persisted_ingresses() {
+        let (state, expected) = state_with_recorded_exploit();
+
+        let direct: GameState =
+            serde_json::from_value(serde_json::to_value(&state).expect("current state serializes"))
+                .expect("current state with complete exploit evidence decodes");
+        assert_eq!(direct.deferred_entry_events, vec![expected.clone()]);
+
+        for persisted in [
+            PersistedGameState::Raw(Box::new(state.clone())),
+            PersistedGameState::capture(state),
+        ] {
+            let restored = serde_json::from_value::<PersistedGameState>(
+                serde_json::to_value(persisted).expect("persisted state serializes"),
+            )
+            .expect("persisted state with complete exploit evidence decodes")
+            .into_game_state_unchecked();
+            assert_eq!(restored.deferred_entry_events, vec![expected.clone()]);
+        }
+    }
+
+    #[test]
+    fn exploit_evidence_guard_rejects_obsolete_and_untrustworthy_snapshots() {
+        let (state, _) = state_with_recorded_exploit();
+        let base = serde_json::to_value(state).expect("fixture serializes");
+        let event_path = "$.deferred_entry_events[0].data";
+
+        let mut cases = Vec::new();
+        let mut missing_record = base.clone();
+        missing_record["deferred_entry_events"][0]["data"]
+            .as_object_mut()
+            .expect("event data is an object")
+            .remove("record");
+        cases.push((missing_record, "record is missing"));
+
+        let mut null_record = base.clone();
+        null_record["deferred_entry_events"][0]["data"]["record"] = serde_json::Value::Null;
+        cases.push((null_record, "record must be an object"));
+
+        let mut scalar_record = base.clone();
+        scalar_record["deferred_entry_events"][0]["data"]["record"] =
+            serde_json::Value::from("not a record");
+        cases.push((scalar_record, "record must be an object"));
+
+        let mut missing_token = base.clone();
+        missing_token["deferred_entry_events"][0]["data"]["record"]
+            .as_object_mut()
+            .expect("record is an object")
+            .remove("is_token");
+        cases.push((missing_token, "record.is_token is missing"));
+
+        let mut invalid_token = base.clone();
+        invalid_token["deferred_entry_events"][0]["data"]["record"]["is_token"] =
+            serde_json::Value::from("true");
+        cases.push((invalid_token, "record.is_token must be a boolean"));
+
+        let mut mismatched_id = base.clone();
+        mismatched_id["deferred_entry_events"][0]["data"]["record"]["object_id"] =
+            serde_json::Value::from(99_999_u64);
+        cases.push((
+            mismatched_id,
+            "record.object_id disagrees with event.sacrificed",
+        ));
+
+        for (value, reason) in cases {
+            let error = serde_json::from_value::<GameState>(value)
+                .expect_err("invalid exploit evidence must refuse the containing state")
+                .to_string();
+            assert!(
+                error.contains(LEGACY_EXPLOIT_EVENT_EVIDENCE_ERROR),
+                "{error}"
+            );
+            assert!(error.contains(event_path), "{error}");
+            assert!(error.contains(reason), "{error}");
+        }
+
+        let mut partial_record = base.clone();
+        partial_record["deferred_entry_events"][0]["data"]["record"]
+            .as_object_mut()
+            .expect("record is an object")
+            .remove("name");
+        let error = serde_json::from_value::<GameState>(partial_record)
+            .expect_err("ordinary incomplete record shape remains a serde schema error")
+            .to_string();
+        assert!(error.contains("missing field `name`"), "{error}");
+        assert!(
+            !error.contains(LEGACY_EXPLOIT_EVENT_EVIDENCE_ERROR),
+            "ordinary record schema errors must not be mislabeled as legacy exploit evidence: {error}"
+        );
+
+        let historical = serde_json::json!({
+            "journal": [{
+                "CreatureExploited": {
+                    "exploiter": 1,
+                    "sacrificed": 2
+                }
+            }]
+        });
+        let error = reject_legacy_exploit_event_evidence(&historical)
+            .expect_err("historical externally tagged evidence is diagnostic-only");
+        assert!(error.contains(LEGACY_EXPLOIT_EVENT_EVIDENCE_ERROR));
+        assert!(error.contains("$.journal[0].CreatureExploited"));
+
+        let benign = serde_json::json!({ "description": "CreatureExploited" });
+        reject_legacy_exploit_event_evidence(&benign)
+            .expect("a string mentioning the event is not an event envelope");
+    }
 
     #[test]
     fn persisted_legacy_tap_effects_migrate_only_effect_payloads() {
