@@ -384,7 +384,14 @@ mod tests {
             "Victim".to_string(),
             Zone::Battlefield,
         );
-        for object_id in [actor, victim] {
+        let friendly_victim = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Friendly Victim".to_string(),
+            Zone::Battlefield,
+        );
+        for object_id in [actor, victim, friendly_victim] {
             let object = state.objects.get_mut(&object_id).unwrap();
             object.card_types.core_types.push(CoreType::Creature);
             object.base_card_types = object.card_types.clone();
@@ -417,6 +424,33 @@ mod tests {
         state.objects.get_mut(&actor).unwrap().controller = PlayerId(1);
         assert!(!matcher(
             &event,
+            &trigger,
+            &test_trigger_source_context(&state, source),
+            &state,
+        ));
+
+        state.objects.get_mut(&actor).unwrap().controller = PlayerId(0);
+        let mut friendly_zone_events = Vec::new();
+        move_to_zone(
+            &mut state,
+            friendly_victim,
+            Zone::Graveyard,
+            &mut friendly_zone_events,
+        );
+        let friendly_record = friendly_zone_events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged { record, .. } => Some(record.clone()),
+                _ => None,
+            })
+            .expect("the production move captured the friendly victim record");
+        let friendly_event = GameEvent::CreatureExploited {
+            exploiter: actor,
+            sacrificed: friendly_victim,
+            record: friendly_record,
+        };
+        assert!(!matcher(
+            &friendly_event,
             &trigger,
             &test_trigger_source_context(&state, source),
             &state,
