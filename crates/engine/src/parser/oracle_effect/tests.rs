@@ -9362,13 +9362,13 @@ fn for_each_sacrifice_target_player_counters_on_source_binds_target_player() {
 
 /// CR 115.1a/c + CR 701.21a: Din of the Fireherd leading leg — "Target
 /// opponent sacrifices a creature for each black creature you control, then
-/// ...". The first sacrifice leg must bind `TargetPlayer` with its dynamic
+/// ...". The first sacrifice leg must bind `TargetOpponent` with its dynamic
 /// `ObjectCount` count. (The "then sacrifices a land" continuation is an
 /// implicit-subject continuation handled by a separate compound path; see
 /// the deviations note — its land filter is a pre-existing controller gap
 /// out of scope of this AST-only for-each fix.)
 #[test]
-fn for_each_sacrifice_din_first_leg_binds_target_player() {
+fn for_each_sacrifice_din_first_leg_binds_target_opponent() {
     let sorcery = vec!["Sorcery".to_string()];
     let pa = crate::parser::parse_oracle_text(
         "Target opponent sacrifices a creature for each black creature you control, \
@@ -9386,8 +9386,8 @@ fn for_each_sacrifice_din_first_leg_binds_target_player() {
         Effect::Sacrifice { target, count, .. } => {
             assert_eq!(
                 target_filter_controller_ref(target),
-                Some(ControllerRef::TargetPlayer),
-                "Din first leg must scope to TargetPlayer, got {target:?}"
+                Some(ControllerRef::TargetOpponent),
+                "Din first leg must scope to TargetOpponent, got {target:?}"
             );
             assert!(
                 matches!(
@@ -14004,7 +14004,7 @@ fn targeted_player_subject_carries_to_conjugated_predicates() {
     };
     assert_eq!(
         target_filter_controller_ref(target),
-        Some(ControllerRef::TargetPlayer)
+        Some(ControllerRef::TargetOpponent)
     );
 
     // CR 601.2c (#2344): the single "target opponent" is chosen once at

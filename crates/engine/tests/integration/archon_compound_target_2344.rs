@@ -34,7 +34,10 @@ fn hand_count(runner: &GameRunner, player: PlayerId) -> usize {
 
 #[test]
 fn compound_target_opponent_chosen_once_and_all_three_effects_apply() {
-    let mut scenario = GameScenario::new_n_player(2, 42);
+    // Three players keep two legal opponents in the target slot. In a duel,
+    // `TargetOpponent` correctly auto-selects the sole legal opponent and the
+    // engine proceeds directly to priority without a selection prompt.
+    let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P1, 20);
     // The one opponent: a creature to sacrifice and a card to discard.
