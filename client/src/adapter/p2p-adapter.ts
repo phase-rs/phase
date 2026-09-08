@@ -237,7 +237,7 @@ class NativeP2PBridge {
   private fullKey: FullSessionKey | null = null;
 
   constructor(
-    private readonly hostDeck: DeckListPayload["player"],
+    private readonly hostDeckData: DeckListPayload,
     private readonly hostDisplayName: string,
     private readonly playerCount: number,
     private readonly formatConfig: FormatConfig | undefined,
@@ -267,7 +267,7 @@ class NativeP2PBridge {
     const host = new WebSocketAdapter(
       "native-engine://phase-server",
       "host",
-      this.hostDeck,
+      this.hostDeckData.player,
       undefined,
       undefined,
       undefined,
@@ -281,6 +281,7 @@ class NativeP2PBridge {
           aiSeats,
           formatConfig: this.formatConfig,
           matchConfig: this.matchConfig,
+          boosterPackPool: this.hostDeckData.booster_pack_pool,
         },
       },
     );
@@ -1106,7 +1107,7 @@ export class P2PHostAdapter implements EngineAdapter {
     }
     if (native) {
       this.nativeBridge = new NativeP2PBridge(
-        (hostDeckData as DeckListPayload).player,
+        hostDeckData as DeckListPayload,
         this.hostDisplayName ?? "Host",
         playerCount,
         formatConfig,

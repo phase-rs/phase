@@ -100,6 +100,7 @@ fn redact_secret_keys(obj: &mut Map<String, Value>) {
     redact_nested_draft_session_json(obj);
     redact_pool_input_cube_list(obj);
     redact_match_launch_pools(obj);
+    redact_intergame_command_launch_pools(obj);
 }
 
 fn redact_nested_draft_session_json(obj: &mut Map<String, Value>) {
@@ -174,6 +175,29 @@ fn redact_match_launch_pools(snapshot: &mut Map<String, Value>) {
             continue;
         };
         deck_payload.remove("booster_pack_pool");
+    }
+}
+
+/// Held intergame commands retain a launch payload for host recovery. Public
+/// backup storage must project this alias exactly as it projects match launches.
+fn redact_intergame_command_launch_pools(snapshot: &mut Map<String, Value>) {
+    let Some(Value::Array(commands)) = snapshot.get_mut("intergameCommands") else {
+        return;
+    };
+    for command in commands {
+        let Some(command) = command.as_object_mut() else {
+            continue;
+        };
+        let Some(launch) = command
+            .get_mut("launchPayload")
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        let Some(deck) = launch.get_mut("deckPayload").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        deck.remove("booster_pack_pool");
     }
 }
 
@@ -415,6 +439,9 @@ mod tests {
                 }},
                 "matchLaunches": [{ "launch": { "deckPayload": {
                     "booster_pack_pool": ["launch"]
+                }}}],
+                "intergameCommands": [{ "launchPayload": { "deckPayload": {
+                    "booster_pack_pool": ["intergame launch"]
                 }}}]
             });
             let redacted = redact_p2p_backup_snapshot_secrets(&raw.to_string()).unwrap();
@@ -424,6 +451,11 @@ mod tests {
             assert!(public["matchLaunches"][0]["launch"]["deckPayload"]
                 .get("booster_pack_pool")
                 .is_none());
+            assert!(
+                public["intergameCommands"][0]["launchPayload"]["deckPayload"]
+                    .get("booster_pack_pool")
+                    .is_none()
+            );
             match &raw["draftSessionJson"] {
                 Value::String(_) => {
                     let nested: Value =

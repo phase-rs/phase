@@ -4525,6 +4525,7 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             draft_metadata,
             start_when_full,
             ranked,
+            booster_pack_pool: _,
         } => L::CreateGameWithSettings {
             deck: deck.clone(),
             display_name: display_name.clone(),
@@ -4846,6 +4847,7 @@ struct MultiplayerSessionRequest {
     format_config: Option<engine::types::format::FormatConfig>,
     start_when_full: bool,
     ranked: bool,
+    booster_pack_pool: Option<Vec<String>>,
     ai_requests: Vec<server_core::session::AiSeatSetup>,
     public: bool,
     password: Option<String>,
@@ -4953,6 +4955,7 @@ async fn create_and_connect_multiplayer_session(
         format_config,
         start_when_full,
         ranked,
+        booster_pack_pool,
         ai_requests,
         public,
         password,
@@ -4997,6 +5000,7 @@ async fn create_and_connect_multiplayer_session(
         if let Some(session) = mgr.sessions.get_mut(&game_code) {
             session.start_when_full = start_when_full;
             session.ranked = ranked;
+            session.booster_pack_pool = booster_pack_pool;
             for setup in ai_requests {
                 session.seat_ai(setup);
             }
@@ -7995,6 +7999,7 @@ async fn handle_client_message(
             draft_metadata,
             start_when_full,
             ranked,
+            booster_pack_pool,
         } => {
             info!(
                 display_name = %display_name,
@@ -8166,17 +8171,19 @@ async fn handle_client_message(
                         ));
                         return;
                     }
-                    let (game_code, player_token) = match mgr.create_game_with_ai(
-                        resolved,
-                        DeckChoice::DeckList(Box::new(deck)),
-                        display_name.clone(),
-                        timer_seconds,
-                        match_config,
-                        ai_requests,
-                        db.card_names(),
-                        format_config.clone(),
-                        db,
-                    ) {
+                    let (game_code, player_token) = match mgr
+                        .create_game_with_ai_with_booster_pack_pool(
+                            resolved,
+                            DeckChoice::DeckList(Box::new(deck)),
+                            display_name.clone(),
+                            timer_seconds,
+                            match_config,
+                            ai_requests,
+                            db.card_names(),
+                            format_config.clone(),
+                            booster_pack_pool.clone(),
+                            db,
+                        ) {
                         Ok(created) => created,
                         Err(error) => {
                             let _ = tx.send(ServerMessage::error(error));
@@ -8303,6 +8310,7 @@ async fn handle_client_message(
                             format_config,
                             start_when_full,
                             ranked,
+                            booster_pack_pool,
                             ai_requests,
                             public,
                             password: password.clone(), // original still needed for Phase 3
@@ -13630,6 +13638,7 @@ mod issue_4548_full_create_tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                booster_pack_pool: None,
             };
             socket
                 .send(WsMessage::Text(
@@ -13805,6 +13814,7 @@ mod issue_4548_full_create_tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                booster_pack_pool: None,
             };
             socket
                 .send(WsMessage::Text(
@@ -13885,6 +13895,7 @@ mod issue_4548_full_create_tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                booster_pack_pool: None,
             };
             let create_json = serde_json::to_string(&create).expect("create json");
             assert!(create_json.len() > 8 * 1024);
@@ -14012,6 +14023,7 @@ mod game_submission_tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            booster_pack_pool: None,
         };
         socket
             .send(WsMessage::Text(
@@ -14035,6 +14047,7 @@ mod game_submission_tests {
 
     async fn create_started_ai_game(
         socket: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+        booster_pack_pool: Option<Vec<String>>,
     ) -> (String, String, server_core::FullSessionKey) {
         let create = ClientMessage::CreateGameWithSettings {
             deck: DeckData::default(),
@@ -14059,6 +14072,7 @@ mod game_submission_tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            booster_pack_pool,
         };
         socket
             .send(WsMessage::Text(
@@ -14084,6 +14098,37 @@ mod game_submission_tests {
             }
         }
         created.expect("Full game identity")
+    }
+
+    #[tokio::test]
+    async fn native_shaped_full_create_preserves_cube_pool_through_start_and_ordinary_control() {
+        let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
+        let pool = vec![
+            "Cube Card".to_string(),
+            "Cube Card".to_string(),
+            "Undealt sentinel".to_string(),
+        ];
+        let mut native_host = connect_and_hello(url.clone()).await;
+        let (cube_code, _, _) = create_started_ai_game(&mut native_host, Some(pool.clone())).await;
+        let sessions = app_state.sessions.lock().await;
+        let cube = sessions.sessions.get(&cube_code).expect("Cube session");
+        assert_eq!(cube.booster_pack_pool, Some(pool.clone()));
+        assert_eq!(
+            cube.state
+                .booster_pack_pool
+                .as_ref()
+                .map(|pool| pool.as_slice()),
+            Some(pool.as_slice())
+        );
+        drop(sessions);
+
+        let mut ordinary_host = connect_and_hello(url).await;
+        let (ordinary_code, _, _) = create_started_ai_game(&mut ordinary_host, None).await;
+        assert!(app_state.sessions.lock().await.sessions[&ordinary_code]
+            .state
+            .booster_pack_pool
+            .is_none());
+        server.abort();
     }
 
     async fn reconnect_started_game(
@@ -14196,7 +14241,8 @@ mod game_submission_tests {
         let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(10), async {
             let mut socket_a = connect_and_hello(url.clone()).await;
-            let (game_code, player_token, full_key) = create_started_ai_game(&mut socket_a).await;
+            let (game_code, player_token, full_key) =
+                create_started_ai_game(&mut socket_a, None).await;
 
             let mut socket_b = connect_and_hello(url).await;
             reconnect_started_game(&mut socket_b, &game_code, &player_token, full_key.clone())
@@ -14653,6 +14699,7 @@ mod refused_auto_start_join_tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                booster_pack_pool: None,
             },
         )
         .await;
@@ -16064,6 +16111,7 @@ mod issue_4548_deadlock_tests {
                     format_config: None,
                     start_when_full: false,
                     ranked: false,
+                    booster_pack_pool: None,
                     ai_requests: vec![],
                     public: false,
                     password: None,
@@ -17275,6 +17323,107 @@ mod p2p_backup_delete_tests {
     }
 
     #[tokio::test]
+    async fn public_backup_store_and_get_redact_intergame_launch_pool() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        let snapshot = serde_json::json!({
+            "intergameCommands": [{
+                "launchPayload": { "deckPayload": {
+                    "booster_pack_pool": ["Cube", "Cube", "Undealt sentinel"],
+                    "main_deck": ["Public card"]
+                }}
+            }]
+        })
+        .to_string();
+
+        let stored = admin::p2p_backup_store(
+            State(app_state.clone()),
+            Json(admin::P2pBackupRequest {
+                draft_code: DRAFT_CODE.to_string(),
+                host_peer_id: HOST_PEER.to_string(),
+                snapshot_json: snapshot,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(stored.status(), StatusCode::OK);
+
+        let (_, stored_snapshot, _) = app_state
+            .game_db
+            .load_p2p_backup(DRAFT_CODE)
+            .expect("load")
+            .expect("stored backup");
+        let stored: serde_json::Value =
+            serde_json::from_str(&stored_snapshot).expect("snapshot JSON");
+        let stored_deck = &stored["intergameCommands"][0]["launchPayload"]["deckPayload"];
+        assert!(stored_deck.get("booster_pack_pool").is_none());
+        assert_eq!(stored_deck["main_deck"], serde_json::json!(["Public card"]));
+
+        let response = admin::p2p_backup_get(
+            State(app_state),
+            Path(DRAFT_CODE.to_string()),
+            Query(admin::P2pBackupGetQuery {
+                host_peer_id: HOST_PEER.to_string(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let response: serde_json::Value = serde_json::from_slice(&body).expect("response JSON");
+        let public: serde_json::Value =
+            serde_json::from_str(response["snapshot_json"].as_str().expect("snapshot JSON"))
+                .expect("snapshot JSON");
+        assert!(
+            public["intergameCommands"][0]["launchPayload"]["deckPayload"]
+                .get("booster_pack_pool")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn public_backup_get_defensively_redacts_legacy_intergame_launch_pool() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        app_state
+            .game_db
+            .save_p2p_backup(
+                DRAFT_CODE,
+                HOST_PEER,
+                &serde_json::json!({
+                    "intergameCommands": [{ "launchPayload": { "deckPayload": {
+                        "booster_pack_pool": ["legacy Cube"], "main_deck": ["Public card"]
+                    }}}]
+                })
+                .to_string(),
+            )
+            .expect("seed raw legacy backup");
+
+        let response = admin::p2p_backup_get(
+            State(app_state),
+            Path(DRAFT_CODE.to_string()),
+            Query(admin::P2pBackupGetQuery {
+                host_peer_id: HOST_PEER.to_string(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let response: serde_json::Value = serde_json::from_slice(&body).expect("response JSON");
+        let public: serde_json::Value =
+            serde_json::from_str(response["snapshot_json"].as_str().expect("snapshot JSON"))
+                .expect("snapshot JSON");
+        let deck = &public["intergameCommands"][0]["launchPayload"]["deckPayload"];
+        assert!(deck.get("booster_pack_pool").is_none());
+        assert_eq!(deck["main_deck"], serde_json::json!(["Public card"]));
+    }
+
+    #[tokio::test]
     async fn delete_rejects_missing_host_peer_id_and_preserves_row() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let app_state = test_app_state(&temp_dir);
@@ -17724,6 +17873,7 @@ mod metrics_tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            booster_pack_pool: None,
         }
     }
 

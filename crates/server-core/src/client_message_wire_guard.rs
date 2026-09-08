@@ -47,6 +47,18 @@ use crate::spectator_wire_guard::{guard_spectate_draft, guard_spectator_join};
 use engine::game::interaction::MAX_INTERACTION_STRING_LEN;
 use engine::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use engine::types::interaction::{InteractionPreviewRequest, InteractionSubmission};
+use lobby_broker::inbound_guard::validate_deck_list;
+
+/// A Cube source is larger than a constructed deck but still must be bounded
+/// before the Full-mode handler persists it. Order and duplicates are data.
+pub const MAX_BOOSTER_PACK_POOL_ENTRIES: usize = 8_192;
+
+fn guard_booster_pack_pool(pool: &Option<Vec<String>>) -> Result<(), String> {
+    if let Some(pool) = pool {
+        validate_deck_list("booster_pack_pool", pool, MAX_BOOSTER_PACK_POOL_ENTRIES)?;
+    }
+    Ok(())
+}
 
 /// Validate wire fields for any inbound `ClientMessage` before handler work.
 ///
@@ -130,6 +142,7 @@ pub fn guard_client_message_before_dispatch(
             room_name,
             host_peer_id,
             draft_metadata,
+            booster_pack_pool,
             ..
         } => {
             guard_create_game_settings_inbound(CreateGameSettingsInbound {
@@ -143,7 +156,8 @@ pub fn guard_client_message_before_dispatch(
                 host_peer_id: host_peer_id.as_deref(),
                 draft_metadata: draft_metadata.as_ref(),
             })?;
-            guard_create_ai_seats(ai_seats, *player_count)
+            guard_create_ai_seats(ai_seats, *player_count)?;
+            guard_booster_pack_pool(booster_pack_pool)
         }
         ClientMessage::JoinGameWithPassword {
             game_code,
@@ -619,6 +633,25 @@ mod tests {
             ServerMode::Full
         )
         .is_ok());
+    }
+
+    #[test]
+    fn booster_pack_pool_guard_preserves_duplicates_and_rejects_oversize_or_bad_names() {
+        assert!(guard_booster_pack_pool(&Some(vec![
+            "Cube Card".into(),
+            "Cube Card".into(),
+            "Undealt sentinel".into(),
+        ]))
+        .is_ok());
+        assert!(guard_booster_pack_pool(&Some(vec![
+            "Card".into();
+            MAX_BOOSTER_PACK_POOL_ENTRIES + 1
+        ]))
+        .unwrap_err()
+        .contains("booster_pack_pool"));
+        assert!(guard_booster_pack_pool(&Some(vec!["bad\nname".into()]))
+            .unwrap_err()
+            .contains("booster_pack_pool"));
     }
 
     #[test]

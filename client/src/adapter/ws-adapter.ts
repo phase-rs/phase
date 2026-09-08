@@ -178,7 +178,7 @@ export interface NativeSocketAdapterOptions {
 /** Native server setup for one local P2P seat. The PeerJS connection remains
  * the guest-facing transport; these sockets never leave the desktop host. */
 export type NativePregameAdapterOptions =
-  | ({ kind: "host"; aiSeats: NativeAiSeat[]; playerCount: number; formatConfig?: FormatConfig; matchConfig?: MatchConfig } & NativeSocketAdapterOptions)
+  | ({ kind: "host"; aiSeats: NativeAiSeat[]; playerCount: number; formatConfig?: FormatConfig; matchConfig?: MatchConfig; boosterPackPool?: string[] | null } & NativeSocketAdapterOptions)
   | ({ kind: "guest" } & NativeSocketAdapterOptions)
   | ({ kind: "reconnect"; gameCode: string; playerId: PlayerId; playerToken: string; fullKey: FullSessionKey } & NativeSocketAdapterOptions);
 
@@ -1639,6 +1639,9 @@ export class WebSocketAdapter implements EngineAdapter {
             deck: { type: "DeckList", data: seat.deck },
           })),
           format_config: options.formatConfig ?? null,
+          ...(options.boosterPackPool !== undefined
+            ? { booster_pack_pool: options.boosterPackPool }
+            : {}),
           start_when_full: false,
           ranked: false,
         },

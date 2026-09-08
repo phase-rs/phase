@@ -221,6 +221,9 @@ describe("P2PDraftHost persistence disposal", () => {
           seat: 0,
           launch: { deckPayload: { booster_pack_pool: ["Launch cube"] } },
         }],
+        intergameCommands: [{
+          launchPayload: { deckPayload: { booster_pack_pool: ["Intergame cube"] } },
+        }],
       };
 
       await privateHost.uploadBackupSnapshot(snapshot);
@@ -231,6 +234,7 @@ describe("P2PDraftHost persistence disposal", () => {
       expect(publicSnapshot.booster_pack_pool).toBeUndefined();
       expect(publicSnapshot.poolInput.data.cube_list_text).toBeUndefined();
       expect(publicSnapshot.matchLaunches[0].launch.deckPayload.booster_pack_pool).toBeUndefined();
+      expect(publicSnapshot.intergameCommands[0].launchPayload.deckPayload.booster_pack_pool).toBeUndefined();
       if (typeof snapshot.draftSessionJson === "string") {
         expect(JSON.parse(publicSnapshot.draftSessionJson).booster_pack_pool).toBeUndefined();
         expect(JSON.parse(snapshot.draftSessionJson).booster_pack_pool).toEqual(["Nested cube"]);
@@ -243,6 +247,7 @@ describe("P2PDraftHost persistence disposal", () => {
       expect(snapshot.booster_pack_pool).toEqual(["Top level cube"]);
       expect(snapshot.poolInput.data.cube_list_text).toBe("Secret cube");
       expect(snapshot.matchLaunches[0].launch.deckPayload.booster_pack_pool).toEqual(["Launch cube"]);
+      expect(snapshot.intergameCommands[0].launchPayload.deckPayload.booster_pack_pool).toEqual(["Intergame cube"]);
     } finally {
       globalThis.fetch = originalFetch;
     }

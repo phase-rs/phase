@@ -85,6 +85,7 @@ function sanitizePublicBackup(
 
   redactPoolInputCubeList(publicSnapshot.poolInput);
   redactMatchLaunchPools(rawPublicSnapshot.matchLaunches);
+  redactIntergameCommandLaunchPools(rawPublicSnapshot.intergameCommands);
   redactDraftSessionPoolAndChaos(rawPublicSnapshot);
   return publicSnapshot;
 }
@@ -100,6 +101,17 @@ function redactMatchLaunchPools(matchLaunches: unknown): void {
     if (!isJsonRecord(matchLaunch) || !isJsonRecord(matchLaunch.launch)) continue;
     if (!isJsonRecord(matchLaunch.launch.deckPayload)) continue;
     delete matchLaunch.launch.deckPayload.booster_pack_pool;
+  }
+}
+
+/** Held Bo3 commands retain their original launch payload for recovery. That
+ * payload is just as public in an HTTP backup as an ordinary match launch. */
+function redactIntergameCommandLaunchPools(intergameCommands: unknown): void {
+  if (!Array.isArray(intergameCommands)) return;
+  for (const command of intergameCommands) {
+    if (!isJsonRecord(command) || !isJsonRecord(command.launchPayload)) continue;
+    if (!isJsonRecord(command.launchPayload.deckPayload)) continue;
+    delete command.launchPayload.deckPayload.booster_pack_pool;
   }
 }
 
