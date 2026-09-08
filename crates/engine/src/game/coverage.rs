@@ -23,11 +23,11 @@ use crate::types::ability::{
     CountScope, CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
     DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
     EffectScope, FilterProp, ForEachCategoryAction, GameRestriction, LibraryPosition,
-    ManaProduction, ObjectProperty, ObjectScope, ObjectSelectionCardinality,
-    ObjectSelectionEligibility, ParsedCondition, PerpetualModification, PlayerFilter,
-    PlayerRelation, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
-    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
+    ManaProduction, MassLibraryShuffleMode, ObjectProperty, ObjectScope,
+    ObjectSelectionCardinality, ObjectSelectionEligibility, ParsedCondition, PerpetualModification,
+    PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection,
+    SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
     SpellStackToGraveyardReplacement, StackAbilityKind, StaticCondition, StaticDefinition,
     TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, VoteSubject, ZoneRef,
 };
@@ -3104,7 +3104,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             enter_with_counters,
             face_down_profile,
             library_position,
-            library_shuffle: _,
+            library_shuffle,
             random_order,
         } => {
             if let Some(o) = origin {
@@ -3135,6 +3135,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if let Some(lp) = library_position {
                 d.push(("library_position".into(), format!("{lp:?}")));
+            }
+            if matches!(library_shuffle, MassLibraryShuffleMode::TerminalShuffle) {
+                d.push(("library_shuffle".into(), format!("{library_shuffle:?}")));
             }
             if *random_order {
                 d.push(("random_order".into(), "true".into()));
@@ -13602,6 +13605,46 @@ mod tests {
                 .iter()
                 .any(|k| k == "enters_attacking"),
             "a plain (non-attacking) ChangeZone must not add the row",
+        );
+    }
+
+    /// The parser-owned terminal shuffle changes the library action from
+    /// per-object randomization to one chained shuffle. It must therefore reach
+    /// coverage signatures, while the default remains absent to avoid churn.
+    #[test]
+    fn change_zone_all_signature_exposes_terminal_shuffle() {
+        let details = |library_shuffle| {
+            effect_details(&Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Library,
+                target: TargetFilter::Controller,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                library_shuffle,
+                random_order: false,
+            })
+        };
+
+        let per_object = details(MassLibraryShuffleMode::PerObject);
+        assert!(
+            !per_object.iter().any(|(key, _)| key == "library_shuffle"),
+            "the default mode must not churn legacy coverage signatures"
+        );
+
+        let terminal = details(MassLibraryShuffleMode::TerminalShuffle);
+        assert!(
+            terminal
+                .iter()
+                .any(|(key, value)| { key == "library_shuffle" && value == "TerminalShuffle" }),
+            "the parser-emitted terminal shuffle must be visible to coverage"
+        );
+        assert_ne!(
+            per_object, terminal,
+            "per-object and terminal library shuffles must not collapse in coverage"
         );
     }
 
