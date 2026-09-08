@@ -108,15 +108,34 @@ pub fn resolve(
     // `valid_source`. Scoped to a pre-bind `ParentTarget` only, so a `SelfRef`
     // reference (Human Torch's "he", whose empty `ability.targets` is normal) still
     // installs.
-    if let DelayedTriggerCondition::WheneverEvent { trigger, .. } = &condition {
+    //
+    // CR 603.7 (issue #8721): `WhenNextEvent` is bound by the SAME
+    // `bind_contextual_filter_to_condition` call below and degrades identically,
+    // so it is gated here too. It is listed second because it also carries an
+    // `or_trigger`, whose filters go through the same rewrite.
+    let over_fire_prone_triggers: Vec<&crate::types::ability::TriggerDefinition> = match &condition
+    {
+        DelayedTriggerCondition::WheneverEvent { trigger, .. } => vec![trigger.as_ref()],
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+            ..
+        } => std::iter::once(trigger.as_ref())
+            .chain(or_trigger.as_deref())
+            .collect(),
+        _ => Vec::new(),
+    };
+    if !over_fire_prone_triggers.is_empty() {
         let references_empty_parent = ability.targets.is_empty()
-            && [
-                &trigger.valid_source,
-                &trigger.valid_card,
-                &trigger.valid_target,
-            ]
-            .iter()
-            .any(|filter| matches!(filter, Some(TargetFilter::ParentTarget)));
+            && over_fire_prone_triggers.iter().any(|trigger| {
+                [
+                    &trigger.valid_source,
+                    &trigger.valid_card,
+                    &trigger.valid_target,
+                ]
+                .iter()
+                .any(|filter| matches!(filter, Some(TargetFilter::ParentTarget)))
+            });
         if references_empty_parent {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::CreateDelayedTrigger,
@@ -1354,6 +1373,94 @@ mod tests {
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::triggers::{PlaneswalkRole, TriggerMode};
+
+    /// CR 603.7 (issue #8721): the over-fire guard covers `WhenNextEvent`, not
+    /// only `WheneverEvent`.
+    ///
+    /// Both conditions are bound by the same `bind_contextual_filter_to_condition`
+    /// call, whose empty-parent rewrite turns `ParentTarget` into
+    /// `TargetFilter::Any`. The guard above therefore has to see both, or a
+    /// `WhenNextEvent` with a bare `ParentTarget` and no chosen target installs a
+    /// trigger that fires on every matching event instead of on one object.
+    ///
+    /// Both directions, because either half alone is trivially satisfiable: a
+    /// guard that refuses everything passes the first assertion, one that refuses
+    /// nothing passes the second.
+    #[test]
+    fn the_over_fire_guard_covers_both_delayed_conditions() {
+        fn condition(next: bool) -> DelayedTriggerCondition {
+            let trigger = Box::new(
+                TriggerDefinition::new(TriggerMode::SpellCast)
+                    .valid_card(TargetFilter::ParentTarget),
+            );
+            if next {
+                DelayedTriggerCondition::WhenNextEvent {
+                    trigger,
+                    or_trigger: None,
+                    lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
+                }
+            } else {
+                DelayedTriggerCondition::WheneverEvent {
+                    trigger,
+                    expiry: crate::types::ability::WheneverEventExpiry::default(),
+                }
+            }
+        }
+
+        for next in [false, true] {
+            let mut state = GameState::new_two_player(42);
+            let ability = ResolvedAbility::new(
+                Effect::CreateDelayedTrigger {
+                    condition: condition(next),
+                    effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    )),
+                    uses_tracked_set: false,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).expect("resolution must not error");
+            assert!(
+                state.delayed_triggers.is_empty(),
+                "next={next}: a bare ParentTarget with no chosen target must not install — \
+                 the empty-parent rewrite would widen it to Any"
+            );
+        }
+
+        // Positive control: the same condition WITH a chosen target installs, so
+        // the guard is not simply refusing everything.
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: condition(true),
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )),
+                uses_tracked_set: false,
+            },
+            vec![crate::types::ability::TargetRef::Object(ObjectId(9))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("resolution must not error");
+        assert_eq!(
+            state.delayed_triggers.len(),
+            1,
+            "a chosen target binds ParentTarget to that object, so the trigger installs"
+        );
+    }
 
     /// V15 — CR 701.17c: a delayed trigger snapshotting a mill's
     /// `TriggeringSource` asks where the card is, and the answer is "the zone it

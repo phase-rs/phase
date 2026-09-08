@@ -1434,6 +1434,19 @@ pub(crate) fn graveyard_destination_rider(
             target: TargetFilter::ParentTarget,
             ..
         } => Some(SpellStackToGraveyardReplacement::Exile),
+        // ISSUE #8721, MEASURED AND REJECTED: this arm also swallows Invasion of
+        // Alara's printed "Put one of them into your hand." — an unconditional
+        // move of the OTHER exiled card, not a graveyard replacement. Gating the
+        // arm on the "if you don't cast it" condition (which the four genuine
+        // members carry and Invasion of Alara does not) does let that
+        // instruction run — and it then moves the WRONG object: with no chosen
+        // target on the head, `ParentTarget` binds to the source, and the Siege
+        // returns itself to its owner's hand. Measured end-to-end through
+        // `GameScenario`/`GameRunner`, both accept and decline.
+        //
+        // So the classification stays as it is and the swallowed instruction is
+        // carried as a named gap: repairing it needs the `ParentTarget` binding
+        // fixed first, which is a separate unit with its own gate run.
         Effect::ChangeZone {
             destination: Zone::Hand,
             target: TargetFilter::ParentTarget,

@@ -61952,3 +61952,62 @@ fn collect_cast_from_zone_defs(def: &AbilityDefinition, out: &mut Vec<AbilityDef
         collect_cast_from_zone_defs(sub, out);
     }
 }
+
+/// CR 601.2 vs CR 603.7 (issue #8721): "if you cast a spell this way, …" carries
+/// two categories, and only one of them is a delayed triggered ability.
+///
+/// Both directions in one test, because either half alone passes trivially: a
+/// recognizer that wraps nothing satisfies the exclusion, and one that wraps
+/// everything satisfies the inclusion. The first draft of this fix wrapped both
+/// categories and changed cards whose consequent is a casting property; the
+/// exclusion half is the one that would have caught it.
+#[test]
+fn a_cast_this_way_gate_defers_a_consequence_but_never_a_casting_property() {
+    fn wraps_a_spell_cast_delayed_trigger(def: &AbilityDefinition) -> bool {
+        fn walk(def: &AbilityDefinition) -> bool {
+            if let Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenNextEvent { trigger, .. },
+                ..
+            } = &*def.effect
+            {
+                if matches!(trigger.mode, TriggerMode::SpellCast)
+                    && trigger.valid_card == Some(TargetFilter::ParentTarget)
+                {
+                    return true;
+                }
+            }
+            def.sub_ability.as_deref().is_some_and(walk)
+                || def.else_ability.as_deref().is_some_and(walk)
+        }
+        walk(def)
+    }
+
+    // Oracle body from `client/public/card-data.json`, without the trigger head.
+    // A CONSEQUENCE of the cast: the counter is placed because a spell was cast,
+    // so it must wait for that cast (Helmut Zemo, Mastermind).
+    let consequence = parse_effect_chain(
+        "You may cast target instant or sorcery card with mana value less than or equal to \
+         his power from your graveyard. If that spell would be put into your graveyard, exile \
+         it instead. If you cast a spell this way, put a +1/+1 counter on Helmut Zemo.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        wraps_a_spell_cast_delayed_trigger(&consequence),
+        "\"put a +1/+1 counter\" happens BECAUSE of the cast, so it must be deferred to it"
+    );
+
+    // A PROPERTY of the cast: CR 601.2 makes this part of casting the spell, so it
+    // must be live before the cast and cannot be deferred past it (Brilliant
+    // Ultimatum).
+    let property = parse_effect_chain(
+        "Exile the top five cards of your library. An opponent separates those cards into two \
+         piles. You may play lands and cast spells from one of those piles. If you cast a \
+         spell this way, you cast it without paying its mana cost.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        !wraps_a_spell_cast_delayed_trigger(&property),
+        "\"you cast it without paying its mana cost\" describes HOW the cast happens \
+         (CR 601.2) and must not be deferred past it"
+    );
+}

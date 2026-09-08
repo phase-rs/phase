@@ -6747,6 +6747,82 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
     (text, None)
 }
 
+/// CR 603.7 + CR 608.2g (issue #8721): the cast-permission back-reference gate — "if you cast
+/// a spell this way, …" / "when you cast that spell, …".
+///
+/// The consequent is gated on a cast that HAS NOT HAPPENED when the granting
+/// ability resolves: in every case measured over the full-corpus parse dump the
+/// permission outlives the granting resolution (the default
+/// `CastFromZoneDriver::LingeringPermission`, which the dump shows as an absent
+/// `driver` key), so the granted spell is cast later under priority rather than
+/// inside it. So the consequent is a delayed
+/// triggered ability keyed to that later cast, and lowering it as a sequential
+/// instruction of this resolution applies it unconditionally (issue #8721).
+///
+/// Deliberately stated about the PERMISSION, not about one effect variant: the
+/// three cards this recognizer changes do not share a head. The recognizer
+/// itself checks only the two wordings — it does not verify that a permission is
+/// present; only the EXCLUSION below asks the parsed consequent anything. Helmut Zemo and Ogre
+/// Battlecaster carry `Effect::CastFromZone { driver: None }`; Discord, Lord of
+/// Disharmony carries no `CastFromZone` at all (its head lowers to
+/// `Unimplemented` plus a `GenericEffect` mana permission).
+///
+/// `valid_card: ParentTarget` is what scopes it to THAT spell: at delayed-trigger
+/// creation `bind_contextual_filter_to_condition` rewrites it through
+/// `concrete_parent_target_filter` to the granting ability's chosen target.
+/// (NOT `parent_target_snapshot` — `condition_uses_creation_time_provenance`
+/// returns false for `WhenNextEvent`, so that path never runs here.)
+///
+/// It FAILS OPEN, and that is named rather than hidden: with no object target on
+/// the granting chain, `parent_targets_filter` returns `TargetFilter::Any`, and
+/// the trigger then fires on any spell its controller casts that turn. Of the
+/// three cards this recognizer changes, Discord, Lord of Disharmony is exactly
+/// that case — issue #8721 carries it as an open gap.
+///
+/// `ThisTurn` rather than `Reflexive` for exactly that reason: `Reflexive` gets
+/// one shot on its creation resolution's own event batch (CR 603.12), which is
+/// precisely the batch in which this cast CANNOT occur.
+///
+/// Two prefixes, not three: `"if you cast it this way, "` has ZERO corpus
+/// members (26 cards print `"if you cast a spell this way, "`, 7 print
+/// `"when you cast that spell, "`), so it is not carried here on the strength of
+/// a sibling recognizer that happens to list it.
+///
+/// EXCLUSION BY DELEGATION, not by a hand-typed list: the enters-with-counter
+/// rider peels the SAME prefix and is owned by
+/// `parse_cast_this_way_enters_with_counter`, which lowers it to `CastFromZone`
+/// permission metadata instead. Ask that authority rather than
+/// re-deciding its grammar here.
+pub(crate) fn strip_cast_this_way_gate(text: &str) -> Option<(&str, DelayedTriggerCondition)> {
+    let lower = text.to_lowercase();
+    if crate::parser::oracle_effect::parse_cast_this_way_enters_with_counter(&lower).is_some() {
+        return None;
+    }
+    let (_, rest) = nom_on_lower(text, &lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("if you cast a spell this way, "),
+                tag("when you cast that spell, "),
+            )),
+        )
+        .parse(i)
+    })?;
+    let trigger = crate::types::ability::TriggerDefinition::new(
+        crate::types::triggers::TriggerMode::SpellCast,
+    )
+    .valid_target(TargetFilter::Controller)
+    .valid_card(TargetFilter::ParentTarget);
+    Some((
+        rest,
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger: Box::new(trigger),
+            or_trigger: None,
+            lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
+        },
+    ))
+}
+
 /// CR 603.7a: Strip temporal prefix indicating a delayed trigger condition.
 /// Symmetric to `strip_temporal_suffix` but handles prefix form:
 /// "At the beginning of the next end step, untap up to two lands."

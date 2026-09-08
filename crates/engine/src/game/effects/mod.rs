@@ -13707,56 +13707,94 @@ fn resolve_chain_body(
         // or the graveyard card leaves before the player can cast it.
         //
         // Diluvian Primordial's canonical per-opponent fanout translates that
-        // CastFromZone into a FreeCastWindow. Consume its *direct* redirect
-        // rider rather than resolving it as an instruction: when a window opens,
-        // park the rider's direct SequentialSibling tail until that window
-        // closes; when none opens, resolve that tail immediately. This keeps an
-        // uncast selected card in its graveyard while preserving a later printed
-        // instruction such as "Then draw a card."
-        // Other CastFromZone shapes keep the established metadata-only rider
-        // handling. Counter only ever carries the exile sub-ability rider (its
+        // CastFromZone into a FreeCastWindow, which is why the tail below can be
+        // parked rather than resolved. Until #8721 the tail handling was scoped
+        // to that fanout alone; it is now shared by every head that consumes the
+        // rider, so the fanout is no longer a special case here. (The comment
+        // this replaces cited "Then draw a card." as the fanout's own tail —
+        // MEASURED over the full-corpus parse dump, no fanout head carries a
+        // tail at all, so that example named nothing.)
+        //
+        // Counter only ever carries the exile sub-ability rider (its
         // library/hand redirect rides `countered_spell_zone`) and consumes it
         // during `counter::resolve` (stack -> exile directly).
         let direct_cast_from_zone_graveyard_rider =
             matches!(&ability.effect, Effect::CastFromZone { .. })
                 && cast_from_zone::graveyard_destination_rider(sub).is_some();
         if direct_cast_from_zone_graveyard_rider {
-            let is_per_opponent_fanout =
-                crate::game::ability_utils::is_per_opponent_target_fanout(ability);
-            if is_per_opponent_fanout {
-                let mut direct_sequential_tail = sub
-                    .sub_ability
-                    .as_deref()
-                    .filter(|tail| tail.sub_link == SubAbilityLink::SequentialSibling)
-                    .cloned();
-                if let Some(tail) = direct_sequential_tail.as_mut() {
-                    if should_propagate_parent_targets(ability, tail) {
-                        tail.targets = ability.targets.clone();
-                    }
-                    apply_parent_chain_context(
-                        tail,
-                        ability,
-                        effect_context_object.as_ref(),
-                        state,
-                    );
+            // CR 608.2c: the RIDER is metadata, but the chain does not end with
+            // it. Whatever the parser hung after the rider as a
+            // `SequentialSibling` is a further printed instruction of this same
+            // spell — "Exile ~." (Sins of the Past), "…put the other cards on
+            // the bottom…" (Invasion of Alara) — and CR 608.2c requires it to be
+            // followed in the order written. Take that tail for EVERY head that
+            // consumes the rider, not only the per-opponent fanout; the decision
+            // left is WHEN it runs, never WHETHER (issue #8721).
+            //
+            // SCOPE, and the reason is a measurement rather than taste: the tail
+            // must be the LAST link. A tail that itself chains further
+            // instructions is not covered here, because running only its first
+            // link can leave the object worse off than dropping the whole tail
+            // did. The Great Work is the one corpus member of that shape
+            // ("Exile this Saga, THEN return it to the battlefield"): measured on
+            // a stand-in, the exile runs and the return does not, so the source
+            // ends in exile where before it reached the graveyard. That second
+            // `SelfRef` fails because CR 400.7 makes the moved object a new one —
+            // a separate defect with its own unit of work (issue filed).
+            let mut direct_sequential_tail = sub
+                .sub_ability
+                .as_deref()
+                .filter(|tail| tail.sub_link == SubAbilityLink::SequentialSibling)
+                .filter(|tail| tail.sub_ability.is_none())
+                .cloned();
+            if let Some(tail) = direct_sequential_tail.as_mut() {
+                if should_propagate_parent_targets(ability, tail) {
+                    tail.targets = ability.targets.clone();
                 }
-                if matches!(
+                apply_parent_chain_context(tail, ability, effect_context_object.as_ref(), state);
+            }
+            // CR 608.2c: the head may have parked its own resolution before the
+            // tail can run. Two shapes do: the per-opponent fanout opens a
+            // `FreeCastWindow` (Diluvian Primordial), and a hand-pick
+            // `CastFromZone` installs its own `EffectZoneChoice` continuation
+            // (Kellan, the Kid — the same state the hand-pick guard further
+            // down reads, which this branch returns before reaching). Running
+            // the tail inline in either case would resolve it against a state
+            // the player has not decided yet, so park it behind that head.
+            //
+            // The second disjunct is spelled out rather than shared. The
+            // hand-pick `CastFromZone` guard ~45 lines below computes the same
+            // three conjuncts. `continuation_installed_by_this_effect` further
+            // down computes only the last two and pairs
+            // `waits_for_resolution_choice` per use site — NEGATED for the
+            // generic skip, absent for `PayCost`, present for `Explore` — so it
+            // is a near-twin, not a twin. If either changes, this is the site to
+            // re-read.
+            //
+            // MEASURED, and said plainly: neither disjunct is reached by any test
+            // in this PR, and no corpus member of the rider class is a
+            // private-zone pick, so this is unreached precaution rather than
+            // measured design. Should the second disjunct ever fire, its
+            // `prepend_to_pending_continuation` is the very move the hand-pick
+            // guard below exists to prevent (issue #5945) — that conflict has to
+            // be settled before it can be relied on.
+            let head_parked_its_own_resolution =
+                matches!(
                     state.waiting_for,
                     WaitingFor::CastOffer {
                         kind: CastOfferKind::FreeCastWindow { .. },
                         ..
                     }
-                ) {
-                    if let Some(tail) = direct_sequential_tail {
-                        prepend_to_pending_continuation(state, tail);
-                    }
-                } else if let Some(tail) = direct_sequential_tail {
+                ) || (waits_for_resolution_choice(&state.waiting_for)
+                    && state.active_ability_continuation().is_some()
+                    && state.active_ability_continuation() != pending_continuation_before.as_ref());
+            if let Some(tail) = direct_sequential_tail {
+                if head_parked_its_own_resolution {
+                    prepend_to_pending_continuation(state, tail);
+                } else {
                     resolve_ability_chain(state, &tail, events, depth + 1)?;
                 }
-                return Ok(());
             }
-            // Generic CastFromZone riders remain metadata consumed by the
-            // granting effect. Only the canonical fanout needs tail handling.
             return Ok(());
         }
         if matches!(&ability.effect, Effect::Counter { .. })
