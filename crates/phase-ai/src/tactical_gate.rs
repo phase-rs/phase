@@ -2023,10 +2023,9 @@ mod tests {
             let (mut state, congregate) = funded_zero_congregate_state();
             state.day_night = Some(day_night);
             if prior_casts > 0 {
-                state.spells_cast_this_turn_by_player.insert(
-                    P0,
-                    engine::im::Vector::from(vec![Default::default()]),
-                );
+                state
+                    .spells_cast_this_turn_by_player
+                    .insert(P0, engine::im::Vector::from(vec![Default::default()]));
             }
             assert_eq!(
                 state
