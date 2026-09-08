@@ -4661,12 +4661,24 @@ pub(super) fn handle_resolution_choice(
                                         .to_string(),
                                 )
                             })?;
-                        chosen_ids.push(effects::search_outside_game::put_outside_game_face_into(
+                        // CR 407.3: the offer already excluded the ante class,
+                        // so a refusal here means the selection named a card
+                        // that was never selectable — an invalid action, not a
+                        // silently dropped card.
+                        let object_id = effects::search_outside_game::put_outside_game_face_into(
                             state,
                             player,
                             &card,
                             destination,
-                        ));
+                        )
+                        .ok_or_else(|| {
+                            EngineError::InvalidAction(format!(
+                                "{} can't be brought into the game from outside the game while \
+                                 not playing for ante (CR 407.3)",
+                                card.name
+                            ))
+                        })?;
+                        chosen_ids.push(object_id);
                     }
                     OutsideGameSelection::FaceUpExile { object_id } => {
                         match effects::search_outside_game::put_face_up_exile_into(

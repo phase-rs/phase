@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::legality::{LegalityFormat, LegalityStatus};
 use crate::database::CardDatabase;
+use crate::game::ante::face_uses_ante;
 use crate::game::companion::{companion_starting_deck, is_eligible_companion};
 use crate::game::deck_loading::{deserialize_draft_set_codes, DeckEntry};
 use crate::parser::oracle::{compute_deck_copy_limit_from_text, oracle_text_allows_commander};
@@ -2063,35 +2064,6 @@ fn tiny_leaders_category_banned(face: &CardFace) -> bool {
     }) || face_uses_ante(face)
         || text.contains("sticker")
         || text.contains("attraction")
-}
-
-/// CR 407.3: "A few cards have the text 'Remove this card from your deck
-/// before playing if you're not playing for ante.' These are the only cards
-/// that can add or remove cards from the ante zone or change a card's owner.
-/// When not playing for ante, players can't include these cards in their
-/// decks or sideboards".
-///
-/// The rule identifies this class by the cards' own printed text, so this
-/// predicate matches that text rather than a hardcoded roster — a name list
-/// would be a snapshot that silently misses anything else printed with the
-/// clause, and would have to be repeated by every format that excludes them.
-///
-/// Matches the substring `playing for ante`, the templated clause's stable
-/// core (unaffected by the "Remove this card"/"Remove ~ from your deck"
-/// wording differences across printings). Verified exact at implementation
-/// time: Scryfall's `oracle:"playing for ante"` returns 9 cards — Amulet of
-/// Quoz, Bronze Tablet, Contract from Below, Darkpact, Demonic Attorney,
-/// Jeweled Bird, Rebirth, Tempest Efreet, Timmerian Fiends — which is the
-/// whole class with no false positives.
-///
-/// This is the exact test `tiny_leaders_category_banned` has always used,
-/// extracted here so its second caller shares one definition of the class.
-fn face_uses_ante(face: &CardFace) -> bool {
-    face.oracle_text
-        .as_deref()
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .contains("playing for ante")
 }
 
 /// Whether a decklist entry resolves to a card of the CR 407.3 ante class.

@@ -1,6 +1,7 @@
 pub mod ability_rw;
 pub mod ability_scan;
 pub mod ability_utils;
+pub(crate) mod ante;
 pub mod arithmetic;
 pub mod attractions;
 pub mod augment;
