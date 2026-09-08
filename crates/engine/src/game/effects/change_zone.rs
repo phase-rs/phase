@@ -497,7 +497,7 @@ pub(crate) fn exact_scoped_graveyard_exile_is_infeasible(
             .iter()
             .any(|target| matches!(target, TargetRef::Object(_)))
         || ability.target_choice_timing != TargetChoiceTiming::Resolution
-        || type_filters.as_slice() != [TypeFilter::Card]
+        || !type_filters.contains(&TypeFilter::Card)
         || properties.as_slice() != canonical_properties
         || max != &spec.min
     {
@@ -2545,6 +2545,32 @@ mod tests {
         stack_choice.target_choice_timing = TargetChoiceTiming::Stack;
         assert_eq!(
             exact_scoped_graveyard_exile_is_infeasible(&state, &stack_choice),
+            None
+        );
+
+        let mut restricted_card_type = baseline.clone();
+        if let Effect::ChangeZone {
+            target: TargetFilter::Typed(target),
+            ..
+        } = &mut restricted_card_type.effect
+        {
+            target.type_filters = vec![TypeFilter::Creature, TypeFilter::Card];
+        }
+        assert_eq!(
+            exact_scoped_graveyard_exile_is_infeasible(&state, &restricted_card_type),
+            Some(true)
+        );
+
+        let mut object_type_without_card = baseline.clone();
+        if let Effect::ChangeZone {
+            target: TargetFilter::Typed(target),
+            ..
+        } = &mut object_type_without_card.effect
+        {
+            target.type_filters = vec![TypeFilter::Creature];
+        }
+        assert_eq!(
+            exact_scoped_graveyard_exile_is_infeasible(&state, &object_type_without_card),
             None
         );
 
