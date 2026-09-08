@@ -9049,6 +9049,7 @@ fn parse_exile_count_prefix<'a>(text: &'a str, lower: &str) -> Option<(QuantityE
         ))
         .parse(input)?;
         let (input, _) = space1.parse(input)?;
+        let (input, _) = peek(tag("cards")).parse(input)?;
         Ok((input, quantity))
     })
 }
@@ -23806,6 +23807,11 @@ mod tests {
                 },
                 "cards from your graveyard".to_string()
             ))
+        );
+        assert_eq!(parse("a card from their graveyard"), None);
+        assert_eq!(
+            parse("five target cards from an opponent's graveyard"),
+            None
         );
         assert_eq!(parse("the top two cards of your library"), None);
 
