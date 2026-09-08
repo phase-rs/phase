@@ -48,6 +48,7 @@ use crate::planner::{
 };
 use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::copy_value::score_legend_rule_keep;
+use crate::policies::effect_classify::{aura_polarity, EffectPolarity};
 use crate::policies::strategy_helpers::{cmp_sacrifice, sacrifice_key};
 
 use crate::policies::tutor::score_search_choice_selection;
@@ -123,7 +124,22 @@ fn target_selection_has_no_modeled_effect(state: &GameState) -> bool {
         return false;
     };
 
-    ability_tree_has_no_modeled_effect(&pending_cast.ability)
+    let source_has_modeled_aura_effect = state
+        .objects
+        .get(&pending_cast.object_id)
+        .filter(|source| {
+            source
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Aura")
+        })
+        .is_some_and(|source| match aura_polarity(source) {
+            EffectPolarity::Beneficial | EffectPolarity::Harmful => true,
+            EffectPolarity::Contextual => false,
+        });
+
+    !source_has_modeled_aura_effect && ability_tree_has_no_modeled_effect(&pending_cast.ability)
 }
 
 fn ability_tree_has_no_modeled_effect(ability: &ResolvedAbility) -> bool {
@@ -10114,6 +10130,83 @@ mod tests {
                 .as_ref()
                 .is_some_and(|action| contract.contains_action(&state, action)),
             "the bounded target answer must stay inside the engine-issued decision domain"
+        );
+    }
+
+    fn unmodeled_aura_target_selection_state(
+        static_mode: Option<StaticMode>,
+    ) -> (GameState, ObjectId) {
+        let mut state = spell_target_selection_state(
+            make_state(),
+            vec![TargetRef::Player(PlayerId(1))],
+            vec![TargetRef::Player(PlayerId(1))],
+            false,
+        );
+        let source_id = {
+            let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
+                panic!("target-selection fixture must retain its pending cast");
+            };
+            pending_cast.ability.effect =
+                Effect::unimplemented("unsupported_aura", "Unsupported Aura effect.");
+            pending_cast.object_id
+        };
+        let source = state
+            .objects
+            .get_mut(&source_id)
+            .expect("pending Aura source exists");
+        source.card_types.subtypes.push("Aura".to_string());
+        if let Some(static_mode) = static_mode {
+            source
+                .static_definitions
+                .push(StaticDefinition::new(static_mode));
+        }
+        (state, source_id)
+    }
+
+    #[test]
+    fn beneficial_aura_target_selection_keeps_the_normal_scoring_path() {
+        let (state, source_id) =
+            unmodeled_aura_target_selection_state(Some(StaticMode::CantBeBlocked));
+
+        assert_eq!(
+            aura_polarity(&state.objects[&source_id]),
+            EffectPolarity::Beneficial,
+            "reach guard: the Aura classifier recognizes the source benefit"
+        );
+        assert!(
+            !target_selection_has_no_modeled_effect(&state),
+            "a beneficial Aura must retain the normal effect-aware target scorer"
+        );
+    }
+
+    #[test]
+    fn harmful_aura_target_selection_keeps_the_normal_scoring_path() {
+        let (state, source_id) =
+            unmodeled_aura_target_selection_state(Some(StaticMode::CantAttack));
+
+        assert_eq!(
+            aura_polarity(&state.objects[&source_id]),
+            EffectPolarity::Harmful,
+            "reach guard: the Aura classifier recognizes the source harm"
+        );
+        assert!(
+            !target_selection_has_no_modeled_effect(&state),
+            "a harmful Aura must retain the normal effect-aware target scorer"
+        );
+    }
+
+    #[test]
+    fn contextual_aura_target_selection_keeps_the_direct_fallback() {
+        let (state, source_id) = unmodeled_aura_target_selection_state(None);
+
+        assert_eq!(
+            aura_polarity(&state.objects[&source_id]),
+            EffectPolarity::Contextual,
+            "reach guard: the Aura source has no modeled target polarity"
+        );
+        assert!(
+            target_selection_has_no_modeled_effect(&state),
+            "a contextual Aura must keep the direct reducer-validated fallback"
         );
     }
 
