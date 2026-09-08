@@ -120,12 +120,16 @@ function redactDraftSessionPoolAndChaos(snapshot: Record<string, unknown>): void
   if (typeof draftSessionJson === "string") {
     try {
       const session: unknown = JSON.parse(draftSessionJson);
-      if (!isJsonRecord(session)) return;
+      if (!isJsonRecord(session)) {
+        delete snapshot.draftSessionJson;
+        return;
+      }
       redactDraftSessionObject(session);
       snapshot.draftSessionJson = JSON.stringify(session);
     } catch {
-      // Keep malformed opaque legacy content intact. The server's structural
-      // sanitizer makes the same best-effort choice at its trust boundary.
+      // An opaque string cannot be safely redacted, so it cannot appear in the
+      // public backup projection.
+      delete snapshot.draftSessionJson;
     }
   } else if (isJsonRecord(draftSessionJson)) {
     redactDraftSessionObject(draftSessionJson);

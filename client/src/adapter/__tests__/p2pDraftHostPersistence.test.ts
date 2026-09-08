@@ -187,6 +187,60 @@ describe("P2PDraftHost persistence disposal", () => {
   });
 
   it.each([
+    [
+      "malformed serialized session",
+      "malformed-draft-session-sentinel",
+      "malformed-draft-session-sentinel",
+    ],
+    [
+      "serialized array session",
+      JSON.stringify(["serialized-array-session-sentinel"]),
+      "serialized-array-session-sentinel",
+    ],
+  ])("drops a %s from the public backup without changing IndexedDB", async (
+    _shape,
+    draftSessionJson,
+    sentinel,
+  ) => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("", { status: 200 }));
+    globalThis.fetch = fetchMock;
+
+    try {
+      const host = new P2PDraftHost(
+        { id: "host-peer" } as never,
+        () => () => {},
+        { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
+        "Premier",
+        8,
+        "Host",
+        "Swiss",
+        "Casual",
+        undefined,
+        undefined,
+        undefined,
+        "https://phase.example",
+      );
+      const privateHost = host as unknown as BackupHost;
+      privateHost.draftCode = "ABC123";
+      const snapshot = { draftSessionJson, publicNote: "retain this outer field" };
+
+      await privateHost.uploadBackupSnapshot(snapshot);
+
+      const [, requestInit] = fetchMock.mock.calls[0]!;
+      const request = JSON.parse(requestInit?.body as string);
+      const publicSnapshot = JSON.parse(request.snapshot_json);
+      expect(publicSnapshot.draftSessionJson).toBeUndefined();
+      expect(JSON.stringify(publicSnapshot)).not.toContain(sentinel);
+      expect(publicSnapshot.publicNote).toBe("retain this outer field");
+      expect(snapshot.draftSessionJson).toBe(draftSessionJson);
+      expect(snapshot.draftSessionJson).toContain(sentinel);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it.each([
     ["serialized", JSON.stringify({ booster_pack_pool: ["Nested cube"] })],
     ["object", { booster_pack_pool: ["Nested cube"] }],
     ["null", null],

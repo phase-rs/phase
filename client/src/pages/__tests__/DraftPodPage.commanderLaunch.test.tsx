@@ -59,6 +59,7 @@ vi.mock("react-router", async (importOriginal) => ({
 const commanderSeatDecks = vi.fn<
   (view: DraftPlayerView, localSeat: number) => Promise<CommanderSeatDecks>
 >();
+const boosterPackPoolForGame = vi.fn<() => Promise<string[] | null>>();
 
 /**
  * The store's own listener on the pod host adapter (step 4 addition).
@@ -109,6 +110,7 @@ const mockHostAdapter = {
   initialize: vi.fn(async () => {}),
   dispose: vi.fn(async () => {}),
   commanderSeatDecks,
+  boosterPackPoolForGame,
   sendCommanderLaunches,
   status: "lobby" as const,
   roomCode: "ABCDE",
@@ -442,6 +444,8 @@ describe("DraftPodPage Commander launch", () => {
   beforeEach(() => {
     navigateSpy.mockClear();
     commanderSeatDecks.mockReset();
+    boosterPackPoolForGame.mockReset();
+    boosterPackPoolForGame.mockResolvedValue(null);
     sendCommanderLaunches.mockClear();
     vi.mocked(P2PHostAdapter).mockClear();
     transport.seatMutations.length = 0;
@@ -477,6 +481,8 @@ describe("DraftPodPage Commander launch", () => {
   // VM-1 — REVERT-FAILING: at base `CompleteView` renders exactly one button
   // and no `navigate` call exists to capture.
   it("launches a CommanderDraft game", async () => {
+    const cubeSource = ["Commander Cube sentinel", "Commander Cube sentinel"];
+    boosterPackPoolForGame.mockResolvedValue(cubeSource);
     await installCompletedPod(4);
     renderPage();
     // Reach guard: `CompleteView` mounted, so a missing button would be a real
@@ -491,6 +497,10 @@ describe("DraftPodPage Commander launch", () => {
     // FormatConfig fields, so this cannot pass against the incumbent.
     expect(await capturedUrl()).toContain("/game/");
     expect(ctorArgs()[4]).toBe(FORMAT_DEFAULTS.CommanderDraft);
+    expect(boosterPackPoolForGame).toHaveBeenCalledTimes(1);
+    expect(
+      (ctorArgs()[0] as { booster_pack_pool: string[] | null }).booster_pack_pool,
+    ).toBe(cubeSource);
   });
 
   // VM-2 — the seat count is READ from `view.seats`, never the literal 4.

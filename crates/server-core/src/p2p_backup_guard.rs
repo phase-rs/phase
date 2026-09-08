@@ -104,30 +104,35 @@ fn redact_secret_keys(obj: &mut Map<String, Value>) {
 }
 
 fn redact_nested_draft_session_json(obj: &mut Map<String, Value>) {
-    let Some(nested_value) = obj.get_mut(DRAFT_SESSION_JSON_KEY) else {
-        return;
-    };
-    match nested_value {
+    let remove_serialized_non_record = match obj.get_mut(DRAFT_SESSION_JSON_KEY) {
+        None => return,
         // Canonical shape: the session serialized into a JSON string. Parse,
         // redact, re-serialize so the field keeps its wire type.
-        Value::String(nested_raw) => {
-            let Ok(mut nested) = serde_json::from_str::<Value>(nested_raw) else {
-                return;
-            };
-            let Some(nested_obj) = nested.as_object_mut() else {
-                return;
-            };
-            redact_draft_session_object(nested_obj);
-            if let Ok(serialized) = serde_json::to_string(&nested) {
-                *nested_value = Value::String(serialized);
-            }
-        }
+        Some(Value::String(nested_raw)) => match serde_json::from_str::<Value>(nested_raw) {
+            Ok(mut nested) => match nested.as_object_mut() {
+                Some(nested_obj) => {
+                    redact_draft_session_object(nested_obj);
+                    if let Ok(serialized) = serde_json::to_string(&nested) {
+                        *nested_raw = serialized;
+                    }
+                    false
+                }
+                None => true,
+            },
+            Err(_) => true,
+        },
         // The same payload sent inline as an object. `snapshot_json` is an
         // opaque host-supplied blob, so nothing upstream pins the field to a
         // string — matching only the string shape let a host keep unopened
         // packs and the rng seed simply by not encoding them twice.
-        Value::Object(nested_obj) => redact_draft_session_object(nested_obj),
-        _ => {}
+        Some(Value::Object(nested_obj)) => {
+            redact_draft_session_object(nested_obj);
+            false
+        }
+        Some(_) => false,
+    };
+    if remove_serialized_non_record {
+        obj.remove(DRAFT_SESSION_JSON_KEY);
     }
 }
 
@@ -422,6 +427,31 @@ mod tests {
         // Untouched fields survive, and the field keeps the shape it arrived in.
         assert_eq!(nested_out["status"], "Drafting");
         assert_eq!(nested_out["config"]["pod_size"], 8);
+    }
+
+    #[test]
+    fn redact_p2p_backup_snapshot_secrets_drops_unredactable_serialized_draft_sessions() {
+        for (draft_session_json, sentinel) in [
+            (
+                Value::String("malformed-draft-session-sentinel".to_string()),
+                "malformed-draft-session-sentinel",
+            ),
+            (
+                Value::String(serde_json::json!(["serialized-array-session-sentinel"]).to_string()),
+                "serialized-array-session-sentinel",
+            ),
+        ] {
+            let raw = serde_json::json!({
+                "draftSessionJson": draft_session_json,
+                "public_note": "retain this outer field"
+            });
+            let redacted = redact_p2p_backup_snapshot_secrets(&raw.to_string()).unwrap();
+            let public: Value = serde_json::from_str(&redacted).unwrap();
+
+            assert!(public.get("draftSessionJson").is_none());
+            assert!(!redacted.contains(sentinel));
+            assert_eq!(public["public_note"], "retain this outer field");
+        }
     }
 
     #[test]
