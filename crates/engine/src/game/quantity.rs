@@ -654,6 +654,61 @@ pub fn quantity_is_cast_stable_for_pre_cast(expr: &QuantityExpr) -> bool {
     }
 }
 
+/// Returns whether resolving `expr` reads a spell-cast journal that a newly
+/// finalized cast can change.
+pub fn quantity_expr_uses_cast_history(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => quantity_ref_uses_cast_history(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_uses_cast_history(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_uses_cast_history)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_uses_cast_history(left) || quantity_expr_uses_cast_history(right)
+        }
+    }
+}
+
+/// Returns whether resolving `qty` reads a spell-cast journal that a newly
+/// finalized cast can change.
+pub fn quantity_ref_uses_cast_history(qty: &QuantityRef) -> bool {
+    match qty {
+        QuantityRef::SpellsCastThisTurn { .. } | QuantityRef::SpellsCastThisGame { .. } => true,
+        QuantityRef::PropertyAggregate(aggregate) => {
+            card_type_set_source_uses_cast_history(aggregate.source())
+        }
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            card_type_set_source_uses_cast_history(source)
+        }
+        _ => false,
+    }
+}
+
+fn card_type_set_source_uses_cast_history(source: &CardTypeSetSource) -> bool {
+    let mut uses_cast_history = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            uses_cast_history |= matches!(
+                leaf,
+                CardTypeSetSource::TurnJournal {
+                    journal: TurnJournalKind::SpellsCast,
+                    ..
+                }
+            );
+        });
+    uses_cast_history || !complete
+}
+
 fn quantity_expr_is_source_context_previewable(
     state: &GameState,
     expr: &QuantityExpr,

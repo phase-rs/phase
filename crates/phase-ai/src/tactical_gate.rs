@@ -13,15 +13,16 @@ use engine::game::functioning_abilities::{
     game_functioning_statics,
 };
 use engine::game::quantity::{
-    quantity_is_cast_stable_for_pre_cast, try_resolve_quantity_in_source_context,
+    quantity_expr_uses_cast_history, quantity_is_cast_stable_for_pre_cast,
+    quantity_ref_uses_cast_history, try_resolve_quantity_in_source_context,
 };
 use engine::game::triggers::{
     synthetic_keyword_spell_cast_trigger_applies, trigger_definition_functions_in_zone,
 };
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    ContinuousModification, CostCategory, Effect, PtValue, TargetFilter, TargetRef, TypeFilter,
-    TypedFilter,
+    ContinuousModification, CostCategory, Effect, PtValue, StaticDefinition, TargetFilter,
+    TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::ability_visit::visit_ability_def;
 use engine::types::actions::GameAction;
@@ -516,7 +517,7 @@ fn cast_history_has_relevant_payoff(state: &GameState, caster: PlayerId) -> bool
 
     // CR 702.117a: the cast can make a held Surge spell available to its
     // caster or teammate when none of them has cast a spell this turn yet.
-    casts_this_turn == 0
+    let enables_surge = casts_this_turn == 0
         && engine::game::players::teammates(state, caster)
             .into_iter()
             .chain(std::iter::once(caster))
@@ -537,7 +538,53 @@ fn cast_history_has_relevant_payoff(state: &GameState, caster: PlayerId) -> bool
                             .any(|keyword| matches!(keyword, Keyword::Surge(_)))
                     })
                 })
+            });
+
+    enables_surge
+        || state.objects.values().any(|object| {
+            matches!(object.zone, Zone::Hand | Zone::Battlefield | Zone::Stack)
+                && object
+                    .abilities
+                    .iter()
+                    .any(ability_uses_cast_history_quantity)
+        })
+        || state.objects.values().any(|object| {
+            matches!(
+                object.zone,
+                Zone::Hand | Zone::Stack | Zone::Command | Zone::Graveyard | Zone::Exile
+            ) && object.static_definitions.iter_all().any(|definition| {
+                matches!(definition.affected, Some(TargetFilter::SelfRef))
+                    && definition.active_zones.contains(&object.zone)
+                    && static_cost_modifier_uses_cast_history_quantity(definition)
             })
+        })
+        || game_functioning_statics(state)
+            .any(|(_, definition)| static_cost_modifier_uses_cast_history_quantity(definition))
+}
+
+fn ability_uses_cast_history_quantity(definition: &AbilityDefinition) -> bool {
+    let mut uses_cast_history = false;
+    let _ = visit_ability_def(definition, &mut |effect| {
+        effect.for_each_quantity_expr(&mut |quantity| {
+            uses_cast_history |= quantity_expr_uses_cast_history(quantity);
+        });
+        if uses_cast_history {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    uses_cast_history
+}
+
+fn static_cost_modifier_uses_cast_history_quantity(definition: &StaticDefinition) -> bool {
+    matches!(
+        &definition.mode,
+        StaticMode::ModifyCost {
+            dynamic_count: Some(quantity),
+            ..
+        } if quantity_ref_uses_cast_history(quantity)
+    )
 }
 
 fn payment_population_is_stable(state: &GameState, caster: PlayerId, spell_id: ObjectId) -> bool {
@@ -1399,10 +1446,11 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use engine::types::ability::{
-        AbilityCondition, BounceSelection, Comparator, CountScope, CounterCostSelection,
-        DelayedTriggerCondition, Duration, EffectKind, FilterProp, ManaProduction, ModalChoice,
-        MultiTargetSpec, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition,
-        StaticDefinition, SubAbilityLink, TargetFilter, REMOVE_COUNTER_COST_X,
+        AbilityCondition, BounceSelection, CardTypeSetSource, Comparator, CountScope,
+        CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, FilterProp,
+        ManaProduction, ModalChoice, MultiTargetSpec, PlayerScope, QuantityExpr, QuantityRef,
+        ResolvedAbility, StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter,
+        TurnJournalKind, REMOVE_COUNTER_COST_X,
     };
     use engine::types::ability::{
         QuantityModification, ReplacementDefinition, ReplacementPlayerScope,
@@ -2088,6 +2136,215 @@ mod tests {
         assert!(
             !zero_cast_is_retained(&state, congregate),
             "removing only the Surge payoff restores known-zero rejection"
+        );
+    }
+
+    fn add_hand_journal_damage_payoff(state: &mut GameState) -> ObjectId {
+        let payoff = create_object(
+            state,
+            CardId(91_701),
+            P0,
+            "Thunder Salvo".to_string(),
+            Zone::Hand,
+        );
+        let object = state
+            .objects
+            .get_mut(&payoff)
+            .expect("journal damage payoff exists");
+        object.card_types.core_types.push(CoreType::Instant);
+        object.base_card_types = object.card_types.clone();
+        object.mana_cost = ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::Red],
+        };
+        Arc::make_mut(&mut object.abilities).push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter: None,
+                    },
+                },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: None,
+                excess: None,
+            },
+        ));
+        payoff
+    }
+
+    fn add_hand_demilich_cost_payoff(state: &mut GameState) -> ObjectId {
+        let payoff = create_object(
+            state,
+            CardId(91_702),
+            P0,
+            "Demilich".to_string(),
+            Zone::Hand,
+        );
+        let object = state
+            .objects
+            .get_mut(&payoff)
+            .expect("Demilich cost payoff exists");
+        object.card_types.core_types.push(CoreType::Creature);
+        object.base_card_types = object.card_types.clone();
+        object.mana_cost = ManaCost::Cost {
+            generic: 0,
+            shards: vec![
+                ManaCostShard::Blue,
+                ManaCostShard::Blue,
+                ManaCostShard::Blue,
+                ManaCostShard::Blue,
+            ],
+        };
+        let mut modifier = StaticDefinition::new(StaticMode::ModifyCost {
+            mode: engine::types::statics::CostModifyMode::Reduce,
+            amount: ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue],
+            },
+            spell_filter: None,
+            dynamic_count: Some(QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    ],
+                }),
+            }),
+        })
+        .affected(TargetFilter::SelfRef);
+        modifier.active_zones = engine::types::zones::self_spell_cost_mod_active_zones();
+        object.static_definitions.push(modifier);
+        payoff
+    }
+
+    #[test]
+    fn cast_history_quantity_classifier_covers_direct_and_journal_population_reads() {
+        let direct_count = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisGame {
+                scope: CountScope::Controller,
+                filter: None,
+            },
+        };
+        let journal_population = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::TurnJournal {
+                    journal: TurnJournalKind::SpellsCast,
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            },
+        };
+
+        assert!(quantity_expr_uses_cast_history(&direct_count));
+        assert!(quantity_expr_uses_cast_history(&journal_population));
+    }
+
+    #[test]
+    fn zero_cast_journal_quantity_payoff_is_paired_and_changes_resolution() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let thunder_salvo = add_hand_journal_damage_payoff(&mut state);
+        for _ in 0..4 {
+            state.add_mana_to_pool(P0, ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
+        }
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a held supported spell whose effect reads the cast journal retains the zero cast"
+        );
+
+        let mut resolution_state = state.clone();
+        let victim = create_object(
+            &mut resolution_state,
+            CardId(91_703),
+            P1,
+            "Journal witness".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = resolution_state
+                .objects
+                .get_mut(&victim)
+                .expect("journal witness exists");
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.power = Some(2);
+            object.toughness = Some(2);
+            object.base_power = Some(2);
+            object.base_toughness = Some(2);
+        }
+
+        let mut without_prior_cast =
+            engine::game::scenario::GameRunner::from_state(resolution_state.clone());
+        let baseline = without_prior_cast
+            .cast(thunder_salvo)
+            .target_object(victim)
+            .resolve();
+        baseline.assert_zone(&[victim], Zone::Battlefield);
+
+        let mut with_prior_cast = engine::game::scenario::GameRunner::from_state(resolution_state);
+        with_prior_cast.cast(congregate).target_player(P0).resolve();
+        let payoff = with_prior_cast
+            .cast(thunder_salvo)
+            .target_object(victim)
+            .resolve();
+        payoff.assert_zone(&[victim], Zone::Graveyard);
+
+        state.objects.remove(&thunder_salvo);
+        state.players[P0.0 as usize]
+            .hand
+            .retain(|object_id| *object_id != thunder_salvo);
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the journal quantity payoff restores known-zero rejection"
+        );
+    }
+
+    #[test]
+    fn zero_cast_journal_cost_payoff_is_paired_and_changes_effective_cost() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let demilich = add_hand_demilich_cost_payoff(&mut state);
+        assert_eq!(
+            effective_spell_cost(&state, P0, demilich),
+            Some(ManaCost::Cost {
+                generic: 0,
+                shards: vec![
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                ],
+            }),
+            "the cost authority sees no reduction before the ordinary cast"
+        );
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a held supported self cost modifier that reads the cast journal retains the zero cast"
+        );
+
+        let mut runner = engine::game::scenario::GameRunner::from_state(state.clone());
+        runner.cast(congregate).target_player(P0).resolve();
+        assert_eq!(
+            effective_spell_cost(runner.state(), P0, demilich),
+            Some(ManaCost::Cost {
+                generic: 0,
+                shards: vec![
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                ],
+            }),
+            "the production cost authority applies the cast-history reduction after the cast"
+        );
+
+        state.objects.remove(&demilich);
+        state.players[P0.0 as usize]
+            .hand
+            .retain(|object_id| *object_id != demilich);
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the journal cost payoff restores known-zero rejection"
         );
     }
 
