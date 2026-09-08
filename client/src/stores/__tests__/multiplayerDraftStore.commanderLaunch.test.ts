@@ -66,6 +66,7 @@ const commanderSeatDecks = vi.fn<
   (view: DraftPlayerView, localSeat: number) => Promise<CommanderSeatDecks>
 >();
 const sendCommanderLaunches = vi.fn();
+const boosterPackPoolForGame = vi.fn(async () => null as string[] | null);
 /**
  * The LOCAL-game payload, used only above the P2P seat ceiling.
  *
@@ -81,7 +82,7 @@ const podCommanderDeckPayload = vi.fn(async (view: DraftPlayerView) => ({
   opponent: deckFor(1),
   ai_decks: Array.from({ length: view.seats.length - 2 }, (_, i) => deckFor(i + 2)),
   draft_set_codes: ["CMR"],
-  booster_pack_pool: view.booster_pack_pool,
+  booster_pack_pool: await boosterPackPoolForGame(),
 }));
 
 const mockHostAdapter = {
@@ -92,6 +93,7 @@ const mockHostAdapter = {
   initialize: vi.fn(async () => {}),
   dispose: vi.fn(async () => {}),
   commanderSeatDecks,
+  boosterPackPoolForGame,
   sendCommanderLaunches,
   podCommanderDeckPayload,
   status: "lobby" as const,
@@ -399,6 +401,7 @@ function commanderView(
     droppedSeats?: number[];
   } = {},
 ): DraftPlayerView {
+  boosterPackPoolForGame.mockResolvedValue(options.boosterPackPool ?? null);
   const humans = new Set([0, ...(options.humanSeats ?? [])]);
   const dropped = new Set(options.droppedSeats ?? []);
   return {
@@ -414,7 +417,6 @@ function commanderView(
     pool: [],
     draft_effects: [],
     draft_set_codes: options.draftSetCodes,
-    booster_pack_pool: options.boosterPackPool,
     seats: Array.from({ length: seatCount }, (_, i) => seat(i, !humans.has(i), !dropped.has(i))),
     cards_per_pack: 14,
     pack_count: 3,

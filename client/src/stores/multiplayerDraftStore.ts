@@ -2010,7 +2010,7 @@ export const useMultiplayerDraftStore = create<
           // wire's required-nullable one; it is not `?? []`, which would assert
           // "the draft contained zero sets" where the host knows the answer.
           draft_set_codes: launchView.draft_set_codes ?? null,
-          booster_pack_pool: launchView.booster_pack_pool,
+          booster_pack_pool: await hostAdapter.boosterPackPoolForGame(),
         },
         host.peer,
         host.onGuestConnected,

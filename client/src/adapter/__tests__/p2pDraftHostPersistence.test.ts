@@ -186,6 +186,68 @@ describe("P2PDraftHost persistence disposal", () => {
     }
   });
 
+  it.each([
+    ["serialized", JSON.stringify({ booster_pack_pool: ["Nested cube"] })],
+    ["object", { booster_pack_pool: ["Nested cube"] }],
+    ["null", null],
+  ])("strips every cube source alias from a %s public backup without changing IndexedDB", async (_shape, draftSessionJson) => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("", { status: 200 }));
+    globalThis.fetch = fetchMock;
+
+    try {
+      const host = new P2PDraftHost(
+        { id: "host-peer" } as never,
+        () => () => {},
+        { type: "Cube", data: { cube_list_text: "Secret cube" } } as never,
+        "Premier",
+        8,
+        "Host",
+        "Swiss",
+        "Casual",
+        undefined,
+        undefined,
+        undefined,
+        "https://phase.example",
+      );
+      const privateHost = host as unknown as BackupHost;
+      privateHost.draftCode = "ABC123";
+      const snapshot = {
+        draftSessionJson,
+        booster_pack_pool: ["Top level cube"],
+        poolInput: { type: "Cube", data: { cube_list_text: "Secret cube", cube_name: "Cube" } },
+        matchLaunches: [{
+          matchId: "match",
+          seat: 0,
+          launch: { deckPayload: { booster_pack_pool: ["Launch cube"] } },
+        }],
+      };
+
+      await privateHost.uploadBackupSnapshot(snapshot);
+
+      const [, requestInit] = fetchMock.mock.calls[0]!;
+      const request = JSON.parse(requestInit?.body as string);
+      const publicSnapshot = JSON.parse(request.snapshot_json);
+      expect(publicSnapshot.booster_pack_pool).toBeUndefined();
+      expect(publicSnapshot.poolInput.data.cube_list_text).toBeUndefined();
+      expect(publicSnapshot.matchLaunches[0].launch.deckPayload.booster_pack_pool).toBeUndefined();
+      if (typeof draftSessionJson === "string") {
+        expect(JSON.parse(publicSnapshot.draftSessionJson).booster_pack_pool).toBeUndefined();
+        expect(JSON.parse(snapshot.draftSessionJson).booster_pack_pool).toEqual(["Nested cube"]);
+      } else if (draftSessionJson && typeof draftSessionJson === "object") {
+        expect(publicSnapshot.draftSessionJson.booster_pack_pool).toBeUndefined();
+        expect((snapshot.draftSessionJson as { booster_pack_pool: string[] }).booster_pack_pool).toEqual(["Nested cube"]);
+      } else {
+        expect(publicSnapshot.draftSessionJson).toBeNull();
+      }
+      expect(snapshot.booster_pack_pool).toEqual(["Top level cube"]);
+      expect(snapshot.poolInput.data.cube_list_text).toBe("Secret cube");
+      expect(snapshot.matchLaunches[0].launch.deckPayload.booster_pack_pool).toEqual(["Launch cube"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("fences a disposed recovery's queued save before a newer recovery can persist", async () => {
     const stale = recoveredHost("Stale host");
     const stalePrivate = stale as unknown as PersistenceHost;

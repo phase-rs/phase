@@ -41,6 +41,7 @@ const wasm = vi.hoisted(() => ({
   suggest_lands: vi.fn(),
   get_bot_deck: vi.fn(),
   export_draft_session: vi.fn(() => "session"),
+  booster_pack_pool_for_game: vi.fn(() => null),
 }));
 
 const persistence = vi.hoisted(() => ({
@@ -1398,7 +1399,7 @@ describe("draft store workspace authority", () => {
     { durable: ["Original", "Original"], projected: ["Other"], expected: ["Original", "Original"], saves: 0 },
     { durable: [], projected: ["Other"], expected: [], saves: 0 },
     { durable: null, projected: ["Other"], expected: null, saves: 0 },
-  ])("resumes legacy source metadata only from the imported view: $durable / $projected", async ({ durable, projected, expected, saves }) => {
+  ])("resumes legacy source metadata only from the host accessor: $durable / $projected", async ({ durable, projected, expected, saves }) => {
     persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
       id: "legacy", setCode: "custom-cube", setName: "Same label", difficulty: 2,
       kind: "Quick", phase: "playing",
@@ -1412,8 +1413,8 @@ describe("draft store workspace authority", () => {
       usedBotSeats: [1], booster_pack_pool: durable,
     });
     const imported = view([card("picked")]);
-    imported.booster_pack_pool = projected;
     wasm.import_draft_session.mockReturnValue(imported);
+    wasm.booster_pack_pool_for_game.mockReturnValue(projected);
     await useDraftStore.getState().resumeDraft();
     expect(wasm.import_draft_session).toHaveBeenCalledWith("legacy session", 2);
     expect(useDraftStore.getState().view).toEqual(imported);
@@ -1424,8 +1425,8 @@ describe("draft store workspace authority", () => {
 
   it.each([false, true])("durably upgrades a legacy staged launch from the engine view (next=%s)", async (next) => {
     const projected = view([card("spell")]);
-    projected.booster_pack_pool = [];
     wasm.start_quick_draft.mockReturnValue(projected);
+    wasm.booster_pack_pool_for_game.mockReturnValue([]);
     await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
     const draftId = useDraftStore.getState().draftId!;
     const run: DraftRunState = {
@@ -1448,7 +1449,6 @@ describe("draft store workspace authority", () => {
     { pool: undefined }, { pool: null },
   ])("retains the original cube source through initial publication, retry, and next match: $pool", async ({ pool }) => {
     const draftView = view([card("spell")]);
-    draftView.booster_pack_pool = pool;
     draftView.seats = [{
       seat_index: 1,
       display_name: "Bot",
@@ -1470,6 +1470,7 @@ describe("draft store workspace authority", () => {
       wasm.start_quick_draft.mockReturnValue(draftView);
       await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
     }
+    wasm.booster_pack_pool_for_game.mockReturnValue(pool);
     wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
     const randomUuid = vi.spyOn(crypto, "randomUUID")
       .mockReturnValue("00000000-0000-4000-8000-000000000123");
@@ -1488,7 +1489,7 @@ describe("draft store workspace authority", () => {
     }));
     persistence.loadDraftRun.mockResolvedValueOnce(stagedRun);
     // A later same-labelled cube must never replace an already bound source.
-    if (pool !== undefined) draftView.booster_pack_pool = ["Other cube"];
+    if (pool !== undefined) wasm.booster_pack_pool_for_game.mockReturnValue(["Other cube"]);
     await useDraftStore.getState().launchMatch(navigate);
 
     expect(randomUuid).toHaveBeenCalledOnce();

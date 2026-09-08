@@ -55,8 +55,8 @@ describe("draftProtocol", () => {
   });
 
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 28", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(28);
+    it("is version 29", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(29);
     });
   });
 
@@ -713,6 +713,21 @@ describe("draftProtocol", () => {
           },
         });
         expect(JSON.stringify(msg.view.source)).not.toContain("assignments");
+      }
+    });
+
+    it("drops the former cube source field from an incoming participant view", () => {
+      const msg = validateDraftMessage({
+        type: "draft_state_update",
+        view: {
+          ...validDraftView,
+          booster_pack_pool: ["Undealt cube entry"],
+        },
+      });
+
+      expect(msg.type).toBe("draft_state_update");
+      if (msg.type === "draft_state_update") {
+        expect((msg.view as Record<string, unknown>).booster_pack_pool).toBeUndefined();
       }
     });
 

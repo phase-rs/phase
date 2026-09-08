@@ -2893,7 +2893,6 @@ mod tests {
             addable_cards: Vec::new(),
             grantable_commander_fillers: Vec::new(),
             draft_set_codes: Vec::new(),
-            booster_pack_pool: None,
             timer_remaining_ms: Some(5000),
             standings: Vec::new(),
             current_round: 0,
@@ -2914,7 +2913,6 @@ mod tests {
                 assert_eq!(v.launch_capability, DraftLaunchCapability::None);
                 assert_eq!(v.commanders_required, 0);
                 assert_eq!(v.timer_remaining_ms, Some(5000));
-                assert_eq!(v.booster_pack_pool, None);
                 assert_eq!(v.pool_groups, view.pool_groups);
                 assert_eq!(
                     v.pool_groups.workspace_capabilities.rarity_group_order,

@@ -1180,7 +1180,6 @@ impl GameSession {
                 // Default to empty so old clients without ai_difficulties
                 // deserialize safely.
                 ai_difficulties: vec![],
-                booster_pack_pool: None,
             },
             Some(&**db),
         );

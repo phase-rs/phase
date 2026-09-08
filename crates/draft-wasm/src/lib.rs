@@ -1468,6 +1468,19 @@ pub fn create_multiplayer_draft(
     Ok(to_js(&view))
 }
 
+/// Return the host-only original cube multiset for the game launched after a
+/// draft. This deliberately bypasses `DraftPlayerView`: players and spectators
+/// must never receive undealt cube entries or their duplicate counts.
+#[wasm_bindgen]
+pub fn booster_pack_pool_for_game() -> Result<JsValue, JsValue> {
+    let pool = booster_pack_pool_for_game_inner().map_err(|error| JsValue::from_str(&error))?;
+    Ok(to_js(&pool))
+}
+
+fn booster_pack_pool_for_game_inner() -> Result<Option<Vec<String>>, String> {
+    with_draft_inner(|session| Ok(session.booster_pack_pool_for_game().map(<[String]>::to_vec)))
+}
+
 /// Pure-Rust core for `create_multiplayer_draft`. Returns a typed
 /// `DraftPlayerView` so this branch is reachable from `cargo test` without
 /// going through `js_sys::JSON::parse`. The WASM export wraps this with
@@ -2334,7 +2347,14 @@ mod create_multiplayer_draft_tests {
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>();
-        assert_eq!(view.booster_pack_pool, Some(expected.clone()));
+        assert!(serde_json::to_value(&view)
+            .unwrap()
+            .get("booster_pack_pool")
+            .is_none());
+        assert_eq!(
+            booster_pack_pool_for_game_inner(),
+            Ok(Some(expected.clone()))
+        );
 
         assert!(
             matches!(view.status, DraftStatus::Drafting),
@@ -2371,7 +2391,11 @@ mod create_multiplayer_draft_tests {
             v
         });
         assert_eq!(post_view.pool.len(), 1);
-        assert_eq!(post_view.booster_pack_pool, Some(expected));
+        assert!(serde_json::to_value(&post_view)
+            .unwrap()
+            .get("booster_pack_pool")
+            .is_none());
+        assert_eq!(booster_pack_pool_for_game_inner(), Ok(Some(expected)));
         if let Some(pack_after) = &post_view.current_pack {
             assert!(
                 !pack_after.iter().any(|c| c.instance_id == picked),
@@ -3614,7 +3638,8 @@ mod create_multiplayer_draft_tests {
         assert_eq!(session.current_pack[0].as_ref().unwrap().0.len(), 15);
         let restored =
             restorable_draft_session_from_json(&serde_json::to_string(&session).unwrap()).unwrap();
-        let pool = filter_for_player(&restored, 0).booster_pack_pool.unwrap();
+        DRAFT_SESSION.with(|cell| cell.set(Some(restored)));
+        let pool = booster_pack_pool_for_game_inner().unwrap().unwrap();
         assert_eq!(pool.len(), 401);
         assert_eq!(pool.last().unwrap(), "Delta");
         clear_state();
@@ -3655,7 +3680,14 @@ mod create_multiplayer_draft_tests {
         .expect("Commander cube should start");
 
         assert_eq!(view.min_deck_size, 60);
-        assert_eq!(view.booster_pack_pool, Some(vec!["Alpha".to_string(); 200]));
+        assert!(serde_json::to_value(&view)
+            .unwrap()
+            .get("booster_pack_pool")
+            .is_none());
+        assert_eq!(
+            booster_pack_pool_for_game_inner(),
+            Ok(Some(vec!["Alpha".to_string(); 200]))
+        );
         DRAFT_SESSION.with(|cell| {
             let session = cell.take().expect("Commander cube session is stored");
             assert_eq!(session.config.min_deck_size, 60);

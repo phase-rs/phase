@@ -1158,7 +1158,18 @@ mod tests {
                 restored.status = status;
                 let view = crate::view::filter_for_player(&restored, 0);
                 assert_eq!(view.status, status);
-                assert_eq!(view.booster_pack_pool.as_ref(), Some(&expected));
+                let json = serde_json::to_value(view).unwrap();
+                assert!(json.get("booster_pack_pool").is_none());
+                let spectator_json = serde_json::to_value(crate::view::filter_for_spectator(
+                    &restored,
+                    SpectatorVisibility::Public,
+                ))
+                .unwrap();
+                assert!(spectator_json.get("booster_pack_pool").is_none());
+                assert_eq!(
+                    restored.booster_pack_pool_for_game(),
+                    Some(expected.as_slice())
+                );
             }
         }
     }
@@ -1177,6 +1188,7 @@ mod tests {
         ));
         assert_eq!(session.status, DraftStatus::Lobby);
         assert_eq!(session.booster_pack_pool, None);
+        assert_eq!(session.booster_pack_pool_for_game(), Some(&[][..]));
         let (mut ordinary, _) = test_session(2);
         apply(&mut ordinary, DraftAction::StartDraft, Some(&fixture)).unwrap();
         assert_eq!(ordinary.status, DraftStatus::Drafting);

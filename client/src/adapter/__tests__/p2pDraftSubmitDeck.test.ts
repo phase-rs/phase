@@ -94,7 +94,7 @@ describe("P2P deck-submission channel", () => {
     const source = ["Cube A", "Cube A", "Undealt sentinel"];
     const draftView = {
       seats: [0, 1, 2, 3].map((seat_index) => ({ seat_index, is_bot: bot && seat_index === 3 })),
-      booster_pack_pool: source, match_config: { match_type: "Bo1" },
+      match_config: { match_type: "Bo1" },
     } as DraftPlayerView;
     privateHost.adapter = stubAdapter({
       exportSession: vi.fn(async () => JSON.stringify({
@@ -104,6 +104,7 @@ describe("P2P deck-submission channel", () => {
         },
       })),
       getBotDeck: vi.fn(async () => ({ main_deck: ["Bot deck"], lands: {}, commander: [] })),
+      boosterPackPoolForGame: vi.fn(async () => source),
     });
     const persisted: DraftMatchLaunch[][] = [];
     privateHost.persistSessionStrict = vi.fn(async () => {

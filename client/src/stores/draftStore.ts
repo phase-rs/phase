@@ -804,9 +804,9 @@ function unresolvedStageMatches(
     && stage.resultCountAtLaunch === run.results.length;
 }
 
-function withBoosterPackPool(run: DraftRunState, view: DraftPlayerView): DraftRunState {
-  return run.booster_pack_pool === undefined && view.booster_pack_pool !== undefined
-    ? { ...run, booster_pack_pool: view.booster_pack_pool }
+function withBoosterPackPool(run: DraftRunState, boosterPackPool: string[] | null): DraftRunState {
+  return run.booster_pack_pool === undefined
+    ? { ...run, booster_pack_pool: boosterPackPool }
     : run;
 }
 
@@ -921,15 +921,19 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       }
       const database = await prepareCardDatabase(meta.difficulty >= 3 || meta.kind === "Sealed");
       const adapter = new DraftAdapter();
-      const view = await withDraftEngineOperation((lease) => {
+      const restored = await withDraftEngineOperation((lease) => {
         if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft resume");
         if (database !== null) lease.loadCardDatabase(database);
         if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft resume");
-        return lease.importSession(saved.sessionJson, meta.difficulty);
+        return {
+          view: lease.importSession(saved.sessionJson, meta.difficulty),
+          boosterPackPool: lease.boosterPackPoolForGame(),
+        };
       });
       if (lifecycle !== lifecycleGeneration) return;
+      const { view } = restored;
       if (run) {
-        const upgraded = withBoosterPackPool(run, view);
+        const upgraded = withBoosterPackPool(run, restored.boosterPackPool);
         if (upgraded !== run) {
           await saveDraftRun(meta.id, upgraded);
           if (lifecycle !== lifecycleGeneration) return;
@@ -1238,21 +1242,27 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       if (durableRun) {
         if (!unresolvedStageMatches(durableRun, state.draftId, state.runFormat, playerDeck)
           || durableRun.results.length !== 0) throw new Error("Conflicting staged draft match");
-        run = withBoosterPackPool(durableRun, state.view);
+        const boosterPackPool = await withDraftEngineOperation((lease) => lease.boosterPackPoolForGame());
+        if (!isExclusive(token, "launch") || lifecycle !== lifecycleGeneration || revision !== workspaceRevision) return;
+        run = withBoosterPackPool(durableRun, boosterPackPool);
       } else {
         const botSeat = pickBotSeat([], state.view);
         const prepared = await withDraftEngineOperation((lease) => {
           if (!isExclusive(token, "launch") || lifecycle !== lifecycleGeneration || revision !== workspaceRevision) {
             throw new Error("Stale draft match launch");
           }
-          return { sessionJson: lease.exportSession(), botDeck: lease.getBotDeck(botSeat) };
+          return {
+            sessionJson: lease.exportSession(),
+            botDeck: lease.getBotDeck(botSeat),
+            boosterPackPool: lease.boosterPackPoolForGame(),
+          };
         });
         sessionJson = prepared.sessionJson;
         const opponentDeck = expandSuggestedDeck(prepared.botDeck);
         const gameId = crypto.randomUUID();
         run = {
           format: state.runFormat,
-          booster_pack_pool: state.view.booster_pack_pool,
+          booster_pack_pool: prepared.boosterPackPool,
           results: [],
           playerDeck,
           opponentDeck,
@@ -1350,7 +1360,9 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     try {
       const savedRun = await loadDraftRun(state.draftId);
       if (!savedRun) throw new Error("Missing durable draft run");
-      const durableRun = withBoosterPackPool(savedRun, state.view);
+      const boosterPackPool = await withDraftEngineOperation((lease) => lease.boosterPackPoolForGame());
+      if (!isExclusive(token, "launch") || lifecycle !== lifecycleGeneration || revision !== workspaceRevision) return;
+      const durableRun = withBoosterPackPool(savedRun, boosterPackPool);
       const playerDeck = projectDeckNames(state.workspaceState, state.view.pool);
       if (draftRunPhase(durableRun) === "complete") throw new Error("Draft run is complete");
       let run = durableRun;
