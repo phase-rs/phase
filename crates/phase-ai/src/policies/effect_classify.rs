@@ -1697,18 +1697,21 @@ mod live_quantity_targeting_tests {
     use engine::game::quantity::quantity_is_cast_stable_for_pre_cast;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityCondition, AbilityCost, CardSelectionMode, ControllerRef, EffectKind, FilterProp,
-        MultiTargetSpec, PlayerFilter, PlayerScope, QuantityRef, RepeatContinuation,
-        ResolvedAbility, SubAbilityLink, TargetChoiceTiming, TargetRef, TypedFilter,
-        UnlessPayModifier,
+        AbilityCondition, AbilityCost, AbilityDefinition, CardSelectionMode, ControllerRef,
+        CopyCountStatus, DetachedRemainder, Duration, EffectKind, FilterProp, ModalChoice,
+        MultiTargetSpec, OpponentMayScope, ParentTargetMissingReason, PlayerFilter, PlayerScope,
+        QuantityRef, RepeatContinuation, ResolvedAbility, SiblingCondition, SubAbilityLink,
+        TargetChoiceTiming, TargetRef, TargetSelectionMode, TypedFilter, UnlessPayModifier,
     };
     use engine::types::actions::GameAction;
     use engine::types::card_type::CoreType;
     use engine::types::game_state::{
-        PendingCast, TargetEffectDetail, TargetSelectionConstraint, TargetSelectionSlot, WaitingFor,
+        DistributionUnit, PendingCast, TargetEffectDetail, TargetSelectionConstraint,
+        TargetSelectionSlot, WaitingFor,
     };
     use engine::types::identifiers::CardId;
     use engine::types::mana::ManaCost;
+    use engine::types::proposed_event::AppliedReplacementKey;
 
     fn player_target_score(
         state: &GameState,
@@ -1821,6 +1824,13 @@ mod live_quantity_targeting_tests {
                 current_legal_targets: legal_targets,
             },
         };
+        exact_pending_impact_from_live_state(state, candidate)
+    }
+
+    fn exact_pending_impact_from_live_state(
+        state: &GameState,
+        candidate: TargetRef,
+    ) -> Option<f64> {
         let decision = AiDecisionContext {
             waiting_for: state.waiting_for.clone(),
             candidates: Vec::new(),
@@ -1898,6 +1908,16 @@ mod live_quantity_targeting_tests {
             ),
             None,
             "an object is not a legal player candidate"
+        );
+        assert_eq!(
+            exact_pending_impact(
+                &mut state,
+                ability.clone(),
+                vec![TargetRef::Player(PlayerId(0))],
+                TargetRef::Player(PlayerId(1)),
+            ),
+            None,
+            "a player excluded only from current_legal_targets cannot take the exact path"
         );
 
         for mutation in ["previous", "later", "multiple", "chooser"] {
@@ -1998,12 +2018,35 @@ mod live_quantity_targeting_tests {
         assert_eq!(
             exact_pending_impact(
                 &mut state,
+                typed(ControllerRef::SpecificPlayer { id: PlayerId(0) }),
+                legal.clone(),
+                TargetRef::Player(PlayerId(1)),
+            ),
+            None,
+            "an unmatched SpecificPlayer is a legal slot candidate but not this root selector's recipient"
+        );
+        assert_eq!(
+            exact_pending_impact(
+                &mut state,
                 typed(ControllerRef::TargetPlayer),
                 legal,
                 TargetRef::Player(PlayerId(1))
             ),
             None,
             "contextual typed siblings are not direct target provenance"
+        );
+        assert_eq!(
+            exact_pending_impact(
+                &mut state,
+                typed(ControllerRef::ParentTargetOwner),
+                vec![
+                    TargetRef::Player(PlayerId(0)),
+                    TargetRef::Player(PlayerId(1)),
+                ],
+                TargetRef::Player(PlayerId(1)),
+            ),
+            None,
+            "ParentTargetOwner is contextual rather than direct root ownership"
         );
         let rider = ResolvedAbility::new(
             Effect::GainLife {
@@ -2150,6 +2193,42 @@ mod live_quantity_targeting_tests {
             None,
             "a pending object/root source mismatch has no exact provenance"
         );
+        let different_existing_source = hand_source(&mut state, 416);
+        let _ = exact_pending_impact(
+            &mut state,
+            ability.clone(),
+            legal.clone(),
+            TargetRef::Player(PlayerId(1)),
+        );
+        let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
+            unreachable!("the exact fixture installs a live pending cast");
+        };
+        pending_cast.object_id = different_existing_source;
+        assert_eq!(
+            exact_pending_impact_from_live_state(&state, TargetRef::Player(PlayerId(1))),
+            None,
+            "two existing source ids still must match before exact source-context resolution"
+        );
+        let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
+            unreachable!("the source-mismatch fixture remains live");
+        };
+        pending_cast.ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+                filter: None,
+                selection: CardSelectionMode::Chosen,
+                unless_filter: None,
+            },
+            Vec::new(),
+            different_existing_source,
+            PlayerId(0),
+        )));
+        assert_eq!(
+            exact_pending_impact_from_live_state(&state, TargetRef::Player(PlayerId(1))),
+            None,
+            "a continuation with a different existing source id cannot inherit root authority"
+        );
         state.objects.remove(&source);
         assert_eq!(
             exact_pending_impact(&mut state, ability, legal, TargetRef::Player(PlayerId(1))),
@@ -2180,6 +2259,7 @@ mod live_quantity_targeting_tests {
             PlayerId(0),
         );
         let legal = vec![
+            TargetRef::Player(PlayerId(0)),
             TargetRef::Player(PlayerId(1)),
             TargetRef::Player(PlayerId(2)),
         ];
@@ -2198,7 +2278,7 @@ mod live_quantity_targeting_tests {
         assert_eq!(
             exact_pending_impact(&mut state, ability, legal, TargetRef::Player(PlayerId(0))),
             None,
-            "the controller remains unmatched in a three-player opponent selector"
+            "a supplied legal controller remains unmatched in a three-player Opponent selector"
         );
     }
 
@@ -2326,6 +2406,64 @@ mod live_quantity_targeting_tests {
             Some(1.25),
             "a controller rider is independent and deliberately ignored"
         );
+        for controller in [
+            ControllerRef::ParentTargetController,
+            ControllerRef::ParentTargetOwner,
+        ] {
+            let contextual_parent = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Typed(TypedFilter {
+                        type_filters: Vec::new(),
+                        controller: Some(controller),
+                        properties: Vec::new(),
+                    }),
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            );
+            assert_eq!(
+                exact_pending_impact(
+                    &mut state,
+                    root.clone().sub_ability(contextual_parent),
+                    legal.clone(),
+                    TargetRef::Player(PlayerId(1)),
+                ),
+                None,
+                "contextual parent controller/owner children cannot consume selected-player ownership"
+            );
+        }
+        let independent_player_child = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Player,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            exact_pending_impact(
+                &mut state,
+                root.clone().sub_ability(independent_player_child),
+                legal.clone(),
+                TargetRef::Player(PlayerId(1)),
+            ),
+            None,
+            "an independently targeting Player child has no ParentTarget ownership"
+        );
+        let unsupported_child = ResolvedAbility::new(Effect::NoOp, Vec::new(), source, PlayerId(0));
+        assert_eq!(
+            exact_pending_impact(
+                &mut state,
+                root.clone().sub_ability(unsupported_child),
+                legal.clone(),
+                TargetRef::Player(PlayerId(1)),
+            ),
+            None,
+            "an unsupported owning child cannot leave a partial exact sum"
+        );
         let mut sibling = fixed_child;
         sibling.sub_link = SubAbilityLink::SequentialSibling;
         assert_eq!(
@@ -2436,66 +2574,213 @@ mod live_quantity_targeting_tests {
             Some(2.5),
             "the plain eligible root reaches exact classification before each mutation"
         );
-        let mut optional = root.clone();
-        optional.optional = true;
-        let mut repeating = root.clone();
-        repeating.repeat_for = Some(QuantityExpr::Fixed { value: 1 });
-        let mut resolution_target = root.clone();
-        resolution_target.target_choice_timing = TargetChoiceTiming::Resolution;
-        let mut multiple = root.clone();
-        multiple.multi_target = Some(MultiTargetSpec::fixed(1, 1));
-        let mut branch = root.clone();
-        branch.else_ability = Some(Box::new(root.clone()));
-        let mut conditional = root.clone();
-        conditional.condition = Some(AbilityCondition::IsMonarch);
-        let mut scoped = root.clone();
-        scoped.player_scope = Some(PlayerFilter::Opponent);
-        let mut chooser = root.clone();
-        chooser.target_chooser = Some(TargetFilter::Any);
-        let mut unless = root.clone();
-        unless.unless_pay = Some(UnlessPayModifier {
-            cost: AbilityCost::Tap,
-            payer: TargetFilter::Any,
-        });
-        let mut distribution = root.clone();
-        distribution.distribution = Some(Vec::new());
-        let mut iteration = root.clone();
-        iteration.repeat_until = Some(RepeatContinuation::ControllerChoice);
-        let mut mode = root.clone();
-        mode.selected_mode_labels.push("mode".to_string());
-        let mut forwarded = root.clone();
-        forwarded.forward_result = true;
-        let mut constrained = root.clone();
-        constrained
-            .target_constraints
-            .push(TargetSelectionConstraint::DifferentTargetPlayers);
-        for (name, mutated) in [
-            ("optional", optional),
-            ("repeat_for", repeating),
-            ("resolution timing", resolution_target),
-            ("multi target", multiple),
-            ("otherwise", branch),
-            ("condition", conditional),
-            ("player scope", scoped),
-            ("target chooser", chooser),
-            ("unless pay", unless),
-            ("distribution", distribution),
-            ("repeat until", iteration),
-            ("mode labels", mode),
-            ("forward result", forwarded),
-            ("target constraints", constrained),
-        ] {
-            assert_eq!(
-                exact_pending_impact(
-                    &mut state,
-                    mutated,
-                    legal.clone(),
-                    TargetRef::Player(PlayerId(1))
-                ),
-                None,
-                "{name} must take the exact classifier's conservative None branch"
-            );
+        let fixed_parent_discard = || {
+            ResolvedAbility::new(
+                Effect::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ParentTarget,
+                    filter: None,
+                    selection: CardSelectionMode::Chosen,
+                    unless_filter: None,
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            )
+        };
+        macro_rules! assert_ineligible_on_root_and_fixed_child {
+            ($name:literal, $mutate:expr) => {{
+                let mut mutated_root = root.clone();
+                $mutate(&mut mutated_root);
+                assert_eq!(
+                    exact_pending_impact(
+                        &mut state,
+                        mutated_root,
+                        legal.clone(),
+                        TargetRef::Player(PlayerId(1)),
+                    ),
+                    None,
+                    concat!($name, " must reject the otherwise-exact root"),
+                );
+                let mut mutated_child = fixed_parent_discard();
+                $mutate(&mut mutated_child);
+                assert_eq!(
+                    exact_pending_impact(
+                        &mut state,
+                        root.clone().sub_ability(mutated_child),
+                        legal.clone(),
+                        TargetRef::Player(PlayerId(1)),
+                    ),
+                    None,
+                    concat!(
+                        $name,
+                        " must reject the otherwise-exact fixed ParentTarget child"
+                    ),
+                );
+            }};
         }
+        assert_ineligible_on_root_and_fixed_child!("kind", |node: &mut ResolvedAbility| {
+            node.kind = AbilityKind::Activated;
+        });
+        assert_ineligible_on_root_and_fixed_child!("targets", |node: &mut ResolvedAbility| {
+            node.targets.push(TargetRef::Player(PlayerId(0)));
+        });
+        assert_ineligible_on_root_and_fixed_child!("duration", |node: &mut ResolvedAbility| {
+            node.duration = Some(Duration::UntilEndOfTurn);
+        });
+        assert_ineligible_on_root_and_fixed_child!(
+            "optional_targeting",
+            |node: &mut ResolvedAbility| {
+                node.optional_targeting = true;
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!("optional", |node: &mut ResolvedAbility| {
+            node.optional = true;
+        });
+        assert_ineligible_on_root_and_fixed_child!(
+            "optional_player",
+            |node: &mut ResolvedAbility| {
+                node.optional_player = Some(TargetFilter::Controller);
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!("optional_for", |node: &mut ResolvedAbility| {
+            node.optional_for = Some(OpponentMayScope::AnyOpponent);
+        });
+        assert_ineligible_on_root_and_fixed_child!("multi_target", |node: &mut ResolvedAbility| {
+            node.multi_target = Some(MultiTargetSpec::fixed(1, 1));
+        });
+        assert_ineligible_on_root_and_fixed_child!(
+            "target_constraints",
+            |node: &mut ResolvedAbility| {
+                node.target_constraints
+                    .push(TargetSelectionConstraint::DifferentTargetPlayers);
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!(
+            "target_choice_timing",
+            |node: &mut ResolvedAbility| {
+                node.target_choice_timing = TargetChoiceTiming::Resolution;
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!(
+            "target_chooser",
+            |node: &mut ResolvedAbility| {
+                node.target_chooser = Some(TargetFilter::Any);
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!("else_ability", |node: &mut ResolvedAbility| {
+            node.else_ability = Some(Box::new(root.clone()));
+        });
+        assert_ineligible_on_root_and_fixed_child!("condition", |node: &mut ResolvedAbility| {
+            node.condition = Some(AbilityCondition::IsMonarch);
+        });
+        assert_ineligible_on_root_and_fixed_child!(
+            "modal_instruction_ordinal",
+            |node: &mut ResolvedAbility| {
+                node.modal_instruction_ordinal = Some(0);
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!(
+            "detached_remainder",
+            |node: &mut ResolvedAbility| {
+                node.detached_remainder = DetachedRemainder::HoldsPublisher;
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!("repeat_for", |node: &mut ResolvedAbility| {
+            node.repeat_for = Some(QuantityExpr::Fixed { value: 1 });
+        });
+        assert_ineligible_on_root_and_fixed_child!("min_x_value", |node: &mut ResolvedAbility| {
+            node.min_x_value = 1;
+        });
+        assert_ineligible_on_root_and_fixed_child!("announced_x", |node: &mut ResolvedAbility| {
+            node.announced_x = Some(QuantityExpr::Fixed { value: 1 });
+        });
+        assert_ineligible_on_root_and_fixed_child!(
+            "cant_be_copied",
+            |node: &mut ResolvedAbility| {
+                node.cant_be_copied = true;
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!(
+            "copy_count_status",
+            |node: &mut ResolvedAbility| {
+                node.copy_count_status = CopyCountStatus::Finalized;
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!(
+            "forward_result",
+            |node: &mut ResolvedAbility| {
+                node.forward_result = true;
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!("unless_pay", |node: &mut ResolvedAbility| {
+            node.unless_pay = Some(UnlessPayModifier {
+                cost: AbilityCost::Tap,
+                payer: TargetFilter::Any,
+            });
+        });
+        assert_ineligible_on_root_and_fixed_child!("distribution", |node: &mut ResolvedAbility| {
+            node.distribution = Some(Vec::new());
+        });
+        assert_ineligible_on_root_and_fixed_child!("distribute", |node: &mut ResolvedAbility| {
+            node.distribute = Some(DistributionUnit::Life);
+        });
+        assert_ineligible_on_root_and_fixed_child!("player_scope", |node: &mut ResolvedAbility| {
+            node.player_scope = Some(PlayerFilter::Opponent);
+        });
+        assert_ineligible_on_root_and_fixed_child!(
+            "starting_with",
+            |node: &mut ResolvedAbility| {
+                node.starting_with = Some(ControllerRef::You);
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!("chosen_x", |node: &mut ResolvedAbility| {
+            node.chosen_x = Some(1);
+        });
+        assert_ineligible_on_root_and_fixed_child!(
+            "chosen_players",
+            |node: &mut ResolvedAbility| {
+                node.chosen_players.push(PlayerId(0));
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!("repeat_until", |node: &mut ResolvedAbility| {
+            node.repeat_until = Some(RepeatContinuation::ControllerChoice);
+        });
+        assert_ineligible_on_root_and_fixed_child!(
+            "replacement_applied",
+            |node: &mut ResolvedAbility| {
+                node.replacement_applied
+                    .insert(AppliedReplacementKey::floating(0));
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!(
+            "target_selection_mode",
+            |node: &mut ResolvedAbility| {
+                node.target_selection_mode = TargetSelectionMode::Random;
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!(
+            "sibling_condition",
+            |node: &mut ResolvedAbility| {
+                node.sibling_condition = SiblingCondition::ReplicatedOrBranch;
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!("modal", |node: &mut ResolvedAbility| {
+            node.modal = Some(ModalChoice::default());
+        });
+        assert_ineligible_on_root_and_fixed_child!(
+            "mode_abilities",
+            |node: &mut ResolvedAbility| {
+                node.mode_abilities
+                    .push(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp));
+            }
+        );
+        assert_ineligible_on_root_and_fixed_child!(
+            "parent_target_missing_reason",
+            |node: &mut ResolvedAbility| {
+                node.parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+            }
+        );
         for (name, filter, selection, unless_filter) in [
             (
                 "filter",
