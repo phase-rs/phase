@@ -1861,7 +1861,6 @@ mod live_quantity_targeting_tests {
             "exact pending source".to_string(),
             Zone::Hand,
         );
-        state.players[0].hand.push_back(source);
         source
     }
 
@@ -2129,7 +2128,6 @@ mod live_quantity_targeting_tests {
             Zone::Battlefield,
         );
         state.objects.get_mut(&own).unwrap().card_types.core_types = vec![CoreType::Creature];
-        state.battlefield.push_back(own);
         for card_id in [413, 414] {
             let opposing = create_object(
                 &mut state,
@@ -2144,7 +2142,6 @@ mod live_quantity_targeting_tests {
                 .unwrap()
                 .card_types
                 .core_types = vec![CoreType::Creature];
-            state.battlefield.push_back(opposing);
         }
         let filter = TargetFilter::Typed(TypedFilter {
             type_filters: Vec::new(),
@@ -2315,7 +2312,6 @@ mod live_quantity_targeting_tests {
             .unwrap()
             .card_types
             .core_types = vec![CoreType::Creature];
-        state.battlefield.push_back(creature);
         let root = direct_draw(
             source,
             QuantityExpr::Ref {
