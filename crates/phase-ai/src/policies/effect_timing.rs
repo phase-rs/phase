@@ -115,7 +115,7 @@ fn evasion_target_verdict(ctx: &PolicyContext<'_>, target: &TargetRef) -> Policy
     let TargetRef::Object(target_id) = target else {
         return PolicyVerdict::neutral(PolicyReason::new("effect_timing_evasion_target_na"));
     };
-    if declared_pair_blockable(ctx.state, *target_id) {
+    if ai_controlled_declared_pair_blockable(ctx.state, ctx.ai_player, *target_id) {
         return PolicyVerdict::neutral(PolicyReason::new(
             "effect_timing_pair_blockable_evasion_target",
         ));
@@ -128,7 +128,7 @@ fn evasion_target_verdict(ctx: &PolicyContext<'_>, target: &TargetRef) -> Policy
             TargetRef::Object(id) => Some(*id),
             _ => None,
         })
-        .any(|sibling| declared_pair_blockable(ctx.state, sibling))
+        .any(|sibling| ai_controlled_declared_pair_blockable(ctx.state, ctx.ai_player, sibling))
     {
         PolicyVerdict::strong(
             -STRONG_MAX,
@@ -256,6 +256,18 @@ fn declared_pair_blockable(
     }) && get_valid_block_targets(state)
         .values()
         .any(|targets| targets.contains(&target_id))
+}
+
+fn ai_controlled_declared_pair_blockable(
+    state: &GameState,
+    ai_player: PlayerId,
+    target_id: engine::types::identifiers::ObjectId,
+) -> bool {
+    state
+        .objects
+        .get(&target_id)
+        .is_some_and(|object| object.controller == ai_player)
+        && declared_pair_blockable(state, target_id)
 }
 
 fn score_action_shape(ctx: &PolicyContext<'_>) -> f64 {
@@ -532,7 +544,8 @@ mod tests {
     use super::*;
     use crate::config::AiConfig;
     use engine::ai_support::{
-        build_decision_context, ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass,
+        build_decision_context, validated_candidate_actions_for_semantic_owner, ActionMetadata,
+        AiDecisionContext, CandidateAction, TacticalClass,
     };
     use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
     use engine::game::scenario::{GameScenario, P0};
@@ -777,6 +790,59 @@ mod tests {
             effect_timing_verdict(state, &futile_candidate, &config),
             PolicyVerdict::Score { delta, reason }
                 if delta < 0.0 && reason.kind == "effect_timing_futile_evasion_target"
+        ));
+    }
+
+    #[test]
+    fn opponent_combat_does_not_penalize_own_target_for_enemy_blockable_attacker() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(1);
+        let source = creature(&mut state, P0, "Whirler Rogue");
+        let own_target = creature(&mut state, P0, "Own Nonattacker");
+        let enemy_attacker = creature(&mut state, PlayerId(1), "Enemy Attacker");
+        let blocker = creature(&mut state, P0, "Ready Blocker");
+        state.combat = Some(CombatState {
+            attackers: vec![declared_attacker(enemy_attacker, P0)],
+            ..Default::default()
+        });
+        install_whirler_prompt(&mut state, source, vec![own_target, enemy_attacker]);
+
+        assert!(get_valid_block_targets(&state)
+            .get(&blocker)
+            .is_some_and(|targets| targets.contains(&enemy_attacker)));
+        let legal_actions = validated_candidate_actions_for_semantic_owner(&state, P0);
+        assert!(legal_actions.iter().any(|candidate| {
+            candidate.action
+                == GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(own_target)),
+                }
+        }));
+        assert!(legal_actions.iter().any(|candidate| {
+            candidate.action
+                == GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(enemy_attacker)),
+                }
+        }));
+
+        let own_candidate = target_candidate(own_target);
+        let decision = build_decision_context(&state);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        assert!(is_single_target_unblockable_activation(&PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &own_candidate,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        }));
+        assert!(matches!(
+            effect_timing_verdict(&state, &own_candidate, &config),
+            PolicyVerdict::Score { delta: 0.0, reason }
+                if reason.kind == "effect_timing_no_pair_blockable_evasion_target"
         ));
     }
 
