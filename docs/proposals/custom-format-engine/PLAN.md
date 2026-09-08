@@ -608,7 +608,7 @@ LegalityRules {
 // true` requires the reader to already know which direction "true" points).
 // This mirrors `LegendRuleScope`'s existing shape rather than introducing a
 // new convention.
-LegacyRuleSet {                         // INDEPENDENT era-rule axes (RESEARCH §8, §10)
+LegacyRuleSet {                         // FIVE INDEPENDENT era-rule axes (RESEARCH §8, §10)
     mana_burn: ManaBurnPolicy,
     damage_timing: CombatDamageTiming,
     wish_scope: WishOutsideGameScope,
@@ -619,6 +619,16 @@ LegacyRuleSet {                         // INDEPENDENT era-rule axes (RESEARCH �
                                         // binary and this leaves room without
                                         // a later refactor. Same reasoning now
                                         // applied to the three siblings above.
+    ante: AntePolicy,                   // Phase 1d (CONTEXT.md Open item 5).
+                                        // #[serde(default)] — it postdates the
+                                        // Axis-A save path, so an already-
+                                        // persisted def carries no `ante` key.
+                                        // The ONLY axis here whose default is
+                                        // behavior-bearing today: `Excluded`
+                                        // enforces CR 407.3 at deck
+                                        // construction. See §7's gate-scope
+                                        // paragraph for why only `Enabled` is
+                                        // a GATED axis.
 }
 
 ManaBurnPolicy {                        // RESEARCH §5
@@ -663,6 +673,24 @@ LegendRuleScope {                       // RESEARCH §10: legend-rule controller
     PreM14AnyController,                // pre-M14: same-named legends across ALL
                                         // controllers all go to owners' graveyards,
                                         // choiceless (Sixth-Edition "both die" form).
+}
+
+AntePolicy {                            // CR 407 (CONTEXT.md Open item 5)
+    Excluded,                           // CR 407.3: cards printed with "Remove this
+                                        // card from your deck before playing if
+                                        // you're not playing for ante" may not be in
+                                        // a deck OR sideboard. DEFAULT — and, unlike
+                                        // every other default here, ENFORCED today,
+                                        // in deck_validation's DeclaredPool, by a
+                                        // printed-text class predicate rather than a
+                                        // card list. Every custom format gets it,
+                                        // including Axis-A lobby saves.
+    Enabled,                            // CR 407.2/407.4: the ante zone and the ante
+                                        // action. Schema only — GATED by
+                                        // IMPLEMENTED_LEGACY_AXES. This is the half
+                                        // that promises unbuilt runtime behavior;
+                                        // gating `Excluded` too would reject every
+                                        // custom format in existence.
 }
 ```
 

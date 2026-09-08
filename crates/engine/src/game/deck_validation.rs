@@ -9451,6 +9451,17 @@ mod tests {
             };
             cards.insert(key.to_string(), card);
         }
+        // Basic land, printed in a Swedish-legal set, so the pipeline tests
+        // below can build a real 60-card deck: `deck_with_copies`/
+        // `legal_60_main` pad with Plains, and the CR 100.2a basic-land
+        // exemption keeps 56 copies under the format's 4-copy ceiling.
+        let mut plains = card_json_with_printings("Plains", &["LEA"]);
+        plains["card_type"] = serde_json::json!({
+            "supertypes": ["Basic"],
+            "core_types": ["Land"],
+            "subtypes": ["Plains"]
+        });
+        cards.insert("plains".to_string(), plains);
         Value::Object(cards).to_string()
     }
 
@@ -9492,6 +9503,97 @@ mod tests {
         assert_eq!(
             pool.status(&db, "Savannah Lions"),
             Some(LegalityStatus::Legal)
+        );
+    }
+
+    /// CR 407.3 through the ACTUAL admission route, not the private helper:
+    /// `FormatConfig::for_custom_rules` → `SelectedFormat::Resolved` →
+    /// `validate_deck_for_format` → `evaluate_custom_format` →
+    /// `custom_format_pool` → `DeclaredPool`. The sibling test above proves the
+    /// pure function; this proves the wiring that reaches it in production, so
+    /// a future refactor that stopped calling it would fail here.
+    ///
+    /// **Both halves of CR 407.3's boundary — "their decks or sideboards".**
+    /// The sideboard reaches the check only because `construction_deck_cards`
+    /// chains it; a main-deck-only regression would not notice if that stopped,
+    /// and the sideboard is exactly where a player would try to hide an ante
+    /// card. Uses `swedish_old_school()`'s real rules rather than a synthetic
+    /// config, since the preset is what ships.
+    #[test]
+    fn validate_deck_for_format_rejects_ante_cards_in_deck_and_sideboard() {
+        let db = CardDatabase::from_json_str(&ante_db_json()).unwrap();
+        let config = FormatConfig::for_custom_rules(
+            &crate::types::custom_format::swedish_old_school().rules,
+        );
+
+        let request_with = |main: Vec<String>, sideboard: Vec<String>| DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard,
+            selected_format: Some(SelectedFormat::Resolved(Box::new(config.clone()))),
+            player_count: default_player_count(),
+            ..Default::default()
+        };
+
+        // Paired positive control on the SAME config: a legal 60-card deck with
+        // a legal sideboard is ACCEPTED. Without it, both rejections below
+        // would still pass against a validator that rejected every deck for
+        // some unrelated reason (deck size, pool membership, copy limit).
+        assert!(
+            validate_deck_for_format(&db, &request_with(expand("Plains", 60), Vec::new())).is_ok(),
+            "a 60-card Swedish-legal deck must be accepted, or the rejections below prove nothing"
+        );
+        assert!(
+            validate_deck_for_format(
+                &db,
+                &request_with(expand("Plains", 60), expand("Savannah Lions", 4))
+            )
+            .is_ok(),
+            "a legal sideboard must be accepted"
+        );
+
+        // CR 407.3, main deck.
+        let in_deck = validate_deck_for_format(
+            &db,
+            &request_with(legal_60_main("Jeweled Bird"), Vec::new()),
+        )
+        .expect_err("an ante card in the main deck must be rejected end-to-end");
+        assert!(
+            in_deck.iter().any(|reason| reason.contains("Jeweled Bird")),
+            "the rejection must name the offending card, got: {in_deck:?}"
+        );
+
+        // CR 407.3, sideboard — the half a main-deck-only test would miss.
+        let in_sideboard = validate_deck_for_format(
+            &db,
+            &request_with(expand("Plains", 60), expand("Jeweled Bird", 1)),
+        )
+        .expect_err("an ante card in the sideboard must be rejected end-to-end (CR 407.3)");
+        assert!(
+            in_sideboard
+                .iter()
+                .any(|reason| reason.contains("Jeweled Bird")),
+            "the sideboard rejection must name the offending card, got: {in_sideboard:?}"
+        );
+
+        // An ante card that is ALSO on the restricted list is rejected
+        // outright, not downgraded to "one copy is fine" — the ordering inside
+        // `DeclaredPool::status`, observed from outside it. Exactly ONE copy,
+        // which the restricted rule alone would permit: at four copies this
+        // would be rejected for the copy limit whether or not the ante rule
+        // exists, and would prove nothing about the ordering.
+        let restricted_ante = validate_deck_for_format(
+            &db,
+            &request_with(deck_with_copies("Contract from Below", 1, 60), Vec::new()),
+        )
+        .expect_err(
+            "one copy of a restricted ante card is legal under the restricted rule alone, so \
+             rejecting it is attributable to CR 407.3",
+        );
+        assert!(
+            restricted_ante
+                .iter()
+                .any(|reason| reason.contains("Contract from Below")),
+            "got: {restricted_ante:?}"
         );
     }
 

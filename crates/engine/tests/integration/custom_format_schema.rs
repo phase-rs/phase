@@ -22,7 +22,7 @@ use engine::types::format::{
     SideboardPolicy,
 };
 use engine::types::player::PlayerId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn sample_structural() -> StructuralRules {
     StructuralRules {
@@ -277,30 +277,60 @@ fn swedish_old_school_declares_its_sourced_card_pool() {
     // and restricts instead. The schema must carry that faithfully.
     assert!(legality.banned.is_empty());
 
-    assert_eq!(
-        legality.restricted.len(),
-        25,
-        "the source's restricted list is 25 cards (CONTEXT.md corrected an earlier 23 miscount)"
-    );
-    for expected in [
+    // The COMPLETE authoritative roster, not a count plus spot-checks: a
+    // same-length substitution in any entry changes legal deck construction,
+    // and a test that only counted to 25 would pass straight through it.
+    // Order-independent so the constructor stays free to reorder, but exact in
+    // both directions — nothing missing, nothing extra.
+    let expected_restricted: BTreeSet<&str> = [
         "Ancestral Recall",
+        "Balance",
         "Black Lotus",
+        "Braingeyser",
+        "Channel",
+        "Chaos Orb",
+        "Contract from Below",
+        "Darkpact",
+        "Demonic Tutor",
+        "Library of Alexandria",
+        "Mana Drain",
+        "Mind Twist",
         "Mishra's Workshop",
+        "Mox Emerald",
+        "Mox Jet",
+        "Mox Pearl",
+        "Mox Ruby",
         "Mox Sapphire",
+        "Regrowth",
+        "Sol Ring",
+        "Strip Mine",
+        "Tempest Efreet",
+        "Time Walk",
         "Timetwister",
-    ] {
-        assert!(
-            legality.restricted.iter().any(|name| name == expected),
-            "restricted list is missing {expected}"
-        );
-    }
-    // Three of the seven ante cards are also restricted, exactly as the
-    // source spells it — the ante exclusion below is what actually keeps them
-    // out of a deck.
-    assert!(legality
-        .restricted
-        .iter()
-        .any(|name| name == "Contract from Below"));
+        "Wheel of Fortune",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        expected_restricted.len(),
+        25,
+        "the source's restricted list is 25 cards (CONTEXT.md corrected an earlier 23 miscount) — \
+         if this trips, the literal above gained a duplicate"
+    );
+    let actual_restricted: BTreeSet<&str> =
+        legality.restricted.iter().map(String::as_str).collect();
+    assert_eq!(
+        actual_restricted, expected_restricted,
+        "swedish_old_school()'s restricted list must match the primary source exactly"
+    );
+    // A set comparison would hide a duplicated entry in the constructor, which
+    // would be a real authoring defect even though it changes no verdict.
+    assert_eq!(legality.restricted.len(), 25);
+
+    // Three of the 25 (Contract from Below, Darkpact, Tempest Efreet) are also
+    // ante cards, exactly as the source spells it — the ante exclusion is what
+    // actually keeps those three out of a deck, ahead of this list.
+    assert!(actual_restricted.contains("Contract from Below"));
 
     // An old card pool played under modern rules: the source mentions no mana
     // burn, damage on the stack, pre-M10 Wish templating or modified legend
