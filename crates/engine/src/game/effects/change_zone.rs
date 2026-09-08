@@ -1879,6 +1879,22 @@ pub fn resolve_all(
     };
     let origin_zone = origin_zones[0];
 
+    // CR 701.24a + CR 701.24d: `lower_change_zone_all_to_library` represents
+    // “shuffle [a set] into [a] library” as one or more mass moves followed by
+    // one terminal Shuffle. The generic zone-delivery tail normally shuffles
+    // every object that enters a library without an explicit placement, which
+    // would turn a single instruction into one shuffle per moved card plus the
+    // terminal shuffle. Carry a transient bottom placement through each member
+    // move to suppress that generic tail; the terminal Shuffle immediately
+    // randomizes the complete library, so this intermediate placement is not a
+    // player-visible ordering instruction.
+    let library_move_has_terminal_shuffle = dest_zone == Zone::Library
+        && effect_library_position.is_none()
+        && mass_library_move_has_terminal_shuffle(ability);
+    let member_library_placement = library_move_has_terminal_shuffle
+        .then_some(LibraryPosition::Bottom)
+        .or(effect_library_position.clone());
+
     // CR 400.6 + CR 400.3: `TargetFilter::Controller` / player-anaphor filters
     // in a mass zone-change reference a *player*, not a set of objects. Such
     // filters arise from phrases like "shuffle your hand into your library"
@@ -2164,7 +2180,7 @@ pub fn resolve_all(
             &enter_with_counters,
             face_down_profile.as_ref(),
             track_exiled_by_source,
-            effect_library_position.clone(),
+            member_library_placement.clone(),
             None,
             Some(ability.controller),
             events,
@@ -2346,6 +2362,25 @@ pub fn resolve_all(
     });
 
     Ok(())
+}
+
+/// True for the intrinsic `ChangeZoneAll → … → Shuffle` continuation emitted
+/// for a mass “shuffle [zone] into [library]” instruction. An intervening
+/// instruction deliberately breaks the match: it owns its own sequencing and
+/// must not change the ordinary library-move delivery behavior.
+fn mass_library_move_has_terminal_shuffle(ability: &ResolvedAbility) -> bool {
+    let mut next = ability.sub_ability.as_deref();
+    while let Some(sub) = next {
+        match &sub.effect {
+            Effect::ChangeZoneAll {
+                destination: Zone::Library,
+                ..
+            } => next = sub.sub_ability.as_deref(),
+            Effect::Shuffle { .. } => return true,
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn owner_scoped_nonbattlefield_mass_filter(
