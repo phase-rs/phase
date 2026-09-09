@@ -601,13 +601,14 @@ mod cast_arm {
     }
 }
 
-/// Review finding (PR #8696): the veto's per-effect loop reads `ctx.effects()`
-/// through `extract_target_filter`, and several REAL, unconditionally
-/// beneficial effects — `Effect::Draw` chief among them — are absent from that
+/// Review finding (PR #8696), then a follow-up finding on the fix itself:
+/// the veto's per-effect loop reads `ctx.effects()` through
+/// `extract_target_filter`, and several REAL, unconditionally beneficial
+/// effects — `Effect::Draw` chief among them — are absent from that
 /// function's match arms and fall to `_ => None`. Such a leg is silently
-/// `continue`d past by `anti_self_harm.rs`'s per-effect loop and never reaches
-/// the `EffectPolarity::Beneficial => return None` arm, because that arm only
-/// fires for legs the loop actually visits.
+/// `continue`d past by `anti_self_harm.rs`'s per-effect loop and never
+/// reaches the `EffectPolarity::Beneficial => return None` arm, because that
+/// arm only fires for legs the loop actually visits.
 ///
 /// Garruk, Cursed Huntsman's [−3] ("Destroy target creature. Draw a card.",
 /// verified against `data/card-data.json`) is the sharpest case: a chained
@@ -619,13 +620,34 @@ mod cast_arm {
 /// field exists; the VARIANT is simply absent from `extract_target_filter`'s
 /// match arms, and only those arms decide what the loop can see.
 ///
-/// On a board where the only legal "target creature" is the AI's own, this
-/// activation was hard-`Reject`ed pre-fix — deleting a card the AI was
-/// guaranteed to draw. Whether the trade (give up a creature, get a card) is
-/// actually worth making is a soft-scoring question for other policies; a hard
-/// veto has no business answering it.
+/// The FIRST fix here stopped there — any effect the loop can't see AND that
+/// `effect_polarity` calls `Beneficial` stood the veto down. That is not
+/// evidence the AI receives a usable payoff: `effect_polarity(Effect::Draw)`
+/// is `Beneficial` regardless of WHO draws, and nothing checked deliverability
+/// either. So the SAME escape that correctly rescues Garruk's [−3] would
+/// ALSO have rescued a synthetic "Destroy target creature. Target opponent
+/// draws a card" (a pure gift, not a payoff) and an AI-directed draw off an
+/// empty library (no payoff, and risks the CR 104.3b loss an empty-library
+/// draw itself creates). `untargeted_effect_confirms_ai_payoff` closes that:
+/// it resolves the actual recipient and, for Draw, the actual deliverability,
+/// rather than trusting `effect_polarity`'s global answer.
+///
+/// Four boards, from one shared fixture parameterized by library size and
+/// draw recipient:
+///
+/// 1. AI-recipient, drawable (Garruk's real [−3], library non-empty) — the
+///    positive control: this activation must NOT be vetoed.
+/// 2. AI-recipient, NOT drawable (same ability, empty library) — still
+///    vetoed: no card is actually coming.
+/// 3. Opponent-recipient (the Draw leg's target swapped to `Opponent`,
+///    synthetic — no printed card does this shape, so it is a hand-modified
+///    variant of the real ability rather than a second real card) — still
+///    vetoed: the AI gets nothing.
+/// 4. No Draw leg at all (bare "Destroy target creature.") — still vetoed:
+///    proves the fix isn't a blanket stand-down.
 mod split_ability_leg {
     use super::*;
+    use engine::types::ability::{Effect, TargetFilter as SplitTargetFilter};
 
     /// The shipped parser's own output for Garruk's [−3], pinned so a parser
     /// shape change fails this test rather than leaving it green on a shape no
@@ -646,7 +668,31 @@ mod split_ability_leg {
         .expect("Garruk's [-3] parses one activated ability")
     }
 
-    fn board_with_only_own_creature() -> (GameState, ObjectId, ObjectId) {
+    /// `board_with_only_own_creature`'s ability, with its Draw leg's recipient
+    /// hand-swapped to `Opponent`. Not a printed card — labeled synthetic in
+    /// every test that uses it — built specifically to isolate the RECIPIENT
+    /// half of `untargeted_effect_confirms_ai_payoff` from its DELIVERABILITY
+    /// half, the same way `without_the_draw_leg_the_same_board_is_still_vetoed`
+    /// already isolates "no Draw leg at all" by hand-editing the same root.
+    fn destroy_then_gift_opponent_a_draw_ability() -> AbilityDefinition {
+        let mut ability = destroy_then_draw_ability();
+        let sub = ability
+            .sub_ability
+            .as_mut()
+            .expect("premise: Garruk's [-3] has a sub_ability");
+        let Effect::Draw { target, .. } = &mut *sub.effect else {
+            panic!("premise: Garruk's [-3] sub_ability is Effect::Draw");
+        };
+        *target = SplitTargetFilter::Opponent;
+        ability
+    }
+
+    /// `library_size` cards in the AI's library — 0 makes the Draw leg
+    /// undeliverable (CR 121.3), any non-zero count makes it deliverable.
+    fn board_with_only_own_creature(
+        ability: AbilityDefinition,
+        library_size: u32,
+    ) -> (GameState, ObjectId, ObjectId) {
         let mut ids = Ids::new();
         let mut state = GameState::new_two_player(4242);
         state.phase = Phase::PreCombatMain;
@@ -665,7 +711,17 @@ mod split_ability_leg {
         {
             let obj = state.objects.get_mut(&planeswalker).unwrap();
             obj.card_types.core_types.push(CoreType::Planeswalker);
-            *Arc::make_mut(&mut obj.abilities) = vec![destroy_then_draw_ability()];
+            *Arc::make_mut(&mut obj.abilities) = vec![ability];
+        }
+
+        for i in 0..library_size {
+            create_object(
+                &mut state,
+                ids.next(),
+                AI,
+                format!("Library Card {i}"),
+                Zone::Library,
+            );
         }
 
         state.waiting_for = WaitingFor::Priority { player: AI };
@@ -704,34 +760,71 @@ mod split_ability_leg {
         AntiSelfHarmPolicy.verdict(&ctx)
     }
 
-    /// The regression. A chained "Destroy target creature. Draw a card." whose
-    /// Destroy leg can only reach the AI's own creature must NOT be vetoed —
-    /// the Draw leg is a real, guaranteed payoff the harmful leg's own-board
-    /// confinement does not erase.
+    /// Case 3 from the module doc, and the reason the other three exist: a
+    /// chained "Destroy target creature. Draw a card." whose Destroy leg can
+    /// only reach the AI's own creature, with the AI actually able to draw,
+    /// must NOT be vetoed — the Draw leg is a real, deliverable payoff the
+    /// harmful leg's own-board confinement does not erase.
     #[test]
-    fn own_board_destroy_with_a_guaranteed_draw_is_not_vetoed() {
-        let (state, planeswalker, _own_creature) = board_with_only_own_creature();
+    fn own_board_destroy_with_a_deliverable_ai_draw_is_not_vetoed() {
+        let (state, planeswalker, _own_creature) =
+            board_with_only_own_creature(destroy_then_draw_ability(), 10);
         assert_eq!(
             reject_kind(&verdict_for(&state, planeswalker)),
             None,
             "'Destroy target creature. Draw a card.' must not be hard-rejected when the \
-             Destroy leg's only legal target is the AI's own creature — the Draw leg is a \
-             real, engine-guaranteed payoff the veto's per-effect loop must not go blind to"
+             Destroy leg's only legal target is the AI's own creature and the AI can actually \
+             draw — the Draw leg is a real, deliverable payoff the veto's per-effect loop \
+             must not go blind to"
         );
     }
 
-    /// Non-vacuity: remove the Draw leg (a bare "Destroy target creature.")
-    /// and the SAME board is still vetoed. Proves the fix isn't a blanket
-    /// stand-down — it responds specifically to the untargeted beneficial leg.
+    /// Case 1: the SAME real ability, but the AI's library is empty. CR
+    /// 121.3: a draw attempt from an empty library still occurs (it just puts
+    /// nothing in hand) and is the state-based-loss condition, so this is not
+    /// merely "no payoff" — it can set up a loss. `can_draw_at_least_one` must
+    /// see through the abstract `effect_polarity(Draw) == Beneficial` reading
+    /// and keep the veto engaged.
+    #[test]
+    fn own_board_destroy_with_an_undeliverable_ai_draw_is_still_vetoed() {
+        let (state, planeswalker, _own_creature) =
+            board_with_only_own_creature(destroy_then_draw_ability(), 0);
+        assert_eq!(
+            reject_kind(&verdict_for(&state, planeswalker)),
+            Some("anti_self_harm_harmful_activation_own_board_only"),
+            "an AI-directed draw off an EMPTY library is not a payoff — 'Beneficial in the \
+             abstract' must not be enough to rescue an own-board-only Destroy when the draw \
+             itself cannot be delivered"
+        );
+    }
+
+    /// Case 2: the Draw leg's recipient hand-swapped to `Opponent` (synthetic
+    /// — see the module doc). The AI gains nothing from this activation at
+    /// all: it gives up its own creature AND hands the opponent a card. Global
+    /// `effect_polarity` alone cannot see the difference between this and the
+    /// real card, because it never reads WHO draws — only recipient-aware
+    /// resolution can.
+    #[test]
+    fn own_board_destroy_with_an_opponent_recipient_draw_is_still_vetoed() {
+        let (state, planeswalker, _own_creature) =
+            board_with_only_own_creature(destroy_then_gift_opponent_a_draw_ability(), 10);
+        assert_eq!(
+            reject_kind(&verdict_for(&state, planeswalker)),
+            Some("anti_self_harm_harmful_activation_own_board_only"),
+            "a Draw leg that resolves to the OPPONENT is not an AI payoff — it must not \
+             rescue an own-board-only Destroy no matter how much library the AI has"
+        );
+    }
+
+    /// Case 4, non-vacuity: remove the Draw leg entirely (a bare "Destroy
+    /// target creature.") and the SAME board is still vetoed. Proves the fix
+    /// isn't a blanket stand-down — it responds specifically to a confirmed
+    /// AI payoff, not to the mere presence of a second effect.
     #[test]
     fn without_the_draw_leg_the_same_board_is_still_vetoed() {
-        let (mut state, planeswalker, _own_creature) = board_with_only_own_creature();
-        {
-            let obj = state.objects.get_mut(&planeswalker).unwrap();
-            let mut bare = Arc::make_mut(&mut obj.abilities)[0].clone();
-            bare.sub_ability = None;
-            *Arc::make_mut(&mut obj.abilities) = vec![bare];
-        }
+        let mut bare = destroy_then_draw_ability();
+        bare.sub_ability = None;
+        let (state, planeswalker, _own_creature) = board_with_only_own_creature(bare, 10);
         assert_eq!(
             reject_kind(&verdict_for(&state, planeswalker)),
             Some("anti_self_harm_harmful_activation_own_board_only"),
