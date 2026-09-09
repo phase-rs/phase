@@ -50,11 +50,24 @@ fn specialized_card_type_guard_draws_for_a_revealed_creature() {
 fn specialized_card_type_guard_stops_the_draw_for_a_noncreature() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::Untap);
-    scenario.add_enchantment_from_oracle(P0, "Reflexive Reveal", ORACLE);
+    let source = scenario
+        .add_enchantment_from_oracle(P0, "Reflexive Reveal", ORACLE)
+        .id();
     let top = scenario.add_card_to_library_top(P0, "Top Noncreature");
 
     let mut runner = scenario.build();
     let hand_before = runner.state().players[P0.0 as usize].hand.len();
+    assert!(
+        !runner.state().objects[&top]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "the negative fixture must put a noncreature on top"
+    );
+    assert!(
+        !runner.state().objects[&source].has_unimplemented_mechanics(),
+        "the negative runtime fixture must exercise the modeled specialized guard"
+    );
 
     runner.advance_to_upkeep();
     runner.advance_until_stack_empty();

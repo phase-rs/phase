@@ -16657,8 +16657,15 @@ fn unmodeled_guarded_clone_replacement_rider_fails_closed() {
         parsed
             .abilities
             .iter()
-            .any(|ability| matches!(&*ability.effect, Effect::Unimplemented { .. })),
-        "the rejected clone source must remain an explicit Effect::Unimplemented gap, got {:?}",
+            .any(|ability| matches!(
+                &*ability.effect,
+                Effect::Unimplemented { name, description }
+                    if name == "when_you_do_guard"
+                        && description.as_deref().is_some_and(|fragment| {
+                            fragment.contains("if the moon is full")
+                        })
+            )),
+        "the rejected clone source must retain the unsupported guard as a when_you_do_guard gap, got {:?}",
         parsed.abilities
     );
 }
@@ -16718,8 +16725,18 @@ fn dominion_saboteur_unsupported_clone_rider_fails_closed() {
         parsed
             .abilities
             .iter()
-            .any(|ability| matches!(&*ability.effect, Effect::Unimplemented { .. })),
-        "the rejected Dominion Saboteur text must remain an explicit parser gap"
+            .any(|ability| matches!(
+                &*ability.effect,
+                Effect::Unimplemented { name, description }
+                    if name == "static_structure"
+                        && description.as_deref().is_some_and(|fragment| {
+                            fragment.contains(
+                                "additional counters on it equal to the same number and kinds of counters"
+                            )
+                        })
+            )),
+        "the rejected Dominion Saboteur text must retain the unsupported counter-copying rider as the explicit gap, got {:?}",
+        parsed.abilities
     );
 }
 
