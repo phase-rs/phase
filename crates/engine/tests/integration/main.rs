@@ -60,6 +60,7 @@ mod azog_morias_ruin_amass_lki;
 mod azors_gateway_transform_condition;
 mod backup_becomes_target_trigger;
 mod balance_equalization;
+mod balance_library_of_leng_multi_discard_7510;
 mod balduvian_horde_random_discard;
 mod baleful_mastery_regression;
 mod banding_combat;
