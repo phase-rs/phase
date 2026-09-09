@@ -23,9 +23,19 @@
 //! The third is the one a card list would never have covered: a booster pack
 //! opened mid-game (Booster Tutor and friends) draws from a set's whole card
 //! pool, not from anything the deck-construction rules already vetted.
+//!
+//! **All three read [`policy_of`], and 1–2 are enforced once for every format
+//! rather than inside any single card-pool authority.** The deck half cannot
+//! live in `DeckValidation`'s `CardPoolAuthority`: that seam is reached only by
+//! constructed-shaped formats, while commander-shaped ones use their own
+//! validator and FreeForAll / TwoHeadedGiant / Limited impose no card-pool
+//! check at all. CR 407.3 is not a card-pool restriction that a permissive
+//! format may waive — it holds whenever the game is not played for ante — so it
+//! belongs beside the other cross-format rules at the dispatch seam.
 
 use crate::types::card::CardFace;
 use crate::types::custom_format::AntePolicy;
+use crate::types::format::FormatConfig;
 use crate::types::game_state::GameState;
 
 /// CR 407.3: "A few cards have the text 'Remove this card from your deck
@@ -52,7 +62,7 @@ pub(crate) fn face_uses_ante(face: &CardFace) -> bool {
         .contains("playing for ante")
 }
 
-/// The ante policy this game is played under.
+/// The ante policy a format declares.
 ///
 /// A built-in format carries no `custom_rules`, and `unwrap_or_default()`
 /// resolves it to [`AntePolicy::Excluded`] — which is not a fallback so much
@@ -60,13 +70,22 @@ pub(crate) fn face_uses_ante(face: &CardFace) -> bool {
 /// in this engine plays for ante. [`AntePolicy::Enabled`] is reachable only by
 /// a custom format declaring it, which `passes_legacy_axis_gate` refuses today
 /// precisely because the ante zone does not exist yet.
-pub(crate) fn policy(state: &GameState) -> AntePolicy {
-    state
-        .format_config
+///
+/// Takes the `FormatConfig` rather than the `GameState` because deck admission
+/// runs before any game exists — `deck_validation` holds only the resolved
+/// rules. Both callers must read the same value or the deck gate and the
+/// in-game gate could disagree about the very same match.
+pub(crate) fn policy_of(format_config: &FormatConfig) -> AntePolicy {
+    format_config
         .custom_rules
         .as_deref()
         .map(|rules| rules.legality.legacy.ante)
         .unwrap_or_default()
+}
+
+/// The ante policy the in-progress game is played under.
+pub(crate) fn policy(state: &GameState) -> AntePolicy {
+    policy_of(&state.format_config)
 }
 
 /// CR 407.3: "When not playing for ante, players can't include these cards in
