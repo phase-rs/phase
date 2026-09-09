@@ -3,8 +3,10 @@
 //!
 //! CR 603.12 creates the separate "When you do" trigger. CR 603.4 checks its
 //! intervening-if condition when the reveal finishes and again under CR 608.2a
-//! when that trigger resolves. CR 701.20b leaves the revealed card on top of the
-//! library, so a successful draw moves that same card to hand.
+//! when that trigger resolves. CR 701.20a keeps the card revealed for that
+//! trigger, CR 608.2i preserves the reveal-time fact across the separate
+//! resolution, and CR 701.20b leaves it on top of the library until a successful
+//! draw moves that same card to hand.
 
 use super::rules::{GameScenario, Phase, P0};
 use engine::types::card_type::CoreType;
@@ -12,7 +14,7 @@ use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::zones::Zone;
 
-const ORACLE: &str = "At the beginning of your upkeep, reveal the top card of your library. When you do, if it's a creature card, draw a card.";
+const ORACLE: &str = "At the beginning of your upkeep, reveal the top card of your library. When you do, if a creature card is revealed this way, draw a card.";
 
 fn make_creature(state: &mut GameState, id: ObjectId) {
     let object = state.objects.get_mut(&id).unwrap();

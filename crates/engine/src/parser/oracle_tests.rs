@@ -16671,9 +16671,9 @@ fn unmodeled_guarded_clone_replacement_rider_fails_closed() {
 }
 
 /// SHAPE — CR 603.12 + CR 603.4 + CR 608.2a: the general condition parser
-/// deliberately defers "if it's a creature card" to the ordered specialized
-/// card-type parser. The specialized parser must preserve both that guard and
-/// the separate reflexive-trigger marker.
+/// deliberately defers "if a creature card is revealed this way" to the
+/// ordered specialized card-type parser. The specialized parser must preserve
+/// both that guard and the separate reflexive-trigger marker.
 #[test]
 fn deferred_reflexive_card_type_guard_reaches_specialized_parser() {
     use crate::parser::oracle_effect::parse_effect_chain;
@@ -16681,7 +16681,7 @@ fn deferred_reflexive_card_type_guard_reaches_specialized_parser() {
     use crate::types::card_type::CoreType;
 
     let def = parse_effect_chain(
-        "reveal the top card of your library. When you do, if it's a creature card, draw a card",
+        "reveal the top card of your library. When you do, if a creature card is revealed this way, draw a card",
         AbilityKind::Spell,
     );
     assert!(matches!(*def.effect, Effect::RevealTop { .. }));

@@ -8980,7 +8980,7 @@ mod tests {
 
     #[test]
     fn reflexive_connector_defers_a_specialized_card_type_guard() {
-        let text = "When you do, if it's a creature card, draw a card";
+        let text = "When you do, if a creature card is revealed this way, draw a card";
         let stripped = strip_if_you_do_conditional_with_context(text, &mut ParseContext::default());
 
         let ReflexiveConditionalStrip::DeferredWhenYouDoGuard {
@@ -8991,7 +8991,10 @@ mod tests {
             panic!("the specialized card-type guard must remain available to its ordered parser");
         };
         assert_eq!(condition, AbilityCondition::WhenYouDo);
-        assert_eq!(remainder, "if it's a creature card, draw a card");
+        assert_eq!(
+            remainder,
+            "if a creature card is revealed this way, draw a card"
+        );
     }
 
     #[test]
