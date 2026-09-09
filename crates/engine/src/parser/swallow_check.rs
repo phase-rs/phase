@@ -4618,7 +4618,7 @@ fn detect_duration_this_turn(
             x,
             AbilityCondition::SourceEnteredThisTurn
                 | AbilityCondition::SpellCastWithVariantThisTurn { .. }
-                | AbilityCondition::NthResolutionThisTurn { .. }
+                | AbilityCondition::AbilityUseCountThisTurn { .. }
         )
     }) {
         return;

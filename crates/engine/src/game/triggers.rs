@@ -2620,7 +2620,7 @@ fn collect_matching_triggers_inner(
             // than the self-ref `ChangesController` case above.
             ability.set_controller_recursive(controller);
             // CR 603.4: Stamp the printed-trigger index so per-turn resolution
-            // tracking (`AbilityCondition::NthResolutionThisTurn`) can identify
+            // tracking (`AbilityCondition::AbilityUseCountThisTurn`) can identify
             // "this ability" at resolution time.
             ability.ability_index = Some(trig_idx);
             // CR 605.4a: A `TapsForMana` triggered mana ability coupled to an
@@ -11276,7 +11276,7 @@ fn gate_binding_diverges_at_fire_time(condition: &AbilityCondition) -> bool {
         | AbilityCondition::WhenYouDo
         | AbilityCondition::RevealedHasCardType { .. }
         | AbilityCondition::PreviousEffectAmount { .. }
-        | AbilityCondition::NthResolutionThisTurn { .. }
+        | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::DiscardedCardMatchesFilter { .. }
         // CR 608.2c: the "this way" ledgers — `state.last_zone_changed_ids` and
         // the tracked sets — declined for exactly the reason their

@@ -35,11 +35,11 @@ use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
 };
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope,
-    DamageChannel, DigSource, Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome,
-    ObjectScope, ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally, AdditionalCostOrigin,
+    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator,
+    ControllerRef, CountScope, DamageChannel, DigSource, Duration, Effect, EffectOutcomeSignal,
+    FilterProp, GuessOutcome, ObjectScope, ParsedCondition, PlayerScope, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -5221,7 +5221,7 @@ pub(crate) fn ability_condition_to_static_condition(
         | AbilityCondition::ZoneChangedThisWay { .. }
         | AbilityCondition::CostPaidObjectMatchesFilter { .. }
         | AbilityCondition::ConditionInstead { .. }
-        | AbilityCondition::NthResolutionThisTurn { .. }
+        | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::ScopedPlayerMatches { .. } => None,
         AbilityCondition::DiscardedCardMatchesFilter { .. } => None,
 
@@ -5886,15 +5886,16 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(AbilityCondition::FirstEndStepOfTurn);
     }
 
-    // CR 603.4: "if this is the [Nth] time this ability has resolved this turn"
-    // and the abbreviated continuation form "if it's the [Nth] time" used by
-    // Omnath's later sentences (the "this ability has resolved this turn" tail
-    // is anaphoric to the prior sentence and is dropped). Composes:
-    //   subject: "this is" | "it's" | "it is"
-    //   ordinal: "first" | "second" | ...
-    //   tail:    optional " this ability has resolved this turn"
-    if let Some(n) = parse_nth_resolution_condition(lower.as_str()) {
-        return Some(AbilityCondition::NthResolutionThisTurn { n });
+    // CR 608.2c + CR 602.2a: "how many times has THIS ability been used this
+    // turn" — the ordinal resolution reading ("if this is the [Nth] time this
+    // ability has resolved this turn") and the activation-threshold reading
+    // ("if this ability has been activated four or more times this turn").
+    if let Some((tally, comparator, n)) = parse_ability_use_count_condition(lower.as_str()) {
+        return Some(AbilityCondition::AbilityUseCountThisTurn {
+            tally,
+            comparator,
+            n,
+        });
     }
 
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you do or if ").parse(lower.as_str()) {
@@ -7784,17 +7785,13 @@ fn parse_a_type_was_verbed_this_way(lower: &str) -> Option<(TypeFilter, bool)> {
 /// anaphoric continuations whose "this ability has resolved this turn" tail was
 /// printed in a prior sentence. Ordinals span first–tenth (Omnath/Ashling print
 /// up to third; the broader ceiling is conservative).
-fn parse_nth_resolution_condition(lower: &str) -> Option<u32> {
-    type E<'a> = OracleError<'a>;
-    let (rest, _) = alt((
-        tag::<_, _, E>("this is the "),
-        tag("it's the "),
-        tag("it is the "),
-    ))
-    .parse(lower)
-    .ok()?;
-    let (rest, n) = alt((
-        value(1u32, tag::<_, _, E>("first")),
+/// CR 608.2c: an English ordinal word as its 1-based value.
+///
+/// The trailing `" time"` tag in [`parse_nth_resolution_clause`] supplies the
+/// word boundary, so "firstborn" can never partial-match.
+fn parse_ordinal_word(i: &str) -> OracleResult<'_, u32> {
+    alt((
+        value(1u32, tag("first")),
         value(2u32, tag("second")),
         value(3u32, tag("third")),
         value(4u32, tag("fourth")),
@@ -7805,15 +7802,59 @@ fn parse_nth_resolution_condition(lower: &str) -> Option<u32> {
         value(9u32, tag("ninth")),
         value(10u32, tag("tenth")),
     ))
-    .parse(rest)
-    .ok()?;
-    let (rest, _) = tag::<_, _, E>(" time").parse(rest).ok()?;
-    let rest = rest.trim_end_matches('.').trim();
-    // Tail is optional — anaphoric forms ("if it's the second time") drop it
-    // because the prior sentence already established "this ability has resolved
-    // this turn" as the subject.
-    if rest.is_empty() || rest == "this ability has resolved this turn" {
-        Some(n)
+    .parse(i)
+}
+
+/// CR 608.2c: "this is the [Nth] time this ability has resolved this turn", and
+/// the abbreviated continuation form "it's the [Nth] time" used by Omnath's
+/// later sentences (the tail is anaphoric to the prior sentence and dropped).
+///
+/// Composes three independent axes, one `alt` each — no permutation is
+/// enumerated:
+///   subject: "this is" | "it's" | "it is"
+///   ordinal: `parse_ordinal_word`
+///   tail:    optional " this ability has resolved this turn"
+fn parse_nth_resolution_clause(
+    input: &str,
+) -> OracleResult<'_, (AbilityUseTally, Comparator, u32)> {
+    let (rest, _) = alt((tag("this is the "), tag("it's the "), tag("it is the "))).parse(input)?;
+    let (rest, n) = parse_ordinal_word(rest)?;
+    let (rest, _) = tag(" time").parse(rest)?;
+    let (rest, _) = opt(tag(" this ability has resolved this turn")).parse(rest)?;
+    Ok((rest, (AbilityUseTally::Resolved, Comparator::EQ, n)))
+}
+
+/// CR 602.2a: "this ability has been activated [N] or more times this turn"
+/// (Dragon Whelp, Nalathni Dragon, Farrelite Priest, Initiates of the Ebon
+/// Hand).
+///
+/// The count phrase sits between two fixed anchors, so the middle is handed to
+/// the shared [`parse_comparison_suffix`] authority rather than enumerating
+/// comparator arms here. That covers the whole comparison class in one call —
+/// "four or more", "two or fewer", "greater than three", bare "four" — so a
+/// future print with a different comparator needs no edit to this combinator.
+fn parse_activation_count_clause(
+    input: &str,
+) -> OracleResult<'_, (AbilityUseTally, Comparator, u32)> {
+    let (rest, _) = tag("this ability has been activated ").parse(input)?;
+    let (rest, count_phrase) = take_until(" times this turn").parse(rest)?;
+    let (rest, _) = tag(" times this turn").parse(rest)?;
+    let (comparator, n) = parse_comparison_suffix(count_phrase).ok_or_else(|| oracle_err(input))?;
+    let n = u32::try_from(n).map_err(|_| oracle_err(input))?;
+    Ok((rest, (AbilityUseTally::Activated, comparator, n)))
+}
+
+/// CR 608.2c: the two printed templates for
+/// [`AbilityCondition::AbilityUseCountThisTurn`] — how many times THIS ability
+/// has resolved, or been activated, so far this turn.
+fn parse_ability_use_count_condition(lower: &str) -> Option<(AbilityUseTally, Comparator, u32)> {
+    let (rest, parsed) = alt((parse_nth_resolution_clause, parse_activation_count_clause))
+        .parse(lower)
+        .ok()?;
+    // Both templates are whole-clause conditions; a leftover tail means the
+    // fragment was something else that merely shares a prefix.
+    if rest.trim_end_matches('.').trim().is_empty() {
+        Some(parsed)
     } else {
         None
     }

@@ -7162,6 +7162,22 @@ fn project_out_resources(state: &GameState) -> GameState {
     // whose ability actually carries the matching restriction so two cycles of a GATED
     // activation compare DIFFERENT (the gate progressed) while pure pumped history is
     // still projected out (unrestricted loops compare equal).
+    //
+    // These tallies now have TWO classes of reader, and only the first justifies
+    // retention:
+    //   1. CR 602.5b legality gates (`ActivationRestriction::OnlyOnceEachTurn` /
+    //      `MaxTimesEachTurn`) — BLOCK repetition, so they must survive projection.
+    //      `ability_has_per_turn_activation_gate` is the single authority.
+    //   2. `AbilityCondition::AbilityUseCountThisTurn { tally: Activated }` — a
+    //      branch condition (Dragon Whelp's "activated four or more times this
+    //      turn"), which does NOT block repetition and so belongs to the cleared
+    //      "pure pumped history" class, exactly like the `Resolved` tally cleared
+    //      below. Its downstream effect is a delayed sacrifice trigger, i.e. a
+    //      board change caught by `objects_content_eq`. The threshold is also
+    //      MONOTONE under a `GE` comparator: once the count passes n it stays
+    //      passed for the turn, so every post-threshold cycle behaves identically
+    //      and genuinely compares equal. Projecting it out is sound, not merely
+    //      tolerable.
     let keep_turn: HashSet<(ObjectId, usize)> = s
         .activated_abilities_this_turn
         .keys()
@@ -7178,7 +7194,7 @@ fn project_out_resources(state: &GameState) -> GameState {
         .collect();
     s.activated_abilities_this_game
         .retain(|key, _| keep_game.contains(key));
-    // CR 603.4: NthResolutionThisTurn{n} is a one-shot branch SELECTOR (an effect
+    // CR 608.2c: AbilityUseCountThisTurn{n} is a one-shot branch SELECTOR (an effect
     // branch fires when the per-ability resolution count == n), NOT a repetition-
     // blocking legality gate. Clearing it is sound: a board-divergent Nth branch is
     // caught by objects_content_eq, and a resource-only Nth branch is a one-time bonus
@@ -11000,14 +11016,14 @@ mod tests {
     }
 
     /// (j) JOURNAL-READER (R2 B-R2-1): a fixed-amount drain churner whose embedded
-    /// ability carries an `NthResolutionThisTurn`-gated branch reads the cleared
+    /// ability carries an `AbilityUseCountThisTurn`-gated branch reads the cleared
     /// per-ability resolution journal ⇒ false. Revert-fail: narrowing the walker
     /// guard axis back to resources-only (dropping journal readers) flips this true.
     #[test]
     fn n1_j_journal_reader_false() {
         let j = |id| {
             let mut ability = gain_ability(1);
-            ability.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 10 });
+            ability.condition = Some(AbilityCondition::nth_resolution_this_turn(10));
             churn_entry(id, 0, ability, None)
         };
         let mut prior = GameState::new_two_player(7);
@@ -12622,7 +12638,7 @@ mod tests {
     /// projected resource.
     ///
     /// Two shipped ASTs that reach different probes: Harvestrite Host carries the read on
-    /// `execute.sub_ability.condition` (`NthResolutionThisTurn{n: 2}`), Poisoner's
+    /// `execute.sub_ability.condition` (`AbilityUseCountThisTurn{n: 2}`), Poisoner's
     /// Apprentice on the def's OWN `condition`
     /// (`QuantityCheck{Ref(LifeGainedThisTurn{Controller}), GE, Fixed(1)}`). Both pump legs
     /// are `PtValue::Fixed` with a `Typed{Creature}` target, so the descent reads nothing
@@ -12771,7 +12787,7 @@ mod tests {
         let ledger_relieved = ledger.clone();
         let mut projected_rider = ledger.clone();
         *projected_rider.effect = Effect::NoOp;
-        projected_rider.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 2 });
+        projected_rider.condition = Some(AbilityCondition::nth_resolution_this_turn(2));
         projected_rider.sub_ability = None;
         ledger.sub_ability = Some(Box::new(projected_rider));
 
@@ -12934,7 +12950,7 @@ mod tests {
 
         let mut rider = hawk_pump.clone();
         *rider.effect = Effect::NoOp;
-        rider.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 2 });
+        rider.condition = Some(AbilityCondition::nth_resolution_this_turn(2));
         rider.sub_ability = None;
         let mut multi = hawk_pump.clone();
         multi.sub_ability = Some(Box::new(rider));
@@ -24262,12 +24278,12 @@ mod tests {
         // ── (a) the same field carrying a PROJECTED-ONLY read ───────────────────────
         // The `ObjectCount` residual above is `{sibling: true, projected: false}`, so a
         // `.sibling`-only conjunct (a) sees it too and cannot attribute this arm's
-        // repoint. `NthResolutionThisTurn` is projected-ONLY — pinned as a shape by
+        // repoint. `AbilityUseCountThisTurn` is projected-ONLY — pinned as a shape by
         // `ability_scan`'s `projected_only_leaves_carry_no_sibling_axis` — so only the
         // both-axes reader sees the rider below.
         let mut projected_rider = base.clone();
         *projected_rider.effect = Effect::NoOp;
-        projected_rider.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 2 });
+        projected_rider.condition = Some(AbilityCondition::nth_resolution_this_turn(2));
         projected_rider.sub_ability = None;
         let mut with_projected = base.clone();
         with_projected.sub_ability = Some(Box::new(projected_rider));
@@ -24387,7 +24403,7 @@ mod tests {
         // cannot attribute this arm's repoint to a `.sibling`-only reader.
         let mut projected_rider = base.clone();
         *projected_rider.effect = Effect::NoOp;
-        projected_rider.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 2 });
+        projected_rider.condition = Some(AbilityCondition::nth_resolution_this_turn(2));
         projected_rider.else_ability = None;
         let mut with_projected = base.clone();
         with_projected.else_ability = Some(Box::new(projected_rider));

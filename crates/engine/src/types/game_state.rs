@@ -18639,7 +18639,7 @@ declare_game_state! {
     /// ability on a specific source object. Incremented at the top of
     /// `resolve_ability_chain` (depth 0) when the resolving ability has a
     /// `Some(ability_index)` stamp; read by
-    /// `AbilityCondition::NthResolutionThisTurn` to gate Omnath-style
+    /// `AbilityCondition::AbilityUseCountThisTurn` to gate Omnath-style
     /// "if this is the [Nth] time this ability has resolved this turn" patterns.
     /// Cleared in `start_next_turn` alongside other per-turn counters.
     #[serde(

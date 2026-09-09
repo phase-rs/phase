@@ -9,17 +9,18 @@ use crate::game::conditions::{
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, CardTypeSetSource,
-    CastFromZoneDriver, ChosenAttribute, CommanderOwnership, ControllerRef, CopyRetargetPermission,
-    CostPaidObjectSnapshot, CounterKindDomain, DetachedRemainder, EachDamageRecipient, Effect,
-    EffectError, EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
-    ForEachCategoryAction, ForwardedResultContext, ManaProduction, MassLibraryShuffleMode,
-    ObjectSelectionCardinality, OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope,
-    PossessionAxis, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation,
-    ResolvedAbility, RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
-    SharedQualityRelation, SiblingCondition, StaticDefinition, SubAbilityLink, TapStateChange,
-    TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause,
-    ZoneChoiceCandidateSource, ZoneChoiceChooser,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally, CardPlayMode,
+    CardTypeSetSource, CastFromZoneDriver, ChosenAttribute, CommanderOwnership, ControllerRef,
+    CopyRetargetPermission, CostPaidObjectSnapshot, CounterKindDomain, DetachedRemainder,
+    EachDamageRecipient, Effect, EffectError, EffectKind, EffectOutcomeSignal,
+    EffectResolutionResult, EffectScope, FilterProp, ForEachCategoryAction, ForwardedResultContext,
+    ManaProduction, MassLibraryShuffleMode, ObjectSelectionCardinality, OpponentMayScope,
+    PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, QuantityExpr, QuantityRef,
+    ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
+    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition,
+    StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
+    TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, ZoneChoiceCandidateSource,
+    ZoneChoiceChooser,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -3134,7 +3135,7 @@ fn apply_parent_chain_context(
     // CR 608.2c: A sub-ability is part of the same printed ability instance as
     // its parent; its instructions are followed in order during a single
     // resolution. Propagate the parent's `ability_index` so chain-level
-    // `AbilityCondition::NthResolutionThisTurn` gates can identify "this ability"
+    // `AbilityCondition::AbilityUseCountThisTurn` gates can identify "this ability"
     // when evaluated on a chained sub-ability. The per-turn resolution counter is
     // keyed on `(source_id, ability_index)`; without this the sub carries no
     // index and the gate always evaluates false, so e.g. Nissa, Resurgent
@@ -4013,7 +4014,7 @@ fn condition_reads_filter_population(
         | AbilityCondition::SourceAttachedToCreature
         | AbilityCondition::DayNightIsNeither
         | AbilityCondition::DayNightIs { .. }
-        | AbilityCondition::NthResolutionThisTurn { .. }
+        | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. } => false,
     }
 }
@@ -4490,7 +4491,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::ConditionInstead { .. }
             | AbilityCondition::DayNightIsNeither
             | AbilityCondition::DayNightIs { .. }
-            | AbilityCondition::NthResolutionThisTurn { .. }
+            | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ScopedPlayerMatches { .. }
             | AbilityCondition::EffectOutcome {
@@ -11599,12 +11600,14 @@ pub fn resolve_ability_chain(
 
     // CR 608.2c: Bump the per-ability per-turn resolution counter at the start of
     // top-level resolution so that the ordinary resolution-time
-    // `AbilityCondition::NthResolutionThisTurn` condition can see the current
+    // `AbilityCondition::AbilityUseCountThisTurn` condition can see the current
     // resolution included in the count. This is not an intervening-if condition
     // governed by CR 603.4. Sub-abilities (depth > 0) share the parent's count —
-    // they belong to the same printed ability instance. Synthesized/runtime-only
-    // abilities (prowess, firebending) and activated abilities lack an
-    // `ability_index` stamp and skip this hook.
+    // they belong to the same printed ability instance. Only synthesized/
+    // runtime-only abilities (prowess, firebending) lack an `ability_index`
+    // stamp and skip this hook; activated abilities are stamped in
+    // `casting_costs::push_ability_entry` (and the loyalty path in
+    // `planeswalker`), so they DO bump this counter.
     if depth == 0 {
         if let Some(idx) = ability.ability_index {
             let count = state
@@ -12591,7 +12594,7 @@ fn resolve_chain_body(
                 // sibling escape hatch (the `next.sub_link == SequentialSibling`
                 // branch below).
                 // CR 608.2c: A dependent `SequentialSibling` whose direct condition
-                // is `NthResolutionThisTurn` is the next ordinal instruction of the
+                // is `AbilityUseCountThisTurn` is the next ordinal instruction of the
                 // same resolving ability (Belladonna Took / Omnath class). It must
                 // reach and evaluate its OWN ordinal condition when the preceding
                 // ordinal is false. Keep this exact escape local: other dependent
@@ -12627,12 +12630,23 @@ fn resolve_chain_body(
                 // shapes. The unconditional and ordinal `SequentialSibling` escapes
                 // below are local to this call site: neither is an independent
                 // intervening-if path that the delayed-body hoist may preserve.
+                // The escape is deliberately scoped to the ORDINAL reading
+                // (`Resolved`) of `AbilityUseCountThisTurn`, which is exactly
+                // what it covered before the tally axis existed. The `Activated`
+                // reading is a single terminal rider ("sacrifice this creature at
+                // the beginning of the next end step", Dragon Whelp class), never
+                // one of several ordinal clauses chained in written order, so it
+                // has no claim on an escape whose whole justification is CR 608.2c
+                // written-order evaluation of successive ordinals.
                 let is_ordinal_sequential_sibling = sub.sub_link
                     == SubAbilityLink::SequentialSibling
                     && sub.sibling_condition == SiblingCondition::Dependent
                     && matches!(
                         sub.condition.as_ref(),
-                        Some(AbilityCondition::NthResolutionThisTurn { .. })
+                        Some(AbilityCondition::AbilityUseCountThisTurn {
+                            tally: AbilityUseTally::Resolved,
+                            ..
+                        })
                     );
                 if sub_outlives_false_parent_gate(sub)
                     || (sub.sub_link == SubAbilityLink::SequentialSibling
@@ -12655,7 +12669,7 @@ fn resolve_chain_body(
                     // CR 608.2c: The false-parent ordinal escape bypasses the
                     // ordinary post-effect chain handoff, so it must explicitly
                     // carry this printed ability's index to the next ordinal
-                    // instruction. Otherwise `NthResolutionThisTurn` reads no
+                    // instruction. Otherwise `AbilityUseCountThisTurn` reads no
                     // `(source, ability_index)` ledger entry and can never match.
                     if is_ordinal_sequential_sibling {
                         apply_parent_chain_context(&mut sub_resolved, ability, None, state);
@@ -16304,22 +16318,41 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::DayNightIs {
             state: DayNight::Night,
         } => state.day_night == Some(DayNight::Night),
-        // CR 608.2c: "if this is the [Nth] time this ability has resolved this
-        // turn" is an ordinary resolution-time condition, not an intervening-if
-        // condition under CR 603.4. The counter is bumped at the top of
-        // `resolve_ability_chain` (depth 0) before this evaluator runs, so a
-        // freshly-incremented count of `n` satisfies the condition for the Nth
-        // resolution. Abilities without an `ability_index` stamp (synthesized
-        // triggers, activated abilities) never increment the counter and therefore
-        // evaluate as `count == 0`, which matches no `n >= 1` print.
-        AbilityCondition::NthResolutionThisTurn { n } => {
+        // CR 608.2c: an ordinary resolution-time condition on how many times
+        // THIS printed ability has been used this turn, not an intervening-if
+        // condition under CR 603.4. Both tallies are keyed by the same
+        // `(source_id, ability_index)` pair, so one lookup serves both:
+        //
+        // - `Resolved` ("if this is the [Nth] time this ability has resolved
+        //   this turn") reads a counter bumped at the top of
+        //   `resolve_ability_chain` (depth 0) before this evaluator runs, so the
+        //   current resolution is already included and a freshly-incremented
+        //   count of `n` satisfies `EQ n` for the Nth resolution.
+        // - `Activated` ("if this ability has been activated [N] or more times
+        //   this turn") reads the CR 602.2a announcement counter incremented in
+        //   `ledger::record_ability_activation`, so the activation now resolving
+        //   is likewise already included, and an activation countered before it
+        //   resolved still counts.
+        //
+        // An ability with no `ability_index` stamp (synthesized/runtime-only
+        // abilities such as prowess and firebending) has no entry in either
+        // ledger and evaluates as `count == 0`, which no `n >= 1` print matches
+        // under `EQ`/`GE`. Fail-closed by construction rather than by a guard.
+        AbilityCondition::AbilityUseCountThisTurn {
+            tally,
+            comparator,
+            n,
+        } => {
             if let Some(idx) = ability.ability_index {
-                let count = state
-                    .ability_resolutions_this_turn
-                    .get(&(ability.source_id, idx))
-                    .copied()
-                    .unwrap_or(0);
-                count == *n
+                let ledger = match tally {
+                    AbilityUseTally::Resolved => &state.ability_resolutions_this_turn,
+                    AbilityUseTally::Activated => &state.activated_abilities_this_turn,
+                };
+                let count = ledger.get(&(ability.source_id, idx)).copied().unwrap_or(0);
+                comparator.evaluate(
+                    crate::game::arithmetic::u32_to_i32_saturating(count),
+                    crate::game::arithmetic::u32_to_i32_saturating(*n),
+                )
             } else {
                 false
             }
@@ -31484,7 +31517,7 @@ mod tests {
     }
 
     // CR 608.2c: Runtime tests for the ordinary resolution-time
-    // `AbilityCondition::NthResolutionThisTurn` condition (not CR 603.4
+    // `AbilityCondition::AbilityUseCountThisTurn` condition (not CR 603.4
     // intervening-if).
 
     /// Build a minimal `ResolvedAbility` with a stamped `ability_index` for
@@ -31504,7 +31537,7 @@ mod tests {
     }
 
     /// Issue #1595 — Nissa, Resurgent Animist. A chained `SequentialSibling`
-    /// sub-ability gated on `NthResolutionThisTurn{2}` must fire on the SECOND
+    /// sub-ability gated on `AbilityUseCountThisTurn{2}` must fire on the SECOND
     /// resolution this turn. Before the fix, sub-abilities carried no
     /// `ability_index`, so the gate evaluated false forever and the second-
     /// resolution half never happened (the reported "only did the first portion
@@ -31525,7 +31558,7 @@ mod tests {
             source_id,
             PlayerId(0),
         );
-        sub.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 2 });
+        sub.condition = Some(AbilityCondition::nth_resolution_this_turn(2));
         sub.sub_link = SubAbilityLink::SequentialSibling;
         // The sub is built WITHOUT an ability_index, exactly as the trigger
         // pipeline produces it (only the top-level trigger gets a stamp).
@@ -31599,7 +31632,7 @@ mod tests {
             source_id,
             PlayerId(0),
         );
-        branch3.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 3 });
+        branch3.condition = Some(AbilityCondition::nth_resolution_this_turn(3));
         branch3.sub_link = SubAbilityLink::SequentialSibling;
         assert!(branch3.ability_index.is_none());
 
@@ -31613,7 +31646,7 @@ mod tests {
             source_id,
             PlayerId(0),
         );
-        branch2.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 2 });
+        branch2.condition = Some(AbilityCondition::nth_resolution_this_turn(2));
         branch2.sub_link = SubAbilityLink::SequentialSibling;
         branch2.sub_ability = Some(Box::new(branch3));
         assert!(branch2.ability_index.is_none());
@@ -31629,7 +31662,7 @@ mod tests {
             source_id,
             PlayerId(0),
         )
-        .condition(AbilityCondition::NthResolutionThisTurn { n: 1 })
+        .condition(AbilityCondition::nth_resolution_this_turn(1))
         .sub_ability(branch2);
         ability.ability_index = Some(0);
 
@@ -31749,7 +31782,7 @@ mod tests {
             source_id,
             PlayerId(0),
         )
-        .condition(AbilityCondition::NthResolutionThisTurn { n: 2 })
+        .condition(AbilityCondition::nth_resolution_this_turn(2))
         .sub_ability(child);
         parent.ability_index = Some(0);
 
@@ -31788,7 +31821,7 @@ mod tests {
             source_id,
             PlayerId(0),
         );
-        branch3.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 1 });
+        branch3.condition = Some(AbilityCondition::nth_resolution_this_turn(1));
         branch3.sub_link = SubAbilityLink::SequentialSibling;
 
         let mut branch2 = ResolvedAbility::new(
@@ -31800,7 +31833,7 @@ mod tests {
             source_id,
             PlayerId(0),
         );
-        branch2.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 1 });
+        branch2.condition = Some(AbilityCondition::nth_resolution_this_turn(1));
         branch2.sub_link = SubAbilityLink::SequentialSibling;
         branch2.sub_ability = Some(Box::new(branch3));
 
@@ -31813,7 +31846,7 @@ mod tests {
             source_id,
             PlayerId(0),
         );
-        branch1.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 2 });
+        branch1.condition = Some(AbilityCondition::nth_resolution_this_turn(2));
         branch1.sub_link = SubAbilityLink::SequentialSibling;
         branch1.sub_ability = Some(Box::new(branch2));
 
@@ -31853,7 +31886,7 @@ mod tests {
         // Initial state: counter is 0; n=1 should be false BEFORE any resolution.
         assert!(
             !evaluate_condition(
-                &AbilityCondition::NthResolutionThisTurn { n: 1 },
+                &AbilityCondition::nth_resolution_this_turn(1),
                 &state,
                 &ability
             ),
@@ -31872,7 +31905,7 @@ mod tests {
         );
         assert!(
             evaluate_condition(
-                &AbilityCondition::NthResolutionThisTurn { n: 1 },
+                &AbilityCondition::nth_resolution_this_turn(1),
                 &state,
                 &ability
             ),
@@ -31880,7 +31913,7 @@ mod tests {
         );
         assert!(
             !evaluate_condition(
-                &AbilityCondition::NthResolutionThisTurn { n: 2 },
+                &AbilityCondition::nth_resolution_this_turn(2),
                 &state,
                 &ability
             ),
@@ -31896,7 +31929,7 @@ mod tests {
         );
         assert!(
             !evaluate_condition(
-                &AbilityCondition::NthResolutionThisTurn { n: 1 },
+                &AbilityCondition::nth_resolution_this_turn(1),
                 &state,
                 &ability
             ),
@@ -31904,7 +31937,7 @@ mod tests {
         );
         assert!(
             evaluate_condition(
-                &AbilityCondition::NthResolutionThisTurn { n: 2 },
+                &AbilityCondition::nth_resolution_this_turn(2),
                 &state,
                 &ability
             ),
@@ -31915,7 +31948,7 @@ mod tests {
         resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
         assert!(
             evaluate_condition(
-                &AbilityCondition::NthResolutionThisTurn { n: 3 },
+                &AbilityCondition::nth_resolution_this_turn(3),
                 &state,
                 &ability
             ),
@@ -31923,7 +31956,7 @@ mod tests {
         );
         assert!(
             !evaluate_condition(
-                &AbilityCondition::NthResolutionThisTurn { n: 2 },
+                &AbilityCondition::nth_resolution_this_turn(2),
                 &state,
                 &ability
             ),
@@ -31997,7 +32030,7 @@ mod tests {
     #[test]
     fn nth_resolution_no_index_does_not_increment_or_match() {
         // Synthesized abilities (prowess, firebending) lack an ability_index.
-        // They must NOT bump the counter and NthResolutionThisTurn must
+        // They must NOT bump the counter and AbilityUseCountThisTurn must
         // evaluate false against them (count is implicitly 0 / no key).
         let mut state = GameState::new_two_player(42);
         let source_id = ObjectId(1);
@@ -32020,11 +32053,112 @@ mod tests {
         );
         assert!(
             !evaluate_condition(
-                &AbilityCondition::NthResolutionThisTurn { n: 1 },
+                &AbilityCondition::nth_resolution_this_turn(1),
                 &state,
                 &ability
             ),
-            "NthResolutionThisTurn must evaluate false when ability lacks an index"
+            "AbilityUseCountThisTurn must evaluate false when ability lacks an index"
+        );
+    }
+
+    /// CR 602.2a + CR 608.2c: Dragon Whelp's threshold — "If this ability has
+    /// been activated four or more times this turn, sacrifice this creature at
+    /// the beginning of the next end step."
+    ///
+    /// The reported bug (#8388) was that the sacrifice fired after three
+    /// activations, because the clause parsed to no condition at all and the
+    /// rider therefore ran unconditionally. The boundary is the whole assertion
+    /// here: false at 3, true at 4.
+    #[test]
+    fn activation_tally_gates_on_the_printed_threshold() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(1);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        // Both activated-ability stack paths stamp this; see
+        // `casting_costs::push_ability_entry`.
+        ability.ability_index = Some(0);
+        let condition = AbilityCondition::AbilityUseCountThisTurn {
+            tally: AbilityUseTally::Activated,
+            comparator: Comparator::GE,
+            n: 4,
+        };
+
+        for activations in 0..4 {
+            state
+                .activated_abilities_this_turn
+                .insert((source_id, 0), activations);
+            assert!(
+                !evaluate_condition(&condition, &state, &ability),
+                "must not fire at {activations} activations — the printed \
+                 threshold is four"
+            );
+        }
+
+        state
+            .activated_abilities_this_turn
+            .insert((source_id, 0), 4);
+        assert!(
+            evaluate_condition(&condition, &state, &ability),
+            "must fire once the fourth activation is recorded"
+        );
+        // "four OR MORE" — the gate stays satisfied past the boundary.
+        state
+            .activated_abilities_this_turn
+            .insert((source_id, 0), 7);
+        assert!(evaluate_condition(&condition, &state, &ability));
+    }
+
+    /// The two tallies read different ledgers, so neither may be satisfied by
+    /// the other's counter. Without this, a single-ledger implementation would
+    /// pass every threshold assertion above while making a countered activation
+    /// (which never resolves) invisible to Dragon Whelp.
+    #[test]
+    fn activation_and_resolution_tallies_read_separate_ledgers() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(1);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        ability.ability_index = Some(0);
+
+        // Four activations recorded, none of them resolved.
+        state
+            .activated_abilities_this_turn
+            .insert((source_id, 0), 4);
+
+        assert!(
+            evaluate_condition(
+                &AbilityCondition::AbilityUseCountThisTurn {
+                    tally: AbilityUseTally::Activated,
+                    comparator: Comparator::GE,
+                    n: 4,
+                },
+                &state,
+                &ability
+            ),
+            "activation tally must see the activation ledger"
+        );
+        assert!(
+            !evaluate_condition(
+                &AbilityCondition::nth_resolution_this_turn(4),
+                &state,
+                &ability
+            ),
+            "resolution tally must NOT be satisfied by activation counts"
         );
     }
 
