@@ -1,0 +1,53 @@
+# Hand-authored token presets that `tokens-gen` merges into
+# `crates/engine/data/known-tokens.toml` and never rewrites.
+#
+# `known-tokens.toml` is regenerated whole from MTGJSON per-set token data on
+# every run, so a row MTGJSON has no source for cannot survive in it — that is
+# the defect this file exists to fix. A row belongs here when a card's Oracle
+# text creates a named token that MTGJSON has not yet published set token data
+# for, which happens for every set during its preview season.
+#
+# Each row is an ordinary `[[token]]` in the same shape as the generated
+# catalog. Two obligations:
+#
+#   * `id` is a placeholder, not an MTGJSON token uuid — use a deterministic
+#     uuid5 namespaced off the creating card's Scryfall oracle_id, so the row
+#     sorts and dedupes safely. The real MTGJSON entry will carry a different
+#     uuid, which is why `id` alone cannot express supersession.
+#   * `source_card_refs` MUST carry an entry with the creating card's real
+#     `scryfall_oracle_id`. `tokens-gen` refuses a row without one, because
+#     that reference is what lets MTGJSON's own entry supersede this row: a
+#     generated preset supersedes a row when it shares the row's `id`, or
+#     shares its set, its token name and that source card.
+#
+# When `tokens-gen` reports a row superseded, delete the row from this file —
+# MTGJSON now ships the token and the generated preset is authoritative. The
+# committed-overlay test in `token_presets.rs` reds until you do.
+
+[[token]]
+id = "1cb84b18-676d-5b79-9c4c-4f94af329ae5"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Soul Tether"]
+set_code = "FRA"
+set_name = "Reality Fracture"
+released_at = "2026-10-02"
+type_line = "Token Artifact — Heartwood"
+rules_text = "{T}: Add {R} or {G}."
+
+[token.body]
+display_name = "Heartwood"
+core_types = ["Artifact"]
+subtypes = ["Heartwood"]
+supertypes = []
+colors = [
+    "Red",
+    "Green",
+]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Woodwork Prodigy // Soul Tether"
+face_name = "Soul Tether"
+scryfall_oracle_id = "f3ed157f-a09b-405f-aec4-0e7a81d80fc8"
+scryfall_id = "7d17f7e3-7b63-4674-9024-4fd1827f40ec"

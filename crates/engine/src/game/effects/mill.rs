@@ -516,10 +516,16 @@ mod tests {
                 Zone::Library,
             );
         }
+        // CR 109.5: the rider's `TargetFilter::Controller` names the controller
+        // of the object whose text it is — this redirect source — not the
+        // controller of the card the replaced event moved. The source therefore
+        // has to be P1 for the rider to mill P1's library and widen the window;
+        // `graveyard_exile_redirect` carries no `valid_card` scope, so the
+        // redirect still applies to P1's card from a P1-controlled source.
         let redirect_source = create_object(
             &mut state,
             CardId(1000),
-            PlayerId(0),
+            PlayerId(1),
             "Redirect Source".to_string(),
             Zone::Battlefield,
         );

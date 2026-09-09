@@ -21,6 +21,7 @@ const NON_VISUAL_EVENTS = new Set([
   "PriorityPassed",
   "MulliganStarted",
   "GameStarted",
+  "ExtraTurnCreated",
   "ManaAdded",
   "DamageCleared",
   "PowerToughnessChanged",

@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use draft_core::types::{DraftConfig, DraftSession as DraftCoreSession, DraftSource, SetLayout};
 
+use seat_reducer::types::DeckChoice;
+
 use crate::lobby::RegisterGameRequest;
 use crate::protocol::DraftLobbyMetadata;
 use crate::session::AiDriverFault;
@@ -15,7 +17,8 @@ use crate::session::AiDriverFault;
 /// Fields that can be reconstructed at restore time are excluded:
 /// - `connected` — all players are disconnected on restore
 /// - `ai_configs` — reconstructed from `ai_difficulties` + `player_count`
-/// - `decks` — consumed at game start, data lives in `state` after that
+/// - `decks` — the resolved payloads are rebuilt from `deck_choices`, which
+///   carries the same cards in the far smaller name-only form
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedSession {
     pub game_code: String,
@@ -29,6 +32,14 @@ pub struct PersistedSession {
     pub next_ai_driver_fault_id: u64,
     pub state: PersistedGameState,
     pub player_tokens: Vec<String>,
+    /// Each seat's unresolved deck form, re-resolved on restore. `#[serde(default)]`
+    /// is the migration mechanism, as for `state_revision` and `ranked`: a
+    /// pre-field snapshot restores with no seat decks and refuses to start.
+    /// Empty for a started snapshot, which nothing re-resolves. On the wire
+    /// that still differs from a pre-field snapshot — the key is written, not
+    /// omitted — but the two are load-equivalent, both resizing to all-`None`.
+    #[serde(default)]
+    pub deck_choices: Vec<Option<DeckChoice>>,
     pub display_names: Vec<String>,
     pub timer_seconds: Option<u32>,
     pub player_count: u8,

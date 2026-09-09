@@ -1,7 +1,7 @@
 //! dq-f: Squirming Emergence — the target's mana-value clause TRAILS its zone
 //! clause ("target nonland permanent card in your graveyard with mana value less
 //! than or equal to the number of permanent cards in your graveyard"). Before the
-//! zone-then-mana-value second pass in `parse_type_phrase_with_ctx`, the trailing
+//! zone-then-mana-value second pass in `parse_type_phrase_folding_with_ctx`, the trailing
 //! "with mana value …" clause was dropped, so every nonland permanent card in the
 //! graveyard was a legal target regardless of its mana value.
 //!

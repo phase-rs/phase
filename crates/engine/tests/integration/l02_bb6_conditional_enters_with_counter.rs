@@ -283,7 +283,7 @@ fn enters_with_counter_subject_covers_this_creature_and_that_artifact() {
 /// creature died this turn" → filtered gate; (b) the bare "a creature died this
 /// turn" still yields the UNFILTERED ref (no Morbid regression); (c) a
 /// name-negation ("a creature not named Ebondeath, Dracolich died this turn") is
-/// NOT claimed by the arm (parse_type_phrase leaves "not named …" leftover → the
+/// NOT claimed by the arm (parse_type_phrase_folding leaves "not named …" leftover → the
 /// arm rejects → clean gap). Revert-probe: remove the filtered arm → (a) errors.
 #[test]
 fn filtered_died_this_turn_arm_and_clean_gaps() {

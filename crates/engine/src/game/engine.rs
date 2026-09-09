@@ -1078,6 +1078,17 @@ pub fn verified_ai_stack_pass_player(state: &GameState, action: &GameAction) -> 
     if !matches!(action, GameAction::PassPriority) || state.stack.is_empty() {
         return None;
     }
+    // A committed Resolve All session owns ordinary priority passes. Only the
+    // AI recheck policy may take the verified-pass continuation boundary.
+    if state
+        .stack_resolution_session
+        .as_ref()
+        .is_some_and(|session| {
+            session.policy != StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
+        })
+    {
+        return None;
+    }
     match state.waiting_for {
         WaitingFor::Priority { player } => Some(player),
         _ => None,
@@ -1212,7 +1223,15 @@ pub fn apply_verified_ai_priority_pass_with_rejection(
     })
 }
 
-pub(crate) fn apply_interaction_for_simulation(
+/// Simulation counterpart of [`apply_interaction`]: `authenticated_actor` is
+/// the trusted submitting connection and `semantic_owner` is the player whose
+/// decision slot the action names, which differ when another player controls
+/// that player's decisions. Runs in `DeferredDisplay` mode, so it skips the
+/// board-global mana-availability sweep for throwaway states no client
+/// renders. Simulation callers with no such split want
+/// [`apply_for_simulation`], the collapsed form that forwards one actor into
+/// both slots.
+pub fn apply_interaction_for_simulation(
     state: &mut GameState,
     authenticated_actor: PlayerId,
     semantic_owner: PlayerId,
@@ -1384,7 +1403,8 @@ fn apply_action_boundary_core(
     stack_resolution_limit: Option<u32>,
 ) -> Result<RawActionApplication, EngineError> {
     let lifecycle = super::lifecycle::enter_action_frame();
-    if let Err(error) = mana_sources::preflight_tap_land_action(state, semantic_owner, &action) {
+    if let Err(error) = mana_sources::preflight_tap_land_action(state, authenticated_actor, &action)
+    {
         lifecycle.discard();
         return Err(error);
     }
@@ -3083,7 +3103,7 @@ fn certified_bounded_cycle_offer<'a>(
         v.dedup();
         v
     };
-    // CR 704.5a: what ONE repetition charges to whichever seat a slot's pin names. The
+    // CR 119.3: what ONE repetition charges to whichever seat a slot's pin names. The
     // max-vs-sum reasoning, the gain clamp and the fail-closed direction live on the
     // function; `elimination_bounds` then sums the charged slots per declarable victim.
     // Extracted rather than inlined so the fork has a callable seam. ⚠ THE "`victim_slot` IS
@@ -3483,7 +3503,7 @@ pub(crate) struct EntryPinSlots {
 ///
 /// THE TWO QUESTIONS THIS TYPE KEEPS APART, because conflating them was a measured
 /// fail-OPEN. PUBLICATION answers CR 732.2a — *is this a game choice the player makes?* —
-/// and shapes the schema. CHARGING answers CR 704.5a — *which seat is charged, and how
+/// and shapes the schema. CHARGING answers CR 119.3 — *which seat is charged, and how
 /// much?* — and shapes the bound. A forced announcement is not a choice, so it is withheld
 /// from the schema; its victim still loses the life, so it is still charged. Deriving the
 /// bound from the PUBLISHED point set made the CR 732.2a withhold silently drop the forced
@@ -3547,7 +3567,7 @@ pub(crate) enum TargetAnnouncement {
     ///   routes to `AutoAssigned`), so no prompt is ever raised and a pin would be a
     ///   designation the RNG contradicts at drive time.
     ///
-    /// CHARGED ALL THE SAME: CR 704.5a asks which seat loses how much life, and nobody having
+    /// CHARGED ALL THE SAME: CR 119.3 asks which seat loses how much life, and nobody having
     /// made the choice changes neither who pays nor how much. Only the CR 732.2a publication
     /// reader acts on this value.
     NotProposerChoice,
@@ -3557,7 +3577,7 @@ pub(crate) enum TargetAnnouncement {
 /// BEFORE the CR 732.2a question of how much of it is a published game choice.
 ///
 /// THE SINGLE ACCEPTANCE AUTHORITY. Both [`entry_publishes_pin_slots`] (publication) and
-/// [`bounded_cycle_charged_targets_for_window`] (CR 704.5a charging) are thin readers of
+/// [`bounded_cycle_charged_targets_for_window`] (CR 119.3 charging) are thin readers of
 /// this one function, so the two can never disagree about WHICH entries are in the cycle —
 /// only about which of their announcements is a published choice. Two independent
 /// acceptance chains that could disagree is exactly the shape gate (3)'s single-authority
@@ -3573,7 +3593,7 @@ struct EntryAnnouncement {
 /// A THIN READER of [`entry_announces`], which owns every acceptance conjunct documented
 /// below; this function contributes exactly one thing on top of it — the CR 732.2a
 /// publication decision (a `Forced` announcement is not a game choice, so no point is
-/// published for it). The CR 704.5a charging reader
+/// published for it). The CR 119.3 charging reader
 /// ([`bounded_cycle_charged_targets_for_window`]) reads the SAME announcement, so the two
 /// cannot disagree about which entries are in the cycle.
 ///
@@ -3646,7 +3666,7 @@ pub(crate) fn entry_publishes_pin_slots(
 /// Every acceptance conjunct documented on [`entry_publishes_pin_slots`] lives here. What
 /// does NOT live here is the CR 732.2a publication decision: this function reports whether
 /// the announcement is `Chosen` or `Forced` and lets its two readers apply that fact to the
-/// question each is answering — the schema (publication) or the bound (CR 704.5a charging).
+/// question each is answering — the schema (publication) or the bound (CR 119.3 charging).
 fn entry_announces(
     state: &GameState,
     entry: &StackEntry,
@@ -3804,7 +3824,7 @@ fn entry_announces(
     // inherited from the `may` expression, which is `None` without it. A `may` the three
     // conjunct groups above suppressed leaves shape (B) with NO slot at all, so the whole
     // entry publishes `None` — the fail-closed direction, now applied by the publication
-    // reader rather than restated here. Shape (B) also charges NOTHING under CR 704.5a:
+    // reader rather than restated here. Shape (B) also charges NOTHING under CR 119.3:
     // there is no announced target, so there is no seat a declaration could aim at.
     if slots.is_empty() {
         if !ability.targets.is_empty() {
@@ -3897,7 +3917,7 @@ fn entry_announces(
     // a defect this commit introduced.
     //
     // ⚠ WITHHELD FROM THE SCHEMA IS NOT UNCHARGED, and the two used to be the same act.
-    // CR 704.5a asks which seat loses how much life, and a forced victim loses it exactly as
+    // CR 119.3 asks which seat loses how much life, and a forced victim loses it exactly as
     // a chosen one does — nobody having made the choice changes who pays, not how much.
     // Reporting the shape here rather than dropping the announcement is what lets
     // [`bounded_cycle_charged_targets_for_window`] charge it while
@@ -4071,17 +4091,18 @@ pub(crate) fn bounded_cycle_pin_slots_for_window(
     points
 }
 
-/// CR 704.5a: what ONE CERTIFIED PERIOD CHARGES — the announcement slot of every accepted
+/// CR 119.3: what ONE CERTIFIED PERIOD CHARGES — the announcement slot of every accepted
 /// entry, paired with the seats that announcement may name, whether or not CR 732.2a
 /// publishes it as a decision point.
 ///
 /// DELIBERATELY NOT A FILTER OVER [`bounded_cycle_pin_slots_for_window`]'s OUTPUT, and that
 /// is the entire reason this exists as its own reader. Publication answers CR 732.2a — "a
 /// sequence of game choices, for all players" — so a FORCED announcement publishes nothing.
-/// Charging answers CR 704.5a — "if a player has 0 or less life, that player loses the
-/// game" — and the victim loses that life whether or not anybody chose it. Deriving the
-/// bound from the published set therefore let the CR 732.2a withhold silently drop a forced
-/// victim into `ResourceVector::elimination_bounds`' cheaper `observed_life_loss` arm,
+/// Charging answers CR 119.3 — "if an effect causes a player to gain life or
+/// lose life, that player's life total is adjusted accordingly" — and the victim
+/// loses that life whether or not anybody chose it. Deriving the bound from the
+/// published set therefore let the CR 732.2a withhold silently drop a forced victim
+/// into `ResourceVector::elimination_bounds`' cheaper `observed_life_loss` arm,
 /// RAISING `max_iterations`: the offer would state more legal repetitions than CR 732.2a
 /// permits, on the very operator whose job is to prove the proposed sequence "may be legally
 /// taken based on the current game state".
@@ -7395,14 +7416,7 @@ fn check_actor_authorization(
     actor: PlayerId,
     action: &GameAction,
 ) -> Result<(), EngineError> {
-    if action.is_actor_scoped_preference()
-        || matches!(
-            action,
-            GameAction::Debug(_)
-                | GameAction::GrantDebugPermission { .. }
-                | GameAction::RevokeDebugPermission { .. }
-        )
-    {
+    if action.is_submitter_scoped() {
         return Ok(());
     }
     if let GameAction::RevokeResolveAllConsent {
@@ -7438,14 +7452,21 @@ fn check_actor_authorization(
     Ok(())
 }
 
-/// Engine-internal convenience: apply `action` as the player the engine is
-/// currently waiting on. Intended for simulation (AI search, legal-action
+/// Engine-internal convenience: apply `action` on behalf of the player the
+/// engine is currently waiting on, submitted by whoever is authorized to
+/// submit for that player. Intended for simulation (AI search, legal-action
 /// probing) and tests — *not* for transport adapters, which must pass a
 /// transport-authenticated `actor` to [`apply`] directly.
 ///
-/// For [`GameAction::Concede`] the concede payload's `player_id` is used as
-/// the actor, so tests can concede any player without first maneuvering the
-/// `WaitingFor` state onto that player.
+/// CR 723.3 + CR 723.5: under a player-control effect those are two different
+/// players, so both halves of the action boundary are derived here from one
+/// authority instead of being collapsed onto the submitter. [`apply`] and
+/// [`apply_for_simulation`] remain the collapsed forms because a transport has
+/// no *trusted* owner to pass, not because none exists.
+///
+/// For [`GameAction::Concede`] the concede payload's `player_id` fills both
+/// halves (CR 723.6), so tests can concede any player without first
+/// maneuvering the `WaitingFor` state onto that player.
 pub fn apply_as_current(
     state: &mut GameState,
     action: GameAction,
@@ -7478,21 +7499,40 @@ fn apply_as_current_with_mode(
     action: GameAction,
     mode: PublicFinalizeMode,
 ) -> Result<ActionResult, EngineError> {
-    let actor = match &action {
-        GameAction::Concede { player_id } => *player_id,
-        // CR 103.5: For simultaneous-decision states, pick the first pending
-        // player as the simulation representative. `authorized_submitters`
-        // returns the full set; `first()` is deterministic (seat-ordered).
+    let (authenticated_actor, semantic_owner) = match &action {
+        // CR 723.6: the controller of another player can't make that player
+        // concede, so a concession is its own submitter and its own owner.
+        GameAction::Concede { player_id } => (*player_id, *player_id),
         _ => {
-            let submitters = turn_control::authorized_submitters(state);
-            submitters.first().copied().ok_or_else(|| {
+            // CR 103.5: For simultaneous-decision states, pick the first
+            // pending player as the simulation representative. `acting_players`
+            // returns the full set; `first()` is deterministic (seat-ordered).
+            let acting = state.waiting_for.acting_players();
+            let owner = *acting.first().ok_or_else(|| {
                 EngineError::InvalidAction(
                     "apply_as_current: no authorized submitter (game over?)".to_string(),
                 )
-            })?
+            })?;
+            // CR 723.3 + CR 723.5: the controller makes the controlled player's
+            // choices, but only control of the player changes — the decision
+            // seat the reducer keys stays the controlled player.
+            let submitter = turn_control::authorized_submitter_for_player(state, owner);
+            if action.is_submitter_scoped() {
+                // CR 723.5b: an action naming the submitting seat rather than a
+                // decision slot is not a choice control redirects.
+                (submitter, submitter)
+            } else {
+                (submitter, owner)
+            }
         }
     };
-    apply_action_boundary(state, actor, action, mode)
+    apply_action_boundary_for_semantic_owner(
+        state,
+        authenticated_actor,
+        semantic_owner,
+        action,
+        mode,
+    )
 }
 
 /// The action boundary at which a typed cost-move root is allowed to resume.
@@ -7693,6 +7733,26 @@ pub(super) fn resume_pending_continuation_if_priority(
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 super::life_safety::observe_boundary_carrier(state);
                 effects::resume_resolution_frames(state, events);
+            }
+        }
+        // CR 614.12a + CR 111.1: An entry replacement's required choices are made
+        // BEFORE the permanent enters, so a liminal entry whose "as enters" chain
+        // paused on a prompt is owed its commit the moment — and only the moment —
+        // every one of those choices has been answered. Placed after the ordinary
+        // continuation drains above (including the deferred-life re-drain) because
+        // those are what run the REST of that chain: Tribute's CR 702.104a
+        // pay-or-decline stage resolves there, and a chain that raises a further
+        // prompt leaves `waiting_for` non-`Priority` so this gate holds the commit
+        // back on its own. Placed BEFORE the phase-transition and cost-move
+        // resumes below because those observe the board, and a permanent whose
+        // entry has been decided must exist before anything can observe it.
+        // Inert unless a `Token` resume with a live liminal entry is parked.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            super::life_safety::observe_boundary_carrier(state);
+            if let Some(waiting_for) =
+                super::engine_replacement::resume_pending_liminal_token_entry(state, events)
+            {
+                state.waiting_for = waiting_for;
             }
         }
         // CR 614.6 + CR 500.5: An interactive cross-event substitute may be
@@ -9470,8 +9530,6 @@ fn apply_action(
     }
 
     let mut events = Vec::new();
-    let mut triggers_processed_inline = false;
-    let skip_deferred_trigger_drain = false;
     // The trigger-construction finisher runs at most once per reducer action, at
     // the outermost handler return of its enumerated seams. Reset the witness
     // here rather than at the outer boundary so a direct `apply_action` caller
@@ -9797,20 +9855,22 @@ fn apply_action(
         state.loop_answer_journal = None;
     }
 
-    // Keep the semantic owner of the prompt before reducing it. Under turn
-    // control this can differ from the authenticated submitter; a successful
-    // action discharges a shortened shortcut only for that owner.
+    // The prompt's semantic owner: the seat `state.waiting_for` names, or the
+    // authenticated submitter where it names no single seat. Under turn control
+    // the two can differ. The simultaneous mulligan arms below do not read it —
+    // they resolve their per-player state from the `actor` parameter.
     let semantic_actor = state.waiting_for.acting_player().unwrap_or(actor);
-    let action_for_divergence = action.clone();
 
     // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass.
     // CR 723.1: A Priority-window action belongs to the semantic priority
     // seat, not necessarily to its authenticated submitter. In
     // particular, a turn controller can act for P0; tearing down P2's
     // representative instead would leave P0's frozen cohort live and let the
-    // boundary runner resolve an entry after P0 deliberately acted. Outside a
-    // Priority window retain the authenticated actor: simultaneous mulligan
-    // variants have no single semantic priority seat.
+    // boundary runner resolve an entry after P0 deliberately acted.
+    // CR 723.3 + CR 723.5: outside a Priority window the prompt's own seat owns
+    // the preference, which is what `semantic_actor` names; its
+    // `unwrap_or(actor)` fallback keeps the authenticated actor wherever
+    // `state.waiting_for` names no single seat.
     // CR 117.6 + CR 805.5b: Canonicalize that seat before consulting a
     // session, because a shared team's representative owns its priority pass.
     let session_preference_owner = match (&state.waiting_for, &action) {
@@ -9821,7 +9881,7 @@ fn apply_action(
         (WaitingFor::Priority { player }, _) => {
             super::topology::priority_pass_representative(state, *player)
         }
-        _ => actor,
+        _ => semantic_actor,
     };
     match &action {
         GameAction::SetAutoPass { .. }
@@ -9860,6 +9920,8 @@ fn apply_action(
 
     // Clear manual mana-tap tracking when the player commits to a non-mana action.
     // ActivateAbility is handled per-arm (only non-mana abilities clear tracking).
+    // CR 723.5a: the tracking records whose resources were spent, so it is keyed
+    // to the seat that spent them, as the insert side already is.
     match &action {
         GameAction::PassPriority
         | GameAction::PlayLand { .. }
@@ -9875,41 +9937,65 @@ fn apply_action(
         | GameAction::RollPlanarDie
         | GameAction::PayUnlessCost { .. }
         | GameAction::PayCombatTax { .. } => {
-            state.lands_tapped_for_mana.remove(&actor);
+            state.lands_tapped_for_mana.remove(&semantic_actor);
         }
         _ => {}
     }
 
+    if let (WaitingFor::Priority { player }, GameAction::PassPriority) =
+        (&state.waiting_for, &action)
+    {
+        // CR 117.3d + CR 723.5 + CR 732.2a-c: single authority, shared with the
+        // AI candidate-legality hatch and the projection fast path so the three
+        // cannot drift.
+        super::priority::pass_priority_legality(state, *player)?;
+        // An explicit pass can be the final CR 117.4 pass. Route it through the
+        // same fenced session seam as an installed auto-pass, so its resolved-entry
+        // count advances the persisted cursor rather than silently bypassing a live
+        // stack-resolution authorization.
+        if stack_resolution_limit.is_some() {
+            let outcome =
+                pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit)?;
+            advance_stack_resolution_session_after_priority_pass(
+                state,
+                outcome.consumed_stack_entries,
+                &outcome.waiting_for,
+            );
+            return Ok(ActionResult {
+                events,
+                waiting_for: outcome.waiting_for,
+                log_entries: vec![],
+            });
+        }
+        return pass_installed_auto_pass_priority(state, *player, &mut events);
+    }
+
+    apply_non_priority_pass_action(
+        state,
+        actor,
+        action,
+        events,
+        semantic_actor,
+        answering_forced_window,
+        stack_len_before_action,
+    )
+}
+
+fn apply_non_priority_pass_action(
+    state: &mut GameState,
+    actor: PlayerId,
+    action: GameAction,
+    mut events: Vec<GameEvent>,
+    semantic_actor: PlayerId,
+    answering_forced_window: bool,
+    stack_len_before_action: usize,
+) -> Result<ActionResult, EngineError> {
+    let mut triggers_processed_inline = false;
+    let skip_deferred_trigger_drain = false;
+    let action_for_divergence = action.clone();
+
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
-        (WaitingFor::Priority { player }, GameAction::PassPriority) => {
-            // CR 117.3d + CR 723.5 + CR 732.2a-c: single authority, shared with the
-            // AI candidate-legality hatch and the projection fast path so the
-            // three cannot drift.
-            super::priority::pass_priority_legality(state, *player)?;
-            // An explicit pass can be the final CR 117.4 pass. Route it
-            // through the same fenced session seam as an installed auto-pass,
-            // so its resolved-entry count advances the persisted cursor rather
-            // than silently bypassing a live stack-resolution authorization.
-            if stack_resolution_limit.is_some() {
-                let outcome = pass_priority_once_with_pipeline(
-                    state,
-                    &mut events,
-                    stack_resolution_limit,
-                )?;
-                advance_stack_resolution_session_after_priority_pass(
-                    state,
-                    outcome.consumed_stack_entries,
-                    &outcome.waiting_for,
-                );
-                return Ok(ActionResult {
-                    events,
-                    waiting_for: outcome.waiting_for,
-                    log_entries: vec![],
-                });
-            }
-            return pass_installed_auto_pass_priority(state, *player, &mut events);
-        }
         (
             WaitingFor::Priority { player },
             GameAction::BeginResolveAll {
@@ -10037,7 +10123,9 @@ fn apply_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            handle_untap_land_for_mana(state, state.priority_player, object_id, &mut events)?;
+            // CR 723.5a: the tap booked to the seat, so the undo must look it up
+            // there rather than under its authorized submitter.
+            handle_untap_land_for_mana(state, *player, object_id, &mut events)?;
             WaitingFor::Priority { player: *player }
         }
         (
@@ -10114,13 +10202,16 @@ fn apply_action(
                 // allows undo — painlands (damage on resolution), pay-life
                 // sources, and sacrifice sources all commit irreversible
                 // state atomically with CR 605.3b resolution.
+                // CR 723.5a: a controller spends only the controlled player's
+                // resources, so the tap books to the seat holding priority, not
+                // to the player authorized to submit for it.
                 if is_land
                     && mana_sources::object_mana_ability_penalty(state, source_id, &ability_def)
                         .is_undoable()
                 {
                     state
                         .lands_tapped_for_mana
-                        .entry(state.priority_player)
+                        .entry(*player)
                         .or_default()
                         .push(source_id);
                 }
@@ -11534,7 +11625,7 @@ fn apply_action(
             WaitingFor::PrecastCopyShortcutOffer { .. }
             | WaitingFor::RespondToPrecastCopyShortcut { .. },
             GameAction::PrecastCopyShortcut { epoch, response },
-        ) => super::precast_copy_shortcut::handle(state, actor, epoch, response, &mut events)?,
+        ) => super::precast_copy_shortcut::handle(state, epoch, response, &mut events)?,
         // CR 732.2b/c: an opponent answers the loop-shortcut offer.
         (
             WaitingFor::RespondToShortcut {
@@ -12261,7 +12352,9 @@ fn apply_action(
             },
             GameAction::UntapLandForMana { object_id },
         ) => {
-            handle_untap_land_for_mana(state, state.priority_player, object_id, &mut events)?;
+            // CR 723.5a: this arm's paired tap keys the seat, so its undo must
+            // too — the submitter may be a different player under turn control.
+            handle_untap_land_for_mana(state, *player, object_id, &mut events)?;
             WaitingFor::ManaPayment {
                 player: *player,
                 convoke_mode: *convoke_mode,

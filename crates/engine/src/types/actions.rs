@@ -313,6 +313,15 @@ pub enum GameAction {
     SelectCoinFlips {
         keep_indices: Vec<usize>,
     },
+    /// CR 706.6: Die-roll ignore choice — indices into `results` the roller
+    /// IGNORES (the rest survive). Note the inversion from
+    /// [`GameAction::SelectCoinFlips`], which names the flips KEPT: CR 705.1
+    /// instructs the player to keep one, while CR 706.6 instructs them to ignore
+    /// the lowest. Length must equal `ignore_count`, and every index must be one
+    /// the engine offered in `ignorable_indices`.
+    SelectDieRolls {
+        ignore_indices: Vec<usize>,
+    },
     /// CR 400.11 + CR 406.3: Player commits one or more selections from the
     /// offered outside-game pool. Each selection is a discriminated source —
     /// a sideboard slot (wishboard) or a face-up exile object (Karn / Coax).
@@ -1813,6 +1822,29 @@ impl GameAction {
         )
     }
 
+    /// Whether this action names the submitting seat itself rather than a
+    /// decision slot the engine is waiting on.
+    ///
+    /// CR 723.5b: the controller of another player can't make choices or
+    /// decisions for that player that aren't called for by the rules or by any
+    /// objects. A UI preference mutates the submitter's own slot and a debug
+    /// capability grant authorizes the submitting connection — neither is such
+    /// a choice, so controlling a player must not redirect either one.
+    ///
+    /// Not `game::interaction::action_preserves_interaction`, whose
+    /// near-identical list answers a different question: this one decides
+    /// whether an action may skip the seat check, that one whether an action
+    /// leaves an open interaction standing. The two lists may diverge.
+    pub fn is_submitter_scoped(&self) -> bool {
+        self.is_actor_scoped_preference()
+            || matches!(
+                self,
+                GameAction::Debug(_)
+                    | GameAction::GrantDebugPermission { .. }
+                    | GameAction::RevokeDebugPermission { .. }
+            )
+    }
+
     /// Issue #4878: allocation-free total order over `GameAction`, used for
     /// deterministic AI candidate / legal-action sorting. Orders by the
     /// `GameActionKind` discriminant first, then by payload fields, so equal
@@ -1876,6 +1908,7 @@ impl GameAction {
             | Self::SpendPoolMana { .. }
             | Self::UnspendPoolMana { .. }
             | Self::SelectCoinFlips { .. }
+            | Self::SelectDieRolls { .. }
             | Self::ChooseReplacement { .. }
             | Self::ChooseEntryController { .. }
             | Self::OrderTriggers { .. }
@@ -2211,6 +2244,7 @@ impl GameAction {
             | GameAction::SelectCards { .. }
             | GameAction::ChooseRemoveCounterCostDistribution { .. }
             | GameAction::SelectCoinFlips { .. }
+            | GameAction::SelectDieRolls { .. }
             | GameAction::ChooseOutsideGameCards { .. }
             | GameAction::SelectTargets { .. }
             | GameAction::ChooseTarget { .. }

@@ -194,6 +194,9 @@ interface UiStoreState {
   selectedObjectId: ObjectId | null;
   hoveredObjectId: ObjectId | null;
   inspectedObjectId: ObjectId | null;
+  /** Public printed-card name retained by a historical log entry when its live
+   * object is no longer in the current game state. */
+  inspectedCardName: string | null;
   inspectedFaceIndex: number;
   /** Presentation requested by the element that opened the current preview. */
   previewPlacement: PreviewPlacement;
@@ -314,7 +317,12 @@ interface UiStoreActions {
   ) => void;
   /** Open a preview from an explicit interaction and keep it visible until a
    * later outside interaction dismisses it. */
-  inspectObjectSticky: (id: ObjectId, faceIndex?: number, placement?: PreviewPlacement) => void;
+  inspectObjectSticky: (
+    id: ObjectId,
+    faceIndex?: number,
+    placement?: PreviewPlacement,
+    fallbackCardName?: string,
+  ) => void;
   dismissPreview: () => void;
   setAltHeld: (held: boolean) => void;
   setShiftHeld: (held: boolean) => void;
@@ -399,6 +407,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   selectedObjectId: null,
   hoveredObjectId: null,
   inspectedObjectId: null,
+  inspectedCardName: null,
   inspectedFaceIndex: 0,
   previewPlacement: "cursor",
   altHeld: false,
@@ -460,6 +469,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
       const applyInspect = () =>
         set((s) => ({
           inspectedObjectId: id,
+          inspectedCardName: null,
           inspectedFaceIndex: faceIndex ?? 0,
           previewPlacement: placement,
           // Inspecting a DIFFERENT object replaces (dismisses) the previous
@@ -540,6 +550,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
         cancelPendingShow();
         set({
           inspectedObjectId: null,
+          inspectedCardName: null,
           inspectedFaceIndex: 0,
           previewPlacement: "cursor",
           previewSticky: false,
@@ -549,7 +560,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     }
   },
 
-  inspectObjectSticky: (id, faceIndex = 0, placement = "cursor") => {
+  inspectObjectSticky: (id, faceIndex = 0, placement = "cursor", fallbackCardName) => {
     if (pendingClearTimer != null) {
       clearTimeout(pendingClearTimer);
       pendingClearTimer = null;
@@ -557,6 +568,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     cancelPendingShow();
     set({
       inspectedObjectId: id,
+      inspectedCardName: fallbackCardName ?? null,
       inspectedFaceIndex: faceIndex,
       previewPlacement: placement,
       previewSticky: true,
@@ -572,6 +584,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     cancelPendingShow();
     set({
       inspectedObjectId: null,
+      inspectedCardName: null,
       inspectedFaceIndex: 0,
       previewPlacement: "cursor",
       previewSticky: false,

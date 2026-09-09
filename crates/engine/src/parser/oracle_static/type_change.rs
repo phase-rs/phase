@@ -2085,7 +2085,7 @@ pub(crate) fn parse_each_noncreature_subject_is_creature_with_pt_mv(
 /// resolved through a hand-rolled conjunct splitter), this class has a SINGLE
 /// leading `each` quantifier and per-conjunct negated-type exclusions
 /// ("non-Equipment", "non-Aura") — so the subject is delegated wholesale to
-/// the general target-phrase grammar (`parse_type_phrase`) instead. That
+/// the general target-phrase grammar (`parse_type_phrase_folding`) instead. That
 /// grammar already recurses per "and"-leg (restarting its own leading `non-`
 /// scan on each recursive call — see `starts_with_type_word`'s `non-` arm) and
 /// backfills the shared trailing qualifiers (controller, mana value) from the
@@ -2126,7 +2126,7 @@ pub(crate) fn parse_each_compound_subject_type_change(
 
     // STEP D — delegate the ENTIRE subject phrase to the general target-phrase
     // grammar instead of hand-rolling a conjunct splitter (see doc comment).
-    let (affected, subject_rest) = parse_type_phrase(subject_tp.original);
+    let (affected, subject_rest) = parse_type_phrase_folding(subject_tp.original);
     if !subject_rest.trim().is_empty() {
         return None;
     }

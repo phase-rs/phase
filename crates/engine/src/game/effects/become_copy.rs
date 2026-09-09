@@ -2,8 +2,8 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::DisplaySource;
 use crate::game::layers::compute_current_copiable_values;
 use crate::types::ability::{
-    ContinuousModification, CopiableValues, Duration, Effect, EffectError, EffectKind,
-    ResolvedAbility, TargetFilter, TargetRef,
+    ContinuousModification, CopiableValues, CopyRecipient, Duration, Effect, EffectError,
+    EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card::{PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use crate::types::events::GameEvent;
@@ -33,8 +33,11 @@ pub fn resolve(
                 .unwrap_or(Duration::Permanent),
             additional_modifications.clone(),
         ),
+        // CR 707.2: a non-`BecomeCopy` effect reaching this resolver has no
+        // recipient axis of its own, so the copy lands on the ability's own
+        // source — the same default `CopyRecipient::Source` encodes.
         _ => (
-            TargetFilter::SelfRef,
+            crate::types::ability::CopyRecipient::Source,
             ability.duration.clone().unwrap_or(Duration::Permanent),
             Vec::new(),
         ),
@@ -43,10 +46,18 @@ pub fn resolve(
     let target_id = ability
         .targets
         .iter()
-        .find_map(|t| match t {
+        .filter_map(|t| match t {
             TargetRef::Object(id) => Some(*id),
             TargetRef::Player(_) => None,
         })
+        // CR 115.1 + CR 601.2c: when the RECIPIENT is itself an announced target
+        // (Shuri: "Target artifact you control becomes a copy of a second target
+        // artifact you control"), it was declared FIRST, so the copy source is
+        // the SECOND declared object. `become_copy_copy_source_target_index` is
+        // derived from the same authority the slot builder uses, so this index
+        // cannot drift from the surfaced slot order. Mirrors
+        // `fight::resolve_fight_fighters`.
+        .nth(crate::game::ability_utils::become_copy_copy_source_target_index(&ability.effect))
         .ok_or_else(|| EffectError::MissingParam("BecomeCopy requires a target".to_string()))?;
 
     let values = compute_current_copiable_values(state, target_id)
@@ -279,51 +290,73 @@ pub(crate) fn apply_precomputed_copy_values(
 fn apply_copy_values_to_recipients(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    recipient: &TargetFilter,
+    recipient: &CopyRecipient,
     copy: PrecomputedCopyValues,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    match &recipient {
-        // Existing single-subject cards install one copy effect on the source.
-        TargetFilter::SelfRef => {
-            apply_precomputed_copy_values(state, ability.source_id, copy, events)
+    let recipient_ids: Vec<ObjectId> = match recipient {
+        // CR 707.2: the ability's own source becomes the copy. Every incumbent
+        // self-copy card (Mirage Mirror, Thespian's Stage, Lazav, …).
+        crate::types::ability::CopyRecipient::Source => {
+            return apply_precomputed_copy_values(state, ability.source_id, copy, events)
         }
-        // CR 611.2c: mass recipient set. `ParentTarget` reads the inherited
-        // object target(s); a typed group filter resolves against the
-        // battlefield at resolution (Niko: "Shards you control").
-        _ => {
-            let recipient_ids: Vec<crate::types::identifiers::ObjectId> = match &recipient {
-                TargetFilter::ParentTarget => ability
-                    .targets
-                    .iter()
-                    .filter_map(|t| match t {
-                        TargetRef::Object(id) => Some(*id),
-                        TargetRef::Player(_) => None,
-                    })
-                    .collect(),
-                _ => {
-                    let ctx = FilterContext::from_ability(ability);
-                    state
-                        .battlefield
-                        .iter()
-                        .copied()
-                        .filter(|id| matches_target_filter(state, *id, recipient, &ctx))
-                        .collect()
-                }
-            };
-            for id in recipient_ids {
-                let mut recipient_copy = copy.clone();
-                // CR 611.2b: recipient-relative durations ("for as long as ~
-                // remains attached to it") track the concrete object receiving
-                // the copy effect, while the copied values may come from a
-                // different object ("a creature card exiled with ~").
-                recipient_copy.duration_subject =
-                    ObjectIncarnationRef::from_object(&state.objects[&id]);
-                apply_precomputed_copy_values(state, id, recipient_copy, events)?;
-            }
-            Ok(())
+        // CR 115.1: an announced recipient — the FIRST declared object target
+        // (the copy source is the second; see `resolve`). Read straight off the
+        // chosen targets rather than re-evaluating the filter: CR 115.1 fixes
+        // the chosen objects at announcement, and the resolution-time legality
+        // recheck (CR 608.2b) is the skip guard in the loop below, not a
+        // re-selection.
+        crate::types::ability::CopyRecipient::Target(_) => ability
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .take(1)
+            .collect(),
+        // CR 611.2c: untargeted recipient set. `ParentTarget` reads the
+        // inherited object target(s); any other filter resolves against the
+        // battlefield at resolution and is then locked (Mirrorweave,
+        // Mirrorform, Niko's "Shards you control", Assimilation Aegis' host).
+        crate::types::ability::CopyRecipient::Untargeted(TargetFilter::ParentTarget) => ability
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
+        crate::types::ability::CopyRecipient::Untargeted(filter) => {
+            let ctx = FilterContext::from_ability(ability);
+            state
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|id| matches_target_filter(state, *id, filter, &ctx))
+                .collect()
         }
+    };
+    for id in recipient_ids {
+        // CR 608.2b (announced recipient) / CR 611.2c (untargeted set): a
+        // recipient that is no longer on the battlefield at resolution is
+        // skipped and the rest of the effect still happens. The two readings
+        // reach the same action by different routes — a `Target` recipient is a
+        // target whose legality is rechecked on resolution (608.2b), while an
+        // `Untargeted` recipient is never a target at all and simply is not
+        // among the objects the locked set can still affect (611.2c).
+        if !state.objects.contains_key(&id) {
+            continue;
+        }
+        let mut recipient_copy = copy.clone();
+        // CR 611.2b: recipient-relative durations ("for as long as ~
+        // remains attached to it") track the concrete object receiving
+        // the copy effect, while the copied values may come from a
+        // different object ("a creature card exiled with ~").
+        recipient_copy.duration_subject = ObjectIncarnationRef::from_object(&state.objects[&id]);
+        apply_precomputed_copy_values(state, id, recipient_copy, events)?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -382,7 +415,7 @@ mod tests {
     ) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration,
                 mana_value_limit: None,
@@ -439,7 +472,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -484,7 +517,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -555,7 +588,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: Some(Duration::UntilEndOfTurn),
                 mana_value_limit: None,
@@ -745,7 +778,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -813,7 +846,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -876,7 +909,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1276,7 +1309,7 @@ mod tests {
         // Resolve BecomeCopy with exactly the modifications the parser would emit.
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1342,7 +1375,7 @@ mod tests {
         // Spider-Man copies Elesh Norn with SetName override.
         let spidey_ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1413,7 +1446,7 @@ mod tests {
         // current_trigger_index = 0.
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1506,7 +1539,7 @@ mod tests {
         // exactly what the parser emits for "and she has this ability").
         let irma_to_bear = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1596,7 +1629,7 @@ mod tests {
 
         let assassin_to_bear = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1647,7 +1680,7 @@ mod tests {
         // Source has zero printed triggers — index 0 is out of bounds.
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1691,7 +1724,7 @@ mod tests {
         let copy_ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1704,7 +1737,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1761,7 +1794,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1852,7 +1885,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,

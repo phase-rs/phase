@@ -2023,7 +2023,7 @@ fn mishra_copy_as_enters_noncreature_is_not_attacking() {
                 AbilityKind::Spell,
                 Effect::BecomeCopy {
                     target: TargetFilter::SpecificObject { id: copy_target },
-                    recipient: TargetFilter::SelfRef,
+                    recipient: crate::types::ability::CopyRecipient::Source,
                     duration: None,
                     mana_value_limit: None,
                     additional_modifications: Vec::new(),

@@ -204,6 +204,22 @@ describe("normalizeEvents", () => {
     expect(steps[0].effects[0].event.type).toBe("TurnStarted");
   });
 
+  it("ExtraTurnCreated is non-visual while TurnStarted remains visual", () => {
+    const creation: GameEvent = {
+      type: "ExtraTurnCreated",
+      data: { player_id: 1, anchor: 0 },
+    };
+    const turnStarted: GameEvent = {
+      type: "TurnStarted",
+      data: { player_id: 1, turn_number: 2 },
+    };
+
+    expect(normalizeEvents([creation])).toEqual([]);
+    const steps = normalizeEvents([creation, turnStarted]);
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects[0].event.type).toBe("TurnStarted");
+  });
+
   it("BlockersDeclared is non-visual (no animation step)", () => {
     const events: GameEvent[] = [
       { type: "BlockersDeclared", data: { assignments: [[3, 1]] } },

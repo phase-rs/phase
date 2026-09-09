@@ -26,7 +26,8 @@ use crate::types::resolved_commands::{
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
-    build_target_slots, flatten_targets_in_chain, validate_targets_in_chain,
+    build_target_slots, flatten_specified_targets_in_chain, flatten_targets_in_chain,
+    validate_targets_in_chain,
 };
 use super::effects;
 use super::targeting;
@@ -1573,12 +1574,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let mut bestow_reverted_at_resolution = false;
     if casting_variant == CastingVariant::Bestow {
         let target_is_illegal = ability.as_ref().is_some_and(|a| {
-            let original = flatten_targets_in_chain(a);
+            // CR 702.103e asks CR 608.2b's question — use the same
+            // specified-target count as the main fizzle site below.
+            let original = flatten_specified_targets_in_chain(a);
             if original.is_empty() {
                 return false;
             }
             let validated = validate_targets_in_chain(state, a);
-            let legal = flatten_targets_in_chain(&validated);
+            let legal = flatten_specified_targets_in_chain(&validated);
             targeting::check_fizzle(&original, &legal)
         });
         let still_bestow_form = state
@@ -1706,7 +1709,24 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // Permanent spells with no spell ability (ability is None) skip straight to
     // zone-change handling below.
     if let Some(ref ability) = ability {
-        let original_targets = flatten_targets_in_chain(ability);
+        // CR 608.2b + CR 115.10a: count only the targets the spell SPECIFIED, not
+        // anaphoric snapshots an inheriting rider carries — see
+        // `flatten_specified_targets_in_chain`. BOTH sides use it: an all-anaphoric
+        // chain must report "no targets" and take the enclosing
+        // `!original_targets.is_empty()` gate ABOVE `check_fizzle` (stack.rs:1733;
+        // the bestow closure's own `if original.is_empty()` at :1580). Taking that
+        // gate skips `validate_targets_in_chain` at :1737 AND routes resolution to
+        // the `else` arm below — `execute_effect(state, ability, ..)` at :1795, the
+        // UNVALIDATED chain, not `execute_effect(state, &validated, ..)` at :1793.
+        // That branch is UNREACHABLE by this change, not merely harmless: the only
+        // writer of an inherited entry pushes `parent_creature_target`, a `find_map`
+        // over the HEAD's own `TargetRef::Object`s (ability_utils.rs:7911-7914), so
+        // an empty head pushes nothing and its sub is empty too. This flatten can
+        // only be empty where the old one already was, so the gate is taken on
+        // exactly the same chains as at BASE. Symmetry is safe by construction —
+        // `validate_targets_in_chain` clones and mutates only `.targets`, and the
+        // discriminator reads no `.targets`.
+        let original_targets = flatten_specified_targets_in_chain(ability);
         // CR 702.103e: when a bestowed Aura reverted at the start of resolution,
         // suppress the fizzle check — the spell is no longer an Aura and proceeds
         // to resolve as a creature spell with no remaining target.
@@ -1715,7 +1735,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             && !mutate_reverted_at_resolution
         {
             let validated = validate_targets_in_chain(state, ability);
-            let legal_targets = flatten_targets_in_chain(&validated);
+            let legal_targets = flatten_specified_targets_in_chain(&validated);
             if targeting::check_fizzle(&original_targets, &legal_targets) {
                 // CR 608.2b: Fizzle — all targets illegal, spell is countered on resolution.
                 if is_spell {
@@ -2248,6 +2268,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             else {
                                 unreachable!("matched ProposedEvent::ZoneChange above");
                             };
+                            // CR 614.1c + CR 616.1: everything this permanent spell's own entry raises
+                            // from here on is its CHILD. Record the boundary before the delivery producer
+                            // runs so the parked PendingSpellResolution is installed beneath that child
+                            // stack rather than on top of it.
+                            let entry_child_stack_start =
+                                state.resolution_stack.capture_child_boundary();
                             match zone_pipeline::deliver(
                                 state,
                                 approved,
@@ -2274,16 +2300,48 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 // so the choice-answer resume can complete Aura
                                 // attachment / cast-link stamps — mirrors the
                                 // ReplacementResult::NeedsChoice arm below.
+                                //
+                                // CR 616.1 + CR 616.1f + CR 614.1c: the ONLY pause that
+                                // reaches this arm is the delivery tail's
+                                // enters-with-counters step, which pushed a
+                                // CounterAdditions frame onto the stack top
+                                // (`apply_etb_counters`'s pause branch). `deliver` is
+                                // called with `CallerEpilogue`, which disables
+                                // `apply_zone_delivery_tail`'s own post-replacement drain,
+                                // so every other mid-entry prompt surfaces at the caller
+                                // epilogue below instead. `active_counter_additions` is
+                                // top-only by design, so this parent must be INSERTED
+                                // BENEATH that child; pushing it on top makes every resume
+                                // drain read `None` and strands both frames until
+                                // `start_next_turn`'s CR 514.3a + CR 500.1 turn-wrap
+                                // assert.
+                                //
+                                // KNOWN RESIDUAL (deliberate): a Devour-shape entrant
+                                // (CR 702.82a/c) also has a CR 614.13a
+                                // eligibility-snapshot ChangeZone frame beneath the counter
+                                // queue, and the sacrifice that consumes that snapshot
+                                // lives in a PostReplacement frame raised by
+                                // `replace_event` ABOVE this capture — i.e. BELOW the
+                                // parked parent. The counter child still drains; the parent
+                                // is then buried under the snapshot and does not complete.
+                                // Do NOT "fix" that by retiring the snapshot from the
+                                // completion helper: the snapshot IS the eligible-pool
+                                // filter (`game/effects/sacrifice.rs`, `is_none_or`), and
+                                // retiring it early was measured to let the devourer
+                                // sacrifice itself, in violation of CR 614.13a.
                                 zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
-                                    state.push_spell_resolution(pending_spell_resolution_snapshot(
-                                        state,
-                                        &entry,
-                                        ability.as_deref(),
-                                        casting_variant,
-                                        actual_mana_spent,
-                                        &spell_targets,
-                                        live_controller,
-                                    ));
+                                    state.push_spell_resolution_after_child(
+                                        pending_spell_resolution_snapshot(
+                                            state,
+                                            &entry,
+                                            ability.as_deref(),
+                                            casting_variant,
+                                            actual_mana_spent,
+                                            &spell_targets,
+                                            live_controller,
+                                        ),
+                                        entry_child_stack_start,
+                                    );
                                     events.push(GameEvent::StackResolved {
                                         object_id: entry.id,
                                     });
@@ -2429,6 +2487,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // `ability == None` are not silently de-kicked when a replacement
                     // needs a player choice. `engine_replacement` restores this onto
                     // the permanent unconditionally after the choice resolves.
+                    //
+                    // AUDITED (do not "fix" without a repro): this push is deliberately
+                    // plain. `replace_event`'s CR 616.1f repeat can in principle apply a
+                    // real applier before returning NeedsChoice, so a child frame is
+                    // structurally possible — but two measured fixtures reach here with
+                    // only this SpellResolution frame resident (a MayCopy enter-as-copy
+                    // spell, and a permanent carrying two self-`Moved` replacements), the
+                    // only test on this path
+                    // (`cost_zone_pipeline.rs::mimeoplasm_forced_exile_cost_resumes_after_…`)
+                    // asserts this frame owns the TOP, and `Ordering::Less` cannot be shown
+                    // unreachable across `replace_event`'s applier fan-out. Adopting
+                    // `push_spell_resolution_after_child` here needs a fixture that measures
+                    // a resident child plus its own `Less` analysis first.
                     state.push_spell_resolution(pending_spell_resolution_snapshot(
                         state,
                         &entry,
@@ -2658,6 +2729,17 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // target for the PersistChosenAttribute resume (CR 608.3c /
             // CR 303.4a). Do not push SpellResolution on top of an
             // AbilityContinuation (Tribute/Siege resume is top-only).
+            //
+            // The plain push is REQUIRED here. This is the caller epilogue's own
+            // prompt, and its answer path (`handle_persist_chosen_attribute_choice`)
+            // reads `active_spell_resolution()` — TOP-ONLY — with no preceding
+            // post-replacement dispatch retire, so this frame must own the top while
+            // the resident PostReplacement frame sits beneath it. A boundary insert
+            // would put this frame BELOW that frame, drop the CR 608.3a / CR 608.3c /
+            // CR 400.7d epilogue, and fall into the Enchant-filter consult that path
+            // explicitly forbids as a spell-path fallback (CR 303.4a). Site A above
+            // inserts beneath its child for the same reason in mirror image: there the
+            // answer path reads the CHILD top-only, here it reads the PARENT.
             if state.has_post_replacement_drain() {
                 state.clear_post_replacement_source();
                 if let Some(wf) = super::engine_replacement::apply_pending_post_replacement_effect(
@@ -4772,11 +4854,11 @@ fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<Batc
     if !flatten_targets_in_chain(ability).is_empty() {
         return None;
     }
-    // CR 603.4: an entry-level
-    // intervening-if is rechecked per entry at resolution and skips the effect
-    // once it flips. The batch path does not recheck per entry, so refuse to
-    // group any entry carrying one — it becomes a singleton run and falls back
-    // to the `resolve_top` path that rechecks correctly.
+    // CR 603.4: an entry-level intervening-if is rechecked per entry at
+    // resolution and skips the effect once it flips. The batch path does not
+    // recheck per entry, so refuse to group any entry carrying one — it
+    // becomes a singleton run and falls back to the `resolve_top` path that
+    // rechecks correctly.
     if condition.is_some() {
         return None;
     }
@@ -5120,6 +5202,64 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    #[test]
+    fn oversized_extra_turn_effect_settles_without_allocating_turns_or_events() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Oversized extra turns".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ExtraTurn {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed {
+                    value: crate::game::effects::extra_turn::MAX_EXTRA_TURNS_PER_RESOLUTION + 1,
+                },
+            },
+            Vec::new(),
+            source_id,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: source_id,
+            source_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(Box::new(ability)),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let mut events = Vec::new();
+
+        resolve_top(&mut state, &mut events);
+
+        assert!(state.extra_turns.is_empty());
+        assert!(state.stack.is_empty());
+        assert_eq!(state.objects[&source_id].zone, Zone::Graveyard);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ExtraTurnCreated { .. })));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: crate::types::ability::EffectKind::ExtraTurn,
+                ..
+            }
+        )));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::StackResolved { object_id } if *object_id == source_id))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -5683,6 +5823,7 @@ mod tests {
             CostPaidObjectSnapshot {
                 object_id: exiled_id,
                 lki: exiled.snapshot_for_mana_spent(),
+                incarnation: 0,
             }
         };
         let spell_id = create_object(

@@ -5,15 +5,14 @@
 //! plus the CR 608.2c antecedent resolution that turns a third-person anaphor
 //! into a bound [`ControllerRef`].
 //!
-//! CR 110.2a: "If an effect instructs a player to
-//! put an object onto the battlefield, that object enters the battlefield under
-//! that player's control unless the effect states otherwise." The clause parsed
-//! here is precisely the "unless the effect states otherwise" escape, so the
-//! grammar and the binding are the authority for who ends up controlling the
-//! permanent.
+//! CR 110.2a: "If an effect instructs a player to put an object onto the
+//! battlefield, that object enters the battlefield under that player's control
+//! unless the effect states otherwise." The clause parsed here is precisely the
+//! "unless the effect states otherwise" escape, so the grammar and the binding
+//! are the authority for who ends up controlling the permanent.
 //!
-//! CR 110.1 scopes this to battlefield
-//! destinations only; a `"to its owner's hand"` phrase has no controller.
+//! CR 110.1 scopes this to battlefield destinations only; a `"to its
+//! owner's hand"` phrase has no controller.
 //!
 //! Before this module the four rewired seams each recognized a *different*
 //! hand-picked subset of the spellings by literal comparison, and every
@@ -36,24 +35,23 @@ use crate::parser::oracle_ir::ast::EntersUnderSpec;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::{ControllerRef, FilterProp, TargetFilter};
 
-/// CR 110.2a: the possessor named by a
-/// battlefield-entry control clause, AS WRITTEN. A syntax type, deliberately
-/// NOT a `ControllerRef`: a combinator sees only the clause, never its
-/// antecedent, so it cannot produce a bound reference without guessing.
+/// CR 110.2a: the possessor named by a battlefield-entry control clause, AS
+/// WRITTEN. A syntax type, deliberately NOT a `ControllerRef`: a combinator
+/// sees only the clause, never its antecedent, so it cannot produce a bound
+/// reference without guessing.
 ///
 /// `Copy` is load-bearing: `strip_return_destination_ext_with_remainder` reads
 /// this out of a `&'static [(...)]` destination table row by value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum ControlClausePossessor {
-    /// CR 109.5: `"under your control"` — the
-    /// resolving player.
+    /// CR 109.5: `"under your control"` — the resolving player.
     You,
-    /// CR 110.2: `"under its/their/his/her
-    /// owner's control"` — explicitly names the moved object's owner. The
-    /// existing `None` carrier preserves that per-object owner at resolution.
+    /// CR 110.2: `"under its/their/his/her owner's control"` — explicitly
+    /// names the moved object's owner. The existing `None` carrier preserves
+    /// that per-object owner at resolution.
     Owner,
-    /// CR 608.2c: a bare third-person plural
-    /// anaphor, `"under their control"`. Needs an antecedent.
+    /// CR 608.2c: a bare third-person plural anaphor, `"under their
+    /// control"`. Needs an antecedent.
     TheirAnaphor,
     /// CR 608.2c: the demonstrative `"under that player's control"`. Needs an
     /// antecedent, and specifically a *player-valued* one.
@@ -76,16 +74,15 @@ impl ControlClausePossessor {
     }
 }
 
-/// CR 608.2c: the antecedent a third-person
-/// control-clause anaphor resolves to, already reduced to something the engine
-/// can name. Never a raw parse scope.
+/// CR 608.2c: the antecedent a third-person control-clause anaphor resolves
+/// to, already reduced to something the engine can name. Never a raw parse
+/// scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ControlAnaphorAntecedent {
     /// A player reference already MAPPED through [`map_relative_player_scope`].
     ContextPlayer(ControllerRef),
-    /// CR 400.1 + CR 400.3 + CR 404.1 + CR 108.3:
-    /// the moved object's own owner, named by the clause's parsed
-    /// object filter.
+    /// CR 400.1 + CR 400.3 + CR 404.1 + CR 108.3: the moved object's own
+    /// owner, named by the clause's parsed object filter.
     MovedObjectOwner,
     /// No antecedent can be named — fail closed.
     Unnameable,
@@ -109,9 +106,9 @@ pub(crate) fn parse_leading_control_clause(i: &str) -> OracleResult<'_, ControlC
     preceded(tag(" "), parse_control_clause).parse(i)
 }
 
-/// CR 108.3: the shared possessive-mark axis.
-/// `'s` / `’s` singular, bare `'` / `’` plural (`"owners'"`). LONGEST-FIRST, so
-/// the singular mark is never short-matched by the bare apostrophe arm.
+/// CR 108.3: the shared possessive-mark axis. `'s` / `’s` singular, bare `'` /
+/// `’` plural (`"owners'"`). LONGEST-FIRST, so the singular mark is never
+/// short-matched by the bare apostrophe arm.
 fn parse_possessive_mark(i: &str) -> OracleResult<'_, ()> {
     value(
         (),
@@ -193,24 +190,23 @@ pub(crate) fn fold_control_clauses(span: &str) -> Option<ControlClausePossessor>
     })
 }
 
-/// CR 608.2c: map a relative-player parse scope
-/// to a `ControllerRef` the CR 110.2a binding may legally use. EXHAUSTIVE, NO
-/// WILDCARD, FAIL-CLOSED — a future `ControllerRef` variant is a compile error
-/// here rather than a silently-admitted controller binding.
+/// CR 608.2c: map a relative-player parse scope to a `ControllerRef` the
+/// CR 110.2a binding may legally use. EXHAUSTIVE, NO WILDCARD, FAIL-CLOSED — a
+/// future `ControllerRef` variant is a compile error here rather than a
+/// silently-admitted controller binding.
 ///
 /// The traced precedent `resolve_player_anaphor_damage_recipient`
 /// (`oracle_effect/lower.rs`) MAPS rather than passes through, for the same
 /// reason; unlike it, this table has no `_ =>` arm.
 ///
 /// REJECTED SOURCE, recorded so it is not re-derived: the traced function's
-/// third source — the CR 608.2k `ctx.subject` bare-player-filter
-/// fallback — maps unconditionally to `TriggeringPlayer`. At these seams that
-/// is WRONG for The Beamtown Bullies (an ACTIVATED ability whose "target
-/// opponent" subject is a TARGET, so there is no trigger event in scope at all)
-/// and for Endless Whispers (a dies-trigger whose "that player" is a CHOSEN
-/// opponent, not the triggering player), and REDUNDANT for Gerrymandering
-/// (already bound by the `ScopedPlayer` arm). Unsafe in two of three cases,
-/// redundant in the third.
+/// third source — the CR 608.2k `ctx.subject` bare-player-filter fallback —
+/// maps unconditionally to `TriggeringPlayer`. At these seams that is WRONG for
+/// The Beamtown Bullies (an ACTIVATED ability whose "target opponent" subject
+/// is a TARGET, so there is no trigger event in scope at all) and for Endless
+/// Whispers (a dies-trigger whose "that player" is a CHOSEN opponent, not the
+/// triggering player), and REDUNDANT for Gerrymandering (already bound by the
+/// `ScopedPlayer` arm). Unsafe in two of three cases, redundant in the third.
 ///
 /// DECLARED RUNTIME CAVEAT: `ScopedPlayer` resolves through
 /// `game/filter.rs::scoped_player_or_controller`, which falls back through the
@@ -281,10 +277,10 @@ pub(crate) fn name_entry_control_antecedent(
     }
 }
 
-/// CR 108.3: true when `filter` carries
-/// `FilterProp::Owned { controller }` for a THIRD-PERSON player — i.e. the
-/// clause's own noun phrase already named an owner that is not the resolving
-/// player. Recursion mirrors `game/filter.rs::filter_contains_last_zone_changed`.
+/// CR 108.3: true when `filter` carries `FilterProp::Owned { controller }` for a
+/// THIRD-PERSON player — i.e. the clause's own noun phrase already named an owner
+/// that is not the resolving player. Recursion mirrors
+/// `game/filter.rs::filter_contains_last_zone_changed`.
 ///
 /// Deliberately EXCLUDED:
 /// - `Owned { You }` — "you" is not third person, so there is no anaphor to
@@ -337,14 +333,14 @@ pub(crate) fn bind_control_clause(
         // CR 109.5: "you"/"your" names the resolving player as an
         // explicit battlefield-entry controller.
         (ControlClausePossessor::You, _) => EntersUnderSpec::Override(ControllerRef::You),
-        // CR 110.2: `Default` is the existing IR spelling for the
-        // resolver's per-moved-object owner behavior. It must not be collapsed
-        // to the CR 110.2a instructed-player default.
+        // CR 110.2: `Default` is the existing IR spelling for the resolver's
+        // per-moved-object owner behavior. It must not be collapsed to the
+        // CR 110.2a instructed-player default.
         (ControlClausePossessor::Owner, _) => EntersUnderSpec::Default,
-        // CR 400.1 + CR 400.3 + CR 404.1 + CR 108.3:
-        // a card in a graveyard is in ITS OWNER'S graveyard, so the
-        // clause's own owner NP and the moved object's owner are the same
-        // player. `ParentTargetOwner` reads exactly that.
+        // CR 400.1 + CR 400.3 + CR 404.1 + CR 108.3: a card in a graveyard
+        // is in ITS OWNER'S graveyard, so the clause's own owner NP and the
+        // moved object's owner are the same player. `ParentTargetOwner`
+        // reads exactly that.
         (ControlClausePossessor::TheirAnaphor, ControlAnaphorAntecedent::MovedObjectOwner) => {
             EntersUnderSpec::Override(ControllerRef::ParentTargetOwner)
         }

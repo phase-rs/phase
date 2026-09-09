@@ -37,6 +37,8 @@ const DraftSpectatorPage = lazy(() =>
   import("./pages/DraftSpectatorPage").then((m) => ({ default: m.DraftSpectatorPage })),
 );
 const ReplayPage = lazy(() => import("./pages/ReplayPage").then((m) => ({ default: m.ReplayPage })));
+const TournamentLandingPage = lazy(() => import("./pages/TournamentLandingPage").then((m) => ({ default: m.TournamentLandingPage })));
+const TournamentPage = lazy(() => import("./pages/TournamentPage").then((m) => ({ default: m.TournamentPage })));
 
 function DevStrict({ children }: { children: ReactNode }) {
   if (!import.meta.env.DEV) return children;
@@ -130,6 +132,8 @@ function AppContent() {
             <Route path="/coverage" element={<DevStrict><CoveragePage /></DevStrict>} />
             <Route path="/draft" element={<DevStrict><DraftLandingPage /></DevStrict>} />
             <Route path="/draft/quick" element={<DevStrict><DraftPage /></DevStrict>} />
+            <Route path="/tournament" element={<DevStrict><TournamentLandingPage /></DevStrict>} />
+            <Route path="/tournament/:code" element={<DevStrict><TournamentPage /></DevStrict>} />
             <Route path="/draft-pod" element={<DraftPodPage />} />
             <Route path="/draft-spectator" element={<DraftSpectatorPage />} />
           </Route>

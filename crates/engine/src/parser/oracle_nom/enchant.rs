@@ -253,7 +253,7 @@ pub(crate) fn parse_enchant_target_full(input: &str) -> OracleResult<'_, TargetF
 
 /// CR 702.5a + CR 702.9: Optional trailing "without [keyword]" qualifier on an
 /// enchant line (Trapped in the Tower, Roots). Delegates to the shared target
-/// suffix authority so Aura legal-target sets match `parse_type_phrase`.
+/// suffix authority so Aura legal-target sets match `parse_type_phrase_folding`.
 fn parse_enchant_without_keyword_suffix(input: &str) -> OracleResult<'_, Vec<FilterProp>> {
     match parse_without_keyword_suffix(input) {
         Some((props, consumed)) => Ok((&input[consumed..], props)),

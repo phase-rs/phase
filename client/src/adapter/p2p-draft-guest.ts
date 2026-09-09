@@ -28,6 +28,7 @@ import {
   type DraftReconnectRejectionKind,
 } from "../network/draftProtocol";
 import type {
+  DraftCommanderLaunch,
   DraftMatchLaunch,
   DraftMatchSettlement,
   DraftP2PMessage,
@@ -67,6 +68,7 @@ export type DraftGuestEvent =
   | { type: "matchSettlementAcknowledged"; matchId: string; receiptId: string; revision: number }
   | { type: "timerSync"; remainingMs: number }
   | { type: "matchStart"; launch: DraftMatchLaunch }
+  | { type: "commanderLaunch"; launch: DraftCommanderLaunch }
   | { type: "bo3SideboardPrompt"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; loserSeat: number | null; timerMs: number }
   | { type: "bo3ChoosePlayDraw"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; timerMs: number }
   | { type: "bo3GameStart"; matchId: string; gameNumber: number; firstPlayerSeat: number }
@@ -165,6 +167,14 @@ export class P2PDraftGuest {
       resolve: () => void;
       reject: (error: Error) => void;
       activeAttempts: number;
+    }
+  >();
+  private landSuggestionWaiters = new Map<
+    string,
+    {
+      session: DraftPeerSession;
+      resolve: (lands: Record<string, number>) => void;
+      reject: (error: Error) => void;
     }
   >();
   /** Set synchronously so two UI clicks share one outbox command. */
@@ -304,12 +314,14 @@ export class P2PDraftGuest {
 
   private retireSession(session: DraftPeerSession): void {
     if (this.session === session) this.session = null;
+    this.failLandSuggestionWaiters("Draft connection retired", session);
     session.close("Draft reconnect attempt retired");
   }
 
   private handleSessionEnd(session: DraftPeerSession): void {
     if (this.session !== session) return;
     this.session = null;
+    this.failLandSuggestionWaiters("Draft host disconnected", session);
     if (this.handshake?.session === session) {
       this.rejectHandshake(session, new Error("Draft host disconnected before acknowledging"));
     } else {
@@ -338,6 +350,21 @@ export class P2PDraftGuest {
       type: "draft_pick_with_draft_effect",
       effectCardInstanceId,
       cardInstanceIds,
+    });
+  }
+
+  suggestLands(): Promise<Record<string, number>> {
+    const session = this.session;
+    if (!session) return Promise.reject(new Error("Not connected to draft host"));
+    const requestId = crypto.randomUUID();
+    return new Promise<Record<string, number>>((resolve, reject) => {
+      this.landSuggestionWaiters.set(requestId, { session, resolve, reject });
+      void session.send({ type: "draft_suggest_lands", requestId }).catch((error: unknown) => {
+        const waiter = this.landSuggestionWaiters.get(requestId);
+        if (!waiter || waiter.session !== session) return;
+        this.landSuggestionWaiters.delete(requestId);
+        waiter.reject(asError(error));
+      });
     });
   }
 
@@ -423,6 +450,14 @@ export class P2PDraftGuest {
       waiter.reject(new Error(reason));
     }
     this.deckSubmissionWaiters.clear();
+  }
+
+  private failLandSuggestionWaiters(reason: string, session?: DraftPeerSession): void {
+    for (const [requestId, waiter] of this.landSuggestionWaiters) {
+      if (session && waiter.session !== session) continue;
+      this.landSuggestionWaiters.delete(requestId);
+      waiter.reject(new Error(reason));
+    }
   }
 
   /** A reconnect makes the participant-owned command eligible for replay. */
@@ -601,6 +636,22 @@ export class P2PDraftGuest {
         break;
       }
 
+      case "draft_suggest_lands_result": {
+        const waiter = this.landSuggestionWaiters.get(msg.requestId);
+        if (!waiter || waiter.session !== session) break;
+        this.landSuggestionWaiters.delete(msg.requestId);
+        waiter.resolve(msg.lands);
+        break;
+      }
+
+      case "draft_suggest_lands_rejected": {
+        const waiter = this.landSuggestionWaiters.get(msg.requestId);
+        if (!waiter || waiter.session !== session) break;
+        this.landSuggestionWaiters.delete(msg.requestId);
+        waiter.reject(new Error(msg.reason));
+        break;
+      }
+
       case "draft_error": {
         if (msg.submissionId) {
           const waiter = this.deckSubmissionWaiters.get(msg.submissionId);
@@ -620,6 +671,7 @@ export class P2PDraftGuest {
         this.resolveLeaveAcknowledgement(session);
         await this.revokeRecovery();
         this.failDeckSubmissionWaiters(msg.reason);
+        this.failLandSuggestionWaiters(msg.reason, session);
         this.emit({ type: "kicked", reason: msg.reason });
         break;
       }
@@ -688,11 +740,17 @@ export class P2PDraftGuest {
         break;
       }
 
+      case "draft_commander_launch": {
+        this.emit({ type: "commanderLaunch", launch: msg.launch });
+        break;
+      }
+
       case "draft_host_left": {
         this.terminated = true;
         this.resolveLeaveAcknowledgement(session);
         await this.revokeRecovery();
         this.failDeckSubmissionWaiters(msg.reason);
+        this.failLandSuggestionWaiters(msg.reason, session);
         this.emit({ type: "hostLeft", reason: msg.reason });
         break;
       }
@@ -787,6 +845,7 @@ export class P2PDraftGuest {
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
     this.failDeckSubmissionWaiters("Draft connection disposed");
+    this.failLandSuggestionWaiters("Draft connection disposed");
     if (this.handshake) this.rejectHandshake(this.handshake.session, abortError());
     if (this.session) {
       this.retireSession(this.session);

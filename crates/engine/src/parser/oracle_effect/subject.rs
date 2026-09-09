@@ -17,9 +17,9 @@ use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChosenSubtypeKind, ColorChangeMode, ContinuousModification,
-    ControllerRef, Duration, EachDamageRecipient, Effect, EffectScope, FilterProp, MultiTargetSpec,
-    ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, StaticCondition,
-    StaticDefinition, TargetFilter, TypedFilter,
+    ControllerRef, CopyRecipient, Duration, EachDamageRecipient, Effect, EffectScope, FilterProp,
+    MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
@@ -41,7 +41,8 @@ use super::super::oracle_static::{
     parse_static_line_multi, peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{
-    parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase, TargetSyntax,
+    parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase_folding,
+    TargetSyntax,
 };
 use super::super::oracle_util::{
     merge_or_filters, parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
@@ -2071,14 +2072,14 @@ fn try_parse_subject_restriction_clause(
         // ties the prohibition to the target's tap state. Without that suffix the
         // window is UNSTATED here, and it must stay `None`.
         //
-        // CR 611.2a: this value lands on BOTH the
-        // embedded `GenericEffect.duration` and the clause CARRIER below, so an
-        // injected `UntilEndOfTurn` default made both indistinguishable from a
-        // printed window and `with_clause_chain_duration` / `apply_duration_to_effect`
-        // declined to distribute the enclosing sentence's window into either.
-        // Measured: Dovin Baan, Edifice of Authority and Mythos of Vadrok print
-        // "until your next turn" on the head and had this prohibition end a full turn
-        // early. Emitting verbatim lets the head window reach it; the resolver
+        // CR 611.2a: this value lands on BOTH the embedded `GenericEffect.duration`
+        // and the clause CARRIER below, so an injected `UntilEndOfTurn` default made
+        // both indistinguishable from a printed window and
+        // `with_clause_chain_duration` / `apply_duration_to_effect` declined to
+        // distribute the enclosing sentence's window into either. Measured: Dovin
+        // Baan, Edifice of Authority and Mythos of Vadrok print "until your next turn"
+        // on the head and had this prohibition end a full turn early. Emitting
+        // verbatim lets the head window reach it; the resolver
         // (`game/effects/effect.rs`) remains the single authority for the fallback
         // when nothing is printed anywhere.
         let duration = tapped_bound_prohibition_duration(&lower);
@@ -2623,7 +2624,36 @@ pub(super) fn parse_subject_application(
         .parse(after_prefix)
         .is_ok()
         {
-            let (filter, _) = parse_target_with_ctx(target_text, ctx);
+            let (filter, rest) = parse_target_with_ctx(target_text, ctx);
+            // CR 115.1d (issue #8581): "any number of target players other
+            // than that player" (Curse of Surveillance) is not silently
+            // dropped here. The plural-noun coordinated-player arm inside
+            // `parse_target_with_ctx` matches the singular "player" tag
+            // against "players", so `rest` routinely carries a benign
+            // leftover "s" even on the fully-supported "any number of target
+            // players"/"target creatures" shapes (see
+            // `parse_subject_any_number_of_target_players`) -- a bare
+            // non-empty-rest guard would fail those too. The actual signal
+            // for an unexpressed exclusion is that leftover, once the "s"
+            // pluralization artifact is stripped, starting with "other than
+            // " -- the one shape this arm cannot express (no player-scoped
+            // counterpart to `FilterProp::Another` exists yet). Failing
+            // closed here (returning None) sends the caller back to
+            // Effect::unimplemented instead of reporting a bare
+            // target=player as fully supported. The general "exclude the
+            // enchanted/reference player from a player-targeted count" shape
+            // is tracked separately (issue #8581); this guard only refuses to
+            // fabricate a wrong AST for it.
+            if (
+                opt(nom::character::complete::char::<_, OracleError<'_>>('s')),
+                multispace0,
+                tag("other than "),
+            )
+                .parse(rest)
+                .is_ok()
+            {
+                return None;
+            }
             let mut application = subject_filter_application(filter, true)?;
             application.multi_target = Some(MultiTargetSpec::unlimited(0));
             return Some(application);
@@ -2736,7 +2766,7 @@ pub(super) fn parse_subject_application(
     {
         let consumed = lower.len() - rest_lower.len();
         let phrase = &subject[consumed..];
-        let (filter, rest) = parse_type_phrase(phrase);
+        let (filter, rest) = parse_type_phrase_folding(phrase);
         let filter = merge_partial_type_phrase_filter(filter, rest.trim());
         return subject_filter_application(filter, false);
     }
@@ -3361,7 +3391,7 @@ pub(super) fn parse_subject_application(
     {
         let consumed = lower.len() - rest_subject.len();
         let original_rest = &subject[consumed..];
-        let (filter, rem) = parse_type_phrase(original_rest);
+        let (filter, rem) = parse_type_phrase_folding(original_rest);
         if rem.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
             return Some(SubjectApplication {
                 affected: TargetFilter::ParentTarget,
@@ -3382,7 +3412,7 @@ pub(super) fn parse_subject_application(
         // the remainder as a type phrase. Covers all "that [type]" patterns generically.
         let consumed = lower.len() - rest_subject.len();
         let original_rest = &subject[consumed..];
-        let (filter, rem) = parse_type_phrase(original_rest);
+        let (filter, rem) = parse_type_phrase_folding(original_rest);
         if rem.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
             // CR 608.2k + CR 608.2c: Inside a trigger effect, "that [type]" is an
             // anaphoric back-reference to the triggering event's subject object (the
@@ -3411,7 +3441,7 @@ pub(super) fn parse_subject_application(
         }
     }
 
-    let (filter, rest) = parse_type_phrase(subject);
+    let (filter, rest) = parse_type_phrase_folding(subject);
     if rest.trim().is_empty() {
         return subject_filter_application(filter, false);
     }
@@ -3908,6 +3938,91 @@ pub(super) fn static_affected_for_application(application: &SubjectApplication) 
     }
 }
 
+/// CR 707.2 + CR 115.1 + CR 611.2c: map a parsed "<subject> become[s] a copy /
+/// copies of …" subject onto [`CopyRecipient`] — WHO becomes the copy.
+///
+/// Single authority for both the singular ("a copy of") and plural ("copies
+/// of") arms of [`build_become_clause`]. They disagreed before: the singular arm
+/// hardcoded the source and discarded the subject entirely, so every card whose
+/// recipient is NOT the source silently copied onto the wrong permanent and
+/// announced one target too few (Shuri, Wakandan Inventor; True Polymorph;
+/// Shapesharer; Saheeli, Sublime Artificer; The Animus; Mirrorweave; Mirrorform;
+/// Reflection Net).
+///
+/// The three readings come straight off `SubjectApplication`:
+///
+/// - CR 115.1 — a DECLARED target subject ("**Target** artifact you control
+///   becomes a copy of …") is announced, so it becomes
+///   [`crate::types::ability::CopyRecipient::Target`]. Declared first in printed order, hence first in
+///   target-declaration order (CR 601.2c).
+/// - CR 707.2 — a self subject (`~`, or an anaphoric "it"/"this creature"
+///   naming the source) is [`crate::types::ability::CopyRecipient::Source`]. This is the incumbent
+///   path for every already-shipping self-copy card and must stay
+///   byte-identical.
+/// - CR 611.2c — any other subject ("**Each other** creature", "Shards you
+///   control", an `AttachedTo` host) names an untargeted set determined as the
+///   effect resolves, so it becomes [`crate::types::ability::CopyRecipient::Untargeted`].
+///
+/// `static_affected_for_application` supplies the non-targeted filter so the
+/// anaphor/`inherits_parent` rewrite stays in one place.
+///
+/// **Invariant.** A `Target(..)` filter must never be a context ref. Six
+/// authorities key off `crate::types::ability::CopyRecipient::announced_filter`,
+/// which is unconditional for `Target`: both slot builders, both target
+/// assigners, the chain target-sink predicate, and the resolver's copy-source
+/// index. A context-ref `Target` would therefore collapse the recipient and the
+/// copy source onto the same declared object. `CopyRecipient::targeted` owns
+/// that decision — here and on deserialization — so the divergence is
+/// unrepresentable rather than merely unlikely.
+///
+/// **Why the copy source gates the announced reading.** An announced recipient
+/// claims declared-target slot 0, which shifts the copy source to slot 1 (see
+/// `become_copy_copy_source_target_index`). That shift is only sound when the
+/// copy source ITSELF claims a declared slot. Two filter shapes claim none, and
+/// this predicate must mirror BOTH arms of the runtime authority
+/// (`game::triggers::extract_target_filter_from_effect`) or the invariant is
+/// weaker than it reads:
+///
+/// - a context ref — Cytoshape's and Polymorphous Rush's `ParentTarget` ("that
+///   creature", naming a creature chosen by an earlier clause), The Myriad
+///   Pools' and Kaya's `TriggeringSource` — is resolved from chain/event
+///   context;
+/// - `TargetFilter::Any`, which on every effect except the damage family is the
+///   "broadcast at resolution, no declared target" sentinel.
+///
+/// In either case slot 1 does not exist and the resolver would find no copy
+/// source at all. Those cards keep the pre-existing `Source` reading: they were
+/// already an honest gap before this axis existed, and silently converting that
+/// gap into a resolution-time failure would be strictly worse (CLAUDE.md: an
+/// unreadable shape must stay visible, not be consumed). Sizing the change to
+/// exactly the class it fixes also keeps its blast radius equal to its claim.
+fn copy_recipient_for_application(
+    application: &SubjectApplication,
+    copy_source: &TargetFilter,
+) -> CopyRecipient {
+    if let Some(target) = application.target.clone() {
+        if !copy_source_claims_a_declared_slot(copy_source) {
+            return crate::types::ability::CopyRecipient::Source;
+        }
+        return crate::types::ability::CopyRecipient::targeted(target);
+    }
+    match static_affected_for_application(application) {
+        TargetFilter::SelfRef => crate::types::ability::CopyRecipient::Source,
+        filter => crate::types::ability::CopyRecipient::Untargeted(filter),
+    }
+}
+
+/// CR 115.1: does a `BecomeCopy` copy-source filter claim a declared target slot?
+///
+/// Mirrors the two suppression arms `extract_target_filter_from_effect` applies
+/// to this effect: the `Any` broadcast sentinel (whose damage-family exception
+/// cannot reach `BecomeCopy`) and any context ref. Keep in lockstep with that
+/// function — if it ever suppresses a third shape for `BecomeCopy`, an announced
+/// recipient would again shift the copy source onto a slot that does not exist.
+fn copy_source_claims_a_declared_slot(copy_source: &TargetFilter) -> bool {
+    !matches!(copy_source, TargetFilter::Any) && !copy_source.is_context_ref()
+}
+
 fn merge_partial_type_phrase_filter(filter: TargetFilter, remainder: &str) -> TargetFilter {
     if remainder.is_empty() {
         return filter;
@@ -3916,7 +4031,7 @@ fn merge_partial_type_phrase_filter(filter: TargetFilter, remainder: &str) -> Ta
     let TargetFilter::Typed(mut left) = filter else {
         return filter;
     };
-    let (suffix_filter, suffix_remainder) = parse_type_phrase(remainder);
+    let (suffix_filter, suffix_remainder) = parse_type_phrase_folding(remainder);
     let TargetFilter::Typed(right) = suffix_filter else {
         return TargetFilter::Typed(left);
     };
@@ -4704,7 +4819,10 @@ fn build_become_clause(
             )),
         });
     }
-    // CR 611.2b: "Becomes" effects without explicit duration are permanent
+    // CR 611.2a: a continuous effect with no stated duration lasts until the end
+    // of the game, so an undurated "becomes" is permanent. (611.2b governs "for
+    // as long as …" windows, which is a different clause of the same rule and
+    // is what the attachment rewrite in `oracle_ir::ast` keys off.)
     let duration = duration.or(Some(Duration::Permanent));
 
     // CR 119.5: "life total becomes N" — set life total to a specific number.
@@ -4946,10 +5064,11 @@ fn build_become_clause(
             super::become_copy_except::parse_except_clause(remainder, card_name, ctx)
                 .map(|(_, mods)| mods)
                 .unwrap_or_default();
+        let recipient = copy_recipient_for_application(&application, &target);
         return Some(ParsedEffectClause {
             effect: Effect::BecomeCopy {
                 target,
-                recipient: TargetFilter::SelfRef,
+                recipient,
                 duration: duration.clone(),
                 mana_value_limit: None,
                 additional_modifications,
@@ -4982,10 +5101,11 @@ fn build_become_clause(
             super::become_copy_except::parse_except_clause(remainder, card_name, ctx)
                 .map(|(_, mods)| mods)
                 .unwrap_or_default();
+        let recipient = copy_recipient_for_application(&application, &target);
         return Some(ParsedEffectClause {
             effect: Effect::BecomeCopy {
                 target,
-                recipient: static_affected_for_application(&application),
+                recipient,
                 duration: duration.clone(),
                 mana_value_limit: None,
                 additional_modifications,
@@ -6067,12 +6187,12 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
         // CR 105.4 + CR 608.2c (issue #327): Try the "of the chosen / of that"
         // qualifier parser first so "creatures of that color" lowers to a
         // typed filter with `FilterProp::IsChosenColor`. The plain
-        // `parse_type_phrase` would silently drop the trailing qualifier and
+        // `parse_type_phrase_folding` would silently drop the trailing qualifier and
         // leave the filter as a bare-creature match, making the restriction
         // accept ALL creatures rather than only those of the chosen color.
         let filter_tp = TextPair::new(filter_text, filter_text);
         let filter = parse_chosen_qualifier_subject(&filter_tp).unwrap_or_else(|| {
-            let (f, _) = parse_type_phrase(filter_text);
+            let (f, _) = parse_type_phrase_folding(filter_text);
             f
         });
         if !matches!(filter, TargetFilter::Any) {
@@ -7013,6 +7133,10 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "look",
     "lose",
     "investigate",
+    // CR 701.53a: "if they do, you incubate N" (Assimilate Essence). The
+    // subject prefix is stripped so the existing imperative lowerer owns the
+    // keyword action and retains the resolving ability's controller.
+    "incubate",
     "learn",
     // CR 701.40a: Manifest — "its controller manifests the top card of their
     // library" (Reality Shift). Subject-shifted manifest clauses route through
@@ -7025,6 +7149,9 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "put",
     "proliferate",
     "regenerate",
+    // CR 701.70a: "you recruit" (Queen of Dale) re-dispatches to the
+    // existing Recruit lowering after the controller subject is stripped.
+    "recruit",
     "reveal",
     "return",
     "sacrifice",
@@ -8393,6 +8520,64 @@ mod tests {
             "expected TakeTheInitiative, got {:?}",
             ability.effect
         );
+    }
+
+    #[test]
+    fn subject_prefixed_recruit_and_incubate_reach_existing_imperatives() {
+        for (text, predicate) in [("you recruit", "recruit"), ("you incubate 2", "incubate 2")] {
+            let stripped = strip_subject_clause(text)
+                .unwrap_or_else(|| panic!("{text:?} must reach subject stripping"));
+            assert_eq!(stripped, predicate, "wrong predicate for {text:?}");
+            let ability =
+                crate::parser::oracle_effect::parse_effect_chain(text, AbilityKind::Spell);
+            if predicate == "incubate 2" {
+                assert!(matches!(
+                    ability.effect.as_ref(),
+                    Effect::Incubate {
+                        count: QuantityExpr::Fixed { value: 2 }
+                    }
+                ));
+            } else {
+                assert!(matches!(
+                    ability.effect.as_ref(),
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        ..
+                    }
+                ));
+                let discard = ability
+                    .sub_ability
+                    .as_deref()
+                    .expect("Recruit must discard");
+                assert!(matches!(
+                    discard.effect.as_ref(),
+                    Effect::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        ..
+                    }
+                ));
+                let token = discard
+                    .sub_ability
+                    .as_deref()
+                    .expect("Recruit must create a token");
+                assert!(matches!(
+                    token.effect.as_ref(),
+                    Effect::Token {
+                        power: PtValue::Fixed(1),
+                        toughness: PtValue::Fixed(1),
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    token.condition.as_ref(),
+                    Some(
+                        crate::types::ability::AbilityCondition::DiscardedCardMatchesFilter {
+                            filter: TargetFilter::Not { .. }
+                        }
+                    )
+                ));
+            }
+        }
     }
 
     #[test]

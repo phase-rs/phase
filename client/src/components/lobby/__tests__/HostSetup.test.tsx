@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act } from "react";
+import { act, useState } from "react";
 import i18n from "i18next";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -85,6 +85,8 @@ vi.mock("../../../adapter/wasm-adapter", () => ({
 }));
 
 import { HostSetup } from "../HostSetup";
+import * as serverDirectory from "../../../services/serverDirectory";
+import type { ConnectionMode, LobbySourceStatus } from "../../../stores/multiplayerStore";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../../stores/multiplayerStore";
 import {
   DIRECTORY_VERSION,
@@ -106,6 +108,8 @@ import {
 
 describe("HostSetup", () => {
   beforeEach(() => {
+    vi.spyOn(serverDirectory, "refreshServerDirectory").mockResolvedValue(undefined);
+    vi.spyOn(useMultiplayerStore.getState(), "ensureSubscriptionSocket").mockResolvedValue(null);
     localStorageItems.clear();
     useMultiplayerStore.setState({
       displayName: "",
@@ -113,7 +117,13 @@ describe("HostSetup", () => {
       lastHostConfig: null,
       // Without these four a picker fixture leaks into every following case.
       userLobbySources: [],
-      sourceStatus: new Map(),
+      sourceStatus: new Map([[DEFAULT_MULTIPLAYER_SERVER_URL, {
+        state: "open", playerCount: 0,
+        serverInfo: {
+          version: "test", buildCommit: "test", mode: "Full",
+          protocolVersion: PROTOCOL_VERSION, lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+        },
+      }]]),
       directorySources: [],
       disabledDirectorySources: [],
     });
@@ -148,6 +158,16 @@ describe("HostSetup", () => {
   const BAD_LOBBY = "wss://badlobby.example/ws";
   const BAD_FULL = "wss://badfull.example/ws";
 
+  function connectedServer(): LobbySourceStatus {
+    return {
+      state: "open", playerCount: 0,
+      serverInfo: {
+        version: "test", buildCommit: "test", mode: "Full",
+        protocolVersion: PROTOCOL_VERSION, lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+      },
+    };
+  }
+
   /** Two hostable servers, one high-scoring `LobbyOnly` broker, and the two
    * `Full` servers this client cannot handshake with — one on each surface.
    *
@@ -165,6 +185,7 @@ describe("HostSetup", () => {
       median_rtt_ms: 50,
     });
     useMultiplayerStore.setState({
+      sourceStatus: new Map([[FAST, connectedServer()], [SLOW, connectedServer()]]),
       directorySources: directoryEntries(
         // Fails the LOBBY window: below the lobby protocol floor, so
         // `ensureSubscriptionSocket` refuses it the browse socket.
@@ -196,7 +217,7 @@ describe("HostSetup", () => {
     const user = userEvent.setup();
     seedCandidates();
 
-    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Host on" }));
     const options = screen.getAllByRole("option");
@@ -222,7 +243,7 @@ describe("HostSetup", () => {
     const onHost = vi.fn().mockResolvedValue(false);
     seedCandidates();
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     // Half ONE: the default skips both, so the best-scored USABLE server is
     // what an untouched form submits.
@@ -269,6 +290,7 @@ describe("HostSetup", () => {
       // A LIVE, fully compatible handshake for the official preset — the
       // authority that actually decides whether this client can speak to it.
       sourceStatus: new Map([
+        [SLOW, connectedServer()],
         [
           OFFICIAL_MULTIPLAYER_SERVER_URL,
           {
@@ -310,7 +332,7 @@ describe("HostSetup", () => {
       ),
     });
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Host on" }));
     // The preset renders as an ordinary unranked candidate — NOT as
@@ -342,7 +364,7 @@ describe("HostSetup", () => {
   // true whoever owns the source, and it only ever ADMITS a candidate. Keying
   // it on the shadowing-aware list instead drops a pinned row out of the
   // picker entirely while it has no live `kind` to be admitted by.
-  it("keeps a pinned row the directory announces as Full in the picker before its handshake", async () => {
+  it("requires a live handshake even for a pinned Full directory announcement", async () => {
     const user = userEvent.setup();
     const onHost = vi.fn().mockResolvedValue(false);
     const pinned = "wss://pinned.example/ws";
@@ -362,14 +384,13 @@ describe("HostSetup", () => {
       }),
     });
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
-    await user.click(screen.getByRole("button", { name: "Host on" }));
-    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
-      "pinned.example — not yet rated",
-    ]);
-
-    await user.click(screen.getByRole("option", { name: /pinned\.example/ }));
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), null);
+    act(() => useMultiplayerStore.setState({ sourceStatus: new Map([[pinned, connectedServer()]]) }));
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Host Game" }));
     expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), pinned);
   });
@@ -378,7 +399,7 @@ describe("HostSetup", () => {
   it("renders no host-target picker in p2p mode", () => {
     seedCandidates();
 
-    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" />);
+    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />);
 
     // Reach-guard FIRST: the form really mounted in p2p mode — its own submit
     // label, which server mode never renders — so the absence below is the
@@ -406,11 +427,13 @@ describe("HostSetup", () => {
       disabledDirectorySources: [],
     });
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
-    // Reach-guard: the form mounted with an empty candidate list, which is the
-    // state the defect needs.
-    expect(screen.getByRole("button", { name: "Host Game" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "You host (P2P)" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), null);
+    onHost.mockClear();
 
     // The directory lands a moment later, exactly as `refreshServerDirectory`
     // delivers it.
@@ -442,7 +465,7 @@ describe("HostSetup", () => {
     const onHost = vi.fn().mockResolvedValue(false);
     seedCandidates();
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     // Paired half ONE: submitting without touching the picker passes the
     // default, so the assertion below is not passing on a constant.
@@ -459,22 +482,88 @@ describe("HostSetup", () => {
 
   afterEach(async () => {
     cleanup();
+    vi.restoreAllMocks();
     await i18n.changeLanguage("en");
   });
 
-  it("uses P2P labeling/theme and hides server-only lobby listing in p2p mode", () => {
+  it("keeps P2P usable through discovery, disconnect and recovery without switching back automatically", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn().mockResolvedValue(false);
+    seedCandidates();
+    const live = useMultiplayerStore.getState().sourceStatus;
+    useMultiplayerStore.setState({ sourceStatus: new Map() });
+    function ControlledSetup() {
+      const [mode, setMode] = useState<ConnectionMode>("server");
+      return <HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={mode} onConnectionModeChange={setMode} />;
+    }
+    render(<ControlledSetup />);
+    expect(useMultiplayerStore.getState().ensureSubscriptionSocket).toHaveBeenCalledWith(FAST);
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeDisabled();
+    expect(screen.getByText(enMultiplayer.hostSetup.dedicatedUnavailable)).toBeInTheDocument();
+    vi.mocked(useMultiplayerStore.getState().ensureSubscriptionSocket).mockClear();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(useMultiplayerStore.getState().ensureSubscriptionSocket).toHaveBeenCalledWith(FAST);
+    expect(screen.getByText("List in lobby")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+    expect(onHost).toHaveBeenLastCalledWith(expect.objectContaining({}), null);
+
+    act(() => useMultiplayerStore.setState({ sourceStatus: live }));
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "You host (P2P)" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "Dedicated server" }));
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).toHaveBeenLastCalledWith(expect.objectContaining({}), FAST);
+
+    act(() => useMultiplayerStore.setState({ sourceStatus: new Map([[FAST, {
+      state: "reconnecting", serverInfo: null, playerCount: null,
+    }]]) }));
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeDisabled();
+    act(() => useMultiplayerStore.setState({ sourceStatus: live }));
+    expect(screen.getByRole("button", { name: "You host (P2P)" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+    expect(onHost).toHaveBeenLastCalledWith(expect.objectContaining({}), null);
+  });
+
+  it("rejects an open lobby connection with an incompatible full-game protocol", () => {
+    const status = connectedServer();
+    useMultiplayerStore.setState({ sourceStatus: new Map([[DEFAULT_MULTIPLAYER_SERVER_URL, {
+      ...status, serverInfo: { ...status.serverInfo!, protocolVersion: PROTOCOL_VERSION + 1 },
+    }]]) });
+    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Host P2P Game" })).toBeEnabled();
+  });
+
+  it("uses another connected dedicated server when the selected one drops", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn().mockResolvedValue(false);
+    seedCandidates();
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
+    act(() => useMultiplayerStore.setState({ sourceStatus: new Map([[SLOW, connectedServer()]]) }));
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Host on" }));
+    expect(screen.getByRole("option", { name: /fast\.example/ })).toBeDisabled();
+    await user.click(screen.getByRole("option", { name: /slow\.example/ }));
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), SLOW);
+  });
+
+  it("uses P2P labeling/theme and still offers the lobby listing in p2p mode", () => {
     render(
       <HostSetup
         onHost={vi.fn()}
         onBack={vi.fn()}
         connectionMode="p2p"
+        onConnectionModeChange={vi.fn()}
       />,
     );
 
     // The screen heading now lives on the page shell (MultiplayerPage); the
     // form itself is distinguished by its P2P submit-button labeling.
     expect(screen.getByRole("button", { name: "Host P2P Game" })).toBeInTheDocument();
-    expect(screen.queryByText("List in lobby")).not.toBeInTheDocument();
+    // Listing is NOT server-only: a brokered P2P room is advertised in the
+    // public lobby, so the control that governs that has to be here too.
+    expect(screen.getByRole("switch", { name: "List in lobby" })).toBeInTheDocument();
     expect(screen.queryByText("P2P currently supports 2-player Standard.")).not.toBeInTheDocument();
   });
 
@@ -484,6 +573,7 @@ describe("HostSetup", () => {
         onHost={vi.fn()}
         onBack={vi.fn()}
         connectionMode="server"
+        onConnectionModeChange={vi.fn()}
       />,
     );
 
@@ -495,10 +585,17 @@ describe("HostSetup", () => {
 
   describe.each(["server", "p2p"] as const)("accessible hosting options (%s mode)", (connectionMode) => {
     it("names every visible switch and associates only the sandbox help", () => {
-      render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} />);
+      render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
 
-      const names = ["Start when full", "Sandbox Mode — allow debug actions", "Set password"];
-      if (connectionMode === "server") names.unshift("List in lobby");
+      // "List in lobby" is present in BOTH modes: a P2P room brokered by a
+      // `LobbyOnly` anchor is listed exactly as a server-run game is, so the
+      // opt-out has to be reachable from either transport.
+      const names = [
+        "List in lobby",
+        "Start when full",
+        "Sandbox Mode — allow debug actions",
+        "Set password",
+      ];
 
       expect(screen.getAllByRole("switch")).toHaveLength(names.length);
       for (const name of names) {
@@ -510,15 +607,12 @@ describe("HostSetup", () => {
           expect(control).not.toHaveAccessibleDescription();
         }
       }
-      if (connectionMode === "p2p") {
-        expect(screen.queryByRole("switch", { name: "List in lobby" })).not.toBeInTheDocument();
-      }
     });
 
     it("keeps the compact track inside a non-shrinking touch target", async () => {
       const user = userEvent.setup();
       const onHost = vi.fn();
-      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} />);
+      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
 
       for (const control of screen.getAllByRole("switch")) {
         // Happy DOM does not lay out CSS. Pin the sizing contract here; check
@@ -541,14 +635,14 @@ describe("HostSetup", () => {
     it("supports native Space and Enter without submitting until Host is activated", async () => {
       const user = userEvent.setup();
       const onHost = vi.fn();
-      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} />);
+      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
 
-      if (connectionMode === "server") {
-        const publicSwitch = screen.getByRole("switch", { name: "List in lobby" });
-        expect(publicSwitch).toBeChecked();
-        await user.click(publicSwitch);
-        expect(publicSwitch).not.toBeChecked();
-      }
+      // Checked by default in both modes — which is what the hidden P2P
+      // toggle used to submit with no way to change it.
+      const publicSwitch = screen.getByRole("switch", { name: "List in lobby" });
+      expect(publicSwitch).toBeChecked();
+      await user.click(publicSwitch);
+      expect(publicSwitch).not.toBeChecked();
 
       const startSwitch = screen.getByRole("switch", { name: "Start when full" });
       expect(startSwitch).toBeChecked();
@@ -577,7 +671,7 @@ describe("HostSetup", () => {
       }));
       expect(onHost).toHaveBeenCalledTimes(1);
       expect(onHost).toHaveBeenCalledWith(expect.objectContaining({
-        public: connectionMode === "p2p",
+        public: false,
         startWhenFull: false,
         password: "test-password",
         formatConfig: expect.objectContaining({ allow_debug_actions: true }),
@@ -587,7 +681,7 @@ describe("HostSetup", () => {
     it("clears a password when its named switch is turned off", async () => {
       const user = userEvent.setup();
       const onHost = vi.fn();
-      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} />);
+      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
 
       const passwordSwitch = screen.getByRole("switch", { name: "Set password" });
       await user.click(passwordSwitch);
@@ -615,7 +709,7 @@ describe("HostSetup", () => {
   it("updates switch names and sandbox help when the active locale changes", async () => {
     const user = userEvent.setup();
     i18n.addResourceBundle("de", "multiplayer", deMultiplayer, true, true);
-    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     const translations = [
       ["List in lobby", "In Lobby listen"],
@@ -643,8 +737,9 @@ describe("HostSetup", () => {
   });
 
   it("keeps sandbox descriptions associated with their own mounted form", () => {
-    const first = render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" />);
-    const second = render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" />);
+    const first = render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
+    const second = render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />);
+    expect(within(second.container).getByRole("region", { name: "Local network" })).toBeInTheDocument();
 
     const descriptionIds = [first, second].map(({ container }) => {
       const control = within(container).getByRole("switch", { name: "Sandbox Mode — allow debug actions" });
@@ -666,6 +761,7 @@ describe("HostSetup", () => {
         onHost={onHost}
         onBack={vi.fn()}
         connectionMode="server"
+        onConnectionModeChange={vi.fn()}
       />,
     );
 
@@ -694,6 +790,7 @@ describe("HostSetup", () => {
         onHost={onHost}
         onBack={vi.fn()}
         connectionMode="server"
+        onConnectionModeChange={vi.fn()}
       />,
     );
 
@@ -715,6 +812,7 @@ describe("HostSetup", () => {
         onHost={onHost}
         onBack={vi.fn()}
         connectionMode="server"
+        onConnectionModeChange={vi.fn()}
       />,
     );
 
@@ -763,6 +861,7 @@ describe("HostSetup", () => {
         onHost={onHost}
         onBack={vi.fn()}
         connectionMode="server"
+        onConnectionModeChange={vi.fn()}
       />,
     );
 
@@ -789,6 +888,7 @@ describe("HostSetup", () => {
         onHost={vi.fn()}
         onBack={vi.fn()}
         connectionMode="server"
+        onConnectionModeChange={vi.fn()}
       />,
     );
 
@@ -809,7 +909,7 @@ describe("HostSetup", () => {
     const user = userEvent.setup();
     const onHost = vi.fn();
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     // Commander's 40 is already in the box, so entering a non-standard value
     // means emptying it first. A per-keystroke clamp used to refill the box
@@ -832,7 +932,7 @@ describe("HostSetup", () => {
     const user = userEvent.setup();
     const onHost = vi.fn();
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     const life = screen.getByLabelText("Starting Life");
     await user.clear(life);
@@ -899,7 +999,7 @@ describe("HostSetup", () => {
         });
 
         render(
-          <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} />,
+          <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />,
         );
 
         // Reached the rendered form at all — i.e. the seat-ceiling lookup did
@@ -957,7 +1057,7 @@ describe("HostSetup", () => {
       printing_fidelity: "NotApplicable",
     });
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     expect(screen.getByRole("button", { name: "Host Game" })).toBeEnabled();
 
@@ -1028,9 +1128,223 @@ describe("HostSetup", () => {
       printing_fidelity: "NotApplicable",
     });
 
-    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" />);
+    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />);
 
     expect(screen.queryByText(saved.name)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Use" })).not.toBeInTheDocument();
+  });
+
+  /**
+   * Hiding such a format from the PICKER is not enough: one already selected in
+   * server mode survives a flip to P2P, and a minimum above the ceiling cannot
+   * be clamped into range — only replaced. Without the guard, `maxPlayers` (6)
+   * falls below `formatConfig.min_players` (7), `Array.from` coerces the
+   * negative length to 0, and the seat picker renders EMPTY while Host submits
+   * a configuration the format itself rejects.
+   */
+  it("replaces a selected over-ceiling format when the mode flips to P2P", async () => {
+    const user = userEvent.setup();
+    const onHostSpy = vi.fn();
+    // Seeded through the store because the module-level `formatConfigForCustomRules`
+    // mock answers every saved format with a 2-player config — the "Use" flow
+    // therefore cannot produce an over-ceiling selection, while the store's
+    // `formatConfig` is exactly how a real one survives into this form.
+    useMultiplayerStore.setState({
+      formatConfig: {
+        ...FORMAT_DEFAULTS.Commander,
+        format: "Custom:0",
+        min_players: 7,
+        max_players: 8,
+      },
+    });
+
+    const { rerender } = render(
+      <HostSetup
+        onHost={onHostSpy}
+        onBack={vi.fn()}
+        connectionMode="server"
+        onConnectionModeChange={vi.fn()}
+      />,
+    );
+
+    // Reach-guard: the over-ceiling format really is in force, so the seats
+    // below are the guard's doing and not a form that never left its defaults.
+    expect(screen.getByRole("button", { name: "8" })).toBeInTheDocument();
+
+    rerender(
+      <HostSetup
+        onHost={onHostSpy}
+        onBack={vi.fn()}
+        connectionMode="p2p"
+        onConnectionModeChange={vi.fn()}
+      />,
+    );
+
+    // Replaced, not clamped: the seat range is Commander's 2–6. Without the
+    // guard this range is empty (6 − 7 + 1 = 0) and NO seat button renders.
+    expect(screen.getByRole("button", { name: "2" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "6" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "7" })).not.toBeInTheDocument();
+
+    // Seated at the REPLACEMENT's own minimum, not at the P2P ceiling: the
+    // seat clamp yields to the guard rather than overwriting what it set.
+    await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+    expect(onHostSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        formatConfig: expect.objectContaining({ format: "Commander", max_players: 2 }),
+      }),
+      null,
+    );
+  });
+
+  it("keeps lobby listing available for P2P with a dedicated server anchor", () => {
+    const fullAnchor = {
+      state: "open" as const,
+      serverInfo: {
+        version: "0.71.0",
+        buildCommit: "",
+        protocolVersion: PROTOCOL_VERSION,
+        mode: "Full" as const,
+        lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+      },
+      playerCount: 0,
+    };
+    useMultiplayerStore.setState({
+      hostingServer: OFFICIAL_MULTIPLAYER_SERVER_URL,
+      sourceStatus: new Map([[OFFICIAL_MULTIPLAYER_SERVER_URL, fullAnchor]]),
+    });
+
+    // Server mode is unaffected — the game runs ON that server, so it lists.
+    const { rerender } = render(
+      <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />,
+    );
+    expect(screen.getByRole("switch", { name: "List in lobby" })).toBeInTheDocument();
+
+    rerender(
+      <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />,
+    );
+    expect(
+      screen.getByRole("switch", { name: "List in lobby" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the lobby listing in P2P when the anchor is a broker or unknown", () => {
+    // Unknown: `sourceStatus` is not persisted, so a cold mount has no mode
+    // yet. The default anchor IS a broker, so unknown must read as available
+    // rather than making the row appear a beat late.
+    useMultiplayerStore.setState({
+      hostingServer: OFFICIAL_MULTIPLAYER_SERVER_URL,
+      sourceStatus: new Map(),
+    });
+    const { rerender } = render(
+      <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />,
+    );
+    expect(screen.getByRole("switch", { name: "List in lobby" })).toBeInTheDocument();
+
+    useMultiplayerStore.setState({
+      sourceStatus: new Map([
+        [
+          OFFICIAL_MULTIPLAYER_SERVER_URL,
+          {
+            state: "open" as const,
+            serverInfo: {
+              version: "0.71.0",
+              buildCommit: "",
+              protocolVersion: PROTOCOL_VERSION,
+              mode: "LobbyOnly" as const,
+              lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+            },
+            playerCount: 0,
+          },
+        ],
+      ]),
+    });
+    rerender(
+      <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />,
+    );
+    expect(screen.getByRole("switch", { name: "List in lobby" })).toBeInTheDocument();
+  });
+
+  // ── Connection mode switch ──────────────────────────────────────────────
+
+  it("mirrors the connection switch and reports a change to the page", async () => {
+    const user = userEvent.setup();
+    const onConnectionModeChange = vi.fn();
+    render(
+      <HostSetup
+        onHost={vi.fn()}
+        onBack={vi.fn()}
+        connectionMode="server"
+        onConnectionModeChange={onConnectionModeChange}
+      />,
+    );
+
+    const group = screen.getByRole("group", { name: "Who hosts?" });
+    expect(
+      within(group).getByRole("button", { name: "Dedicated server" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    // Listing is offered under both transports, so it must survive the flip.
+    expect(screen.getByText("List in lobby")).toBeInTheDocument();
+
+    await user.click(within(group).getByRole("button", { name: "You host (P2P)" }));
+
+    // The page owns the value, so the form reports and does not self-apply.
+    expect(onConnectionModeChange).toHaveBeenCalledWith("p2p");
+    expect(screen.getByText("List in lobby")).toBeInTheDocument();
+  });
+
+  /**
+   * The mode is mutable while this form is mounted and the form is not
+   * remounted on a change, so the mount-time seat clamp is not enough: before
+   * this, a Commander Draft table set to 8 seats in server mode kept
+   * submitting 8 after a flip to P2P while the seat picker rendered 3–6 with
+   * nothing selected — and the AI seat at index 7 rode along with it.
+   */
+  it("clamps seats, and the AI seats past them, when the mode drops the ceiling", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn();
+    const { rerender } = render(
+      <HostSetup
+        onHost={onHost}
+        onBack={vi.fn()}
+        connectionMode="server"
+        onConnectionModeChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Format" }));
+    await user.click(screen.getByRole("option", { name: "Commander Draft" }));
+    await user.click(screen.getByRole("button", { name: "8" }));
+    // Seat 8 (index 7) is an AI, so the clamp has to prune it rather than only
+    // lower the count — an unpruned seat is submitted via `effectiveAiSeats`.
+    const humans = screen.getAllByRole("button", { name: "Human" });
+    await user.click(humans[humans.length - 1]);
+
+    rerender(
+      <HostSetup
+        onHost={onHost}
+        onBack={vi.fn()}
+        connectionMode="p2p"
+        onConnectionModeChange={vi.fn()}
+      />,
+    );
+
+    // Said, not silent — and the number comes from `P2P_MAX_PEERS`.
+    expect(
+      screen.getByText(
+        "P2P tables seat at most 6 players, so the seat count is capped.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "8" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+
+    expect(onHost).toHaveBeenCalledWith(
+      expect.objectContaining({
+        formatConfig: expect.objectContaining({ max_players: 6 }),
+        aiSeats: [],
+      }),
+      null,
+    );
   });
 });

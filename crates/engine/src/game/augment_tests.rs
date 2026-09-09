@@ -232,7 +232,7 @@ fn combine_host_uses_current_copiable_values_after_copy_effect() {
     let mut events = Vec::<GameEvent>::new();
     let copy_ability = ResolvedAbility::new(
         Effect::BecomeCopy {
-            recipient: TargetFilter::SelfRef,
+            recipient: crate::types::ability::CopyRecipient::Source,
             target: TargetFilter::Any,
             duration: None,
             mana_value_limit: None,

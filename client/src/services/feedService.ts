@@ -59,6 +59,7 @@ export function validateFeed(data: unknown): Feed | null {
   if (typeof data.version !== "number") return null;
   if (!isNonEmptyString(data.updated)) return null;
   if (!Array.isArray(data.decks)) return null;
+  if (data.decks.length === 0) return null;
   if (!data.decks.every(isValidFeedDeck)) return null;
   return data as unknown as Feed;
 }
@@ -242,9 +243,10 @@ export async function initializeFeeds({ allowRefresh = true, signal }: Initializ
     }
   }
 
-  // Auto-refresh any subscription whose cache is older than FEED_STALE_AFTER_MS
-  // or missing on this device after a profile restore.
-  // Applies to both bundled (local static assets) and remote (network) feeds.
+  // Bundled feeds are deployment assets and may change without their legacy
+  // numeric version changing. Fetch them on initialization so a fresh local
+  // timestamp can never pin an older IndexedDB copy. Remote feeds retain the
+  // TTL to avoid unnecessary third-party requests.
   // Manual "Refresh all" / per-feed Refresh buttons bypass the TTL via refreshFeed().
   const now = Date.now();
   for (const sub of subs) {
@@ -252,7 +254,8 @@ export async function initializeFeeds({ allowRefresh = true, signal }: Initializ
 
     const cached = getCachedFeed(sub.sourceId);
     const isStale = now - sub.lastRefreshedAt >= FEED_STALE_AFTER_MS;
-    if (!isStale && cached) {
+    const bundled = sub.type === "bundled";
+    if (!bundled && !isStale && cached) {
       syncFeedDecksToStorage(cached);
       continue;
     }
@@ -264,10 +267,12 @@ export async function initializeFeeds({ allowRefresh = true, signal }: Initializ
       const normalizedFeed = { ...feed, id: sub.sourceId, format: registrySource?.format ?? feed.format };
       const cachePersistence = setCachedFeed(sub.sourceId, normalizedFeed);
       syncFeedDecksToStorage(normalizedFeed);
+      const feedChanged = cached?.updated !== normalizedFeed.updated;
+      const metadataChanged = sub.lastVersion !== feed.version || sub.error !== undefined;
       sub.lastVersion = feed.version;
-      sub.lastRefreshedAt = Date.now();
+      if (isStale || feedChanged) sub.lastRefreshedAt = Date.now();
       if (sub.error !== undefined) sub.error = undefined;
-      saveFeedSubscriptions(subs);
+      if (isStale || feedChanged || metadataChanged) saveFeedSubscriptions(subs);
       await cachePersistence;
     } catch (err) {
       if (signal?.aborted || (err instanceof DOMException && err.name === "AbortError")) throw err;

@@ -20,6 +20,7 @@ pub mod duel_suite;
 pub mod eval;
 pub mod features;
 pub mod mana_colors;
+pub(crate) mod manland;
 pub mod plan;
 pub mod planner;
 pub mod policies;

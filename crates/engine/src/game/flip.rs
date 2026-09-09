@@ -856,7 +856,7 @@ mod tests {
         let become_copy = ResolvedAbility::new(
             Effect::BecomeCopy {
                 target: TargetFilter::Any,
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 duration: Some(Duration::Permanent),
                 mana_value_limit: None,
                 additional_modifications: Vec::new(),

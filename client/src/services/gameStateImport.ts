@@ -1,16 +1,20 @@
 import { strFromU8, unzipSync } from "fflate";
 
-import type { GameState } from "../adapter/types.ts";
+import {
+  persistedGameStateView,
+  type PersistedGameState,
+} from "../adapter/types.ts";
 
 /**
  * Parse import text into a `GameState`, or return a human-readable error string.
  *
- * Accepts either a bare `GameState` or the full debug-export wrapper
- * (`{ gameState, waitingFor, ... }`) produced by `gameStateExport.ts`. The
- * presence of `waiting_for` on the resolved object is the structural marker
- * that distinguishes a GameState from arbitrary JSON.
+ * Accepts a bare `GameState`, the full debug-export wrapper
+ * (`{ gameState, waitingFor, ... }`), or a trusted persistence envelope
+ * (`{ state, ... }`) produced by `gameStateExport.ts`. The presence of
+ * `waiting_for` on the resolved public state is the structural marker that
+ * distinguishes a game state from arbitrary JSON.
  */
-export function gameStateFromImportText(importText: string): GameState | string {
+export function gameStateFromImportText(importText: string): PersistedGameState | string {
   let parsed: unknown;
   try {
     parsed = JSON.parse(importText);
@@ -18,18 +22,28 @@ export function gameStateFromImportText(importText: string): GameState | string 
     return "Invalid JSON";
   }
 
-  // Accept either a bare GameState or the full debug export format {gameState, ...}
-  const state = (
+  // The debug export nests a raw state under `gameState`; a trusted persistence
+  // envelope must stay intact so the engine can restore its private runtime.
+  const persistedState = (
     parsed && typeof parsed === "object" && "gameState" in parsed
-      ? (parsed as { gameState: GameState }).gameState
+      ? (parsed as { gameState: PersistedGameState }).gameState
       : parsed
-  ) as GameState;
+  ) as PersistedGameState;
+  if (!persistedState || typeof persistedState !== "object") {
+    return "JSON does not look like a GameState (missing waiting_for or players)";
+  }
+  const state = persistedGameStateView(persistedState);
 
-  if (!state || typeof state !== "object" || !("waiting_for" in state)) {
-    return "JSON does not look like a GameState (missing waiting_for)";
+  if (
+    !state
+    || typeof state !== "object"
+    || !("waiting_for" in state)
+    || !Array.isArray(state.players)
+  ) {
+    return "JSON does not look like a GameState (missing waiting_for or players)";
   }
 
-  return state;
+  return persistedState;
 }
 
 /**

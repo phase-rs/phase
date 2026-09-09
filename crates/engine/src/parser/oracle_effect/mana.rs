@@ -25,7 +25,7 @@ use super::super::oracle_keyword::parse_granted_keyword_fragment;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
 };
-use super::super::oracle_target::parse_type_phrase;
+use super::super::oracle_target::parse_type_phrase_folding;
 use super::super::oracle_util::{parse_mana_production, parse_number, TextPair};
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::TargetFilter;
@@ -65,7 +65,7 @@ fn try_parse_any_color_among_permanents_filter(
     let prefix_len = trimmed_lower.len() - rest.len();
     let trimmed_original = after_color.trim().trim_end_matches('.').trim();
     let type_text = trimmed_original.get(prefix_len..)?.trim();
-    let (filter, remainder) = parse_type_phrase(type_text);
+    let (filter, remainder) = parse_type_phrase_folding(type_text);
     if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
         return None;
     }
@@ -91,7 +91,7 @@ fn try_parse_for_each_color_mana(text: &str, lower: &str) -> Option<Effect> {
     // CR 702.167c + CR 105.1: "For each color among the exiled cards used to craft
     // this creature, add one mana of that color" (Sunbird Effigy) — the iteration
     // source is the craft-material linked-exile pool, not a battlefield type
-    // phrase. Tried first so the craft noun phrase wins over `parse_type_phrase`.
+    // phrase. Tried first so the craft noun phrase wins over `parse_type_phrase_folding`.
     if let Ok((craft_rest, filter)) =
         crate::parser::oracle_nom::quantity::parse_craft_materials_filter(type_text_lower.trim())
     {
@@ -105,11 +105,11 @@ fn try_parse_for_each_color_mana(text: &str, lower: &str) -> Option<Effect> {
             });
         }
     }
-    // Recover original-cased slice for parse_type_phrase.
+    // Recover original-cased slice for parse_type_phrase_folding.
     let offset = lower_trimmed.len() - rest.len();
     let original_trimmed = text.trim_end_matches('.').trim();
     let type_text = &original_trimmed[offset..offset + type_text_lower.len()];
-    let (filter, remainder) = parse_type_phrase(type_text);
+    let (filter, remainder) = parse_type_phrase_folding(type_text);
     if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
         return None;
     }
@@ -1399,7 +1399,7 @@ fn scan_mana_production_type(
                     nom_rest,
                 ),
                 |type_text: &str| {
-                    let (filter, remainder) = parse_type_phrase(type_text.trim());
+                    let (filter, remainder) = parse_type_phrase_folding(type_text.trim());
                     if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
                         return None;
                     }
@@ -2694,7 +2694,7 @@ pub(crate) fn parse_mana_spend_trigger(lower: &str) -> Option<ManaSpellGrant> {
 /// CR 106.6 spend restriction was never the right type — see
 /// [`ManaSpellGrant::TriggerOnSpend`].
 ///
-/// The type/color phrase is DELEGATED to `oracle_target::parse_type_phrase`, the
+/// The type/color phrase is DELEGATED to `oracle_target::parse_type_phrase_folding`, the
 /// engine's single authority for phrases like "red instant or sorcery". One call
 /// therefore covers the whole type × color class ("an instant or sorcery spell",
 /// "a red instant or sorcery spell", "a Dragon creature spell") instead of the
@@ -2772,7 +2772,7 @@ fn parse_spend_trigger_filter(filter: &str) -> Option<TargetFilter> {
     if !post.is_empty() || pre.is_empty() {
         return None;
     }
-    let (parsed, remainder) = parse_type_phrase(pre);
+    let (parsed, remainder) = parse_type_phrase_folding(pre);
     if !remainder.trim().is_empty() || matches!(parsed, TargetFilter::Any) {
         return None;
     }

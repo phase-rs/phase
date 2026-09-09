@@ -3,18 +3,82 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   applyBackup,
   buildBackup,
+  buildCloudBackup,
   importBackupFromFile,
   mergeDeckCollections,
+  projectCloudBackup,
   type PhaseBackupV1,
 } from "../backup";
 import {
+  ACTIVE_DECK_KEY,
+  DECK_METADATA_KEY,
   DECK_FOLDERS_KEY,
   DRAFT_WORKSPACE_PREFERENCES_KEY,
+  FEED_DECK_ORIGINS_KEY,
+  FEED_SUBSCRIPTIONS_KEY,
   STORAGE_KEY_PREFIX,
 } from "../../constants/storage";
 
 beforeEach(() => {
   localStorage.clear();
+});
+
+describe("backup — cloud projection", () => {
+  it("keeps subscription identity without device-local cache state or feed decks", () => {
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Personal", "personal");
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Generated", "generated");
+    localStorage.setItem(FEED_DECK_ORIGINS_KEY, JSON.stringify({ Generated: "daily-feed" }));
+    localStorage.setItem(DECK_METADATA_KEY, JSON.stringify({
+      Personal: { addedAt: 1 },
+      Generated: { addedAt: 2, starred: true },
+    }));
+    localStorage.setItem(ACTIVE_DECK_KEY, "Generated");
+    localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify([{
+      sourceId: "daily-feed",
+      url: "/feeds/daily.json",
+      type: "bundled",
+      subscribedAt: 10,
+      lastRefreshedAt: 20,
+      lastVersion: 7,
+      error: "device-only failure",
+    }]));
+
+    const cloud = buildCloudBackup();
+
+    expect(cloud.decks).toEqual({ Personal: "personal" });
+    expect(cloud.feedDeckOrigins).toBeNull();
+    expect(cloud.activeDeck).toBeNull();
+    expect(JSON.parse(cloud.deckMetadata ?? "{}")).toEqual({
+      Personal: { addedAt: 1 },
+    });
+    expect(JSON.parse(cloud.feedSubscriptions ?? "[]")).toEqual([{
+      sourceId: "daily-feed",
+      url: "/feeds/daily.json",
+      type: "bundled",
+      subscribedAt: 0,
+      lastRefreshedAt: 0,
+      lastVersion: 0,
+    }]);
+  });
+
+  it("is idempotent after legacy feed material has been stripped", () => {
+    const projected = projectCloudBackup({
+      ...backupWithoutWorkspacePreferences(),
+      decks: { Generated: "generated" },
+      deckMetadata: JSON.stringify({ Generated: { addedAt: 2, starred: true } }),
+      feedSubscriptions: JSON.stringify([{
+        sourceId: "daily-feed",
+        url: "/feeds/daily.json",
+        type: "bundled",
+        subscribedAt: 10,
+        lastRefreshedAt: 20,
+        lastVersion: 1,
+      }]),
+      feedDeckOrigins: JSON.stringify({ Generated: "daily-feed" }),
+    });
+
+    expect(projectCloudBackup(projected)).toEqual(projected);
+  });
 });
 
 const FOLDERS_JSON = JSON.stringify([{ id: "f1", name: "Control", order: 0 }]);

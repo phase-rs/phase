@@ -148,7 +148,34 @@ function setupCommanderAvatars(
 }
 
 function setupDraftMatchAvatars(seed: string) {
-  const matchPairing = useMultiplayerDraftStore.getState().matchPairing;
+  const { matchPairing, commanderLaunch, commanderSeat } = useMultiplayerDraftStore.getState();
+
+  // CR 903.13a: a Commander pod launches ONE shared N-seat game, so none of the
+  // pairwise derivation below applies — `matchPairing` is null by design and
+  // `localPlayerId` would hand every one of the four players seat 0, each guest
+  // then rendering and acting as the HOST's seat.
+  //
+  // Fenced on the game id because `commanderLaunch` outlives its game: unfenced,
+  // a LATER draft-match game would take this branch on a stale launch. Keyed on
+  // the launch and not on `matchPairing == null`, which would also swallow an
+  // unpaired ordinary draft-match.
+  //
+  // Writes `activePlayerId` and NOTHING else — the names and avatars for an
+  // N-seat commander game are the extended online/p2p avatar effect's, which
+  // derives them from each player's own commander. Returning before the
+  // wholesale `setState` below is what keeps that from being erased.
+  //
+  // Re-derived on every run rather than consumed once: this effect's cleanup
+  // calls `clearWireAssignedSeat()`, so a one-shot write would leave the seat
+  // null after any remount. A null seat writes NOTHING — falling back to 0 here
+  // is the exact defect this branch exists to remove.
+  if (commanderLaunch?.gameId === seed) {
+    if (commanderSeat !== null) {
+      useMultiplayerStore.getState().setActivePlayerId(commanderSeat);
+    }
+    return;
+  }
+
   const randomAvatars = assignRandomAvatars(2, seed);
   const names = new Map<number, string>();
 
@@ -637,15 +664,47 @@ export function GameProvider({
   }, [mode, gameId]);
 
   useEffect(() => {
-    if (mode !== "online" && mode !== "p2p-host" && mode !== "p2p-join") return;
+    // A Commander pod's launched game is admitted here for its names and
+    // avatars, and ONLY for those — its seat stays with `setupDraftMatchAvatars`
+    // in the effect below, whose cleanup is what nulls the seat, so writer and
+    // cleanup have to share an effect. This is a deliberate re-division of the
+    // name/avatar authority `setupDraftMatchAvatars` holds for 1v1 pod matches,
+    // not the repair of an oversight: the modes above take their names from a
+    // LOBBY (hence `preservePlayerNames`), and a 1v1 pod match has neither a
+    // lobby nor more than two seats. An N-seat Commander game has no lobby names
+    // either — it has commanders, which is exactly what `setupCommanderAvatars`
+    // already derives an N-player identity map from.
+    //
+    // Same session fence as the seat branch, and for the same reason:
+    // `commanderLaunch` outlives its game.
+    const commanderLaunch = useMultiplayerDraftStore.getState().commanderLaunch;
+    const isCommanderDraftMatch = mode === "draft-match" && commanderLaunch?.gameId === gameId;
+    if (
+      mode !== "online" && mode !== "p2p-host" && mode !== "p2p-join"
+      && !isCommanderDraftMatch
+    ) return;
     const state = useGameStore.getState().gameState;
     const count = state?.players.length ?? playerCount ?? 2;
     setupRandomAvatars(count, gameId, true);
+    if (isCommanderDraftMatch) {
+      // `useMultiplayerStore` is module-level, so a PREVIOUS draft-match's
+      // `{0: "You", 1: …}` survives into this game — and on a seat-2 client
+      // `getOpponentDisplayName(0)` would then label the HOST's seat "You".
+      // Cleared here in the effect body, exactly once: inside
+      // `applyCommanderAvatars` it would re-blank the map on every store update
+      // until the commanders land, and after that gate it would be dead code.
+      // An absent name renders as the viewer-relative fallback instead, and the
+      // viewer's own name is computed from their identity, never read from here.
+      useMultiplayerStore.setState({ playerNames: new Map() });
+    }
     let appliedCommanderAvatars = false;
     const applyCommanderAvatars = (gameState: typeof state) => {
       if (!gameState?.format_config?.uses_commander || !gameState.command_zone?.length) return;
       appliedCommanderAvatars = true;
-      setupCommanderAvatars(gameState, true);
+      // The lobby modes keep their names; the Commander pod game has none to
+      // keep and takes commander-derived ones for every seat. Never `false` for
+      // `setupRandomAvatars` above — that one would write a literal "You".
+      setupCommanderAvatars(gameState, !isCommanderDraftMatch);
     };
     applyCommanderAvatars(state);
     const unsub = useGameStore.subscribe((next) => {
@@ -1497,10 +1556,13 @@ export function GameProvider({
           player: ExpandedDeck;
           opponent: ExpandedDeck;
           ai_decks: ExpandedDeck[];
-          // CR 903.13f(3): every set the draft contained, written by
-          // `podCommanderDeckPayload`.  Stated here because the payload
-          // carries it; it is passed through opaquely to the engine, so this
-          // annotation documents the contract rather than changing behaviour.
+          // CR 903.13f(3): every set the draft contained, passed through
+          // opaquely to the engine. NO pod path writes it here any more — the
+          // Commander launch carries the set list straight into its host
+          // adapter, and the only surviving writer of this sessionStorage key
+          // is quick-draft persistence, whose payload has no such field. Kept
+          // because the type describes what this reader accepts, not what any
+          // producer currently sends.
           draft_set_codes?: string[] | null;
         };
         try {

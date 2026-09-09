@@ -148,6 +148,21 @@ struct MintFrame {
 /// Generic mandatory-chain beat: pass at `Priority`, otherwise take the first legal action.
 /// The Dina chain opens no player choices, so no preference ordering is needed.
 fn dina_drive_one_beat(state: &mut GameState) -> Result<String, String> {
+    // CR 117.3d: at a priority window this policy always passes, so dispatch the pass instead of
+    // enumerating the whole per-viewer candidate set to find it. This reproduces both halves of the
+    // enumerator's hatch — its structural predicate and the submitter identity it authorizes
+    // (CR 723.5) — so this arm stays inside the subset that hatch asserts equivalent to a
+    // simulated pass; every other shape falls through to the enumerating path below.
+    if let WaitingFor::Priority { player } = state.waiting_for {
+        if engine::game::priority::pass_priority_structurally_legal(state, player) {
+            let action = GameAction::PassPriority;
+            let label = format!("{action:?}");
+            let actor = engine::game::turn_control::authorized_submitter_for_player(state, player);
+            return apply(state, actor, action)
+                .map(|_| label)
+                .map_err(|e| format!("apply err (PassPriority): {e:?}"));
+        }
+    }
     let who = state
         .waiting_for
         .acting_player()
@@ -174,7 +189,8 @@ fn dina_drive_one_beat(state: &mut GameState) -> Result<String, String> {
         )
     })?;
     let label = format!("{action:?}");
-    apply(state, who, action.clone())
+    let actor = engine::game::turn_control::authorized_submitter_for_player(state, who);
+    apply(state, actor, action.clone())
         .map(|_| label)
         .map_err(|e| format!("apply err ({action:?}): {e:?}"))
 }

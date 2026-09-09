@@ -300,7 +300,7 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
 /// caller's business: an explicit "among `<set>`" (CR 109.2, owned by
 /// `oracle_target::parse_superlative_property_suffix`), or the enclosing noun
 /// phrase itself (CR 109.2, owned by the bare-form pass in
-/// `parse_type_phrase_with_ctx`).
+/// `parse_type_phrase_folding_with_ctx`).
 ///
 /// The `not(alphanumeric1)` tail guard enforces a word boundary so "mana values"
 /// or "powerstone" cannot half-match the property word. The `among`-form caller

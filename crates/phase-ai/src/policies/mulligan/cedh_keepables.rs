@@ -2,8 +2,7 @@
 //! Gated internally on `features.bracket_tier == Cedh` (`MulliganPolicy` has no
 //! `activation()` method; every registered policy is consulted on every hand).
 //!
-//! CR 103.5: deciding to keep after the
-//! mulligan process.
+//! CR 103.5: deciding to keep after the mulligan process.
 //!
 //! Real cEDH mulligan strategy ("keep only hands that win or stop the opponent
 //! from winning by turn 4") lands when the `ComboRegistry` is populated and

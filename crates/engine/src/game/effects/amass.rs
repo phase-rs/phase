@@ -182,10 +182,7 @@ fn amassed_army_snapshot(state: &GameState, object_id: ObjectId) -> Option<CostP
     state
         .objects
         .get(&object_id)
-        .map(|obj| CostPaidObjectSnapshot {
-            object_id,
-            lki: obj.snapshot_public_characteristics(),
-        })
+        .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_public_characteristics()))
 }
 
 /// Create a 0/0 black [subtype] Army creature token on the battlefield.

@@ -618,7 +618,10 @@ fn assimilation_aegis_attached_trigger_copies_the_host_only_while_attached() {
             duration,
             ..
         } => {
-            assert_eq!(*recipient, TargetFilter::AttachedTo);
+            assert_eq!(
+                *recipient,
+                crate::types::ability::CopyRecipient::Untargeted(TargetFilter::AttachedTo)
+            );
             assert_eq!(*duration, expected_duration);
             assert!(
                 matches!(target, TargetFilter::And { filters } if filters.iter().any(|f| matches!(f, TargetFilter::ExiledBySource)))

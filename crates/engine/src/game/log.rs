@@ -1,3 +1,4 @@
+use crate::game::combat::AttackTarget;
 use crate::types::ability::{AbilityTag, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -130,6 +131,12 @@ fn importance(event: &GameEvent) -> LogImportance {
         // they landed in and what it does.
         | GameEvent::RoomEntered { .. }
         | GameEvent::ArmyAmassed { .. } => LogImportance::Context,
+        // A countered spell or prevented damage is the decisive outcome of an
+        // otherwise-visible action, so Timeline must not make that outcome
+        // disappear behind the Details view.
+        GameEvent::DamagePrevented { .. } | GameEvent::SpellCountered { .. } => {
+            LogImportance::Context
+        }
         // The remaining variants are deliberately listed rather than covered by a
         // wildcard. Adding a GameEvent must require an explicit presentation policy.
         // CR 701.17a + CR 400.2: the mill's library departure is hidden
@@ -137,6 +144,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         // never narrated (`should_exclude_event` drops it).
         GameEvent::Milled { .. }
         | GameEvent::HiddenSearchViewed { .. }
+        | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::Mutated { .. }
         | GameEvent::Augmented { .. }
@@ -169,8 +177,6 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::SagaChapterAbilityResolved { .. }
         | GameEvent::DamageCleared { .. }
         | GameEvent::ResolutionHalted { .. }
-        | GameEvent::DamagePrevented { .. }
-        | GameEvent::SpellCountered { .. }
         | GameEvent::ObjectIntensified { .. }
         | GameEvent::Evolved { .. }
         | GameEvent::Unattached { .. }
@@ -289,6 +295,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::HiddenSearchViewed { .. }
         | GameEvent::CreatureExploited { .. }
         | GameEvent::TurnStarted { .. }
+        | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::Mutated { .. }
@@ -448,6 +455,13 @@ fn should_exclude_event(event: &GameEvent, state: &GameState) -> bool {
         // can observe it; the player already saw the chapter ability itself
         // resolve. Same low-signal bookkeeping class as StackResolved.
         GameEvent::SagaChapterAbilityResolved { .. } => true,
+        // CR 500.7: queue insertion is low-signal bookkeeping. The resolving
+        // instruction and eventual `TurnStarted` event carry the narrative.
+        GameEvent::ExtraTurnCreated { .. } => true,
+        // `handle_empty_attackers` emits this bookkeeping event so the combat
+        // pipeline can advance uniformly, but no creature attacked. It must
+        // not be narrated as an attack against the default defender.
+        GameEvent::AttackersDeclared { attacker_ids, .. } if attacker_ids.is_empty() => true,
         _ => false,
     }
 }
@@ -487,6 +501,15 @@ fn player_seg(state: &GameState, id: PlayerId) -> LogSegment {
     }
 }
 
+fn attack_target_seg(state: &GameState, target: AttackTarget) -> LogSegment {
+    match target {
+        AttackTarget::Player(player_id) => player_seg(state, player_id),
+        AttackTarget::Planeswalker(object_id) | AttackTarget::Battle(object_id) => {
+            card_seg(state, object_id)
+        }
+    }
+}
+
 fn text(s: &str) -> LogSegment {
     LogSegment::Text(s.to_string())
 }
@@ -517,6 +540,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::MulliganStarted => LogCategory::Game,
 
         GameEvent::TurnStarted { .. }
+        | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
         | GameEvent::PriorityPassed { .. } => LogCategory::Turn,
 
@@ -676,6 +700,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
     match event {
         GameEvent::GameStarted => vec![text("Game started")],
         GameEvent::HiddenSearchViewed { .. } => vec![],
+        GameEvent::ExtraTurnCreated { .. } => vec![],
         // CR 701.17a + CR 400.2: never narrated — the library departure it
         // reports is hidden information (`should_exclude_event` drops it).
         GameEvent::Milled { .. } => vec![],
@@ -1055,17 +1080,52 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::AttackersDeclared {
             attacker_ids,
             defending_player,
-            ..
+            attacks,
         } => {
-            let mut segs = vec![
-                player_seg(state, *defending_player),
-                text(" is attacked by "),
-            ];
-            for (i, id) in attacker_ids.iter().enumerate() {
-                if i > 0 {
-                    segs.push(text(", "));
+            // The legacy fallback keeps pre-`attacks` snapshots legible. New
+            // declarations preserve each attacker's actual target, which may be
+            // a different player, planeswalker, or battle.
+            let attack_targets: Vec<_> = if attacks.is_empty() {
+                attacker_ids
+                    .iter()
+                    .copied()
+                    .map(|attacker| (attacker, AttackTarget::Player(*defending_player)))
+                    .collect()
+            } else {
+                attacks.clone()
+            };
+            let mut groups: Vec<(AttackTarget, Vec<ObjectId>)> = Vec::new();
+            for (attacker, target) in attack_targets {
+                if let Some((_, attackers)) =
+                    groups.iter_mut().find(|(existing, _)| *existing == target)
+                {
+                    attackers.push(attacker);
+                } else {
+                    groups.push((target, vec![attacker]));
                 }
-                segs.push(card_seg(state, *id));
+            }
+
+            let mut segs = Vec::new();
+            for (group_index, (target, attackers)) in groups.iter().enumerate() {
+                if group_index > 0 {
+                    segs.push(text("; "));
+                }
+                for (attacker_index, attacker) in attackers.iter().enumerate() {
+                    if attacker_index > 0 {
+                        segs.push(text(if attacker_index + 1 == attackers.len() {
+                            " and "
+                        } else {
+                            ", "
+                        }));
+                    }
+                    segs.push(card_seg(state, *attacker));
+                }
+                segs.push(text(if attackers.len() == 1 {
+                    " attacks "
+                } else {
+                    " attack "
+                }));
+                segs.push(attack_target_seg(state, *target));
             }
             segs
         }
@@ -1104,10 +1164,12 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::CombatDamageDealtToPlayer {
             player_id,
             source_amounts,
-            ..
+            total_damage,
         } => vec![
             player_seg(state, *player_id),
-            text(" is dealt combat damage by "),
+            text(" is dealt "),
+            num(*total_damage as i32),
+            text(" combat damage by "),
             num(source_amounts.len() as i32),
             text(" creature(s)"),
         ],
@@ -1459,6 +1521,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::CreatureExploited {
             exploiter,
             sacrificed,
+            ..
         } => vec![
             card_seg(state, *exploiter),
             text(" exploits "),
@@ -1691,10 +1754,19 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" sticker on "),
             card_seg(state, *object_id),
         ],
-        GameEvent::AttractionsRolledToVisit { roll, .. } => {
+        GameEvent::AttractionsRolledToVisit { rolls, .. } => {
+            // CR 701.52a: ONE turn-based action, so ONE log line — a count-
+            // raising replacement (CR 706.6) that leaves several surviving dice
+            // lists them together rather than reporting the action twice.
             vec![
                 text("Rolled "),
-                text(&roll.to_string()),
+                text(
+                    &rolls
+                        .iter()
+                        .map(u8::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
                 text(" to visit Attractions"),
             ]
         }
@@ -1832,6 +1904,134 @@ mod tests {
             cast_mana_value: None,
         };
         assert!(!should_exclude_event(&cast, &state));
+    }
+
+    #[test]
+    fn extra_turn_creation_is_excluded_but_turn_start_is_visible() {
+        let state = GameState::new_two_player(42);
+        let creation = GameEvent::ExtraTurnCreated {
+            player_id: PlayerId(1),
+            anchor: PlayerId(0),
+        };
+        let turn_started = GameEvent::TurnStarted {
+            player_id: PlayerId(1),
+            turn_number: 2,
+        };
+
+        assert_eq!(importance(&creation), LogImportance::Detail);
+        assert_eq!(tone(&creation), LogTone::Neutral);
+        assert_eq!(categorize(&creation), LogCategory::Turn);
+        assert!(should_exclude_event(&creation, &state));
+        assert!(format_segments(&creation, &state).is_empty());
+        assert!(resolve_log_entries(&[creation], &state, &state).is_empty());
+        assert_eq!(
+            resolve_log_entries(&[turn_started], &state, &state).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn empty_attack_declaration_is_excluded_from_the_log() {
+        let state = GameState::new_two_player(42);
+        let no_attackers = GameEvent::AttackersDeclared {
+            attacker_ids: vec![],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        };
+        let attacker = GameEvent::AttackersDeclared {
+            attacker_ids: vec![ObjectId(7)],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        };
+
+        assert!(should_exclude_event(&no_attackers, &state));
+        assert!(!should_exclude_event(&attacker, &state));
+    }
+
+    #[test]
+    fn attack_log_uses_each_attackers_actual_target() {
+        let mut state = GameState::new_two_player(42);
+        let bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Balduvian Bears".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let wolf = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Runeclaw Bear".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let gideon = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Gideon Jura".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![bear, wolf],
+            defending_player: PlayerId(1),
+            attacks: vec![
+                (bear, AttackTarget::Player(PlayerId(1))),
+                (wolf, AttackTarget::Planeswalker(gideon)),
+            ],
+        };
+
+        assert_eq!(
+            format_segments(&event, &state),
+            vec![
+                card_seg(&state, bear),
+                text(" attacks "),
+                player_seg(&state, PlayerId(1)),
+                text("; "),
+                card_seg(&state, wolf),
+                text(" attacks "),
+                card_seg(&state, gideon),
+            ]
+        );
+    }
+
+    #[test]
+    fn countering_and_prevention_are_visible_in_timeline() {
+        let countered = GameEvent::SpellCountered {
+            object_id: ObjectId(7),
+            countered_by: ObjectId(8),
+            countered_by_controller: PlayerId(1),
+        };
+        let prevented = GameEvent::DamagePrevented {
+            source_id: ObjectId(7),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+        };
+
+        assert_eq!(importance(&countered), LogImportance::Context);
+        assert_eq!(importance(&prevented), LogImportance::Context);
+    }
+
+    #[test]
+    fn combat_damage_summary_keeps_the_actual_total() {
+        let state = GameState::new_two_player(42);
+        let event = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_amounts: vec![(ObjectId(7), 3), (ObjectId(8), 4)],
+            total_damage: 7,
+        };
+
+        assert_eq!(
+            format_segments(&event, &state),
+            vec![
+                player_seg(&state, PlayerId(1)),
+                text(" is dealt "),
+                num(7),
+                text(" combat damage by "),
+                num(2),
+                text(" creature(s)"),
+            ]
+        );
     }
 
     #[test]

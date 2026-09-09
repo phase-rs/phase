@@ -23,10 +23,13 @@ import type {
 } from "../adapter/draft-adapter";
 import type { DeckCardCount, MatchConfig, MatchScore } from "../adapter/types";
 import {
+  MAX_MATERIALIZED_VIRTUAL_BASICS,
   MAX_DRAFT_WORKSPACE_NETWORK_PLACEMENTS,
+  isPlainRecord,
   validateWorkspaceState,
   type DraftWorkspaceState,
 } from "../components/draft/workspace/types";
+import { BASIC_LAND_NAMES } from "../constants/game";
 import type {
   DraftIntergameCommand,
   DraftIntergameCommandAck,
@@ -149,8 +152,15 @@ import type {
  *  26 — player views carry required `commanders_required`, the exact
  *       procedure-owned designation count. A v25 peer lacks it and would
  *       otherwise infer designation capability from `DraftKind`.
+ *  27 — `draft_commander_launch`, the Host → Guest N-seat Commander game
+ *       launch. A v26 peer has no arm for it and would silently drop the
+ *       message, stranding that seat on the completed pod with no way to
+ *       join the game every other seat is playing.
+ *  28 — authoritative per-seat Auto Lands requests and correlated results,
+ *       including explicit rejection so an older peer cannot leave a waiter
+ *       pending after an otherwise exact handshake.
  */
-export const DRAFT_PROTOCOL_VERSION = 26 as const;
+export const DRAFT_PROTOCOL_VERSION = 28 as const;
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
@@ -209,6 +219,28 @@ export interface DraftMatchDeckPayload {
    * which the engine reads as constructed play (no grant).
    */
   draft_set_codes?: string[] | null;
+}
+
+/**
+ * CR 903.13a: every deck a completed Commander pod's launch needs, computed in
+ * one pass over the pod's seat plan so each deck is synthesized exactly once.
+ *
+ * Purely a return type — nothing here travels on the wire. `draftSetCodes` is
+ * deliberately absent: it belongs to the `DraftCommanderLaunch` MESSAGE, and
+ * duplicating it here would give the launch two sources of truth.
+ */
+export interface CommanderSeatDecks {
+  hostDeck: DraftDeckPayload;
+  /**
+   * Every LIVE human seat's own deck, including `localSeat`.
+   *
+   * `localSeat`'s entry is the SAME OBJECT as `hostDeck`, never a second
+   * synthesis of it. That is what lets the sender address every recipient from
+   * this one list without re-reading the draft session — the exactly-once
+   * export invariant would otherwise force a second `exportDraftSession()`.
+   */
+  liveSeatDecks: Array<{ seat: number; deck: DraftDeckPayload }>;
+  engineSeatDecks: Array<{ seat: number; deck: DraftDeckPayload }>;
 }
 
 /**
@@ -272,6 +304,40 @@ export type DraftMatchLaunch =
       binding: DraftMatchBinding;
     };
 
+/**
+ * A completed Commander pod's launch into ONE shared N-seat game.
+ *
+ * A SIBLING of `DraftMatchLaunch`, never a fourth arm of it: every
+ * `DraftMatchLaunch` arm is pairwise/tournament-shaped (`matchId`, `round`,
+ * `binding`, `localSeat`/`opponentSeat`) and flows into tournament settlement,
+ * none of which an N-seat Commander launch has.
+ */
+export interface DraftCommanderLaunch {
+  /** Shared game id: host and every guest install the runtime under the same id. */
+  gameId: string;
+  /** PeerJS room code the host is hosting the Commander game on. */
+  roomCode: string;
+  /** This seat's own drafted, submitted deck. */
+  localDeck: DraftDeckPayload;
+  /** Total seats in the game — pod seats, humans and engine-piloted alike. */
+  playerCount: number;
+  /**
+   * CR 903.13f(3): every set the draft contained. REQUIRED but nullable,
+   * deliberately unlike the optional `draft_set_codes` on `DraftMatchDeckPayload`
+   * — the host always constructs this field.
+   *
+   * Carry the host's own value through; do not substitute a literal. `null` is
+   * this wire's declared "no sets" value, so it is what an absent list is
+   * spelled as here. That is a contract-vocabulary choice, NOT a rules one: the
+   * engine reads `null`, `undefined` and `[]` identically as the empty array,
+   * i.e. constructed play (`engine_wasm.d.ts`; `deserialize_draft_set_codes`
+   * maps `Absent => Vec::new()`). Substituting `[]` would not change the grant —
+   * it would just assert "the draft contained zero sets" where the host
+   * already knows the answer.
+   */
+  draftSetCodes: string[] | null;
+}
+
 // ── Message Types ──────────────────────────────────────────────────────
 
 /**
@@ -279,12 +345,13 @@ export type DraftMatchLaunch =
  *
  * Flow:
  *   Guest → Host: `draft_join`, `draft_reconnect`, `draft_pick`, `draft_pick_with_draft_effect`, `draft_submit_deck`,
- *                 `draft_request_advance`, `draft_workspace_update`, `draft_leave`
+ *                 `draft_request_advance`, `draft_workspace_update`, `draft_suggest_lands`, `draft_leave`
  *   Host → Guest: `draft_welcome`, `draft_reconnect_ack`, `draft_reconnect_rejected`,
- *                 `draft_state_update`, `draft_pick_ack`, `draft_error`,
+ *                 `draft_state_update`, `draft_pick_ack`, `draft_suggest_lands_result`, `draft_suggest_lands_rejected`, `draft_error`,
  *                 `draft_kicked`, `draft_pairing`, `draft_match_result`,
  *                 `draft_paused`, `draft_resumed`, `draft_lobby_update`,
- *                 `draft_host_left`, `draft_timer_sync`, `draft_match_start`, `draft_leave_ack`
+ *                 `draft_host_left`, `draft_timer_sync`, `draft_match_start`,
+ *                 `draft_commander_launch`, `draft_leave_ack`
  */
 export type DraftP2PMessage =
   // ── Guest → Host ───────────────────────────────────────────────────
@@ -324,6 +391,11 @@ export type DraftP2PMessage =
   | {
       type: "draft_workspace_update";
       workspaceState: DraftWorkspaceState;
+    }
+  | {
+      /** The host derives spells and seat from its retained authoritative state. */
+      type: "draft_suggest_lands";
+      requestId: string;
     }
   | {
       /** Explicit participant exit, bound to the currently authenticated seat. */
@@ -377,6 +449,16 @@ export type DraftP2PMessage =
   | {
       type: "draft_pick_ack";
       view: DraftPlayerView;
+    }
+  | {
+      type: "draft_suggest_lands_result";
+      requestId: string;
+      lands: Record<string, number>;
+    }
+  | {
+      type: "draft_suggest_lands_rejected";
+      requestId: string;
+      reason: string;
     }
   | {
       type: "draft_error";
@@ -448,6 +530,11 @@ export type DraftP2PMessage =
       /** Host → Guest: instructs player to start their match for this round. */
       type: "draft_match_start";
       launch: DraftMatchLaunch;
+    }
+  | {
+      /** Host → Guest: instructs the seat to join the pod's shared Commander game. */
+      type: "draft_commander_launch";
+      launch: DraftCommanderLaunch;
     }
   // ── Bo3 (Traditional Draft) Messages ────────────────────────��────────
   | {
@@ -540,6 +627,7 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_pick_with_draft_effect",
   "draft_submit_deck",
   "draft_workspace_update",
+  "draft_suggest_lands",
   "draft_leave",
   "draft_welcome",
   "draft_reconnect_ack",
@@ -548,6 +636,8 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_state_update",
   "draft_deck_submit_ack",
   "draft_pick_ack",
+  "draft_suggest_lands_result",
+  "draft_suggest_lands_rejected",
   "draft_error",
   "draft_kicked",
   "draft_pairing",
@@ -561,6 +651,7 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_timer_sync",
   "draft_request_advance",
   "draft_match_start",
+  "draft_commander_launch",
   "draft_bo3_sideboard_prompt",
   "draft_bo3_between_games",
   "draft_bo3_sideboard_submit",
@@ -575,6 +666,7 @@ const VALID_DRAFT_TYPES = new Set([
 ]);
 
 const MAX_DRAFT_CARD_INSTANCE_ID_LENGTH = 256;
+const MAX_DRAFT_SUGGESTION_REASON_LENGTH = 1024;
 
 /**
  * The largest `DraftProcedure.cards_per_pick` over every kind — the
@@ -609,6 +701,90 @@ function requireDraftCardInstanceId(value: unknown, field: string, context: stri
     throw new Error(`Invalid ${context}: ${field} must be a bounded string`);
   }
   return value;
+}
+
+function requireExactOwnKeyRecord(
+  raw: unknown,
+  expectedKeys: readonly string[],
+  context: string,
+): Record<string, unknown> {
+  if (!isPlainRecord(raw)) {
+    throw new Error(`Invalid ${context}: must be a plain record`);
+  }
+  const keys = Reflect.ownKeys(raw);
+  if (
+    keys.length !== expectedKeys.length
+    || !expectedKeys.every((expected) => Object.prototype.hasOwnProperty.call(raw, expected))
+    || !keys.every((key) =>
+      typeof key === "string"
+      && expectedKeys.includes(key)
+      && Object.prototype.propertyIsEnumerable.call(raw, key))
+  ) {
+    throw new Error(`Invalid ${context}: invalid fields`);
+  }
+  return raw;
+}
+
+function validateSuggestedLands(raw: unknown): Record<string, number> {
+  if (!isPlainRecord(raw)) {
+    throw new Error("Invalid land suggestion result: lands must be a plain record");
+  }
+  const keys = Reflect.ownKeys(raw);
+  if (keys.length > BASIC_LAND_NAMES.size) {
+    throw new Error("Invalid land suggestion result: too many land entries");
+  }
+  const lands: Record<string, number> = {};
+  for (const key of keys) {
+    if (
+      typeof key !== "string"
+      || !Object.prototype.propertyIsEnumerable.call(raw, key)
+      || !BASIC_LAND_NAMES.has(key)
+    ) {
+      throw new Error("Invalid land suggestion result: land names must be canonical basics");
+    }
+    const count = raw[key];
+    if (
+      typeof count !== "number"
+      || !Number.isSafeInteger(count)
+      || count < 0
+      || count > MAX_MATERIALIZED_VIRTUAL_BASICS
+    ) {
+      throw new Error("Invalid land suggestion result: land counts must be bounded nonnegative integers");
+    }
+    lands[key] = count;
+  }
+  return lands;
+}
+
+function validateSuggestLandsMessage(raw: unknown, type: string): DraftP2PMessage {
+  if (type === "draft_suggest_lands") {
+    const request = requireExactOwnKeyRecord(raw, ["type", "requestId"], "land suggestion request");
+    return {
+      type: "draft_suggest_lands",
+      requestId: requireDraftCardInstanceId(request.requestId, "requestId", "land suggestion request"),
+    };
+  }
+  if (type === "draft_suggest_lands_result") {
+    const result = requireExactOwnKeyRecord(raw, ["type", "requestId", "lands"], "land suggestion result");
+    return {
+      type: "draft_suggest_lands_result",
+      requestId: requireDraftCardInstanceId(result.requestId, "requestId", "land suggestion result"),
+      lands: validateSuggestedLands(result.lands),
+    };
+  }
+  const rejection = requireExactOwnKeyRecord(raw, ["type", "requestId", "reason"], "land suggestion rejection");
+  if (
+    typeof rejection.reason !== "string"
+    || rejection.reason.length === 0
+    || rejection.reason.length > MAX_DRAFT_SUGGESTION_REASON_LENGTH
+  ) {
+    throw new Error("Invalid land suggestion rejection: reason must be a bounded string");
+  }
+  return {
+    type: "draft_suggest_lands_rejected",
+    requestId: requireDraftCardInstanceId(rejection.requestId, "requestId", "land suggestion rejection"),
+    reason: rejection.reason,
+  };
 }
 
 function validatePick(raw: Record<string, unknown>): DraftP2PMessage {
@@ -951,6 +1127,62 @@ function requireWorkspaceState(
   return validated;
 }
 
+/**
+ * The `Array.isArray` + element-type idiom `validateSubmitDeck` uses, lifted
+ * because a commander launch needs it for four arrays. Module-private, matching
+ * the same un-exported guard in `adapter/format-config-shape.ts` and
+ * `services/scryfall.ts` rather than reaching across layers for one.
+ */
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function validateCommanderLaunch(raw: Record<string, unknown>): DraftP2PMessage {
+  if (typeof raw.launch !== "object" || raw.launch === null) {
+    throw new Error("Invalid commander launch: missing launch");
+  }
+  const launch = raw.launch as Record<string, unknown>;
+  if (typeof launch.gameId !== "string" || launch.gameId.length === 0) {
+    throw new Error("Invalid commander launch: gameId must be a non-empty string");
+  }
+  // An empty room code becomes `joinRoom("")` on the guest, so it is rejected
+  // here for the same reason `draft_leave` rejects an empty draft token.
+  if (typeof launch.roomCode !== "string" || launch.roomCode.length === 0) {
+    throw new Error("Invalid commander launch: roomCode must be a non-empty string");
+  }
+  // No upper bound: the ceiling is enforced where the game adapter is built
+  // (`P2PHostAdapter` refuses > 6; the engine's Commander Draft format allows
+  // 8), never by the message.
+  if (
+    typeof launch.playerCount !== "number"
+    || !Number.isInteger(launch.playerCount)
+    || launch.playerCount <= 0
+  ) {
+    throw new Error("Invalid commander launch: playerCount must be a positive integer");
+  }
+  if (typeof launch.localDeck !== "object" || launch.localDeck === null) {
+    throw new Error("Invalid commander launch: missing localDeck");
+  }
+  const localDeck = launch.localDeck as Record<string, unknown>;
+  if (
+    !isStringArray(localDeck.main_deck)
+    || !isStringArray(localDeck.sideboard)
+    || !isStringArray(localDeck.commander)
+  ) {
+    throw new Error("Invalid commander launch: malformed localDeck");
+  }
+  // Required but NULLABLE, mirroring `requireWorkspaceState`: an absent key is
+  // rejected because the type carries no `?`, while `null` is the meaningful
+  // "no draft set is known, so constructed play" value the engine already reads.
+  if (!("draftSetCodes" in launch)) {
+    throw new Error("Invalid commander launch: missing draftSetCodes");
+  }
+  if (launch.draftSetCodes !== null && !isStringArray(launch.draftSetCodes)) {
+    throw new Error("Invalid commander launch: draftSetCodes must be null or a string array");
+  }
+  return raw as DraftP2PMessage;
+}
+
 /** Validate a parsed object as a DraftP2PMessage. Throws on malformed data. */
 export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   if (typeof raw !== "object" || raw === null || !("type" in raw)) {
@@ -979,6 +1211,16 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   }
   if (msg.type === "draft_submit_deck") {
     return validateSubmitDeck(raw as Record<string, unknown>);
+  }
+  if (msg.type === "draft_commander_launch") {
+    return validateCommanderLaunch(raw as Record<string, unknown>);
+  }
+  if (
+    msg.type === "draft_suggest_lands"
+    || msg.type === "draft_suggest_lands_result"
+    || msg.type === "draft_suggest_lands_rejected"
+  ) {
+    return validateSuggestLandsMessage(raw, msg.type);
   }
   if (msg.type === "draft_deck_submit_ack") {
     const acknowledgement = raw as Record<string, unknown>;

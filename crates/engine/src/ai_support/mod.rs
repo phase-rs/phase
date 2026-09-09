@@ -55,8 +55,8 @@ pub use combat_withdrawal::{
     combat_withdrawal_fact_for_current_target, CombatWithdrawalFact, CombatWithdrawalTargetRole,
 };
 pub use context::{
-    build_decision_context, build_decision_context_for_semantic_owner, AiDecisionContext,
-    AiDecisionContract,
+    apply_ai_action_proposal, build_decision_context, build_decision_context_for_semantic_owner,
+    AiDecisionContext, AiDecisionContract, AiProposalApplication,
 };
 pub use copy::{
     copy_effect_adds_flying, copy_target_filter, copy_target_mana_value_ceiling,
@@ -1284,6 +1284,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::SelectCards { .. }
         | GameAction::ChooseRemoveCounterCostDistribution { .. }
         | GameAction::SelectCoinFlips { .. }
+        | GameAction::SelectDieRolls { .. }
         | GameAction::ChooseOutsideGameCards { .. }
         | GameAction::SelectTargets { .. }
         | GameAction::ChooseTarget { .. }
@@ -2614,9 +2615,14 @@ fn collect_activation_block_reasons_for_object(
 /// actionable in that window. The gate is the rule, not an optimisation.
 ///
 /// Scoped to the acting player across the same five zones and behind the same
-/// `obj.controller == player` / `!is_mana_ability` filters as the enforcement
-/// sites in `candidates.rs`, so an entry can only ever describe an object the
-/// viewer controls.
+/// player-scoping / `!is_mana_ability` filters as the enforcement sites in
+/// `candidates.rs`, so an entry can only ever describe an object the viewer
+/// controls. Battlefield and command-zone scans scope by `obj.controller`; the
+/// owner-keyed hand and graveyard scans scope by `obj.owner` (CR 108.4 +
+/// CR 108.4a — a card that is not a permanent or spell has no controller). The
+/// two files MUST agree: this read-out and the offered action set partition one
+/// ability space, so a scope that differs between them yields a blocked row for
+/// an ability that is never offered.
 ///
 /// Bounded by [`MAX_ACTIVATION_BLOCK_TOTAL`]. Returns a map, never a `Result`.
 pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<AbilityBlockEntry>> {
@@ -2657,8 +2663,9 @@ pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<Abil
     // search hot path and is deliberately out of scope.
 
     // CR 602.2: "Only an object's controller (or its owner, if it doesn't have a
-    // controller) can activate its activated ability" — battlefield, therefore
-    // controller-scoped, with no `activation_zone` filter
+    // controller) can activate its activated ability unless the object
+    // specifically says otherwise." Battlefield, therefore controller-scoped,
+    // with no `activation_zone` filter
     // (the gate itself checks `obj.zone != required_zone`).
     for &obj_id in &state.battlefield {
         if let Some(obj) = state.objects.get(&obj_id) {
@@ -2698,9 +2705,12 @@ pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<Abil
     }
 
     // CR 602.1: hand-activated abilities (Cycling per CR 702.29a, etc.).
+    // CR 108.4 + CR 108.4a: a card in a hand is neither a permanent nor a spell,
+    // so it has no controller and the owner stands in. Mirrors the hand loop in
+    // `candidates.rs`.
     for &obj_id in &state.players[player.0 as usize].hand {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
+            if obj.owner == player {
                 collect_activation_block_reasons_for_object(
                     state,
                     player,
@@ -2715,9 +2725,12 @@ pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<Abil
     }
 
     // CR 113.6b + CR 602.2: graveyard-activated abilities.
+    // CR 108.4 + CR 108.4a: same owner fallback as the hand loop above, and
+    // CR 404.1 puts a card into its OWNER's graveyard. Mirrors the graveyard
+    // loop in `candidates.rs`.
     for &obj_id in &state.players[player.0 as usize].graveyard {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
+            if obj.owner == player {
                 collect_activation_block_reasons_for_object(
                     state,
                     player,
@@ -4409,7 +4422,7 @@ mod tests {
             Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::BecomeCopy {
-                    recipient: TargetFilter::SelfRef,
+                    recipient: crate::types::ability::CopyRecipient::Source,
                     target: TargetFilter::Any,
                     duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
                     mana_value_limit: None,

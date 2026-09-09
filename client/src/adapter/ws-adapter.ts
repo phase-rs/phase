@@ -1,3 +1,4 @@
+import { initializeLanCapabilities, isLanEndpoint } from "../services/lan";
 import type {
   AbilityBlockEntry,
   EngineAdapter,
@@ -208,6 +209,32 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 69 — GameEvent gained the tagged variant ExtraTurnCreated { player_id,
+ *      anchor }. Event-bearing full-server frames can now carry that tag, so
+ *      the exact handshake must refuse v68 peers that do not share the variant
+ *      contract. P2P moves in lockstep; lobby messages are unchanged.
+ * 68 — PendingManaAbility.chosen_tappers changed from Vec<ObjectId> to
+ *      Option<Vec<ObjectId>> (#8698), so an ANSWERED zero-tapper selection of
+ *      the CR 107.3a X-sentinel form (X=0) is distinguishable from a selection
+ *      stage nobody has answered. A PARSE bump like 67: the field carries no
+ *      serde default, so the pre-68 unanswered shape — which omitted the field
+ *      entirely — is a missing-field error rather than a silent decode. The
+ *      reverse skew is what made the bump mandatory: Some([]) serializes as
+ *      `chosen_tappers: []`, which a v67 build reads through its is_empty()
+ *      gate as *unanswered*, re-surfacing the same PayCost prompt forever.
+ * 67 — DerivedViews.dungeon_rooms entries gained required `card` and `rooms`
+ *      fields, carrying the dungeon card's Scryfall identity and the whole
+ *      room graph (each room's edges plus its position on the printed card).
+ *      A PARSE bump like 66, not a capability bump like 24: neither field is
+ *      serde-optional, so a v66 peer fails deserialization on any snapshot
+ *      where a player is venturing rather than degrading silently. The
+ *      reverse skew is equally hard — this client destructures `card`
+ *      unconditionally to resolve the card art, so a v66 host would throw in
+ *      render, not merely omit the map panel.
+ * 65 — DraftMatchStart now announces the exact Full-session identity for the
+ *      spawned match. Draft reconnect attaches the authenticated draft seat
+ *      to that Full-session lifetime, and Full follow-up frames carry the key
+ *      needed to reject stale-generation traffic. Lobby messages are unchanged.
  * 61 — Effect.ChooseCounterKind gained domain and chooser (CR 608.2d): the
  *      population a counter-kind choice draws from, and whether the game draws
  *      one at random instead of prompting. Serde-additive, so an older payload
@@ -437,7 +464,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 63;
+export const PROTOCOL_VERSION = 69;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -467,6 +494,60 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * twice for GameState-only changes and the derived lobby window went disjoint
  * from the deployed broker's.
  *
+ * 8 — Tournament match structure. CreateTournament gains `match_type` (Bo1 /
+ *     Bo3), optional (`#[serde(default)]`); `None` resolves to the arity default
+ *     (Bo3 head-to-head, Bo1 for pods — single-game per MSTR), preserving pre-8
+ *     behaviour. TournamentSummary gains the resolved `match_type`, server →
+ *     client. This lets a 2-player event be Bo1 (e.g. single-game single
+ *     elimination). Purely ADDITIVE, so MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+ *     stays at 2 and no client-side floor is needed: a client's `match_type`
+ *     reaching a pre-8 broker deserializes away (the event runs the default
+ *     structure — a silent capability loss, not a parse error), and a pre-8
+ *     broker's summary omitting it is inert against a `JSON.parse` client.
+ * 7 — Tournament game-format label and an "automatic + N" round option. Two
+ *     fields added to CreateTournament, both optional (`#[serde(default)]`):
+ *     `format` (a GameFormat display label, mirroring the one a LobbyGame
+ *     listing already carries) and `plus_rounds` (add N to the auto-derived
+ *     round count — the "Swiss plus N" shape, mutually exclusive with
+ *     `total_rounds`). Separately, the DIFFERENT TournamentSummary message
+ *     gains a `format` echoed back resolved (server → client). Purely ADDITIVE
+ *     in BOTH directions, so MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below stays at
+ *     2 and — unlike 6's scoring relaxation — NO client-side floor is needed:
+ *     a client sending `format`/`plus_rounds` to a pre-7 broker has them
+ *     ignored as unknown fields (a silent capability loss, not a parse error),
+ *     and a pre-7 broker's summary omitting `format` is inert against this
+ *     client, whose consumer is `JSON.parse`.
+ * 6 — Broker-owned tournament action legality, broker-owned default scoring,
+ *     and expiring/rotating tournament credentials. Two lobby variants added —
+ *     RenewTournamentCredential and TournamentCredentialRenewed — which alone
+ *     makes this bump mandatory. PairingView gains a required report_gate;
+ *     TournamentSummary gains a required open_actions and a required resolved
+ *     scoring; TournamentCreated and TournamentJoined each gain a required
+ *     expires_at_ms beside the token they already carried. All of those are
+ *     server → client, and this client ignores fields it does not name, so
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2 — a
+ *     v2 broker still speaks everything this client already parses.
+ *     CreateTournament.scoring is RELAXED from required to optional, `None`
+ *     meaning "the broker applies its arity default". That direction is NOT
+ *     symmetric: a client that omits scoring against a pre-6 broker gets a
+ *     hard `missing field` parse error, not a degrade. It is gated on the
+ *     CLIENT side by MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING below — capability,
+ *     not parseability, exactly as 5 gated the ack — so a below-floor session
+ *     keeps sending an explicit policy instead of being evicted.
+ * 5 — Request-correlated settlement for the four GATED tournament actions.
+ *     Two LobbyServerMessage variants added — TournamentActionAck and
+ *     TournamentActionRejected — which is what makes this bump mandatory. Both
+ *     are requester-only point replies carrying the client-minted request_id,
+ *     so a caller can tell its own outcome from an ambient TournamentUpdate for
+ *     the same tournament. StartTournamentRound, ReportMatchResult,
+ *     DropFromTournament and EndTournament each gain one optional request_id.
+ *     Purely ADDITIVE in both directions — an omitted correlator deserializes
+ *     to None and a present one is ignored by a v4 broker — so
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2.
+ *     Capability, not parseability, is what moves here: a pre-5 broker cannot
+ *     ANSWER a correlated action, which is what
+ *     MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK below exists to gate — separately,
+ *     and without evicting the session.
  * 4 — The tournament-organizer message set: seven LobbyClientMessage variants
  *     and five LobbyServerMessage variants. Purely ADDITIVE, so
  *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2 — no
@@ -488,7 +569,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 4;
+export const LOBBY_PROTOCOL_VERSION = 8;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
@@ -501,6 +582,82 @@ export const LOBBY_PROTOCOL_VERSION = 4;
  * release used to strand every older desktop build.
  */
 export const MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL = 2;
+
+/**
+ * Lowest broker LOBBY_PROTOCOL_VERSION that can answer a gated tournament
+ * action with a `TournamentActionAck` / `TournamentActionRejected` frame.
+ *
+ * This is a FLOOR frozen at the version that introduced correlated tournament
+ * settlement, not a moving target. It must NOT be bumped when
+ * LOBBY_PROTOCOL_VERSION moves: a v6 or v7 broker still answers the ack, and
+ * raising this to match the current version would refuse every one of them and
+ * silently disable organizer actions against servers that work perfectly. For
+ * the same reason it must never be written as an expression over
+ * LOBBY_PROTOCOL_VERSION — `scripts/check-protocol-version.mjs` matches it only
+ * against a bare integer literal, so re-deriving it fails the cross-language
+ * gate rather than shipping that bug.
+ *
+ * Like {@link MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL} there is deliberately NO
+ * ceiling. It moves only if a future version REMOVES the ack, which would be a
+ * breaking change requiring its own floor decision.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK = 5;
+
+/**
+ * Lowest broker LOBBY_PROTOCOL_VERSION that accepts a `CreateTournament` with
+ * `scoring` omitted and applies its own arity default.
+ *
+ * A FLOOR frozen at the version that introduced broker-owned default scoring,
+ * on exactly the terms {@link MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK} above is
+ * frozen — and it must NOT be bumped when LOBBY_PROTOCOL_VERSION moves: a v7
+ * or v8 broker still applies the default, and raising this to match the
+ * current version would push every one of them below the floor and make this
+ * client send an explicit policy forever.
+ *
+ * The gate it guards is sharper than the ack's, which is why the floor exists
+ * at all. Omitting `scoring` against a pre-6 broker is not a missing
+ * capability that degrades — it is a hard `missing field \`scoring\`` parse
+ * error on the broker side. Below this floor the client keeps sending an
+ * explicit policy; at or above it, it may omit one and read the resolved
+ * value back off `TournamentSummary.scoring`.
+ *
+ * Written as a bare integer literal and never as an expression over
+ * LOBBY_PROTOCOL_VERSION — `scripts/check-protocol-version.mjs` matches it
+ * only against a bare integer, so re-deriving it fails the cross-language gate
+ * instead of shipping the latent bug. Like the two floors above there is
+ * deliberately NO ceiling.
+ *
+ * Scope note (protocol v6, wire-contract-only): this floor is the frozen
+ * cross-language contract for the omit-`scoring` capability, and is enforced
+ * today only by `check-protocol-version.mjs`. It has no runtime send-path
+ * consumer yet — `tournamentClient.ts` still always sends an explicit
+ * `ScoringPolicy`, which is the conservative, always-correct direction. The
+ * version-gated omit-path this floor guards lands with the tournament
+ * client-rendering follow-up, alongside reading the resolved value back off
+ * `TournamentSummary.scoring`.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING = 6;
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` that honors a per-event `match_type`
+ * (Bo1 / Bo3) on `CreateTournament`.
+ *
+ * Below this, a broker discards `match_type` as an unknown field and applies the
+ * arity default (Bo3 head-to-head, Bo1 pods). That silent substitution is
+ * harmless when the request already matches the default, but it turns an
+ * explicit **Bo1 head-to-head** choice into a Bo3 event with no signal — so the
+ * send path refuses that one request (see `matchTypeNeedsCapability` /
+ * `createTournament`) rather than let an organizer receive a structure they did
+ * not pick.
+ *
+ * Unlike the two floors above, this is a CLIENT-side send-path floor with no
+ * shared Rust constant to mirror, so it is deliberately NOT registered in
+ * `scripts/check-protocol-version.mjs`. Frozen at 8 (the version that introduced
+ * `match_type`) and, like the others, written as a bare literal rather than
+ * derived from `LOBBY_PROTOCOL_VERSION`, so a future bump cannot silently drag
+ * it forward and start refusing v8 brokers.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE = 8;
 
 /** Identity advertised by the server in its `ServerHello`. */
 export interface ServerInfo {
@@ -833,50 +990,60 @@ export class WebSocketAdapter implements EngineAdapter {
       this.initResolve = resolve;
       this.initReject = reject;
 
-      if (!this.isNativeSocket() && !isValidWebSocketUrl(this.serverUrl)) {
-        reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
-        this.initResolve = null;
-        this.initReject = null;
-        return;
-      }
+      const initializeConnection = async () => {
+        if (!this.isNativeSocket() && isLanEndpoint(this.serverUrl)) {
+          await initializeLanCapabilities();
+          if (this.disposed) {
+            throw new AdapterError("WS_CLOSED", "Adapter disposed before initialization completed", true);
+          }
+        }
 
-      // A ws:// target from an HTTPS page is blocked by the browser before the
-      // handshake — surface why instead of letting it fail as "unreachable".
-      const blockReason = this.isNativeSocket()
-        ? null
-        : mixedContentBlockReason(this.serverUrl);
-      if (blockReason) {
-        reject(new AdapterError("WS_ERROR", blockReason, false));
-        this.initResolve = null;
-        this.initReject = null;
-        return;
-      }
+        if (!this.isNativeSocket() && !isValidWebSocketUrl(this.serverUrl)) {
+          reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
+          this.initResolve = null;
+          this.initReject = null;
+          return;
+        }
 
-      this.seedNativeReconnectSession();
-      const setupFrame =
-        this.options.nativeAi
-          ? this.nativeAiSetupFrame(this.options.nativeAi)
-          : this.options.nativePregame
-            ? this.nativePregameSetupFrame(this.options.nativePregame)
-          : this.mode === "host"
-          ? { type: "CreateGame", data: { deck: this.deckData } }
-          : this.mode === "spectate"
-            ? { type: "SpectatorJoin", data: { game_code: this.joinGameCode! } }
-            : {
-                type: "JoinGameWithPassword",
-                data: {
-                  game_code: this.joinGameCode!,
-                  deck: this.deckData,
-                  display_name: this.displayName,
-                  password: this.joinPassword ?? null,
-                  reservation_token: this.reservationToken ?? null,
-                },
-              };
+        // A ws:// target from an HTTPS page is blocked by the browser before the
+        // handshake — surface why instead of letting it fail as "unreachable".
+        const blockReason = this.isNativeSocket()
+          ? null
+          : mixedContentBlockReason(this.serverUrl);
+        if (blockReason) {
+          reject(new AdapterError("WS_ERROR", blockReason, false));
+          this.initResolve = null;
+          this.initReject = null;
+          return;
+        }
 
-      this.attachSocket(setupFrame).catch(() => {
-        // `attachSocket` emits reject via initReject; swallow the
-        // rejection here so it doesn't surface as an unhandled promise.
-      });
+        this.seedNativeReconnectSession();
+        const setupFrame =
+          this.options.nativeAi
+            ? this.nativeAiSetupFrame(this.options.nativeAi)
+            : this.options.nativePregame
+              ? this.nativePregameSetupFrame(this.options.nativePregame)
+            : this.mode === "host"
+            ? { type: "CreateGame", data: { deck: this.deckData } }
+            : this.mode === "spectate"
+              ? { type: "SpectatorJoin", data: { game_code: this.joinGameCode! } }
+              : {
+                  type: "JoinGameWithPassword",
+                  data: {
+                    game_code: this.joinGameCode!,
+                    deck: this.deckData,
+                    display_name: this.displayName,
+                    password: this.joinPassword ?? null,
+                    reservation_token: this.reservationToken ?? null,
+                  },
+                };
+
+        this.attachSocket(setupFrame).catch(() => {
+          // `attachSocket` emits reject via initReject; swallow the
+          // rejection here so it doesn't surface as an unhandled promise.
+        });
+      };
+      void initializeConnection().catch((error: Error) => this.rejectInitialization(error));
     });
   }
 
@@ -1855,7 +2022,8 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "StateUpdate": {
-        const data = msg.data as { state_revision: number; state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; activation_block_reasons?: Record<string, AbilityBlockEntry[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; log_entries?: GameLogEntry[]; derived?: GameState["derived"]; rewind_targets?: RewindOption[] };
+        const data = msg.data as { state_revision: number; state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; activation_block_reasons?: Record<string, AbilityBlockEntry[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; log_entries?: GameLogEntry[]; derived?: GameState["derived"]; rewind_targets?: RewindOption[]; full_key?: FullSessionKey };
+        if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
         // Attach the engine-authored derived views to the state snapshot so
         // components (e.g. CommanderDamage) can read them via gameState.derived
         // without a separate subscription path. See
@@ -2057,7 +2225,8 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "OpponentDisconnected": {
-        const data = msg.data as { grace_seconds: number };
+        const data = msg.data as { grace_seconds: number; full_key?: FullSessionKey };
+        if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
         this.emit({
           type: "opponentDisconnected",
           graceSeconds: data.grace_seconds,
@@ -2066,6 +2235,8 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "OpponentReconnected": {
+        const data = (msg.data ?? {}) as { full_key?: FullSessionKey };
+        if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
         this.emit({ type: "opponentReconnected" });
         break;
       }
@@ -2276,6 +2447,13 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     this.fullSessionKey = key;
     return true;
+  }
+
+  /** Allows legacy follow-up frames only until the server establishes an exact Full identity. */
+  private acceptFollowUpFullSessionKey(key: FullSessionKey | undefined): boolean {
+    return !this.fullSessionKey && !key
+      ? true
+      : this.acceptFullSessionKey(key);
   }
 
   /** Reject identity-bearing reconnect frames before they can update session state. */

@@ -1,9 +1,9 @@
 //! `RampKeepablesMulligan` — feature-driven mulligan policy for mana-ramp decks.
 //!
-//! CR 103.5: deciding to keep after the
-//! mulligan process. When a deck's mana-ramp commitment is meaningful, opening
-//! hands that combine a ramp piece (dork/rock/fetch-spell/ritual/extra-landdrop)
-//! with enough lands to use it are strongly preferred.
+//! CR 103.5: deciding to keep after the mulligan process. When a deck's
+//! mana-ramp commitment is meaningful, opening hands that combine a ramp piece
+//! (dork/rock/fetch-spell/ritual/extra-landdrop) with enough lands to use it are
+//! strongly preferred.
 //!
 //! Opts out for decks where `features.mana_ramp.commitment <= 0.3` — the
 //! baseline `KeepablesByLandCount` policy is the sole voice for those decks.

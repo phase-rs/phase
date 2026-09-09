@@ -1376,6 +1376,7 @@ function GamePageContent({
   const gamePageStyle = {
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
     "--game-split-safe-top": "0px",
+    "--game-left-rail-offset": "0px",
     // Where the targeting prompt starts, which is the only part of its
     // placement this page can state: the split layout puts seat panes at the
     // very top of the board, so the prompt clears them. How TALL the block is
@@ -1470,9 +1471,12 @@ function GamePageContent({
 
   return (
     <div
-      ref={containerRef}
-      className={`game-no-select relative h-[100dvh] w-full overflow-hidden bg-gray-950${showDebugBounds ? " debug-bounds" : ""}`}
-      style={gamePageStyle}
+      className={`game-no-select flex h-[100dvh] w-full flex-col bg-gray-950 lg:flex-row${showDebugBounds ? " debug-bounds" : ""}`}
+    >
+      <div
+        ref={containerRef}
+        className="relative min-h-0 min-w-0 flex-1 overflow-hidden contain-paint"
+        style={gamePageStyle}
       onContextMenu={(e) => {
         e.preventDefault();
         const target = e.target as HTMLElement | null;
@@ -1539,13 +1543,6 @@ function GamePageContent({
         className={`relative ${boardChoiceLayerActive && !isReconnecting ? GAME_Z_LAYER.boardChoiceGrid : GAME_Z_LAYER.board} grid min-w-0 h-full${isReconnecting ? " pointer-events-none" : ""}`}
         style={{
           paddingTop: "var(--game-top-overlay-offset, 0px)",
-          // The game log docks as a rail, not an overlay: it publishes its width
-          // as `--game-{left,right}-rail-offset` and the board's content box
-          // shrinks by that much, so nothing is ever hidden underneath it.
-          // Padding (not width/margin) keeps row 3's `100dvh`-derived height
-          // math untouched — only the horizontal content box moves.
-          paddingLeft: "var(--game-left-rail-offset, 0px)",
-          paddingRight: "var(--game-right-rail-offset, 0px)",
           gridTemplateRows,
           gridTemplateColumns: "1fr",
         }}
@@ -1742,7 +1739,6 @@ function GamePageContent({
         </div>
       </DraggableWidget>
 
-      <GameLogPanel />
       <MobileHandDrawer />
       <FlexEditOverlay />
 
@@ -1995,10 +1991,6 @@ function GamePageContent({
           supplied constraints. Display-only. */}
       <AttackRequirementBadges />
       <BlockerConstraintBadges />
-
-      {/* Card preview overlay. Owns its own inspect-state subscriptions so a
-          hover doesn't re-render GamePageContent (and the whole battlefield). */}
-      <GameCardPreview />
 
       {/* WaitingFor-driven prompt overlays (only for human player).
           Wrapped in DialogHost so any active dialog can be peeked away to
@@ -2345,6 +2337,11 @@ function GamePageContent({
         onExit={handleUnhandledExit}
         exitLabel={isOnlineMode ? t("gamePage.actions.concedeGame") : t("gamePage.actions.returnToMenuLower")}
       />
+      </div>
+      <GameLogPanel />
+      {/* This is a peer of the board and log columns: a preview opened from a
+          log card must not be clipped by the paint-contained board column. */}
+      <GameCardPreview />
     </div>
   );
 }
@@ -3009,6 +3006,24 @@ function GameOverScreen({
     navigate("/draft/quick?resume=1");
   };
 
+  /**
+   * There are TWO "back to pod" affordances in a `draft-match` game — this
+   * game-over button and the in-game menu's "Back to draft"
+   * (`GameMenu.tsx`) — and a third exit through Concede
+   * (`useConcedeHandler`). All three ask the same question, so all three ask
+   * `endCommanderSession`, which owns the answer and the reasoning: a pairwise
+   * pod match must survive being left, a Commander launch must not.
+   *
+   * `finally`, not `then` — a teardown that rejects must not strand the player
+   * on the game-over screen.
+   */
+  const handleBackToPod = () => {
+    void useMultiplayerDraftStore
+      .getState()
+      .endCommanderSession()
+      .finally(() => navigate("/draft-pod"));
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex flex-col items-center justify-center px-4"
@@ -3098,7 +3113,7 @@ function GameOverScreen({
             ) : isDraftPodMatch ? (
               <button
                 disabled={!resultRecorded}
-                onClick={() => navigate("/draft-pod")}
+                onClick={handleBackToPod}
                 className={gameButtonClass({
                   tone: isVictory ? "amber" : "slate",
                   size: "lg",

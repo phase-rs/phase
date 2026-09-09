@@ -1638,9 +1638,9 @@ pub(super) fn parse_token_keyword_clause(text: &str) -> Vec<Keyword> {
 
     let raw_clause = strip_token_keyword_clause_suffixes(after_with)
         .trim()
-        .trim_end_matches('.')
-        .trim_end_matches(',')
+        .trim_end_matches(&['.', ','][..])
         .trim_end_matches(" and")
+        .trim_end_matches(&['.', ','][..])
         .trim();
 
     split_token_keyword_list(raw_clause)
@@ -2908,6 +2908,39 @@ mod tests {
                 TypedFilter::creature().controller(crate::types::ability::ControllerRef::You),
             ))
         );
+    }
+
+    #[test]
+    fn named_token_with_keywords_before_quoted_ability_preserves_keywords() {
+        let text = r#"Create a legendary 5/5 black Horror Villain creature token named Regression Nullwatch with flying, indestructible, and "Regression Nullwatch attacks each combat if able.""#;
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+            .expect("named token with quoted must-attack ability must parse");
+        let Effect::Token { name, keywords, .. } = effect else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+
+        assert_eq!(name, "Regression Nullwatch");
+        assert_eq!(keywords, vec![Keyword::Flying, Keyword::Indestructible]);
+    }
+
+    #[test]
+    fn named_token_with_keywords_before_quoted_ability_preserves_must_attack() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::statics::StaticMode;
+
+        let text = r#"Create a legendary 5/5 black Horror Villain creature token named Regression Nullwatch with flying, indestructible, and "Regression Nullwatch attacks each combat if able.""#;
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+            .expect("named token with quoted must-attack ability must parse");
+        let Effect::Token {
+            static_abilities, ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(static_abilities[0].mode, StaticMode::MustAttack);
+        assert_eq!(static_abilities[0].affected, Some(TargetFilter::SelfRef),);
     }
 
     #[test]

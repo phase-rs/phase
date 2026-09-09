@@ -1,3 +1,4 @@
+import * as phaseSocket from "../../../services/openPhaseSocket";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -103,6 +104,19 @@ describe("ServerPicker", () => {
     return user;
   }
 
+  it("uses the shared handshake for a LAN connection probe", async () => {
+    const probe = vi.spyOn(phaseSocket, "openPhaseSocket").mockRejectedValue(new Error("unavailable"));
+    try {
+      setPageProtocol("http:");
+      render(<ServerPicker onClose={vi.fn()} />);
+      const user = userEvent.setup();
+      await user.type(screen.getByPlaceholderText(/wss:\/\//), "ws://192.168.1.2:9374/ws");
+      await user.click(screen.getByRole("button", { name: "Test" }));
+      expect(probe).toHaveBeenCalledWith("ws://192.168.1.2:9374/ws", { timeoutMs: 3000 });
+      expect(useMultiplayerStore.getState().userLobbySources).toEqual([]);
+    } finally { probe.mockRestore(); }
+  });
+
   it("adds and removes a user lobby source", async () => {
     useMultiplayerStore.setState({ userLobbySources: [userSource("keep.example")] });
     render(<ServerPicker onClose={vi.fn()} />);
@@ -161,7 +175,7 @@ describe("ServerPicker", () => {
 
     await addUrl("ws://70.249.47.161:9374/ws");
 
-    expect(screen.getByText(/HTTPS/)).toBeInTheDocument();
+    expect(screen.getByText(/This page is served over HTTPS/)).toBeInTheDocument();
     expect(useMultiplayerStore.getState().userLobbySources).toEqual([]);
 
     // Paired positive: loopback is exempt from the mixed-content rule, so the
@@ -175,20 +189,25 @@ describe("ServerPicker", () => {
     ]);
   });
 
-  it("switches the hosting server and back to direct codes", async () => {
-    useMultiplayerStore.setState({ userLobbySources: [userSource("play.example.com")] });
+  it("picks a server, and offers no way to pick none", async () => {
+    useMultiplayerStore.setState({
+      hostingServer: null,
+      userLobbySources: [userSource("play.example.com")],
+    });
     const user = userEvent.setup();
     render(<ServerPicker onClose={vi.fn()} />);
 
-    await user.click(screen.getByRole("button", { name: /None \(P2P only\)/ }));
-
-    expect(useMultiplayerStore.getState().hostingServer).toBeNull();
-    // Sources are a separate axis: switching to direct codes keeps them.
-    expect(useMultiplayerStore.getState().userLobbySources).toHaveLength(1);
+    // The picker is purely server selection now — connection mode moved to the
+    // lobby's switch, so the old "None (P2P only)" row is gone.
+    expect(
+      screen.queryByRole("button", { name: /None \(P2P only\)/ }),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Official/ }));
 
     expect(useMultiplayerStore.getState().hostingServer).toBe(PRESET_URL);
+    // Sources are a separate axis: choosing a hosting server keeps them.
+    expect(useMultiplayerStore.getState().userLobbySources).toHaveLength(1);
   });
 
   it("uses a user source as the hosting server", async () => {

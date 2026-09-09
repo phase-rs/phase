@@ -429,9 +429,12 @@ export default defineConfig(({ mode }) => {
           {
             // Same-origin deck feeds fetched by the home dashboard
             // (see src/data/feedRegistry.ts). Mutable — regenerated
-            // periodically — so StaleWhileRevalidate.
+            // periodically — so prefer the network and retain the cached copy
+            // only as an offline fallback. StaleWhileRevalidate returned an
+            // old feed to startup while refreshing it in the background,
+            // allowing default catalogs to differ between active clients.
             urlPattern: /\/feeds\/[^/]+\.json$/,
-            handler: "StaleWhileRevalidate",
+            handler: "NetworkFirst",
             options: {
               cacheName: "deck-feeds",
               expiration: { maxEntries: 16 },

@@ -88,6 +88,27 @@ pub struct PriorTargetBindingCounters {
     pub selection_bindings: u64,
 }
 
+/// Test-only counters for the CR 508.1d attack-declaration solver
+/// (`combat::selectable_targets_by_attacker` and the strict validator it
+/// drives). Kept out of [`PerfCounterSnapshot`] for the same reason the two
+/// counter sets above are: that struct's serialized field set powers the AI
+/// performance baseline (`phase-ai::duel_suite::perf`), which these
+/// declare-attackers-prompt guards have no business perturbing.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AttackDeclarationSolverCounters {
+    /// Times the solver built its per-candidate target table
+    /// (`SolverTargetTable::build`). The table depends only on the constraints
+    /// model + target universe, never on the forced pair, so the prompt builder
+    /// must build ONE per universe rather than one per (attacker, target) pair.
+    pub target_table_builds: u64,
+    /// Whole-battlefield static sweeps taken to derive an attacker cap
+    /// (`max_attackers_each_combat` / `per_defender_caps` /
+    /// `per_permanent_defender_caps`). The constraints model caches all three at
+    /// build time, so a validation run against a prebuilt model must add none.
+    pub cap_static_sweeps: u64,
+}
+
 thread_local! {
     /// Per-thread (NOT process-global) so parallel `cargo test` runs do not
     /// cross-pollute counters between a test's `reset()` and `snapshot()`.
@@ -159,6 +180,13 @@ thread_local! {
         Cell::new(PriorTargetBindingCounters {
             static_union_enumerations: 0,
             selection_bindings: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static ATTACK_DECLARATION_SOLVER_COUNTERS: Cell<AttackDeclarationSolverCounters> = const {
+        Cell::new(AttackDeclarationSolverCounters {
+            target_table_builds: 0,
+            cap_static_sweeps: 0,
         })
     };
     static LEGALITY_CLONE_PHASE: Cell<Option<LegalityClonePhase>> = const { Cell::new(None) };
@@ -325,6 +353,13 @@ pub(crate) fn record_post_apply_uncached_source_collection() {
 /// O(battlefield) `.any()` behind the O(1) `static_kind_present(IgnoreHexproof)`
 /// presence index — so on a board with zero functioning `IgnoreHexproof` statics this
 /// counter stays at 0 across an entire target enumeration.
+///
+/// Also incremented by `combat::compute_combat_tax` once per admitted call — i.e.
+/// once per real `battlefield ∪ command_zone` tax sweep, AFTER its O(1)
+/// `static_kind_present(CantAttack / CantBlock / CantAttackOrBlock)` gate. Attack
+/// candidate enumeration asks for a tax verdict once per proposed (attacker,
+/// target) pairing, so on a board with no combat-tax static this counter stays at
+/// 0 across the whole enumeration instead of reaching 2N.
 pub fn record_static_full_scan() {
     with_mut(|s| s.static_full_scans += 1);
 }
@@ -486,6 +521,31 @@ pub fn prior_target_binding_snapshot() -> PriorTargetBindingCounters {
     PRIOR_TARGET_BINDING_COUNTERS.with(Cell::get)
 }
 
+/// CR 508.1d: one solver target-table build.
+#[cfg(feature = "test-support")]
+pub fn record_attack_solver_target_table_build() {
+    ATTACK_DECLARATION_SOLVER_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.target_table_builds += 1;
+        cell.set(counters);
+    });
+}
+
+/// CR 508.1c: one whole-battlefield sweep taken to derive an attacker cap.
+#[cfg(feature = "test-support")]
+pub fn record_attack_cap_static_sweep() {
+    ATTACK_DECLARATION_SOLVER_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.cap_static_sweeps += 1;
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn attack_declaration_solver_snapshot() -> AttackDeclarationSolverCounters {
+    ATTACK_DECLARATION_SOLVER_COUNTERS.with(Cell::get)
+}
+
 #[cfg(feature = "test-support")]
 pub fn reset_prior_target_binding_counters() {
     PRIOR_TARGET_BINDING_COUNTERS
@@ -499,4 +559,7 @@ pub fn reset() {
         .with(|counters| counters.set(HomogeneousTargetWalkCacheCounters::default()));
     #[cfg(feature = "test-support")]
     reset_prior_target_binding_counters();
+    #[cfg(feature = "test-support")]
+    ATTACK_DECLARATION_SOLVER_COUNTERS
+        .with(|counters| counters.set(AttackDeclarationSolverCounters::default()));
 }

@@ -103,7 +103,8 @@ describe("workspace preferences", () => {
     expect(resolveDraftWorkspaceSideboardCollapsed(false, 430, "phone-portrait")).toBe(false);
     expect(resolveDraftWorkspaceSideboardCollapsed(false, 844, "phone-landscape")).toBe(false);
     expect(resolveDraftWorkspaceSideboardCollapsed(null, 430, "phone-portrait")).toBe(true);
-    expect(resolveDraftWorkspaceSideboardCollapsed(null, 844, "phone-landscape")).toBe(false);
+    expect(resolveDraftWorkspaceSideboardCollapsed(null, 844, "phone-landscape")).toBe(true);
+    expect(resolveDraftWorkspaceSideboardCollapsed(true, 844, "phone-landscape")).toBe(true);
     expect(resolveDraftWorkspaceSideboardCollapsed(false, 768, "tablet-portrait")).toBe(false);
     expect(resolveDraftWorkspaceSideboardCollapsed(false, 1024, "tablet-landscape")).toBe(false);
     expect(resolveDraftWorkspaceSideboardCollapsed(null, 768, "tablet-portrait")).toBe(true);

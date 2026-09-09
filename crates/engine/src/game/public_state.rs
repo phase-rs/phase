@@ -484,6 +484,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // `_ => {}`) so a new event variant must be classified to compile.
             GameEvent::GameStarted
             | GameEvent::HiddenSearchViewed { .. }
+            | GameEvent::ExtraTurnCreated { .. }
             // CR 701.17a: the milled object's display is already marked dirty by
             // the paired `ZoneChanged` in the same batch, and no player-level
             // display field depends on the mill itself.

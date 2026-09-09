@@ -24,6 +24,36 @@
 //!    the `.deb`/source case on a system without the GStreamer plugin sets
 //!    installed. `bundle.linux.deb.depends` declares them for apt; this arm
 //!    names them for everyone else.
+//!
+//! `REQUIRED_PLUGINS` below is therefore not only what arm 2 checks: it is the
+//! authority for the Debian *packages* this app's packaging has to ship, and
+//! every consumer of it is invisible from here. Two act on it today, and a
+//! package absent from either is absent at runtime on that install path:
+//!
+//! * `bundle.linux.deb.depends` in `tauri.conf.json`, which apt resolves when
+//!   the `.deb` is installed; and
+//! * the Linux apt step of `shell-release.yml`'s `build-shell` job, which is
+//!   the whole set `linuxdeploy-plugin-gstreamer` has available to copy into
+//!   the AppImage — it bundles what the runner has installed and nothing else.
+//!
+//! Keeping only the first current is how the AppImage shipped without an AAC
+//! decoder and played every `.m4a` silently (issue #8615), so
+//! `scripts/check_media_plugin_packaging.py` checks each consumer against this
+//! list separately — never against their union, which the `.deb` alone would
+//! satisfy. Adding an entry below means adding its package to both.
+//!
+//! The *package* set is what that gate enforces; the per-library list it is
+//! derived from is scoped to arm 2's probe, and is not an inventory of every
+//! library this app's audio touches. Two real consumers already sit outside
+//! it: the four `.mp3` tracks under `client/public/audio/music/` decode
+//! through `libgstmpg123.so` and `libgstaudioparsers.so`, and `autoaudiosink`
+//! is a selector bin whose concrete sink under a bundle-only
+//! `GST_PLUGIN_SYSTEM_PATH` is `libgstpulseaudio.so`. None of the three is
+//! declared below. All three ship in `gstreamer1.0-plugins-good` (checked
+//! against Ubuntu noble's package contents), which every consumer already
+//! names, so they are covered incidentally by a package rather than by
+//! declaration — correct today, and nothing here would notice if a
+//! repackaging split them out.
 
 use std::path::{Path, PathBuf};
 
@@ -87,12 +117,12 @@ pub const REQUIRED_PLUGINS: &[RequiredPlugin] = &[
     },
     RequiredPlugin {
         library: "libgstisomp4.so",
-        provides: "qtdemux (the .m4a container every bundled track uses)",
+        provides: "qtdemux (the container every bundled .m4a track uses)",
         debian_package: "gstreamer1.0-plugins-good",
     },
     RequiredPlugin {
         library: "libgstlibav.so",
-        provides: "avdec_aac (the .m4a codec every bundled track uses)",
+        provides: "avdec_aac (the codec every bundled .m4a track uses)",
         debian_package: "gstreamer1.0-libav",
     },
 ];

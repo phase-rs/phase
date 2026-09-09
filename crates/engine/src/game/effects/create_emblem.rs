@@ -19,9 +19,10 @@ use std::sync::Arc;
 /// `emblem_source` provenance. `grant_emblem` does NOT set `emblem_source`
 /// because it has no ability source of its own.
 ///
-/// This helper does NOT read any format pool fields (`momir_pool`,
-/// `momir_pool_faces`); those are resolution-time-only reads, which is why
-/// `deck_loading` can grant the Momir emblem before the pool is built.
+/// This helper does NOT read the card database (`GameState::card_db`); the
+/// Momir emblem's random creature is drawn only when its ability resolves,
+/// which is why `deck_loading` can grant the emblem before the database handle
+/// is installed.
 pub fn grant_emblem(
     state: &mut GameState,
     owner: PlayerId,

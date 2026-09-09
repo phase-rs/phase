@@ -1,9 +1,9 @@
 //! `TribalDensityMulligan` — feature-driven mulligan policy for tribal decks.
 //!
-//! CR 103.5: deciding to keep after the
-//! mulligan process. When a deck's tribal commitment is meaningful, opening
-//! hands with a dense mix of tribe members and payoffs are strongly preferred
-//! over sparse hands where the tribal plan can't execute.
+//! CR 103.5: deciding to keep after the mulligan process. When a deck's
+//! tribal commitment is meaningful, opening hands with a dense mix of tribe
+//! members and payoffs are strongly preferred over sparse hands where the
+//! tribal plan can't execute.
 //!
 //! Opts out for decks where `features.tribal.commitment <
 //! tribal::MULLIGAN_FLOOR` (0.4) — below that threshold the baseline

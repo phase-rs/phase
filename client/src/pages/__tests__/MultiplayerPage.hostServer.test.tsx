@@ -1,20 +1,9 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-/**
- * Which server a host action probes, and therefore hosts on.
- *
- * `executeAction` computes ONE `ensureSubscriptionSocket` probe before the
- * P2P/server branch, and the mode it learns from that probe is what decides
- * which leg runs — so the probe target is the whole claim. The two cases below
- * are each other's control: same page, same spy, opposite targets, the only
- * difference being the mode the action carries.
- *
- * Harness shape follows `MultiplayerPage.joinOrigin.test.tsx`: render the real
- * page, stub the child that invokes the callback under test, keep the real
- * store module via `importOriginal`, and mock `useNavigate`.
- */
+/** Render the real page and store, recording the hosting boundary calls. */
 const harness = vi.hoisted(() => ({
   navigate: vi.fn(),
   /** The live props of each stubbed child, so the TEST decides when to invoke
@@ -110,6 +99,7 @@ vi.mock("../../services/multiplayerSession", () => ({
   saveWsSession: vi.fn(),
 }));
 
+import { OFFICIAL_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { MultiplayerPage } from "../MultiplayerPage";
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import { LOBBY_PROTOCOL_VERSION, PROTOCOL_VERSION } from "../../adapter/ws-adapter";
@@ -169,18 +159,21 @@ describe("MultiplayerPage host server", () => {
     // mock of `serverMetrics` above.
     vi.stubGlobal("navigator", { sendBeacon: vi.fn(() => true) });
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 599 })));
-    ensureSubscriptionSocket.mockResolvedValue({
+    ensureSubscriptionSocket.mockImplementation(async (url: string) => ({
       serverInfo: {
         version: "test",
         buildCommit: "test",
-        mode: "Full",
+        mode: url === OFFICIAL_MULTIPLAYER_SERVER_URL ? "LobbyOnly" : "Full",
         protocolVersion: PROTOCOL_VERSION,
         lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
       },
-    });
+    }));
     // zustand actions are plain state fields, so `setState` swaps them.
     useMultiplayerStore.setState({
       hostingServer: URL_A,
+      // Reset per case: the mode is persisted store state now, so leg (ii)'s
+      // flip to P2P would otherwise leak into whatever runs after it.
+      connectionMode: null,
       userLobbySources: [],
       sourceStatus: new Map(),
       directorySources: [],
@@ -200,6 +193,17 @@ describe("MultiplayerPage host server", () => {
   });
 
   // V-U15g, leg (i)
+  it("honors the form's P2P fallback even before the saved dedicated preference updates", async () => {
+    useMultiplayerStore.setState({ connectionMode: "server" });
+    renderPage("/multiplayer?view=host-setup");
+    await submitHostSetup(null);
+    expect(startP2PHostingSession).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(),
+      { brokerUrl: OFFICIAL_MULTIPLAYER_SERVER_URL, roomName: "Test room" },
+    );
+    expect(startHosting).not.toHaveBeenCalled();
+  });
+
   it("probes and hosts on the chosen server, never on the anchor", async () => {
     renderPage("/multiplayer?view=host-setup");
     await screen.findByTestId("host-setup");
@@ -216,28 +220,109 @@ describe("MultiplayerPage host server", () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
-  // V-U15g, leg (ii) — the regression guard on the P2P leg. `null` is what
-  // `HostSetup` actually passes in P2P, and `null ?? hostingServer` IS the live
-  // read this line has always made.
-  it("probes the anchor when the action chose no server", async () => {
+  it("registers P2P with the official broker when the anchor is a dedicated server", async () => {
     renderPage();
     await screen.findByTestId("lobby");
 
-    // The production route into P2P host-setup with a NON-NULL anchor: the
-    // lobby's own "host a direct-code game" affordance, which flips the mode
-    // without touching `hostingServer`.
+    // The production route into P2P host-setup with a NON-NULL anchor: open
+    // Host Game from the lobby, then choose P2P on the screen that owns that
+    // choice. Neither step touches `hostingServer`.
     act(() => {
-      (harness.lobby!.onHostP2P as () => void)();
+      (harness.lobby!.onHostGame as () => void)();
     });
     await screen.findByTestId("host-setup");
+    act(() => {
+      (harness.hostSetup!.onConnectionModeChange as (m: string) => void)("p2p");
+    });
 
     await submitHostSetup(null);
 
     await waitFor(() => expect(startP2PHostingSession).toHaveBeenCalled());
     expect(ensureSubscriptionSocket).toHaveBeenCalledWith(URL_A);
-    expect(ensureSubscriptionSocket).not.toHaveBeenCalledWith(URL_B);
+    expect(ensureSubscriptionSocket).toHaveBeenCalledWith(OFFICIAL_MULTIPLAYER_SERVER_URL);
+    expect(startP2PHostingSession).toHaveBeenCalledWith(
+      expect.objectContaining({ public: true }), expect.anything(),
+      { brokerUrl: OFFICIAL_MULTIPLAYER_SERVER_URL, roomName: "Test room" },
+    );
+    expect(useMultiplayerStore.getState().hostingServer).toBe(URL_A);
     expect(startHosting).not.toHaveBeenCalled();
     expect(navigator.sendBeacon).not.toHaveBeenCalled();
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
+  it("uses a known dedicated anchor's connected official broker without probing the game server", async () => {
+    useMultiplayerStore.setState({
+      connectionMode: "p2p",
+      sourceStatus: new Map([[URL_A, {
+        state: "open", playerCount: 0,
+        serverInfo: {
+          version: "test", buildCommit: "test", mode: "Full",
+          protocolVersion: PROTOCOL_VERSION, lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+        },
+      }]]),
+    });
+    renderPage("/multiplayer?view=host-setup");
+    await submitHostSetup(null);
+    expect(ensureSubscriptionSocket).toHaveBeenCalledExactlyOnceWith(OFFICIAL_MULTIPLAYER_SERVER_URL);
+    expect(startP2PHostingSession).toHaveBeenCalledWith(
+      expect.objectContaining({ public: true }), expect.anything(),
+      { brokerUrl: OFFICIAL_MULTIPLAYER_SERVER_URL, roomName: "Test room" },
+    );
+  });
+
+  it("preserves a custom broker and passes its probed URL despite an anchor change", async () => {
+    useMultiplayerStore.setState({ connectionMode: "p2p" });
+    ensureSubscriptionSocket.mockImplementation(async () => {
+      useMultiplayerStore.setState({ hostingServer: URL_B });
+      return { serverInfo: { mode: "LobbyOnly" } };
+    });
+    renderPage("/multiplayer?view=host-setup");
+    await submitHostSetup(null);
+    expect(ensureSubscriptionSocket).toHaveBeenCalledExactlyOnceWith(URL_A);
+    expect(startP2PHostingSession).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), { brokerUrl: URL_A, roomName: "Test room" },
+    );
+  });
+
+  it("requires explicit unlisted hosting when the official broker is unavailable", async () => {
+    const user = userEvent.setup();
+    useMultiplayerStore.setState({ connectionMode: "p2p" });
+    ensureSubscriptionSocket.mockImplementation(async (url: string) => (
+      url === URL_A ? { serverInfo: { mode: "Full" } } : null
+    ));
+    renderPage("/multiplayer?view=host-setup");
+    await submitHostSetup(null);
+    expect(screen.getByText(OFFICIAL_MULTIPLAYER_SERVER_URL)).toBeInTheDocument();
+    expect(startP2PHostingSession).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Continue without lobby" }));
+    expect(startP2PHostingSession).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), { brokerUrl: null, roomName: "Test room" },
+    );
+  });
+
+  it("does not replace an unavailable custom broker using unrelated server metadata", async () => {
+    useMultiplayerStore.setState({
+      connectionMode: "p2p",
+      serverInfo: {
+        version: "test", buildCommit: "test", mode: "Full",
+        protocolVersion: PROTOCOL_VERSION, lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+      },
+    });
+    ensureSubscriptionSocket.mockResolvedValue(null);
+    renderPage("/multiplayer?view=host-setup");
+    await submitHostSetup(null);
+    expect(screen.getByText(URL_A)).toBeInTheDocument();
+    expect(ensureSubscriptionSocket).toHaveBeenCalledExactlyOnceWith(URL_A);
+    expect(startP2PHostingSession).not.toHaveBeenCalled();
+  });
+
+  it("does not silently turn a dedicated hosting choice into P2P", async () => {
+    const showToast = vi.fn();
+    useMultiplayerStore.setState({ showToast });
+    renderPage("/multiplayer?view=host-setup");
+    await submitHostSetup(OFFICIAL_MULTIPLAYER_SERVER_URL);
+    expect(startHosting).not.toHaveBeenCalled();
+    expect(startP2PHostingSession).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith("Couldn't connect to the dedicated multiplayer server.");
+  });
+
 });

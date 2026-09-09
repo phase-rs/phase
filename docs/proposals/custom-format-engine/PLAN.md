@@ -608,7 +608,7 @@ LegalityRules {
 // true` requires the reader to already know which direction "true" points).
 // This mirrors `LegendRuleScope`'s existing shape rather than introducing a
 // new convention.
-LegacyRuleSet {                         // INDEPENDENT era-rule axes (RESEARCH §8, §10)
+LegacyRuleSet {                         // FIVE INDEPENDENT era-rule axes (RESEARCH §8, §10)
     mana_burn: ManaBurnPolicy,
     damage_timing: CombatDamageTiming,
     wish_scope: WishOutsideGameScope,
@@ -619,6 +619,16 @@ LegacyRuleSet {                         // INDEPENDENT era-rule axes (RESEARCH �
                                         // binary and this leaves room without
                                         // a later refactor. Same reasoning now
                                         // applied to the three siblings above.
+    ante: AntePolicy,                   // Phase 1d (CONTEXT.md Open item 5).
+                                        // #[serde(default)] — it postdates the
+                                        // Axis-A save path, so an already-
+                                        // persisted def carries no `ante` key.
+                                        // The ONLY axis here whose default is
+                                        // behavior-bearing today: `Excluded`
+                                        // enforces CR 407.3 at deck
+                                        // construction. See §7's gate-scope
+                                        // paragraph for why only `Enabled` is
+                                        // a GATED axis.
 }
 
 ManaBurnPolicy {                        // RESEARCH §5
@@ -663,6 +673,24 @@ LegendRuleScope {                       // RESEARCH §10: legend-rule controller
     PreM14AnyController,                // pre-M14: same-named legends across ALL
                                         // controllers all go to owners' graveyards,
                                         // choiceless (Sixth-Edition "both die" form).
+}
+
+AntePolicy {                            // CR 407 (CONTEXT.md Open item 5)
+    Excluded,                           // CR 407.3: cards printed with "Remove this
+                                        // card from your deck before playing if
+                                        // you're not playing for ante" may not be in
+                                        // a deck OR sideboard. DEFAULT — and, unlike
+                                        // every other default here, ENFORCED today,
+                                        // in deck_validation's DeclaredPool, by a
+                                        // printed-text class predicate rather than a
+                                        // card list. Every custom format gets it,
+                                        // including Axis-A lobby saves.
+    Enabled,                            // CR 407.2/407.4: the ante zone and the ante
+                                        // action. Schema only — GATED by
+                                        // IMPLEMENTED_LEGACY_AXES. This is the half
+                                        // that promises unbuilt runtime behavior;
+                                        // gating `Excluded` too would reject every
+                                        // custom format in existence.
 }
 ```
 
@@ -932,8 +960,10 @@ not appear as a selectable format until that item resolves:
   and `legal_sets: Some(...)` here — never `None` — since this preset DOES
   restrict the pool); restricted = [**25** names, verbatim in CONTEXT.md —
   corrected this round from a "23" miscount]; legacy = default (all
-  `false`/`Modern` — no mana burn, no damage-on-stack, no Wish/legend-rule
-  reversion). `reprint_policy` (on `CustomFormatDef`): `None` for now — NOT
+  `false`/`Modern`/`Excluded` — no mana burn, no damage-on-stack, no
+  Wish/legend-rule reversion, and ante cards excluded per CR 407.3, which is
+  what the source's own carve-out asks for). `reprint_policy` (on
+  `CustomFormatDef`): `None` for now — NOT
   a value pending confirmation, but the genuinely correct value until
   CONTEXT.md Open item 6 resolves (there is no confirmed authored intent to
   declare yet; `None` says exactly that, distinctly from a lobby save's
@@ -942,8 +972,12 @@ not appear as a selectable format until that item resolves:
   None` per §1's pairing rule — revisit alongside Open item 6, since resolving
   that item to a real `Some(_)` value also flips this to
   `SetCodeApproximation` with a matching `description` update. Ante-card
-  handling remains open per Open item 5 separately; do not encode either
-  without resolving its own item first.
+  handling — CONTEXT.md Open item 5 — **is** resolved, in Phase 1d: the
+  `AntePolicy` axis carries it, this preset declares nothing of its own for
+  it, and the seven cards the source carves out are excluded by CR 407.3's
+  printed-text class rather than by any list here. See that item for why
+  neither originally-offered option (a third list, or an `ante_enabled`
+  toggle over `banned`) was taken.
 
 **Phase 2 presets — the four EC formats**, unchanged from the original design,
 now explicitly sequenced after phase 1 (§8) since they need the
@@ -1132,6 +1166,15 @@ Swedish ruleset makes no mention of any of these rules and uses fully modern
 defaults. This section is unchanged from the original design and remains the
 correct plan for phase 2's four EC-format presets.
 
+**One clarification since Phase 1d added the `ante` axis (CONTEXT.md Open item
+5):** the sentence above still holds, because it is about *runtime rules
+wiring*. `AntePolicy::Excluded` needs none — CR 407.3 is a deck-construction
+rule, enforced in `deck_validation.rs` where the other card-pool rules already
+live, not at any game-rules seam. `AntePolicy::Enabled` is what would need
+wiring (the CR 407.2 ante zone, the CR 407.4 ante action), and it is gated
+unimplemented exactly like every axis below. No preset in either phase
+declares it.
+
 - **Mana burn** (`LegacyRuleSet.mana_burn`) — **REWRITTEN AGAIN per
   maintainer review round 3** (CONTEXT.md point 1). Round 2 fixed the
   life-loss-not-damage half but got the mechanism wrong: it gated only the
@@ -1140,8 +1183,8 @@ correct plan for phase 2's four EC-format presets.
   boundary was reached, the pool had already been silently drained at the
   prior intra-phase-group step, with nothing left to burn. Two things
   verified directly this session that the round-2 fix missed:
-  - **Life loss, not damage** (unchanged from round 2, still correct):
-    `docs/MagicCompRules.txt:8278` (obsolete-rules glossary): "unspent mana
+  - **Life loss, not damage** (unchanged from round 2, still correct): the
+    obsolete-rules glossary entry "Mana Burn (Obsolete)": "unspent mana
     caused a player to **lose life**." Damage and life loss are behaviorally
     different in this engine (damage can be prevented/redirected and
     triggers "dealt damage" abilities; life loss does neither).
@@ -1206,11 +1249,11 @@ correct plan for phase 2's four EC-format presets.
      unsynchronized computation point (this resolves the "life loss can
      defer through replacement handling" concern directly).
   Annotate as a pre-M10 rule removed by the M10 update (cite the
-  obsolete-glossary entry `MagicCompRules.txt:8277-8278`). Slightly larger
-  than round 2's estimate (a new `ManaExpiry` variant + its construction-site
-  and clearing-logic wiring, not just a life-loss check at an existing call
-  site) but still small and, critically, reuses a proven pattern rather than
-  adding a new one.
+  obsolete-glossary entry "Mana Burn (Obsolete)"). Slightly larger than round
+  2's estimate (a new `ManaExpiry` variant + its construction-site and
+  clearing-logic wiring, not just a life-loss check at an existing call site)
+  but still small and, critically, reuses a proven pattern rather than adding
+  a new one.
 - **Pre-M10 Wish exile access** (`wish_scope: WishOutsideGameScope`, renamed
   from the placeholder `pre_m10_wish_reaches_exile` bool during round 1 —
   same field, now typed): fully traced in RESEARCH §9. This is a REAL
@@ -1546,15 +1589,21 @@ mechanism §6's "actually enforced, not just documented" test targets.
 **Gate scope, precisely (maintainer review round 5 caught that this wasn't
 stated precisely enough; round 6's `reprint_policy` relocation, §1/§3, makes
 it precise by construction rather than by exemption): `IMPLEMENTED_LEGACY_AXES`
-covers exactly `LegacyRuleSet`'s four axes — `mana_burn`, `damage_timing`,
-`wish_scope`, `legend_rule_scope` — because those are now the ONLY fields on
-`CustomFormatRules` that are independently declarable AND behavior-bearing.**
+covers exactly `LegacyRuleSet`'s five axes — `mana_burn`, `damage_timing`,
+`wish_scope`, `legend_rule_scope`, `ante` — because those are now the ONLY
+fields on `CustomFormatRules` that are independently declarable AND
+behavior-bearing.**
 `reprint_policy` doesn't need an exemption from this gate anymore — it isn't
 on `CustomFormatRules` at all after round 6's move to `CustomFormatDef`, so
-there's nothing there for the gate to either cover or exempt. There is no
-ante-card field to cover yet either (CONTEXT.md Open item 5 — no schema slot
-exists). If a future field is ever added to `CustomFormatRules` with real
-behavior attached (an ante-list, say), it must be added to this gate in the
+there's nothing there for the gate to either cover or exempt. `ante` was added
+in Phase 1d (CONTEXT.md Open item 5, resolved there) and followed this rule
+exactly — added to `LegacyRuleSet` and to the gate in the SAME change. It is
+also the one axis whose coverage is PARTIAL by design: only the non-default
+`AntePolicy::Enabled` is a declared axis, because `Excluded`'s CR 407.3
+deck-construction consequence is enforced from the moment the field exists.
+Gating the default too would reject every custom format in existence. If a
+future field is ever added to `CustomFormatRules` with real
+behavior attached, it must be added to this gate in the
 SAME change — the gate's job is to cover every behavior-bearing field on the
 RESOLVED RULES struct, and it is a review-time checklist item whenever
 `CustomFormatRules`/`LegacyRuleSet` gains a member, not a one-time list to

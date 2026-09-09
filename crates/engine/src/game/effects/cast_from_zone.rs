@@ -3297,6 +3297,135 @@ mod tests {
         );
     }
 
+    /// CR 400.7: the in-place hand grant authorizes casting the card FROM THE
+    /// HAND. A card that leaves the hand without being cast "becomes a new object
+    /// with no memory of, or relation to, its previous existence", so the
+    /// permission must not travel with it.
+    ///
+    /// MEASURED, not hypothetical. `zones::apply_zone_exit_cleanup` dropped these
+    /// grants at the EXILE exit and at the STACK exit and nowhere else, so a
+    /// hand-origin grant rode a discard into the graveyard — where
+    /// `casting::has_graveyard_timed_alt_cost_permission` tests the CURRENT zone
+    /// and never the origin, and re-offered the card as a free GRAVEYARD cast on
+    /// every priority. That is the same re-offer the `from == Zone::Stack` block
+    /// exists to prevent, reached through the other door.
+    ///
+    /// Driven through the resolved zone-command core and then replayed, because
+    /// both live execution and journal replay must leave the same permission state.
+    ///
+    /// DISCRIMINATING: with `Zone::Hand` dropped from the exit condition, the
+    /// permission is still on the card in the graveyard.
+    #[test]
+    fn a_hand_grant_does_not_survive_the_card_leaving_the_hand() {
+        let mut state = make_test_state();
+        let card = add_card_to_hand(&mut state, PlayerId(0), CardId(517));
+        let ability = electrodominance_hand_ability(3);
+
+        let mut events = vec![];
+        grant_lingering_permissions(&mut state, &ability, &[card], &mut events).unwrap();
+        assert!(
+            !state.objects[&card].casting_permissions.is_empty(),
+            "reach guard: the in-place hand grant must have been recorded"
+        );
+
+        let mut replayed = state.clone();
+        let command = crate::game::zones::resolve_and_apply_zone_change(
+            &mut state,
+            card,
+            Zone::Hand,
+            Zone::Graveyard,
+            PlayerId(0),
+            crate::types::game_state::ZoneChangeRecord::test_minimal(
+                card,
+                Some(Zone::Hand),
+                Zone::Graveyard,
+            ),
+        )
+        .expect("live hand exit must resolve");
+
+        assert_eq!(
+            state.objects[&card].zone,
+            Zone::Graveyard,
+            "reach guard: the card must actually have left the hand"
+        );
+        assert!(
+            state.objects[&card].casting_permissions.is_empty(),
+            "CR 400.7: the hand grant must not ride the discard into the graveyard, \
+             where the graveyard cast path would re-offer it; got {:?}",
+            state.objects[&card].casting_permissions
+        );
+        crate::game::zones::apply_resolved_zone_change(&mut replayed, &command)
+            .expect("hand exit command must replay");
+        assert!(
+            replayed.objects[&card].casting_permissions.is_empty(),
+            "CR 400.7: replay must not retain a hand-origin cast permission"
+        );
+    }
+
+    /// CR 400.7: the GRAVEYARD half of the same rule.
+    ///
+    /// `grant_lingering_permissions` treats `Zone::Exile | Zone::Graveyard |
+    /// Zone::Hand` as "in place" and stamps the permission without moving the
+    /// card. Exile has had its own exit clear for a long time; the hand and the
+    /// graveyard had none, so a grant on a graveyard resident (Emry, Lurker of
+    /// the Loch's "you may cast that card this turn" is the named specimen)
+    /// travelled with the card when the graveyard was exiled — and
+    /// `casting::has_exile_cast_permission` reads the CURRENT zone, never the
+    /// origin, so it offered the cast again from exile. (Emry's own grant is not
+    /// free — "You may cast that card this turn. (You still pay its costs.
+    /// Timing rules still apply.)" —
+    /// which is why the clear matches on the permission variant and not on its
+    /// cost payload.)
+    ///
+    /// DISCRIMINATING: with `Zone::Graveyard` dropped from the condition, the
+    /// permission is still on the card in exile.
+    #[test]
+    fn a_graveyard_grant_does_not_survive_the_card_leaving_the_graveyard() {
+        let mut state = make_test_state();
+        let card = add_card_to_graveyard(&mut state, PlayerId(0), CardId(518));
+        let ability = electrodominance_hand_ability(3);
+
+        let mut events = vec![];
+        grant_lingering_permissions(&mut state, &ability, &[card], &mut events).unwrap();
+        assert!(
+            !state.objects[&card].casting_permissions.is_empty(),
+            "reach guard: the in-place graveyard grant must have been recorded"
+        );
+
+        let mut replayed = state.clone();
+        let command = crate::game::zones::resolve_and_apply_zone_change(
+            &mut state,
+            card,
+            Zone::Graveyard,
+            Zone::Exile,
+            PlayerId(0),
+            crate::types::game_state::ZoneChangeRecord::test_minimal(
+                card,
+                Some(Zone::Graveyard),
+                Zone::Exile,
+            ),
+        )
+        .expect("live graveyard exit must resolve");
+
+        assert_eq!(
+            state.objects[&card].zone,
+            Zone::Exile,
+            "reach guard: the card must actually have left the graveyard"
+        );
+        assert!(
+            state.objects[&card].casting_permissions.is_empty(),
+            "CR 400.7: the graveyard grant must not travel with the card into exile, \
+             where the exile cast path would re-offer it; got {:?}",
+            state.objects[&card].casting_permissions
+        );
+        crate::game::zones::apply_resolved_zone_change(&mut replayed, &command)
+            .expect("graveyard exit command must replay");
+        assert!(
+            replayed.objects[&card].casting_permissions.is_empty(),
+            "CR 400.7: replay must not retain a graveyard-origin cast permission"
+        );
+    }
+
     /// CR 611.2a + CR 305.1: both halves of one in-place grant consume the same
     /// enforceable-duration decision — the cast permission and the land-play
     /// companion.

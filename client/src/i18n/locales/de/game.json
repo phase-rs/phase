@@ -511,6 +511,8 @@
     "enduringStoryTooltip": "Bleibende Geschichte — erhalten, wenn du eine Storied bleibende Karte und drei oder mehr Artefakte, legendäre bleibende Karten und/oder Sagen kontrollierst; bleibt für den Rest der Partie bestehen",
     "dungeonAriaLabel": "Wagt sich in {{name}} vor, {{roomName}}, Raum {{room}} von {{total}}",
     "dungeonRoomTooltip": "{{roomName}} — Raum {{room}} von {{total}}",
+    "dungeonMapLoading": "Verlieskarte wird geladen…",
+    "dungeonMapUnavailable": "Bild der Verlieskarte nicht verfügbar",
     "dungeonTooltip": "Wagt sich in {{name}} vor",
     "poisonAriaLabel_one": "{{count}} Giftmarke",
     "poisonAriaLabel_other": "{{count}} Giftmarken",
@@ -963,6 +965,7 @@
     "genericEvent": "Ereignis: {{type}}",
     "searchPlaceholder": "Search log…",
     "allTurns": "All turns",
+    "turnFilterLabel": "Nach Zug filtern",
     "turnChip": "T{{turn}}",
     "entryCount": "{{count}} entries",
     "copy": "Copy",
@@ -2414,6 +2417,18 @@
     },
     "buttons": {
       "keep": "Keep this"
+    }
+  },
+  "dieRoll": {
+    "ignore": {
+      "title": "Ignore a Roll",
+      "subtitle_one": "Choose which of the tied lowest rolls to ignore.",
+      "subtitle_other": "Choose {{count}} of the tied lowest rolls to ignore."
+    },
+    "buttons": {
+      "ignore": "Ignore this",
+      "ignoring": "Ignoring",
+      "keep": "Kept"
     }
   },
   "spectator": {

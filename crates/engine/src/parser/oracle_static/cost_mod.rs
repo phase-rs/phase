@@ -168,7 +168,7 @@ pub(crate) fn parse_cost_payment_prohibition_statics(
     let (_, _) = (opt(tag::<_, _, OracleError<'_>>(".")), eof)
         .parse(after_suffix)
         .ok()?;
-    let (filter, filter_remainder) = parse_type_phrase(filter_text.trim());
+    let (filter, filter_remainder) = parse_type_phrase_folding(filter_text.trim());
     if !filter_remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
         return None;
     }
@@ -308,7 +308,7 @@ fn parse_cast_spells_alternative_cost(text: &str) -> Option<StaticDefinition> {
         .parse(remainder_lower.as_str())
         .is_ok();
 
-    let base_filter = parse_type_phrase(filter_original).0;
+    let base_filter = parse_type_phrase_folding(filter_original).0;
     let affected = apply_spell_keyword_subject_constraints(base_filter, None, None, Vec::new());
 
     let cost = parse_oracle_cost(cost_slice);
@@ -523,7 +523,7 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
             .parse(prefix_lower)
             .map_or(prefix_lower, |(rest, _)| rest);
         // CR 105.2: peel a color-quality prefix ("colorless spell" — Darksteel
-        // Monolith) via the shared authority — `parse_type_phrase` drops the
+        // Monolith) via the shared authority — `parse_type_phrase_folding` drops the
         // word, which would silently over-broaden the grant to any spell. The
         // helper expects the word with its trailing space, so re-pad the
         // trimmed prefix slice.
@@ -537,7 +537,7 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
             // the remaining type words are the last `rest.len()` bytes of the
             // trimmed original slice (the TextPair length-mapping convention).
             let tail = &type_prefix_original[type_prefix_original.len() - rest.len()..];
-            parse_type_phrase(tail).0
+            parse_type_phrase_folding(tail).0
         };
         (base, color_prop.into_iter().collect::<Vec<_>>())
     };
@@ -610,7 +610,7 @@ pub(crate) fn parse_collect_evidence_alt_cost(text: &str) -> Option<StaticDefini
     let base_filter = if type_prefix_original.is_empty() {
         TargetFilter::Typed(TypedFilter::card())
     } else {
-        parse_type_phrase(type_prefix_original).0
+        parse_type_phrase_folding(type_prefix_original).0
     };
     let affected = apply_spell_keyword_subject_constraints(base_filter, None, None, Vec::new());
 
@@ -812,13 +812,13 @@ pub(crate) fn parse_cast_by_paying_life_alt_cost(text: &str) -> Option<StaticDef
         };
 
     // Strip trailing "spell" / "spells" before type parsing — "enchantment spell" →
-    // "enchantment". `parse_type_phrase` expects bare type words.
+    // "enchantment". `parse_type_phrase_folding` expects bare type words.
     let filter_for_parse = strip_cost_mod_spell_noun_suffix(filter_for_parse);
 
     let base_filter = if filter_for_parse.is_empty() {
         TargetFilter::Typed(TypedFilter::card())
     } else {
-        let (filter, remainder) = parse_type_phrase(filter_for_parse);
+        let (filter, remainder) = parse_type_phrase_folding(filter_for_parse);
         if !remainder.trim().is_empty() {
             return None;
         }

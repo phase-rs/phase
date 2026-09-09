@@ -100,6 +100,7 @@ function formatSpeed(value: number, max: number, labels: { instant: string; slow
 }
 const SETTINGS_TABS = [
   { id: "gameplay" },
+  { id: "experimental" },
   { id: "visual" },
   { id: "combat" },
   { id: "audio" },
@@ -179,6 +180,7 @@ export function PreferencesModal({
   const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const spellPaymentMode = usePreferencesStore((s) => s.spellPaymentMode);
   const priorityPassingMode = usePreferencesStore((s) => s.priorityPassingMode);
+  const experimentalTournamentsEnabled = usePreferencesStore((s) => s.experimentalTournamentsEnabled);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const animationSpeedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
@@ -190,6 +192,7 @@ export function PreferencesModal({
   const setMultiplayerBoardLayout = usePreferencesStore((s) => s.setMultiplayerBoardLayout);
   const setSpellPaymentMode = usePreferencesStore((s) => s.setSpellPaymentMode);
   const setPriorityPassingMode = usePreferencesStore((s) => s.setPriorityPassingMode);
+  const setExperimentalTournamentsEnabled = usePreferencesStore((s) => s.setExperimentalTournamentsEnabled);
   const setBoardBackground = usePreferencesStore((s) => s.setBoardBackground);
   const customBackgroundUrl = usePreferencesStore((s) => s.customBackgroundUrl);
   const setCustomBackgroundUrl = usePreferencesStore((s) => s.setCustomBackgroundUrl);
@@ -494,6 +497,27 @@ export function PreferencesModal({
                       )}
                     </SettingGroup>
                   </div>
+                </SettingsSection>
+              )}
+
+              {activeTab === "experimental" && (
+                <SettingsSection title={t("experimental.title")}>
+                  <SettingGroup label={t("experimental.tournaments")}>
+                    <label className="flex min-h-11 items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={experimentalTournamentsEnabled}
+                        onChange={(event) => setExperimentalTournamentsEnabled(event.target.checked)}
+                        className="mt-1 accent-cyan-500"
+                      />
+                      <span className="text-sm text-slate-200">
+                        {t("experimental.showTournaments")}
+                        <span className="mt-0.5 block text-xs leading-relaxed text-slate-400">
+                          {t("experimental.showTournamentsDescription")}
+                        </span>
+                      </span>
+                    </label>
+                  </SettingGroup>
                 </SettingsSection>
               )}
 

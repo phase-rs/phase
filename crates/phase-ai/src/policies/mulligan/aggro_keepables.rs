@@ -1,9 +1,8 @@
 //! `AggroKeepablesMulligan` — feature-driven mulligan policy for aggro decks.
 //!
-//! CR 103.5: deciding to keep after the
-//! mulligan process. When a deck's aggro-pressure commitment is meaningful,
-//! opening hands that combine early drops, lands, and evasion/burn are
-//! strongly preferred.
+//! CR 103.5: deciding to keep after the mulligan process. When a deck's
+//! aggro-pressure commitment is meaningful, opening hands that combine
+//! early drops, lands, and evasion/burn are strongly preferred.
 //!
 //! Opts out for decks where `features.aggro_pressure.commitment <= MULLIGAN_FLOOR` —
 //! the baseline `KeepablesByLandCount` policy is the sole voice for those decks.

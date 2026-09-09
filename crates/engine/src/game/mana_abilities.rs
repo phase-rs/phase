@@ -593,7 +593,7 @@ pub(super) fn resolve_mana_ability_excluding(
         // synchronous auto-tap recursively retry its still-live caller.
         resume: ManaAbilityResume::Priority,
         cost_move_resume: resume.cloned(),
-        chosen_tappers: Vec::new(),
+        chosen_tappers: None,
         chosen_discards: Vec::new(),
         chosen_mana_payment: None,
         chosen_counter_count: None,
@@ -907,7 +907,17 @@ pub fn activate_mana_ability(
             "Phased-out permanents cannot activate abilities (CR 702.26b)".to_string(),
         ));
     }
-    if source.controller != player {
+    // CR 602.2 + CR 108.4a: the executor counterpart of the readiness gate in
+    // `mana_ability_ready_without_simulation_gated`. `GameAction::ActivateAbility`
+    // on a mana ability is routed straight here by `engine.rs` rather than through
+    // `casting::handle_activate_ability`, so this is where a directly-submitted
+    // mana activation is actually authorized and it must apply the same rule.
+    // CR 108.4: a card in a hand, graveyard, library or exile is neither a
+    // permanent nor a spell and so has no controller; CR 108.4a directs the ask to
+    // its owner. `controller_or_owner` is the single authority for that selection
+    // and keeps the CR 109.4c command-zone emblem on its controller. This runs
+    // ahead of the `activation_zone` check below, so it sees every zone.
+    if source.controller_or_owner() != player {
         return Err(EngineError::NotYourPriority);
     }
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
@@ -955,7 +965,7 @@ pub fn activate_mana_ability(
             color_override,
             resume,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
@@ -1460,7 +1470,7 @@ pub fn handle_tap_creatures_for_mana_ability(
     }
 
     let mut updated = pending.clone();
-    updated.chosen_tappers = chosen.to_vec();
+    updated.chosen_tappers = Some(chosen.to_vec());
     // CR 107.3a: for the X-sentinel form only, the selected payment count *is*
     // the announced value of X for this mana ability. `min_count == 0` is not a
     // usable signal here for the same reason it is not at the spell-cost seam.
@@ -1511,10 +1521,10 @@ pub fn handle_exile_for_mana_ability(
     // CR 117.1 + CR 400.7j + CR 608.2k: Capture the cost-paid object's public
     // characteristics before it leaves its zone.
     let captured = chosen.first().and_then(|id| {
-        state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
-            object_id: *id,
-            lki: obj.snapshot_for_mana_spent(),
-        })
+        state
+            .objects
+            .get(id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
     });
 
     let mut updated = pending.clone();
@@ -1558,10 +1568,10 @@ pub fn handle_sacrifice_for_mana_ability(
     }
 
     let captured = chosen.first().and_then(|id| {
-        state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
-            object_id: *id,
-            lki: obj.snapshot_for_mana_spent(),
-        })
+        state
+            .objects
+            .get(id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
     });
 
     let mut updated = pending.clone();
@@ -1760,8 +1770,19 @@ fn mana_ability_ready_without_simulation_gated(
     if !obj.detained_by.is_empty() {
         return false;
     }
-    // CR 602.2a: Only the controller may activate the ability.
-    if obj.controller != player {
+    // CR 602.2: "Only an object's controller (or its owner, if it doesn't have a
+    // controller) can activate its activated ability unless the object specifically
+    // says otherwise." CR 108.4: a card is not a permanent or spell — and so has no
+    // controller — in a hand, graveyard, library or exile, and CR 108.4a directs
+    // anything asking for that controller to use the owner instead. This gate admits
+    // those zones (`activation_zone`, checked just below), so it must ask for the
+    // permission reference point rather than a raw `.controller`.
+    //
+    // `GameObject::controller_or_owner` is the single authority for that selection.
+    // Routing through it rather than swapping in `.owner` is what keeps the command
+    // zone correct: CR 109.4c makes an emblem an object that DOES have a controller
+    // while sitting in the command zone, and the helper carries that exception.
+    if obj.controller_or_owner() != player {
         return false;
     }
     // CR 113.6 + CR 113.6b: A permanent's abilities function only on the battlefield by
@@ -2061,7 +2082,11 @@ pub(super) fn advance_mana_ability_activation(
         }
     }
 
-    if pending.chosen_tappers.is_empty() {
+    // CR 107.3a + CR 601.2h: `is_none()`, NOT `is_empty()`. An empty selection
+    // is a legal, ANSWERED X=0 payment of the X-sentinel form, so deriving
+    // "unanswered" from the collection's cardinality re-surfaces this same
+    // prompt forever. Matches the already-correct `chosen_x.is_none()` gate.
+    if pending.chosen_tappers.is_none() {
         if let Some((min_count, max_count, creatures, mode)) =
             tap_creature_cost_choice(state, pending.player, pending.source_id, &ability_def.cost)
         {
@@ -2449,7 +2474,7 @@ fn ensure_mana_ability_selection_cursor_consumed(
     pending: &PendingManaAbility,
     cursor: &ManaAbilityCostCursor,
 ) -> Result<(), EngineError> {
-    if cursor.next_tapper != pending.chosen_tappers.len() {
+    if cursor.next_tapper != pending.chosen_tappers.as_ref().map_or(0, Vec::len) {
         return Err(EngineError::InvalidAction(
             "Too many creatures selected for mana ability cost".to_string(),
         ));
@@ -2485,18 +2510,67 @@ fn append_suspended_child_cost_events(
     parent.deferred_cost_events.extend_from_slice(current);
 }
 
+/// CR 107.3a + CR 601.2h: Advance the payment cursor past the component just
+/// applied, so `ensure_mana_ability_selection_cursor_consumed` can confirm the
+/// whole announced selection was consumed and nothing was left over.
+///
+/// `chosen_x` is the ANNOUNCED value of X for this activation
+/// (`PendingManaAbility::chosen_x`), bound once at selection completion by
+/// `handle_tap_creatures_for_mana_ability`. It is a parameter rather than a
+/// `&PendingManaAbility` for the same reason `paid_discard_count` already is:
+/// the contract is "advance from the cost's announced facts", and that keeps
+/// this unit-testable without building a pending activation.
+///
+/// Private to this module, like every other cost-cursor helper here. There is
+/// exactly one production call site, in
+/// `pay_selected_mana_ability_cost_components`; the `Aggregate` exhaustiveness
+/// guard below — unreachable through `apply()` because
+/// `tap_creature_cost_choice` refuses to register an aggregate tap cost — is
+/// asserted from this file's own `x_sentinel_mana_ability_cost_application`
+/// test module, which reaches a private item as a descendant module rather
+/// than through widened production visibility.
 fn advance_mana_ability_selection_cursor(
     cursor: &mut ManaAbilityCostCursor,
     cost: &AbilityCost,
     paid_discard_count: Option<usize>,
+    chosen_x: Option<u32>,
 ) -> Result<(), EngineError> {
     match cost {
         AbilityCost::TapCreatures { requirement, .. } => {
-            cursor.next_tapper += requirement.fixed_count().ok_or_else(|| {
-                EngineError::InvalidAction(
-                    "Aggregate-power tap cost is not valid for a mana ability".to_string(),
-                )
-            })? as usize;
+            // CR 107.3a: the cursor must advance by the ANNOUNCED X, not by the
+            // `u32::MAX` X-sentinel that `fixed_count()` reports for the
+            // `Tap X untapped ...` form — the same authority the application
+            // loop in `pay_mana_ability_cost_with_choices` already reads.
+            // Exhaustive with no wildcard so a fourth
+            // `TapCreaturesSelectionMode` variant breaks the build here instead
+            // of silently taking a wrong branch.
+            cursor.next_tapper += match requirement.selection_mode() {
+                TapCreaturesSelectionMode::Fixed => requirement
+                    .fixed_count()
+                    .expect("Fixed mode is derived from TapCreaturesRequirement::Count"),
+                TapCreaturesSelectionMode::VariableX => chosen_x.ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "Missing announced X for tap-creatures mana ability cost".to_string(),
+                    )
+                })?,
+                // Unreachable through the production path, by this engine's own
+                // invariant: `tap_creature_cost_choice`'s
+                // `let count = requirement.fixed_count()?;` yields `None` for
+                // the aggregate form, so an aggregate-power tap cost is never
+                // registered as a mana-ability cost component and never
+                // reaches this cursor. NOT a rules prohibition: CR 605.1a
+                // states a mana ability's criteria (no target, could add mana,
+                // not a loyalty ability, and no cost or effect that moves a
+                // card to or from a library) and an aggregate-power tap cost
+                // violates none of them. Kept as an exhaustiveness guard so a
+                // fourth `TapCreaturesSelectionMode` cannot silently take a
+                // wrong branch.
+                TapCreaturesSelectionMode::Aggregate(_) => {
+                    return Err(EngineError::InvalidAction(
+                        "Aggregate-power tap cost is not valid for a mana ability".to_string(),
+                    ));
+                }
+            } as usize;
         }
         AbilityCost::Discard { self_scope, .. } if !self_scope.is_source_card() => {
             cursor.next_discard += paid_discard_count.expect(
@@ -2863,6 +2937,7 @@ fn pay_mana_ability_cost_component(
             let mut tappers = pending
                 .chosen_tappers
                 .iter()
+                .flatten()
                 .copied()
                 .skip(cursor.next_tapper);
             let mut discards = pending
@@ -2919,7 +2994,12 @@ fn pay_mana_ability_cost_component(
                 }
                 Err(error) => return Err(error),
             };
-            advance_mana_ability_selection_cursor(cursor, cost, paid_discard_count)?;
+            advance_mana_ability_selection_cursor(
+                cursor,
+                cost,
+                paid_discard_count,
+                pending.chosen_x,
+            )?;
             let choice_player = match &component_progress {
                 ManaAbilityCostComponentProgress::Complete => None,
                 ManaAbilityCostComponentProgress::Paused {
@@ -4674,8 +4754,26 @@ fn discard_cost_choice(
     // discard paid by doing nothing (skip the leg). `Err` (fewer eligible cards than the nonzero
     // count) is unreachable here because `cost_payability` already gated activation on hand size,
     // so `unwrap_or_default()`'s `None` fallback is the correct "no selection to surface" result.
-    super::casting::resolve_non_self_discard_requirement(state, player, source_id, cost)
-        .unwrap_or_default()
+    let (count, mut eligible) =
+        super::casting::resolve_non_self_discard_requirement(state, player, source_id, cost)
+            .unwrap_or_default()?;
+    if let Some((pending_spell, reserved)) = state
+        .pending_cast
+        .as_ref()
+        .filter(|pending| pending.ability.controller == player)
+        .and_then(|pending| {
+            pending
+                .deferred_random_discard_cost
+                .as_ref()
+                .map(|cost| (pending.object_id, cost.count))
+        })
+    {
+        eligible.retain(|&id| id != pending_spell);
+        if eligible.len() < count + reserved {
+            return None;
+        }
+    }
+    Some((count, eligible))
 }
 
 /// CR 117.1 + CR 118.3: Match non-self `AbilityCost::Exile` shapes. Returns
@@ -4746,10 +4844,10 @@ fn prepare_deterministic_exile_cost_selection(
         ));
     }
     let captured = chosen.first().and_then(|id| {
-        state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
-            object_id: *id,
-            lki: obj.snapshot_for_mana_spent(),
-        })
+        state
+            .objects
+            .get(id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
     });
     let mut updated = pending.clone();
     updated.chosen_exiled = chosen;
@@ -10921,7 +11019,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
@@ -11023,7 +11121,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
@@ -11234,7 +11332,7 @@ mod tests {
                 color_override: None,
                 resume: ManaAbilityResume::Priority,
                 cost_move_resume: None,
-                chosen_tappers: Vec::new(),
+                chosen_tappers: None,
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
                 chosen_counter_count: None,
@@ -11467,7 +11565,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
@@ -11573,7 +11671,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
@@ -12636,7 +12734,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
@@ -13172,7 +13270,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
@@ -13737,7 +13835,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
@@ -13810,7 +13908,7 @@ mod tests {
             color_override: Some(ProductionOverride::SingleColor(ManaType::Black)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
@@ -13938,7 +14036,7 @@ mod tests {
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
@@ -14004,7 +14102,7 @@ mod tests {
             color_override: Some(ProductionOverride::SingleColor(ManaType::Red)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
@@ -14072,6 +14170,7 @@ mod tests {
         ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot {
             object_id: paid.id,
             lki: paid.snapshot_for_mana_spent(),
+            incarnation: 0,
         });
 
         let resolved = resolve_quantity_with_targets(
@@ -14161,7 +14260,7 @@ mod tests {
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
@@ -15019,6 +15118,66 @@ mod tests {
             assert!(
                 tappers.iter().all(|id| !state.objects[id].tapped),
                 "a refused aggregate cost must not tap anything"
+            );
+        }
+
+        /// The cursor-ADVANCE sibling of [`aggregate_shape_is_refused`] above,
+        /// which covers the cost-APPLICATION loop. Both arms must refuse the
+        /// aggregate shape, and this one must refuse it with the message it
+        /// carried before Unit 2 replaced `fixed_count().ok_or_else(..)` with an
+        /// exhaustive `selection_mode()` match — byte-identical, so a
+        /// maintainer reading the error in a log sees no change.
+        ///
+        /// Direct-call, and legitimately so: `advance_mana_ability_selection_cursor`
+        /// is private to `game::mana_abilities` and this module is a DESCENDANT
+        /// of it, so Rust privacy already grants the reach and no production
+        /// visibility is widened for the assertion. The arm itself is dead code
+        /// under `apply()` — `tap_creature_cost_choice`'s
+        /// `requirement.fixed_count()?` refuses to register an aggregate tap
+        /// cost — so there is no production entry point to drive instead, which
+        /// is why this stays an exhaustiveness-guard assertion rather than a
+        /// scenario test.
+        ///
+        /// REVERT-PROBE: alter the aggregate arm's message text, or drop the arm
+        /// for a `_ => {}` wildcard (which advances by nothing and returns
+        /// `Ok`) ⇒ the message assertion, or the `expect_err`, fails.
+        #[test]
+        fn aggregate_shape_is_refused_by_the_cursor_advance() {
+            let aggregate = AbilityCost::TapCreatures {
+                requirement: TapCreaturesRequirement::total_power_at_least(5),
+                filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            };
+            // Positive reach guard: the fixture really is the aggregate mode, so
+            // this cannot silently assert against the `Fixed` or `VariableX` arm.
+            let AbilityCost::TapCreatures { requirement, .. } = &aggregate else {
+                unreachable!("the fixture above is a TapCreatures cost");
+            };
+            assert!(
+                matches!(
+                    requirement.selection_mode(),
+                    TapCreaturesSelectionMode::Aggregate(_)
+                ),
+                "reach guard: the fixture must be the aggregate selection mode"
+            );
+            let mut cursor = mana_ability_cost_cursor(
+                &Some(aggregate.clone()),
+                &HashSet::new(),
+                None,
+                ManaAbilityCostResolutionMode::Interactive,
+                None,
+            );
+            let err = advance_mana_ability_selection_cursor(&mut cursor, &aggregate, None, None)
+                .expect_err("an aggregate tap cost is never a valid mana-ability cost");
+            let EngineError::InvalidAction(message) = &err else {
+                panic!("an aggregate mana-ability tap cost must be an InvalidAction, got {err:?}");
+            };
+            assert_eq!(
+                message, "Aggregate-power tap cost is not valid for a mana ability",
+                "the Aggregate arm's message must be byte-identical to the pre-fix one",
+            );
+            assert_eq!(
+                cursor.next_tapper, 0,
+                "a refused aggregate advance must not move the cursor"
             );
         }
     }

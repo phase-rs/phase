@@ -303,6 +303,44 @@ fn register_transient_effect(
         }
     }
 
+    // CR 601.2b + CR 118.9 + CR 611.2c: A duration-bound "you may cast [filter]
+    // from your hand without paying their mana costs" permission (Chandra,
+    // Flame's Catalyst's ultimate) is a PLAYER-scoped rules modification, not an
+    // object grant. The set of cards it covers is re-read at every cast attempt —
+    // a card DRAWN LATER in the same turn is covered, which is the whole reason
+    // this class cannot be a per-object permission — so per CR 611.2c the
+    // affected filter must ride on the TCE intact rather than be frozen to a
+    // `SpecificObject` set by the broadcast branch below.
+    //
+    // Read directly off the TCE by the single free-cast authority
+    // (`casting::unlimited_hand_cast_free_source`), exactly as `MayLookAtFaceDown`
+    // is read by `viewer_may_look_at_face_down`; `layers.rs` never grafts it onto
+    // an object. `controller` is the player the permission belongs to, and the
+    // TCE outlives its source — load-bearing here, since paying Chandra's [-8]
+    // puts her in the graveyard (CR 704.5i) before the ability resolves.
+    if modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: crate::types::statics::StaticMode::CastFromHandFree { .. },
+            }
+        )
+    }) {
+        if let Some(affected) = static_def.affected.clone() {
+            install_transient(
+                state,
+                end_permission,
+                ability.source_id,
+                ability.controller,
+                duration.clone(),
+                affected,
+                modifications,
+                static_def.condition.clone(),
+            );
+            return;
+        }
+    }
+
     // CR 118.7 + CR 611.2c: A transient "activated abilities of <X> cost {N} less
     // this turn" reduction (The Dining Car's chaos ability) rides as an
     // `AddStaticMode { ReduceAbilityCost }` whose `affected` names the SOURCE
@@ -680,14 +718,21 @@ fn register_transient_effect(
         Some(TargetFilter::CostPaidObject) | Some(TargetFilter::ParentTarget)
             if ability.targets.is_empty() && ability.cost_paid_object.is_some() =>
         {
-            if let Some(snap) = &ability.cost_paid_object {
+            // CR 400.7: resolve through the shared live-reference guard so a
+            // returned same-id object never receives the grant. A stale
+            // referent installs nothing.
+            if let Some(id) = ability
+                .cost_paid_object
+                .as_ref()
+                .and_then(|snap| snap.live_object_id(state))
+            {
                 install_transient(
                     state,
                     end_permission,
                     ability.source_id,
                     ability.controller,
                     duration.clone(),
-                    TargetFilter::SpecificObject { id: snap.object_id },
+                    TargetFilter::SpecificObject { id },
                     modifications.clone(),
                     static_def.condition.clone(),
                 );
@@ -706,14 +751,23 @@ fn register_transient_effect(
         Some(TargetFilter::AmassedArmy)
             if ability.targets.is_empty() && ability.amassed_army_object.is_some() =>
         {
-            if let Some(snap) = &ability.amassed_army_object {
+            // CR 400.7: resolve through the shared live-reference guard, as the
+            // `CostPaidObject` arm above does. An Army that changed zones is a
+            // new object at the same storage id; installing the grant on it
+            // would apply an effect bound to the previous incarnation. A stale
+            // referent installs nothing (no fallback to a same-id object).
+            if let Some(id) = ability
+                .amassed_army_object
+                .as_ref()
+                .and_then(|snap| snap.live_object_id(state))
+            {
                 install_transient(
                     state,
                     end_permission,
                     ability.source_id,
                     ability.controller,
                     duration.clone(),
-                    TargetFilter::SpecificObject { id: snap.object_id },
+                    TargetFilter::SpecificObject { id },
                     modifications.clone(),
                     static_def.condition.clone(),
                 );
@@ -1071,6 +1125,28 @@ fn snapshot_transient_modifications(
 /// UNTOUCHED so CDA-style "+1/+1 for each X" continuous mods keep their dynamic
 /// behavior — only resolution-context refs, which read transient context that
 /// is gone by the next layer recompute, are snapshotted.
+///
+/// ORDERING INVARIANT — read before re-timing die-roll emission. The "resolved
+/// one step earlier" assumption above is NOT free once a CR 706.6 ignore
+/// replacement (Barbarian Class, Pixie Guide, Wyll) is in play: emission is then
+/// deferred past a `SelectDieRolls` action boundary, and this scan runs against
+/// whatever the vec holds at registration time.
+///
+/// What preserves it is `WaitingFor::DieKeepChoice`'s membership in
+/// `waits_for_resolution_choice` (`game/effects/mod.rs`): the effect chain
+/// suspends at the keep-choice, so this `GenericEffect` registration is stashed
+/// and drained only AFTER `resume_after_ignore` has pushed the survivors'
+/// `DieRolled` events. Remove that arm and the `debug_assert!` below trips in
+/// debug — while RELEASE builds silently register a permanent +0/+0, because
+/// CR 611.2d freezes X once on resolution and the layer system never re-resolves
+/// it.
+///
+/// NOTE FOR CENSUS-TAKERS: this consumer reads `DieRolled` INDIRECTLY, through
+/// `extract_amount_from_event` (`game/targeting.rs`). A `grep -rn 'DieRolled'`
+/// CANNOT see it. Enumerate die-result readers by the predicate "reads a die
+/// result out of an events slice", and grep `extract_amount_from_event` call
+/// sites as a second axis. Sibling consumer at `game/contraptions.rs`
+/// (`recent_roll_difference`).
 fn snapshot_resolution_context_quantity(expr: &QuantityExpr, events: &[GameEvent]) -> QuantityExpr {
     match expr {
         QuantityExpr::Ref {
@@ -1284,6 +1360,7 @@ mod tests {
         let snapshot = crate::types::ability::CostPaidObjectSnapshot {
             object_id: army,
             lki: state.objects[&army].snapshot_public_characteristics(),
+            incarnation: 0,
         };
 
         let static_def = StaticDefinition::continuous()
@@ -1345,6 +1422,7 @@ mod tests {
         let snapshot = crate::types::ability::CostPaidObjectSnapshot {
             object_id: paid,
             lki: state.objects[&paid].snapshot_public_characteristics(),
+            incarnation: 0,
         };
         let static_def = StaticDefinition::continuous()
             .affected(TargetFilter::CostPaidObject)
@@ -4037,6 +4115,165 @@ mod tests {
         assert!(
             !object_cant_tap(&state, untouched),
             "a non-goaded creature must NOT be restricted"
+        );
+    }
+
+    /// CR 400.7 + CR 701.47c: An `AmassedArmy` transient grant must not install
+    /// on an Army that left and returned under the same storage id — that is a
+    /// new object, and the grant was bound to the previous incarnation.
+    ///
+    /// Paired with `amassed_army_transient_grant_installs_on_undeparted_army`,
+    /// which drives the same fixture down the installing branch; without it this
+    /// negative could pass merely by never reaching the arm.
+    #[test]
+    fn amassed_army_transient_grant_skips_new_incarnation_after_round_trip() {
+        use crate::types::ability::CostPaidObjectSnapshot;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let army = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Army".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Capture BEFORE departure; capturing after would record the NEW
+        // incarnation and the assertion would hold for the wrong reason.
+        let army_obj = state.objects.get(&army).expect("army exists");
+        let incarnation_before = army_obj.incarnation;
+        let snapshot =
+            CostPaidObjectSnapshot::capture(army_obj, army_obj.snapshot_public_characteristics());
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::AmassedArmy)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        let mut ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def.clone()],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        ability.set_amassed_army_object_recursive(snapshot);
+
+        // CR 400.7: battlefield -> graveyard -> battlefield, same storage id.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, army, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, army, Zone::Battlefield, &mut events);
+
+        let returned = state.objects.get(&army).expect("row survives the move");
+        assert_eq!(
+            returned.zone,
+            Zone::Battlefield,
+            "fixture reach-guard: the id must be back on the battlefield"
+        );
+        assert!(
+            returned.incarnation > incarnation_before,
+            "fixture reach-guard: the round trip must bump the incarnation ({} -> {})",
+            incarnation_before,
+            returned.incarnation
+        );
+
+        let before = state.transient_continuous_effects.len();
+        register_transient_effect(
+            &mut state,
+            &ability,
+            &static_def,
+            Some(&TargetFilter::AmassedArmy),
+            &Duration::UntilEndOfTurn,
+            None,
+        );
+
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            before,
+            "CR 400.7: the returned Army is a new object, so no transient grant              may be installed for the stale amassed-Army reference"
+        );
+    }
+
+    /// CR 701.47c: Paired positive for
+    /// `amassed_army_transient_grant_skips_new_incarnation_after_round_trip`.
+    /// Identical fixture, but the Army never departs, so the grant IS installed
+    /// and targets that Army.
+    #[test]
+    fn amassed_army_transient_grant_installs_on_undeparted_army() {
+        use crate::types::ability::CostPaidObjectSnapshot;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let army = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Army".to_string(),
+            Zone::Battlefield,
+        );
+
+        let army_obj = state.objects.get(&army).expect("army exists");
+        let snapshot =
+            CostPaidObjectSnapshot::capture(army_obj, army_obj.snapshot_public_characteristics());
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::AmassedArmy)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        let mut ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def.clone()],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        ability.set_amassed_army_object_recursive(snapshot);
+
+        let before = state.transient_continuous_effects.len();
+        register_transient_effect(
+            &mut state,
+            &ability,
+            &static_def,
+            Some(&TargetFilter::AmassedArmy),
+            &Duration::UntilEndOfTurn,
+            None,
+        );
+
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            before + 1,
+            "an undeparted amassed Army must still receive its grant"
+        );
+        assert_eq!(
+            state
+                .transient_continuous_effects
+                .last()
+                .expect("just installed")
+                .affected,
+            TargetFilter::SpecificObject { id: army },
+            "the grant must name the amassed Army itself"
         );
     }
 }

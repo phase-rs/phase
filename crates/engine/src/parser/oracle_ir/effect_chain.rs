@@ -193,10 +193,10 @@ fn ability_definition_has_result_table_roll_die(def: &AbilityDefinition) -> bool
 ///
 /// # The partition is the rules' own, not an engineering convenience
 ///
-/// CR 602.1 — *"Activated abilities have a cost and
-/// an effect. They are written as `[Cost]: [Effect.] [Activation instructions
-/// (if any).]`"* — draws exactly the seam this type sits on, and CR 113.3b
-/// repeats the tripartite form for abilities generally. So:
+/// CR 602.1 — *"Activated abilities have a cost and an effect. They are written
+/// as `[Cost]: [Effect.] [Activation instructions (if any).]`"* — draws exactly
+/// the seam this type sits on, and CR 113.3b repeats the tripartite form for
+/// abilities generally. So:
 ///
 /// | shell field group | CR |
 /// |---|---|
@@ -205,9 +205,9 @@ fn ability_definition_has_result_table_roll_die(def: &AbilityDefinition) -> bool
 /// | `min_x_value` | CR 601.2b — the announced value of a variable cost |
 /// | `ability_tag`, `cant_be_copied`, `description` | ability-level identity/provenance, not resolution steps |
 ///
-/// while `EffectChainIr` holds the CR 608.2 resolution instructions.
-/// Because the root-vs-clause axis follows a seam CR 602.1 already draws, the
-/// widening satisfies the categorical-boundary rule rather than straddling rule
+/// while `EffectChainIr` holds the CR 608.2 resolution instructions. Because
+/// the root-vs-clause axis follows a seam CR 602.1 already draws, the widening
+/// satisfies the categorical-boundary rule rather than straddling rule
 /// sections.
 ///
 /// **This is 12 of `AbilityDefinition`'s 38 root fields, deliberately not a
@@ -342,13 +342,13 @@ pub(crate) struct AbilityShellIr {
     ///
     /// # This is the one field that is NOT the CR 602.1 activation envelope
     ///
-    /// Everything else on this shell partitions along the seam CR 602.1
-    /// draws — cost before the colon, activation instructions after it. `optional`
-    /// does not: CR 608.2d places the choice
-    /// *"while applying the effect"*, which is CR 608.2 resolution, the half this
-    /// type deliberately leaves to [`EffectChainIr`]. So its presence here is an
-    /// explicit, named exception rather than an extension of the partition, and
-    /// this doc block is where the exception is justified.
+    /// Everything else on this shell partitions along the seam CR 602.1 draws —
+    /// cost before the colon, activation instructions after it. `optional` does
+    /// not: CR 608.2d places the choice *"while applying the effect"*, which is
+    /// CR 608.2 resolution, the half this type deliberately leaves to
+    /// [`EffectChainIr`]. So its presence here is an explicit, named exception
+    /// rather than an extension of the partition, and this doc block is where the
+    /// exception is justified.
     ///
     /// # Why the exception is nonetheless correct
     ///

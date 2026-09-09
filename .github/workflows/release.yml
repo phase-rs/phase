@@ -82,10 +82,11 @@ jobs:
     needs: [resolve-release-ref]
     runs-on: ubuntu-latest
     # Card-data generation grows with the card/deck corpus: this job hit 28m for
-    # v0.4.0 and crossed the prior 30m ceiling for v0.5.0 (killed mid-frontend
-    # build, stranding the release). Raised to 60m for headroom — the ceiling
-    # only bills the failure case, so a normal ~30m run still ends at ~30m.
-    timeout-minutes: 60
+    # v0.4.0 crossed the prior 30m ceiling, and v0.75.0 consumed the 60m
+    # ceiling just before its R2 upload finished, stranding that release.
+    # A normal run still ends near 30m, so 90m only affects genuinely stalled
+    # builds while allowing cold caches and larger card/deck corpora to finish.
+    timeout-minutes: 90
     outputs:
       card_data_sha256: ${{ steps.card-data-hash.outputs.card_data_sha256 }}
       card_data_hash16: ${{ steps.card-data-hash.outputs.hash }}

@@ -333,7 +333,7 @@ export function resolveDraftWorkspaceSideboardCollapsed(
     return explicitValue ?? true;
   }
   if (responsiveContext === "draft" && responsiveLayout === "phone-landscape") {
-    return explicitValue ?? false;
+    return explicitValue ?? true;
   }
   if (responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape") {
     return explicitValue ?? true;

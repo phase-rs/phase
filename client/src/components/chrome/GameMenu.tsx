@@ -14,6 +14,7 @@ import { FullscreenButton } from "./FullscreenButton.tsx";
 import { VolumeControl } from "./VolumeControl.tsx";
 import { clearGame } from "../../stores/gameStore.ts";
 import { useDraftStore } from "../../stores/draftStore.ts";
+import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore.ts";
 import { useCardDataMeta } from "../../hooks/useCardDataMeta.ts";
 import { useConcedeHandler } from "../../hooks/useConcedeHandler.ts";
 import type { ResolvedMultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
@@ -337,7 +338,24 @@ export function GameMenu({
                   navigate("/draft/quick?resume=1");
                 });
               } else if (isDraftPodMatch) {
-                navigate("/draft-pod");
+                // One of THREE exits from a `draft-match` game — this menu
+                // entry, `GamePage`'s game-over button, and Concede — and all
+                // three ask the same question, so all three ask
+                // `endCommanderSession`. It owns the answer and the reasoning:
+                // a pairwise pod match is mid-tournament and must survive being
+                // left, a Commander launch is the pod's last act and must not.
+                // Do not re-inline the condition here; a second copy of that
+                // rationale is how the two drift apart.
+                //
+                // This entry is reachable for the WHOLE game, not just at game
+                // over, so it is the likeliest of the three routes.
+                //
+                // `finally`, not `then` — a teardown that rejects must not
+                // strand the player in a game they have left.
+                void useMultiplayerDraftStore
+                  .getState()
+                  .endCommanderSession()
+                  .finally(() => navigate("/draft-pod"));
               } else {
                 navigate("/");
               }

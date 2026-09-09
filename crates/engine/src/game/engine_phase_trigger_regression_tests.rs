@@ -3505,7 +3505,7 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
     let waiting_for = engine_replacement::apply_post_replacement_effect(
         &mut state,
         &effect_def,
-        Some(source_id),
+        engine_replacement::ContinuationSubjects::affected_only(Some(source_id)),
         None,
         None,
         Default::default(),
@@ -3715,7 +3715,7 @@ fn copy_target_choice_resolves_become_copy() {
             .execute(crate::types::ability::AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 crate::types::ability::Effect::BecomeCopy {
-                    recipient: TargetFilter::SelfRef,
+                    recipient: crate::types::ability::CopyRecipient::Source,
                     target: TargetFilter::Any,
                     duration: None,
                     mana_value_limit: Some(
@@ -3818,7 +3818,7 @@ fn copy_target_choice_applies_copied_enter_with_counters_replacement_before_sba(
             .execute(crate::types::ability::AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 Effect::BecomeCopy {
-                    recipient: TargetFilter::SelfRef,
+                    recipient: crate::types::ability::CopyRecipient::Source,
                     target: TargetFilter::Typed(crate::types::ability::TypedFilter::new(
                         crate::types::ability::TypeFilter::Creature,
                     )),
@@ -4178,7 +4178,7 @@ fn copy_target_choice_fires_granted_etb_trigger_against_deferred_entry_event() {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::BecomeCopy {
-                    recipient: TargetFilter::SelfRef,
+                    recipient: crate::types::ability::CopyRecipient::Source,
                     target: TargetFilter::Typed(crate::types::ability::TypedFilter::new(
                         crate::types::ability::TypeFilter::Creature,
                     )),
@@ -4366,7 +4366,7 @@ fn copy_target_choice_surfaces_interactive_trigger_prompt_for_deferred_entry() {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::BecomeCopy {
-                    recipient: TargetFilter::SelfRef,
+                    recipient: crate::types::ability::CopyRecipient::Source,
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     duration: None,
                     mana_value_limit: None,
@@ -4583,7 +4583,7 @@ fn superior_spider_man_full_copy_flow_copies_graveyard_card_and_exiles_it() {
         let become_copy = crate::types::ability::AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Typed(
                     crate::types::ability::TypedFilter::new(
                         crate::types::ability::TypeFilter::Creature,
@@ -4775,7 +4775,7 @@ fn reflexive_when_you_do_fires_after_become_copy_replacement() {
         let become_copy = crate::types::ability::AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Typed(
                     crate::types::ability::TypedFilter::new(
                         crate::types::ability::TypeFilter::Creature,

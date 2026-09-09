@@ -10917,6 +10917,7 @@ fn cost_paid_object_resolves_as_put_counter_effect_target() {
     ability.cost_paid_object = Some(CostPaidObjectSnapshot {
         object_id: recipient,
         lki: snapshot,
+        incarnation: 0,
     });
 
     let mut events = Vec::new();
@@ -55958,28 +55959,281 @@ mod hazel_x_sentinel_mana_ability {
             );
     }
 
-    // ------------------------------------------------------------------
-    // BLOCKED — two production defects outside this plan's scope prevent the
-    // Hazel end-to-end tests (Verification Matrix row 8: "activate Hazel with 3
-    // eligible tokens, select 2, resolve, assert 2 mana lands in the pool") from
-    // being written honestly. Both were found by driving the real pipeline; both
-    // are described in the implementation report. Neither is fixed here, so no
-    // test claims the end-to-end unlock:
-    //
-    //  A. `advance_mana_ability_selection_cursor` (`mana_abilities.rs`) does
-    //     `cursor.next_tapper += requirement.fixed_count()`, i.e. `+= u32::MAX`
-    //     for an X-sentinel cost. `ensure_mana_ability_selection_cursor_consumed`
-    //     then rejects the activation with "Too many creatures selected for mana
-    //     ability cost". (The plan traced only the `.skip()` consumer of
-    //     `next_tapper` and concluded this site was harmless; it is not.)
-    //
-    //  B. `advance_mana_ability_activation` gates tap-cost registration on
-    //     `pending.chosen_tappers.is_empty()` as a "no selection yet" sentinel.
-    //     For a `VariableX` cost an empty selection is a LEGAL, COMPLETE X=0
-    //     payment, so the same `PayCost` window is re-surfaced forever.
-    //     Distinguishing the two states needs a state-representation decision
-    //     this plan never scoped.
-    // ------------------------------------------------------------------
+    /// Supportive Parents' verbatim Oracle text (`{2}{G}`, 3/3 Human Citizen) —
+    /// a real printed `Fixed`-count tap-for-mana cost, with no morph, no
+    /// subtype filter and no rider to muddy the assertion. Used to pin that
+    /// Unit 2's `selection_mode()` dispatch leaves `Fixed` byte-identical;
+    /// `HAZEL_MANA_ABILITY` deliberately is NOT reused, because it cannot
+    /// produce a `Fixed` cost at all.
+    const SUPPORTIVE_PARENTS_MANA_ABILITY: &str =
+        "Tap two untapped creatures you control: Add one mana of any color.";
+
+    /// CR 107.3a + CR 601.2h + CR 605.1a: the whole X-sentinel mana payment,
+    /// end to end through `apply()` — the test the `BLOCKED` note above this
+    /// module used to say could not be written honestly.
+    ///
+    /// Revert probe: restore `advance_mana_ability_selection_cursor`'s
+    /// `TapCreatures` arm to `requirement.fixed_count()` and `next_tapper`
+    /// becomes `u32::MAX as usize`, so
+    /// `ensure_mana_ability_selection_cursor_consumed` rejects the payment with
+    /// `InvalidAction("Too many creatures selected for mana ability cost")` and
+    /// assertion (a) below fails with that exact message.
+    #[test]
+    fn hazel_mana_ability_taps_two_tokens_and_pays_two_life() {
+        let (mut runner, hazel, index, tokens) = setup(2);
+        let life_before = runner.life(P0);
+
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: hazel,
+                ability_index: index,
+            })
+            .expect("activation must surface the tap-cost prompt");
+
+        // Reach guard: the prompt really is the X-sentinel tap window with a
+        // zero floor and the two eligible tokens on offer.
+        let WaitingFor::PayCost {
+            kind: PayCostKind::TapCreatures { mode },
+            count,
+            min_count,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "expected the tap-creatures pay-cost prompt, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*mode, TapCreaturesSelectionMode::VariableX);
+        assert_eq!((*count, *min_count), (2, 0));
+
+        // (a) CR 601.2h: the announced selection must be ACCEPTED.
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![tokens[0], tokens[1]],
+            })
+            .expect(
+                "CR 107.3a: the cursor must advance by the ANNOUNCED X, so selecting both \
+                 eligible tokens is a complete payment — not \"Too many creatures selected \
+                 for mana ability cost\"",
+            );
+
+        // CR 605.1a: `Add X mana in any combination of colors` surfaces a
+        // per-unit color choice, and mana reaches the pool only once answered.
+        let WaitingFor::ChooseManaColor {
+            choice: ManaChoicePrompt::AnyCombination { count, options },
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "expected the any-combination color prompt for X=2, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*count, 2, "the announced X must size the color prompt");
+        assert!(options.contains(&ManaType::Green));
+        runner
+            .act(GameAction::ChooseManaColor {
+                choice: ManaChoice::Combination(vec![ManaType::Green, ManaType::Green]),
+                count: 1,
+            })
+            .expect("a 2-entry combination must answer an X=2 any-combination prompt");
+
+        // (b) CR 605.1a: exactly X mana in the pool.
+        assert_eq!(
+            runner.state().players[0].mana_pool.total(),
+            2,
+            "X=2 must add two mana to the pool"
+        );
+        // (c) both chosen tokens tapped.
+        assert!(
+            tokens.iter().all(|id| runner.state().objects[id].tapped),
+            "both announced tappers must be tapped"
+        );
+        // (d) the `{T}` component tapped Hazel itself.
+        assert!(
+            runner.state().objects[&hazel].tapped,
+            "the {{T}} cost component must tap Hazel"
+        );
+        // (e) CR 118.3 + CR 601.2h: the 2-life component was paid.
+        assert_eq!(
+            runner.life(P0) - life_before,
+            -2,
+            "the `Pay 2 life` component must be paid"
+        );
+    }
+
+    /// CR 107.3a: Unit 2's `selection_mode()` dispatch must leave the `Fixed`
+    /// mode byte-identical in behavior — driven on a REAL printed card
+    /// (Supportive Parents) all the way through `apply()`.
+    ///
+    /// The `Aggregate` mode's refusal is NOT asserted here. It is dead code
+    /// under `apply()` (`tap_creature_cost_choice` refuses to register an
+    /// aggregate tap cost), so reaching it needs a direct call to a function
+    /// private to `game::mana_abilities`; that assertion lives in that file's
+    /// own `x_sentinel_mana_ability_cost_application` module
+    /// (`aggregate_shape_is_refused_by_the_cursor_advance`), which is a
+    /// descendant module and needs no widened production visibility. This
+    /// module is `game::casting::tests`, a SIBLING, so asserting it from here
+    /// would have required exactly that widening.
+    ///
+    /// Revert probe: a refactor that folded `Fixed` into the X path (reading
+    /// `chosen_x`, which is `None` for a fixed cost) fails this test at the
+    /// `SelectCards` step with "Missing announced X for tap-creatures mana
+    /// ability cost".
+    #[test]
+    fn x_sentinel_cursor_advance_preserves_fixed_mode() {
+        // ---- Fixed: Supportive Parents, verbatim, through apply() ----
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let parents = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Supportive Parents",
+                3,
+                3,
+                SUPPORTIVE_PARENTS_MANA_ABILITY,
+            )
+            .id();
+        let helpers: Vec<ObjectId> = (0..2)
+            .map(|i| scenario.add_creature(P0, &format!("Helper {i}"), 1, 1).id())
+            .collect();
+        let mut runner = scenario.build();
+        for id in helpers.iter().chain(std::iter::once(&parents)) {
+            let obj = runner.state_mut().objects.get_mut(id).unwrap();
+            obj.tapped = false;
+            obj.summoning_sick = false;
+        }
+
+        // Positive reach guard, mirroring `setup`'s own: the parsed cost is the
+        // FIXED leg with a count of exactly 2, so this cannot silently exercise
+        // the `VariableX` branch.
+        let index = runner.state().objects[&parents]
+            .abilities
+            .iter()
+            .position(|a| {
+                a.cost
+                    .as_ref()
+                    .and_then(crate::game::casting::find_tap_creatures_cost)
+                    .is_some_and(|(requirement, _)| {
+                        requirement.selection_mode() == TapCreaturesSelectionMode::Fixed
+                            && requirement.fixed_count() == Some(2)
+                    })
+            })
+            .expect("Supportive Parents must parse to a Fixed(2) TapCreatures mana ability");
+
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: parents,
+                ability_index: index,
+            })
+            .expect("activation must surface the fixed tap-cost prompt");
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![helpers[0], helpers[1]],
+            })
+            .expect("the exact fixed-count selection must be accepted");
+        let WaitingFor::ChooseManaColor {
+            choice: ManaChoicePrompt::SingleColor { options },
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "`Add one mana of any color` must surface a single-color prompt, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert!(options.contains(&ManaType::Green));
+        runner
+            .act(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Green),
+                count: 1,
+            })
+            .expect("the single-color choice must resolve");
+        assert_eq!(
+            runner.state().players[0].mana_pool.total(),
+            1,
+            "the Fixed leg must add exactly one mana"
+        );
+        assert!(
+            helpers.iter().all(|id| runner.state().objects[id].tapped),
+            "both chosen creatures must be tapped by the Fixed leg"
+        );
+    }
+
+    /// CR 107.3a + CR 601.2h: a legal X=0 announcement must TERMINATE the
+    /// activation rather than re-surfacing the same prompt forever.
+    ///
+    /// Revert probe: restore `advance_mana_ability_activation`'s gate to
+    /// `pending.chosen_tappers.is_empty()` and the identical
+    /// `PayCost { kind: TapCreatures { mode: VariableX } }` window is returned
+    /// again — an infinite re-prompt livelock the player can never escape — so
+    /// the "does not re-surface" assertion below fails.
+    #[test]
+    fn hazel_x_zero_mana_activation_terminates() {
+        let (mut runner, hazel, index, tokens) = setup(1);
+        let life_before = runner.life(P0);
+
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: hazel,
+                ability_index: index,
+            })
+            .expect("activation must surface the tap-cost prompt");
+        assert!(
+            matches!(
+                &runner.state().waiting_for,
+                WaitingFor::PayCost {
+                    kind: PayCostKind::TapCreatures {
+                        mode: TapCreaturesSelectionMode::VariableX
+                    },
+                    min_count: 0,
+                    ..
+                }
+            ),
+            "reach guard: the X-sentinel prompt with a zero floor must be live, got {:?}",
+            runner.state().waiting_for
+        );
+
+        runner
+            .act(GameAction::SelectCards { cards: vec![] })
+            .expect("CR 107.3a: X=0 is a legal announcement, so an empty selection is legal");
+
+        // The negative: the SAME prompt must not come back.
+        assert!(
+            !matches!(
+                &runner.state().waiting_for,
+                WaitingFor::PayCost {
+                    kind: PayCostKind::TapCreatures { .. },
+                    ..
+                }
+            ),
+            "an answered X=0 tap selection must not re-surface the tap-cost prompt, got {:?}",
+            runner.state().waiting_for
+        );
+        // With X = 0 the `AnyCombination` production has no live choice
+        // dimension, so no color prompt is surfaced and no mana is added.
+        assert_eq!(
+            runner.state().players[0].mana_pool.total(),
+            0,
+            "X=0 produces no mana"
+        );
+        // The positive triple, proving the payment actually EXECUTED rather
+        // than being rejected upstream.
+        assert_eq!(
+            runner.life(P0) - life_before,
+            -2,
+            "the `Pay 2 life` component must still be paid at X=0"
+        );
+        assert!(
+            runner.state().objects[&hazel].tapped,
+            "the {{T}} component must still tap Hazel at X=0"
+        );
+        assert!(
+            tokens.iter().all(|id| !runner.state().objects[id].tapped),
+            "an X=0 payment must tap no token"
+        );
+    }
 
     /// Hostile: an over-ceiling selection is still refused. The fix widens the
     /// window to `[0, eligible]`; it does not remove the ceiling.

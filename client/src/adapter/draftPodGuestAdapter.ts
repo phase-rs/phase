@@ -17,7 +17,12 @@ import {
   type DraftGuestEvent,
   type DraftGuestRecoveryFailure,
 } from "./p2p-draft-guest";
-import type { DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
+import type {
+  DraftCommanderLaunch,
+  DraftMatchLaunch,
+  DraftMatchSettlement,
+  DraftPauseReason,
+} from "../network/draftProtocol";
 import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
 import { joinRoom, type JoinResult } from "../network/connection";
 import type { DraftWorkspaceState } from "../components/draft/workspace/types";
@@ -59,6 +64,7 @@ export type DraftPodGuestEvent =
   | { type: "matchSettlementAcknowledged"; matchId: string; receiptId: string; revision: number }
   | { type: "timerSync"; remainingMs: number }
   | { type: "matchStart"; launch: DraftMatchLaunch }
+  | { type: "commanderLaunch"; launch: DraftCommanderLaunch }
   | { type: "bo3SideboardPrompt"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; loserSeat: number | null; timerMs: number }
   | { type: "bo3ChoosePlayDraw"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; timerMs: number }
   | { type: "bo3GameStart"; matchId: string; gameNumber: number; firstPlayerSeat: number }
@@ -332,6 +338,12 @@ export class DraftPodGuestAdapter {
           launch: event.launch,
         });
         break;
+      // A PURE re-emit, deliberately unlike `matchStart` above: a Commander
+      // launch does not change pod phase. The pod stays `complete`, which is
+      // the view the guest's join affordance is rendered from.
+      case "commanderLaunch":
+        this.emit({ type: "commanderLaunch", launch: event.launch });
+        break;
       case "kicked":
         this.setStatus("kicked");
         this.emit({ type: "kicked", reason: event.reason });
@@ -441,6 +453,11 @@ export class DraftPodGuestAdapter {
   async updateWorkspace(state: DraftWorkspaceState): Promise<void> {
     if (!this.guest) throw new Error("Guest not initialized");
     await this.guest.updateWorkspace(state);
+  }
+
+  async suggestLands(): Promise<Record<string, number>> {
+    if (!this.guest) throw new Error("Guest not initialized");
+    return this.guest.suggestLands();
   }
 
   sendMatchSettlement(settlement: DraftMatchSettlement): void {

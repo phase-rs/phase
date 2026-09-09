@@ -682,7 +682,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it,
 /// or a documented adapter-local extension is intentionally in use.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 91] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 92] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -1061,6 +1061,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 91] = [
         area: "prompts",
         reason: "CR 705: Phase models coin flips and the re-flip/keep decision (GameAction::SelectCoinFlips, WaitingFor::CoinFlipKeepChoice). Choosing which flips to keep is a bounded subset selection over abstract items — ChooseFromSelection's shape — but its options carry only a label, so the flips would be distinguished by prose alone. That is the general prompt-discriminator problem noted under upstream.display-sequencing-missing rather than a coin-specific gap.",
         suggested_protocol_extension: "None needed upstream — ChooseFromSelection fits. Adapter work.",
+    },
+    UnsupportedCapability {
+        code: "local.die-roll-unsupported",
+        area: "prompts",
+        reason: "CR 706.6 + CR 614.1a: Phase models the die-roll ignore decision (GameAction::SelectDieRolls, WaitingFor::DieKeepChoice { results, ignorable_indices, ignore_count }). It looks like the coin-flip sibling above — a bounded subset selection over abstract items — and it shares that entry's label-only discriminator problem, since results are bare u8 naturals that a client could only tell apart by prose. But it does NOT reduce to ChooseFromSelection, and the difference is legality rather than presentation. CR 706.6's second sentence lets the player choose only among the rolls TIED for the lowest natural result, so `ignorable_indices` is a strict subset of `results`, engine-computed (roll_die.rs sets it from DieRollIgnoreOutcome::tied) and engine-enforced: engine_resolution_choices.rs rejects any submitted index outside it with EngineError::InvalidAction. ChooseFromSelectionInput carries only `options: Vec<SelectionOption>` plus `min_total`/`max_total`, and SelectionOption is { label, weight, can_repeat } — there is no per-option selectable/disabled flag. Emitting every roll under a count bound would therefore advertise as legal a selection the engine rejects (ignoring a non-lowest roll), which is the same advertise-illegal-as-legal failure refused under local.aggregate-selection-constraint-unmapped. The engine already draws this line internally: CoinFlipProjection::selectable_indices is None for CR 705.1 flips and Some(set) for CR 706.6 rolls. Coin flips need no such field and are genuinely just unwritten adapter work; die rolls are not.",
+        suggested_protocol_extension: "Give SelectionOption an optional `selectable: bool` (or ChooseFromSelectionInput an optional legal-index set), so a prompt can offer an option for display while marking it unpickable. That is the minimum needed here, and it generalizes: any prompt whose legal picks are a computed subset of what the player must SEE to understand the choice needs it — the roller has to see every roll to grasp why only the tied ones may be ignored. The label-only discriminator half remains adapter work under upstream.display-sequencing-missing.",
     },
     UnsupportedCapability {
         code: "local.outside-game-selection-unsupported",
@@ -2694,6 +2700,12 @@ pub fn convert_available_action(
         }
         GameAction::SelectCoinFlips { .. } => {
             AvailableActionConversion::Unsupported("local.coin-flip-unsupported")
+        }
+        // CR 706.6: the die-roll ignore choice has the same shape as the coin
+        // flip keep choice above, and the same gap — options carry only a label,
+        // so the rolls cannot be distinguished except by prose.
+        GameAction::SelectDieRolls { .. } => {
+            AvailableActionConversion::Unsupported("local.die-roll-unsupported")
         }
         GameAction::ChooseOutsideGameCards { .. } => {
             AvailableActionConversion::Unsupported("local.outside-game-selection-unsupported")
@@ -8554,13 +8566,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 91);
+        assert_eq!(capabilities.len(), 92);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 91, "capability codes must be unique");
+        assert_eq!(codes.len(), 92, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(

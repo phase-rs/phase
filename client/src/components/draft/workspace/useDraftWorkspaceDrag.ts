@@ -11,7 +11,7 @@ import type {
   PendingDraftPickIntent,
 } from "../../../stores/draftStore";
 import type { DraftZone } from "./types";
-import type { WorkspaceDropState } from "./workspacePlacement";
+import type { ResolvedWorkspaceDestination, WorkspaceDropState } from "./workspacePlacement";
 
 const MOVE_THRESHOLD_SQUARED = 100;
 
@@ -37,6 +37,8 @@ export interface DraftDropDispatch {
 
 interface UseDraftWorkspaceDragOptions {
   readonly enabled: boolean;
+  readonly workspaceProjectionEnabled: boolean;
+  readonly retainLastValidWorkspaceTarget?: boolean;
   readPickInteraction(): DraftPickInteractionSnapshot;
   subscribePickInteraction(listener: () => void): () => void;
   onDrop(request: DraftDropRequest): DraftDropDispatch;
@@ -54,14 +56,36 @@ interface TargetResolution {
   readonly row: number | null;
 }
 
+interface ResolvedTarget extends TargetResolution {
+  readonly board: RegisteredTarget | null;
+  readonly columnTarget: RegisteredTarget | null;
+  readonly collapsedTarget: RegisteredTarget | null;
+  readonly rowElement: HTMLElement | null;
+}
+
 type DropDestination = Pick<TargetResolution, "zone" | "column"> & { readonly row?: number };
+
+export interface WorkspaceDragPreviewImage {
+  readonly src: string | null;
+  readonly alt: string;
+}
+
+export interface WorkspaceDragOrigin {
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
+  readonly height: number;
+}
 
 export interface WorkspaceDragSource {
   readonly kind: "workspace";
   readonly instanceIds: readonly [string];
   readonly cards: readonly [DraftCardInstance];
+  readonly canonicalTarget: ResolvedWorkspaceDestination;
   readonly previewWidth: number;
   readonly previewHeight: number;
+  readonly origin: WorkspaceDragOrigin;
+  readonly previewImage?: WorkspaceDragPreviewImage;
   onDrop(target: DropDestination): boolean;
 }
 
@@ -88,9 +112,23 @@ interface PointerSession {
   readonly requestToken: string;
   readonly startX: number;
   readonly startY: number;
+  clientX: number;
+  clientY: number;
   captureOwned: boolean;
   released: boolean;
   expectedLostCapture: boolean;
+  hasLeftCanonicalTarget: boolean;
+}
+
+interface GeometryRefresh {
+  readonly token: object;
+  readonly handle: number;
+  readonly generation: number;
+  readonly session: PointerSession;
+  readonly pointerId: number;
+  readonly source: DraftDragSource;
+  readonly clientX: number;
+  readonly clientY: number;
 }
 
 function pointerSequenceSuppression(session: PointerSession): Exclude<CompatibilitySuppression, { readonly kind: "none" }> {
@@ -119,6 +157,28 @@ interface Settlement {
   outcome: DraftPickOutcome | null;
   unlocked: boolean;
   terminal: boolean;
+}
+
+interface WorkspaceProjectionLatch {
+  readonly token: number;
+  readonly geometryRevision: number;
+  destinationReady: boolean;
+  motionComplete: boolean;
+}
+
+interface CompletedWorkspaceProjection {
+  readonly token: number;
+  readonly geometryRevision: number;
+}
+
+function targetsEqual(left: TargetResolution | null, right: TargetResolution | null): boolean {
+  return left === right || (
+    left !== null
+    && right !== null
+    && left.zone === right.zone
+    && left.column === right.column
+    && left.row === right.row
+  );
 }
 
 interface RegisteredTarget {
@@ -196,6 +256,10 @@ export interface DraftWorkspaceDragController extends PackDragController {
   readonly announcement: string;
   readonly activeTarget: TargetResolution | null;
   readonly dragPreview: DraftWorkspaceDragPreview | null;
+  readonly workspaceProjection?: WorkspaceDragProjectionPreview | null;
+  readonly geometryRevision: number;
+  markWorkspaceProjectionDestinationReady?(token: number, geometryRevision: number): void;
+  completeWorkspaceProjection?(token: number, geometryRevision: number): void;
   handleWorkspacePointerDown(
     event: React.PointerEvent<HTMLElement>,
     source: WorkspaceDragSource,
@@ -215,6 +279,28 @@ export interface DraftWorkspaceDragPreview {
   readonly clientY: number;
 }
 
+export interface WorkspaceDragProjectionPreview {
+  readonly token: number;
+  readonly source: WorkspaceDragSource;
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly target: TargetResolution | null;
+  readonly hasLeftCanonicalTarget: boolean;
+  readonly settling: boolean;
+}
+
+function targetDiffersFromCanonicalTarget(
+  target: TargetResolution | null,
+  canonicalTarget: ResolvedWorkspaceDestination,
+): boolean {
+  return target !== null
+    && (
+      target.zone !== canonicalTarget.zone
+      || target.column !== canonicalTarget.column
+      || (target.row !== null && target.row !== canonicalTarget.row)
+    );
+}
+
 export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): DraftWorkspaceDragController {
   const { t } = useTranslation("draft");
   const optionsRef = useRef(options);
@@ -222,13 +308,22 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
   const [announcement, setAnnouncement] = useState("");
   const [activeTarget, setActiveTarget] = useState<TargetResolution | null>(null);
   const [dragPreview, setDragPreview] = useState<DraftWorkspaceDragPreview | null>(null);
+  const [workspaceProjection, setWorkspaceProjection] = useState<WorkspaceDragProjectionPreview | null>(null);
+  const [geometryRevision, setGeometryRevision] = useState(0);
   const activeTargetRef = useRef<TargetResolution | null>(null);
+  const retainedTargetRef = useRef<ResolvedTarget | null>(null);
   const sessionRef = useRef<PointerSession | null>(null);
   const settlementRef = useRef<Settlement | null>(null);
   const suppressionRef = useRef<CompatibilitySuppression>({ kind: "none" });
   const targetsRef = useRef(new Map<string, RegisteredTarget>());
   const targetCallbacksRef = useRef(new Map<string, RefCallback<HTMLElement>>());
   const observerRef = useRef<ResizeObserver | null>(null);
+  const geometryGenerationRef = useRef(0);
+  const geometryRevisionRef = useRef(0);
+  const pendingGeometryRefreshRef = useRef<GeometryRefresh | null>(null);
+  const workspaceProjectionTokenRef = useRef(0);
+  const workspaceProjectionLatchRef = useRef<WorkspaceProjectionLatch | null>(null);
+  const completedWorkspaceProjectionRef = useRef<CompletedWorkspaceProjection | null>(null);
   const ledgerRef = useRef<LedgerObservation>({
     ...options.readPickInteraction(),
     order: 0,
@@ -247,6 +342,77 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
     }
   }, [t]);
 
+  const clearRetainedTarget = useCallback(() => {
+    retainedTargetRef.current = null;
+  }, []);
+
+  const cancelPendingGeometryRefresh = useCallback(() => {
+    const pending = pendingGeometryRefreshRef.current;
+    if (pending !== null) {
+      window.cancelAnimationFrame(pending.handle);
+      if (pendingGeometryRefreshRef.current === pending) pendingGeometryRefreshRef.current = null;
+    }
+    geometryGenerationRef.current += 1;
+  }, []);
+
+  const clearWorkspaceProjection = useCallback((token?: number) => {
+    if (token !== undefined && workspaceProjectionTokenRef.current !== token) return;
+    workspaceProjectionLatchRef.current = null;
+    if (token === undefined || completedWorkspaceProjectionRef.current?.token === token) {
+      completedWorkspaceProjectionRef.current = null;
+    }
+    setWorkspaceProjection(null);
+  }, []);
+
+  const settleWorkspaceProjection = useCallback((token: number) => {
+    const latch = workspaceProjectionLatchRef.current;
+    if (latch === null || latch.token !== token || !latch.destinationReady || !latch.motionComplete) return;
+    clearWorkspaceProjection(token);
+  }, [clearWorkspaceProjection]);
+
+  const updateWorkspaceProjection = useCallback((
+    source: WorkspaceDragSource,
+    clientX: number,
+    clientY: number,
+    target: TargetResolution | null,
+    hasLeftCanonicalTarget: boolean,
+  ) => {
+    if (!optionsRef.current.workspaceProjectionEnabled) {
+      clearWorkspaceProjection();
+      return;
+    }
+    setWorkspaceProjection((current) => {
+      if (current?.source !== source) return current;
+      if (!targetsEqual(current.target, target)) completedWorkspaceProjectionRef.current = null;
+      return { ...current, clientX, clientY, target, hasLeftCanonicalTarget };
+    });
+  }, [clearWorkspaceProjection]);
+
+  const retainWorkspaceProjection = useCallback((
+    source: WorkspaceDragSource,
+    clientX: number,
+    clientY: number,
+    target: TargetResolution,
+  ) => {
+    if (!optionsRef.current.workspaceProjectionEnabled) {
+      clearWorkspaceProjection();
+      return;
+    }
+    const token = workspaceProjectionTokenRef.current;
+    const geometryRevision = geometryRevisionRef.current;
+    const completedProjection = completedWorkspaceProjectionRef.current;
+    workspaceProjectionLatchRef.current = {
+      token,
+      geometryRevision,
+      destinationReady: false,
+      motionComplete: completedProjection?.token === token
+        && completedProjection.geometryRevision === geometryRevision,
+    };
+    setWorkspaceProjection((current) => current?.source === source
+      ? { ...current, clientX, clientY, target, settling: true }
+      : current);
+  }, [clearWorkspaceProjection]);
+
   const releaseCapture = useCallback((session: PointerSession) => {
     if (session.released || !session.captureOwned) return;
     session.released = true;
@@ -262,19 +428,23 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
   const retirePointer = useCallback((announceCancellation: boolean) => {
     const session = sessionRef.current;
     if (session === null || session.phase === "retired") return;
+    cancelPendingGeometryRefresh();
     session.phase = "retired";
     setDragPreview(null);
+    clearWorkspaceProjection();
+    clearRetainedTarget();
     releaseCapture(session);
     publishTarget(null);
     if (announceCancellation) setAnnouncement(t("workspace.drag.cancelled"));
     if (settlementRef.current === null) sessionRef.current = null;
-  }, [publishTarget, releaseCapture, t]);
+  }, [cancelPendingGeometryRefresh, clearRetainedTarget, clearWorkspaceProjection, publishTarget, releaseCapture, t]);
 
   const finishSettlement = useCallback(() => {
     const settlement = settlementRef.current;
     if (settlement === null || settlement.terminal || settlement.outcome === null) return;
     if (settlement.admission.kind === "owned" && !settlement.unlocked) return;
     settlement.terminal = true;
+    clearRetainedTarget();
     settlement.source.onSettled({ kind: "outcome", outcome: settlement.outcome });
     if (settlement.outcome.status === "acknowledged") {
       setAnnouncement(t("workspace.drag.success", { card: settlement.source.cards.map((card) => card.name).join(", ") }));
@@ -283,18 +453,19 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
     }
     settlementRef.current = null;
     sessionRef.current = null;
-  }, [t]);
+  }, [clearRetainedTarget, t]);
 
   const conflictSettlement = useCallback(() => {
     const settlement = settlementRef.current;
     if (settlement === null || settlement.terminal) return;
     settlement.terminal = true;
     setDragPreview(null);
+    clearRetainedTarget();
     settlement.source.onSettled({ kind: "conflict" });
     settlementRef.current = null;
     sessionRef.current = null;
     publishTarget(null);
-  }, [publishTarget]);
+  }, [clearRetainedTarget, publishTarget]);
 
   const observeInteraction = useCallback(() => {
     const next = optionsRef.current.readPickInteraction();
@@ -347,15 +518,23 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
 
   useEffect(() => optionsRef.current.subscribePickInteraction(observeInteraction), [observeInteraction]);
 
-  const resolveTarget = useCallback((x: number, y: number, source: DraftDragSource): TargetResolution | null => {
+  const resolveTarget = useCallback((x: number, y: number, source: DraftDragSource): ResolvedTarget | null => {
     const collapsed = targetsRef.current.get("collapsed-sideboard");
     if (collapsed !== undefined) {
       const rect = clippedRect(collapsed.element);
       if (rect !== null && containsPoint(rect, x, y)) {
-        return { zone: "sideboard", column: Math.max(0, optionsRef.current.resolveCollapsedSideboardColumn(source.instanceIds[0])), row: null };
+        return {
+          zone: "sideboard",
+          column: Math.max(0, optionsRef.current.resolveCollapsedSideboardColumn(source.instanceIds[0])),
+          row: null,
+          board: null,
+          columnTarget: null,
+          collapsedTarget: collapsed,
+          rowElement: null,
+        };
       }
     }
-    const candidates: TargetResolution[] = [];
+    const candidates: ResolvedTarget[] = [];
     for (const board of targetsRef.current.values()) {
       if (board.kind !== "board") continue;
       const boardRect = clippedRect(board.element);
@@ -366,23 +545,134 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
         if (columnRect === null) continue;
         const rect = intersectRects(columnRect, boardRect);
         if (rect === null || !containsPoint(rect, x, y)) continue;
-        const row = [...column.element.querySelectorAll<HTMLElement>("[data-board-row]")]
+        const rowElement = [...column.element.querySelectorAll<HTMLElement>("[data-board-row]")]
           .find((element) => {
             const rowRect = clippedRect(element);
             return rowRect !== null && containsPoint(rowRect, x, y);
-          })?.dataset.boardRow;
+          });
+        const row = rowElement?.dataset.boardRow;
         candidates.push({
           zone: column.zone,
           column: column.column,
           row: row === undefined ? null : Number(row),
+          board,
+          columnTarget: column,
+          collapsedTarget: null,
+          rowElement: rowElement ?? null,
         });
       }
     }
     candidates.sort((left, right) => left.column - right.column
       || (left.zone === right.zone ? 0 : left.zone === "deck" ? -1 : 1));
     const resolved = candidates[0];
-    return resolved === undefined ? null : { zone: resolved.zone, column: resolved.column, row: resolved.row };
+    return resolved ?? null;
   }, []);
+
+  const validRetainedTarget = useCallback((): TargetResolution | null => {
+    const target = retainedTargetRef.current;
+    if (target === null) return null;
+    if (target.collapsedTarget !== null) {
+      if (
+        targetsRef.current.get("collapsed-sideboard") !== target.collapsedTarget
+        || clippedRect(target.collapsedTarget.element) === null
+      ) {
+        clearRetainedTarget();
+        return null;
+      }
+      return { zone: target.zone, column: target.column, row: null };
+    }
+    if (target.board === null || target.columnTarget === null) {
+      clearRetainedTarget();
+      return null;
+    }
+    if (
+      targetsRef.current.get(`board:${target.zone}`) !== target.board
+      || targetsRef.current.get(`column:${target.zone}:${target.column}`) !== target.columnTarget
+    ) {
+      clearRetainedTarget();
+      return null;
+    }
+    const boardRect = clippedRect(target.board.element);
+    const columnRect = clippedRect(target.columnTarget.element);
+    if (boardRect === null || columnRect === null || intersectRects(boardRect, columnRect) === null) {
+      clearRetainedTarget();
+      return null;
+    }
+    if (
+      target.rowElement !== null
+      && (
+        !target.columnTarget.element.contains(target.rowElement)
+        || target.rowElement.dataset.boardRow !== String(target.row)
+        || clippedRect(target.rowElement) === null
+      )
+    ) {
+      clearRetainedTarget();
+      return null;
+    }
+    return { zone: target.zone, column: target.column, row: target.row };
+  }, [clearRetainedTarget]);
+
+  const resolveEffectiveTarget = useCallback((x: number, y: number, source: DraftDragSource): TargetResolution | null => {
+    const target = resolveTarget(x, y, source);
+    if (target !== null) {
+      if (source.kind === "workspace" && optionsRef.current.retainLastValidWorkspaceTarget) {
+        retainedTargetRef.current = target;
+      }
+      return { zone: target.zone, column: target.column, row: target.row };
+    }
+    if (source.kind !== "workspace" || !optionsRef.current.retainLastValidWorkspaceTarget) return null;
+    return validRetainedTarget();
+  }, [resolveTarget, validRetainedTarget]);
+
+  const invalidateGeometry = useCallback(() => {
+    const session = sessionRef.current;
+    if (session?.phase !== "dragging" || pendingGeometryRefreshRef.current !== null) return;
+    const generation = geometryGenerationRef.current + 1;
+    geometryGenerationRef.current = generation;
+    const token = {};
+    const handle = window.requestAnimationFrame(() => {
+      const refresh = pendingGeometryRefreshRef.current;
+      if (
+        refresh === null
+        || refresh.token !== token
+        || geometryGenerationRef.current !== refresh.generation
+        || sessionRef.current !== refresh.session
+        || sessionRef.current.pointerId !== refresh.pointerId
+        || sessionRef.current.source !== refresh.source
+        || sessionRef.current.phase !== "dragging"
+      ) return;
+      pendingGeometryRefreshRef.current = null;
+      const target = resolveEffectiveTarget(refresh.clientX, refresh.clientY, refresh.source);
+      publishTarget(target);
+      if (refresh.source.kind === "workspace" && optionsRef.current.workspaceProjectionEnabled) {
+        refresh.session.hasLeftCanonicalTarget ||= targetDiffersFromCanonicalTarget(
+          target,
+          refresh.source.canonicalTarget,
+        );
+        updateWorkspaceProjection(
+          refresh.source,
+          refresh.clientX,
+          refresh.clientY,
+          target,
+          refresh.session.hasLeftCanonicalTarget,
+        );
+      }
+      completedWorkspaceProjectionRef.current = null;
+      geometryRevisionRef.current += 1;
+      setGeometryRevision(geometryRevisionRef.current);
+    });
+    const refresh: GeometryRefresh = {
+      token,
+      handle,
+      generation,
+      session,
+      pointerId: session.pointerId,
+      source: session.source,
+      clientX: session.clientX,
+      clientY: session.clientY,
+    };
+    pendingGeometryRefreshRef.current = refresh;
+  }, [publishTarget, resolveEffectiveTarget, updateWorkspaceProjection]);
 
   const classifyAdmission = useCallback((
     source: PackDropSource,
@@ -427,6 +717,7 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
         source.kind === "workspace" ? !touchWorkspaceDragEnabled : !touchPackDragEnabled
       ))
     ) return;
+    clearWorkspaceProjection();
     const snapshot = optionsRef.current.readPickInteraction();
     if (
       snapshot.pickInteractionLocked
@@ -434,11 +725,13 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
       || (source.kind !== "workspace" && snapshot.interactionGeneration !== source.interactionGeneration)
     ) return;
     suppressionRef.current = { kind: "none" };
+    clearRetainedTarget();
     const element = event.currentTarget;
     const session: PointerSession = {
       phase: "pending", pointerId: event.pointerId, pointerType: event.pointerType === "touch" ? "touch" : event.pointerType === "pen" ? "pen" : "mouse", element, source,
       requestToken: crypto.randomUUID(), startX: event.clientX, startY: event.clientY,
-      captureOwned: false, released: false, expectedLostCapture: false,
+      clientX: event.clientX, clientY: event.clientY,
+      captureOwned: false, released: false, expectedLostCapture: false, hasLeftCanonicalTarget: false,
     };
     sessionRef.current = session;
     try {
@@ -447,7 +740,7 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
     } catch {
       retirePointer(false);
     }
-  }, [retirePointer]);
+  }, [clearRetainedTarget, clearWorkspaceProjection, retirePointer]);
   const handlePointerDown = useCallback<PackDragController["handlePointerDown"]>(
     (event, source, allowTouchPackDrag = false) => beginPointer(event, source, false, allowTouchPackDrag),
     [beginPointer],
@@ -461,6 +754,7 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
   const handlePointerMove = useCallback<PackDragController["handlePointerMove"]>((event) => {
     const session = sessionRef.current;
     if (session === null || session.pointerId !== event.pointerId || session.phase === "settling" || session.phase === "retired") return;
+    const startingDrag = session.phase === "pending";
     if (session.phase === "pending") {
       const dx = event.clientX - session.startX;
       const dy = event.clientY - session.startY;
@@ -471,13 +765,45 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
       }
       setAnnouncement(t("workspace.drag.started", { card: session.source.cards.map((card) => card.name).join(", ") }));
     }
+    session.clientX = event.clientX;
+    session.clientY = event.clientY;
+    cancelPendingGeometryRefresh();
     setDragPreview({ source: session.source, clientX: event.clientX, clientY: event.clientY });
-    publishTarget(resolveTarget(event.clientX, event.clientY, session.source));
-  }, [publishTarget, resolveTarget, retirePointer, t]);
+    const target = resolveEffectiveTarget(event.clientX, event.clientY, session.source);
+    if (session.source.kind === "workspace" && optionsRef.current.workspaceProjectionEnabled) {
+      session.hasLeftCanonicalTarget ||= targetDiffersFromCanonicalTarget(
+        target,
+        session.source.canonicalTarget,
+      );
+      if (startingDrag) {
+        workspaceProjectionTokenRef.current += 1;
+        completedWorkspaceProjectionRef.current = null;
+        setWorkspaceProjection({
+          token: workspaceProjectionTokenRef.current,
+          source: session.source,
+          clientX: event.clientX,
+          clientY: event.clientY,
+          target,
+          hasLeftCanonicalTarget: session.hasLeftCanonicalTarget,
+          settling: false,
+        });
+      } else {
+        updateWorkspaceProjection(
+          session.source,
+          event.clientX,
+          event.clientY,
+          target,
+          session.hasLeftCanonicalTarget,
+        );
+      }
+    }
+    publishTarget(target);
+  }, [cancelPendingGeometryRefresh, publishTarget, resolveEffectiveTarget, t, updateWorkspaceProjection]);
 
   const handlePointerUp = useCallback<PackDragController["handlePointerUp"]>((event) => {
     const session = sessionRef.current;
     if (session === null || session.pointerId !== event.pointerId || session.phase === "retired" || session.phase === "settling") return;
+    cancelPendingGeometryRefresh();
     if (session.phase === "pending") {
       retirePointer(false);
       return;
@@ -493,7 +819,7 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
         return;
       }
     }
-    const target = resolveTarget(event.clientX, event.clientY, session.source);
+    const target = resolveEffectiveTarget(event.clientX, event.clientY, session.source);
     publishTarget(target);
     if (target === null) {
       retirePointer(true);
@@ -511,15 +837,20 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
           column: target.column,
           ...(target.row === null ? {} : { row: target.row }),
         })) {
+          retainWorkspaceProjection(session.source, event.clientX, event.clientY, target);
           setAnnouncement(t("workspace.drag.moved", {
             card: session.source.cards.map((card) => card.name).join(", "),
           }));
+        } else {
+          clearWorkspaceProjection();
         }
       } catch {
+        clearWorkspaceProjection();
         setAnnouncement(t("workspace.drag.dispatchError", {
           card: session.source.cards.map((card) => card.name).join(", "),
         }));
       } finally {
+        clearRetainedTarget();
         releaseCapture(session);
         session.phase = "retired";
         sessionRef.current = null;
@@ -605,7 +936,7 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
       sessionRef.current = null;
       publishTarget(null);
     });
-  }, [classifyAdmission, conflictSettlement, finishSettlement, publishTarget, releaseCapture, resolveTarget, retirePointer, t]);
+  }, [cancelPendingGeometryRefresh, classifyAdmission, clearRetainedTarget, clearWorkspaceProjection, conflictSettlement, finishSettlement, publishTarget, releaseCapture, resolveEffectiveTarget, retainWorkspaceProjection, retirePointer, t]);
 
   const handlePointerCancel = useCallback<PackDragController["handlePointerCancel"]>((event) => {
     const session = sessionRef.current;
@@ -665,23 +996,54 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
         targetsRef.current.set(key, { ...target, element });
         observerRef.current?.observe(element);
       }
+      if (previous?.element !== element) {
+        cancelPendingGeometryRefresh();
+        clearRetainedTarget();
+        invalidateGeometry();
+      }
     };
     targetCallbacksRef.current.set(key, callback);
     return callback;
-  }, []);
+  }, [cancelPendingGeometryRefresh, clearRetainedTarget, invalidateGeometry]);
   const registerBoard = useCallback((zone: DraftZone) => registerTarget(`board:${zone}`, { kind: "board", zone, column: null }), [registerTarget]);
   const registerColumn = useCallback((zone: DraftZone, column: number) => registerTarget(`column:${zone}:${column}`, { kind: "column", zone, column }), [registerTarget]);
   const registerCollapsedSideboard = useMemo(() => registerTarget("collapsed-sideboard", { kind: "collapsed-sideboard", zone: "sideboard", column: null }), [registerTarget]);
-  const invalidateGeometry = useCallback(() => {
-    const session = sessionRef.current;
-    if (session?.phase === "dragging") publishTarget(null);
-  }, [publishTarget]);
+  const markWorkspaceProjectionDestinationReady = useCallback((token: number, geometryRevision: number) => {
+    if (!optionsRef.current.workspaceProjectionEnabled) {
+      clearWorkspaceProjection();
+      return;
+    }
+    const latch = workspaceProjectionLatchRef.current;
+    if (latch === null || latch.token !== token || latch.geometryRevision !== geometryRevision) return;
+    latch.destinationReady = true;
+    settleWorkspaceProjection(token);
+  }, [clearWorkspaceProjection, settleWorkspaceProjection]);
+  const completeWorkspaceProjection = useCallback((token: number, geometryRevision: number) => {
+    if (!optionsRef.current.workspaceProjectionEnabled) {
+      clearWorkspaceProjection();
+      return;
+    }
+    if (geometryRevisionRef.current !== geometryRevision) return;
+    const latch = workspaceProjectionLatchRef.current;
+    if (latch === null) {
+      if (workspaceProjectionTokenRef.current === token) {
+        completedWorkspaceProjectionRef.current = { token, geometryRevision };
+      }
+      return;
+    }
+    if (latch.token !== token || latch.geometryRevision !== geometryRevision) return;
+    latch.motionComplete = true;
+    settleWorkspaceProjection(token);
+  }, [clearWorkspaceProjection, settleWorkspaceProjection]);
   const dispose = useCallback(() => {
+    cancelPendingGeometryRefresh();
     retirePointer(false);
     conflictSettlement();
+    clearRetainedTarget();
+    clearWorkspaceProjection();
     for (const target of targetsRef.current.values()) observerRef.current?.unobserve(target.element);
     targetsRef.current.clear();
-  }, [conflictSettlement, retirePointer]);
+  }, [cancelPendingGeometryRefresh, clearRetainedTarget, clearWorkspaceProjection, conflictSettlement, retirePointer]);
 
   useEffect(() => {
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(invalidateGeometry);
@@ -692,21 +1054,36 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
     window.addEventListener("scroll", onGeometryChange, true);
     window.addEventListener("resize", onGeometryChange);
     window.visualViewport?.addEventListener("resize", onGeometryChange);
+    window.visualViewport?.addEventListener("scroll", onGeometryChange);
     return () => {
       window.removeEventListener("scroll", onGeometryChange, true);
       window.removeEventListener("resize", onGeometryChange);
       window.visualViewport?.removeEventListener("resize", onGeometryChange);
+      window.visualViewport?.removeEventListener("scroll", onGeometryChange);
       for (const target of registeredTargets.values()) observer?.unobserve(target.element);
       observer?.disconnect();
       if (observerRef.current === observer) observerRef.current = null;
+      cancelPendingGeometryRefresh();
       retirePointer(false);
       conflictSettlement();
+      clearWorkspaceProjection();
     };
-  }, [conflictSettlement, invalidateGeometry, retirePointer]);
+  }, [cancelPendingGeometryRefresh, clearWorkspaceProjection, conflictSettlement, invalidateGeometry, retirePointer]);
 
   useEffect(() => {
-    if (!options.enabled) retirePointer(false);
-  }, [options.enabled, retirePointer]);
+    if (!options.enabled) {
+      retirePointer(false);
+      clearWorkspaceProjection();
+    }
+    if (!options.retainLastValidWorkspaceTarget) {
+      clearRetainedTarget();
+      if (sessionRef.current?.source.kind === "workspace") retirePointer(false);
+    }
+  }, [clearRetainedTarget, clearWorkspaceProjection, options.enabled, options.retainLastValidWorkspaceTarget, retirePointer]);
+
+  useEffect(() => {
+    if (!options.workspaceProjectionEnabled) clearWorkspaceProjection();
+  }, [clearWorkspaceProjection, options.workspaceProjectionEnabled]);
 
   const dropState = useCallback((zone: DraftZone): WorkspaceDropState => ({
     zoneActive: activeTargetRef.current?.zone === zone,
@@ -718,6 +1095,10 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
     announcement,
     activeTarget,
     dragPreview,
+    workspaceProjection,
+    geometryRevision,
+    markWorkspaceProjectionDestinationReady,
+    completeWorkspaceProjection,
     handlePointerDown,
     handleWorkspacePointerDown,
     handlePointerMove,
@@ -732,9 +1113,9 @@ export function useDraftWorkspaceDrag(options: UseDraftWorkspaceDragOptions): Dr
     invalidateGeometry,
     dispose,
   }), [
-    activeTarget, announcement, consumeCompatibilityActivation, dispose, dragPreview, dropState,
+    activeTarget, announcement, completeWorkspaceProjection, consumeCompatibilityActivation, dispose, dragPreview, dropState, geometryRevision,
     handleLostPointerCapture, handlePointerCancel, handlePointerDown, handlePointerMove,
-    handleWorkspacePointerDown,
+    handleWorkspacePointerDown, workspaceProjection,
     handlePointerUp, invalidateGeometry, registerBoard, registerCollapsedSideboard, registerColumn,
   ]);
 }

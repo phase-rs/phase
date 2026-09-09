@@ -11,19 +11,23 @@
 //! dispatch (and the mode-agnostic Subscribe/Ping arms, whose behavior is
 //! identical across modes), so every entry the core sees is a P2P entry.
 
+use engine::types::format::GameFormat;
+use engine::types::match_config::MatchType;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::env::BrokerEnv;
 use crate::lobby::{LobbyManager, RegisterGameRequest};
-use crate::protocol::{LobbyClientMessage, LobbyServerMessage, ServerMode};
+use crate::protocol::{
+    LobbyClientMessage, LobbyServerMessage, ServerMode, TournamentRequestId, TournamentView,
+};
 use crate::reservation_auth::{
     consume_owned_reservation, release_owned_reservation, ReservationConsume, ReservationRelease,
     NOT_OWNED_RESERVATION,
 };
 use crate::tournament::{
-    BracketShape, CreateTournamentRequest, MatchArity, PairingId, PodOutcome, ScoringPolicy,
-    TournamentExpiryEvent, TournamentManager,
+    BracketShape, CreateTournamentRequest, CredentialVerdict, MatchArity, PairingId, PodOutcome,
+    ScoringPolicy, TournamentExpiryEvent, TournamentManager, TournamentRole,
 };
 
 /// Capacity cap for the broker path. `LobbyManager` is otherwise unbounded —
@@ -146,6 +150,35 @@ pub enum Outbound {
     /// (AtomicU32 natively / `getWebSockets().length` in a DO), so the core
     /// cannot fill the value — it just asks the shell to emit it.
     SendPlayerCountToSelf,
+}
+
+/// Whether a gated tournament action moved any [`crate::protocol::TournamentSummary`]
+/// field, and therefore whether the list broadcast is warranted.
+///
+/// A typed axis rather than a `bool`: the distinction is a real property of the
+/// action — only a result report leaves every summary field untouched — and
+/// until now it survived only as a comment each handler had to remember.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListRowEffect {
+    /// At least one summary field moved, so subscribers need the list row.
+    Changed,
+    /// Every summary field is untouched; broadcasting the list would be a
+    /// no-op re-render for every subscriber.
+    Unchanged,
+}
+
+/// What a successful gated tournament action produced. Handlers describe the
+/// outcome; they never assemble outbounds themselves.
+///
+/// This is the type that makes an uncorrelated exit a **compile error**: the
+/// four gated handlers return `Result<GatedEffect, String>`, so neither a
+/// success tail nor a refusal can reach the shell without passing through
+/// [`Broker::settle_gated`], which is the only place either is minted.
+#[derive(Debug, Clone, PartialEq)]
+struct GatedEffect {
+    code: String,
+    view: TournamentView,
+    list_row: ListRowEffect,
 }
 
 /// Result of the build-commit compatibility check. `pub` so the native shell's
@@ -277,6 +310,60 @@ impl Broker {
         })
     }
 
+    /// The correlated settlement for one gated tournament action, and the
+    /// single authority for it. Success and refusal are two halves of one
+    /// signal, so both are minted here and nowhere else: the four gated
+    /// handlers hand back a [`GatedEffect`] or a reason and never build an
+    /// outbound themselves.
+    ///
+    /// `request_id: None` reproduces the pre-correlation behavior **exactly** —
+    /// the same `Vec<Outbound>`, in the same order, that these handlers
+    /// returned before the correlator existed. A client that does not mint one
+    /// (any build older than lobby protocol 5) is unaffected by this change.
+    ///
+    /// **Order within the returned `Vec` is significant** (see [`Outbound`]).
+    /// On success this emits `[ack?, ToSubscribers(TournamentUpdate),
+    /// list_update?]` — the `ToSelf` point reply ahead of the broadcast, which
+    /// is the convention [`Broker::handle_join_tournament`] already follows for
+    /// its own `TournamentJoined` + `TournamentUpdate` pair.
+    ///
+    /// The ack carries no token: the caller already holds the one that
+    /// authorized the action, and the correlator identifies a *request*, never
+    /// a *requester* — it must never be read as permission.
+    fn settle_gated(
+        &self,
+        request_id: Option<TournamentRequestId>,
+        outcome: Result<GatedEffect, String>,
+    ) -> Vec<Outbound> {
+        let GatedEffect {
+            code,
+            view,
+            list_row,
+        } = match outcome {
+            Ok(effect) => effect,
+            Err(reason) => return vec![settle_rejection(request_id, &reason)],
+        };
+
+        let mut out = Vec::new();
+        if let Some(request_id) = request_id {
+            out.push(Outbound::ToSelf(LobbyServerMessage::TournamentActionAck {
+                request_id,
+                code: code.clone(),
+                view: view.clone(),
+            }));
+        }
+        out.push(Outbound::ToSubscribers(
+            LobbyServerMessage::TournamentUpdate { code, view },
+        ));
+        // Exhaustive rather than an `if`: a third effect added later must force
+        // a decision here instead of silently taking the "no list row" path.
+        match list_row {
+            ListRowEffect::Changed => out.push(self.tournament_list_update()),
+            ListRowEffect::Unchanged => {}
+        }
+        out
+    }
+
     /// The detail view for `code`, or `None` if the tournament is gone.
     fn tournament_view(&self, code: &str) -> Option<crate::protocol::TournamentView> {
         self.tournaments
@@ -292,8 +379,16 @@ impl Broker {
         msg: LobbyClientMessage,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
+        // The correlator is read BEFORE the guard, so a gated frame refused at
+        // the bounds check is refused *to that request* rather than by a bare
+        // `Error` a correlated caller is designed to ignore — which would be a
+        // hang until timeout. Exhaustive by construction on the message enum,
+        // so a future gated variant that forgets its correlator is visible at
+        // `LobbyClientMessage::tournament_request_id` rather than silently
+        // uncorrelated here.
+        let request_id = msg.tournament_request_id();
         if let Err(reason) = crate::inbound_guard::guard_inbound(&msg) {
-            return vec![error(&reason)];
+            return vec![settle_rejection(request_id, &reason)];
         }
         match msg {
             LobbyClientMessage::ClientHello {
@@ -424,6 +519,9 @@ impl Broker {
                 scoring,
                 bracket,
                 total_rounds,
+                plus_rounds,
+                format,
+                match_type,
             } => self.handle_create_tournament(
                 conn,
                 name,
@@ -431,6 +529,9 @@ impl Broker {
                 scoring,
                 bracket,
                 total_rounds,
+                plus_rounds,
+                format,
+                match_type,
                 env,
             ),
 
@@ -442,26 +543,55 @@ impl Broker {
 
             LobbyClientMessage::GetTournament { code } => self.handle_get_tournament(code),
 
+            LobbyClientMessage::RenewTournamentCredential { code, role, token } => {
+                self.handle_renew_tournament_credential(code, role, token, env)
+            }
+
+            // The four gated actions destructure their correlator by name and
+            // route the handler's outcome through [`Broker::settle_gated`], the
+            // one place a gated success or refusal is minted. The handlers
+            // return `Result<GatedEffect, String>` precisely so that no arm
+            // here can answer a gated frame any other way. The binding shadows
+            // the `request_id` read above the guard with the same value — one
+            // read, one settlement.
             LobbyClientMessage::StartTournamentRound {
                 code,
                 organizer_token,
-            } => self.handle_start_tournament_round(code, organizer_token, env),
+                request_id,
+            } => {
+                let outcome = self.handle_start_tournament_round(code, organizer_token, env);
+                self.settle_gated(request_id, outcome)
+            }
 
             LobbyClientMessage::ReportMatchResult {
                 code,
                 pairing_id,
                 player_token,
-                outcome,
-            } => self.handle_report_match_result(code, pairing_id, player_token, outcome, env),
+                outcome: reported,
+                request_id,
+            } => {
+                let outcome =
+                    self.handle_report_match_result(code, pairing_id, player_token, reported, env);
+                self.settle_gated(request_id, outcome)
+            }
 
-            LobbyClientMessage::DropFromTournament { code, player_token } => {
-                self.handle_drop_from_tournament(code, player_token, env)
+            LobbyClientMessage::DropFromTournament {
+                code,
+                player_token,
+                request_id,
+            } => {
+                let outcome = self.handle_drop_from_tournament(code, player_token, env);
+                self.settle_gated(request_id, outcome)
             }
 
             LobbyClientMessage::EndTournament {
                 code,
                 organizer_token,
-            } => self.handle_end_tournament(code, organizer_token, env),
+                request_id,
+            } => {
+                let outcome = self.handle_end_tournament(code, organizer_token, env);
+                self.settle_gated(request_id, outcome)
+            }
         }
     }
 
@@ -1003,19 +1133,38 @@ impl Broker {
     /// `Err` carries the message to reply with, distinguishing "no such
     /// tournament" from "wrong token" for the caller while keeping both a
     /// single early return at the call site.
-    fn authorize_organizer(&self, code: &str, presented: &str) -> Result<(), String> {
+    ///
+    /// THREE `Err` shapes now rather than two: an EXPIRED credential is told
+    /// apart from a wrong one, because they are different client-side
+    /// situations and only the first is recoverable — by
+    /// `RenewTournamentCredential`. The distinction leaks nothing: `Expired` is
+    /// reachable only by a caller who already presented the exact stored
+    /// secret.
+    ///
+    /// The comparison itself is [`crate::tournament::TournamentCredential`]'s,
+    /// not this function's: it is constant-time and it carries the expiry
+    /// conjunct, so no call site here can spell a plaintext `==` or forget the
+    /// clock. An empty presented token cannot match — the stored secret is
+    /// never empty and the comparison is length-checked first.
+    fn authorize_organizer(
+        &self,
+        code: &str,
+        presented: &str,
+        env: &impl BrokerEnv,
+    ) -> Result<(), String> {
         let meta = self
             .tournaments
             .get(code)
             .ok_or_else(|| format!("Tournament not found: {code}"))?;
-        // An empty presented token must never authorize anything. Stored
-        // tokens come from `BrokerEnv::new_token` and are never empty, so this
-        // is belt-and-braces against a future env rather than a live hole —
-        // but an authority check is the wrong place to rely on that.
-        if presented.is_empty() || meta.organizer_token != presented {
-            return Err(format!("Invalid organizer token for tournament {code}"));
+        match meta.organizer_token.verdict(presented, env.now_ms()) {
+            CredentialVerdict::Accepted => Ok(()),
+            CredentialVerdict::Expired => Err(format!(
+                "Organizer credential for tournament {code} has expired - renew it and retry"
+            )),
+            CredentialVerdict::Mismatch => {
+                Err(format!("Invalid organizer token for tournament {code}"))
+            }
         }
-        Ok(())
     }
 
     /// The `player_key` owning `presented` in `code`, if any.
@@ -1040,24 +1189,50 @@ impl Broker {
     /// out, so there is a real, reachable window in which a dropped seat could
     /// settle a match it is no longer in.
     ///
-    /// Three distinct `Err` shapes — missing tournament, unusable token,
-    /// dropped entrant — because they are three different client-side
-    /// situations and the caller replies with the message verbatim. The
-    /// dropped case reveals nothing: it is told only to the holder of that
-    /// player's own token.
-    fn authorize_player(&self, code: &str, presented: &str) -> Result<String, String> {
+    /// FOUR distinct `Err` shapes — missing tournament, unusable token,
+    /// EXPIRED token, dropped entrant — because they are four different
+    /// client-side situations and the caller replies with the message
+    /// verbatim. The dropped and expired cases reveal nothing: each is told
+    /// only to the holder of that player's own token.
+    ///
+    /// The comparison is [`crate::tournament::TournamentCredential`]'s, so it
+    /// is constant-time and carries the expiry conjunct; see
+    /// [`Broker::authorize_organizer`].
+    fn authorize_player(
+        &self,
+        code: &str,
+        presented: &str,
+        env: &impl BrokerEnv,
+    ) -> Result<String, String> {
         let meta = self
             .tournaments
             .get(code)
             .ok_or_else(|| format!("Tournament not found: {code}"))?;
-        if presented.is_empty() {
-            return Err(format!("Invalid player token for tournament {code}"));
-        }
-        let player = meta
-            .players
-            .iter()
-            .find(|p| p.player_token == presented)
-            .ok_or_else(|| format!("Invalid player token for tournament {code}"))?;
+        let now_ms = env.now_ms();
+        // The scan records an expiry it walked past so a holder of the RIGHT
+        // secret is told that it lapsed rather than that it was never valid.
+        // It cannot short-circuit on the first expired match, because a
+        // rotation may have left an older seat holding a stale copy; only a
+        // full pass proves no seat still accepts this secret.
+        let mut expired = false;
+        let player =
+            meta.players
+                .iter()
+                .find(|p| match p.player_token.verdict(presented, now_ms) {
+                    CredentialVerdict::Accepted => true,
+                    CredentialVerdict::Expired => {
+                        expired = true;
+                        false
+                    }
+                    CredentialVerdict::Mismatch => false,
+                });
+        let Some(player) = player else {
+            return Err(if expired {
+                format!("Player credential for tournament {code} has expired - renew it and retry")
+            } else {
+                format!("Invalid player token for tournament {code}")
+            });
+        };
         if player.dropped {
             return Err(format!("Player has dropped from tournament {code}"));
         }
@@ -1070,9 +1245,12 @@ impl Broker {
         conn: &mut ConnState,
         name: String,
         arity: MatchArity,
-        scoring: ScoringPolicy,
+        scoring: Option<ScoringPolicy>,
         bracket: BracketShape,
         total_rounds: Option<u32>,
+        plus_rounds: Option<u32>,
+        format: Option<GameFormat>,
+        match_type: Option<MatchType>,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
         // Registry capacity, checked before a code or a token is minted and
@@ -1094,7 +1272,13 @@ impl Broker {
         // `TournamentManager::create_tournament` takes a caller-supplied code
         // for the same reason `LobbyManager::register_game` does.
         let code = env.new_game_code();
-        let organizer_token = match self.tournaments.create_tournament(
+        // An omitted `scoring` is resolved HERE, by the broker, from the same
+        // `default_for_arity` authority the organizer would otherwise have had
+        // to reimplement client-side — and the resolved value goes back out on
+        // `TournamentSummary::scoring`, so nobody has to recompute it to see
+        // what their event scores. The same shape `total_rounds` already has.
+        let scoring = scoring.unwrap_or_else(|| ScoringPolicy::default_for_arity(arity));
+        let minted = match self.tournaments.create_tournament(
             &code,
             CreateTournamentRequest {
                 name: name.clone(),
@@ -1102,10 +1286,13 @@ impl Broker {
                 scoring,
                 bracket,
                 total_rounds,
+                plus_rounds,
+                format,
+                match_type,
             },
             env,
         ) {
-            Ok(token) => token,
+            Ok(minted) => minted,
             Err(reason) => return vec![error(&reason)],
         };
 
@@ -1124,7 +1311,8 @@ impl Broker {
         vec![
             Outbound::ToSelf(LobbyServerMessage::TournamentCreated {
                 code,
-                organizer_token,
+                organizer_token: minted.secret,
+                expires_at_ms: minted.expires_at_ms,
                 view,
             }),
             self.tournament_list_update(),
@@ -1139,14 +1327,13 @@ impl Broker {
         display_name: String,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
-        let player_token =
-            match self
-                .tournaments
-                .join_tournament(&code, &player_key, &display_name, env)
-            {
-                Ok(token) => token,
-                Err(reason) => return vec![error(&reason)],
-            };
+        let minted = match self
+            .tournaments
+            .join_tournament(&code, &player_key, &display_name, env)
+        {
+            Ok(minted) => minted,
+            Err(reason) => return vec![error(&reason)],
+        };
 
         let Some(view) = self.tournament_view(&code) else {
             return vec![error("Tournament was joined but could not be read back")];
@@ -1162,12 +1349,50 @@ impl Broker {
         vec![
             Outbound::ToSelf(LobbyServerMessage::TournamentJoined {
                 code: code.clone(),
-                player_token,
+                player_token: minted.secret,
+                expires_at_ms: minted.expires_at_ms,
                 view: view.clone(),
             }),
             Outbound::ToSubscribers(LobbyServerMessage::TournamentUpdate { code, view }),
             self.tournament_list_update(),
         ]
+    }
+
+    /// Token-gated, but not one of the four gated ACTIONS: it settles through
+    /// its own point reply rather than through [`Broker::settle_gated`],
+    /// because it carries no [`TournamentRequestId`] and mutates no tournament
+    /// state a subscriber could be watching.
+    ///
+    /// **Exactly one outbound, and it is `ToSelf`.** The rotated secret must
+    /// never be fanned out, and nothing on `TournamentSummary` or
+    /// `TournamentView` moved, so a broadcast would be a re-render carrying a
+    /// secret for no reason.
+    fn handle_renew_tournament_credential(
+        &mut self,
+        code: String,
+        role: TournamentRole,
+        token: String,
+        env: &impl BrokerEnv,
+    ) -> Vec<Outbound> {
+        match self.tournaments.renew_credential(&code, role, &token, env) {
+            Ok(minted) => {
+                // The code and the role, never the secret — the same rule
+                // `ConnState`'s tournament bookkeeping already follows.
+                info!(tournament = %code, ?role, "tournament credential rotated");
+                vec![Outbound::ToSelf(
+                    LobbyServerMessage::TournamentCredentialRenewed {
+                        code,
+                        role,
+                        token: minted.secret,
+                        expires_at_ms: minted.expires_at_ms,
+                    },
+                )]
+            }
+            Err(reason) => {
+                warn!(tournament = %code, ?role, "RenewTournamentCredential rejected");
+                vec![error(&reason)]
+            }
+        }
     }
 
     /// Read-only. Ungated: a tournament is public once its code is known,
@@ -1182,32 +1407,36 @@ impl Broker {
         }
     }
 
+    /// Organizer-gated. Describes its outcome and leaves the outbounds to
+    /// [`Broker::settle_gated`]; every refusal is an `Err` the type system
+    /// forces through that one settlement.
     fn handle_start_tournament_round(
         &mut self,
         code: String,
         organizer_token: String,
         env: &impl BrokerEnv,
-    ) -> Vec<Outbound> {
-        if let Err(reason) = self.authorize_organizer(&code, &organizer_token) {
+    ) -> Result<GatedEffect, String> {
+        if let Err(reason) = self.authorize_organizer(&code, &organizer_token, env) {
             warn!(tournament = %code, "StartTournamentRound rejected — bad organizer token");
-            return vec![error(&reason)];
+            return Err(reason);
         }
-        if let Err(reason) = self.tournaments.generate_pairings(&code, env) {
-            return vec![error(&reason)];
-        }
+        self.tournaments.generate_pairings(&code, env)?;
         let Some(view) = self.tournament_view(&code) else {
-            return vec![error(&format!("Tournament not found: {code}"))];
+            return Err(format!("Tournament not found: {code}"));
         };
         info!(tournament = %code, "tournament round paired");
 
         // Status may flip to `InProgress` and `current_round` advances — both
         // are list-row fields, so the list update is warranted here.
-        vec![
-            Outbound::ToSubscribers(LobbyServerMessage::TournamentUpdate { code, view }),
-            self.tournament_list_update(),
-        ]
+        Ok(GatedEffect {
+            code,
+            view,
+            list_row: ListRowEffect::Changed,
+        })
     }
 
+    /// Player-gated, and the one gated action whose list row does not move —
+    /// see [`ListRowEffect::Unchanged`] on the success tail below.
     fn handle_report_match_result(
         &mut self,
         code: String,
@@ -1215,15 +1444,15 @@ impl Broker {
         player_token: String,
         outcome: PodOutcome,
         env: &impl BrokerEnv,
-    ) -> Vec<Outbound> {
-        let reporter = match self.authorize_player(&code, &player_token) {
+    ) -> Result<GatedEffect, String> {
+        let reporter = match self.authorize_player(&code, &player_token, env) {
             Ok(key) => key,
             Err(reason) => {
                 // `reason` distinguishes an unusable token from an entrant who
                 // has dropped, so it is logged rather than flattened into one
                 // "bad token" message that would misreport the second case.
                 warn!(tournament = %code, %reason, "ReportMatchResult rejected — player not authorized");
-                return vec![error(&reason)];
+                return Err(reason);
             }
         };
 
@@ -1240,21 +1469,17 @@ impl Broker {
             Some(true) => {}
             Some(false) => {
                 warn!(tournament = %code, pairing = pairing_id, "ReportMatchResult rejected — reporter not seated in this pairing");
-                return vec![error(&format!(
+                return Err(format!(
                     "Player {reporter} is not seated in pairing {pairing_id}"
-                ))];
+                ));
             }
-            None => return vec![error(&format!("Pairing {pairing_id} not found in {code}"))],
+            None => return Err(format!("Pairing {pairing_id} not found in {code}")),
         }
 
-        if let Err(reason) = self
-            .tournaments
-            .report_result(&code, pairing_id, outcome, env)
-        {
-            return vec![error(&reason)];
-        }
+        self.tournaments
+            .report_result(&code, pairing_id, outcome, env)?;
         let Some(view) = self.tournament_view(&code) else {
-            return vec![error(&format!("Tournament not found: {code}"))];
+            return Err(format!("Tournament not found: {code}"));
         };
         info!(tournament = %code, pairing = pairing_id, "match result reported");
 
@@ -1263,18 +1488,22 @@ impl Broker {
         // which live only in the detail view. Status, round, and active-player
         // count — every field a `TournamentSummary` carries — are untouched,
         // so broadcasting the whole list here would be a no-op re-render for
-        // every subscriber.
-        vec![Outbound::ToSubscribers(
-            LobbyServerMessage::TournamentUpdate { code, view },
-        )]
+        // every subscriber. That reasoning is now the justification for a typed
+        // field rather than for an unwritten convention.
+        Ok(GatedEffect {
+            code,
+            view,
+            list_row: ListRowEffect::Unchanged,
+        })
     }
 
+    /// Player-gated.
     fn handle_drop_from_tournament(
         &mut self,
         code: String,
         player_token: String,
         env: &impl BrokerEnv,
-    ) -> Vec<Outbound> {
+    ) -> Result<GatedEffect, String> {
         // Resolving the token to its owner is what confines a drop to the
         // player who presented it: the key is never taken from the payload,
         // so there is no field a client could point at someone else.
@@ -1288,52 +1517,51 @@ impl Broker {
         // for an event this caller has left. Refusing is both the honest
         // answer ("you are not a participant") and the one that does not hand
         // a departed entrant a liveness lever.
-        let player_key = match self.authorize_player(&code, &player_token) {
+        let player_key = match self.authorize_player(&code, &player_token, env) {
             Ok(key) => key,
             Err(reason) => {
                 warn!(tournament = %code, %reason, "DropFromTournament rejected — player not authorized");
-                return vec![error(&reason)];
+                return Err(reason);
             }
         };
-        if let Err(reason) = self.tournaments.drop_player(&code, &player_key, env) {
-            return vec![error(&reason)];
-        }
+        self.tournaments.drop_player(&code, &player_key, env)?;
         let Some(view) = self.tournament_view(&code) else {
-            return vec![error(&format!("Tournament not found: {code}"))];
+            return Err(format!("Tournament not found: {code}"));
         };
         info!(tournament = %code, player = %player_key, "player dropped from tournament");
 
         // A drop lowers `active_player_count`, which IS a summary field, so
         // the list row genuinely changed here (unlike a result report).
-        vec![
-            Outbound::ToSubscribers(LobbyServerMessage::TournamentUpdate { code, view }),
-            self.tournament_list_update(),
-        ]
+        Ok(GatedEffect {
+            code,
+            view,
+            list_row: ListRowEffect::Changed,
+        })
     }
 
+    /// Organizer-gated.
     fn handle_end_tournament(
         &mut self,
         code: String,
         organizer_token: String,
         env: &impl BrokerEnv,
-    ) -> Vec<Outbound> {
-        if let Err(reason) = self.authorize_organizer(&code, &organizer_token) {
+    ) -> Result<GatedEffect, String> {
+        if let Err(reason) = self.authorize_organizer(&code, &organizer_token, env) {
             warn!(tournament = %code, "EndTournament rejected — bad organizer token");
-            return vec![error(&reason)];
+            return Err(reason);
         }
-        if let Err(reason) = self.tournaments.complete_tournament(&code, env) {
-            return vec![error(&reason)];
-        }
+        self.tournaments.complete_tournament(&code, env)?;
         let Some(view) = self.tournament_view(&code) else {
-            return vec![error(&format!("Tournament not found: {code}"))];
+            return Err(format!("Tournament not found: {code}"));
         };
         info!(tournament = %code, "tournament completed");
 
         // Status → `Completed`, a summary field.
-        vec![
-            Outbound::ToSubscribers(LobbyServerMessage::TournamentUpdate { code, view }),
-            self.tournament_list_update(),
-        ]
+        Ok(GatedEffect {
+            code,
+            view,
+            list_row: ListRowEffect::Changed,
+        })
     }
 }
 
@@ -1365,6 +1593,28 @@ pub fn server_hello(
 
 fn error(message: &str) -> Outbound {
     Outbound::ToSelf(LobbyServerMessage::error(message))
+}
+
+/// The refusal for one gated tournament action: a `TournamentActionRejected`
+/// carrying the caller's own correlator when it sent one, and the bare `Error`
+/// this broker has always sent when it did not.
+///
+/// A free function rather than a [`Broker::settle_gated`] branch alone because
+/// the inbound bounds guard refuses *before* dispatch — before any handler
+/// could have produced a `Result<GatedEffect, String>` — and both refusals must
+/// be shaped the same way. `settle_gated`'s `Err` arm delegates here, so a
+/// gated refusal has exactly one construction site.
+///
+/// [`error`] itself is deliberately untouched: every non-tournament path keeps
+/// today's exact bytes.
+fn settle_rejection(request_id: Option<TournamentRequestId>, message: &str) -> Outbound {
+    match request_id {
+        Some(request_id) => Outbound::ToSelf(LobbyServerMessage::TournamentActionRejected {
+            request_id,
+            message: message.to_string(),
+        }),
+        None => error(message),
+    }
 }
 
 /// Append to a per-connection tournament bookkeeping list, evicting oldest-first
@@ -2272,8 +2522,9 @@ mod tests {
 
     use crate::protocol::{TournamentSummary, TournamentView};
     use crate::tournament::{
-        BracketShape, MatchArity, PairingOutcome, PodOutcome, ScoringPolicy, TournamentStatus,
-        IN_PROGRESS_ABANDON_SECS, REGISTRATION_TIMEOUT_SECS,
+        BracketShape, MatchArity, PairingOutcome, PodOutcome, ScoringPolicy, TournamentAction,
+        TournamentStatus, IN_PROGRESS_ABANDON_SECS, REGISTRATION_TIMEOUT_SECS,
+        TOURNAMENT_CREDENTIAL_TTL_MS,
     };
 
     /// Creates a tournament through the real dispatch path and returns
@@ -2289,9 +2540,12 @@ mod tests {
             LobbyClientMessage::CreateTournament {
                 name: "Friday Night".into(),
                 arity: MatchArity::HEAD_TO_HEAD,
-                scoring: ScoringPolicy::default(),
+                scoring: Some(ScoringPolicy::default()),
                 bracket,
                 total_rounds: None,
+                plus_rounds: None,
+                format: None,
+                match_type: None,
             },
             env,
         );
@@ -2424,6 +2678,7 @@ mod tests {
             LobbyClientMessage::StartTournamentRound {
                 code: code.clone(),
                 organizer_token: organizer_token.clone(),
+                request_id: None,
             },
             env,
         );
@@ -2444,9 +2699,12 @@ mod tests {
             LobbyClientMessage::CreateTournament {
                 name: "Friday Night".into(),
                 arity: MatchArity::HEAD_TO_HEAD,
-                scoring: ScoringPolicy::default(),
+                scoring: Some(ScoringPolicy::default()),
                 bracket: BracketShape::Swiss,
                 total_rounds: None,
+                plus_rounds: None,
+                format: None,
+                match_type: None,
             },
             &env,
         );
@@ -2455,6 +2713,7 @@ mod tests {
             Outbound::ToSelf(LobbyServerMessage::TournamentCreated {
                 code,
                 organizer_token,
+                expires_at_ms: _,
                 view,
             }) => {
                 // The point reply's own view must not restate the token.
@@ -2598,10 +2857,12 @@ mod tests {
                 LobbyClientMessage::StartTournamentRound {
                     code: code.clone(),
                     organizer_token: wrong.to_string(),
+                    request_id: None,
                 },
                 LobbyClientMessage::EndTournament {
                     code: code.clone(),
                     organizer_token: wrong.to_string(),
+                    request_id: None,
                 },
             ] {
                 let out = broker.handle(&mut conn, msg, &env);
@@ -2623,6 +2884,7 @@ mod tests {
             LobbyClientMessage::StartTournamentRound {
                 code: code.clone(),
                 organizer_token: organizer_token.clone(),
+                request_id: None,
             },
             &env,
         );
@@ -2648,6 +2910,7 @@ mod tests {
             LobbyClientMessage::EndTournament {
                 code: code_one,
                 organizer_token: token_two,
+                request_id: None,
             },
             &env,
         );
@@ -2670,6 +2933,7 @@ mod tests {
                 LobbyClientMessage::DropFromTournament {
                     code: code.clone(),
                     player_token: wrong.to_string(),
+                    request_id: None,
                 },
                 &env,
             );
@@ -2685,6 +2949,7 @@ mod tests {
             LobbyClientMessage::DropFromTournament {
                 code: code.clone(),
                 player_token: token_a,
+                request_id: None,
             },
             &env,
         );
@@ -2723,6 +2988,7 @@ mod tests {
             LobbyClientMessage::StartTournamentRound {
                 code: code.clone(),
                 organizer_token,
+                request_id: None,
             },
             &env,
         );
@@ -2752,6 +3018,7 @@ mod tests {
                 pairing_id,
                 player_token: outsider_token,
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             &env,
         );
@@ -2781,6 +3048,7 @@ mod tests {
                 pairing_id,
                 player_token: seated_token,
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             &env,
         );
@@ -2812,9 +3080,12 @@ mod tests {
             LobbyClientMessage::CreateTournament {
                 name: "Commander Night".into(),
                 arity,
-                scoring: ScoringPolicy::default_for_arity(arity),
+                scoring: Some(ScoringPolicy::default_for_arity(arity)),
                 bracket: BracketShape::Swiss,
                 total_rounds: None,
+                plus_rounds: None,
+                format: None,
+                match_type: None,
             },
             env,
         );
@@ -2862,6 +3133,7 @@ mod tests {
             LobbyClientMessage::StartTournamentRound {
                 code: code.clone(),
                 organizer_token,
+                request_id: None,
             },
             &env,
         );
@@ -2878,6 +3150,7 @@ mod tests {
             LobbyClientMessage::DropFromTournament {
                 code: code.clone(),
                 player_token: tokens[0].clone(),
+                request_id: None,
             },
             &env,
         );
@@ -2905,6 +3178,7 @@ mod tests {
                     winner: "key-1".into(),
                     game_wins: std::collections::HashMap::new(),
                 },
+                request_id: None,
             },
             &env,
         );
@@ -2921,6 +3195,7 @@ mod tests {
                 pairing_id,
                 player_token: tokens[0].clone(),
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             &env,
         );
@@ -2954,6 +3229,7 @@ mod tests {
                     winner: "key-1".into(),
                     game_wins: std::collections::HashMap::new(),
                 },
+                request_id: None,
             },
             &env,
         );
@@ -2993,6 +3269,7 @@ mod tests {
             LobbyClientMessage::DropFromTournament {
                 code: code.clone(),
                 player_token: token_a.clone(),
+                request_id: None,
             },
             &env,
         );
@@ -3009,6 +3286,7 @@ mod tests {
             LobbyClientMessage::DropFromTournament {
                 code: code.clone(),
                 player_token: token_a,
+                request_id: None,
             },
             &env,
         );
@@ -3028,6 +3306,469 @@ mod tests {
         );
     }
 
+    // -- Correlated gated settlement (V5, V10, V11, V12) ---------------------
+
+    /// Every correlator carried by a gated point reply in `out`, ack or
+    /// refusal alike.
+    ///
+    /// The match names both correlated variants explicitly rather than reaching
+    /// for a field by serde: a third correlated reply added later must be
+    /// classified here instead of going invisible to every correlation test in
+    /// this module.
+    fn correlators(out: &[Outbound]) -> Vec<TournamentRequestId> {
+        out.iter()
+            .filter_map(|ob| match ob {
+                Outbound::ToSelf(LobbyServerMessage::TournamentActionAck {
+                    request_id, ..
+                })
+                | Outbound::ToSelf(LobbyServerMessage::TournamentActionRejected {
+                    request_id,
+                    ..
+                }) => Some(*request_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The single `TournamentActionAck` in `out`, or a panic naming what was
+    /// there instead.
+    fn ack_of(out: &[Outbound]) -> (TournamentRequestId, &str, &TournamentView) {
+        out.iter()
+            .find_map(|ob| match ob {
+                Outbound::ToSelf(LobbyServerMessage::TournamentActionAck {
+                    request_id,
+                    code,
+                    view,
+                }) => Some((*request_id, code.as_str(), view)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected a TournamentActionAck, got {out:?}"))
+    }
+
+    fn rejection_of(out: &[Outbound]) -> (TournamentRequestId, &str) {
+        match out {
+            [Outbound::ToSelf(LobbyServerMessage::TournamentActionRejected {
+                request_id,
+                message,
+            })] => (*request_id, message.as_str()),
+            other => panic!("expected a single TournamentActionRejected, got {other:?}"),
+        }
+    }
+
+    fn has_ack(out: &[Outbound]) -> bool {
+        out.iter().any(|ob| {
+            matches!(
+                ob,
+                Outbound::ToSelf(LobbyServerMessage::TournamentActionAck { .. })
+            )
+        })
+    }
+
+    fn subscriber_update_view(out: &[Outbound]) -> &TournamentView {
+        out.iter()
+            .find_map(|ob| match ob {
+                Outbound::ToSubscribers(LobbyServerMessage::TournamentUpdate { view, .. }) => {
+                    Some(view)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected a broadcast TournamentUpdate, got {out:?}"))
+    }
+
+    fn has_list_update(out: &[Outbound]) -> bool {
+        out.iter().any(|ob| {
+            matches!(
+                ob,
+                Outbound::ToSubscribers(LobbyServerMessage::TournamentListUpdate { .. })
+            )
+        })
+    }
+
+    /// V5 — THE MAINTAINER'S REGRESSION, broker half.
+    ///
+    /// Two connections act on ONE tournament through one `Broker`, each with
+    /// its own correlator. The settlement each receives must carry *its own*
+    /// id: the whole defect being fixed is that a caller could not tell its own
+    /// outcome from another actor's frame for the same tournament.
+    #[test]
+    fn a_gated_settlement_carries_only_its_own_callers_request_id() {
+        const ORGANIZER_ID: TournamentRequestId = TournamentRequestId(11);
+        const ALICE_ID: TournamentRequestId = TournamentRequestId(22);
+        const BOB_ID: TournamentRequestId = TournamentRequestId(33);
+
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut organizer = ConnState::default();
+        let mut alice = ConnState::default();
+        let mut bob = ConnState::default();
+
+        let (code, organizer_token) =
+            make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+        let token_a = join_tournament(&mut alice, &mut broker, &env, &code, "key-a", "Alice");
+        join_tournament(&mut bob, &mut broker, &env, &code, "key-b", "Bob");
+
+        // Hostile/negative pair, part 1: the true organizer's correlated action
+        // is ACKED, not rejected — so the refusal below is about Bob's token,
+        // not about correlation refusing everything.
+        let started = broker.handle(
+            &mut organizer,
+            LobbyClientMessage::StartTournamentRound {
+                code: code.clone(),
+                organizer_token: organizer_token.clone(),
+                request_id: Some(ORGANIZER_ID),
+            },
+            &env,
+        );
+        assert_eq!(correlators(&started), vec![ORGANIZER_ID]);
+        assert!(has_ack(&started), "{started:?}");
+
+        let pairing_id = broker
+            .tournaments()
+            .get(&code)
+            .expect("event")
+            .pairings
+            .first()
+            .expect("round 1 paired")
+            .id;
+
+        // Alice reports her own pairing, correlated with HER id.
+        let alice_out = broker.handle(
+            &mut alice,
+            LobbyClientMessage::ReportMatchResult {
+                code: code.clone(),
+                pairing_id,
+                player_token: token_a,
+                outcome: PodOutcome::Draw,
+                request_id: Some(ALICE_ID),
+            },
+            &env,
+        );
+        let (alice_ack_id, alice_ack_code, _) = ack_of(&alice_out);
+        assert_eq!(alice_ack_id, ALICE_ID);
+        assert_eq!(alice_ack_code, code);
+        assert_eq!(correlators(&alice_out), vec![ALICE_ID]);
+
+        // Bob — a real entrant of this very tournament, holding a real token
+        // for the wrong authority tier — tries to end it, correlated with HIS
+        // id. The refusal must be his, and must carry no trace of Alice's.
+        let bob_out = broker.handle(
+            &mut bob,
+            LobbyClientMessage::EndTournament {
+                code: code.clone(),
+                organizer_token: "not-the-organizer".into(),
+                request_id: Some(BOB_ID),
+            },
+            &env,
+        );
+        let (bob_id, bob_message) = rejection_of(&bob_out);
+        assert_eq!(bob_id, BOB_ID);
+        assert!(!bob_message.is_empty(), "a refusal must say why");
+        assert!(
+            !has_ack(&bob_out),
+            "a refused action must not ack: {bob_out:?}"
+        );
+        assert_eq!(
+            correlators(&bob_out),
+            vec![BOB_ID],
+            "Bob's refusal carried a correlator that was not his"
+        );
+        assert!(
+            !correlators(&bob_out).contains(&ALICE_ID),
+            "Alice's correlator reached Bob"
+        );
+
+        // Reach-guard: the refusal changed nothing. A rejection that also
+        // completed the tournament would satisfy every assertion above.
+        assert_eq!(
+            broker.tournaments().get(&code).expect("event").status,
+            TournamentStatus::InProgress
+        );
+    }
+
+    /// V10 — an organizer who never subscribed still observes success.
+    ///
+    /// This is what the ack buys that the broadcast never could: before it, the
+    /// four gated actions produced only a `ToSubscribers` frame, so an
+    /// unsubscribed caller waited out its own timeout on an action that had
+    /// already succeeded.
+    #[test]
+    fn a_gated_ack_reaches_an_unsubscribed_caller_alongside_the_broadcast() {
+        const REQUEST_ID: TournamentRequestId = TournamentRequestId(7);
+
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut organizer = ConnState::default();
+        let mut player = ConnState::default();
+
+        let (code, organizer_token) =
+            make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+        join_tournament(&mut player, &mut broker, &env, &code, "key-a", "Alice");
+        join_tournament(&mut player, &mut broker, &env, &code, "key-b", "Bob");
+        // The premise of the row: this connection never sent `SubscribeLobby`.
+        assert!(!organizer.subscribed);
+
+        let out = broker.handle(
+            &mut organizer,
+            LobbyClientMessage::StartTournamentRound {
+                code: code.clone(),
+                organizer_token,
+                request_id: Some(REQUEST_ID),
+            },
+            &env,
+        );
+
+        let (ack_id, ack_code, ack_view) = ack_of(&out);
+        assert_eq!(ack_id, REQUEST_ID);
+        assert_eq!(ack_code, code);
+        // The broadcast is still emitted alongside, and the two agree — the ack
+        // is the same state, addressed, not a second and possibly divergent one.
+        assert_eq!(ack_view, subscriber_update_view(&out));
+        assert_eq!(ack_view.summary.status, TournamentStatus::InProgress);
+        // Order is significant: the point reply precedes the fan-out, the same
+        // convention `handle_join_tournament` follows.
+        assert!(matches!(
+            out.first(),
+            Some(Outbound::ToSelf(
+                LobbyServerMessage::TournamentActionAck { .. }
+            ))
+        ));
+    }
+
+    /// V11 — an uncorrelated caller's outbounds are unchanged by this fix.
+    ///
+    /// `request_id: None` is what every pre-correlation client sends, and it
+    /// must keep producing exactly the vectors these handlers produced before
+    /// `settle_gated` existed: the two-element tail for the three list-moving
+    /// actions, the one-element tail for a result report, and a bare `Error`
+    /// on refusal.
+    #[test]
+    fn an_uncorrelated_gated_caller_gets_the_pre_correlation_outbounds() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let (code, organizer_token, token_a, _token_b) =
+            started_event(&mut conn, &mut broker, &env);
+        // `started_event` already ran the uncorrelated `StartTournamentRound`.
+        let pairing_id = broker
+            .tournaments()
+            .get(&code)
+            .expect("event")
+            .pairings
+            .first()
+            .expect("round 1 paired")
+            .id;
+
+        let reported = broker.handle(
+            &mut conn,
+            LobbyClientMessage::ReportMatchResult {
+                code: code.clone(),
+                pairing_id,
+                player_token: token_a,
+                outcome: PodOutcome::Draw,
+                request_id: None,
+            },
+            &env,
+        );
+        assert!(matches!(
+            reported.as_slice(),
+            [Outbound::ToSubscribers(
+                LobbyServerMessage::TournamentUpdate { .. }
+            )]
+        ));
+
+        let ended = broker.handle(
+            &mut conn,
+            LobbyClientMessage::EndTournament {
+                code: code.clone(),
+                organizer_token: organizer_token.clone(),
+                request_id: None,
+            },
+            &env,
+        );
+        assert!(matches!(
+            ended.as_slice(),
+            [
+                Outbound::ToSubscribers(LobbyServerMessage::TournamentUpdate { .. }),
+                Outbound::ToSubscribers(LobbyServerMessage::TournamentListUpdate { .. }),
+            ]
+        ));
+
+        // The refusal half: still a bare `Error`, never the correlated variant.
+        let refused = broker.handle(
+            &mut conn,
+            LobbyClientMessage::StartTournamentRound {
+                code: code.clone(),
+                organizer_token: "wrong".into(),
+                request_id: None,
+            },
+            &env,
+        );
+        assert!(is_error(&refused), "{refused:?}");
+        assert!(correlators(&refused).is_empty());
+
+        // Reach-guard in the same test: the SAME action, correlated, does gain
+        // the ack — so the assertions above are about the correlator's absence,
+        // not about a broker that stopped acking.
+        let mut other = ConnState::default();
+        let (code_two, organizer_two) =
+            make_tournament(&mut other, &mut broker, &env, BracketShape::Swiss);
+        join_tournament(&mut other, &mut broker, &env, &code_two, "key-a", "Alice");
+        join_tournament(&mut other, &mut broker, &env, &code_two, "key-b", "Bob");
+        let correlated = broker.handle(
+            &mut other,
+            LobbyClientMessage::StartTournamentRound {
+                code: code_two,
+                organizer_token: organizer_two,
+                request_id: Some(TournamentRequestId(99)),
+            },
+            &env,
+        );
+        assert_eq!(correlated.len(), 3);
+        assert_eq!(correlators(&correlated), vec![TournamentRequestId(99)]);
+    }
+
+    /// V12 — `ListRowEffect` preserves the report-result asymmetry.
+    ///
+    /// A result report moves no `TournamentSummary` field, so it must still be
+    /// the one gated action that does not broadcast the list; the other three
+    /// must still do so. Every arm also asserts its `TournamentUpdate` IS
+    /// present, so "no list update" cannot pass by emitting nothing at all.
+    #[test]
+    fn only_a_result_report_leaves_the_list_row_untouched() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+
+        let (code, organizer_token) =
+            make_tournament(&mut conn, &mut broker, &env, BracketShape::Swiss);
+        let token_a = join_tournament(&mut conn, &mut broker, &env, &code, "key-a", "Alice");
+        let token_b = join_tournament(&mut conn, &mut broker, &env, &code, "key-b", "Bob");
+
+        let started = broker.handle(
+            &mut conn,
+            LobbyClientMessage::StartTournamentRound {
+                code: code.clone(),
+                organizer_token: organizer_token.clone(),
+                request_id: Some(TournamentRequestId(1)),
+            },
+            &env,
+        );
+        subscriber_update_view(&started);
+        assert!(has_list_update(&started), "a new round moves the list row");
+
+        let pairing_id = broker
+            .tournaments()
+            .get(&code)
+            .expect("event")
+            .pairings
+            .first()
+            .expect("round 1 paired")
+            .id;
+        let reported = broker.handle(
+            &mut conn,
+            LobbyClientMessage::ReportMatchResult {
+                code: code.clone(),
+                pairing_id,
+                player_token: token_a,
+                outcome: PodOutcome::Draw,
+                request_id: Some(TournamentRequestId(2)),
+            },
+            &env,
+        );
+        subscriber_update_view(&reported);
+        assert!(
+            !has_list_update(&reported),
+            "a result report moves no summary field: {reported:?}"
+        );
+
+        let dropped = broker.handle(
+            &mut conn,
+            LobbyClientMessage::DropFromTournament {
+                code: code.clone(),
+                player_token: token_b,
+                request_id: Some(TournamentRequestId(3)),
+            },
+            &env,
+        );
+        subscriber_update_view(&dropped);
+        assert!(
+            has_list_update(&dropped),
+            "a drop lowers active_player_count: {dropped:?}"
+        );
+
+        let ended = broker.handle(
+            &mut conn,
+            LobbyClientMessage::EndTournament {
+                code,
+                organizer_token,
+                request_id: Some(TournamentRequestId(4)),
+            },
+            &env,
+        );
+        subscriber_update_view(&ended);
+        assert!(
+            has_list_update(&ended),
+            "completion moves status: {ended:?}"
+        );
+    }
+
+    /// D6 — a gated frame refused at the inbound bounds guard, before any
+    /// handler runs, still settles the caller's own correlator.
+    ///
+    /// `request_id` is read in `Broker::handle` ahead of `guard_inbound`
+    /// specifically so this path is not a bare `Error`: a correlated caller
+    /// deliberately ignores an uncorrelated `Error` (client module header,
+    /// part 5), so a regression here would not fail loudly — it would hang
+    /// every correlated caller to its timeout on an oversized-token frame the
+    /// broker rejects instantly.
+    #[test]
+    fn a_guard_refused_gated_frame_still_settles_its_own_correlator() {
+        const REQUEST_ID: TournamentRequestId = TournamentRequestId(42);
+        let over_long = "t".repeat(crate::validation::MAX_TOKEN_LEN + 1);
+
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        hello(&mut conn, &mut broker, &env);
+
+        let correlated = broker.handle(
+            &mut conn,
+            LobbyClientMessage::StartTournamentRound {
+                code: "TOUR01".into(),
+                organizer_token: over_long.clone(),
+                request_id: Some(REQUEST_ID),
+            },
+            &env,
+        );
+        let (id, message) = rejection_of(&correlated);
+        assert_eq!(id, REQUEST_ID);
+        // Discriminating, not just non-empty: `handle_start_tournament_round`'s
+        // own refusals (bad token, tournament not found) route through this
+        // same `settle_rejection` call and would otherwise satisfy a bare
+        // non-empty check just as well — which would let this test silently
+        // drift onto the handler path if the bounds check ever moved, taking
+        // D6's only coverage with it without turning the suite red.
+        assert!(
+            message.contains("organizer_token") && message.contains("at most"),
+            "expected the bounds-guard message, got: {message}"
+        );
+
+        // Reach-guard: the SAME oversized frame, uncorrelated, still produces
+        // today's bare `Error` — proving the assertions above are about the
+        // correlator's presence, not about a broker that started wrapping
+        // every guard refusal in a tournament-shaped frame.
+        let uncorrelated = broker.handle(
+            &mut conn,
+            LobbyClientMessage::StartTournamentRound {
+                code: "TOUR01".into(),
+                organizer_token: over_long,
+                request_id: None,
+            },
+            &env,
+        );
+        assert!(is_error(&uncorrelated), "{uncorrelated:?}");
+    }
+
     // -- Row 5: the broker never short-circuits past the manager -------------
 
     #[test]
@@ -3045,6 +3786,7 @@ mod tests {
                 pairing_id,
                 player_token: token_a.clone(),
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             &env,
         );
@@ -3053,6 +3795,7 @@ mod tests {
             LobbyClientMessage::EndTournament {
                 code: code.clone(),
                 organizer_token: organizer_token.clone(),
+                request_id: None,
             },
             &env,
         );
@@ -3073,6 +3816,7 @@ mod tests {
                 pairing_id,
                 player_token: token_a,
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             &env,
         );
@@ -3087,6 +3831,7 @@ mod tests {
             LobbyClientMessage::StartTournamentRound {
                 code,
                 organizer_token,
+                request_id: None,
             },
             &env,
         );
@@ -3103,7 +3848,8 @@ mod tests {
         let env = FakeEnv::new();
         let mut broker = Broker::new();
         let mut original = ConnState::default();
-        let (code, organizer_token, ..) = started_event(&mut original, &mut broker, &env);
+        let (code, organizer_token, token_a, _token_b) =
+            started_event(&mut original, &mut broker, &env);
 
         // Simulate the socket closing entirely.
         let teardown = broker.on_disconnect(&mut original);
@@ -3127,10 +3873,13 @@ mod tests {
             LobbyClientMessage::ReportMatchResult {
                 code: code.clone(),
                 pairing_id,
-                player_token: broker.tournaments().get(&code).expect("event").players[0]
-                    .player_token
-                    .clone(),
+                // The secret handed to the entrant at join, not one read back
+                // out of the stored credential: `TournamentCredential` keeps
+                // its secret private, which is exactly the property that makes
+                // a plaintext `==` at a call site unspellable.
+                player_token: token_a,
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             &env,
         );
@@ -3139,6 +3888,7 @@ mod tests {
             LobbyClientMessage::EndTournament {
                 code: code.clone(),
                 organizer_token,
+                request_id: None,
             },
             &env,
         );
@@ -3418,6 +4168,7 @@ mod tests {
             LobbyClientMessage::DropFromTournament {
                 code: code.clone(),
                 player_token: token.clone(),
+                request_id: None,
             },
             &env,
         );
@@ -3504,9 +4255,12 @@ mod tests {
             LobbyClientMessage::CreateTournament {
                 name: "One Too Many".into(),
                 arity: MatchArity::HEAD_TO_HEAD,
-                scoring: ScoringPolicy::default(),
+                scoring: Some(ScoringPolicy::default()),
                 bracket: BracketShape::Swiss,
                 total_rounds: None,
+                plus_rounds: None,
+                format: None,
+                match_type: None,
             },
             &env,
         );
@@ -3562,6 +4316,7 @@ mod tests {
                         .into_iter()
                         .collect(),
                 },
+                request_id: None,
             },
             &env,
         );
@@ -3606,6 +4361,7 @@ mod tests {
             LobbyClientMessage::DropFromTournament {
                 code: code.clone(),
                 player_token: token_a,
+                request_id: None,
             },
             &env,
         );
@@ -3668,5 +4424,409 @@ mod tests {
             serde_json::from_value(serde_json::Value::Object(legacy)).expect("legacy snapshot");
         assert_eq!(restored.lobby().len(), 1, "lobby entries survive");
         assert!(restored.tournaments().is_empty());
+    }
+
+    // -- Broker-owned default scoring (V6) ----------------------------------
+
+    /// Creates a tournament with an explicitly chosen `scoring` and returns
+    /// `(code, organizer_token, resolved_scoring)` read back off the reply's
+    /// own summary — the value a client would actually see.
+    fn create_with_scoring(
+        conn: &mut ConnState,
+        broker: &mut Broker,
+        env: &FakeEnv,
+        arity: MatchArity,
+        scoring: Option<ScoringPolicy>,
+    ) -> (String, String, ScoringPolicy, u64) {
+        let out = broker.handle(
+            conn,
+            LobbyClientMessage::CreateTournament {
+                name: "Friday Night".into(),
+                arity,
+                scoring,
+                bracket: BracketShape::Swiss,
+                total_rounds: None,
+                plus_rounds: None,
+                format: None,
+                match_type: None,
+            },
+            env,
+        );
+        match out.first() {
+            Some(Outbound::ToSelf(LobbyServerMessage::TournamentCreated {
+                code,
+                organizer_token,
+                expires_at_ms,
+                view,
+            })) => (
+                code.clone(),
+                organizer_token.clone(),
+                view.summary.scoring,
+                *expires_at_ms,
+            ),
+            other => panic!("expected TournamentCreated, got {other:?}"),
+        }
+    }
+
+    /// V6. An omitted `scoring` is resolved by the BROKER from
+    /// `ScoringPolicy::default_for_arity`, and the resolved value comes back
+    /// on the summary so no client has to recompute it — the same shape
+    /// `total_rounds` already has.
+    ///
+    /// Two arities, because a single one cannot tell "the broker applied the
+    /// arity default" apart from "the broker applied a constant".
+    #[test]
+    fn an_omitted_scoring_is_resolved_by_the_broker_from_the_arity() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+
+        let (code, _, head_to_head, _) =
+            create_with_scoring(&mut conn, &mut broker, &env, MatchArity::HEAD_TO_HEAD, None);
+        assert_eq!(
+            (
+                head_to_head.win_points(),
+                head_to_head.draw_points(),
+                head_to_head.loss_points()
+            ),
+            (3, 1, 0),
+            "MTR 2.1's 3/1/0 at two seats"
+        );
+
+        let (_, _, pod, _) = create_with_scoring(
+            &mut conn,
+            &mut broker,
+            &env,
+            MatchArity::COMMANDER_POD,
+            None,
+        );
+        assert_eq!(
+            (pod.win_points(), pod.draw_points(), pod.loss_points()),
+            (7, 1, 0),
+            "MSTR's 2n-1 at four seats"
+        );
+
+        // The stored record agrees with what went out on the wire: the
+        // resolution happens once, at creation, and is not recomputed per view.
+        assert_eq!(
+            broker.tournaments().get(&code).expect("event").scoring,
+            head_to_head
+        );
+
+        // An explicit override survives untouched — the discriminating case
+        // against a broker that defaulted unconditionally.
+        let explicit = ScoringPolicy::new(9, 2, 1).expect("valid policy");
+        let (_, _, kept, _) = create_with_scoring(
+            &mut conn,
+            &mut broker,
+            &env,
+            MatchArity::COMMANDER_POD,
+            Some(explicit),
+        );
+        assert_eq!(kept, explicit);
+    }
+
+    // -- Credential expiry on the mint replies (V26) ------------------------
+
+    /// V26. Both replies that MINT a credential carry that credential's
+    /// expiry, and the value is clock-derived rather than constant.
+    ///
+    /// The assertion is deliberately clock-relative — `env.now_ms() +
+    /// TOURNAMENT_CREDENTIAL_TTL_MS` at the instant of the call. It is not
+    /// satisfied by a hardcoded constant, by a `> now` sentinel, or by a value
+    /// read from a different clock tick, and unlike an equality against the
+    /// stored credential's field it is constructible here:
+    /// `TournamentCredential` keeps its expiry private behind `accepts()`, and
+    /// adding an accessor purely to test with would weaken exactly the
+    /// single-authority property that field's privacy exists to hold.
+    #[test]
+    fn both_mint_replies_carry_the_credentials_expiry() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+
+        let at_create = env.now_ms();
+        let (code, organizer_token, _, created_expiry) =
+            create_with_scoring(&mut conn, &mut broker, &env, MatchArity::HEAD_TO_HEAD, None);
+        assert_eq!(created_expiry, at_create + TOURNAMENT_CREDENTIAL_TTL_MS);
+
+        // Positive control #1: advance the clock and the next mint's expiry
+        // moves by exactly the same delta. A constant would not.
+        env.advance_secs(3_600);
+        let at_join = env.now_ms();
+        assert_eq!(at_join, at_create + 3_600 * 1_000);
+
+        let mut entrant = ConnState::default();
+        let out = broker.handle(
+            &mut entrant,
+            LobbyClientMessage::JoinTournament {
+                code: code.clone(),
+                player_key: "key-a".into(),
+                display_name: "Alice".into(),
+            },
+            &env,
+        );
+        let (player_token, joined_expiry) = match out.first() {
+            Some(Outbound::ToSelf(LobbyServerMessage::TournamentJoined {
+                player_token,
+                expires_at_ms,
+                ..
+            })) => (player_token.clone(), *expires_at_ms),
+            other => panic!("expected TournamentJoined, got {other:?}"),
+        };
+        assert_eq!(joined_expiry, at_join + TOURNAMENT_CREDENTIAL_TTL_MS);
+        assert_eq!(joined_expiry - created_expiry, 3_600 * 1_000);
+
+        // Positive control #2, and the one that reaches the STORED credential
+        // without new public surface: the wire value is pinned to the
+        // credential's own behavior through the accessor that already exists.
+        // The boundary is exclusive, stated once on `TournamentCredential`.
+        let meta = broker.tournaments().get(&code).expect("event");
+        assert!(meta
+            .organizer_token
+            .accepts(&organizer_token, created_expiry - 1));
+        assert!(!meta
+            .organizer_token
+            .accepts(&organizer_token, created_expiry));
+        let player = meta.player("key-a").expect("entrant");
+        assert!(player
+            .player_token
+            .accepts(&player_token, joined_expiry - 1));
+        assert!(!player.player_token.accepts(&player_token, joined_expiry));
+
+        // Hostile: the RENEWAL reply's expiry is strictly greater than the
+        // mint reply's once the clock has moved, which proves rotation re-bound
+        // the expiry rather than echoing the original.
+        env.advance_secs(60);
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::RenewTournamentCredential {
+                code: code.clone(),
+                role: TournamentRole::Organizer,
+                token: organizer_token.clone(),
+            },
+            &env,
+        );
+        match out.as_slice() {
+            [Outbound::ToSelf(LobbyServerMessage::TournamentCredentialRenewed {
+                code: reply_code,
+                role,
+                token,
+                expires_at_ms,
+            })] => {
+                assert_eq!(reply_code, &code);
+                assert_eq!(*role, TournamentRole::Organizer);
+                assert_ne!(token, &organizer_token, "rotation mints a NEW secret");
+                assert!(
+                    *expires_at_ms > created_expiry,
+                    "the rotated expiry must be re-derived, not echoed"
+                );
+                assert_eq!(*expires_at_ms, env.now_ms() + TOURNAMENT_CREDENTIAL_TTL_MS);
+            }
+            other => panic!("expected exactly one TournamentCredentialRenewed, got {other:?}"),
+        }
+    }
+
+    /// The rotated secret is never fanned out: rotation answers with exactly
+    /// one `ToSelf` outbound and no broadcast, because nothing a subscriber
+    /// watches changed and a secret must not ride a frame with more than one
+    /// recipient.
+    #[test]
+    fn credential_rotation_answers_only_the_caller() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let (code, organizer_token) =
+            make_tournament(&mut conn, &mut broker, &env, BracketShape::Swiss);
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::RenewTournamentCredential {
+                code: code.clone(),
+                role: TournamentRole::Organizer,
+                token: organizer_token.clone(),
+            },
+            &env,
+        );
+        assert_eq!(out.len(), 1, "rotation is a point reply: {out:?}");
+        assert!(
+            !out.iter()
+                .any(|ob| matches!(ob, Outbound::ToSubscribers(_))),
+            "a rotated secret must never be broadcast: {out:?}"
+        );
+
+        // The old secret is dead at the broker's own authority boundary, not
+        // only inside the manager.
+        let refused = broker.handle(
+            &mut conn,
+            LobbyClientMessage::StartTournamentRound {
+                code: code.clone(),
+                organizer_token,
+                request_id: None,
+            },
+            &env,
+        );
+        assert!(
+            is_error(&refused) && error_reason(&refused).contains("Invalid organizer token"),
+            "the rotated-away organizer secret must stop authorizing: {refused:?}"
+        );
+    }
+
+    /// An expired credential is refused by the broker's own authority check
+    /// with a message that says so, so a holder can tell "renew and retry"
+    /// apart from "you were never authorized".
+    #[test]
+    fn the_broker_tells_an_expired_credential_apart_from_a_wrong_one() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let (code, organizer_token) =
+            make_tournament(&mut conn, &mut broker, &env, BracketShape::Swiss);
+
+        // Reach-guard: the same call is accepted while the credential is live,
+        // so the refusal below is about expiry and not about the fixture.
+        let ok = broker.handle(
+            &mut conn,
+            LobbyClientMessage::StartTournamentRound {
+                code: code.clone(),
+                organizer_token: organizer_token.clone(),
+                request_id: None,
+            },
+            &env,
+        );
+        assert!(
+            !error_reason_contains(&ok, "Invalid organizer token"),
+            "a live credential must authorize: {ok:?}"
+        );
+
+        env.advance_secs(TOURNAMENT_CREDENTIAL_TTL_MS / 1_000);
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::StartTournamentRound {
+                code,
+                organizer_token,
+                request_id: None,
+            },
+            &env,
+        );
+        let reason = gated_rejection_reason(&out);
+        assert!(
+            reason.contains("expired"),
+            "expected the expiry message, got: {reason}"
+        );
+    }
+
+    /// V3, production half. The `open_actions` a client reads off the wire and
+    /// the refusal the DISPATCH path produces come from one authority, so a
+    /// terminal transition between the view and the dispatch cannot be talked
+    /// past.
+    ///
+    /// This goes through `broker.handle` rather than the manager directly,
+    /// because `handle` is the entry point a real client reaches and the one
+    /// that routes a gated action through `settle_gated`.
+    #[test]
+    fn a_stale_open_actions_read_off_the_wire_does_not_survive_the_dispatch() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let (code, organizer_token, token_a, _token_b) =
+            started_event(&mut conn, &mut broker, &env);
+
+        // What the client was actually shown, read off the wire projection.
+        let shown = broker
+            .tournament_view(&code)
+            .expect("view")
+            .summary
+            .open_actions;
+        assert!(
+            shown.contains(&TournamentAction::StartRound)
+                && shown.contains(&TournamentAction::Drop)
+                && shown.contains(&TournamentAction::EndTournament),
+            "the reach-guard: a running event advertises all three, got {shown:?}"
+        );
+
+        // The event ends between the view and the dispatch.
+        let pairing_id = broker.tournaments().get(&code).expect("event").pairings[0].id;
+        broker.handle(
+            &mut conn,
+            LobbyClientMessage::ReportMatchResult {
+                code: code.clone(),
+                pairing_id,
+                player_token: token_a,
+                outcome: PodOutcome::Draw,
+                request_id: None,
+            },
+            &env,
+        );
+        let ended = broker.handle(
+            &mut conn,
+            LobbyClientMessage::EndTournament {
+                code: code.clone(),
+                organizer_token: organizer_token.clone(),
+                request_id: None,
+            },
+            &env,
+        );
+        assert!(!is_error(&ended), "the event must actually end: {ended:?}");
+
+        // The wire now advertises nothing, and each stale dispatch is refused
+        // with the lifecycle message rather than being admitted.
+        let after = broker
+            .tournament_view(&code)
+            .expect("view")
+            .summary
+            .open_actions;
+        assert!(
+            after.is_empty(),
+            "a terminal event advertises nothing: {after:?}"
+        );
+
+        for msg in [
+            LobbyClientMessage::StartTournamentRound {
+                code: code.clone(),
+                organizer_token: organizer_token.clone(),
+                request_id: None,
+            },
+            LobbyClientMessage::EndTournament {
+                code: code.clone(),
+                organizer_token,
+                request_id: None,
+            },
+        ] {
+            let out = broker.handle(&mut conn, msg, &env);
+            let reason = gated_rejection_reason(&out);
+            assert!(
+                reason.contains("no longer running") || reason.contains("already finished"),
+                "expected the lifecycle refusal, got: {reason}"
+            );
+        }
+    }
+
+    /// True when `out` carries an `Error` or a gated rejection whose message
+    /// contains `needle`. Used for reach-guards, where the point is only that a
+    /// specific refusal did NOT happen.
+    fn error_reason_contains(out: &[Outbound], needle: &str) -> bool {
+        out.iter().any(|ob| match ob {
+            Outbound::ToSelf(LobbyServerMessage::Error { message, .. }) => message.contains(needle),
+            Outbound::ToSelf(LobbyServerMessage::TournamentActionRejected { message, .. }) => {
+                message.contains(needle)
+            }
+            _ => false,
+        })
+    }
+
+    /// The message from whichever refusal shape a gated action settled with —
+    /// a bare `Error` or a correlated `TournamentActionRejected`.
+    fn gated_rejection_reason(out: &[Outbound]) -> String {
+        for ob in out {
+            match ob {
+                Outbound::ToSelf(LobbyServerMessage::Error { message, .. })
+                | Outbound::ToSelf(LobbyServerMessage::TournamentActionRejected {
+                    message, ..
+                }) => return message.clone(),
+                _ => {}
+            }
+        }
+        panic!("expected a refusal outbound, got {out:?}")
     }
 }

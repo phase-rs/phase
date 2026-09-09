@@ -216,8 +216,8 @@ claim = "the one consumer runs the COVERAGE half too -- adjacency is load-bearin
   [[probe.mutation]]
   kind    = "replace"
   file    = "crates/engine/src/analysis/decision_template.rs"
-  find    = "    predictability_gate(template, &required).is_ok()\n        && validate_pins(schema, template, validated_range, state).is_ok()\n"
-  replace = "    predictability_gate(template, &required).is_ok()\n        // probe pad\n        // probe pad\n        // probe pad\n        && validate_pins(schema, template, validated_range, state).is_ok()\n"
+  find    = "        && validate_pins(schema, template, validated_range, state).is_ok()\n"
+  replace = "        // probe pad\n        // probe pad\n        // probe pad\n        && validate_pins(schema, template, validated_range, state).is_ok()\n"
   [[probe.assert_count]]
   file  = "crates/engine/src/analysis/decision_template.rs"
   text  = "// probe pad"

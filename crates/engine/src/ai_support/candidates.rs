@@ -1333,6 +1333,37 @@ pub fn candidate_actions_broad_with_probe(
                 Vec::new()
             }
         }
+        WaitingFor::DieKeepChoice {
+            player,
+            ignorable_indices,
+            ignore_count,
+            ..
+        } => {
+            // CR 706.6: "if multiple results are tied for the lowest, the player
+            // chooses one of those rolls to be ignored." Only the engine-narrowed
+            // `ignorable_indices` are legal choices — the AI must not consider
+            // ignoring a roll that is not tied at the extreme.
+            //
+            // `ignore_count` is NOT always 1: CR 706.6 applies once per
+            // instructing effect, so two stacked replacements (Barbarian Class +
+            // Wyll — both legal in the same Commander dice deck) make it 2 and
+            // the roller owes two picks. Enumerating only the single-index shape
+            // would leave an AI seat with an EMPTY legal-action set, which
+            // `AiDecisionContract::contains_action` then uses to reject even
+            // `phase-ai`'s `fallback_action` rescue — the softlock class #6942
+            // fixed. Enumerate the real C(ignorable, ignore_count) domain
+            // instead, bounded like every other selection enumerator here.
+            bounded_ignore_combinations(ignorable_indices, *ignore_count)
+                .into_iter()
+                .map(|ignore_indices| {
+                    candidate(
+                        GameAction::SelectDieRolls { ignore_indices },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect()
+        }
         WaitingFor::DigChoice {
             player,
             keep_count,
@@ -4324,7 +4355,15 @@ pub(crate) fn priority_actions_with_probe(
         // CR 602.1: Hand-activated abilities (Cycling per CR 702.29a, etc.)
         for &obj_id in &state.players[player.0 as usize].hand {
             if let Some(obj) = state.objects.get(&obj_id) {
-                if obj.controller == player {
+                // CR 108.4 + CR 108.4a: a card in a hand represents neither a
+                // permanent nor a spell, so it has no controller — "if anything
+                // asks for the controller of a card that doesn't have one, use
+                // its owner instead". `obj.controller` is NOT cleared by every
+                // zone change (only a battlefield exit reverts it), so scoping a
+                // hand scan by `controller` asks for a value the rules say does
+                // not exist. Owner is the rule and it is also what this
+                // owner-keyed hand list already means.
+                if obj.owner == player {
                     for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
                         if ability_def.kind == crate::types::ability::AbilityKind::Activated
                             && ability_def.activation_zone == Some(crate::types::zones::Zone::Hand)
@@ -4359,10 +4398,18 @@ pub(crate) fn priority_actions_with_probe(
         // suppressed by split second, mirroring the hand-zone loop above.
         for &obj_id in &state.players[player.0 as usize].graveyard {
             if let Some(obj) = state.objects.get(&obj_id) {
-                // CR 602.2a: "Only an object's controller (or its owner, if it
-                // doesn't have a controller) can activate its activated
-                // ability." Restrict candidates to the acting player.
-                if obj.controller == player {
+                // CR 602.2: "Only an object's controller (or its owner, if it
+                // doesn't have a controller) can activate its activated ability
+                // unless the object specifically says otherwise." Nothing in a
+                // graveyard says otherwise here, so the restriction stands;
+                // `analysis/resource.rs` is where that exception is honored, via
+                // `activator_filter`. Restrict candidates to the acting player.
+                // CR 108.4 +
+                // CR 108.4a supply that owner fallback: a card in a graveyard is
+                // not a permanent or spell, so it has no controller, and CR 404.1
+                // puts it into its OWNER's graveyard. Owner is therefore the
+                // rules-correct scope for the flashback / unearth / escape class.
+                if obj.owner == player {
                     for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
                         if ability_def.kind == crate::types::ability::AbilityKind::Activated
                             && ability_def.activation_zone
@@ -4397,7 +4444,9 @@ pub(crate) fn priority_actions_with_probe(
     // block above.
     for &obj_id in &state.players[player.0 as usize].hand {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
+            // CR 108.4 + CR 108.4a: owner fallback for a card with no
+            // controller, mirroring the non-mana hand loop above.
+            if obj.owner == player {
                 for (i, ability_def) in obj.abilities.iter().enumerate() {
                     if ability_def.kind == crate::types::ability::AbilityKind::Activated
                         && ability_def.activation_zone == Some(crate::types::zones::Zone::Hand)
@@ -4428,10 +4477,11 @@ pub(crate) fn priority_actions_with_probe(
     // "{1}, Exile this card from your graveyard: Add one mana of any color")
     // remain legal under split second because they are mana abilities, so this
     // loop lives outside the split-second-gated block — mirroring the hand-zone
-    // mana loop above. CR 602.2a: only the object's controller can activate it.
+    // mana loop above. CR 602.2: only the object's controller — or its owner,
+    // when it has none (CR 108.4 + CR 108.4a) — can activate it.
     for &obj_id in &state.players[player.0 as usize].graveyard {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
+            if obj.owner == player {
                 for (i, ability_def) in obj.abilities.iter().enumerate() {
                     if ability_def.kind == crate::types::ability::AbilityKind::Activated
                         && ability_def.activation_zone == Some(crate::types::zones::Zone::Graveyard)
@@ -5879,6 +5929,32 @@ fn push_object_combo(
     if seen.insert(key) {
         output.push(combo);
     }
+}
+
+/// CR 706.6: The die-roll ignore submissions to offer for a `DieKeepChoice`.
+///
+/// Enumerates `C(ignorable, ignore_count)` under the shared selection caps, so a
+/// pathological die count cannot make candidate generation blow up. The
+/// deterministic take-`ignore_count` prefix is emitted FIRST and is always
+/// present, which is the invariant that matters: an empty candidate list makes
+/// `AiDecisionContract::contains_action` reject every action — including
+/// `phase-ai`'s own fallback — and softlocks the AI seat (#6942).
+fn bounded_ignore_combinations(ignorable: &[usize], ignore_count: usize) -> Vec<Vec<usize>> {
+    if ignore_count == 0 || ignorable.len() < ignore_count {
+        return Vec::new();
+    }
+    // The forced pick: always legal, always offered, and the same submission
+    // `phase-ai`'s `fallback_action` produces — so the contract accepts it.
+    let forced: Vec<usize> = ignorable.iter().take(ignore_count).copied().collect();
+    if ignorable.len() > SELECTION_POOL_CAP {
+        return vec![forced];
+    }
+    let mut combos = combinations_usize(ignorable, ignore_count);
+    combos.truncate(SELECTION_CANDIDATE_CAP);
+    if !combos.contains(&forced) {
+        combos.insert(0, forced);
+    }
+    combos
 }
 
 fn combinations_usize(items: &[usize], k: usize) -> Vec<Vec<usize>> {

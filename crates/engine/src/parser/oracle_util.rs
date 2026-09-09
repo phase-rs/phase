@@ -924,6 +924,8 @@ pub const SELF_REF_TYPE_PHRASES: &[&str] = &[
     "this aura",
     "this vehicle",
     "this planeswalker",
+    // CR 114.1 + CR 114.3: An emblem is an object, usually nameless; this phrase refers to that source.
+    "this emblem",
     "this battle",
     "this token",
     "this spacecraft",
@@ -2577,6 +2579,8 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
                         // Tomorrow"). Reject it so the verb survives unmangled.
                         || super::oracle_nom::primitives::is_verb_word(&lower_candidate)
                         || is_subtype_word(&lower_candidate)
+                        || parse_subtype(&lower_candidate)
+                            .is_some_and(|(_, consumed)| consumed == lower_candidate.len())
                     {
                         continue;
                     }
@@ -2804,6 +2808,24 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("When Sharuum enters", "Sharuum the Hegemon"),
             "When ~ enters"
+        );
+    }
+
+    #[test]
+    fn normalize_first_word_short_name_preserves_plural_subtype() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "Affinity for Allies (This spell costs {1} less to cast for each Ally you control.)",
+                "Allies at Last",
+            ),
+            "Affinity for Allies (This spell costs {1} less to cast for each Ally you control.)",
+            "a plural subtype is not a shortened self-reference"
+        );
+
+        assert_eq!(
+            parse_subtype("AlliesExtra"),
+            None,
+            "partial subtype matches must not suppress ordinary short-name normalization"
         );
     }
 
@@ -3414,6 +3436,19 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("This creature enters tapped", "Some Card"),
             "~ enters tapped"
+        );
+    }
+
+    #[test]
+    fn normalize_this_emblem_without_matching_longer_words() {
+        assert_eq!(
+            normalize_card_name_refs("this emblem deals 1 damage to you", "Chandra"),
+            "~ deals 1 damage to you"
+        );
+        assert_eq!(
+            normalize_card_name_refs("this emblematic creature attacks", "Chandra"),
+            "this emblematic creature attacks",
+            "self-reference normalization must respect word boundaries"
         );
     }
 

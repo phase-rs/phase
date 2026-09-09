@@ -8,6 +8,7 @@ import { DraftSteps } from "../draft/DraftSteps";
 import { WhatsNewModal } from "../modal/WhatsNewModal";
 import { CardDataLoadingBar } from "./CardDataLoadingBar";
 import { ChromeControls } from "./ChromeControls";
+import { OfflineModeBadge } from "./OfflineModeBadge";
 import { Rail } from "./Rail";
 import { DraftShellChromeProvider, ShellProvider, type DraftShellChromeConfig } from "./ShellContext";
 import { SocialBar } from "./SocialBar";
@@ -104,15 +105,17 @@ export function AppShell() {
             >
               {draftTopRowChrome && (
                 <>
-                  <Link
-                    to="/"
-                    aria-label={t("nav.home")}
-                    title={t("nav.home")}
-                    className="relative z-10 flex w-11 shrink-0 flex-col items-center justify-center gap-0.5 rounded-[8px] border border-hairline bg-black/45 px-1 py-1 transition-colors hover:border-white/15 hover:bg-slate-950"
-                  >
-                    <HomeIcon className="h-6 w-6 opacity-70" />
-                    <span className="text-[9px] font-semibold leading-none text-fg-meta">{t("nav.home")}</span>
-                  </Link>
+                  {draftChromeMode !== "tablet-drafting" && (
+                    <Link
+                      to="/"
+                      aria-label={t("nav.home")}
+                      title={t("nav.home")}
+                      className="relative z-10 flex w-11 shrink-0 flex-col items-center justify-center gap-0.5 rounded-[8px] border border-hairline bg-black/45 px-1 py-1 transition-colors hover:border-white/15 hover:bg-slate-950"
+                    >
+                      <HomeIcon className="h-6 w-6 opacity-70" />
+                      <span className="text-[9px] font-semibold leading-none text-fg-meta">{t("nav.home")}</span>
+                    </Link>
+                  )}
                   {phoneAction && (
                     <button
                       type="button"
@@ -160,6 +163,7 @@ export function AppShell() {
                 <SocialBar />
               ) : null}
             </div>
+            <OfflineModeBadge />
             {/* Inner Suspense so a lazy route's load swaps ONLY the content area —
                 the rail/scene persist (true SPA feel). */}
             <main className={`shell-content min-h-0 min-w-0 flex-1 ${responsiveDraftChrome ? "overflow-hidden" : "max-[820px]:pb-[76px]"}`}>

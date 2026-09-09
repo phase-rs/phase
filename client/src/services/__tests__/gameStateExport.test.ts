@@ -9,6 +9,7 @@ import {
   exportAuthoritativeGameStateZip,
   serializeGameStateDebugSnapshot,
 } from "../gameStateExport.ts";
+import { gameStateFromImportText, readImportFile } from "../gameStateImport.ts";
 
 describe("gameStateExport", () => {
   afterEach(() => {
@@ -73,11 +74,13 @@ describe("gameStateExport", () => {
     expect(JSON.parse(json).gameState.turn_number).toBe(7);
   });
 
-  it("writes the trusted engine envelope, not the client snapshot", async () => {
-    const trustedState = JSON.stringify({
-      state: { stack_resolution_session: { policy: "RecheckNoMeaningfulPriorityAction" } },
-      schema_version: 1,
-    });
+  it("imports an authoritative state ZIP without discarding its trusted envelope", async () => {
+    const gameState = buildGameState({ turn_number: 7 });
+    const trustedEnvelope = {
+      state: gameState,
+      precast_shortcut_runtime: { nonce: "trusted-runtime" },
+    };
+    const trustedState = JSON.stringify(trustedEnvelope);
     let writtenBlob: Blob | null = null;
     const write = vi.fn(async (blob: Blob) => {
       writtenBlob = blob;
@@ -101,6 +104,17 @@ describe("gameStateExport", () => {
     const [entryName] = Object.keys(entries);
     expect(entryName).toMatch(/^authoritative-game-state-.*\.json$/);
     expect(strFromU8(entries[entryName])).toBe(trustedState);
+
+    const imported = gameStateFromImportText(
+      await readImportFile(new File([writtenBlob!], filename, { type: "application/zip" })),
+    );
+    expect(imported).toEqual(trustedEnvelope);
+  });
+
+  it("rejects an incomplete game state import", () => {
+    expect(gameStateFromImportText(JSON.stringify({ waiting_for: { type: "Priority" } }))).toBe(
+      "JSON does not look like a GameState (missing waiting_for or players)",
+    );
   });
 
   it("exports the trusted envelope from the P2P host", async () => {

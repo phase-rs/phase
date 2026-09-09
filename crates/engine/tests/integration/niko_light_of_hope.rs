@@ -168,7 +168,7 @@ fn a_parser_lowers_middle_clause_between_exile_and_return() {
                 "donor = the exiled 'it'"
             );
             match recipient {
-                TargetFilter::Typed(tf) => {
+                engine::types::ability::CopyRecipient::Untargeted(TargetFilter::Typed(tf)) => {
                     assert!(
                         tf.type_filters
                             .contains(&TypeFilter::Subtype("Shard".to_string())),
@@ -420,7 +420,10 @@ fn e_recipient_is_not_a_target() {
     // above is not vacuously matching a SelfRef donor).
     match &become_copy {
         Effect::BecomeCopy { recipient, .. } => assert!(
-            matches!(recipient, TargetFilter::Typed(_)),
+            matches!(
+                recipient,
+                engine::types::ability::CopyRecipient::Untargeted(TargetFilter::Typed(_))
+            ),
             "recipient is the typed Shard group, distinct from the donor"
         ),
         _ => unreachable!(),
@@ -451,8 +454,8 @@ fn f_single_subject_recipient_selfref_omitted_from_json() {
         Effect::BecomeCopy { recipient, .. } => {
             assert_eq!(
                 *recipient,
-                TargetFilter::SelfRef,
-                "single-subject copy recipient defaults to SelfRef"
+                engine::types::ability::CopyRecipient::Source,
+                "single-subject copy recipient defaults to the ability's own source"
             );
         }
         other => panic!("expected BecomeCopy, got {other:?}"),
@@ -462,6 +465,58 @@ fn f_single_subject_recipient_selfref_omitted_from_json() {
     assert!(
         !json.contains("recipient"),
         "SelfRef recipient must be skip-serialized (byte-identical card-data): {json}"
+    );
+}
+
+// ── (g) Deserialization normalizes a context-ref `Target` ─────────────────
+//
+// CR 115.1 + CR 608.2k: `CopyRecipient::announced_filter` is unconditional for
+// `Target`, because six authorities (both slot builders, both target assigners,
+// the chain target-sink predicate, and the resolver's copy-source index) must
+// agree on whether slot 0 is the recipient. The parser can never emit a
+// context-ref `Target`, but `Deserialize` is a second entry point: a hand-edited
+// or corrupted mid-resolution snapshot could otherwise introduce
+// `Target(TriggeringSource)`, which announces a slot for an object no player
+// chooses and collapses the recipient onto the copy source.
+#[test]
+fn g_deserializing_a_context_ref_target_recipient_normalizes_to_untargeted() {
+    use engine::types::ability::CopyRecipient;
+
+    // Reach guard: the ordinary announced shape survives deserialization
+    // unchanged, so the normalization below cannot pass by flattening
+    // everything to `Untargeted`.
+    let announced: Effect = serde_json::from_str(
+        r#"{"type":"BecomeCopy","target":{"type":"Any"},
+            "recipient":{"type":"Target","filter":{"type":"Typed","type_filters":["Artifact"],"controller":"You","properties":[]}}}"#,
+    )
+    .expect("announced recipient must deserialize");
+    let Effect::BecomeCopy { recipient, .. } = &announced else {
+        panic!("expected BecomeCopy, got {announced:?}");
+    };
+    assert!(
+        matches!(recipient, CopyRecipient::Target(_)),
+        "a non-context-ref Target must stay announced, got {recipient:?}"
+    );
+    assert!(recipient.announced_filter().is_some());
+
+    // THE DISCRIMINATING ROW: a context ref in the announced position is
+    // normalized on the way in, so no consumer ever sees it.
+    let corrupted: Effect = serde_json::from_str(
+        r#"{"type":"BecomeCopy","target":{"type":"Any"},
+            "recipient":{"type":"Target","filter":{"type":"TriggeringSource"}}}"#,
+    )
+    .expect("context-ref recipient must still deserialize");
+    let Effect::BecomeCopy { recipient, .. } = &corrupted else {
+        panic!("expected BecomeCopy, got {corrupted:?}");
+    };
+    assert_eq!(
+        *recipient,
+        CopyRecipient::Untargeted(TargetFilter::TriggeringSource),
+        "a context-ref Target must normalize to Untargeted on deserialization"
+    );
+    assert!(
+        recipient.announced_filter().is_none(),
+        "a normalized context ref must announce no target slot"
     );
 }
 
@@ -517,12 +572,14 @@ fn plural_arm_covers_recipient_class_not_just_niko() {
             ..
         } => {
             match recipient {
-                TargetFilter::Typed(tf) => assert!(
-                    tf.type_filters
-                        .contains(&TypeFilter::Subtype("Shapeshifter".to_string()))
-                        && tf.controller == Some(ControllerRef::You),
-                    "recipient = Shapeshifters you control: {tf:#?}"
-                ),
+                engine::types::ability::CopyRecipient::Untargeted(TargetFilter::Typed(tf)) => {
+                    assert!(
+                        tf.type_filters
+                            .contains(&TypeFilter::Subtype("Shapeshifter".to_string()))
+                            && tf.controller == Some(ControllerRef::You),
+                        "recipient = Shapeshifters you control: {tf:#?}"
+                    )
+                }
                 other => panic!("recipient must be a typed group: {other:#?}"),
             }
             assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
@@ -547,7 +604,7 @@ fn plural_arm_covers_recipient_class_not_just_niko() {
     );
     match &dc[0] {
         Effect::BecomeCopy { recipient, .. } => match recipient {
-            TargetFilter::Typed(tf) => assert!(
+            engine::types::ability::CopyRecipient::Untargeted(TargetFilter::Typed(tf)) => assert!(
                 tf.type_filters.contains(&TypeFilter::Creature)
                     && tf.controller == Some(ControllerRef::You),
                 "recipient = other creatures you control: {tf:#?}"

@@ -1,7 +1,7 @@
 {
   "name": "phase-rs-client",
   "private": true,
-  "version": "0.75.0",
+  "version": "0.78.0",
   "type": "module",
   "packageManager": "pnpm@9.15.9",
   "scripts": {
@@ -37,7 +37,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-i18next": "^17.0.8",
-    "react-router": "^7.18.0",
+    "react-router": "^7.18.2",
     "tailwindcss": "^4.2.1",
     "three": "^0.184.0",
     "vite-plugin-wasm": "^3.4.1",

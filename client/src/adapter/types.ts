@@ -63,6 +63,45 @@ export interface DungeonRoomView {
   room: RoomPreview;
   /** Total rooms on the dungeon card, for "room 3 of 7". */
   room_count: number;
+  /** The printed dungeon card's Scryfall identity. */
+  card: DungeonCardView;
+  /** Every room on the card in printed order, with edges and card geometry. */
+  rooms: DungeonRoomNodeView[];
+}
+
+// Mirrors `engine::game::derived_views::DungeonCardView`.
+//
+// Two ids, because the five dungeons are NOT indexed uniformly by the client's
+// Scryfall sidecars. Four are `layout: "normal"` and resolve from
+// `scryfall-data.json` by `oracle_id`; Undercity is printed as the
+// double-faced `Undercity // The Initiative`, a layout that
+// `gen-scryfall-images.sh` excludes as non-playable, so it exists ONLY in
+// `scryfall-token-images.json`, keyed by printing id. Callers try the card
+// table and fall back to the token table.
+export interface DungeonCardView {
+  oracle_id: string;
+  scryfall_id: string;
+  /** Selects the dungeon face of the double-faced Undercity printing. */
+  face_name: string;
+}
+
+// Mirrors `engine::game::derived_views::DungeonRoomNodeView`. `RoomPreview` is
+// flattened into this by serde, so `index`/`name`/`text` sit alongside the
+// edges and geometry rather than under a nested key.
+export interface DungeonRoomNodeView extends RoomPreview {
+  /** Rooms the venture marker may move to from here (CR 309.5a); empty for
+   *  the bottommost room. */
+  next_rooms: number[];
+  /** Where this room is drawn on the card face. */
+  marker: RoomMarkerPoint;
+}
+
+// Mirrors `engine::game::dungeon::RoomMarkerPoint`. Permille (0-1000) of the
+// card image rather than a fraction, so the engine's derived views can keep
+// deriving `Eq` (f32 is not `Eq`).
+export interface RoomMarkerPoint {
+  x_permille: number;
+  y_permille: number;
 }
 
 // ── Game Format ─────────────────────────────────────────────────────────
@@ -157,11 +196,22 @@ export type WishOutsideGameScope = "PostM10SideboardOnly" | "PreM10ReachesExile"
  *  all-controllers form. Schema only — unenforced. */
 export type LegendRuleScope = "Modern" | "PreM14AnyController";
 
+/** CR 407: whether the format is played for ante. `Excluded` is the modern
+ *  default and the only value the engine implements; unlike its sibling axes
+ *  it is enforced, at deck construction (CR 407.3). */
+export type AntePolicy = "Excluded" | "Enabled";
+
 export interface LegacyRuleSet {
   mana_burn: ManaBurnPolicy;
   damage_timing: CombatDamageTiming;
   wish_scope: WishOutsideGameScope;
   legend_rule_scope: LegendRuleScope;
+  /** Optional because this axis postdates the Axis-A save path: a definition
+   *  persisted before it existed carries no `ante` key. Mirrors the engine's
+   *  `#[serde(default)]` on the same field, where absent likewise means
+   *  `"Excluded"` — which is what such a save meant. The engine always emits
+   *  it, so only a locally-persisted definition can be missing it. */
+  ante?: AntePolicy;
 }
 
 /** CR 903.3 and the Tiny Leaders / Oathbreaker / Brawl deck-construction
@@ -2103,7 +2153,7 @@ export type WaitingFor =
   | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[]; kind?: ReplacementChoiceKind; last_applied_decides?: boolean } }
   | { type: "EntryControllerChoice"; data: { player: PlayerId; candidates: PlayerId[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
-  | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null; purpose?: { type: "BecomeCopy" | "PersistChosenAttribute" } } }
+  | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null; purpose?: { type: "BecomeCopy" | "PersistChosenAttribute" | "CopyTokenSource" } } }
   | { type: "ExploreChoice"; data: { player: PlayerId; source_id: ObjectId; choosable: ObjectId[]; remaining: ObjectId[]; pending_effect: unknown } }
   | { type: "ReturnAsAuraTarget"; data: { player: PlayerId; source_id: ObjectId; returned_id: ObjectId; legal_targets: TargetRef[]; pending_effect: unknown } }
   | { type: "EquipTarget"; data: { player: PlayerId; equipment_id: ObjectId; valid_targets: ObjectId[] } }
@@ -2116,6 +2166,21 @@ export type WaitingFor =
   | { type: "ArrangePlanarDeckTopChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_on_top: number } }
   | { type: "RedistributeLifeTotals"; data: { player: PlayerId; options: { assignment: [PlayerId, number][] }[] } }
   | { type: "CoinFlipKeepChoice"; data: { player: PlayerId; results: boolean[]; keep_count: number } }
+  | {
+      type: "DieKeepChoice";
+      data: {
+        player: PlayerId;
+        /** Natural results (CR 706.2), in roll order. */
+        results: number[];
+        /**
+         * Engine-computed indices the player may ignore (CR 706.6). For
+         * "ignore the lowest roll" this is exactly the set tied for the
+         * lowest natural — the client must never decide which roll is lowest.
+         */
+        ignorable_indices: number[];
+        ignore_count: number;
+      };
+    }
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean } }
@@ -2664,6 +2729,7 @@ export type GameAction =
   | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCards"; data: { cards: ObjectId[] } }
   | { type: "SelectCoinFlips"; data: { keep_indices: number[] } }
+  | { type: "SelectDieRolls"; data: { ignore_indices: number[] } }
   | { type: "ChooseOutsideGameCards"; data: { selections: OutsideGameSelection[] } }
   | { type: "SelectTargets"; data: { targets: TargetRef[] } }
   | { type: "ChooseTarget"; data: { target: TargetRef | null } }
@@ -2873,6 +2939,7 @@ export type GameEvent =
       data: { searcher: PlayerId; cards: LibrarySearchCardView[]; audience: PlayerId[] };
     }
   | { type: "TurnStarted"; data: { player_id: PlayerId; turn_number: number } }
+  | { type: "ExtraTurnCreated"; data: { player_id: PlayerId; anchor: PlayerId } }
   | { type: "PhaseChanged"; data: { phase: Phase } }
   | { type: "PriorityPassed"; data: { player_id: PlayerId } }
   | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId; cast_mana_value?: number } }
@@ -4512,6 +4579,11 @@ export interface EngineAdapter {
   resumeRestoredGameState?(): Promise<RestoredGameStateResult | null>;
   /** Returns an opaque, exact member of the current engine-issued decision domain. */
   getAiActionProposal?(difficulty: string, playerId: number): Promise<AiActionProposal | null> | AiActionProposal | null;
+  /**
+   * Returns an engine-issued tactical proposal without optional deep search.
+   * Used only to recover an AI seat whose normal proposal repeatedly failed.
+   */
+  getAiTacticalActionProposal?(difficulty: string, playerId: number): Promise<AiActionProposal | null> | AiActionProposal | null;
   /** Applies a proposal only if its authority token and exact action remain current. */
   submitAiActionProposal?(proposal: AiActionProposal): Promise<AiProposalSubmission> | AiProposalSubmission;
   restoreState(state: PersistedGameState): void | Promise<void>;
@@ -4588,4 +4660,320 @@ export function supportsServerRewind(
   return adapter !== null
     && (adapter as Partial<ServerRewindCapability>).supportsServerRewind === true
     && typeof (adapter as Partial<ServerRewindCapability>).sendRequestTakeback === "function";
+}
+
+// ── Tournament organizer (lobby protocol 4) ──────────────────────────────
+//
+// Token-free mirrors of the tournament wire surface served by
+// `crates/lobby-broker`. Every type below is a projection the broker populates
+// and the client only reads; snake_case field names are the wire names
+// verbatim, with no camelCase translation layer.
+//
+// Deliberately absent, because the broker is the sole authority for each:
+// standings arrive pre-ranked and are never re-sorted here, pairings arrive in
+// generation order, and arity/bracket legality is validated server-side only.
+
+/**
+ * Seats at one pairing. Mirrors `crates/lobby-broker/src/tournament.rs:83-85`,
+ * which carries `#[serde(try_from = "u8", into = "u8")]` — so it crosses the
+ * wire as a **bare number**, never a wrapper object. `2` is head-to-head; `4`
+ * is the standard Commander pod. Alias-as-documentation, the same convention
+ * `ObjectId`/`PlayerId` use above: TypeScript erases it, and the `2..=128`
+ * validation lives in `MatchArity::new` on the broker.
+ */
+export type MatchArity = number;
+
+/**
+ * Stable, tournament-scoped pairing identity. Mirrors
+ * `crates/lobby-broker/src/tournament.rs:330` (`pub type PairingId = u32`) — a
+ * monotonic counter, not a re-derivable index into `pairings`.
+ */
+export type PairingId = number;
+
+/**
+ * Match-point scoring. Mirrors `crates/lobby-broker/src/tournament.rs:153-159`,
+ * whose `#[serde(try_from/into = "RawScoringPolicy")]` boundary makes the wire
+ * shape a **flat** three-field object rather than a tagged wrapper.
+ */
+export interface ScoringPolicy {
+  win_points: number;
+  draw_points: number;
+  loss_points: number;
+}
+
+/**
+ * Mirrors `crates/lobby-broker/src/tournament.rs:265-295`. `Completed` means
+ * every pairing that exists has a resolved outcome — NOT that every scheduled
+ * round was played; `Abandoned` (7-day inactivity) may still hold pending
+ * pairings. Clients render the two distinctly for exactly that reason.
+ */
+export type TournamentStatus =
+  | "Registration"
+  | "InProgress"
+  | "Completed"
+  | "Abandoned";
+
+/** Mirrors `crates/lobby-broker/src/tournament.rs:316-320`. */
+export type BracketShape = "Swiss" | "SingleElimination";
+
+/**
+ * The reported content of a *played* pairing. Mirrors the externally-tagged
+ * `crates/lobby-broker/src/tournament.rs:336-348`. `game_wins` is keyed by
+ * `player_key`, and is empty for a pod (arity > 2) because pods are single-game
+ * per MSTR; at head-to-head it carries the completed-Bo3 tally.
+ */
+export type PodOutcome =
+  | { Decisive: { winner: string; game_wins: Record<string, number> } }
+  | "Draw";
+
+/**
+ * A pairing's resolved outcome. Mirrors the externally-tagged
+ * `crates/lobby-broker/src/tournament.rs:355-367`.
+ *
+ * `Reported` is a **newtype** variant wrapping {@link PodOutcome}, so a
+ * reported decisive result is nested twice on the wire —
+ * `{"Reported":{"Decisive":{…}}}` — never flattened to
+ * `{"Reported":{"winner":…}}`. Keeping the nesting is what makes "a bye, a
+ * forfeit and a reported result are mutually exclusive" a compile-time fact
+ * here as much as it is in Rust.
+ */
+export type PairingOutcome =
+  | "Bye"
+  | { Forfeit: { winner: string } }
+  | { Reported: PodOutcome };
+
+/**
+ * The computed tiebreak axes for one player, in the order they rank. Mirrors
+ * `crates/lobby-broker/src/tournament.rs:714-726` — externally-tagged struct
+ * variants, so the arm name selects a *different field set*, not merely a
+ * label. `HeadToHead` is MTR §3.1's order; `Multiplayer` is MSTR's.
+ */
+export type Tiebreaks =
+  | {
+      HeadToHead: {
+        opponents_match_win_pct: number;
+        game_win_pct: number;
+        opponents_game_win_pct: number;
+      };
+    }
+  | {
+      Multiplayer: {
+        match_win_pct: number;
+        opponents_avg_match_points: number;
+        opponents_match_win_pct: number;
+      };
+    };
+
+/**
+ * One row of the computed standings. Mirrors
+ * `crates/lobby-broker/src/tournament.rs:756-768`. Every field is derived
+ * server-side from the pairing history and arrives **already ranked** — the
+ * client renders `standings` in array order and never re-sorts or re-ranks.
+ * `matches_played` excludes byes (they are counted in `byes`) so the MSTR
+ * match-win-percentage denominator stays correct.
+ */
+export interface TournamentStanding {
+  player_key: string;
+  display_name: string;
+  dropped: boolean;
+  match_points: number;
+  matches_played: number;
+  byes: number;
+  tiebreaks: Tiebreaks;
+}
+
+/**
+ * One entrant, as any client may see them — the token-free half of
+ * `TournamentPlayer`. Mirrors `crates/lobby-broker/src/protocol.rs:473-478`.
+ */
+export interface PlayerSummary {
+  player_key: string;
+  display_name: string;
+  dropped: boolean;
+}
+
+/**
+ * One pairing with its seats resolved to full {@link PlayerSummary}s. Mirrors
+ * `crates/lobby-broker/src/protocol.rs:496-503`.
+ *
+ * Named `TournamentPairingView`, not `PairingView`: `adapter/draft-adapter.ts`
+ * already exports an incompatible `PairingView` (the draft pod's
+ * `seat_a`/`seat_b` shape) consumed across the draft surface. The two are
+ * unrelated types from different crates and must not be conflated.
+ *
+ * `players` is a list, not a pair: the same shape carries a head-to-head
+ * pairing (2 seats), a full or short pod (up to `arity`), and a bye (1 seat).
+ * `outcome` is emitted with **no** `skip_serializing_if`, so a pending pairing
+ * arrives as an explicit `"outcome": null`.
+ *
+ * NOTE (protocol v6, client-render deferred): the wire struct now also carries
+ * a required `report_gate` (broker-owned per-pairing report legality). It is
+ * intentionally not mirrored here yet — the client-rendering follow-up adds the
+ * field and consumes it. Received unknown fields are ignored by `JSON.parse`,
+ * so omitting it is inert. The Rust line citations below predate the v6 shift.
+ */
+export interface TournamentPairingView {
+  id: PairingId;
+  round: number;
+  players: PlayerSummary[];
+  outcome: PairingOutcome | null;
+}
+
+/**
+ * The role selector carried by the wire's `RenewTournamentCredential` (protocol
+ * v6). Mirrors `lobby_broker::tournament::TournamentRole`, which has no
+ * `rename_all` and so serializes as `"Organizer"` / `"Player"`.
+ *
+ * Deliberately NOT named `TournamentRole`: `stores/multiplayerStore` already
+ * exports a lowercase display-role `TournamentRole = "organizer" | "player"`,
+ * and the two spellings are wire-incompatible. The credential-renewal sender (a
+ * follow-up) must send THESE capitalized values, or the broker rejects the
+ * frame with a serde unknown-variant error.
+ */
+export type TournamentCredentialRole = "Organizer" | "Player";
+
+/**
+ * One row of the tournament list. Mirrors
+ * `crates/lobby-broker/src/protocol.rs:507-528` (citation predates the v6 shift).
+ *
+ * NOTE (protocol v6, client-render deferred): the wire struct now also carries
+ * a required `scoring` (resolved `ScoringPolicy`) and `open_actions`
+ * (broker-owned set of legal tournament actions). Both are intentionally not
+ * mirrored here yet — the client-rendering follow-up adds and consumes them.
+ * Unknown received fields are ignored by `JSON.parse`, so omitting them is inert.
+ */
+export interface TournamentSummary {
+  code: string;
+  name: string;
+  arity: MatchArity;
+  bracket: BracketShape;
+  status: TournamentStatus;
+  /**
+   * **Active** entrants — `TournamentMeta::active_player_count`
+   * (`crates/lobby-broker/src/protocol.rs:538`), NOT `players.length`. A
+   * dropped entrant is counted in {@link TournamentView.players} but not here,
+   * so rendering this as a total entrant count is wrong by exactly the number
+   * of drops.
+   */
+  player_count: number;
+  current_round: number;
+  /**
+   * The scheduled length, resolved server-side through
+   * `TournamentMeta::total_rounds`. `current_round < total_rounds` is a legal
+   * shape for a `Completed` event — an organizer may stop early.
+   */
+  total_rounds: number;
+  created_at: number;
+  /**
+   * The event's game-format label (Standard, Commander, …), a display label
+   * only — the tournament enforces no deck legality. Typed `| null` because the
+   * Rust field is `#[serde(default)] Option<GameFormat>` with NO
+   * `skip_serializing_if`, so `None` arrives as an explicit `"format": null`,
+   * not a missing key — the common "organizer named none" path. `undefined`
+   * only against a pre-v7 broker that omits the field entirely (lobby protocol
+   * 7 added it). Guard with `!= null` to cover both. Mirrors the `format` a
+   * {@link LobbyGame} listing carries; resolve its label through `FORMAT_REGISTRY`.
+   */
+  format?: GameFormat | null;
+  /**
+   * The RESOLVED match structure (Bo1 / Bo3) the event runs — the organizer's
+   * choice or the broker's arity default (Bo3 head-to-head, Bo1 for pods, which
+   * are single-game). `Bo3` only ever appears at head-to-head. `undefined`
+   * against a pre-v8 broker that omits the field (lobby protocol 8 added it).
+   */
+  match_type?: MatchType;
+}
+
+/**
+ * The full detail view of one tournament. Mirrors
+ * `crates/lobby-broker/src/protocol.rs:556-562`.
+ *
+ * `players` and `pairings` are full histories, never filtered subsets: dropped
+ * players stay listed (their `dropped` flag is the distinction to render) and
+ * every round's pairings stay present, because the standings are only
+ * interpretable against the history that produced them.
+ */
+export interface TournamentView {
+  summary: TournamentSummary;
+  players: PlayerSummary[];
+  pairings: TournamentPairingView[];
+  standings: TournamentStanding[];
+}
+
+/**
+ * `LobbyServerMessage::TournamentCreated`'s payload
+ * (`crates/lobby-broker/src/protocol.rs:830-834`; citation predates the v6 shift).
+ * A point reply only — `organizer_token` is minted here and is never broadcast.
+ *
+ * NOTE (protocol v6, client-render deferred): the wire payload now also carries
+ * a required `expires_at_ms` beside the token (credential expiry). It is
+ * intentionally not mirrored here yet — the credential-rotation client
+ * follow-up adds and consumes it; the unknown field is ignored on parse.
+ */
+export interface TournamentCreatedReply {
+  code: string;
+  organizer_token: string;
+  view: TournamentView;
+}
+
+/**
+ * `LobbyServerMessage::TournamentJoined`'s payload
+ * (`crates/lobby-broker/src/protocol.rs:837-841`; citation predates the v6 shift).
+ * A point reply only — `player_token` is minted here and is never broadcast.
+ *
+ * NOTE (protocol v6, client-render deferred): the wire payload now also carries
+ * a required `expires_at_ms` beside the token (credential expiry). It is
+ * intentionally not mirrored here yet — the credential-rotation client
+ * follow-up adds and consumes it; the unknown field is ignored on parse.
+ */
+export interface TournamentJoinedReply {
+  code: string;
+  player_token: string;
+  view: TournamentView;
+}
+
+/**
+ * `LobbyServerMessage::TournamentUpdate`'s payload
+ * (`crates/lobby-broker/src/protocol.rs:844-847`). Both the `GetTournament`
+ * point reply and the broadcast every mutating handler fans out — the wire
+ * carries no discriminator between the two beyond `code`. See the module
+ * header of `services/tournamentClient.ts`.
+ */
+export interface TournamentUpdateReply {
+  code: string;
+  view: TournamentView;
+}
+
+/**
+ * `LobbyServerMessage::TournamentActionAck`'s payload
+ * (`crates/lobby-broker/src/protocol.rs`). The requester-only acknowledgement of
+ * one gated tournament action.
+ *
+ * `request_id` is the correlator this client minted and the broker echoed —
+ * `TournamentRequestId` is `#[serde(transparent)]` over a `u64`, so it arrives
+ * as a plain number. It identifies a **request**, never a requester, and is
+ * never an authority: the organizer/player token remains the only permission.
+ *
+ * Carries no token. Unlike `TournamentCreated` / `TournamentJoined` this point
+ * reply mints nothing — the caller already holds the credential that authorized
+ * the action.
+ */
+export interface TournamentActionAckReply {
+  request_id: number;
+  code: string;
+  view: TournamentView;
+}
+
+/**
+ * `LobbyServerMessage::TournamentActionRejected`'s payload
+ * (`crates/lobby-broker/src/protocol.rs`). The requester-only refusal of one
+ * gated tournament action, carrying the same correlator the request did.
+ *
+ * One refusal shape rather than a rejected/failed pair: the lobby draws no
+ * distinction between kinds of refusal — every one is prose from the broker's
+ * single `fn error` — so `message` is that text verbatim. No token, no view.
+ */
+export interface TournamentActionRejectedReply {
+  request_id: number;
+  message: string;
 }

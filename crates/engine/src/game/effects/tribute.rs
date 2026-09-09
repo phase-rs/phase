@@ -45,7 +45,13 @@ pub fn resolve(
 
     // Read the opponent persisted by the preceding Effect::Choose { Opponent, persist: true }.
     // CR 702.104a: "choose an opponent" — that opponent then decides pay/decline.
-    let chosen_opponent = state.objects.get(&source_id).and_then(|obj| {
+    //
+    // CR 614.12a: this whole chain runs BEFORE the creature enters, so on the copy
+    // seam the source is still a liminal projection and never a `state.objects`
+    // entry. Reading `objects` alone found nothing and fell through to the
+    // Declined branch below, which is indistinguishable from an opponent who
+    // actually declined — a token copy of a Tribute creature could not be paid.
+    let chosen_opponent = state.entering_or_live_object(source_id).and_then(|obj| {
         obj.chosen_attributes
             .iter()
             .rev() // Most recent choice wins if multiple Tributes share a source.
@@ -121,12 +127,13 @@ fn record_outcome(
     source_id: crate::types::identifiers::ObjectId,
     outcome: TributeOutcome,
 ) {
-    if let Some(obj) = state.objects.get_mut(&source_id) {
+    // CR 614.12a: on the copy seam the source is still a liminal entrant when the
+    // pay/decline answer lands, so the outcome the CR 702.104b trigger reads has
+    // to be recorded on the projection that is about to become the permanent.
+    if let Some(chosen_attributes) = state.chosen_attributes_mut(source_id) {
         // CR 702.104b: Only one outcome is meaningful per ETB; replace any prior.
-        obj.chosen_attributes
-            .retain(|attr| !matches!(attr, ChosenAttribute::TributeOutcome(_)));
-        obj.chosen_attributes
-            .push(ChosenAttribute::TributeOutcome(outcome));
+        chosen_attributes.retain(|attr| !matches!(attr, ChosenAttribute::TributeOutcome(_)));
+        chosen_attributes.push(ChosenAttribute::TributeOutcome(outcome));
     }
 }
 

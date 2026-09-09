@@ -41,6 +41,70 @@ use crate::types::zones::Zone;
 // Shared helpers for building card faces from MTGJSON data
 // ---------------------------------------------------------------------------
 
+/// Exact primary Oracle-parser input prepared by the production face builder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OracleParserInput {
+    pub oracle_text: String,
+    pub card_name: String,
+    pub keyword_names: Vec<String>,
+    pub types: Vec<String>,
+    pub subtypes: Vec<String>,
+    pub has_cleave_variant: bool,
+    cleave_oracle_text: Option<String>,
+}
+
+/// Prepare the single primary parse performed by `build_oracle_face_inner`.
+pub fn prepare_oracle_parser_input(
+    mtgjson: &AtomicCard,
+    skip_mtgjson_keywords: bool,
+) -> OracleParserInput {
+    let mtgjson_keyword_names = mtgjson
+        .keywords
+        .as_ref()
+        .map(|keywords| {
+            keywords
+                .iter()
+                .map(|keyword| keyword.to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    let keyword_names = if skip_mtgjson_keywords {
+        vec!["__force_keyword_extract__".to_string()]
+    } else {
+        mtgjson_keyword_names
+    };
+    let raw_oracle_text = mtgjson.text.as_deref().unwrap_or("");
+    let (oracle_text, cleave_text) = prepare_cleave_oracle_text(raw_oracle_text, &keyword_names);
+    OracleParserInput {
+        oracle_text,
+        card_name: mtgjson
+            .face_name
+            .as_deref()
+            .unwrap_or(&mtgjson.name)
+            .to_string(),
+        keyword_names,
+        types: mtgjson.types.clone(),
+        subtypes: mtgjson.subtypes.clone(),
+        has_cleave_variant: cleave_text.is_some(),
+        cleave_oracle_text: cleave_text,
+    }
+}
+
+/// CR 702.148a-b + CR 612: Cleave removes bracketed rules text as a text-changing effect.
+fn prepare_cleave_oracle_text(
+    raw_oracle_text: &str,
+    keyword_names: &[String],
+) -> (String, Option<String>) {
+    if keyword_names.iter().any(|name| name == "cleave") {
+        (
+            apply_bracket_mode(raw_oracle_text, BracketMode::KeepContent),
+            Some(apply_bracket_mode(raw_oracle_text, BracketMode::RemoveSpan)),
+        )
+    } else {
+        (raw_oracle_text.to_string(), None)
+    }
+}
+
 /// CR 702.148a-b + CR 612: Parse a face's Oracle text under Cleave's
 /// text-changing semantics, returning the printed-cost parse and (when the face
 /// has Cleave) the bracket-removed cleave variant.
@@ -69,19 +133,34 @@ pub(crate) fn parse_oracle_with_cleave_brackets(
     crate::parser::oracle::ParsedAbilities,
     Option<CleaveVariant>,
 ) {
-    let has_cleave = keyword_names.iter().any(|n| n == "cleave");
+    let (base_oracle_text, cleave_text) =
+        prepare_cleave_oracle_text(raw_oracle_text, keyword_names);
+    parse_prepared_oracle_text(
+        &base_oracle_text,
+        cleave_text.as_deref(),
+        card_name,
+        keyword_names,
+        types,
+        subtypes,
+    )
+}
 
-    let base_oracle_text = if has_cleave {
-        apply_bracket_mode(raw_oracle_text, BracketMode::KeepContent)
-    } else {
-        raw_oracle_text.to_string()
-    };
-    let parsed = parse_oracle_text(&base_oracle_text, card_name, keyword_names, types, subtypes);
+fn parse_prepared_oracle_text(
+    base_oracle_text: &str,
+    cleave_text: Option<&str>,
+    card_name: &str,
+    keyword_names: &[String],
+    types: &[String],
+    subtypes: &[String],
+) -> (
+    crate::parser::oracle::ParsedAbilities,
+    Option<CleaveVariant>,
+) {
+    let parsed = parse_oracle_text(base_oracle_text, card_name, keyword_names, types, subtypes);
 
-    let cleave_variant = if has_cleave {
-        let cleave_text = apply_bracket_mode(raw_oracle_text, BracketMode::RemoveSpan);
+    let cleave_variant = if let Some(cleave_text) = cleave_text {
         let cleave_parsed =
-            parse_oracle_text(&cleave_text, card_name, keyword_names, types, subtypes);
+            parse_oracle_text(cleave_text, card_name, keyword_names, types, subtypes);
         Some(CleaveVariant {
             abilities: cleave_parsed.abilities,
             triggers: cleave_parsed.triggers,
@@ -10124,11 +10203,7 @@ fn build_oracle_face_inner(
         .as_ref()
         .map(|kws| kws.iter().map(|s| s.to_ascii_lowercase()).collect())
         .unwrap_or_default();
-    let parser_keyword_names: Vec<String> = if skip_mtgjson_keywords {
-        vec!["__force_keyword_extract__".to_string()]
-    } else {
-        mtgjson_keyword_names.clone()
-    };
+    let parser_input = prepare_oracle_parser_input(mtgjson, skip_mtgjson_keywords);
 
     // B8: For multi-face cards, skip MTGJSON-provided keywords entirely.
     // MTGJSON duplicates keywords across both faces of Transform/DFC cards,
@@ -10150,21 +10225,19 @@ fn build_oracle_face_inner(
     };
 
     let raw_oracle_text = mtgjson.text.as_deref().unwrap_or("");
-    let face_name = mtgjson.face_name.as_deref().unwrap_or(&mtgjson.name);
-
-    let types: Vec<String> = mtgjson.types.clone();
-    let subtypes: Vec<String> = mtgjson.subtypes.clone();
+    let face_name = parser_input.card_name.as_str();
 
     // CR 702.148a-b + CR 612: Cleave's text-changing effect removes every
     // square-bracketed span from the spell's rules text. `parse_oracle_with_cleave_brackets`
     // is the single authority for the dual (printed-cost / cleave-cost) parse,
     // shared with the test scenario harness so the two pipelines cannot diverge.
-    let (parsed, cleave_variant) = parse_oracle_with_cleave_brackets(
-        raw_oracle_text,
-        face_name,
-        &parser_keyword_names,
-        &types,
-        &subtypes,
+    let (parsed, cleave_variant) = parse_prepared_oracle_text(
+        &parser_input.oracle_text,
+        parser_input.cleave_oracle_text.as_deref(),
+        &parser_input.card_name,
+        &parser_input.keyword_names,
+        &parser_input.types,
+        &parser_input.subtypes,
     );
 
     let extracted_keywords = parsed.extracted_keywords;
@@ -11224,6 +11297,44 @@ mod cycling_synthesis_tests {
             foreign_data: Vec::new(),
             related_cards: crate::database::mtgjson::SetRelatedCards::default(),
         }
+    }
+
+    #[test]
+    fn oracle_parser_input_uses_face_name_and_multiface_keyword_mode() {
+        let mut card = counter_phrase_card("Combined Name", "Flying", &["Flying"]);
+        card.face_name = Some("Front Face".to_string());
+        let single = prepare_oracle_parser_input(&card, false);
+        let multi = prepare_oracle_parser_input(&card, true);
+        assert_eq!(single.card_name, "Front Face");
+        assert_eq!(single.keyword_names, vec!["flying"]);
+        assert_eq!(multi.keyword_names, vec!["__force_keyword_extract__"]);
+    }
+
+    #[test]
+    fn oracle_parser_input_uses_production_cleave_base_text() {
+        let card = counter_phrase_card("Cleave Test", "Draw [two] cards.", &["Cleave"]);
+        let input = prepare_oracle_parser_input(&card, false);
+        assert_eq!(input.oracle_text, "Draw two cards.");
+        assert!(input.has_cleave_variant);
+        let (production, cleave) = parse_oracle_with_cleave_brackets(
+            card.text.as_deref().expect("fixture text"),
+            &input.card_name,
+            &input.keyword_names,
+            &input.types,
+            &input.subtypes,
+        );
+        assert_eq!(
+            serde_json::to_value(parse_oracle_text(
+                &input.oracle_text,
+                &input.card_name,
+                &input.keyword_names,
+                &input.types,
+                &input.subtypes,
+            ))
+            .expect("serialize prepared parse"),
+            serde_json::to_value(production).expect("serialize production parse")
+        );
+        assert!(cleave.is_some());
     }
 
     /// CR 122.1b: a keyword counter grants its keyword only while the counter is
@@ -16486,7 +16597,7 @@ mod myriad_runtime_tests {
         // Make Muddle become a copy of the target "except it has myriad".
         let copy_ability = ResolvedAbility::new(
             Effect::BecomeCopy {
-                recipient: TargetFilter::SelfRef,
+                recipient: crate::types::ability::CopyRecipient::Source,
                 target: TargetFilter::Any,
                 duration: Some(Duration::UntilEndOfTurn),
                 mana_value_limit: None,

@@ -21,6 +21,19 @@ const validWorkspace = {
 
 const validDraftView = { launch_capability: "None" as const, commanders_required: 0 };
 
+/** A well-formed `DraftCommanderLaunch`, rebuilt per case so mutations cannot leak. */
+const commanderLaunch = () => ({
+  gameId: "commander-game-1",
+  roomCode: "PHASE-CMDR",
+  localDeck: {
+    main_deck: ["Island"],
+    sideboard: ["Mountain"],
+    commander: ["Kenrith, the Returned King"],
+  },
+  playerCount: 4,
+  draftSetCodes: null as string[] | null,
+});
+
 function workspaceWithPlacementCount(count: number) {
   return {
     schemaVersion: 1 as const,
@@ -42,8 +55,8 @@ describe("draftProtocol", () => {
   });
 
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 26", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(26);
+    it("is version 28", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(28);
     });
   });
 
@@ -266,6 +279,52 @@ describe("draftProtocol", () => {
   });
 
   describe("validateDraftMessage", () => {
+    it.each([
+      { type: "draft_suggest_lands", requestId: "request-1" },
+      { type: "draft_suggest_lands_result", requestId: "request-1", lands: { Island: 17 } },
+      { type: "draft_suggest_lands_rejected", requestId: "request-1", reason: "Deckbuilding is unavailable" },
+    ])("accepts a strict v28 land-suggestion envelope", (message) => {
+      expect(validateDraftMessage(message)).toEqual(message);
+    });
+
+    it.each(["deck", "seat", "seatIndex", "spells"])(
+      "rejects surplus %s fields on every v28 land-suggestion envelope",
+      (surplus) => {
+        for (const message of [
+          { type: "draft_suggest_lands", requestId: "request-1" },
+          { type: "draft_suggest_lands_result", requestId: "request-1", lands: {} },
+          { type: "draft_suggest_lands_rejected", requestId: "request-1", reason: "No workspace" },
+        ]) {
+          expect(() => validateDraftMessage({ ...message, [surplus]: "forbidden" })).toThrow();
+        }
+      },
+    );
+
+    it.each([
+      { requestId: "" },
+      { requestId: "x".repeat(257) },
+      { requestId: 1 },
+      { type: "draft_suggest_lands_result", requestId: "request-1", lands: { Unknown: 1 } },
+      { type: "draft_suggest_lands_result", requestId: "request-1", lands: { Island: -1 } },
+      { type: "draft_suggest_lands_result", requestId: "request-1", lands: { Island: 1.5 } },
+      { type: "draft_suggest_lands_result", requestId: "request-1", lands: { Island: Number.NaN } },
+      { type: "draft_suggest_lands_result", requestId: "request-1", lands: { Island: 1001 } },
+    ])("rejects invalid v28 land-suggestion data", (message) => {
+      expect(() => validateDraftMessage({ type: "draft_suggest_lands", ...message })).toThrow();
+    });
+
+    it("rejects inherited, symbol, and non-enumerable v28 envelope fields", () => {
+      const inherited = Object.create({ requestId: "request-1" });
+      inherited.type = "draft_suggest_lands";
+      const symbolKey = Symbol("surplus");
+      const symbol = { type: "draft_suggest_lands", requestId: "request-1", [symbolKey]: true };
+      const nonEnumerable = { type: "draft_suggest_lands", requestId: "request-1" };
+      Object.defineProperty(nonEnumerable, "spells", { value: [], enumerable: false });
+      expect(() => validateDraftMessage(inherited)).toThrow();
+      expect(() => validateDraftMessage(symbol)).toThrow();
+      expect(() => validateDraftMessage(nonEnumerable)).toThrow();
+    });
+
     it("accepts only versioned, token-bound draft leave messages", () => {
       expect(validateDraftMessage({
         type: "draft_leave",
@@ -753,6 +812,70 @@ describe("draftProtocol", () => {
       });
     });
 
+    describe("draft_commander_launch", () => {
+      const withDeck = (deck: Record<string, unknown>) => ({
+        ...commanderLaunch(),
+        localDeck: { ...commanderLaunch().localDeck, ...deck },
+      });
+      const withoutKey = (key: string): Record<string, unknown> => {
+        const launch: Record<string, unknown> = commanderLaunch();
+        delete launch[key];
+        return launch;
+      };
+
+      it("accepts a launch whose draftSetCodes is null", () => {
+        const launch = commanderLaunch();
+        expect(validateDraftMessage({ type: "draft_commander_launch", launch })).toEqual({
+          type: "draft_commander_launch",
+          launch,
+        });
+      });
+
+      it("accepts a launch carrying every set the draft contained", () => {
+        const launch = { ...commanderLaunch(), draftSetCodes: ["CMM", "CLB"] };
+        expect(validateDraftMessage({ type: "draft_commander_launch", launch })).toEqual({
+          type: "draft_commander_launch",
+          launch,
+        });
+      });
+
+      // ACCEPTANCE control: the branch is a shape guard, not a whitelist, so an
+      // unrecognized field survives rather than failing the message.
+      it("accepts a structurally valid launch carrying an unknown extra field", () => {
+        const launch = { ...commanderLaunch(), unknownFutureField: "carried" };
+        expect(validateDraftMessage({ type: "draft_commander_launch", launch })).toEqual({
+          type: "draft_commander_launch",
+          launch,
+        });
+      });
+
+      const rejections: Array<[string, unknown]> = [
+        ["launch is absent", undefined],
+        ["gameId is not a string", { ...commanderLaunch(), gameId: 7 }],
+        ["gameId is empty", { ...commanderLaunch(), gameId: "" }],
+        ["roomCode is not a string", { ...commanderLaunch(), roomCode: null }],
+        ["roomCode is empty", { ...commanderLaunch(), roomCode: "" }],
+        ["playerCount is not an integer", { ...commanderLaunch(), playerCount: 2.5 }],
+        // 0, not a negative: both `>= 0` and `> 0` reject a negative, so only
+        // the zero boundary discriminates between them.
+        ["playerCount is zero", { ...commanderLaunch(), playerCount: 0 }],
+        ["localDeck is absent", withoutKey("localDeck")],
+        ["main_deck is not an array", withDeck({ main_deck: "Island" })],
+        // The `.every` half of the guard: an `Array.isArray`-only implementation
+        // passes every non-array case above and fails only this one.
+        ["main_deck holds a non-string element", withDeck({ main_deck: ["Island", 3] })],
+        ["sideboard is not an array", withDeck({ sideboard: "Mountain" })],
+        ["commander is not an array", withDeck({ commander: null })],
+        ["draftSetCodes is neither null nor an array", { ...commanderLaunch(), draftSetCodes: "CMM" }],
+        ["draftSetCodes is absent", withoutKey("draftSetCodes")],
+      ];
+
+      it.each(rejections)("rejects a launch whose %s", (_label, launch) => {
+        expect(() => validateDraftMessage({ type: "draft_commander_launch", launch }))
+          .toThrow(/Invalid commander launch/);
+      });
+    });
+
     it.each([
       "draft_join",
       "draft_reconnect",
@@ -779,6 +902,7 @@ describe("draftProtocol", () => {
       "draft_timer_sync",
       "draft_request_advance",
       "draft_match_start",
+      "draft_commander_launch",
       "draft_bo3_sideboard_prompt",
       "draft_bo3_between_games",
       "draft_bo3_sideboard_submit",
@@ -804,6 +928,7 @@ describe("draftProtocol", () => {
         },
         draft_reconnect_rejected: { kind: "NoReconnectWindow", reason: "No grace window" },
         draft_deck_submit_ack: { submissionId: "submission-1", view: validDraftView },
+        draft_commander_launch: { launch: commanderLaunch() },
       };
       const msg = validateDraftMessage(
         msgType === "draft_workspace_update"
@@ -1110,6 +1235,16 @@ describe("draftProtocol", () => {
             matchAuthoritySeat: 0,
           },
         },
+      };
+
+      const decoded = await decodeDraftWireMessage(await encodeDraftWireMessage(msg));
+      expect(decoded).toEqual(msg);
+    });
+
+    it("round-trips a commander launch message", async () => {
+      const msg: DraftP2PMessage = {
+        type: "draft_commander_launch",
+        launch: { ...commanderLaunch(), draftSetCodes: ["CMM"] },
       };
 
       const decoded = await decodeDraftWireMessage(await encodeDraftWireMessage(msg));

@@ -81,10 +81,21 @@ pub fn resolve(
     // CR 400.11: only the revealed cards matching the effect's filter may be
     // taken. `pack_slot` indexes the OPENED pack, not the filtered list, so the
     // slot a selection names is stable even when the filter excludes cards.
+    //
+    // CR 407.3: an ante card "can't be brought into the game from outside the
+    // game", so it is never OFFERED either — the pack is drawn from a set's
+    // whole card pool, which no deck-construction check has vetted. Filtering
+    // here rather than only at materialization keeps the prompt honest: a
+    // player is not shown a choice that would then be refused. The reveal above
+    // is deliberately left whole, because CR 407.3 restricts what may be taken,
+    // not what the pack contains.
     let choices: Vec<OutsideGameChoiceEntry> = cards
         .into_iter()
         .enumerate()
-        .filter(|(_, card)| matches_target_filter_against_face(card, &filter))
+        .filter(|(_, card)| {
+            matches_target_filter_against_face(card, &filter)
+                && crate::game::ante::admits_face_from_outside_game(state, card)
+        })
         .map(|(pack_slot, card)| OutsideGameChoiceEntry {
             name: card.name.clone(),
             source: OutsideGameChoiceSource::BoosterPack {

@@ -251,6 +251,19 @@ fn f4_drive_one_beat(state: &mut GameState) -> Result<(), String> {
 }
 
 fn f4_drive_one_beat_at(state: &mut GameState, seat: PlayerId) -> Result<(), String> {
+    // CR 117.3d: at a priority window this policy always passes, so dispatch the pass instead of
+    // enumerating the whole per-viewer candidate set to find it. This reproduces both halves of the
+    // enumerator's hatch — its structural predicate and the submitter identity it authorizes
+    // (CR 723.5) — so this arm stays inside the subset that hatch asserts equivalent to a
+    // simulated pass; every other shape falls through to the enumerating path below.
+    if let WaitingFor::Priority { player } = state.waiting_for {
+        if engine::game::priority::pass_priority_structurally_legal(state, player) {
+            let actor = engine::game::turn_control::authorized_submitter_for_player(state, player);
+            return apply(state, actor, GameAction::PassPriority)
+                .map(|_| ())
+                .map_err(|e| format!("apply err (PassPriority): {e:?}"));
+        }
+    }
     let who = state
         .waiting_for
         .acting_player()
@@ -283,7 +296,8 @@ fn f4_drive_one_beat_at(state: &mut GameState, seat: PlayerId) -> Result<(), Str
             state.waiting_for
         )
     })?;
-    apply(state, who, action.clone())
+    let actor = engine::game::turn_control::authorized_submitter_for_player(state, who);
+    apply(state, actor, action.clone())
         .map(|_| ())
         .map_err(|e| format!("apply err ({action:?}): {e:?}"))
 }
@@ -303,6 +317,25 @@ fn drive_f4_to_offer_at(state: &mut GameState, cap: u32, seat: PlayerId) -> Opti
         f4_drive_one_beat_at(state, seat).ok()?;
     }
     None
+}
+
+/// The tracked F4 dump driven to its bounded offer once per process, handed out as an owned
+/// clone. Nextest runs one test per process, so this collapses the repeated identical drives
+/// INSIDE a test and shares nothing across tests.
+///
+/// Eligible only where the pre-drive board is the unmodified fixture and the drive takes the
+/// default seat and cap: a case that edits the board first, drives at another seat or cap, or
+/// wants a second INDEPENDENT execution of the drive, loads and drives its own. Callers pass the
+/// clone straight to `f4_allocation_offer`, whose drive then finds the offer already standing and
+/// returns at beat 0.
+fn f4_at_offer() -> GameState {
+    static MEMO: std::sync::OnceLock<GameState> = std::sync::OnceLock::new();
+    MEMO.get_or_init(|| {
+        let mut state = load_f4();
+        drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
+        state
+    })
+    .clone()
 }
 
 fn offer_parts(
@@ -635,7 +668,7 @@ fn r1_the_bounded_offer_fires_on_the_real_f4_dump() {
     // CR 704.5a headroom is `life - 1`: a seat at exactly 0 has LOST, so a legal shortcut must
     // stop one point above it. CR 104.3c: an empty library is only lethal on the next draw, so
     // the library axis divides the whole remaining library.
-    // CR 704.5a: a published re-aimable `Targets` slot may be pointed at ANY of its legal
+    // CR 119.3: a published re-aimable `Targets` slot may be pointed at ANY of its legal
     // player targets in EVERY remaining repetition, so each of them is charged that slot's
     // magnitude ON TOP of its own observed drain. Both terms come off the offer's OWN
     // published data — `certificate.per_cycle.victim_slot` and `schema.points` — never from
@@ -5879,7 +5912,7 @@ fn p4_row_1b_an_authored_non_canonical_distribution_is_accepted() {
 
     // ── (a) UNEQUAL PARTS over all three victims ──
     {
-        let mut state = load_f4();
+        let mut state = f4_at_offer();
         let offer = f4_allocation_offer(&mut state);
         let count = offer.max_count;
         assert!(
@@ -5911,7 +5944,7 @@ fn p4_row_1b_an_authored_non_canonical_distribution_is_accepted() {
 
     // ── (b) A PROPER SUBSET omitting the PRE-ANNOUNCED seat ──
     {
-        let mut state = load_f4();
+        let mut state = f4_at_offer();
         let offer = f4_allocation_offer(&mut state);
         let count = offer.max_count;
         let declared: Vec<PlayerId> = offer
@@ -5961,7 +5994,7 @@ fn p4_row_1b_an_authored_non_canonical_distribution_is_accepted() {
     // exception does not excuse. Without it the conjunct ranges over the empty set across the
     // whole matrix: row (1) declares every victim, and arm (b)'s only omission is excused.
     {
-        let mut state = load_f4();
+        let mut state = f4_at_offer();
         let offer = f4_allocation_offer(&mut state);
         let count = offer.max_count;
         let omitted = *offer
@@ -6008,7 +6041,7 @@ fn p4_row_1b_an_authored_non_canonical_distribution_is_accepted() {
 
     // The omitted seat's zero in (c) is an AXIS, not a dead reading: the same seat reads a
     // strictly positive loss under row (1)'s allocation on the same board.
-    let mut control = load_f4();
+    let mut control = f4_at_offer();
     let control_offer = f4_allocation_offer(&mut control);
     assert_eq!(
         control_offer.max_count, count_probe,
@@ -6065,7 +6098,7 @@ fn p4_row_1b_an_authored_non_canonical_distribution_is_accepted() {
 #[test]
 fn p4_row_1c_a_segment_starting_at_the_last_index_realizes_nothing_but_stays_announced() {
     let drive = |allocation_of: &dyn Fn(&F4Allocation) -> Vec<(PlayerId, u32)>| {
-        let mut state = load_f4();
+        let mut state = f4_at_offer();
         let offer = f4_allocation_offer(&mut state);
         let count = offer.max_count;
         let allocation = allocation_of(&offer);
@@ -7216,7 +7249,7 @@ fn the_responders_element_agrees_with_the_producers_other_two_call_sites() {
 
     // ── MAIN LEG: the proposer's own preview of this declaration, through `preview_interaction`,
     //    the responder's published element for the same declaration.
-    let mut state = load_f4();
+    let mut state = f4_at_offer();
     let offer = f4_allocation_offer(&mut state);
     let allocation: Vec<(PlayerId, u32)> =
         offer.legal_seats.iter().copied().zip(SEGMENTS).collect();
@@ -7274,7 +7307,7 @@ fn the_responders_element_agrees_with_the_producers_other_two_call_sites() {
 
     // ── SECOND LEG: when the declaration IS the canonical split at a count the offer publishes
     //    an element for, the responder's element agrees with THAT element too.
-    let mut canonical_state = load_f4();
+    let mut canonical_state = f4_at_offer();
     let canonical_offer = f4_allocation_offer(&mut canonical_state);
     let sampled = canonical_offer
         .published_preview

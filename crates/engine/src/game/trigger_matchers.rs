@@ -781,8 +781,8 @@ fn is_player_scope_damage_filter(filter: &TargetFilter) -> bool {
         // predicate ("deals damage to a player who has more life than you") is a
         // player recipient, never an object one. Decided, not defaulted: the
         // `_ => false` tail below would silently misclassify it as an object
-        // filter. Unreachable today — no printed card produces this shape — but
-        // pinned by a unit test so a future flip is deliberate.
+        // filter. Cartographer's Hawk exercises this event-time player-relative
+        // damage-recipient shape; the unit test keeps future changes deliberate.
         TargetFilter::PlayerMatching { .. } => true,
         _ => false,
     }
@@ -1033,6 +1033,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::SpellCountered { .. }
         | GameEvent::ObjectIntensified { .. }
         | GameEvent::CounterRemoved { .. }
+        | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::ObjectConjured { .. }
         | GameEvent::EffectResolved { .. }
         | GameEvent::Unattached { .. }
@@ -3585,11 +3586,12 @@ pub(super) fn match_foretell(
     }
 }
 
-/// CR 702.110b: "exploits a creature" — fires when a creature matching the
-/// trigger's subject filter exploits. `valid_card`/`valid_source` scope the
-/// EXPLOITER: `SelfRef` ⇒ "this creature exploits", a typed/controller
-/// filter ⇒ "a creature you control exploits". With no filter, defaults to
-/// the source ("this creature exploits").
+/// CR 702.110b + CR 603.10a + CR 400.7 + CR 111.7: "exploits a creature"
+/// fires when the actor in `CreatureExploited.exploiter` matches `valid_source`
+/// and the sacrificed victim's captured battlefield appearance matches
+/// `valid_card`. The departure record remains authoritative after the victim
+/// changes zones or a token ceases to exist. With no actor filter, the actor
+/// defaults to the trigger source ("this creature exploits").
 pub(super) fn match_exploited(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -3597,19 +3599,25 @@ pub(super) fn match_exploited(
     state: &GameState,
 ) -> bool {
     let source_id = source_event_subject_id(source_context);
-    let GameEvent::CreatureExploited { exploiter, .. } = event else {
+    let GameEvent::CreatureExploited {
+        exploiter, record, ..
+    } = event
+    else {
         return false;
     };
-    // `valid_source`/`valid_card` scope the EXPLOITER's subject filter. With no
-    // filter, "this creature exploits" — match the source by identity.
-    match trigger
-        .valid_source
-        .as_ref()
-        .or(trigger.valid_card.as_ref())
-    {
+    let actor_matches = match trigger.valid_source.as_ref() {
         Some(filter) => exploiter_matches_subject_filter(state, *exploiter, filter, source_context),
         None => *exploiter == source_id,
-    }
+    };
+    actor_matches
+        && trigger.valid_card.as_ref().is_none_or(|filter| {
+            super::filter::matches_target_filter_on_zone_change_record(
+                state,
+                record,
+                filter,
+                &super::filter::FilterContext::from_trigger_source(source_context),
+            )
+        })
 }
 
 /// CR 603.10a + CR 400.7: Match an exploiter against the trigger's subject
@@ -3644,12 +3652,15 @@ fn exploiter_matches_subject_filter(
 ///   from `state.objects` entirely — so `filter_inner` cannot see it at all and returns
 ///   `false` for every filter.
 ///
-/// Match the live object first; when it no longer carries its battlefield appearance, fall
+/// Match the live object first; when the subject has CEASED to exist, prefer its own
+/// departure record (CR 608.2i + CR 608.2h) over the ObjectId-keyed cache; otherwise fall
 /// back to the last-known-information snapshot captured on battlefield exit
 /// (`apply_zone_exit_cleanup`, zones.rs).
 ///
-/// Single authority for the three matchers that need this fallback: `match_sacrificed`,
-/// `exploiter_matches_subject_filter`, and `match_connives`.
+/// Single authority for the four call sites that reach this fallback: `match_sacrificed`,
+/// `exploiter_matches_subject_filter`, `match_connives`, and — verdict-inert — the
+/// `match_saga_chapter_ability` observer arm, which rejects any subject absent from
+/// `state.objects` on the statement after it calls in.
 ///
 /// Note a printed card keeps its `core_types` and `controller` across a zone change, and
 /// `filter_inner` has no zone gate, so the *ceased-to-exist token* is the vector that
@@ -3663,6 +3674,63 @@ pub(super) fn subject_filter_matches_with_lki(
 ) -> bool {
     if target_filter_matches_object(state, object_id, filter, source_context) {
         return true;
+    }
+    // CR 608.2i + CR 608.2h + CR 400.7: when the subject has CEASED to exist
+    // (CR 704.5d/e), its departure record — not the ObjectId-keyed
+    // `lki_cache` — is the authority. CR 608.2i is what entitles a look-back
+    // trigger to read the recorded past state at all; CR 400.7 is why the
+    // answer must carry an incarnation, which the record's
+    // `trigger_source_context` has and an id-keyed snapshot cannot.
+    //
+    // WHICH AXES THIS ACTUALLY MOVES, measured over the whole engine suite:
+    // `matches_target_filter_on_lki_snapshot` copies name, types, keywords,
+    // P/T, base P/T, colors, mana value, controller, owner, attachments and
+    // `is_suspected` from the snapshot VERBATIM, so a typed/controller
+    // filter is answered identically by both paths and cannot change. It
+    // differs only where it SYNTHESIZES: `trigger_source_context: None`
+    // (so `SelfRef` / `OriginalSource` are unsatisfiable), `is_token` read
+    // from `state.objects` (so always FALSE for a ceased subject),
+    // `from_zone: None`, and a zeroed `combat_status`.
+    //
+    // Two production shapes are measured to reach here and flip:
+    //   * `match_exploited` — every "When this creature exploits a creature"
+    //     trigger carries `valid_card: SelfRef`; a ceased exploiter matched
+    //     none of them before this block.
+    //   * `match_sacrificed` — a Saga TOKEN sacrificed by CR 704.5s is
+    //     ceased by CR 704.5d LATER IN THE SAME SBA PASS, before that pass's
+    //     events are collected, so a `FilterProp::Token` observer
+    //     (Mirkwood Bats and nine siblings) saw `is_token == false`.
+    // An ordinary effect- or cost-driven sacrifice does NOT reach here: its
+    // `PermanentSacrificed` shares a buffer with the move and is collected
+    // before the action's SBA loop, so the subject is still present.
+    // `match_connives` CAN reach this block with a ceased subject (see
+    // `connives_typed_filter_matches_ceased_to_exist_token_conniver_via_lki`),
+    // but its verdict cannot move: all three `Connives` observers carry a
+    // copied-verbatim `Typed { Creature, controller: You }` filter, which the
+    // record and the cache path answer identically.
+    // `match_saga_chapter_ability`'s observer arm can execute this block but
+    // cannot change its verdict either — it rejects any subject absent from
+    // `state.objects` on the next statement.
+    //
+    // Strictly ADDITIVE: a record hit returns early, a record miss falls
+    // through to the unchanged cache path, so no existing verdict inverts.
+    //
+    // Residency and row authority are both shared, not re-derived here:
+    // `zones::battlefield_residency` is the single authority for "has this
+    // object left the battlefield, and does it still exist", and
+    // `game_state::terminal_battlefield_departure_row` is the single authority
+    // for which ledger row answers for a ceased one (CR 704.5d/e).
+    let ceased_departure_row = matches!(
+        super::zones::battlefield_residency(state, object_id),
+        super::zones::BattlefieldResidency::DepartedCeased
+    )
+    .then(|| crate::types::game_state::terminal_battlefield_departure_row(state, object_id))
+    .flatten();
+    if let Some(record) = ceased_departure_row {
+        let ctx = super::filter::FilterContext::from_trigger_source(source_context);
+        if super::filter::matches_target_filter_on_zone_change_record(state, record, filter, &ctx) {
+            return true;
+        }
     }
     if state
         .objects
@@ -5411,8 +5479,8 @@ mod tests {
     /// predicate as a PLAYER recipient. Decided, not defaulted: the match ends
     /// in `_ => false`, so nothing but this pin records the decision.
     ///
-    /// Unreachable today (no printed card produces a `PlayerMatching` damage
-    /// recipient), which is precisely why it is pinned — a future flip must be
+    /// Cartographer's Hawk produces a `PlayerMatching` damage recipient for its
+    /// event-time player-relative trigger; this pin keeps future changes
     /// deliberate.
     #[test]
     fn player_matching_is_a_player_scope_damage_recipient() {
@@ -16951,8 +17019,40 @@ mod tests {
         assert_eq!(count, None);
     }
 
-    // CR 702.110b: `match_exploited` scopes the exploiter via `valid_card` /
-    // `valid_source` rather than hard-coding `exploiter == source`.
+    // CR 702.110b: `match_exploited` scopes the actor via `valid_source` and
+    // the sacrificed victim via `valid_card`.
+
+    fn exploit_event_from_real_departure(
+        state: &GameState,
+        exploiter: ObjectId,
+        sacrificed: ObjectId,
+    ) -> GameEvent {
+        let mut departure_state = state.clone();
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut departure_state,
+            sacrificed,
+            Zone::Graveyard,
+            &mut events,
+        );
+        let record = events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Battlefield),
+                    record,
+                    ..
+                } if *object_id == sacrificed => Some(record.clone()),
+                _ => None,
+            })
+            .expect("the fixture's real battlefield departure emits a record");
+        GameEvent::CreatureExploited {
+            exploiter,
+            sacrificed,
+            record,
+        }
+    }
 
     #[test]
     fn exploited_self_ref_matches_self_exploit() {
@@ -16965,12 +17065,9 @@ mod tests {
             Zone::Battlefield,
         );
         let mut trigger = make_trigger(TriggerMode::Exploited);
-        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.valid_source = Some(TargetFilter::SelfRef);
 
-        let event = GameEvent::CreatureExploited {
-            exploiter: source,
-            sacrificed: source,
-        };
+        let event = exploit_event_from_real_departure(&state, source, source);
 
         assert!(match_exploited(
             &event,
@@ -16998,12 +17095,9 @@ mod tests {
             Zone::Battlefield,
         );
         let mut trigger = make_trigger(TriggerMode::Exploited);
-        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.valid_source = Some(TargetFilter::SelfRef);
 
-        let event = GameEvent::CreatureExploited {
-            exploiter: other,
-            sacrificed: other,
-        };
+        let event = exploit_event_from_real_departure(&state, other, other);
 
         assert!(!match_exploited(
             &event,
@@ -17041,14 +17135,11 @@ mod tests {
             .push(CoreType::Creature);
 
         let mut trigger = make_trigger(TriggerMode::Exploited);
-        trigger.valid_card = Some(TargetFilter::Typed(
+        trigger.valid_source = Some(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
         ));
 
-        let event = GameEvent::CreatureExploited {
-            exploiter: other,
-            sacrificed: other,
-        };
+        let event = exploit_event_from_real_departure(&state, other, other);
 
         assert!(match_exploited(
             &event,
@@ -17056,6 +17147,147 @@ mod tests {
             &test_trigger_source_context(&state, source),
             &state
         ));
+    }
+
+    #[test]
+    fn exploited_victim_filter_uses_departure_record_after_live_identity_changes() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Exploit Payoff".to_string(),
+            Zone::Battlefield,
+        );
+        let actor = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Victim Token".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [actor, victim] {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+        }
+        state.objects.get_mut(&victim).unwrap().is_token = true;
+
+        let event = exploit_event_from_real_departure(&state, actor, victim);
+        let GameEvent::CreatureExploited { record, .. } = &event else {
+            unreachable!()
+        };
+        assert!(record.is_token);
+
+        let mut creature = make_trigger(TriggerMode::Exploited);
+        creature.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        creature.valid_card = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let context = test_trigger_source_context(&state, source);
+        assert!(match_exploited(&event, &creature, &context, &state));
+
+        let mut nontoken = creature.clone();
+        nontoken.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![crate::types::ability::FilterProp::NonToken]),
+        ));
+        assert!(!match_exploited(&event, &nontoken, &context, &state));
+
+        state.objects.remove(&victim);
+        let replacement = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Contradictory Live Object".to_string(),
+            Zone::Battlefield,
+        );
+        let mut replacement_object = state.objects.remove(&replacement).unwrap();
+        replacement_object.id = victim;
+        replacement_object
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        replacement_object.is_token = false;
+        state.objects.insert(victim, replacement_object);
+
+        assert!(match_exploited(&event, &creature, &context, &state));
+        assert!(!match_exploited(&event, &nontoken, &context, &state));
+    }
+
+    #[test]
+    fn exploited_victim_filter_composes_subtype_negation_and_controller() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Henry Wu".to_string(),
+            Zone::Battlefield,
+        );
+        let actor = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let human = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(1),
+            "Human Victim".to_string(),
+            Zone::Battlefield,
+        );
+        let zombie = create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(1),
+            "Non-Human Victim".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [actor, human, zombie] {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+        }
+        state
+            .objects
+            .get_mut(&human)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Human".to_string());
+        state
+            .objects
+            .get_mut(&zombie)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Zombie".to_string());
+
+        let mut trigger = make_trigger(TriggerMode::Exploited);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .with_type(crate::types::ability::TypeFilter::Non(Box::new(
+                    crate::types::ability::TypeFilter::Subtype("Human".to_string()),
+                )))
+                .controller(ControllerRef::Opponent),
+        ));
+        let context = test_trigger_source_context(&state, source);
+        let nonhuman_event = exploit_event_from_real_departure(&state, actor, zombie);
+        let human_event = exploit_event_from_real_departure(&state, actor, human);
+        assert!(match_exploited(&nonhuman_event, &trigger, &context, &state));
+        assert!(!match_exploited(&human_event, &trigger, &context, &state));
     }
 
     #[test]
@@ -17072,10 +17304,7 @@ mod tests {
         assert!(trigger.valid_card.is_none());
         assert!(trigger.valid_source.is_none());
 
-        let event = GameEvent::CreatureExploited {
-            exploiter: source,
-            sacrificed: source,
-        };
+        let event = exploit_event_from_real_departure(&state, source, source);
 
         assert!(match_exploited(
             &event,
@@ -17124,16 +17353,30 @@ mod tests {
             .push(CoreType::Creature);
 
         // Real zone-change pipeline: snapshots LKI and strips the graveyard object.
-        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+        let mut departure_events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            source,
+            Zone::Graveyard,
+            &mut departure_events,
+        );
         assert!(state.lki_cache.contains_key(&source));
 
+        let record = departure_events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged { record, .. } => Some(record.clone()),
+                _ => None,
+            })
+            .expect("the self-sacrifice fixture emits a departure record");
         let event = GameEvent::CreatureExploited {
             exploiter: source,
             sacrificed: source,
+            record,
         };
 
         let mut you = make_trigger(TriggerMode::Exploited);
-        you.valid_card = Some(TargetFilter::Typed(
+        you.valid_source = Some(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
         ));
         assert!(
@@ -17147,7 +17390,7 @@ mod tests {
         );
 
         let mut opponent = make_trigger(TriggerMode::Exploited);
-        opponent.valid_card = Some(TargetFilter::Typed(
+        opponent.valid_source = Some(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::Opponent),
         ));
         assert!(
@@ -17191,7 +17434,8 @@ mod tests {
         }
 
         // Real zone-change pipeline: snapshots LKI on battlefield exit.
-        crate::game::zones::move_to_zone(&mut state, token, Zone::Graveyard, &mut Vec::new());
+        let mut departure_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, token, Zone::Graveyard, &mut departure_events);
         assert!(state.lki_cache.contains_key(&token));
         // CR 111.7: the token ceases to exist — purged from `state.objects` before the
         // exploit trigger's filter is evaluated.
@@ -17204,13 +17448,21 @@ mod tests {
 
         // The token exploited ITSELF: it is both the exploiter (subject) and the trigger's
         // own source (context).
+        let record = departure_events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged { record, .. } => Some(record.clone()),
+                _ => None,
+            })
+            .expect("the token self-sacrifice fixture emits a departure record");
         let event = GameEvent::CreatureExploited {
             exploiter: token,
             sacrificed: token,
+            record,
         };
 
         let mut you = make_trigger(TriggerMode::Exploited);
-        you.valid_card = Some(TargetFilter::Typed(
+        you.valid_source = Some(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
         ));
         assert!(
@@ -17225,7 +17477,7 @@ mod tests {
         );
 
         let mut opponent = make_trigger(TriggerMode::Exploited);
-        opponent.valid_card = Some(TargetFilter::Typed(
+        opponent.valid_source = Some(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::Opponent),
         ));
         assert!(

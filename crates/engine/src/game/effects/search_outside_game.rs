@@ -48,11 +48,19 @@ pub fn resolve(
                         sideboard_index,
                         entry.count,
                     );
+                    // CR 407.3: an ante card may not be in a sideboard in the
+                    // first place, and may not be brought in from outside the
+                    // game — so it is not offered. Deck validation already
+                    // rejects such a sideboard; this is the same rule applied
+                    // where the pool is actually consumed, for a pool that was
+                    // assembled without validation (casual play, or a deck
+                    // loaded by a path that skipped it).
                     (available_count > 0
                         && crate::game::filter::matches_target_filter_against_face(
                             &entry.card,
                             filter,
-                        ))
+                        )
+                        && crate::game::ante::admits_face_from_outside_game(state, &entry.card))
                     .then(|| OutsideGameChoiceEntry {
                         source: OutsideGameChoiceSource::Sideboard {
                             sideboard_index,
@@ -213,6 +221,17 @@ pub(crate) fn put_sideboard_entry_into_game(
         entry.card.clone()
     };
 
+    // CR 407.3: refuse BEFORE the bookkeeping below, not at materialization —
+    // that increment consumes one of the entry's available uses, and a card
+    // the rules never let into the game must not spend one.
+    if !crate::game::ante::admits_face_from_outside_game(state, &card_face) {
+        return Err(EffectError::InvalidParam(format!(
+            "{} can't be brought into the game from outside the game while not playing for ante \
+             (CR 407.3)",
+            card_face.name
+        )));
+    }
+
     if let Some(used) = state
         .outside_game_cards_brought_in
         .iter_mut()
@@ -229,12 +248,15 @@ pub(crate) fn put_sideboard_entry_into_game(
             });
     }
 
-    Ok(put_outside_game_face_into(
-        state,
-        player,
-        &card_face,
-        destination,
-    ))
+    // The CR 407.3 gate above already cleared this face, so the authority's own
+    // check cannot refuse here; map it rather than unwrap so a future divergence
+    // between the two surfaces as an error instead of a panic.
+    put_outside_game_face_into(state, player, &card_face, destination).ok_or_else(|| {
+        EffectError::InvalidParam(format!(
+            "{} can't be brought into the game from outside the game (CR 407.3)",
+            card_face.name
+        ))
+    })
 }
 
 /// CR 400.11b: Bring one card from OUTSIDE the game into `destination` as a new
@@ -246,18 +268,28 @@ pub(crate) fn put_sideboard_entry_into_game(
 /// replacement pipeline to run — the card is materialized from its printed face.
 /// Shared by the sideboard/wishboard pool and by booster packs, which differ
 /// only in where the face came from and in the bookkeeping their pool requires.
+///
+/// Returns `None` when CR 407.3 forbids the card from being brought in from
+/// outside the game — see [`crate::game::ante`]. Because this is the one place
+/// every outside-game source materializes through, enforcing it here means a
+/// source added later cannot bypass the rule by forgetting to ask; the offer
+/// sites filter the class out too, so a `None` here is defense in depth rather
+/// than a path a player can reach.
 pub(crate) fn put_outside_game_face_into(
     state: &mut GameState,
     player: PlayerId,
     card_face: &crate::types::card::CardFace,
     destination: Zone,
-) -> ObjectId {
+) -> Option<ObjectId> {
+    if !crate::game::ante::admits_face_from_outside_game(state, card_face) {
+        return None;
+    }
     let card_id = CardId(state.next_object_id);
     let obj_id = zones::create_object(state, card_id, player, card_face.name.clone(), destination);
     if let Some(obj) = state.objects.get_mut(&obj_id) {
         apply_card_face_to_object(obj, card_face);
     }
-    obj_id
+    Some(obj_id)
 }
 
 fn available_sideboard_count(

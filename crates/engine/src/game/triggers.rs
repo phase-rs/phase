@@ -2206,6 +2206,58 @@ fn collect_observer_triggers_under_lki_attachment(
     matched
 }
 
+/// CR 603.10a + CR 608.2h + CR 704.5d/e: the last-known information of an
+/// object that left the battlefield and then CEASED TO EXIST, sourced from the
+/// per-turn departure ledger rather than from `state.objects` (which no longer
+/// holds it at all).
+///
+/// WHY THE LEDGER AND NOT THE EVENT BATCH. The sibling CR 603.10a / CR 603.10f
+/// arms below search `events` because each is *keyed on* a `ZoneChanged` in the
+/// batch by construction. `CreatureExploited` is not: CR 702.110b emits it when
+/// the exploit ability RESOLVES, while the exploiter's own departure was
+/// recorded in an earlier action's batch by the CR 704.3 state-based-action
+/// sweep. Measured on the reachable fixture: at this seam the batch contains no
+/// battlefield-origin `ZoneChanged` for the exploiter, so a batch-local search
+/// finds nothing and the arm would be inert.
+///
+/// WHICH ROW IS AUTHORITATIVE is not decided here. That rule is rules-bearing
+/// (CR 704.5d/e) and shared with `trigger_matchers::subject_filter_matches_with_lki`,
+/// so it lives once in `game_state::terminal_battlefield_departure_row` and
+/// both seams delegate. Two hand-kept copies would have to change in lockstep
+/// with nothing linking them.
+///
+/// FAIL CLOSED on every other shape: no authoritative row, an `Absent`
+/// (context-free legacy) record, or a `Malformed` one all yield `None`, exactly
+/// as the two sibling arms treat the same tri-state.
+///
+/// THE RETURNED `attached_to` IS FORWARD-COMPATIBLE DEAD WEIGHT TODAY, not a
+/// load-bearing value: `collect_observer_triggers_under_lki_attachment`
+/// installs it through `state.objects.get_mut(&observer_id)`, which is `None`
+/// for an object that has ceased — by definition of the arm that calls this.
+/// It is returned anyway so this arm stays byte-for-byte parallel with the
+/// co-departure arm, and so it is already correct if that installer ever
+/// learns to synthesize an absent observer. No test can distinguish it.
+///
+/// Returns the context CLONED: the caller needs the immutable borrow of
+/// `state` to end before `collect_observer_triggers_under_lki_attachment` takes
+/// `&mut GameState`. Only the `DepartedCeased` path pays for it.
+fn ceased_departure_lki(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<(
+    TriggerSourceContext,
+    Option<crate::game::game_object::AttachTarget>,
+)> {
+    let record = crate::types::game_state::terminal_battlefield_departure_row(state, object_id)?;
+    match crate::types::game_state::battlefield_departure_source_context_from_record(record) {
+        crate::types::game_state::BattlefieldDepartureSourceContext::Present(context) => {
+            Some((context.clone(), record.attached_to))
+        }
+        crate::types::game_state::BattlefieldDepartureSourceContext::Absent
+        | crate::types::game_state::BattlefieldDepartureSourceContext::Malformed => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_matching_triggers_inner(
     state: &GameState,
@@ -2972,7 +3024,13 @@ fn source_has_trigger_in_zone(state: &GameState, source_id: ObjectId, zone: Zone
     })
 }
 
-pub(crate) fn trigger_definition_functions_in_zone(def: &TriggerDefinition, zone: Zone) -> bool {
+/// Returns whether a trigger definition functions from `zone`.
+///
+/// CR 113.6 gives abilities their normal battlefield functionality; CR 113.6b
+/// permits an ability to state another zone where it functions. An empty
+/// `trigger_zones` list therefore means battlefield only, while an explicit
+/// list is authoritative.
+pub fn trigger_definition_functions_in_zone(def: &TriggerDefinition, zone: Zone) -> bool {
     if def.trigger_zones.is_empty() {
         zone == Zone::Battlefield
     } else {
@@ -4418,42 +4476,40 @@ fn collect_pending_triggers_with_collection(
                 ..
             } = event
             {
-                if has_prowess && *caster == controller {
-                    // Check if the cast spell is noncreature
-                    let is_noncreature = state
-                        .objects
-                        .get(spell_obj_id)
-                        .map(|obj| !obj.card_types.core_types.contains(&CoreType::Creature))
-                        .unwrap_or(false);
-
-                    if is_noncreature {
-                        let prowess_effect = Effect::Pump {
-                            power: crate::types::ability::PtValue::Fixed(1),
-                            toughness: crate::types::ability::PtValue::Fixed(1),
-                            target: TargetFilter::SelfRef,
-                        };
-                        let prowess_ability =
-                            ResolvedAbility::new(prowess_effect, Vec::new(), obj_id, controller);
-                        let prowess_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
-                            .description("Prowess".to_string());
-                        pending.push(PendingTriggerContext::single(PendingTrigger {
-                            source_id: obj_id,
-                            controller,
-                            condition: prowess_trig_def.condition,
-                            ability: Box::new(prowess_ability),
-                            timestamp,
-                            target_constraints: Vec::new(),
-                            distribute: None,
-                            trigger_event: Some(event.clone()),
-                            modal: None,
-                            mode_abilities: vec![],
-                            description: prowess_trig_def.description,
-                            may_trigger_origin: None,
-                            subject_match_count: None,
-                            die_result: None,
-                            provenance: None,
-                        }));
-                    }
+                if has_prowess
+                    && synthetic_keyword_spell_cast_trigger_applies(
+                        state,
+                        obj_id,
+                        *caster,
+                        *spell_obj_id,
+                    )
+                {
+                    let prowess_effect = Effect::Pump {
+                        power: crate::types::ability::PtValue::Fixed(1),
+                        toughness: crate::types::ability::PtValue::Fixed(1),
+                        target: TargetFilter::SelfRef,
+                    };
+                    let prowess_ability =
+                        ResolvedAbility::new(prowess_effect, Vec::new(), obj_id, controller);
+                    let prowess_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
+                        .description("Prowess".to_string());
+                    pending.push(PendingTriggerContext::single(PendingTrigger {
+                        source_id: obj_id,
+                        controller,
+                        condition: prowess_trig_def.condition,
+                        ability: Box::new(prowess_ability),
+                        timestamp,
+                        target_constraints: Vec::new(),
+                        distribute: None,
+                        trigger_event: Some(event.clone()),
+                        modal: None,
+                        mode_abilities: vec![],
+                        description: prowess_trig_def.description,
+                        may_trigger_origin: None,
+                        subject_match_count: None,
+                        die_result: None,
+                        provenance: None,
+                    }));
                 }
             }
 
@@ -4906,49 +4962,107 @@ fn collect_pending_triggers_with_collection(
             }
         }
 
-        // CR 603.10a: Abilities that trigger when a player sacrifices a permanent
-        // look back in time. An exploit ability emits `CreatureExploited` only
-        // after the sacrifice resolves (CR 702.110b), so a creature that exploits
-        // ITSELF has already left the battlefield when this event fires. Scan the
-        // exploiter with zone_filter=Battlefield (last-known information) so its
-        // own "when ~ exploits a creature" trigger still fires. Guarded to the
-        // off-battlefield case only: when the exploiter sacrificed a DIFFERENT
-        // creature it is still on the battlefield and the live scan + per-event
-        // dedup already cover it.
+        // CR 603.10a: abilities that trigger when a player sacrifices a
+        // permanent look back in time, so an exploiter that is no longer on the
+        // battlefield keeps its own "when ~ exploits a creature" trigger. Which
+        // source that trigger is read from depends on the exploiter's residency;
+        // the per-arm comments below carry that reasoning, and deliberately do
+        // NOT restate it here, so there is one account of it and not two.
         if let GameEvent::CreatureExploited { exploiter, .. } = event {
-            if state
-                .objects
-                .get(exploiter)
-                .is_some_and(|o| o.zone != Zone::Battlefield)
-            {
-                let matched_triggers = {
-                    let obj = &state.objects[exploiter];
-                    collect_matching_triggers(
-                        state,
-                        event,
-                        events,
-                        obj,
-                        obj.entered_battlefield_turn.unwrap_or(0),
-                        Some(Zone::Battlefield),
-                        &mut batched_this_pass,
-                        &mut registered_this_event,
-                        &active_suppress_triggers,
-                        collection,
-                        TriggerSourceVisit::Observer,
-                    )
-                };
-                for matched in matched_triggers {
-                    if !session.record_match(state, &matched, event) {
-                        continue;
+            // CR 702.110b + CR 603.10a: exploit emits `CreatureExploited` only
+            // as the exploit ability RESOLVES, so the exploiter may already
+            // have left the battlefield — CR 603.10a ("abilities that trigger
+            // when a player sacrifices a permanent") is what entitles its own
+            // "When ~ exploits a creature" trigger to fire anyway. The three
+            // residencies need three different sources for the exploiter's
+            // abilities, so this match is EXHAUSTIVE and wildcard-free: a
+            // future `BattlefieldResidency` variant must be a compile error
+            // here, not a silently dropped trigger.
+            //
+            // Measured, because the obvious reading is wrong: a token that
+            // exploits ITSELF is `DepartedPresent`, not `DepartedCeased`. Its
+            // battlefield→graveyard move and its `CreatureExploited` land in
+            // the SAME event buffer, and collection runs over that buffer
+            // before the next CR 704.3 check performs the CR 704.5d sweep. The
+            // reachable `DepartedCeased` vector is instead an exploiter killed
+            // by state-based actions in a PRIOR batch while its exploit ETB
+            // trigger waits on the stack with its subject already locked
+            // (CR 603.3d) — a token Vulturous Aven that takes lethal damage
+            // after its trigger is on the stack, and exploits a different
+            // creature when that trigger resolves.
+            //
+            // `DepartedPresent` keeps reading the LIVE object
+            // (`&state.objects[exploiter]`) unchanged. Whether that live
+            // graveyard object is the most faithful source view at all — it is
+            // a new object under CR 400.7, and the departure record is the
+            // CR 608.2h authority — is a PRE-EXISTING question this change
+            // does not answer and does not bless; it is out of scope here.
+            match super::zones::battlefield_residency(state, *exploiter) {
+                // Still on the battlefield: the live scan and the per-event
+                // dedup already cover it (the exploiter sacrificed something
+                // else and survived).
+                super::zones::BattlefieldResidency::Remained => {}
+                super::zones::BattlefieldResidency::DepartedPresent => {
+                    let matched_triggers = {
+                        let obj = &state.objects[exploiter];
+                        collect_matching_triggers(
+                            state,
+                            event,
+                            events,
+                            obj,
+                            obj.entered_battlefield_turn.unwrap_or(0),
+                            Some(Zone::Battlefield),
+                            &mut batched_this_pass,
+                            &mut registered_this_event,
+                            &active_suppress_triggers,
+                            collection,
+                            TriggerSourceVisit::Observer,
+                        )
+                    };
+                    for matched in matched_triggers {
+                        if !session.record_match(state, &matched, event) {
+                            continue;
+                        }
+                        if matched.batched {
+                            batched_this_pass.insert((*exploiter, matched.trig_idx));
+                        }
+                        registered_this_event.insert((*exploiter, matched.trig_idx));
+                        pending.push(PendingTriggerContext::batched(
+                            matched.pending,
+                            matched.trigger_events,
+                        ));
                     }
-                    if matched.batched {
-                        batched_this_pass.insert((*exploiter, matched.trig_idx));
+                }
+                super::zones::BattlefieldResidency::DepartedCeased => {
+                    if let Some((source_context, lki_attached_to)) =
+                        ceased_departure_lki(state, *exploiter)
+                    {
+                        let matched_triggers = collect_observer_triggers_under_lki_attachment(
+                            state,
+                            *exploiter,
+                            lki_attached_to,
+                            event,
+                            events,
+                            &source_context,
+                            &mut batched_this_pass,
+                            &mut registered_this_event,
+                            &active_suppress_triggers,
+                            collection,
+                        );
+                        for matched in matched_triggers {
+                            if !session.record_match(state, &matched, event) {
+                                continue;
+                            }
+                            if matched.batched {
+                                batched_this_pass.insert((*exploiter, matched.trig_idx));
+                            }
+                            registered_this_event.insert((*exploiter, matched.trig_idx));
+                            pending.push(PendingTriggerContext::batched(
+                                matched.pending,
+                                matched.trigger_events,
+                            ));
+                        }
                     }
-                    registered_this_event.insert((*exploiter, matched.trig_idx));
-                    pending.push(PendingTriggerContext::batched(
-                        matched.pending,
-                        matched.trigger_events,
-                    ));
                 }
             }
         }
@@ -4979,11 +5093,24 @@ fn collect_pending_triggers_with_collection(
                 if observer_id == *moved_id {
                     continue;
                 }
-                if !state
-                    .objects
-                    .get(&observer_id)
-                    .is_some_and(|o| o.zone != Zone::Battlefield)
-                {
+                // CR 603.10a + CR 704.5d: a co-departed observer that ceased to
+                // exist is still an observer. Its object is gone from
+                // `state.objects`, but its ZoneChangeRecord owns its identity and
+                // trigger entries (CR 608.2h), which is what
+                // `collect_observer_triggers_under_lki_attachment` reads below —
+                // exactly as the CR 603.10f arm does. Only an observer still ON the
+                // battlefield is excluded here (the live scan covers it).
+                //
+                // CR 400.7f is the rule that ENTITLES this arm to find the
+                // co-departed Aura: "Abilities that trigger when an enchanted
+                // permanent leaves the battlefield can find the new object that each
+                // Aura enchanting that permanent became in its owner's graveyard if
+                // it was put into that graveyard at the same time the enchanted
+                // permanent left the battlefield. ... (See rule 704.5m.)"
+                // Simultaneity — not attachment identity — is what makes it
+                // findable, which is why this guard reads the co-departure group and
+                // not `record.attached_to`.
+                if !super::zones::battlefield_residency(state, observer_id).has_departed() {
                     continue;
                 }
                 // CR 603.10a + CR 400.7: This observer left in the same
@@ -5053,7 +5180,9 @@ fn collect_pending_triggers_with_collection(
                     collection,
                 );
                 for matched in matched_triggers {
-                    session.record_match(state, &matched, event);
+                    if !session.record_match(state, &matched, event) {
+                        continue;
+                    }
                     if matched.batched {
                         batched_this_pass.insert((observer_id, matched.trig_idx));
                     }
@@ -5115,11 +5244,12 @@ fn collect_pending_triggers_with_collection(
                 // what CR 603.10f requires: the departure record (CR 608.2h last
                 // known information) remains the authority for what the observer
                 // was attached to, and it outlives the object itself.
-                if state
-                    .objects
-                    .get(observer_id)
-                    .is_some_and(|o| o.zone == Zone::Battlefield)
-                {
+                //
+                // That rationale now lives in `zones::battlefield_residency`, the
+                // shared authority this guard delegates to: `Remained` is exactly
+                // "present AND still on the battlefield", so `!has_departed()` is
+                // the same predicate this arm has always used.
+                if !super::zones::battlefield_residency(state, *observer_id).has_departed() {
                     continue;
                 }
                 // CR 400.7 + CR 608.2h: the record's own source context — not a
@@ -6107,6 +6237,30 @@ fn collect_pending_triggers_with_collection(
         )
     });
     pending
+}
+
+/// CR 702.108a: whether this battlefield Prowess instance creates its
+/// synthesized trigger for an announced spell cast.
+///
+/// Prowess has no `TriggerDefinition`; callers that need to account for cast
+/// consequences must use this authority rather than scanning keywords ad hoc.
+pub fn synthetic_keyword_spell_cast_trigger_applies(
+    state: &GameState,
+    source_id: ObjectId,
+    caster: PlayerId,
+    spell_id: ObjectId,
+) -> bool {
+    let Some(source) = state.objects.get(&source_id) else {
+        return false;
+    };
+    let Some(spell) = state.objects.get(&spell_id) else {
+        return false;
+    };
+
+    source.zone == Zone::Battlefield
+        && source.controller == caster
+        && source.has_keyword(&Keyword::Prowess)
+        && !spell.card_types.core_types.contains(&CoreType::Creature)
 }
 
 /// Probe whether a throwaway event batch would create trigger work that uses
@@ -11804,6 +11958,11 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         FilterProp::Owned { controller } | FilterProp::ProtectorMatches { controller } => {
             controller_ref_binding_diverges(controller)
         }
+        // CR 303.4 + CR 301.5: the player referent is a `ControllerRef` like
+        // `Owned`/`ProtectorMatches` above — recurse into the same authority
+        // rather than bucketing with `AttachedToRecipient` (whose divergence is
+        // about the per-recipient `FilterContext` binding, a different axis).
+        FilterProp::AttachedToPlayer { player } => controller_ref_binding_diverges(player),
         FilterProp::MostPrevalentCreatureTypeIn { scope, .. } => {
             controller_ref_binding_diverges(scope)
         }
@@ -11963,7 +12122,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         | FilterProp::WasPlayed
         | FilterProp::WasKicked
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -13899,13 +14058,12 @@ fn evaluate_trigger_condition_with_source(
         // `Not { Box::new(WasCast) }`. The `Not` arm inverts the result, so an
         // unanswerable subject resolves Not(WasCast) to `true`. This is NOT because
         // CR 603.4 removes the ability when the source leaves its zone — CR 603.4
-        // says nothing about the source's zone, and
-        // CR 113.7a explicitly says the opposite for abilities ("Destruction or
-        // removal of the source after that time won't affect the ability"). Rather,
-        // a subject the engine cannot answer for yields `false` for the plain
-        // condition, and `Not` inverts that `false` to `true` — the same
-        // "unanswerable is not a licence to substitute a different object" contract
-        // `trigger_subject_read` documents.
+        // says nothing about the source's zone, and CR 113.7a explicitly says the
+        // opposite for abilities ("Destruction or removal of the source after that
+        // time won't affect the ability"). Rather, a subject the engine cannot
+        // answer for yields `false` for the plain condition, and `Not` inverts that
+        // `false` to `true` — the same "unanswerable is not a licence to substitute
+        // a different object" contract `trigger_subject_read` documents.
         // CR 601.2 + CR 603.4: cast-origin check. zone=None → cast from anywhere
         // (Discover/Wedding Ring/Satoru back-compat). zone=Some(z) → cast specifically
         // from zone z (Twilight Diviner: graveyard). Two independent scope axes:
@@ -21862,6 +22020,7 @@ pub mod tests {
             CostPaidObjectSnapshot {
                 object_id: sacrificed,
                 lki: obj.snapshot_for_mana_spent(),
+                incarnation: 0,
             }
         };
         runner
@@ -21932,6 +22091,7 @@ pub mod tests {
             CostPaidObjectSnapshot {
                 object_id: sacrificed,
                 lki: obj.snapshot_for_mana_spent(),
+                incarnation: 0,
             }
         };
         runner
@@ -22119,6 +22279,7 @@ pub mod tests {
             CostPaidObjectSnapshot {
                 object_id: sacrificed,
                 lki: obj.snapshot_for_mana_spent(),
+                incarnation: 0,
             }
         };
         runner
@@ -43916,6 +44077,7 @@ pub mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             Vec::new(),
@@ -44259,6 +44421,7 @@ pub mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             Vec::new(),
@@ -44320,6 +44483,7 @@ pub mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             LogicalZoneProductionCarrier::BatchDelivery => Effect::BounceAll {

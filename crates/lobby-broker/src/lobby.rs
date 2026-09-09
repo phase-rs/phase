@@ -594,11 +594,14 @@ mod tests {
         assert_eq!(result.unwrap_err(), "password_required");
     }
 
+    /// Pins the answer a joiner gets once the entry is gone: "not found", not
+    /// "Wrong password". A destroyed session's entry is delisted, so this is
+    /// the arm every stale code now lands in.
     #[test]
     fn verify_password_game_not_found() {
         let lobby = LobbyManager::new();
         let result = lobby.verify_password("NOPE", None);
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Game not found in lobby: NOPE");
     }
 
     #[test]

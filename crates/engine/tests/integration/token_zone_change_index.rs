@@ -1255,12 +1255,12 @@ fn suppressed_liminal_copy_token_entry_realizes_through_a_mandatory_as_enters_ch
 /// loses its `"OrderTriggers(2)"` element and fails first, and the Soul Warden assertion goes
 /// 1 → 0. No other test in this file moves.
 ///
-/// CR 603.6a: this class settles through `handle_tribute_choice`,
-/// which builds its `ActionResult` directly in the reducer match and never reaches
-/// `run_post_action_pipeline`, so the action-boundary convergence is what runs the ETB check for
-/// it. TWO abilities trigger — Soul Warden's observer and the copy's own CR 603.4 "if tribute
-/// wasn't paid" ETB — same controller, so CR 603.3b makes their order the controller's choice and
-/// the ordering prompt is REQUIRED here, not an artifact of the harness.
+/// CR 603.6a: this class settles through `handle_tribute_choice`, which builds its `ActionResult`
+/// directly in the reducer match and never reaches `run_post_action_pipeline`, so the
+/// action-boundary convergence is what runs the ETB check for it. TWO abilities trigger — Soul
+/// Warden's observer and the copy's own CR 603.4 "if tribute wasn't paid" ETB — same controller,
+/// so CR 603.3b makes their order the controller's choice and the ordering prompt is REQUIRED
+/// here, not an artifact of the harness.
 #[test]
 fn suppressed_liminal_copy_token_entry_realizes_through_an_as_enters_choice_with_a_second_pause() {
     let mut scenario = GameScenario::new();
@@ -1338,13 +1338,13 @@ fn suppressed_liminal_copy_token_entry_realizes_through_an_as_enters_choice_with
         "the emitted ZoneChanged carries the index the recorder assigned"
     );
 
-    // (4) CR 603.6a: the realized entry is the event that put a
-    //     permanent onto the battlefield, so every permanent is checked for matching ETB triggers.
-    //     `handle_tribute_choice` builds its `ActionResult` straight out of the reducer match, so
-    //     the action-boundary convergence in `apply_action_boundary_core` is what runs that check
-    //     for this class. TWO triggers fire (Soul Warden's observer and Fanatic's own CR 603.4
-    //     "if tribute wasn't paid" ETB) — the `OrderTriggers(2)` element of the reach-guard above
-    //     pins that, and this assertion pins that the observer actually resolved.
+    // (4) CR 603.6a: the realized entry is the event that put a permanent onto the battlefield, so
+    //     every permanent is checked for matching ETB triggers. `handle_tribute_choice` builds its
+    //     `ActionResult` straight out of the reducer match, so the action-boundary convergence in
+    //     `apply_action_boundary_core` is what runs that check for this class. TWO triggers fire
+    //     (Soul Warden's observer and Fanatic's own CR 603.4 "if tribute wasn't paid" ETB) — the
+    //     `OrderTriggers(2)` element of the reach-guard above pins that, and this assertion pins
+    //     that the observer actually resolved.
     assert_eq!(
         life_of_p0(runner.state()) - life_start,
         1,

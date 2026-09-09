@@ -3,18 +3,34 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const EXPECTED_PROTOCOL_VERSION = 63;
+const EXPECTED_PROTOCOL_VERSION = 69;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
-const EXPECTED_LOBBY_PROTOCOL_VERSION = 4;
+const EXPECTED_LOBBY_PROTOCOL_VERSION = 8;
+// The capability FLOOR for correlated tournament settlement — a different kind
+// of number from the other version constants here, and the reason it is pinned
+// separately. Those track a surface's current version; this one is frozen at the
+// version that INTRODUCED the ack and must never be bumped alongside
+// EXPECTED_LOBBY_PROTOCOL_VERSION. Raising it would refuse every newer broker
+// that answers the ack perfectly well, silently disabling all four organizer
+// actions.
+const EXPECTED_MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK = 5;
+// The capability FLOOR for broker-owned default scoring — a second frozen
+// floor, pinned for the same reason as the ack floor above and never bumped
+// alongside EXPECTED_LOBBY_PROTOCOL_VERSION. It is frozen at the version that
+// RELAXED CreateTournament.scoring to optional. Raising it would push every
+// newer broker below the floor and pin this client to sending an explicit
+// policy forever; lowering it is worse, because omitting `scoring` against a
+// pre-6 broker is a hard `missing field` parse error rather than a degrade.
+const EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING = 6;
 // The P2P wire version. A THIRD independent surface: host/guest first-contact
 // frames carry it, and the same GameState shape change that moves
 // EXPECTED_PROTOCOL_VERSION must move this one too. It was previously ungated
 // here, so a full-game bump could ship with an unbumped P2P version and CI
 // stayed green — a v(n-1) host and a v(n) guest would then complete a
 // handshake and only fail when the incompatible payload arrived.
-const EXPECTED_WIRE_PROTOCOL_VERSION = 47;
+const EXPECTED_WIRE_PROTOCOL_VERSION = 52;
 
 function extractVersion(source, pattern, label) {
   const match = source.match(pattern);
@@ -119,6 +135,21 @@ const AUTHORED_LITERALS = [
   [serverCoreSource, "crates/server-core/src/protocol.rs", []],
   [clientSource, "client/src/adapter/ws-adapter.ts", [
     "LOBBY_PROTOCOL_VERSION",
+    // Authored for the opposite reason to the others: it is frozen, not
+    // current. Deriving it would silently disable the organizer actions at the
+    // next lobby bump, so the classifier has to insist on the literal.
+    "MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK",
+    // Same frozen-floor reasoning as the ack floor above: the default-scoring
+    // floor must stay a literal so re-deriving it from the current version
+    // fails this check instead of silently pinning the client forever.
+    "MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING",
+    // The client-only send-path floor for per-event `match_type`. Frozen at the
+    // version that introduced it, for the same reason as the two floors above:
+    // deriving it from the current version would, at the next lobby bump,
+    // silently start refusing v8 brokers that honor `match_type` perfectly. It
+    // has no shared Rust constant to mirror, so unlike the ack/scoring floors it
+    // is not additionally value-pinned by an EXPECTED_* assertion below.
+    "MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE",
     "MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL",
     "PROTOCOL_VERSION",
   ]],
@@ -222,6 +253,31 @@ const clientLobbyFloor = extractVersion(
   /export\s+const\s+MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL\s*=\s*(\d+)\s*;/,
   "client/src/adapter/ws-adapter.ts",
 );
+const clientTournamentAckFloor = extractVersion(
+  clientSource,
+  /export\s+const\s+MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK\s*=\s*(\d+)\s*;/,
+  "client/src/adapter/ws-adapter.ts",
+);
+const clientDefaultScoringFloor = extractVersion(
+  clientSource,
+  /export\s+const\s+MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING\s*=\s*(\d+)\s*;/,
+  "client/src/adapter/ws-adapter.ts",
+);
+
+// The structural invariant, and the reason this block exists. Each of the six
+// regexes above requires a bare integer literal on the right-hand side, so a
+// future edit to `LOBBY_PROTOCOL_VERSION = PROTOCOL_VERSION - 1` (or any other
+// expression) fails to match and trips "Could not find protocol version"
+// rather than silently re-coupling the two surfaces.
+//
+// That device is doing MORE work for the two FROZEN floors — the ack floor and
+// the default-scoring floor — than for the four current-version pins. The
+// plausible "improvement" to a frozen floor is to re-derive it from the current
+// version — `= LOBBY_PROTOCOL_VERSION` — which reads like removing a magic
+// number and is in fact a latent bug: at the next lobby bump every v5 broker,
+// which does mint the ack, would be refused as unsupported, and every v6
+// broker, which does apply the scoring default, likewise. The bare-integer
+// regex is what turns that edit into a failed check here instead.
 
 if (rustLobbyVersion !== clientLobbyVersion) {
   console.error(
@@ -241,6 +297,44 @@ if (rustLobbyVersion !== EXPECTED_LOBBY_PROTOCOL_VERSION) {
   console.error(
     `Lobby protocol version must remain ${EXPECTED_LOBBY_PROTOCOL_VERSION}: got ${rustLobbyVersion}. ` +
       `Bump it ONLY for a LobbyClientMessage/LobbyServerMessage shape change — never for a full-game bump.`,
+  );
+  process.exit(1);
+}
+
+if (
+  clientTournamentAckFloor !== EXPECTED_MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK
+) {
+  console.error(
+    `MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK must remain ${EXPECTED_MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK}: got ${clientTournamentAckFloor}. ` +
+      `It is FROZEN at the lobby version that introduced TournamentActionAck — not a moving target. ` +
+      `Do NOT bump it with LOBBY_PROTOCOL_VERSION: a newer broker still answers the ack, and raising this ` +
+      `floor would refuse every one of them and silently disable all four organizer actions.`,
+  );
+  process.exit(1);
+}
+
+if (clientDefaultScoringFloor !== EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING) {
+  console.error(
+    `MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING must remain ${EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING}: got ${clientDefaultScoringFloor}. ` +
+      `It is FROZEN at the lobby version that relaxed CreateTournament.scoring to optional — not a moving target. ` +
+      `Do NOT bump it with LOBBY_PROTOCOL_VERSION: a newer broker still applies the arity default, and raising this ` +
+      `floor would pin this client to sending an explicit scoring policy against every broker that can default one.`,
+  );
+  process.exit(1);
+}
+
+if (clientDefaultScoringFloor > rustLobbyVersion) {
+  console.error(
+    `The default-scoring floor ${clientDefaultScoringFloor} exceeds the lobby version ${rustLobbyVersion}: ` +
+      `no broker could ever accept a CreateTournament with scoring omitted.`,
+  );
+  process.exit(1);
+}
+
+if (clientTournamentAckFloor > rustLobbyVersion) {
+  console.error(
+    `The tournament-ack floor ${clientTournamentAckFloor} exceeds the lobby version ${rustLobbyVersion}: ` +
+      `no broker could ever answer a gated tournament action.`,
   );
   process.exit(1);
 }

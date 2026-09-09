@@ -1,9 +1,9 @@
 //! `LandfallKeepablesMulligan` — feature-driven mulligan policy for landfall decks.
 //!
-//! CR 103.5: deciding to keep after the
-//! mulligan process. When a deck's landfall commitment is meaningful, opening
-//! hands that combine a landfall payoff with a workable land count are
-//! strongly preferred over hands without a payoff.
+//! CR 103.5: deciding to keep after the mulligan process. When a deck's
+//! landfall commitment is meaningful, opening hands that combine a landfall
+//! payoff with a workable land count are strongly preferred over hands
+//! without a payoff.
 //!
 //! Opts out for decks where `features.landfall.commitment <= 0.3` — the
 //! baseline `KeepablesByLandCount` policy is the sole voice for those decks.

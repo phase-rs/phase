@@ -20,10 +20,11 @@ use lobby_broker::inbound_guard::{
 use lobby_broker::validation::{
     validate_create_tournament_fields, validate_drop_from_tournament_fields,
     validate_end_tournament_fields, validate_get_tournament_fields,
-    validate_join_tournament_fields, validate_report_match_result_fields,
-    validate_start_tournament_round_fields, validate_unregister_lobby_fields,
-    validate_update_lobby_metadata_fields, CreateTournamentFields, DropFromTournamentFields,
-    EndTournamentFields, JoinTournamentFields, ReportMatchResultFields, StartTournamentRoundFields,
+    validate_join_tournament_fields, validate_renew_tournament_credential_fields,
+    validate_report_match_result_fields, validate_start_tournament_round_fields,
+    validate_unregister_lobby_fields, validate_update_lobby_metadata_fields,
+    CreateTournamentFields, DropFromTournamentFields, EndTournamentFields, JoinTournamentFields,
+    RenewTournamentCredentialFields, ReportMatchResultFields, StartTournamentRoundFields,
     UpdateLobbyMetadataFields,
 };
 
@@ -192,9 +193,16 @@ pub fn guard_client_message_before_dispatch(
         // validation the broker crate cannot depend on. The identical calls
         // appear in `guard_broker_projection_inbound`; `both_inbound_guards_agree_
         // on_every_tournament_variant` is what keeps the two from drifting.
-        ClientMessage::CreateTournament { name, .. } => {
-            validate_create_tournament_fields(CreateTournamentFields { name })
-        }
+        ClientMessage::CreateTournament {
+            name,
+            total_rounds,
+            plus_rounds,
+            ..
+        } => validate_create_tournament_fields(CreateTournamentFields {
+            name,
+            total_rounds: *total_rounds,
+            plus_rounds: *plus_rounds,
+        }),
         ClientMessage::JoinTournament {
             code,
             player_key,
@@ -205,32 +213,51 @@ pub fn guard_client_message_before_dispatch(
             display_name,
         }),
         ClientMessage::GetTournament { code } => validate_get_tournament_fields(code),
+        // `request_id: _` on all four: the gated actions' correlator is an
+        // opaque echoed integer with no bounds to check, and binding it
+        // explicitly shows it was considered. `ReportMatchResult` gives up its
+        // `..` rest pattern for that: a rest pattern silently absorbs every
+        // future field, making this the one arm where a newly-added bounded
+        // field could slip past the guard without a compile error.
         ClientMessage::StartTournamentRound {
             code,
             organizer_token,
+            request_id: _,
         } => validate_start_tournament_round_fields(StartTournamentRoundFields {
             code,
             organizer_token,
         }),
         ClientMessage::ReportMatchResult {
             code,
+            pairing_id: _,
             player_token,
             outcome,
-            ..
+            request_id: _,
         } => validate_report_match_result_fields(ReportMatchResultFields {
             code,
             player_token,
             outcome,
         }),
-        ClientMessage::DropFromTournament { code, player_token } => {
-            validate_drop_from_tournament_fields(DropFromTournamentFields { code, player_token })
-        }
+        ClientMessage::DropFromTournament {
+            code,
+            player_token,
+            request_id: _,
+        } => validate_drop_from_tournament_fields(DropFromTournamentFields { code, player_token }),
         ClientMessage::EndTournament {
             code,
             organizer_token,
+            request_id: _,
         } => validate_end_tournament_fields(EndTournamentFields {
             code,
             organizer_token,
+        }),
+        ClientMessage::RenewTournamentCredential {
+            code,
+            role: _,
+            token,
+        } => validate_renew_tournament_credential_fields(RenewTournamentCredentialFields {
+            code,
+            token,
         }),
         ClientMessage::CreateDraftWithSettings {
             display_name,
@@ -357,7 +384,8 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::StartTournamentRound { .. }
         | ClientMessage::ReportMatchResult { .. }
         | ClientMessage::DropFromTournament { .. }
-        | ClientMessage::EndTournament { .. } => ServerMessage::error(reason),
+        | ClientMessage::EndTournament { .. }
+        | ClientMessage::RenewTournamentCredential { .. } => ServerMessage::error(reason),
     }
 }
 
@@ -440,9 +468,16 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         // map into the broker, so anything unbounded here is an unbounded
         // clone — the same hazard `UpdateLobbyMetadata`'s arm above exists to
         // prevent.
-        ClientMessage::CreateTournament { name, .. } => {
-            validate_create_tournament_fields(CreateTournamentFields { name })
-        }
+        ClientMessage::CreateTournament {
+            name,
+            total_rounds,
+            plus_rounds,
+            ..
+        } => validate_create_tournament_fields(CreateTournamentFields {
+            name,
+            total_rounds: *total_rounds,
+            plus_rounds: *plus_rounds,
+        }),
         ClientMessage::JoinTournament {
             code,
             player_key,
@@ -453,32 +488,48 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             display_name,
         }),
         ClientMessage::GetTournament { code } => validate_get_tournament_fields(code),
+        // `request_id: _` for the same reason as the dispatch guard above: the
+        // correlator carries no bound, and binding it explicitly here keeps the
+        // two guards reading identically.
         ClientMessage::StartTournamentRound {
             code,
             organizer_token,
+            request_id: _,
         } => validate_start_tournament_round_fields(StartTournamentRoundFields {
             code,
             organizer_token,
         }),
         ClientMessage::ReportMatchResult {
             code,
+            pairing_id: _,
             player_token,
             outcome,
-            ..
+            request_id: _,
         } => validate_report_match_result_fields(ReportMatchResultFields {
             code,
             player_token,
             outcome,
         }),
-        ClientMessage::DropFromTournament { code, player_token } => {
-            validate_drop_from_tournament_fields(DropFromTournamentFields { code, player_token })
-        }
+        ClientMessage::DropFromTournament {
+            code,
+            player_token,
+            request_id: _,
+        } => validate_drop_from_tournament_fields(DropFromTournamentFields { code, player_token }),
         ClientMessage::EndTournament {
             code,
             organizer_token,
+            request_id: _,
         } => validate_end_tournament_fields(EndTournamentFields {
             code,
             organizer_token,
+        }),
+        ClientMessage::RenewTournamentCredential {
+            code,
+            role: _,
+            token,
+        } => validate_renew_tournament_credential_fields(RenewTournamentCredentialFields {
+            code,
+            token,
         }),
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
@@ -777,7 +828,7 @@ mod tests {
 
     // -- Tournament organizer ----------------------------------------------
 
-    use crate::protocol::{BracketShape, MatchArity, PodOutcome, ScoringPolicy};
+    use crate::protocol::{BracketShape, MatchArity, PodOutcome, ScoringPolicy, TournamentRole};
     use lobby_broker::validation::{
         MAX_DISPLAY_NAME_LEN, MAX_GAME_CODE_LEN, MAX_GAME_WINS_ENTRIES, MAX_ROOM_NAME_LEN,
         MAX_TOKEN_LEN,
@@ -797,9 +848,12 @@ mod tests {
                 ClientMessage::CreateTournament {
                     name: "n".repeat(MAX_ROOM_NAME_LEN + 1),
                     arity: MatchArity::HEAD_TO_HEAD,
-                    scoring: ScoringPolicy::default(),
+                    scoring: Some(ScoringPolicy::default()),
                     bracket: BracketShape::Swiss,
                     total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
+                    match_type: None,
                 },
             ),
             (
@@ -821,6 +875,7 @@ mod tests {
                 ClientMessage::StartTournamentRound {
                     code: "TOUR01".into(),
                     organizer_token: long_token.clone(),
+                    request_id: None,
                 },
             ),
             (
@@ -830,6 +885,7 @@ mod tests {
                     pairing_id: 0,
                     player_token: long_token.clone(),
                     outcome: PodOutcome::Draw,
+                    request_id: None,
                 },
             ),
             (
@@ -837,13 +893,36 @@ mod tests {
                 ClientMessage::DropFromTournament {
                     code: "TOUR01".into(),
                     player_token: long_token.clone(),
+                    request_id: None,
                 },
             ),
             (
                 "organizer_token",
                 ClientMessage::EndTournament {
                     code: "TOUR01".into(),
-                    organizer_token: long_token,
+                    organizer_token: long_token.clone(),
+                    request_id: None,
+                },
+            ),
+            // Lobby protocol 6's rotation frame. Both guards gained an arm for
+            // it, and an arm that returned `Ok(())` in one of them would be
+            // exhaustive and compile — which is precisely the divergence
+            // `both_inbound_guards_agree_on_every_tournament_variant` exists
+            // to rule out, so the new variant has to be in this table.
+            (
+                "token",
+                ClientMessage::RenewTournamentCredential {
+                    code: "TOUR01".into(),
+                    role: TournamentRole::Organizer,
+                    token: long_token,
+                },
+            ),
+            (
+                "code",
+                ClientMessage::RenewTournamentCredential {
+                    code: long_code,
+                    role: TournamentRole::Player,
+                    token: "tok".into(),
                 },
             ),
         ]
@@ -854,9 +933,12 @@ mod tests {
             ClientMessage::CreateTournament {
                 name: "Friday Night".into(),
                 arity: MatchArity::HEAD_TO_HEAD,
-                scoring: ScoringPolicy::default(),
+                scoring: Some(ScoringPolicy::default()),
                 bracket: BracketShape::Swiss,
                 total_rounds: Some(3),
+                plus_rounds: None,
+                format: None,
+                match_type: None,
             },
             ClientMessage::JoinTournament {
                 code: "TOUR01".into(),
@@ -869,20 +951,34 @@ mod tests {
             ClientMessage::StartTournamentRound {
                 code: "TOUR01".into(),
                 organizer_token: "tok".into(),
+                request_id: None,
             },
             ClientMessage::ReportMatchResult {
                 code: "TOUR01".into(),
                 pairing_id: 0,
                 player_token: "tok".into(),
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             ClientMessage::DropFromTournament {
                 code: "TOUR01".into(),
                 player_token: "tok".into(),
+                request_id: None,
             },
             ClientMessage::EndTournament {
                 code: "TOUR01".into(),
                 organizer_token: "tok".into(),
+                request_id: None,
+            },
+            ClientMessage::RenewTournamentCredential {
+                code: "TOUR01".into(),
+                role: TournamentRole::Organizer,
+                token: "tok".into(),
+            },
+            ClientMessage::RenewTournamentCredential {
+                code: "TOUR01".into(),
+                role: TournamentRole::Player,
+                token: "tok".into(),
             },
         ]
     }
@@ -948,6 +1044,7 @@ mod tests {
                 winner: "key-0".into(),
                 game_wins,
             },
+            request_id: None,
         };
 
         let err = guard_broker_projection_inbound(&msg).unwrap_err();

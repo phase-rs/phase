@@ -32,6 +32,19 @@ describe("logSearch", () => {
     expect(segmentsToPlainText(result[0].segments)).toContain("damage");
   });
 
+  it("keeps preceding engine-authored turn context beside a search result", () => {
+    const turn = {
+      ...entry("Turn", "Turn 4 — Chandra", 4),
+      presentation: { importance: "Context" as const, tone: "Neutral" as const, boundary: "Turn" as const, visibility: "Public" as const },
+    };
+    const match = entry("Combat", "Balduvian Bears attacks Chandra", 4);
+
+    expect(filterLogEntries([turn, match], { query: "Balduvian", categories: null, turn: null })).toEqual([
+      turn,
+      match,
+    ]);
+  });
+
   it("does not expose pregame turn zero as a turn filter", () => {
     const turns = uniqueTurns([entry("Game", "setup", 0), entry("Stack", "cast", 1)]);
     expect(turns).toEqual([1]);

@@ -2302,7 +2302,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::BecomeCopy {
-                            recipient: TargetFilter::SelfRef,
+                            recipient: crate::types::ability::CopyRecipient::Source,
                             target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
                             duration: None,
                             mana_value_limit: None,

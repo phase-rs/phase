@@ -977,10 +977,11 @@ fn b2_devour_producer_path_leaves_no_dispatching_drain() {
 /// installed a drain.
 ///
 /// **H7 — guard, the non-interference witness for the ENTRY call site.** The
-/// submission below routes `apply_as_current -> apply_as_current_with_mode ->
-/// apply_action_boundary -> apply_action_boundary_with_stack_limit ->
-/// apply_action_boundary_core`, so the entry-side sweep added at that function
-/// runs on THIS state — a healthy one, parked mid-prompt with a live owner.
+/// submission below routes `apply_as_current -> apply_as_current_with_mode
+/// -> apply_action_boundary_for_semantic_owner
+/// -> apply_action_boundary_with_stack_limit -> apply_action_boundary_core`,
+/// so the entry-side sweep added at that function runs on THIS state — a
+/// healthy one, parked mid-prompt with a live owner.
 /// This row is therefore also the row that ESTABLISHES the premise §5.4's
 /// safety rests on: parked-awaiting-input work carries `Paused`, never
 /// `Dispatching` (CR 614.12a — the as-enters choice is still being made, so the
@@ -999,7 +1000,8 @@ fn h1_devour_empty_sacrifice_retires_its_drain_and_frame() {
 
     // NON-INTERFERENCE WITNESS for the entry-side sweep added at
     // `engine::apply_action_boundary_core`. The submission below routes
-    // `apply_as_current -> apply_as_current_with_mode -> apply_action_boundary
+    // `apply_as_current -> apply_as_current_with_mode
+    //  -> apply_action_boundary_for_semantic_owner
     //  -> apply_action_boundary_with_stack_limit -> apply_action_boundary_core`,
     // so the entry sweep runs on THIS state — a healthy one, parked mid-prompt
     // with a live owner. CR 614.12a: the as-enters choice is still being made,

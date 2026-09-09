@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+use crate::lan::{self, LanServerStatus, RunningLan};
 use crate::native_bridge::BridgeHandle;
 use crate::native_engine_contract::{
     NativeEngineCapabilities, NativeEngineError, NativeEngineIntent, NativeEngineKey,
@@ -531,6 +532,7 @@ impl RunningEngine {
 
 struct NativeEngineState {
     running: Option<RunningEngine>,
+    lan: Option<RunningLan>,
     bridges: BTreeMap<u64, BridgeHandle>,
     next_bridge_id: u64,
 }
@@ -539,6 +541,7 @@ impl Default for NativeEngineState {
     fn default() -> Self {
         Self {
             running: None,
+            lan: None,
             bridges: BTreeMap::new(),
             next_bridge_id: 1,
         }
@@ -790,7 +793,9 @@ fn ensure_native_engine_sync(
         Some(resolved) => resolved,
         None => resolve_artifact(app, &fetch, &files, &key, intent)?,
     };
-    let repair_allowed = !held_is_healthy_for_key && retained_record.is_none();
+    let repair_allowed = !held_is_healthy_for_key
+        && retained_record.is_none()
+        && !state.lan.as_ref().is_some_and(|lan| lan.key == key);
 
     let spawn_plan = provision_resolved_artifact(
         Some(app),
@@ -833,7 +838,7 @@ fn ensure_native_engine_sync(
         &files.games_db(&key),
         &files.log_directory(),
         &files.startup_log(),
-        port,
+        ServerMode::Solo(port),
         &spawn_plan.arguments,
     )?;
     if let Err(error) = wait_for_health(&client, port, &mut child) {
@@ -861,7 +866,9 @@ fn ensure_native_engine_sync(
         child,
         stdin: Some(stdin),
     });
-    if let Err(error) = gc_after_successful_spawn(&files, &key) {
+    if let Err(error) =
+        gc_after_successful_spawn(&files, &key, state.lan.as_ref().map(|lan| &lan.key))
+    {
         eprintln!("native engine GC after successful spawn failed: {error:?}");
     }
     Ok(NativeEngineReady { port })
@@ -888,6 +895,131 @@ fn stop_native_engine_sync(app: &AppHandle) -> Result<(), NativeEngineError> {
         // is resolved by the adopt-or-kill at the next ensure_native_engine.
         Ok(())
     }
+}
+
+pub(crate) fn start_lan_server_sync(
+    app: &AppHandle,
+    key: NativeEngineKey,
+    intent: NativeEngineIntent,
+) -> Result<LanServerStatus, NativeEngineError> {
+    key.validate()?;
+    if intent == NativeEngineIntent::PrepareForOffline {
+        return Err(NativeEngineError::invalid_key(
+            "LAN hosting requires a start intent",
+        ));
+    }
+    let files = NativeEngineFiles::from_app(app)?;
+    let client = http_client()?;
+    let mut state = engine_state().lock().map_err(lan::lan_error)?;
+    clear_exited_lan(&mut state)?;
+    if let Some(running) = &state.lan {
+        return if running.key == key {
+            Ok(running.status())
+        } else {
+            Err(lan::lan_error(
+                "stop the current LAN server before changing its engine key",
+            ))
+        };
+    }
+    let ips = lan::private_addresses()?;
+    fs::create_dir_all(&files.base).map_err(NativeEngineError::storage)?;
+    check_release_ratchet(&files, &key)?;
+    let fetch = |url: &str| fetch_bytes(&client, url);
+    let resolved = resolve_artifact(app, &fetch, &files, &key, intent)?;
+    // Both runtimes share verified artifacts; never repair files a live solo
+    // process (including a persisted/adoptable child) could still be reading.
+    let record = read_spawn_record(&files)?;
+    let repair_allowed = !state
+        .running
+        .as_ref()
+        .is_some_and(|running| running.key() == &key)
+        && !record
+            .as_ref()
+            .is_some_and(|record| record.key == key && health_passes(&client, record.port));
+    let plan = provision_resolved_artifact(
+        Some(app),
+        &fetch,
+        &files,
+        &key,
+        &resolved,
+        intent,
+        repair_allowed,
+    )?;
+    let port = reserve_port()?;
+    let addresses: Vec<_> = ips
+        .iter()
+        .map(|ip| format!("ws://{ip}:{port}/ws"))
+        .collect();
+    let logs = files.log_directory().join("lan");
+    let database = files
+        .base
+        .join("games")
+        .join(format!("lan-{}.db", key.channel()));
+    let arguments = lan_server_arguments(key.origin(), intent, &addresses[0]);
+    let (child, stdin) = spawn_server(
+        &plan.binary,
+        &plan.data_directory,
+        &database,
+        &logs,
+        &logs.join("server-startup.log"),
+        ServerMode::Lan(port),
+        &arguments,
+    )?;
+    let mut running = RunningLan {
+        key: key.clone(),
+        child,
+        stdin: Some(stdin),
+        addresses,
+        advertisement: None,
+    };
+    wait_for_health(&client, port, &mut running.child)?;
+    running.advertisement = Some(lan::advertise(&ips, port, key.channel())?);
+    persist_release_ratchet(&files, &key)?;
+    let status = running.status();
+    state.lan = Some(running);
+    // Solo GC retains the LAN key; LAN startup doesn't evict a persisted solo
+    // owner's files, whose liveness can outlast the in-memory running slot.
+    Ok(status)
+}
+
+fn lan_server_arguments(origin: &str, intent: NativeEngineIntent, public_url: &str) -> Vec<String> {
+    let mut arguments = vec![
+        "--bind".into(),
+        "0.0.0.0".into(),
+        "--exit-on-stdin-close".into(),
+        "--allowed-origin".into(),
+        origin.into(),
+        "--public-url".into(),
+        public_url.into(),
+    ];
+    if intent != NativeEngineIntent::StartOnline {
+        arguments.push("--no-data-download".into());
+    }
+    arguments
+}
+
+fn clear_exited_lan(state: &mut NativeEngineState) -> Result<(), NativeEngineError> {
+    if let Some(running) = &mut state.lan {
+        if running.child.try_wait().map_err(lan::lan_error)?.is_some() {
+            state.lan.take();
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn lan_server_status_sync() -> Result<LanServerStatus, NativeEngineError> {
+    let mut state = engine_state().lock().map_err(lan::lan_error)?;
+    clear_exited_lan(&mut state)?;
+    Ok(state
+        .lan
+        .as_ref()
+        .map(RunningLan::status)
+        .unwrap_or_default())
+}
+
+pub(crate) fn stop_lan_server_sync() -> Result<(), NativeEngineError> {
+    engine_state().lock().map_err(lan::lan_error)?.lan.take();
+    Ok(())
 }
 
 fn http_client() -> Result<Client, NativeEngineError> {
@@ -1625,13 +1757,18 @@ fn reserve_port() -> Result<u16, NativeEngineError> {
         })
 }
 
+enum ServerMode {
+    Solo(u16),
+    Lan(u16),
+}
+
 fn spawn_server(
     binary: &Path,
     data_directory: &Path,
     games_db: &Path,
     log_directory: &Path,
     startup_log: &Path,
-    port: u16,
+    mode: ServerMode,
     arguments: &[String],
 ) -> Result<(Child, ChildStdin), NativeEngineError> {
     fs::create_dir_all(log_directory).map_err(NativeEngineError::storage)?;
@@ -1641,6 +1778,9 @@ fn spawn_server(
         .truncate(true)
         .open(startup_log)
         .map_err(NativeEngineError::storage)?;
+    let port = match mode {
+        ServerMode::Solo(port) | ServerMode::Lan(port) => port,
+    };
     let mut command = Command::new(binary);
     command
         .env("PORT", port.to_string())
@@ -1655,6 +1795,15 @@ fn spawn_server(
         // structured logger. Keep the latest one beside its rolling logs so a
         // server that exits before `/health` is diagnosable without a console.
         .stderr(Stdio::from(startup_log));
+
+    if matches!(mode, ServerMode::Lan(_)) {
+        command
+            .env_remove("PHASE_SINGLE_USER")
+            .env_remove("PHASE_LOBBY_ONLY")
+            .env_remove("PHASE_ANNOUNCE_TO")
+            .env_remove("NGROK_AUTHTOKEN")
+            .env_remove("PHASE_METRICS_PORT");
+    }
 
     // The shell is a GUI-subsystem app but phase-server is console-subsystem, so
     // Windows would otherwise pop a console window for the child on every launch.
@@ -1842,14 +1991,16 @@ fn process_is_plausibly_ours(pid: u32, binary: &Path) -> bool {
 fn gc_after_successful_spawn(
     files: &NativeEngineFiles,
     retained: &NativeEngineKey,
+    other_active: Option<&NativeEngineKey>,
 ) -> Result<(), NativeEngineError> {
-    gc_channel_directories(files, retained)?;
+    gc_channel_directories(files, retained, other_active)?;
     gc_cache(files)
 }
 
 fn gc_channel_directories(
     files: &NativeEngineFiles,
     retained: &NativeEngineKey,
+    other_active: Option<&NativeEngineKey>,
 ) -> Result<(), NativeEngineError> {
     let retained_name = retained.directory_name();
     let prefix = format!("{}-", retained.channel());
@@ -1859,6 +2010,7 @@ fn gc_channel_directories(
         let name = name.to_string_lossy();
         if name.starts_with(&prefix)
             && name != retained_name
+            && !other_active.is_some_and(|key| name == key.directory_name())
             && entry
                 .file_type()
                 .map_err(NativeEngineError::storage)?
@@ -2803,6 +2955,73 @@ mod tests {
     }
 
     #[test]
+    fn lan_launch_is_multiplayer_with_explicit_origin_and_public_address() {
+        let args = lan_server_arguments(
+            RELEASE_ORIGIN,
+            NativeEngineIntent::StartOffline,
+            "ws://192.168.1.2:9374/ws",
+        );
+        assert_eq!(
+            args,
+            [
+                "--bind",
+                "0.0.0.0",
+                "--exit-on-stdin-close",
+                "--allowed-origin",
+                RELEASE_ORIGIN,
+                "--public-url",
+                "ws://192.168.1.2:9374/ws",
+                "--no-data-download"
+            ]
+        );
+        assert!(!lan_server_arguments(
+            PREVIEW_ORIGIN,
+            NativeEngineIntent::StartOnline,
+            "ws://10.0.0.1:9374/ws"
+        )
+        .iter()
+        .any(|arg| arg == "--no-data-download"));
+    }
+
+    #[test]
+    fn gc_retains_both_active_artifact_keys() {
+        let files = test_files("lan-active-gc");
+        let solo = release_key("3.0.0");
+        let lan = release_key("2.0.0");
+        let stale = release_key("1.0.0");
+        for key in [&solo, &lan, &stale] {
+            fs::create_dir_all(files.key_directory(key)).unwrap();
+        }
+        gc_after_successful_spawn(&files, &solo, Some(&lan)).unwrap();
+        assert!(files.key_directory(&solo).is_dir());
+        assert!(files.key_directory(&lan).is_dir());
+        assert!(!files.key_directory(&stale).exists());
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exited_lan_child_clears_running_status() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take();
+        child.wait().unwrap();
+        let mut state = NativeEngineState::default();
+        state.lan = Some(RunningLan {
+            key: release_key("1.0.0"),
+            child,
+            stdin,
+            addresses: vec![],
+            advertisement: None,
+        });
+        clear_exited_lan(&mut state).unwrap();
+        assert!(state.lan.is_none());
+    }
+
+    #[test]
     fn manifest_diff_cache_gc_and_different_key_directory_gc() {
         let files = test_files("gc");
         let current = release_key("2.0.0");
@@ -2822,7 +3041,7 @@ mod tests {
             fs::create_dir_all(files.key_directory(key)).unwrap();
             write_json_atomically(&files.manifest_data(key), &StoredManifestData { data }).unwrap();
         }
-        gc_after_successful_spawn(&files, &current).unwrap();
+        gc_after_successful_spawn(&files, &current, None).unwrap();
         assert!(files.key_directory(&current).exists());
         assert!(!files.key_directory(&old_release).exists());
         assert!(files.key_directory(&preview).exists());
@@ -3188,6 +3407,7 @@ mod tests {
         let (outbound, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut state = NativeEngineState {
             running: Some(RunningEngine::Adopted(retained)),
+            lan: None,
             bridges: BTreeMap::from([(1, BridgeHandle::new(abort, outbound))]),
             next_bridge_id: 2,
         };

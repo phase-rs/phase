@@ -256,7 +256,7 @@
     "compact": { "sideboardRegion": "Sideboard compatto" },
     "toolbar": { "label": "Disposizione del tabellone" },
     "layout": { "label": "Layout", "columns": "Colonne", "maxPerRow": "Massimo di colonne per riga", "decreaseMaxPerRow": "Riduci massimo di colonne per riga", "increaseMaxPerRow": "Aumenta massimo di colonne per riga" },
-    "sort": { "label": "Ordina tabellone", "group": "Raggruppa", "cmc": "Valore di mana", "color": "Colore", "rarity": "Rarità", "type": "Tipo" },
+    "sort": { "label": "Raggruppa per", "group": "Raggruppa", "cmc": "Valore di mana", "color": "Colore", "rarity": "Rarità", "type": "Tipo" },
     "rows": { "label": "Righe del tabellone", "one": "Una riga", "two": "Due righe" },
     "rowHeaders": { "creatures": "Creature", "nonCreatures": "Non creature" },
     "columns": { "label": "Colonne del tabellone", "add": "Aggiungi colonna", "removeFinal": "Rimuovi ultima colonna", "removeHeader": "Rimuovi colonna {{column}}" },
@@ -310,6 +310,7 @@
     "textBasedBuilder": "Costruttore testuale",
     "textBuilder": "Costruttore testo",
     "averageManaCost": "Costo medio di mana",
+    "deckStats": "Statistiche del mazzo",
     "manaColor": "Colore del mana",
     "countInCost": "Quantità nel costo",
     "type": "Tipo",
@@ -583,6 +584,12 @@
   "podComplete": {
     "title": "Draft completato",
     "launchCommanderGame": "Avvia partita Commander",
+    "launchLocalCommanderGame": "Avvia partita Commander locale",
+    "waitingForPlayers": "In attesa che i giocatori si uniscano…",
+    "cancelCommanderLaunch": "Annulla avvio",
+    "joinCommanderGame": "Unisciti alla partita Commander",
+    "joiningCommanderGame": "Accesso in corso: in attesa degli altri giocatori…",
+    "seatCeiling": "Questo tavolo ha {{seats}} giocatori; una partita Commander peer-to-peer ne supporta al massimo {{max}}. Giocherai questa partita in locale contro il motore, con tutti i mazzi draftati.",
     "returnToMenu": "Torna al menu"
   },
   "podError": {

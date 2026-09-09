@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const lanGate = vi.hoisted(() => ({ supported: false, probe: vi.fn(), authorize: vi.fn() }));
+vi.mock("../../services/nativeEngineSocket", () => ({ NativeEngineSocket: class { constructor() { return new MockWebSocket("native-lan"); } } }));
+vi.mock("../../services/lan", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/lan")>(),
+  initializeLanCapabilities: lanGate.probe,
+  authorizeLanServer: lanGate.authorize,
+  canUseLanBridge: () => lanGate.supported,
+}));
+
 import {
   NativeEngineVersionMismatchError,
   PROTOCOL_VERSION,
@@ -184,6 +193,87 @@ describe("WebSocketAdapter", () => {
     adapter.sendMatchConcede();
 
     expect(ws.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "ConcedeMatch" }));
+  });
+
+  const fullFollowUpCases = [
+    {
+      label: "StateUpdate",
+      acceptedEvent: "stateChanged",
+      frame: (fullKey?: { game_code: string; generation: number }) => ({
+        type: "StateUpdate",
+        data: {
+          state_revision: 2,
+          state: { ...createMockState(), turn_number: 2 },
+          events: [],
+          ...(fullKey ? { full_key: fullKey } : {}),
+        },
+      }),
+    },
+    {
+      label: "OpponentDisconnected",
+      acceptedEvent: "opponentDisconnected",
+      frame: (fullKey?: { game_code: string; generation: number }) => ({
+        type: "OpponentDisconnected",
+        data: { grace_seconds: 30, ...(fullKey ? { full_key: fullKey } : {}) },
+      }),
+    },
+    {
+      label: "OpponentReconnected",
+      acceptedEvent: "opponentReconnected",
+      frame: (fullKey?: { game_code: string; generation: number }) => ({
+        type: "OpponentReconnected",
+        data: fullKey ? { full_key: fullKey } : {},
+      }),
+    },
+  ];
+
+  it.each(
+    fullFollowUpCases.flatMap(({ label, acceptedEvent, frame }) => [
+      {
+        label,
+        acceptedEvent,
+        frame: frame(),
+        expectedError: "Server omitted a valid Full session identity",
+      },
+      {
+        label,
+        acceptedEvent,
+        frame: frame({ game_code: "GAME01", generation: 2 }),
+        expectedError: "Server changed the Full session identity",
+      },
+      {
+        label,
+        acceptedEvent,
+        frame: frame({ game_code: "GAME01", generation: 1 }),
+        expectedError: null,
+      },
+    ]),
+  )("fences $label by the established Full identity", ({ frame, acceptedEvent, expectedError }) => {
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "GameCreated",
+        data: {
+          game_code: "GAME01",
+          player_token: "player-token",
+          full_key: { game_code: "GAME01", generation: 1 },
+        },
+      }),
+    );
+    const listener = vi.fn();
+    adapter.onEvent(listener);
+
+    ws.dispatchSynthetic("message", JSON.stringify(frame));
+
+    expect(listener.mock.calls.some(([event]) => event.type === acceptedEvent)).toBe(
+      expectedError === null,
+    );
+    if (expectedError) {
+      expect(listener).toHaveBeenCalledWith({ type: "error", message: expectedError });
+      expect(ws.close).toHaveBeenCalledOnce();
+    } else {
+      expect(ws.close).not.toHaveBeenCalled();
+    }
   });
 
   it("exports only the trusted snapshot returned by the server", async () => {
@@ -2007,4 +2097,62 @@ describe("WebSocketAdapter", () => {
       });
     });
   });
+});
+
+
+it("waits for the first LAN capability probe before rejecting an HTTPS manual join", async () => {
+  const originalLocation = window.location;
+  Object.defineProperty(window, "location", { configurable: true, value: { ...originalLocation, protocol: "https:" } });
+  let release!: () => void;
+  lanGate.supported = false;
+  lanGate.authorize.mockReset().mockResolvedValue(undefined);
+  lanGate.probe.mockImplementation(() => new Promise<boolean>((resolve) => {
+    release = () => { lanGate.supported = true; resolve(true); };
+  }));
+  const manual = new WebSocketAdapter("ws://192.168.1.2:9374/ws", "join", { main_deck: [], sideboard: [] }, "ABC123");
+  MockWebSocket.last = null;
+  const initialized = manual.initialize();
+  // The adapter must not reject on mixed content while capability is unknown.
+  release();
+  // The transport's probe shares the resolved capability in production.
+  lanGate.probe.mockResolvedValue(true);
+  try {
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+    expect(lanGate.authorize).toHaveBeenCalledExactlyOnceWith("ws://192.168.1.2:9374/ws");
+    const socket = MockWebSocket.last!;
+    socket.dispatchSynthetic("message", SERVER_HELLO);
+    await vi.waitFor(() => expect(socket.send).toHaveBeenCalledWith(expect.stringContaining('"type":"JoinGameWithPassword"')));
+    socket.dispatchSynthetic("message", JSON.stringify({ type: "GameStarted", data: { state: createMockState(), your_player: 0 } }));
+    await expect(initialized).resolves.toBeUndefined();
+  } finally {
+    manual.dispose(); lanGate.supported = false;
+    Object.defineProperty(window, "location", { configurable: true, value: originalLocation });
+  }
+});
+
+
+it.each(["resolve", "reject"] as const)("disposes during a pending LAN probe before its late %s", async (completion) => {
+  let complete!: () => void;
+  const probe = new Promise<boolean>((resolve, reject) => {
+    complete = () => completion === "resolve" ? resolve(true) : reject(new Error("Late probe failure"));
+  });
+  lanGate.probe.mockReset().mockReturnValue(probe);
+  lanGate.authorize.mockReset();
+  const manual = new WebSocketAdapter("ws://192.168.1.2:9374/ws", "join", { main_deck: [], sideboard: [] }, "ABC123");
+  MockWebSocket.last = null;
+  const rejection = trackRejection(manual.initialize());
+  manual.dispose();
+  try {
+    expect(await rejection()).toMatchObject({
+      code: "WS_CLOSED",
+      message: "Adapter disposed before initialization completed",
+    });
+    complete();
+    await probe.catch(() => {});
+    expect(MockWebSocket.last).toBeNull();
+    expect(lanGate.authorize).not.toHaveBeenCalled();
+    expect(lanGate.probe).toHaveBeenCalledOnce();
+  } finally {
+    lanGate.probe.mockReset().mockResolvedValue(false);
+  }
 });

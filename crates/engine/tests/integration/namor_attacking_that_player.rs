@@ -17,7 +17,7 @@
 //! discriminate it.
 //!
 //! **Defect B — the pump was board-wide.** With "attacking that player"
-//! unconsumed by `parse_type_phrase`, the clause fell through to the numeric
+//! unconsumed by `parse_type_phrase_folding`, the clause fell through to the numeric
 //! imperative path, which emits the documented
 //! `Effect::Pump { target: TargetFilter::Any }` sentinel. `TargetFilter::Any`
 //! matches unconditionally, so +2/+0 landed on every permanent on the

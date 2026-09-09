@@ -253,9 +253,10 @@ export function createAIController(config: AIControllerConfig): AIController {
       return;
     }
 
-    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+    const useTacticalFallback = consecutiveFailures >= MAX_CONSECUTIVE_FAILURES;
+    if (useTacticalFallback && !useGameStore.getState().adapter?.getAiTacticalActionProposal) {
       debugLog(
-        `AI controller halted after ${MAX_CONSECUTIVE_FAILURES} failed proposals on ${waitingFor.type}`,
+        `AI controller halted after ${MAX_CONSECUTIVE_FAILURES} failed proposals on ${waitingFor.type}; no tactical fallback is available`,
         "error",
       );
       notifyEngineLost(`ai-controller-stuck:${waitingFor.type}`);
@@ -263,10 +264,10 @@ export function createAIController(config: AIControllerConfig): AIController {
       return;
     }
 
-    scheduleAction(waitingPlayerId);
+    scheduleAction(waitingPlayerId, useTacticalFallback);
   }
 
-  function scheduleAction(playerId: number) {
+  function scheduleAction(playerId: number, useTacticalFallback: boolean) {
     if (pending) return;
 
     // Start computing immediately — in parallel with the artificial delay.
@@ -279,7 +280,9 @@ export function createAIController(config: AIControllerConfig): AIController {
     const waitingForType = gameState?.waiting_for?.type;
     const scheduledWaitingFor = gameState?.waiting_for ?? null;
     if (!scheduledWaitingFor) return;
-    const getProposal = adapter?.getAiActionProposal;
+    const getProposal = useTacticalFallback
+      ? adapter?.getAiTacticalActionProposal
+      : adapter?.getAiActionProposal;
     if (!getProposal) return;
     const attempt = beginAttempt(scheduledWaitingFor, playerId);
     const proposalPromise: Promise<AiActionProposal | null> = Promise.resolve(
@@ -337,7 +340,9 @@ export function createAIController(config: AIControllerConfig): AIController {
           try {
             if (!isAttemptCurrent(attempt)) return;
             const retryAdapter = useGameStore.getState().adapter;
-            const retryGetProposal = retryAdapter?.getAiActionProposal;
+            const retryGetProposal = useTacticalFallback
+              ? retryAdapter?.getAiTacticalActionProposal
+              : retryAdapter?.getAiActionProposal;
             if (!retryGetProposal) return;
             proposal = await retryGetProposal.call(retryAdapter, difficulty, playerId);
           } catch (retryErr) {

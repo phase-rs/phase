@@ -1957,6 +1957,180 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
     }
     targets
 }
+/// CR 608.2b + CR 115.10a: the targets this chain SPECIFIED — one entry per
+/// instance of the word "target" — as opposed to every `TargetRef` the chain
+/// happens to hold.
+///
+/// CR 608.2b's fizzle quantifier is "if all its targets, **for every instance of
+/// the word 'target'**, are now illegal". CR 115.10a: "Unless that object or
+/// player is identified by the word 'target' … it's not a target." So an
+/// anaphoric rider — Swords to Plowshares' "**its** controller gains life equal
+/// to **its** power", Condemn's toughness variant, Solitude's ETB — must not
+/// contribute to that count.
+///
+/// CR 608.2b's own Example says this outright:
+///   "Sorin's Thirst is a black instant that reads, 'Sorin's Thirst deals 2
+///    damage to target creature and you gain 2 life.' If the creature isn't a
+///    legal target during the resolution of Sorin's Thirst … then Sorin's Thirst
+///    doesn't resolve. Its controller doesn't gain any life."
+/// The rider clause has no instance of "target" of its own, so it does not keep
+/// the spell alive, and it does not happen.
+///
+/// The rider's `targets` entry is a snapshot of the PARENT's chosen object,
+/// pushed at announcement by `assign_targets_recursive` /
+/// `assign_selected_slots_recursive` so `Power { Target }` has something to read
+/// (issue #3864: the rider deliberately surfaces no slot of its own). Counting
+/// that snapshot let a spell whose ONLY specified target had become illegal
+/// resolve anyway — the exile no-opped and the life gain still fired off last
+/// known information (issues #5965, #8058).
+///
+/// The discriminator mirrors the GENERIC TAIL of those two functions — the
+/// condition under which the tail performs the push — in its three STRUCTURAL
+/// conjuncts, and deliberately NOT in its fourth, value-testing one:
+///
+///   `sub_ability_inherits_parent_creature_target_only(parent, sub)`
+///   `  && !defers_sub_ability_target_selection(&parent.effect)`
+///   `  && !defers_conditional_target_selection(sub)`
+///
+/// Those three lines are a STATEMENT OF THE CONDITION, not of anyone's
+/// evaluation order. The producer evaluates the defer-head guard first
+/// (:7898), then the PREDICATE (:7907 — computed before the `as_mut()` borrow,
+/// because the helper needs `&parent` and `&sub` at once), then the defer-sub
+/// guard (:7916). The mirror below regroups BOTH gates ahead of the predicate,
+/// deliberately, so a reader sees both refusals before the classification.
+/// Same verdict either way — and only because all three conjuncts are pure and
+/// total over already-loaded fields, and none of them reads `.targets`. If any
+/// one of them ever gains a side effect or an early `.targets` read, the
+/// regrouping stops being free: re-derive it then rather than assuming it.
+///
+/// THE PRODUCER HAS A FOURTH GATE, AND MIRRORING IT WOULD BE A BUG. The push is
+/// additionally guarded by `if let Some(creature) = parent_creature_target`
+/// (:7920 / :8345) — a `find_map` over the PARENT's own `TargetRef::Object`s.
+/// It is omitted here for a reason stronger than redundancy: it is the one gate
+/// that READS `.targets`, and `.targets` is exactly the field
+/// `validate_targets_in_chain` rewrites. On the ORIGINAL side the head still
+/// holds its chosen object, so a fourth conjunct would say "inherited"; on the
+/// VALIDATED side the head's `targets` has been emptied by the very
+/// re-validation under test, so it would say "NOT inherited" and count the
+/// rider's snapshot — resurrecting the exact defect this function exists to fix.
+/// Omitting it is what keeps the verdict provably identical on both sides of the
+/// `check_fizzle` comparison. It is also inert in the only direction that could
+/// matter: when `parent_creature_target` is `None` the producer pushes nothing,
+/// so the sub's `targets` is empty from this writer and skipping an empty vector
+/// is a no-op.
+///
+/// LOCKSTEP — A SECOND ANNOUNCE-TIME SNAPSHOT WRITER THIS FUNCTION DOES NOT YET
+/// COVER. `stamp_other_batch_source_targets` (see above) also writes targets a
+/// node did not specify: for
+/// `EachSourceDealsDamage { sources: ParentTarget, recipient: OtherBatchSource }`
+/// it stamps the two nearest `TargetOnly` producers' objects onto a node that
+/// carries no instance of the word "target" of its own (Grim Contest, "Choose
+/// target creature you control and target creature an opponent controls. Each
+/// of those creatures deals damage equal to its toughness to the other."). Those
+/// stamped entries are NOT excluded here, so if BOTH announced targets become
+/// illegal the stamped node keeps them, `legal_targets` stays non-empty, and the
+/// spell resolves instead of being countered — the same CR 608.2b masking this
+/// function fixes for anaphoric riders, in a different class. That is a KNOWN,
+/// PRE-EXISTING gap, deliberately out of scope here and tracked separately in
+/// issue #8684 (Grim Contest is the one affected printed card today); it
+/// is recorded so the omission is discoverable rather than latent. If this
+/// function is ever widened to cover it, the discriminator must key off
+/// `stamp_other_batch_source_targets`' own condition, exactly as it keys off the
+/// assigners' condition today.
+///
+/// IT IS NOT THE WHOLE OF EITHER FUNCTION, and the difference is deliberate.
+/// Both open with six effect-keyed arms — an `AdditionalCostPaidInstead` sub,
+/// `MoveCounters`, `Attach`, a paired-subject effect, `Fight`, and multi-role
+/// mana — that recurse into `sub_ability` and return with NO inherits test, and
+/// `chain_has_target_sink` returns early for four of those same parent shapes.
+/// So this mirror can answer "inherited" on a parent whose producer arm never
+/// reached the push. That over-exclusion is INERT today, for two reasons that
+/// must be re-checked if either side moves. The only sub it can misclassify is
+/// a GainLife anaphor rider (`effect_player_filter_is_parent_target_anaphor` is
+/// `_ => false` for everything else), and for such a rider:
+///   * on FIVE of the six arms the slot builder surfaces no slot for it, so its
+///     `targets` is empty and skipping it is a no-op —
+///     `collect_target_slots_inner`'s `Fight` arm descends into no sub at all,
+///     and the other four route through `collect_sub_chain_slots`, whose
+///     descent gate is this same predicate;
+///   * on the `AdditionalCostPaidInstead` arm the slot builder DOES descend
+///     unfiltered and the rider CAN hold a player-selected target — but both
+///     assigners then execute `parent.targets = sub.targets.clone()` in that
+///     same arm, so the parent already contributes every entry the sub
+///     holds. On the ORIGINAL side that makes emptiness unchanged by
+///     construction. On the VALIDATED side it does not follow:
+///     `validate_targets_in_chain` has NO `AdditionalCostPaidInstead`
+///     arm, so parent and sub take different arms — the sub's
+///     context-ref arm keeps its entry unconditionally while the
+///     parent's copy is re-validated against the parent's own filter
+///     and can be dropped. A divergence needs a parent whose validation
+///     drops what the sub's does not: unreachable today only because no
+///     card produces an `AdditionalCostPaidInstead` `GainLife` anaphor
+///     rider. If one ever does, re-derive this bullet — do not assume it.
+///
+/// LOCKSTEP: if any of those six arms is ever made to surface a slot for an
+/// inheriting sub, this mirror must gain the corresponding arm in the SAME
+/// commit — the same rule that binds it to the two `defers_*` guards.
+///
+/// The predicate alone is NECESSARY BUT NOT SUFFICIENT. On the deferred path
+/// (`Scry`/`Dig`/`Surveil`/`ChooseCard`/`SearchLibrary`/`RevealHand`/`Choose`
+/// heads) the producer does not push a snapshot at all — it routes through
+/// `assign_targets_after_deferred_effect`, which writes REAL, player-selected
+/// targets into the sub, while the predicate still returns true. Skipping those
+/// would stop a chain fizzling that correctly fizzles today: the same defect,
+/// inverted.
+///
+/// All three conjuncts are purely structural — none reads `.targets` — and
+/// `validate_targets_in_chain` clones the ability and mutates only `.targets`,
+/// so the verdict is provably identical on the original and validated sides and
+/// on both sides of the fizzle comparison. Any future widening of the
+/// inherited-rider class is covered here automatically.
+///
+/// Scoped to SUB nodes deliberately. A ROOT node holding a context-ref snapshot
+/// is a different shape (a delayed-return trigger: Flickerwisp's "return that
+/// card", whose referent is legitimately in Exile) and keeps its entry, exactly
+/// as `validate_targets_in_chain`'s context-ref arm keeps it.
+pub(crate) fn flatten_specified_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
+    fn visit(ability: &ResolvedAbility, targets_are_inherited: bool, out: &mut Vec<TargetRef>) {
+        if !targets_are_inherited {
+            if is_per_opponent_target_fanout(ability) {
+                out.extend(object_targets_only(&ability.targets));
+            } else {
+                out.extend(ability.targets.iter().cloned());
+            }
+        }
+        // An inherited node's own entries are skipped, but its sub-chain is
+        // still walked: a rider may itself carry a genuinely targeting child.
+        // (Today neither assign path recurses after the push, so this traversal
+        // is inert and preserves BASE exactly — it is the correct shape if that
+        // ever changes.)
+        if let Some(sub) = ability.sub_ability.as_deref() {
+            // Mirror BOTH producer gates — `assign_targets_recursive`
+            // :7898 / :7916 and `assign_selected_slots_recursive`
+            // :8323 / :8341 — REGROUPED ahead of the predicate. This is NOT
+            // the producer's order: it evaluates the predicate at :7907,
+            // BETWEEN its two gates. The regrouping is verdict-preserving
+            // because all three conjuncts are pure and none reads `.targets`.
+            // On the deferred path the sub receives REAL selected targets
+            // instead of a snapshot.
+            let inherited = !defers_sub_ability_target_selection(&ability.effect)
+                && !defers_conditional_target_selection(sub)
+                && sub_ability_inherits_parent_creature_target_only(ability, sub);
+            visit(sub, inherited, out);
+        }
+        // CR 601.2c: neither assign path writes an inherited target into an
+        // `else_ability` — both push only to `sub_ability`, and neither
+        // function references `else_ability` at all — so an else branch always
+        // owns whatever targets it holds.
+        if let Some(else_ability) = ability.else_ability.as_deref() {
+            visit(else_ability, false, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    visit(ability, false, &mut out);
+    out
+}
 
 /// CR 601.2d: The node whose effect divides damage/counters among its own
 /// targets. Mirrors `extract_distribution_total`, which inspects only the
@@ -2594,6 +2768,42 @@ pub(crate) fn fight_subject_needs_target_slot(subject: &TargetFilter) -> bool {
     }
 }
 
+/// CR 115.1 + CR 601.2c: the `Effect::BecomeCopy` RECIPIENT filter that must be
+/// announced as its own target slot, or `None` when the recipient needs no
+/// announcement (`crate::types::ability::CopyRecipient::Source`, or an untargeted CR 611.2c set).
+///
+/// **Single authority.** Three consumers must agree exactly or the target
+/// machinery silently misbinds:
+///
+/// 1. `collect_target_slots_inner` — surfaces the cast-time slot.
+/// 2. `collect_target_slot_specs` — surfaces the matching per-slot spec. The
+///    two are mirrors with NO assertion linking them; divergence fails silently
+///    as misaligned `TargetInstanceId`s.
+/// 3. `game::effects::become_copy::resolve` — reads
+///    [`become_copy_copy_source_target_index`] to know which declared object
+///    target is the copy SOURCE rather than the recipient.
+///
+/// The recipient is declared FIRST because it is printed first ("**Target
+/// artifact you control** becomes a copy of **a second target artifact you
+/// control**" — Shuri, Wakandan Inventor), and CR 601.2c declares targets in
+/// the order written.
+pub(crate) fn become_copy_recipient_slot_filter(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::BecomeCopy { recipient, .. } => recipient.announced_filter(),
+        _ => None,
+    }
+}
+
+/// CR 115.1: index into an ability's declared OBJECT targets at which the
+/// `BecomeCopy` copy source lives.
+///
+/// `0` for the incumbent single-target shape; `1` when the recipient claimed
+/// slot 0 via [`become_copy_recipient_slot_filter`]. Derived from that same
+/// function so the resolver's index mapping cannot drift from the slot builder.
+pub(crate) fn become_copy_copy_source_target_index(effect: &Effect) -> usize {
+    usize::from(become_copy_recipient_slot_filter(effect).is_some())
+}
+
 /// Legal targets for the companion `TargetFilter::Player` slot — the player
 /// whose permanents a `ControllerRef::TargetPlayer` ("that player controls")
 /// filter scopes to. Single authority shared by the static slot build
@@ -3210,6 +3420,31 @@ fn collect_target_slots_inner(
                 effect_detail: acc.current_effect_detail,
             });
         }
+        // CR 115.1 + CR 601.2c: a `BecomeCopy` whose RECIPIENT is itself an
+        // announced target ("Target artifact you control becomes a copy of a
+        // second target artifact you control" — Shuri) declares that recipient
+        // BEFORE the copy source, matching printed order. Surfaced here, ahead
+        // of the generic `extract_target_filter_from_effect` slot below (which
+        // yields the copy SOURCE), so the two slots land in declaration order.
+        // The generic path is left completely untouched, preserving
+        // `optional_targeting` / `multi_target` / graveyard-and-exile choice
+        // behaviour for every incumbent self-copy card.
+        if ability.target_choice_timing == TargetChoiceTiming::Stack {
+            if let Some(filter) = become_copy_recipient_slot_filter(&ability.effect) {
+                let legal_targets =
+                    legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
+                if legal_targets.is_empty() && !ability.optional_targeting {
+                    return Err(no_legal_target_slots());
+                }
+                acc.push(TargetSelectionSlot {
+                    legal_targets,
+                    optional: ability.optional_targeting,
+                    chooser: None,
+                    effect_kind: acc.current_effect_kind,
+                    effect_detail: acc.current_effect_detail,
+                });
+            }
+        }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
             && !effect_target_filter_references_chosen_player(&ability.effect)
         {
@@ -3653,6 +3888,7 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another
@@ -3686,7 +3922,7 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
         | FilterProp::InAnyZone { .. }
         | FilterProp::SharesQuality { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -3799,6 +4035,7 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another
@@ -3831,7 +4068,7 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         | FilterProp::DistinctFrom { .. }
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -5552,6 +5789,31 @@ fn collect_target_slot_specs(
                 optional: ability.optional_targeting,
                 instance: id,
             });
+        }
+        // CR 115.1 + CR 601.2c: EXACT MIRROR of the `BecomeCopy` recipient slot
+        // in `collect_target_slots_inner` — same gate, same position ahead of
+        // the generic copy-source slot below. NO assertion links spec order to
+        // slot order, so a divergence here fails silently as misaligned
+        // `TargetInstanceId`s.
+        //
+        // CR 115.3: the recipient gets its OWN `TargetInstanceId` because it is
+        // a SEPARATE instance of the word "target" ("Target artifact you
+        // control … a second target artifact you control"). Per CR 115.3 the
+        // same object may be chosen once for EACH instance, so this is
+        // deliberately NOT a distinctness constraint: Shuri may legally answer
+        // both slots with the same artifact (a no-op self-copy). Sharing one
+        // instance across the two slots — the "up to N targets" idiom below —
+        // would wrongly forbid that.
+        if ability.target_choice_timing == TargetChoiceTiming::Stack {
+            if let Some(filter) = become_copy_recipient_slot_filter(&ability.effect) {
+                let id = TargetInstanceId(*next_instance);
+                *next_instance += 1;
+                specs.push(TargetSlotSpec {
+                    filter: filter.clone(),
+                    optional: ability.optional_targeting,
+                    instance: id,
+                });
+            }
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack {
             if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
@@ -7680,6 +7942,29 @@ fn assign_targets_recursive(
             ));
         }
     }
+    // CR 115.1 + CR 601.2c: Mirror the `BecomeCopy` recipient slot pushed by
+    // `collect_target_slots`, at the SAME position in this ladder — after the
+    // companion/quantity/combat-relation slots and immediately before the
+    // generic copy-source consumption below. Position parity is what makes
+    // `targets[0]` the recipient and `targets[1]` the copy source, the exact
+    // order `become_copy::resolve` reads via
+    // `become_copy_copy_source_target_index`. (No `BecomeCopy` co-occurs with
+    // those three companion slots today — its copy-source filter never
+    // references `ControllerRef::TargetPlayer`, and it is neither a fight nor a
+    // quantity effect — so this is order-preserving now and stays correct if one
+    // ever does.)
+    if ability.target_choice_timing == TargetChoiceTiming::Stack
+        && become_copy_recipient_slot_filter(&ability.effect).is_some()
+    {
+        if let Some(target) = targets.get(*next_target) {
+            ability.targets.push(target.clone());
+            *next_target += 1;
+        } else if !ability.optional_targeting {
+            return Err(EngineError::InvalidAction(
+                "Missing required target".to_string(),
+            ));
+        }
+    }
     if ability.target_choice_timing == TargetChoiceTiming::Stack
         && triggers::extract_target_filter_from_effect(&ability.effect).is_some()
     {
@@ -8067,6 +8352,33 @@ fn assign_selected_slots_recursive(
     }
     if ability.target_choice_timing == TargetChoiceTiming::Stack
         && effect_needs_parent_target_combat_relation_slot(&ability.effect)
+    {
+        let Some(selected_slot) = selected_slots.get(*next_slot) else {
+            return Err(EngineError::InvalidAction(
+                "Missing target selection".to_string(),
+            ));
+        };
+        match selected_slot {
+            Some(target) => ability.targets.push(target.clone()),
+            None if ability.optional_targeting => {}
+            None => {
+                return Err(EngineError::InvalidAction(
+                    "Missing required target".to_string(),
+                ));
+            }
+        }
+        *next_slot += 1;
+    }
+    // CR 115.1 + CR 601.2c: Mirror the `BecomeCopy` recipient slot for the
+    // ONE-SLOT-AT-A-TIME `ChooseTarget` walk (the path every AI game and the
+    // scenario driver take), at the SAME position in this ladder as in
+    // `collect_target_slots_inner` — after the companion/quantity/combat-relation
+    // slots and immediately before the generic copy-source consumption below.
+    // Position parity is what makes `targets[0]` the recipient and `targets[1]`
+    // the copy source, the order `become_copy::resolve` reads via
+    // `become_copy_copy_source_target_index`.
+    if ability.target_choice_timing == TargetChoiceTiming::Stack
+        && become_copy_recipient_slot_filter(&ability.effect).is_some()
     {
         let Some(selected_slot) = selected_slots.get(*next_slot) else {
             return Err(EngineError::InvalidAction(
@@ -8510,6 +8822,17 @@ fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
         return true;
     }
 
+    // CR 115.1 + CR 601.2c: A `BecomeCopy` with an announced recipient consumes
+    // TWO targets into its own node (recipient, then copy source), so it is a
+    // sink on the same footing as the `PreventDamage` head above. Without this,
+    // the blanket early return in `assign_selected_slots_in_chain` flattens both
+    // chosen targets onto the root and the recipient/copy-source split is lost.
+    if ability.target_choice_timing == TargetChoiceTiming::Stack
+        && become_copy_recipient_slot_filter(&ability.effect).is_some()
+    {
+        return true;
+    }
+
     // CR 109.4 + CR 115.1: A node also acts as a target sink when its filter
     // references `ControllerRef::TargetPlayer` (DamageAll, PutCounterAll,
     // etc.) — `collect_target_slots` pushes a companion player slot for it,
@@ -8797,8 +9120,10 @@ fn node_slot_filters(ability: &ResolvedAbility) -> NodeSlotFilters {
 ///     condition is a DIFFERENT authority from the one that produced `Legacy`.
 ///     BASE's `retarget_slot_violation` is a no-op at a position exactly when
 ///
-///         mana_multi_role(&ability.effect).is_none()
-///             && paired_subject_slot_filters(&ability.effect).next().is_none()
+///     ```text
+///     mana_multi_role(&ability.effect).is_none()
+///         && paired_subject_slot_filters(&ability.effect).next().is_none()
+///     ```
 ///
 ///     (its `filters.is_empty()` early-out). `Legacy` is produced by
 ///     `node_slot_filters`' `NotDerivable` verdict or by its arity gate
@@ -11528,6 +11853,312 @@ mod tests {
         );
     }
 
+    /// Helper: the Swords head — `ChangeZone { origin: None, destination:
+    /// Exile, target: Typed[Creature] }`, matching the committed IR snapshot.
+    fn change_zone_head(destination: Zone, targets: Vec<TargetRef>) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            targets,
+            ObjectId(99),
+            PlayerId(0),
+        )
+    }
+
+    /// Helper: the anaphoric rider — "Its controller gains life equal to its
+    /// power." `GainLife { player: ParentTargetController, amount:
+    /// Ref(Power { scope: Target }) }`, matching the committed IR snapshot.
+    fn gain_life_anaphor_rider(targets: Vec<TargetRef>) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                player: TargetFilter::ParentTargetController,
+            },
+            targets,
+            ObjectId(99),
+            PlayerId(0),
+        )
+    }
+
+    /// V8 — CR 608.2b + CR 115.10a: the inherited rider's `targets` entry is a
+    /// snapshot of the parent's chosen object, not an instance of the word
+    /// "target", so `flatten_specified_targets_in_chain` must not count it.
+    /// This is the unit-level statement of the #5965 / #8058 fix.
+    #[test]
+    fn flatten_specified_targets_in_chain_excludes_inherited_rider_entry() {
+        let victim = ObjectId(77);
+        let mut ability = change_zone_head(Zone::Exile, vec![TargetRef::Object(victim)]);
+        ability.sub_ability = Some(Box::new(gain_life_anaphor_rider(vec![TargetRef::Object(
+            victim,
+        )])));
+
+        // REACH GUARD (paired positive, MANDATORY): the verdict is decided by
+        // the FIRST failing conjunct, not the last one named — so assert the
+        // discriminator itself, not a proxy for it.
+        assert!(
+            sub_ability_inherits_parent_creature_target_only(
+                &ability,
+                ability.sub_ability.as_deref().unwrap()
+            ),
+            "reach-guard: the fixture must actually be an inherited rider, or \
+             this test pins nothing"
+        );
+
+        // SHAPE check, NOT an inheritance control: `flatten_targets_in_chain`
+        // only concatenates `.targets` and never consults the discriminator, so
+        // it returns 2 for any two-node chain with one entry each. It is kept
+        // because the claim is about the old-vs-new pair; the assertion above
+        // is what makes this test non-vacuous.
+        assert_eq!(flatten_targets_in_chain(&ability).len(), 2);
+
+        assert_eq!(
+            flatten_specified_targets_in_chain(&ability),
+            vec![TargetRef::Object(victim)],
+            "CR 608.2b + CR 115.10a: 'its controller gains life equal to its \
+             power' has no instance of the word 'target' of its own, so its \
+             propagated snapshot must not keep the spell alive"
+        );
+    }
+
+    /// V9 — CR 603.7c: a ROOT node holding a `ParentTarget` snapshot
+    /// (Flickerwisp's "return that card") keeps its entry. The fixture is the
+    /// one from
+    /// `validate_targets_in_chain_preserves_parent_target_snapshot_off_battlefield`
+    /// above: a SINGLE-NODE `ResolvedAbility` with NO `sub_ability`, so this
+    /// test's verdict is decided entirely by the root seed
+    /// `visit(ability, false, ..)`. It does NOT exercise sub-scoping — that is
+    /// pinned by V8 (inherited sub dropped) and V10 (non-inherited sub kept).
+    /// What it IS: a regression pin against anyone changing that root seed to
+    /// `true`, which would silently fizzle every delayed return.
+    #[test]
+    fn flatten_specified_targets_in_chain_keeps_root_context_ref_snapshot() {
+        let format = FormatConfig::duel_commander();
+        let mut state = GameState::new(format, 2, 2);
+        let victim = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Exile,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![TargetRef::Object(victim)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        assert!(
+            ability.sub_ability.is_none(),
+            "reach-guard: this fixture is single-node — its verdict comes from \
+             the root seed, not from the discriminator"
+        );
+        assert_eq!(
+            flatten_specified_targets_in_chain(&ability),
+            vec![TargetRef::Object(victim)],
+            "CR 603.7c: a root-node ParentTarget snapshot is the delayed \
+             return's own referent and must keep its entry — narrowing the \
+             root seed would silently fizzle every delayed return"
+        );
+    }
+
+    /// V10 — the MG1 sibling-negative. On the DEFERRED path
+    /// (`Scry`/`Dig`/`Surveil`/`ChooseCard`/`SearchLibrary`/`RevealHand`/
+    /// `Choose` heads) the producer does NOT push a snapshot: it routes through
+    /// `assign_targets_after_deferred_effect`, which writes REAL,
+    /// player-selected targets into the sub — while the predicate still returns
+    /// true. Mirroring the predicate ALONE would skip those and stop a chain
+    /// fizzling that correctly fizzles today: the same defect, inverted.
+    #[test]
+    fn flatten_specified_targets_in_chain_keeps_deferred_head_sub_targets() {
+        let victim = ObjectId(77);
+        let mut ability = ResolvedAbility::new(
+            Effect::Surveil {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(gain_life_anaphor_rider(vec![TargetRef::Object(
+            victim,
+        )])));
+
+        // REACH GUARD (paired positive, MANDATORY): the verdict is decided by
+        // the FIRST failing conjunct, not the last one named. Both halves must
+        // hold, or the deferred-head conjunct is never exercised and this test
+        // is vacuous.
+        assert!(
+            sub_ability_inherits_parent_creature_target_only(
+                &ability,
+                ability.sub_ability.as_deref().unwrap()
+            ),
+            "reach-guard: the fixture must satisfy the predicate, otherwise the \
+             deferred-head conjunct is never exercised and this test is vacuous"
+        );
+        assert!(
+            defers_sub_ability_target_selection(&ability.effect),
+            "reach-guard: the head must be in the deferring set — that is the \
+             conjunct under test"
+        );
+
+        assert_eq!(
+            flatten_specified_targets_in_chain(&ability),
+            vec![TargetRef::Object(victim)],
+            "CR 608.2b: on the deferred path the sub's targets are \
+             player-SELECTED (assign_targets_after_deferred_effect), not a \
+             propagated snapshot — they must still be counted"
+        );
+    }
+
+    /// V10b — the sibling that pins the SECOND defer guard,
+    /// `!defers_conditional_target_selection(sub)`. V10's head is `Surveil`, so
+    /// V10 is refused by conjunct 1 and would still pass if conjunct 2 were
+    /// deleted in isolation — a pair-wise mutation check cannot tell the two
+    /// apart. This fixture inverts that: a NON-deferring head (conjunct 1 holds)
+    /// over a `WhenYouDo`-conditioned GainLife anaphor sub, so conjunct 2 is the
+    /// only conjunct that can refuse. Delete it and this returns one entry, not
+    /// two.
+    #[test]
+    fn flatten_specified_targets_in_chain_keeps_conditional_deferred_sub_targets() {
+        let victim = ObjectId(77);
+        let mut ability = change_zone_head(Zone::Exile, vec![TargetRef::Object(victim)]);
+        let mut rider = gain_life_anaphor_rider(vec![TargetRef::Object(victim)]);
+        // CR 603.12 + CR 608.2d: a `WhenYouDo` reflexive rider chooses its
+        // targets while resolving, so the producer returns at the defer-sub
+        // guard BEFORE the snapshot push ever happens.
+        rider.condition = Some(AbilityCondition::WhenYouDo);
+        ability.sub_ability = Some(Box::new(rider));
+
+        // The verdict is decided by the FIRST failing conjunct, not the last one named.
+        // REACH GUARD (paired positive, MANDATORY) — conjunct 1 must NOT refuse:
+        assert!(
+            !defers_sub_ability_target_selection(&ability.effect),
+            "reach-guard: the head must NOT be in the deferring set, or conjunct 1 \
+             refuses first and the conjunct under test is never exercised"
+        );
+        // REACH GUARD — the predicate must hold. It is conjunct 3, evaluated
+        // LAST, so it does not refuse "first" in any ordering sense; the point
+        // is that a false predicate would make this test pass vacuously under
+        // the conjunct-2 deletion mutation, since `&&` would never reach it:
+        assert!(
+            sub_ability_inherits_parent_creature_target_only(
+                &ability,
+                ability.sub_ability.as_deref().unwrap()
+            ),
+            "reach-guard: the fixture must satisfy the predicate, or this test is vacuous"
+        );
+        // The conjunct actually under test:
+        assert!(
+            defers_conditional_target_selection(ability.sub_ability.as_deref().unwrap()),
+            "reach-guard: the sub must defer its target selection — that is the \
+             conjunct this test exists to pin"
+        );
+
+        assert_eq!(
+            flatten_specified_targets_in_chain(&ability),
+            vec![TargetRef::Object(victim), TargetRef::Object(victim)],
+            "CR 603.12 + CR 608.2d: a WhenYouDo rider receives NO announce-time \
+             snapshot push (the producer returns at the defer-sub guard), so \
+             whatever targets it holds are its own and must still be counted"
+        );
+    }
+
+    /// V11 — the not-in-class boundary. `effect_player_filter_is_parent_target_anaphor`
+    /// matches `Effect::GainLife` only, so a `Draw` rider never receives the
+    /// inherited push and its targets must be counted as specified. This is the
+    /// test the forward-compatibility argument rests on: widen that predicate
+    /// and this fix covers the new members with no further edit, because the
+    /// fix reads the same predicate.
+    #[test]
+    fn flatten_specified_targets_in_chain_keeps_draw_rider_targets() {
+        let victim = ObjectId(77);
+        let mut ability = change_zone_head(Zone::Graveyard, vec![TargetRef::Object(victim)]);
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                // NOT Fixed(1): with a fixed count `effect_target_slot_filter`
+                // returns None for Draw, `effect_needs_target_creature_quantity_slot`
+                // is already false, and the predicate short-circuits ONE
+                // CONJUNCT EARLIER — the test would pass without ever reaching
+                // the anaphor arm it claims to pin.
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                target: TargetFilter::ParentTargetController,
+            },
+            vec![TargetRef::Object(victim)],
+            ObjectId(99),
+            PlayerId(0),
+        )));
+        let sub = ability.sub_ability.as_deref().unwrap();
+
+        // The verdict is decided by the FIRST failing conjunct, not the last one named.
+        // REACH GUARD (paired positive, MANDATORY) — conjunct 1:
+        assert!(
+            chain_has_target_sink(&ability),
+            "reach-guard: the parent must be a target sink, or the predicate \
+             short-circuits at conjunct 1 (:5001) and this test never reaches \
+             the anaphor arm"
+        );
+        // REACH GUARD (paired positive, MANDATORY) — the upstream quantity-slot
+        // conjunct must HOLD, so the anaphor arm is the only conjunct that can refuse.
+        assert!(
+            effect_needs_target_creature_quantity_slot(&sub.effect),
+            "reach-guard: the quantity-slot conjunct must HOLD, so the anaphor \
+             arm is the only conjunct that can refuse"
+        );
+        // With both reach-guards holding, the `_ => false` arm at :5110 is the
+        // ONLY conjunct that can be refusing here.
+        assert!(
+            !sub_ability_inherits_parent_creature_target_only(&ability, sub),
+            "CR 115.10a: a Draw rider is not a GainLife anaphor, so it is never \
+             an inherited rider"
+        );
+
+        assert_eq!(
+            flatten_specified_targets_in_chain(&ability),
+            flatten_targets_in_chain(&ability),
+            "nothing in this chain is inherited, so the two flattens must agree \
+             exactly — this is the boundary the forward-compatibility argument \
+             rests on"
+        );
+    }
+
     /// CR 115.1 + CR 603.7c: delayed plural returns become `ChangeZoneAll`
     /// with a tracked-set filter, but their snapshotted referent is still not a
     /// chosen target. It must survive validation while it is in exile.
@@ -11560,6 +12191,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![TargetRef::Object(victim)],
@@ -16863,6 +17495,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![],
@@ -16902,6 +17535,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
+                library_shuffle: Default::default(),
                 random_order: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -18108,6 +18742,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         });
 
         assert_eq!(

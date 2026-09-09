@@ -1,4 +1,22 @@
 {
+  "lan": {
+    "title": "Rete locale",
+    "guidance": "Inserisci un indirizzo server per unirti manualmente. Le pagine HTTPS richiedono un server wss:// sicuro; usa l’app desktop per gli indirizzi ws:// locali.",
+    "unavailable": "L’hosting e la ricerca LAN richiedono un’app desktop aggiornata.",
+    "checking": "Verifica del supporto LAN…",
+    "start": "Avvia hosting LAN",
+    "stop": "Interrompi hosting LAN",
+    "scan": "Cerca server LAN",
+    "pending": "Operazione in corso…",
+    "running": "L’hosting LAN è attivo. Condividi un indirizzo con i giocatori della tua rete.",
+    "empty": "Nessun server LAN trovato. Verifica che l’host sia attivo sulla stessa rete e riprova.",
+    "add": "Aggiungi server",
+    "copy": "Copia indirizzo",
+    "copied": "Indirizzo copiato",
+    "error": "Operazione LAN non riuscita. {{detail}}",
+    "added": "Server aggiunto. Usa un server dedicato quando la connessione è compatibile e pronta.",
+    "originUnavailable": "L’hosting LAN non è disponibile per questa versione o origine dell’app."
+  },
   "concedeDialog": {
     "title": "Concedere la partita?",
     "game": {
@@ -127,11 +145,14 @@
     "kindFull": "(server di gioco)",
     "kindLobbyOnly": "(broker lobby)"
   },
+  "connectionMode": {
+    "label": "Connessione",
+    "server": "Server ufficiale",
+    "p2p": "P2P"
+  },
   "serverPicker": {
     "title": "Server",
     "subtitle": "Scegli dove ospitare e quali lobby sfogliare.",
-    "noneLabel": "Nessuno (solo P2P)",
-    "directCodes": "codici diretti",
     "official": "Ufficiale",
     "selfHosted": "Self-hosted",
     "customUrlPlaceholder": "wss://tuo-server.esempio/ws",
@@ -177,10 +198,7 @@
     "createDraft": "Crea draft"
   },
   "lobbyView": {
-    "directConnection": "Connessione diretta",
     "onlineLobby": "Lobby online",
-    "pickServerTitle": "Scegli un server per usare la modalità lobby online",
-    "pickServer": "Scegli server",
     "online": "{{count}} online",
     "format": "Formato",
     "allFormats": "Tutti i formati",
@@ -192,18 +210,13 @@
     "noFormatGames": "Nessuna partita {{format}} al momento.",
     "noOpenGames": "Nessuna partita aperta al momento.",
     "showAllFormats": "Mostra tutti i formati",
-    "p2pNotice": "Server dedicato non disponibile. Puoi comunque ospitare o unirti direttamente con un codice stanza di 5 caratteri.",
-    "joinByCode": "Unisciti tramite codice",
     "joinATable": "Unisciti a un tavolo",
-    "p2pCodePlaceholder": "Inserisci codice P2P di 5 caratteri",
     "serverCodePlaceholder": "Inserisci codice o CODICE@IP:PORTA",
     "join": "Unisciti",
     "host": "Ospita",
-    "hostP2PDescription": "Crea una stanza diretta per un avversario.",
     "hostServerDescription": "Apri una stanza e attendi i giocatori.",
     "hostDraft": "Ospita draft",
     "hostGame": "Ospita partita",
-    "hostP2PGame": "Ospita partita P2P",
     "passwordRequired": "Password richiesta",
     "passwordPlaceholder": "Inserisci password",
     "watch": "Watch",
@@ -211,9 +224,11 @@
     "invalidJoinServer": "L'indirizzo del server in quel codice non è valido."
   },
   "hostSetup": {
+    "dedicatedUnavailable": "Al momento non è disponibile alcun server dedicato. Puoi ospitare una partita tramite P2P.",
     "hostDirectMatch": "Ospita partita diretta",
     "hostMatch": "Ospita partita",
-    "p2pNotice": "Il server dedicato non è disponibile, quindi questa stanza userà una connessione diretta.",
+    "p2pNotice": "Modalità peer-to-peer. Questa stanza collega i giocatori direttamente invece di girare su un server.",
+    "p2pSeatCap": "I tavoli P2P ospitano al massimo {{max}} giocatori, quindi il numero di posti è limitato.",
     "roomName": "Nome stanza",
     "optional": "(facoltativo)",
     "roomNamePlaceholder": "es. Commander del venerdì sera",

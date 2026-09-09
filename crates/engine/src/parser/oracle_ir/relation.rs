@@ -22,7 +22,10 @@
 //! whole choice axis is one parameterized variant).
 
 use super::doc::OracleItemId;
-use crate::types::ability::{ChosenSubtypeKind, TargetFilter};
+use crate::types::{
+    ability::{ChosenSubtypeKind, TargetFilter},
+    card_type::CoreType,
+};
 
 /// A cross-item relation between parsed document items, recovered at parse time
 /// and applied by id during lowering. Closed set.
@@ -107,6 +110,15 @@ pub(crate) enum LinkedReturnOutcome {
 /// `DocumentRelationIr` variant.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum LinkedChoiceKind {
+    /// CR 607.2d + CR 614.1c + CR 614.12a: an as-enters replacement makes a
+    /// persisted labeled card-type choice, and distinct static item(s) read the
+    /// source's `IsChosenCardType` property. `options` is the proven exact
+    /// domain; lowering changes only this replacement item's proven chooser.
+    ConstrainedCardTypeStatic {
+        chooser: OracleItemId,
+        statics: Vec<OracleItemId>,
+        options: Vec<CoreType>,
+    },
     /// CR 607.2d + CR 614.1c: A persisted "as this enters, choose a creature
     /// type / color" replacement (`chooser`) linked to a self-ETB counter
     /// replacement (`counter`) whose counter count reads the chosen creature

@@ -1449,7 +1449,7 @@ fn moonlit_parses_to_copy_of_host_replacement() {
     assert_eq!(
         rep.condition,
         Some(ReplacementCondition::FirstTokenCreationEachTurn {
-            player: ControllerRef::You,
+            active_player_req: None,
         }),
         "first-time-each-turn gate"
     );

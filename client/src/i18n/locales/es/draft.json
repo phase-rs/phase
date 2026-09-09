@@ -256,7 +256,7 @@
     "compact": { "sideboardRegion": "Banquillo compacto" },
     "toolbar": { "label": "Diseño del tablero" },
     "layout": { "label": "Diseño", "columns": "Columnas", "maxPerRow": "Máximo de columnas por fila", "decreaseMaxPerRow": "Reducir máximo de columnas por fila", "increaseMaxPerRow": "Aumentar máximo de columnas por fila" },
-    "sort": { "label": "Ordenar tablero", "group": "Agrupar", "cmc": "Valor de maná", "color": "Color", "rarity": "Rareza", "type": "Tipo" },
+    "sort": { "label": "Agrupar por", "group": "Agrupar", "cmc": "Valor de maná", "color": "Color", "rarity": "Rareza", "type": "Tipo" },
     "rows": { "label": "Filas del tablero", "one": "Una fila", "two": "Dos filas" },
     "rowHeaders": { "creatures": "Criaturas", "nonCreatures": "No criaturas" },
     "columns": { "label": "Columnas del tablero", "add": "Añadir columna", "removeFinal": "Quitar última columna", "removeHeader": "Quitar columna {{column}}" },
@@ -310,6 +310,7 @@
     "textBasedBuilder": "Constructor de texto",
     "textBuilder": "Constructor texto",
     "averageManaCost": "Coste de maná medio",
+    "deckStats": "Estadísticas del mazo",
     "manaColor": "Color de maná",
     "countInCost": "Cantidad en el coste",
     "type": "Tipo",
@@ -583,6 +584,12 @@
   "podComplete": {
     "title": "Draft completado",
     "launchCommanderGame": "Iniciar partida de Commander",
+    "launchLocalCommanderGame": "Iniciar partida de Commander local",
+    "waitingForPlayers": "Esperando a que se unan los jugadores…",
+    "cancelCommanderLaunch": "Cancelar inicio",
+    "joinCommanderGame": "Unirse a la partida de Commander",
+    "joiningCommanderGame": "Uniéndose: esperando a los demás jugadores…",
+    "seatCeiling": "Esta mesa tiene {{seats}} jugadores; una partida de Commander entre pares admite {{max}} como máximo. Jugarás esta partida localmente contra el motor, con todos los mazos drafteados.",
     "returnToMenu": "Volver al menú"
   },
   "podError": {

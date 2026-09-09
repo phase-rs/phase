@@ -10,6 +10,7 @@ rules_domain = "mtg-cr"
 [labels]
 frontend_deferred = "defer-fe"
 quality = "quality"
+approved_for_review = "pr:approved-for-review"
 
 # Artifact verification remains audit-only until the contributor contract is
 # published and an immutable post-publication cutoff is configured.

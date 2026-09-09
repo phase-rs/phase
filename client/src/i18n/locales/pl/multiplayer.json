@@ -1,4 +1,22 @@
 {
+  "lan": {
+    "title": "Sieć lokalna",
+    "guidance": "Wpisz adres serwera, aby dołączyć ręcznie. Strony HTTPS wymagają bezpiecznego serwera wss://; użyj aplikacji komputerowej dla lokalnych adresów ws://.",
+    "unavailable": "Hostowanie i wyszukiwanie LAN wymaga aktualnej aplikacji komputerowej.",
+    "checking": "Sprawdzanie obsługi LAN…",
+    "start": "Rozpocznij hostowanie LAN",
+    "stop": "Zatrzymaj hostowanie LAN",
+    "scan": "Znajdź serwery LAN",
+    "pending": "Przetwarzanie…",
+    "running": "Hostowanie LAN jest aktywne. Udostępnij adres graczom w swojej sieci.",
+    "empty": "Nie znaleziono serwerów LAN. Sprawdź, czy gospodarz działa w tej samej sieci, i spróbuj ponownie.",
+    "add": "Dodaj serwer",
+    "copy": "Kopiuj adres",
+    "copied": "Adres skopiowany",
+    "error": "Operacja LAN nie powiodła się. {{detail}}",
+    "added": "Dodano serwer. Użyj serwera dedykowanego, gdy połączenie będzie zgodne i gotowe.",
+    "originUnavailable": "Hostowanie LAN jest niedostępne dla tej wersji lub pochodzenia aplikacji."
+  },
   "concedeDialog": {
     "title": "Poddać grę?",
     "game": {
@@ -127,11 +145,14 @@
     "kindFull": "(serwer gry)",
     "kindLobbyOnly": "(broker poczekalni)"
   },
+  "connectionMode": {
+    "label": "Połączenie",
+    "server": "Oficjalny serwer",
+    "p2p": "P2P"
+  },
   "serverPicker": {
     "title": "Serwer",
     "subtitle": "Wybierz, gdzie hostujesz i które poczekalnie przeglądasz.",
-    "noneLabel": "Brak (tylko P2P)",
-    "directCodes": "bezpośrednie kody",
     "official": "Oficjalny",
     "selfHosted": "Własny hosting",
     "customUrlPlaceholder": "wss://twoj-serwer.example/ws",
@@ -177,10 +198,7 @@
     "createDraft": "Utwórz draft"
   },
   "lobbyView": {
-    "directConnection": "Połączenie bezpośrednie",
     "onlineLobby": "Poczekalnia online",
-    "pickServerTitle": "Wybierz serwer, aby korzystać z trybu poczekalni online",
-    "pickServer": "Wybierz serwer",
     "online": "{{count}} online",
     "format": "Format",
     "allFormats": "Wszystkie formaty",
@@ -192,18 +210,13 @@
     "noFormatGames": "Brak gier {{format}} w tej chwili.",
     "noOpenGames": "Brak otwartych gier w tej chwili.",
     "showAllFormats": "Pokaż wszystkie formaty",
-    "p2pNotice": "Dedykowany serwer niedostępny. Nadal możesz być gospodarzem lub dołączyć bezpośrednio za pomocą 5-znakowego kodu pokoju.",
-    "joinByCode": "Dołącz za pomocą kodu",
     "joinATable": "Dołącz do stołu",
-    "p2pCodePlaceholder": "Wpisz 5-znakowy kod P2P",
     "serverCodePlaceholder": "Wpisz kod lub KOD@IP:PORT",
     "join": "Dołącz",
     "host": "Hostuj",
-    "hostP2PDescription": "Utwórz bezpośredni pokój dla jednego przeciwnika.",
     "hostServerDescription": "Otwórz pokój i czekaj na graczy.",
     "hostDraft": "Hostuj draft",
     "hostGame": "Hostuj grę",
-    "hostP2PGame": "Hostuj grę P2P",
     "passwordRequired": "Wymagane hasło",
     "passwordPlaceholder": "Wpisz hasło",
     "watch": "Watch",
@@ -211,9 +224,11 @@
     "invalidJoinServer": "Adres serwera w tym kodzie jest nieprawidłowy."
   },
   "hostSetup": {
+    "dedicatedUnavailable": "Żaden serwer dedykowany nie jest teraz dostępny. Możesz hostować grę przez P2P.",
     "hostDirectMatch": "Hostuj mecz bezpośredni",
     "hostMatch": "Hostuj mecz",
-    "p2pNotice": "Dedykowany serwer jest niedostępny, więc ten pokój użyje połączenia bezpośredniego.",
+    "p2pNotice": "Tryb peer-to-peer. Ten pokój łączy graczy bezpośrednio, zamiast działać na serwerze.",
+    "p2pSeatCap": "Stoły P2P mieszczą maksymalnie {{max}} graczy, więc liczba miejsc jest ograniczona.",
     "roomName": "Nazwa pokoju",
     "optional": "(opcjonalnie)",
     "roomNamePlaceholder": "np. Piątkowy wieczór Commander",

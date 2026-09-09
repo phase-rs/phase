@@ -33,6 +33,16 @@ describe("game log presentation", () => {
     expect(filterLogByView(entries, "details").map((value) => value.seq)).toEqual([1, 2, 3]);
     expect(filterLogByView(entries, "diagnostics").map((value) => value.seq)).toEqual([1, 2, 3, 4]);
     expect(filterLogByView(entries, "timeline", new Set(["Debug"]))).toEqual([entries[3]]);
+
+    const boundary = entry("Context", {
+      seq: 5,
+      category: "Turn",
+      presentation: { importance: "Context", tone: "Neutral", boundary: "Turn", visibility: "Public" },
+    });
+    expect(filterLogByView([boundary, entries[0]], "timeline", new Set(["Stack"]))).toEqual([
+      boundary,
+      entries[0],
+    ]);
   });
 
   it("requires an explicit diagnostics opt-in for hidden information", () => {
@@ -75,8 +85,26 @@ describe("game log presentation", () => {
 
     expect(timelineRows([firstBoundary, secondBoundary])).toEqual([]);
     expect(timelineRows([firstBoundary, secondBoundary], true)).toEqual([
-      { type: "divider", divider: { seq: 1, turn: 1, phase: "Upkeep", boundary: "Turn" } },
-      { type: "divider", divider: { seq: 2, turn: 2, phase: "Draw", boundary: "Turn" } },
+      {
+        type: "divider",
+        divider: {
+          seq: 1,
+          turn: 1,
+          phase: "Upkeep",
+          boundary: "Turn",
+          turnSegments: firstBoundary.segments,
+        },
+      },
+      {
+        type: "divider",
+        divider: {
+          seq: 2,
+          turn: 2,
+          phase: "Draw",
+          boundary: "Turn",
+          turnSegments: secondBoundary.segments,
+        },
+      },
     ]);
     expect(timelineRows([{ ...firstBoundary, turn: 0 }], true)).toEqual([]);
   });

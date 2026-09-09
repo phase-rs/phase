@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4709
-- **Total card appearances across root causes:** 4742 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4698
+- **Total card appearances across root causes:** 4731 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -13,11 +13,11 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
 | 1 | Relative-clause / filter restriction on target dropped | 745 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 584 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 583 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 404 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 387 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 329 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
-| 6 | Disjunctive (or-list) collapsed to first branch | 237 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
+| 6 | Disjunctive (or-list) collapsed to first branch | 226 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 209 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 210 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
@@ -25,7 +25,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 157 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 138 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
 | 13 | State/game-state condition → StaticCondition::Unrecognized | 132 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
-| 14 | Granted/quoted ability or continuous modification dropped | 95 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
+| 14 | Granted/quoted ability or continuous modification dropped | 96 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
 | 15 | Multi-target / 'up to N' optionality or count dropped | 83 | oracle_target.rs strip_optional_target_prefix — preserve MultiTargetSpec and optional_targeting |
 | 16 | Keyword payload / multiplicity / mis-tokenization | 83 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
 | 17 | Copy 'except' / additional-modification clause dropped | 81 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
@@ -148,7 +148,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Cantor of the Refrain
 - Captain America's Shield
 - Captain N'ghathrod
-- Cartographer's Hawk
 - Cathedral Membrane
 - Cemetery Prowler
 - Cephalid Shrine
@@ -801,7 +800,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (584 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (583 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -1241,7 +1240,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Rowdy Crew
 - Rubblebelt Braggart
 - Runaway Steam-Kin
-- Runo Stromkirk
 - Rushing-Tide Zubera
 - Rushwood Legate
 - Saffi Eriksdotter
@@ -2554,7 +2552,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 6. Disjunctive (or-list) collapsed to first branch  (237 cards)
+### 6. Disjunctive (or-list) collapsed to first branch  (226 cards)
 
 **Signature.** An 'A or B (or C)' enumeration in a target/filter/cost/trigger/effect collapses to the first branch (or splits into a dangling Unknown); the OR/AnyOf union is never built.
 
@@ -2573,7 +2571,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Ana Battlemage
 - Angel of Serenity
 - Angelic Intervention
-- Anje, Maid of Dishonor
 - Archangel of Wrath
 - Ashes of the Abhorrent
 - Ashling, Rimebound
@@ -2615,7 +2612,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Deathgazer
 - Deathmark
 - Deeproot Wayfinder
-- Definitely Not a Turtle
 - Degavolver
 - Dire-Strain Anarchist
 - Donna Noble
@@ -2631,7 +2627,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Eclipsed Steppe
 - Eivor, Wolf-Kissed
 - Elenda, Saint of Dusk
-- Elite Headhunter
 - Elsewhere Flask
 - Eluge, the Shoreless Sea
 - Embrace Oblivion
@@ -2673,7 +2668,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Jodah's Avenger
 - Jukai Trainee
 - Kaalia, Zenith Seeker
-- Kamahl's Druidic Vow
 - Kami of Mourning
 - Kastral, the Windcrested
 - Katara's Reversal
@@ -2700,7 +2694,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Michelangelo, Improviser
 - Mindsparker
 - Mister Immortal
-- Mold Folk
 - Mythos of Nethroi
 - Nahiri, the Harbinger
 - Nashi, Searcher in the Dark
@@ -2734,7 +2727,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Rock Basilisk
 - Sarah's Wings
 - Sarkhan the Masterless
-- Sauron, the Dark Lord
 - Savai Triome
 - Sawback Manticore
 - Scarred Puma
@@ -2744,10 +2736,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Shivan Sand-Mage
 - Shoreline Scout
 - Sidequest: Catch a Fish
-- Sivriss, Nightmare Speaker
-- Skophos Warleader
-- Skullport Merchant
-- Slaughter-Priest of Mogis
 - Sludge Titan
 - Sonar Strike
 - Songstitcher
@@ -2777,7 +2765,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Track Down
 - Training Compound
 - Traveling Chocobo
-- Ultimate Spider-Man
 - Umara Mystic
 - Umara Wizard
 - Underground Sea
@@ -4073,7 +4060,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 14. Granted/quoted ability or continuous modification dropped  (95 cards)
+### 14. Granted/quoted ability or continuous modification dropped  (96 cards)
 
 **Signature.** A static-grant modification list omits a granted activated/triggered ability, keyword, color, subtype, or P/T conjunct that the Oracle conjoins ('is a … with "<ability>"', 'and has flying').
 
@@ -4157,6 +4144,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - True-Faith Censer
 - U.S.Agent, John Walker
 - Ultima, Origin of Oblivion
+- Ultimate Spider-Man
 - Unable to Scream
 - Uncontrolled Infestation
 - Unexpected Potential

@@ -8,17 +8,17 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{
-    auto_pass_recommended, auto_pass_recommended_for_viewer, end_continuous_effect_offers,
-    legal_actions_for_viewer, legal_actions_full, AiDecisionContract,
+    apply_ai_action_proposal, auto_pass_recommended, auto_pass_recommended_for_viewer,
+    end_continuous_effect_offers, legal_actions_for_viewer, legal_actions_full, AiDecisionContract,
+    AiProposalApplication,
 };
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
 #[cfg(test)]
 use engine::game::engine::apply;
 use engine::game::engine::{
-    apply_interaction_with_rejection, apply_with_rejection, preflight_debug_action_with_rejection,
-    resume_restored_stack_automation, RestoredStackAutomationOutcome,
-    RestoredStackAutomationPresentation,
+    apply_with_rejection, preflight_debug_action_with_rejection, resume_restored_stack_automation,
+    RestoredStackAutomationOutcome, RestoredStackAutomationPresentation,
 };
 use engine::game::interaction::{
     bind_interaction_authority, preview_interaction, submit_interaction_with_rejection,
@@ -41,7 +41,9 @@ use engine::game::{
 };
 use engine::types::actions::DebugAction;
 use engine::types::custom_format::{CustomFormatDef, CustomFormatRules};
-use engine::types::format::{DeckCopyLimit, FormatConfig, GameFormat};
+use engine::types::format::{
+    validate_starting_life_bounds, DeckCopyLimit, FormatConfig, GameFormat,
+};
 use engine::types::game_state::{
     PersistedGameState, PersistedRestoreFinalization, PreparedPersistedGameState,
     TrustedGameStateEnvelope, WaitingFor,
@@ -196,6 +198,26 @@ fn validate_external_format_config(config: &FormatConfig, player_count: u8) -> R
     config.reject_unimplemented_range_of_influence()
 }
 
+/// Resolves and validates `initialize_game_impl`'s effective `FormatConfig`
+/// from an already-decoded declared config (if any) and the resolved
+/// `player_count`. `decoded_format_config` is `None` exactly when the JS
+/// caller supplied no format config (`null`/`undefined`) — in that case this
+/// is the WASM boundary's own site that supplies an UNDECLARED default (see
+/// `FormatConfig::validate_for_player_count`'s doc comment for the taxonomy
+/// of call sites), via the same shared `FormatConfig::default_for_player_count`
+/// authority `server_core::session::SessionManager::create_game_n_players`
+/// uses, so the two ingresses never disagree about what an undeclared config
+/// defaults to for a given seat count.
+fn resolve_and_validate_initialize_format_config(
+    decoded_format_config: Option<FormatConfig>,
+    resolved_player_count: u8,
+) -> Result<FormatConfig, String> {
+    let format_config = decoded_format_config
+        .unwrap_or_else(|| FormatConfig::default_for_player_count(resolved_player_count));
+    validate_external_format_config(&format_config, resolved_player_count)?;
+    Ok(format_config)
+}
+
 fn parse_initialize_format_config(
     decoded: Result<FormatConfig, String>,
 ) -> Result<FormatConfig, serde_json::Value> {
@@ -235,6 +257,116 @@ mod external_format_config_tests {
         assert!(validate_external_format_config(&config, 2)
             .expect_err("limited range must remain disabled at the WASM boundary")
             .contains("not supported"));
+    }
+
+    /// `validate_external_format_config`'s `validate_for_player_count` call
+    /// (used by `initialize_game_impl`) is one of the five production call
+    /// sites: `CommanderDraft`'s registry range is 3-8, so a 2-player
+    /// initialize request must be rejected here too — a retryable wire
+    /// rejection, unlike the same check's use at
+    /// `server_core::session::GameSession::from_persisted`.
+    #[test]
+    fn external_initialization_rejects_player_count_outside_format_registry_range() {
+        let config = FormatConfig::commander_draft();
+
+        assert!(validate_external_format_config(&config, 2)
+            .expect_err("2 players is outside CommanderDraft's 3-8 registry range")
+            .contains("player_count"));
+    }
+
+    /// `format_config_for_custom_rules` resolves a saved custom-format
+    /// definition into a live `FormatConfig` for the "select a saved custom
+    /// format" lobby action; `custom_rules` is user-editable localStorage
+    /// data, so bounding `starting_life` here fails early with a readable
+    /// lobby-level message rather than a raw `FormatConfig::deserialize`
+    /// error at game start — defense in depth, since that `Deserialize`
+    /// remains the closing gate either way.
+    /// `resolve_and_validate_custom_format_config` is the resolve-plus-bound
+    /// step behind the `#[wasm_bindgen]` shell (which cannot be exercised
+    /// natively — see its own doc comment).
+    #[test]
+    fn resolve_and_validate_custom_format_config_rejects_starting_life_outside_bounds() {
+        use engine::types::custom_format::{
+            CommandZoneMode, CustomFormatId, CustomFormatRules, LegacyRuleSet, LegalityRules,
+            StructuralRules,
+        };
+        use engine::types::format::{DeckSizeRule, SideboardPolicy, MAX_STARTING_LIFE};
+
+        fn rules_with_starting_life(starting_life: i32) -> CustomFormatRules {
+            CustomFormatRules {
+                id: CustomFormatId(1),
+                structural: StructuralRules {
+                    starting_life,
+                    min_players: 2,
+                    max_players: 4,
+                    deck_size: DeckSizeRule::Minimum(60),
+                    singleton: false,
+                    command_zone_mode: CommandZoneMode::Disabled,
+                    range_of_influence: None,
+                    team_based: false,
+                    sideboard_policy: SideboardPolicy::Unlimited,
+                    default_deck_copy_limit: DeckCopyLimit::UpTo(4),
+                },
+                legality: LegalityRules {
+                    legal_sets: None,
+                    banned: Vec::new(),
+                    restricted: Vec::new(),
+                    legacy: LegacyRuleSet::default(),
+                },
+            }
+        }
+
+        assert!(
+            resolve_and_validate_custom_format_config(&rules_with_starting_life(20)).is_ok(),
+            "a playable, in-bounds starting_life must resolve"
+        );
+        assert!(
+            resolve_and_validate_custom_format_config(&rules_with_starting_life(0))
+                .expect_err("0 starting life loses every seat at the first SBA check (CR 704.5a)")
+                .contains("starting_life"),
+        );
+        assert!(
+            resolve_and_validate_custom_format_config(&rules_with_starting_life(
+                MAX_STARTING_LIFE + 1
+            ))
+            .expect_err("a starting_life above MAX_STARTING_LIFE risks i32 overflow")
+            .contains("starting_life"),
+        );
+    }
+
+    /// Regression: `initialize_game_impl` previously defaulted an undeclared
+    /// config to `FormatConfig::standard()` unconditionally, so a local
+    /// 4-player game with no declared format config was rejected with
+    /// "player_count 4 is outside Standard's seat range 2-2" — naming a
+    /// format the caller never chose. `resolve_and_validate_initialize_
+    /// format_config` is the exact function `initialize_game_impl` calls for
+    /// this decision, so this test would fail if the fix were reverted.
+    #[test]
+    fn initialize_without_a_declared_format_config_accepts_a_four_player_local_game() {
+        let config = resolve_and_validate_initialize_format_config(None, 4).expect(
+            "an undeclared config for 4 players must default to a format that admits 4 seats",
+        );
+        assert_eq!(
+            config.format,
+            GameFormat::FreeForAll,
+            "4 seats must default via FormatConfig::default_for_player_count, not Standard"
+        );
+    }
+
+    #[test]
+    fn initialize_with_a_declared_format_config_validates_that_config_unchanged() {
+        let commander_draft = FormatConfig::commander_draft();
+
+        let resolved =
+            resolve_and_validate_initialize_format_config(Some(commander_draft.clone()), 4)
+                .expect("CommanderDraft's registry range (3-8) admits 4 players");
+        assert_eq!(resolved.format, GameFormat::CommanderDraft);
+
+        assert!(
+            resolve_and_validate_initialize_format_config(Some(commander_draft), 2)
+                .expect_err("2 players is outside CommanderDraft's 3-8 registry range")
+                .contains("player_count")
+        );
     }
 
     #[test]
@@ -374,7 +506,7 @@ thread_local! {
     /// panics leaves the borrow flag permanently set — every subsequent call fails.
     /// Cell::take() + Cell::set() has no borrow guard, making it panic-resilient.
     static GAME_STATE: Cell<Option<GameState>> = const { Cell::new(None) };
-    static CARD_DB: RefCell<Option<CardDatabase>> = const { RefCell::new(None) };
+    static CARD_DB: RefCell<Option<std::sync::Arc<CardDatabase>>> = const { RefCell::new(None) };
     /// When set, this engine is claimed by a multiplayer host session. The
     /// engine claims it itself, in the same call that installs the game
     /// (`initialize_multiplayer_host_game`, `resume_multiplayer_host_state`),
@@ -737,7 +869,7 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Failed to parse card database: {}", e)))?;
     let count = db.card_count() as u32;
     CARD_DB.with(|cell| {
-        *cell.borrow_mut() = Some(db);
+        *cell.borrow_mut() = Some(std::sync::Arc::new(db));
     });
     Ok(count)
 }
@@ -750,9 +882,11 @@ pub fn build_ai_card_subset() -> Result<String, JsValue> {
         let db = db_cell.borrow();
         GAME_STATE.with(|state_cell| {
             let state = state_cell.take();
+            // `Option<&Arc<T>>` does not coerce to `Option<&T>` — deref
+            // coercion does not reach inside a generic type constructor.
             let result = engine::game::card_subset::build_ai_card_subset_or_full(
                 state.as_ref(),
-                db.as_ref(),
+                db.as_deref(),
             );
             state_cell.set(state);
             result
@@ -920,10 +1054,17 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
             | GameFormat::Limited => false,
-            // Matches `evaluate_selected_format_summary`'s Custom arm: no
-            // CustomFormatRules resolver exists yet, so eligibility cannot be
-            // answered here. `false` is the fail-closed reading — a permissive
-            // `true` would offer an unvalidated card as a commander.
+            // Phase 1d wired a real custom-format deck-legality evaluator
+            // (`evaluate_custom_format`), but it is scoped to non-command-zone
+            // (constructed-shaped) custom formats — a command-zone custom
+            // (`CommandZoneMode::Enabled`, the shape a saved Commander/Brawl/
+            // Tiny-Leaders/Oathbreaker lobby produces) fails closed there too.
+            // This function also only ever receives a bare `GameFormat`, never
+            // the resolved `CommanderEligibilityRule` a command-zone custom
+            // format declares, so eligibility genuinely cannot be answered
+            // here regardless. `false` is the fail-closed reading — a
+            // permissive `true` would offer an unvalidated card as a
+            // commander.
             GameFormat::Custom(_) => false,
         }
     })
@@ -1131,8 +1272,12 @@ pub fn evaluate_deck_compatibility_js(request: JsValue) -> Result<JsValue, JsVal
 /// (`validateGuestDeck` in `client/src/adapter/p2p-adapter.ts`), which kicks a
 /// guest whose deck is illegal for the room's format. UI-hint callers must keep
 /// using `evaluate_deck_compatibility_js`: that one deliberately answers "no
-/// opinion" (`selected_format_compatible: null`) for a Custom format, which is
-/// the honest answer for a legality chip and an unacceptable one for a kick.
+/// opinion" (`selected_format_compatible: null`) for a Custom format — every
+/// request crossing this WASM boundary carries only a bare `GameFormat` tag
+/// (Wire-Inertness Invariant, `types::format::SelectedFormat`), which can never
+/// resolve real rules even though Phase 1d wired a real evaluator
+/// (`evaluate_custom_format`) for a trusted, already-`Resolved` config — which
+/// is the honest answer for a legality chip and an unacceptable one for a kick.
 #[wasm_bindgen(js_name = evaluateDeckFormatGate)]
 pub fn evaluate_deck_format_gate_js(request: JsValue) -> Result<JsValue, JsValue> {
     let request: DeckCompatibilityRequest = serde_wasm_bindgen::from_value(request)
@@ -1176,9 +1321,18 @@ pub fn custom_format_from_lobby_config(
 }
 
 /// The single authoritative `CustomFormatRules -> FormatConfig` resolver,
-/// exposed for the lobby's "select a saved custom format" action. Total and
-/// infallible: a `CustomFormatRules` carries every structural field the config
-/// needs, so there is no unresolvable input.
+/// exposed for the lobby's "select a saved custom format" action.
+/// `FormatConfig::for_custom_rules` itself is total and infallible: a
+/// `CustomFormatRules` carries every structural field the config needs, so
+/// there is no unresolvable input. This wrapper is fallible anyway — beyond
+/// deserializing the JS payload, it also bounds the resolved config's
+/// `starting_life` (CR 704.5a / CR 810.8c playability floor, and the engine's
+/// `MAX_STARTING_LIFE` overflow-safety ceiling) via
+/// `validate_starting_life_bounds`. `custom_rules` is user-editable
+/// localStorage data, so this bound fails early with a readable lobby-level
+/// message rather than a raw `FormatConfig::deserialize` error at game
+/// start. It is defense in depth, not the sole check: `FormatConfig`'s own
+/// `Deserialize` (see below) remains the closing gate regardless.
 ///
 /// The frontend must call this rather than assembling a `FormatConfig` from the
 /// saved rules itself. `FormatConfig`'s own `Deserialize` re-derives the config
@@ -1188,7 +1342,22 @@ pub fn custom_format_from_lobby_config(
 pub fn format_config_for_custom_rules(custom_rules: JsValue) -> Result<JsValue, JsValue> {
     let rules: CustomFormatRules = serde_wasm_bindgen::from_value(custom_rules)
         .map_err(|e| JsValue::from_str(&format!("Invalid CustomFormatRules: {e}")))?;
-    Ok(to_js(&FormatConfig::for_custom_rules(&rules)))
+    let config =
+        resolve_and_validate_custom_format_config(&rules).map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&config))
+}
+
+/// The fallible resolve step behind [`format_config_for_custom_rules`],
+/// extracted so it is reachable from a native `#[cfg(test)]` module: the
+/// `#[wasm_bindgen]` shell above serializes through `to_js`, which panics
+/// outside a wasm32 runtime (see `validate_deck_list_seats`'s own note on the
+/// same constraint).
+fn resolve_and_validate_custom_format_config(
+    rules: &CustomFormatRules,
+) -> Result<FormatConfig, String> {
+    let config = FormatConfig::for_custom_rules(rules);
+    validate_starting_life_bounds(&config)?;
+    Ok(config)
 }
 
 /// Returns the engine-authored Oathbreaker signature-spell selection policy.
@@ -1474,24 +1643,33 @@ fn initialize_game_impl(
 ) -> JsValue {
     let seed = seed.map(|s| s as u64).unwrap_or(42);
 
-    let format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
+    // Resolved before the format config: an undeclared config's default must
+    // be chosen FOR this seat count (see
+    // `resolve_and_validate_initialize_format_config`), so `count` has to be
+    // known first.
+    let count = player_count.unwrap_or(2);
+
+    let decoded_format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
         match parse_initialize_format_config(
             serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
                 .map_err(|error| error.to_string()),
         ) {
-            Ok(config) => config,
+            Ok(config) => Some(config),
             Err(error) => return to_js(&error),
         }
     } else {
-        FormatConfig::standard()
+        None
     };
-    let count = player_count.unwrap_or(2);
-    if let Err(reason) = validate_external_format_config(&format_config, count) {
-        return to_js(&serde_json::json!({
-            "error": true,
-            "reasons": [reason],
-        }));
-    }
+    let format_config =
+        match resolve_and_validate_initialize_format_config(decoded_format_config, count) {
+            Ok(config) => config,
+            Err(reason) => {
+                return to_js(&serde_json::json!({
+                    "error": true,
+                    "reasons": [reason],
+                }));
+            }
+        };
 
     let mut state = GameState::new(format_config.clone(), count, seed);
     // Read the posture from `kind`, not from `is_multiplayer_mode()`: the flag
@@ -1575,8 +1753,11 @@ fn initialize_game_impl(
             // a hard error instead of a silently-wrong-format game.
             let payload = resolve_deck_list(db, &deck_list);
 
-            load_and_hydrate_decks(&mut state, &payload, Some(db));
+            load_and_hydrate_decks(&mut state, &payload, Some(&**db));
             state.all_card_names = db.card_names().into();
+            // CR 707.2 + CR 202.3: resolvers that draw from the whole corpus
+            // (the Momir Basic emblem) read the database through this handle.
+            engine::game::install_card_db(&mut state, std::sync::Arc::clone(db));
             None
         });
 
@@ -2374,6 +2555,9 @@ fn rehydrate_restored_state_from_card_db(state: &mut GameState) -> Result<(), St
             db,
             CardDbRehydrationFinalization::Defer,
         );
+        // `card_db` is `#[serde(skip)]`, so a restored state arrives without a
+        // draw source. Reinstall it or the Momir emblem silently makes nothing.
+        engine::game::install_card_db(state, std::sync::Arc::clone(db));
         Ok(())
     })
 }
@@ -2387,6 +2571,39 @@ fn decode_and_rehydrate_restored_game_state(
     let state = restored
         .state
         .finalize_after_rehydration(|state| {
+            // Deliberate, accepted asymmetry with
+            // `server_core::session::GameSession::from_persisted`: that path
+            // rejects a persisted `player_count` outside its format's
+            // registry range; this closure does not bound the persisted seat
+            // count against the registry range at all. This is the shared
+            // body of both `restore_game_state` (undo, and resuming a
+            // localStorage save) and `resume_multiplayer_host_state` (P2P
+            // host crash recovery), so a hard rejection here would strand
+            // user-owned state that was already playable. A repair that
+            // widens `min_players`/`max_players` to admit the persisted seat
+            // count was tried and reverted: `min_players` is a Locked row in
+            // `built_in_axes_no_looser_than_rules` (must equal the format
+            // registry's value exactly), so a widened config fails
+            // `FormatConfig::deserialize`'s own admission gate the very next
+            // time it is loaded — permanently bricking the save, and, since
+            // this state is autosaved and broadcast to P2P guests, taking
+            // them down with it. The residual risk of leaving this
+            // unvalidated is reachable, not merely hypothetical — the same
+            // legacy-save framing `validate_for_player_count`'s own doc
+            // comment uses at `from_persisted`: e.g. a `CommanderDraft` save
+            // (registry range 3..=8) persisted with `player_count` 2 from
+            // before this bound existed on whichever path created it, no
+            // hand-editing required. `MULTIPLAYER_MODE` mitigates only the
+            // `restore_game_state` (undo) path, which refuses outright once
+            // the flag is set; it does not cover `resume_multiplayer_host_
+            // state`, whose own guard refuses only when the flag is ALREADY
+            // set and then sets it — the P2P host path, whose restored state
+            // is broadcast to guests, has no seat-count mitigation at all.
+            // One option this leaves unexplored: this closure takes a
+            // per-caller `|state|` hook (`restore_runtime`), so a bound
+            // could be applied on the `resume_multiplayer_host_state` path
+            // alone, leaving undo unaffected. Not implemented here. Accepted
+            // as-is; untracked.
             rehydrate_restored_state_from_card_db(state)?;
             // Combat declaration snapshots are display data derived from the rehydrated
             // live board. Rebuild them before this external state becomes interactive.
@@ -2439,10 +2656,10 @@ fn backfill_legacy_debug_permissions(
 #[cfg(test)]
 fn load_minimal_test_card_database() {
     CARD_DB.with(|cell| {
-        *cell.borrow_mut() = Some(
+        *cell.borrow_mut() = Some(std::sync::Arc::new(
             CardDatabase::from_json_str("{}")
                 .expect("an empty test card database must deserialize"),
-        );
+        ));
     });
 }
 
@@ -2611,6 +2828,63 @@ mod restored_card_db_requirements_tests {
         assert!(error.contains("card database"));
         assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
         assert!(!is_multiplayer_mode());
+    }
+
+    /// Pins a deliberate NON-check at this closure, not a behavior: rounds
+    /// 4-6 tried, in turn, (a) a hard rejection of a persisted seat count
+    /// outside its format's registry range (reverted — it would strand
+    /// already-playable user-owned state, since this closure is the shared
+    /// body of `restore_game_state` undo/localStorage-save restore and
+    /// `resume_multiplayer_host_state` P2P host crash recovery) and (b) a
+    /// repair that widens the restored config's `min_players`/`max_players`
+    /// to admit the persisted seat count (also reverted — `min_players` is a
+    /// Locked row in `built_in_axes_no_looser_than_rules`, so a widened
+    /// config fails `FormatConfig::deserialize`'s own admission gate the
+    /// very next time it is loaded, permanently bricking the save). Neither
+    /// alternative survived review; this test fails if either is
+    /// re-introduced. `FormatConfig::commander_draft()` (registry range
+    /// 3..=8) persisted with 2 seats reproduces both hazards at once: a
+    /// hard-reject alternative would return `Err`, and a repair alternative
+    /// would leave `min_players` widened to 2, which is exactly the
+    /// condition under which `FormatConfig::deserialize` refuses to
+    /// round-trip the config (see `from_persisted_rejects_a_persisted_
+    /// player_count_outside_the_format_registry_range` and this closure's
+    /// own comment for the full history).
+    #[test]
+    fn decoded_restore_neither_rejects_nor_repairs_a_persisted_seat_count_outside_the_format_registry_range(
+    ) {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let mut state = GameState::new_two_player(17);
+        state.format_config = FormatConfig::commander_draft();
+        let json = serde_json::to_string(&state).unwrap();
+
+        let restored = decode_and_rehydrate_restored_game_state(&json, |_| {}).expect(
+            "2 seats against CommanderDraft's 3-8 registry range must not be hard-rejected \
+             (that is the reverted reject alternative)",
+        );
+        assert_eq!(
+            restored.state.players.len(),
+            2,
+            "the persisted seat count must pass through unchanged"
+        );
+        assert_eq!(
+            restored.state.format_config.min_players, 3,
+            "min_players must NOT widen to admit the persisted seat count — widening is the \
+             reverted repair alternative this test guards against"
+        );
+        assert!(
+            serde_json::from_str::<FormatConfig>(
+                &serde_json::to_string(&restored.state.format_config).unwrap()
+            )
+            .is_ok(),
+            "the restored config must still round-trip through FormatConfig's own Deserialize \
+             admission gate — this is exactly the property a re-introduced min_players-widening \
+             repair would violate, since a widened min_players fails the Locked-row check in \
+             built_in_axes_no_looser_than_rules on the very next load"
+        );
+        assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
     }
 }
 
@@ -3297,53 +3571,28 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
     };
 
     match with_state_mut(|state| {
-        // Classification lives in the engine (`verified_ai_stack_pass_player`),
-        // not in this adapter: it is the same call the callee gates on, so the
-        // two cannot disagree. CLAUDE.md — transport layers hold zero game
-        // logic.
-        let is_stack_recheck_pass =
-            engine::game::engine::verified_ai_stack_pass_player(state, &action).is_some();
-        // A payment finalize is no longer misclassified, so it now passes
-        // through `permits` — whose `state_revision` equality check can report
-        // `Stale` for a proposal minted against a superseded state. The client
-        // treats `Stale` as a benign race and re-queries without counting a
-        // failure, which is the intended handling for every other action.
-        if !is_stack_recheck_pass && !proposal.contract.permits(state, actor, &action) {
-            return AiProposalSubmission::Stale {
-                reason: "decision_changed_or_action_outside_issued_bounds",
-            };
-        }
-        let applied = if is_stack_recheck_pass {
-            engine::game::engine::apply_verified_ai_priority_pass_with_rejection(
-                state,
-                actor,
-                &proposal.contract,
-                action.clone(),
-            )
-        } else {
-            apply_interaction_with_rejection(
-                state,
-                actor,
-                proposal.contract.semantic_owner,
-                action.clone(),
-            )
-        };
-        match applied {
-            Ok(result) => {
-                if is_stack_recheck_pass {
-                    record_verified_ai_priority_pass(actor, proposal.contract.semantic_owner);
-                } else {
-                    record_replay_action(false, actor, action);
-                }
-                invalidate_ai_proposals();
-                AiProposalSubmission::Applied {
-                    result: Box::new(result),
-                }
-            }
-            Err(rejection) => AiProposalSubmission::Rejected { rejection },
-        }
+        apply_ai_action_proposal(state, &proposal.contract, actor, action.clone())
     }) {
-        Ok(outcome) => to_js(&outcome),
+        Ok(AiProposalApplication::AppliedStackPass { result }) => {
+            record_verified_ai_priority_pass(actor, proposal.contract.semantic_owner);
+            invalidate_ai_proposals();
+            to_js(&AiProposalSubmission::Applied {
+                result: Box::new(result),
+            })
+        }
+        Ok(AiProposalApplication::AppliedAction { result }) => {
+            record_replay_action(false, actor, action);
+            invalidate_ai_proposals();
+            to_js(&AiProposalSubmission::Applied {
+                result: Box::new(result),
+            })
+        }
+        Ok(AiProposalApplication::Stale) => to_js(&AiProposalSubmission::Stale {
+            reason: "decision_changed_or_action_outside_issued_bounds",
+        }),
+        Ok(AiProposalApplication::Rejected { rejection }) => {
+            to_js(&AiProposalSubmission::Rejected { rejection })
+        }
         Err(_) => to_js(&AiProposalSubmission::Stale {
             reason: "state_unavailable",
         }),
@@ -3453,7 +3702,7 @@ mod bracket_estimate_tests {
         )
         .unwrap()
         .with_bracket_lists(BracketLists::from_json_str(r#"{"version":"t"}"#).unwrap());
-        CARD_DB.with(|c| *c.borrow_mut() = Some(db));
+        CARD_DB.with(|c| *c.borrow_mut() = Some(std::sync::Arc::new(db)));
 
         let deck = PlayerDeckList {
             commander: vec!["Atraxa, Praetors' Voice".into()],
@@ -4250,35 +4499,6 @@ mod tests {
     }
 
     #[test]
-    fn stack_pass_proposal_uses_the_verified_recheck_seam() {
-        let player = PlayerId(0);
-        let mut state = priority_state(player);
-        state
-            .stack
-            .push_back(no_op_stack_entry(70_101, PlayerId(1)));
-        add_non_mana_recheck_action(&mut state, PlayerId(1));
-        let action = GameAction::PassPriority;
-        let token = install_issued_candidate(state, player, &action);
-
-        assert_eq!(
-            proposal_outcome(&token, player, &action)["status"],
-            "applied"
-        );
-        with_state(|state| {
-            assert_eq!(
-                state
-                    .stack_resolution_session
-                    .as_ref()
-                    .map(|session| session.policy),
-                Some(engine::types::game_state::StackResolutionPolicy::RecheckNoMeaningfulPriorityAction),
-                "the WASM proposal boundary must not downgrade a verified stack pass"
-            );
-        })
-        .expect("test state must remain installed");
-        clear_game_state();
-    }
-
-    #[test]
     fn public_proposal_issuer_mints_a_submitable_priority_capability() {
         let player = PlayerId(0);
         clear_game_state();
@@ -4834,28 +5054,6 @@ mod tests {
         assert!(has_replay_recording());
     }
 
-    fn add_non_mana_recheck_action(state: &mut GameState, controller: PlayerId) {
-        let object_id = create_object(
-            state,
-            CardId(70_100),
-            controller,
-            "Wasm Recheck Action".to_string(),
-            Zone::Battlefield,
-        );
-        let object = state
-            .objects
-            .get_mut(&object_id)
-            .expect("created battlefield object");
-        object.card_types.core_types.push(CoreType::Artifact);
-        Arc::make_mut(&mut object.abilities).push(AbilityDefinition::new(
-            AbilityKind::Activated,
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
-            },
-        ));
-    }
-
     #[test]
     fn restore_is_decode_only_until_explicit_stack_automation_resume() {
         clear_game_state();
@@ -5312,7 +5510,7 @@ mod replay_bridge_tests {
             }"#,
         )
         .unwrap();
-        CARD_DB.with(|c| *c.borrow_mut() = Some(db));
+        CARD_DB.with(|c| *c.borrow_mut() = Some(std::sync::Arc::new(db)));
 
         let mut state = GameState::new_two_player(11);
         state.debug_mode = true;
@@ -5420,7 +5618,7 @@ mod replay_bridge_tests {
             }"#,
         )
         .unwrap();
-        CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(std::sync::Arc::new(db)));
 
         let mut state = GameState::new_two_player(19);
         state.debug_mode = true;
@@ -5781,10 +5979,10 @@ mod ai_scoring_rng_bridge_tests {
         // rows this module would then have to keep true. `restored_card_db_requirements_tests`
         // is the row that pins the requirement itself.
         CARD_DB.with(|cell| {
-            *cell.borrow_mut() = Some(
+            *cell.borrow_mut() = Some(std::sync::Arc::new(
                 engine::database::CardDatabase::from_json_str("{}")
                     .expect("an empty card database must parse"),
-            );
+            ));
         });
 
         // The exact shipped plant: `AiWorkerPool` calls `worker.restoreState(..)`

@@ -633,6 +633,19 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     }
   }
 
+  async getAiTacticalActionProposal(
+    difficulty: string,
+    playerId: number,
+  ): Promise<AiActionProposal | null> {
+    this.assertInitialized();
+    try {
+      if (this.engine) return await this.engine.getAiTacticalActionProposal(difficulty, playerId);
+      return await this.fallback!.getAiTacticalActionProposal(difficulty, playerId);
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
   async submitAiActionProposal(
     proposal: AiActionProposal,
   ): Promise<AiProposalSubmission> {
@@ -1216,6 +1229,7 @@ interface MainThreadFallback {
   getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult>;
   getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot>;
   getAiActionProposal(difficulty: string, playerId: number): Promise<AiActionProposal | null>;
+  getAiTacticalActionProposal(difficulty: string, playerId: number): Promise<AiActionProposal | null>;
   getAiActionProposalWithDiagnostics(
     difficulty: string,
     playerId: number,
@@ -1387,6 +1401,9 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     getAiActionProposal: (difficulty: string, playerId: number) =>
       enqueue(() => (wasm.get_ai_action_proposal(difficulty, playerId) ?? null) as AiActionProposal | null),
+
+    getAiTacticalActionProposal: (difficulty: string, playerId: number) =>
+      enqueue(() => (wasm.get_ai_tactical_action_proposal(difficulty, playerId) ?? null) as AiActionProposal | null),
 
     getAiActionProposalWithDiagnostics: (difficulty: string, playerId: number) =>
       enqueue(() => (wasm.get_ai_action_proposal_with_diagnostics(difficulty, playerId) ?? null) as {

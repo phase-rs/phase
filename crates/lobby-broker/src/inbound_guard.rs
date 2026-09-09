@@ -298,6 +298,33 @@ mod tests {
         assert!(err.contains("range_of_influence"));
     }
 
+    /// Phase 1d production seam: `guard_create_game_settings_inbound` is the
+    /// only inbound gate `format_config.validate_for_player_count` runs
+    /// behind on this path — a deleted `?` here would leave an
+    /// out-of-registry-range `player_count` admitted straight through to
+    /// session creation. Commander's registry range is 2..=6; `player_count`
+    /// is clamped to `MAX_PLAYER_COUNT` (8) before the bounds check, so 8
+    /// still lands outside the range and must be rejected.
+    #[test]
+    fn borrowed_create_guard_rejects_player_count_outside_format_registry_range() {
+        let format_config = FormatConfig::commander();
+
+        let err = guard_create_game_settings_inbound(CreateGameSettingsInbound {
+            deck: &deck(1, 0),
+            display_name: "Host",
+            password: None,
+            timer_seconds: None,
+            player_count: 8,
+            format_config: Some(&format_config),
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+        })
+        .unwrap_err();
+
+        assert!(err.contains("player_count"));
+    }
+
     #[test]
     fn borrowed_join_guard_rejects_oversized_deck_without_owned_message() {
         let err = guard_join_game_with_password_inbound(JoinGameWithPasswordInbound {

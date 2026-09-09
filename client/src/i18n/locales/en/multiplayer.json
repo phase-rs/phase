@@ -1,4 +1,22 @@
 {
+  "lan": {
+    "title": "Local network",
+    "guidance": "Enter a server address to join manually. HTTPS browser pages require a secure wss:// server; use the desktop app for local ws:// addresses.",
+    "unavailable": "LAN hosting and discovery require a current desktop app.",
+    "checking": "Checking desktop LAN support…",
+    "start": "Start LAN hosting",
+    "stop": "Stop LAN hosting",
+    "scan": "Find LAN servers",
+    "pending": "Working…",
+    "running": "LAN hosting is running. Share an address with players on your network.",
+    "empty": "No LAN servers found. Check that the host is running on the same network, then try again.",
+    "add": "Add server",
+    "copy": "Copy address",
+    "copied": "Address copied",
+    "error": "LAN operation failed. {{detail}}",
+    "added": "Server added. Use Dedicated server once its connection is compatible and ready.",
+    "originUnavailable": "LAN hosting is unavailable for this app version or origin."
+  },
   "concedeDialog": {
     "title": "Concede Game?",
     "game": {
@@ -127,11 +145,14 @@
     "kindFull": "(game server)",
     "kindLobbyOnly": "(lobby broker)"
   },
+  "connectionMode": {
+    "label": "Who hosts?",
+    "server": "Dedicated server",
+    "p2p": "You host (P2P)"
+  },
   "serverPicker": {
     "title": "Server",
     "subtitle": "Choose where you host, and which lobbies you browse.",
-    "noneLabel": "None (P2P only)",
-    "directCodes": "direct codes",
     "official": "Official",
     "selfHosted": "Self-hosted",
     "customUrlPlaceholder": "wss://your-server.example/ws",
@@ -177,10 +198,7 @@
     "createDraft": "Create Draft"
   },
   "lobbyView": {
-    "directConnection": "Direct Connection",
     "onlineLobby": "Online Lobby",
-    "pickServerTitle": "Pick a server to use online lobby mode",
-    "pickServer": "Pick server",
     "online": "{{count}} online",
     "format": "Format",
     "allFormats": "All formats",
@@ -192,28 +210,25 @@
     "noFormatGames": "No {{format}} games right now.",
     "noOpenGames": "No open games right now.",
     "showAllFormats": "Show all formats",
-    "p2pNotice": "Dedicated server unavailable. You can still host or join directly with a 5-character room code.",
-    "joinByCode": "Join by Code",
     "joinATable": "Join a Table",
-    "p2pCodePlaceholder": "Enter 5-character P2P code",
     "serverCodePlaceholder": "Enter code or CODE@IP:PORT",
     "join": "Join",
     "watch": "Watch",
     "host": "Host",
-    "hostP2PDescription": "Create a direct room for one opponent.",
     "hostServerDescription": "Open a room and wait for players.",
     "hostDraft": "Host Draft",
     "hostGame": "Host Game",
-    "hostP2PGame": "Host P2P Game",
     "passwordRequired": "Password Required",
     "passwordPlaceholder": "Enter password",
     "sourcesDegraded": "Some lobby sources are unreachable",
     "invalidJoinServer": "That join code's server address isn't valid."
   },
   "hostSetup": {
+    "dedicatedUnavailable": "No dedicated server is available right now. You can host using P2P.",
     "hostDirectMatch": "Host Direct Match",
     "hostMatch": "Host Match",
-    "p2pNotice": "Dedicated server is unavailable, so this room will use a direct connection.",
+    "p2pNotice": "Your device runs the game. Keep the app open and stay connected. You can list your game in the lobby.",
+    "p2pSeatCap": "P2P tables seat at most {{max}} players, so the seat count is capped.",
     "roomName": "Room Name",
     "optional": "(optional)",
     "roomNamePlaceholder": "e.g. Friday Night Commander",
@@ -239,7 +254,7 @@
     "ranked": "Ranked",
     "listInLobby": "List in lobby",
     "hostServer": "Host on",
-    "hostServerHelp": "Which server runs this match. Your browsing and direct-code settings don't change.",
+    "hostServerHelp": "A dedicated server runs the game. It may slow down or go offline. You can list your game in the lobby.",
     "hostServerScore": "{{name}} — health {{score}}",
     "hostServerUnscored": "{{name}} — not yet rated",
     "sandboxMode": "Sandbox Mode — allow debug actions",

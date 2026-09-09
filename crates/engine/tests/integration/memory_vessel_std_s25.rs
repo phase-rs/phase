@@ -465,9 +465,9 @@ fn memory_vessel_oracle_text_lowers_fully() {
     // ISSUE #7923 / V-U2e3 — `[BASE]`. THIS ASSERTION CARRIES THE REVERT-FAILING
     // CONTENT OF DELETING `try_parse_exile_play_grant_with_play_prohibition`.
     //
-    // CR 608.2c: the printed text is ONE sentence
-    // whose conjuncts are comma-joined steps of a single instruction, so the link
-    // between the grant and the prohibition is a `ContinuationStep`;
+    // CR 608.2c: the printed text is ONE sentence whose conjuncts are
+    // comma-joined steps of a single instruction, so the link between the grant
+    // and the prohibition is a `ContinuationStep`;
     // `SubAbilityLink::SequentialSibling` is reserved for the NEXT printed
     // instruction (a `Sentence` boundary). The deleted one-off HAND-SET
     // `SequentialSibling`; the general path now derives the link from

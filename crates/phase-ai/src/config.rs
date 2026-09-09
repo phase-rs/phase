@@ -173,11 +173,43 @@ pub enum OpponentModel {
     SampledReply,
 }
 
+/// How the heuristic combat AI gates a marginal attacker (see
+/// [`crate::combat_ai`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombatEvModel {
+    /// The historical 3-way boolean gate (`free_damage` / `favorable_trade` /
+    /// `lifelink_bonus` per objective). Un-animated man-lands are invisible and
+    /// there is no numeric downside weighting. Used by VeryEasy / Easy.
+    Basic,
+    /// Numeric `expected_damage - P(bad_block) * value_lost` gate that also
+    /// treats an animatable man-land as a latent blocker (CR 509.1a), folds in
+    /// the defender's open-mana combat-trick risk, and raises the bar for
+    /// marginal attacks while ahead and off-clock. Used by Medium and up.
+    DownsideWeighted,
+}
+
 #[derive(Debug, Clone)]
 pub struct AiProfile {
     pub risk_tolerance: f64,
     pub interaction_patience: f64,
     pub stabilize_bias: f64,
+    /// Combat marginal-attacker gate. See [`CombatEvModel`].
+    pub combat_ev_model: CombatEvModel,
+    /// `DownsideWeighted` only: credence that a detected animatable man-land the
+    /// defender has open mana for actually blocks (it costs them mana + the
+    /// land). Scales that block's contribution to `P(bad_block)`. ~0.6.
+    pub latent_blocker_credence: f64,
+    /// `DownsideWeighted` only: multiplier applied to an attacker's value-at-risk
+    /// when the AI has zero untapped mana and therefore cannot protect it after
+    /// blocks. ~1.3.
+    pub no_follow_up_downside_mult: f64,
+    /// `DownsideWeighted` only: EV a `PreserveAdvantage` attack must clear when
+    /// the AI is ahead and under no clock — marginal "because I can" attacks are
+    /// held back below this bar. In creature-value units (~0.75).
+    pub offclock_attack_ev_floor: f64,
+    /// `DownsideWeighted` only: scale on the defender's open-mana combat-trick /
+    /// burn probability before it feeds `P(bad_block)`. 1.0 = as-modeled.
+    pub trick_risk_scale: f64,
 }
 
 impl AiProfile {
@@ -192,6 +224,9 @@ impl AiProfile {
             interaction_patience: (self.interaction_patience * strategy.interaction_patience_mult)
                 .clamp(0.1, 1.0),
             stabilize_bias: (self.stabilize_bias * strategy.stabilize_bias_mult).clamp(0.5, 2.0),
+            // Combat-EV knobs are difficulty-scoped, not archetype-modulated —
+            // carry them through unchanged.
+            ..self.clone()
         }
     }
 }
@@ -202,6 +237,13 @@ impl Default for AiProfile {
             risk_tolerance: 0.6,
             interaction_patience: 0.75,
             stabilize_bias: 1.0,
+            // Preserve the historical gate for the raw wrapper and tests;
+            // difficulty presets opt Medium+ into `DownsideWeighted`.
+            combat_ev_model: CombatEvModel::Basic,
+            latent_blocker_credence: 0.6,
+            no_follow_up_downside_mult: 1.3,
+            offclock_attack_ev_floor: 0.75,
+            trick_risk_scale: 1.0,
         }
     }
 }
@@ -229,6 +271,14 @@ impl Default for SearchConfig {
 /// All values are `f64` for compatibility with the CMA-ES training pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyPenalties {
+    /// Reward for activating a random-creature mana sink (the Momir's Madness
+    /// emblem) on a turn its schedule opens. Without a positive score here the
+    /// activation loses to `PassPriority` outright: the effect's polarity is
+    /// `Contextual`, so no other policy has an opinion on it.
+    pub momir_curve_activation: f64,
+    /// Reward for choosing the scheduled X at the sink's `{X}` prompt, so the
+    /// AI spends its turn's mana rather than taking the search's default.
+    pub momir_curve_x_on_schedule: f64,
     /// Penalty for targeting a creature already doomed by pending stack effects.
     pub redundant_removal_penalty: f64,
     /// Penalty for targeting a creature with pending (but non-lethal) damage.
@@ -599,6 +649,13 @@ pub struct PolicyPenalties {
 impl Default for PolicyPenalties {
     fn default() -> Self {
         Self {
+            // Strong band: the sink is the format's only source of board
+            // presence, so on a scheduled turn it is the play. Sized to clear
+            // `PassPriority` decisively without eclipsing a lethal attack.
+            momir_curve_activation: 3.0,
+            // Strong band: picking the scheduled X is the whole decision — a
+            // smaller creature is a strictly worse use of the same card.
+            momir_curve_x_on_schedule: 2.5,
             redundant_removal_penalty: -6.0,
             redundant_damage_penalty: -4.0,
             gift_card_penalty: -3.0,
@@ -838,19 +895,19 @@ fn default_lethality_tapout_penalty() -> f64 {
 /// rather than by this gap, which a CMA-ES run could close at any time; this
 /// number is a within-class weight.
 ///
-/// **CR 305.4 — the rate-limit rationale above is FALSE on one of this
-/// penalty's call sites, and that is a known mispricing, not an oversight.**
-/// CR 305.4: "Effects may also allow players to
-/// 'put' lands onto the battlefield. This isn't the same as 'playing a land' and
-/// doesn't count as a land played during the current turn." A fetchland *puts*
-/// its replacement onto the battlefield, so sacrificing it consumes no land
-/// drop and the CR 305.2 rationale does not apply. `self_cost::sacrifice_leaf_cost`
-/// short-circuits on `TargetFilter::SelfRef` and charges this full penalty to a
-/// land that sacrifices itself, so the AI under-activates fetchland-shaped
-/// abilities. Discounting that path is an unmeasured behaviour change and is
-/// deferred, NOT blocked on missing infrastructure: `policies::fetch_land_patience`
-/// (which cites CR 305.4 for the same reason) already carries the predicates —
-/// see the note at `self_cost::sacrifice_leaf_cost`.
+/// **CR 305.4 — the rate-limit rationale above is FALSE on one of this penalty's
+/// call sites, and that is a known mispricing, not an oversight.** CR 305.4:
+/// "Effects may also allow players to 'put' lands onto the battlefield. This isn't
+/// the same as 'playing a land' and doesn't count as a land played during the
+/// current turn." A fetchland *puts* its replacement onto the battlefield, so
+/// sacrificing it consumes no land drop and the CR 305.2 rationale does not apply.
+/// `self_cost::sacrifice_leaf_cost` short-circuits on `TargetFilter::SelfRef` and
+/// charges this full penalty to a land that sacrifices itself, so the AI
+/// under-activates fetchland-shaped abilities. Discounting that path is an
+/// unmeasured behaviour change and is deferred, NOT blocked on missing
+/// infrastructure: `policies::fetch_land_patience` (which cites CR 305.4 for the
+/// same reason) already carries the predicates — see the note at
+/// `self_cost::sacrifice_leaf_cost`.
 fn default_sacrifice_land_penalty() -> f64 {
     4.5
 }
@@ -1013,6 +1070,18 @@ pub const ACTIVE_POLICY_PENALTY_FIELDS: &[&str] = &[
 /// Policy penalties intentionally not present in an active CMA-ES parameter
 /// vector yet.
 pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
+    (
+        "momir_curve_activation",
+        "Momir's Madness schedule — the format has no ai-gate matchup coverage \
+         (ai-duel is Commander-only), so the value is set from the format's own \
+         logic rather than measured play and must not be handed to CMA-ES until \
+         a Momir matchup exists to calibrate against.",
+    ),
+    (
+        "momir_curve_x_on_schedule",
+        "Momir's Madness schedule — same reason as momir_curve_activation: no \
+         Momir matchup exists in the ai-gate suite to calibrate against.",
+    ),
     (
         "gift_extra_turn_penalty",
         "CR 702.174g extra-turn gift downside — one shipped card (Perch Protection); \
@@ -1231,6 +1300,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.9,
                 interaction_patience: 0.2,
                 stabilize_bias: 0.8,
+                ..AiProfile::default()
             },
             false,
             false,
@@ -1255,6 +1325,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.8,
                 interaction_patience: 0.4,
                 stabilize_bias: 0.9,
+                ..AiProfile::default()
             },
             true,
             false,
@@ -1279,6 +1350,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.65,
                 interaction_patience: 0.7,
                 stabilize_bias: 1.0,
+                combat_ev_model: CombatEvModel::DownsideWeighted,
+                ..AiProfile::default()
             },
             true,
             false,
@@ -1308,6 +1381,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.55,
                 interaction_patience: 0.9,
                 stabilize_bias: 1.1,
+                combat_ev_model: CombatEvModel::DownsideWeighted,
+                ..AiProfile::default()
             },
             true,
             false,
@@ -1337,6 +1412,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.45,
                 interaction_patience: 1.0,
                 stabilize_bias: 1.2,
+                combat_ev_model: CombatEvModel::DownsideWeighted,
+                ..AiProfile::default()
             },
             true,
             false,
@@ -1366,6 +1443,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.4,
                 interaction_patience: 1.0,
                 stabilize_bias: 1.2,
+                combat_ev_model: CombatEvModel::DownsideWeighted,
+                ..AiProfile::default()
             },
             true, // play_lookahead
             true, // combat_lookahead — cEDH is the first tier to enable this

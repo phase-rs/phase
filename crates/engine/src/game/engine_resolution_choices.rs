@@ -120,6 +120,7 @@ fn legacy_mass_library_order_prompt_is_current(
         destination: Zone::Library,
         origin,
         library_position: Some(position),
+        library_shuffle: _,
         random_order: false,
         target,
         ..
@@ -871,6 +872,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
+            | WaitingFor::DieKeepChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::CastOffer {
                 kind: CastOfferKind::Discover { .. },
@@ -1220,12 +1222,7 @@ fn finalize_standard_search_selection(
                 &frame.pending.chain,
             );
         state.resolving_continuation_attach_host = frame.pending.search_attach_host;
-        let mut targets: Vec<_> = chosen.iter().copied().map(TargetRef::Object).collect();
-        // CR 701.23a + CR 701.24a: propagate the semantic searcher for
-        // library-owner-sensitive shuffle and tail instructions.
-        if player != frame.pending.chain.controller {
-            targets.push(TargetRef::Player(player));
-        }
+        let targets = search_selection_targets(&frame.pending.chain, player, chosen);
         frame.pending.chain.targets = targets.clone();
         propagate_targets_through_search_shuffle(&mut frame.pending.chain, &targets);
         state.push_ability_continuation(frame);
@@ -1237,10 +1234,7 @@ fn finalize_standard_search_selection(
             state,
             &continuation.pending.chain,
         );
-        let mut targets: Vec<_> = chosen.iter().copied().map(TargetRef::Object).collect();
-        if player != continuation.pending.chain.controller {
-            targets.push(TargetRef::Player(player));
-        }
+        let targets = search_selection_targets(&continuation.pending.chain, player, chosen);
         let continuation = state
             .outer_ability_continuation_of_active_post_replacement_draw_mut()
             .expect("checked paired continuation must remain resident while the draw is active");
@@ -2018,6 +2012,102 @@ pub(super) fn handle_resolution_choice(
             let wf = match next {
                 Some(wf) => wf,
                 None => finish_with_continuation(state, player, events),
+            };
+            ResolutionChoiceOutcome::WaitingFor(wf)
+        }
+        (
+            WaitingFor::DieKeepChoice {
+                player,
+                results,
+                ignorable_indices,
+                ignore_count,
+            },
+            GameAction::SelectDieRolls { ignore_indices },
+        ) => {
+            // CR 706.6: the roller must ignore exactly `ignore_count` distinct
+            // rolls, and only rolls the engine offered — for "ignore the lowest"
+            // that is the set tied for the lowest natural result. Validating
+            // against `ignorable_indices` (not merely against the range) is what
+            // stops a submission that ignores a non-lowest roll.
+            if ignore_indices.len() != ignore_count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must ignore exactly {ignore_count} die roll(s), got {}",
+                    ignore_indices.len()
+                )));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for &index in &ignore_indices {
+                if !ignorable_indices.contains(&index) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Die roll index {index} is not among the rolls that may be ignored"
+                    )));
+                }
+                if !seen.insert(index) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Duplicate die roll index {index}"
+                    )));
+                }
+            }
+            debug_assert!(
+                ignorable_indices.iter().all(|index| *index < results.len()),
+                "ignorable_indices must index into results",
+            );
+
+            let pending = state
+                .take_active_die_roll_frame()
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("No active die-roll frame to resume".to_string())
+                })?;
+
+            // CR 706.4 + CR 608.2: `apply()` clears `die_result_this_resolution`
+            // on every action boundary, and `stack.rs` clears it at further
+            // reset points, so the context the roll was made in is gone by the
+            // time this handler runs. Restore it from the frame BEFORE
+            // `resume_after_ignore` (which then overwrites it per-survivor and
+            // finally with the survivors' aggregate), and restore `prev` only
+            // AFTER the continuation drain so a chained sub_ability reads the
+            // aggregate. Save/restore rather than a bare clear keeps this
+            // re-entrant, mirroring the `ChooseFromZone` trigger-context
+            // round-trip.
+            //
+            // SCOPE: this covers the `QuantityRef::EventContextAmount` cascade
+            // in `game/quantity.rs`. It does NOT cover
+            // `snapshot_resolution_context_quantity`
+            // (`game/effects/effect.rs`), which reads the events slice and never
+            // consults this field — that path is carried by emission ordering.
+            let prev_die_result = state.die_result_this_resolution;
+            state.die_result_this_resolution = pending.die_result;
+            // CR 706.6: the roller only ever chose among the TIED rolls. Any
+            // roll the rules determined must go (a stacked "ignore the lowest"
+            // run over `[4, 7, 7]` forces the 4) was never offered, so union it
+            // back in here — the roller cannot keep a forced roll by picking
+            // around it.
+            let mut ignore_indices = ignore_indices;
+            ignore_indices.extend_from_slice(&pending.forced_ignored);
+            ignore_indices.sort_unstable();
+            ignore_indices.dedup();
+            let next = crate::game::effects::roll_die::resume_after_ignore(
+                state,
+                pending,
+                ignore_indices,
+                events,
+            )
+            .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
+            // CR 608.2c: re-suspended for another interactive choice, else the
+            // whole die-roll instruction completed — drain back to Priority.
+            let wf = match next {
+                // Re-suspended on yet another branch choice: the frame re-parked
+                // itself with the cursor advanced, so leave the restored context
+                // in place for that continuation to read. Restoring `prev` here
+                // would wipe the surviving-dice aggregate out from under the
+                // re-parked frame. Matches `drain_active_die_roll`.
+                Some(wf) => wf,
+                None => {
+                    let wf = finish_with_continuation(state, player, events);
+                    state.die_result_this_resolution = prev_die_result;
+                    wf
+                }
             };
             ResolutionChoiceOutcome::WaitingFor(wf)
         }
@@ -4274,6 +4364,7 @@ pub(super) fn handle_resolution_choice(
                     ));
                 }
             }
+
             // CR 608.2c: Enforce the printed-text selection restriction at the
             // submission boundary so the AI candidate filter and the engine
             // resolver agree on legality.
@@ -4564,12 +4655,24 @@ pub(super) fn handle_resolution_choice(
                                         .to_string(),
                                 )
                             })?;
-                        chosen_ids.push(effects::search_outside_game::put_outside_game_face_into(
+                        // CR 407.3: the offer already excluded the ante class,
+                        // so a refusal here means the selection named a card
+                        // that was never selectable — an invalid action, not a
+                        // silently dropped card.
+                        let object_id = effects::search_outside_game::put_outside_game_face_into(
                             state,
                             player,
                             &card,
                             destination,
-                        ));
+                        )
+                        .ok_or_else(|| {
+                            EngineError::InvalidAction(format!(
+                                "{} can't be brought into the game from outside the game while \
+                                 not playing for ante (CR 407.3)",
+                                card.name
+                            ))
+                        })?;
+                        chosen_ids.push(object_id);
                     }
                     OutsideGameSelection::FaceUpExile { object_id } => {
                         match effects::search_outside_game::put_face_up_exile_into(
@@ -4808,10 +4911,10 @@ pub(super) fn handle_resolution_choice(
                 .and_then(|_| chosen.first())
                 .and_then(|id| {
                     state.objects.get(id).map(|object| {
-                        crate::types::ability::CostPaidObjectSnapshot {
-                            object_id: *id,
-                            lki: object.snapshot_for_mana_spent(),
-                        }
+                        crate::types::ability::CostPaidObjectSnapshot::capture(
+                            object,
+                            object.snapshot_for_mana_spent(),
+                        )
                     })
                 });
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
@@ -5422,6 +5525,7 @@ pub(super) fn handle_resolution_choice(
                             Effect::ChangeZoneAll {
                                 destination: Zone::Library,
                                 library_position: Some(position),
+                                library_shuffle: _,
                                 random_order: false,
                                 ..
                             } if library_position.as_ref() == Some(position)
@@ -5454,6 +5558,36 @@ pub(super) fn handle_resolution_choice(
                         "Selected card is no longer in {:?}",
                         zone
                     )));
+                }
+            }
+
+            // CR 701.24c-e + CR 400.3: once the choice is validated, publish
+            // its prospective owner population before any selected member enters
+            // the replacement pipeline. The prompt seam already retained an
+            // empty typed participant when necessary; this extends that set.
+            if matches!(effect_kind, EffectKind::ChangeZone) {
+                if let Some(continuation) = state
+                    .active_ability_continuation()
+                    .map(|continuation| (*continuation.chain).clone())
+                {
+                    if matches!(
+                        effects::tracked_set_publication_mode(&continuation),
+                        effects::TrackedSetPublicationMode::Prospective { .. }
+                    ) {
+                        let participants = effects::prospective_subject_participants(
+                            state,
+                            &continuation,
+                            &chosen,
+                        );
+                        effects::publish_tracked_set_for_resolution(
+                            state,
+                            &continuation,
+                            effects::TrackedSetPublicationInput::FinalizedSubjects {
+                                objects: &chosen,
+                                participants: &participants,
+                            },
+                        );
+                    }
                 }
             }
 
@@ -6248,10 +6382,10 @@ pub(super) fn handle_resolution_choice(
                     // "the creature you blighted" remains available when the
                     // continuation resumes.
                     if let Some(obj) = state.objects.get(&blighted) {
-                        let snapshot = crate::types::ability::CostPaidObjectSnapshot {
-                            object_id: blighted,
-                            lki: obj.snapshot_for_mana_spent(),
-                        };
+                        let snapshot = crate::types::ability::CostPaidObjectSnapshot::capture(
+                            obj,
+                            obj.snapshot_for_mana_spent(),
+                        );
                         if let Some(frame) = state.active_ability_continuation_frame_mut() {
                             frame
                                 .pending
@@ -7791,6 +7925,27 @@ fn publish_effect_zone_choice_tracked_set(
     {
         return;
     }
+    let active_continuation = state
+        .active_ability_continuation()
+        .map(|continuation| (*continuation.chain).clone());
+    if let Some(continuation) = active_continuation {
+        if matches!(
+            effects::tracked_set_publication_mode(&continuation),
+            effects::TrackedSetPublicationMode::Prospective { .. }
+        ) {
+            let participants =
+                effects::prospective_subject_participants(state, &continuation, chosen);
+            effects::publish_tracked_set_for_resolution(
+                state,
+                &continuation,
+                effects::TrackedSetPublicationInput::FinalizedSubjects {
+                    objects: chosen,
+                    participants: &participants,
+                },
+            );
+            return;
+        }
+    }
     // Distinguish mid-pause "nothing to publish yet" from a genuine empty
     // narrowed set (PutAtLibraryPosition Bottom). The latter must still rebind
     // `chain_tracked_set_id` so a chained TrackedSet exile cannot re-select
@@ -9007,6 +9162,42 @@ fn resume_with_error_propagation(
     super::engine::resume_pending_continuation_if_priority(state, events)
 }
 
+/// CR 608.2c + CR 701.23a: A search selection replaces the continuation's
+/// object targets with the found cards. Preserve the existing player target
+/// only when a later node still resolves a parent reference: the found-card
+/// delivery must see the chosen cards, while that tail must still see the
+/// player named before the search (Head Games / Jester's Mask).
+fn search_selection_targets(
+    chain: &ResolvedAbility,
+    player: crate::types::player::PlayerId,
+    chosen: &[ObjectId],
+) -> Vec<TargetRef> {
+    let mut targets: Vec<_> = chosen.iter().copied().map(TargetRef::Object).collect();
+    let consumes_parent_player = matches!(
+        &chain.effect,
+        Effect::Shuffle {
+            target: crate::types::ability::TargetFilter::ParentTarget
+        }
+    ) || chain
+        .sub_ability
+        .as_deref()
+        .is_some_and(effects::ability_refs_parent_target);
+    if consumes_parent_player {
+        if let Some(parent_player) = chain.targets.iter().find_map(|target| match target {
+            TargetRef::Player(player) => Some(*player),
+            TargetRef::Object(_) => None,
+        }) {
+            targets.push(TargetRef::Player(parent_player));
+        }
+    }
+    // CR 701.23a + CR 701.24a: propagate the semantic searcher for
+    // library-owner-sensitive shuffle and tail instructions.
+    if player != chain.controller && !targets.contains(&TargetRef::Player(player)) {
+        targets.push(TargetRef::Player(player));
+    }
+    targets
+}
+
 fn propagate_targets_through_search_shuffle(ability: &mut ResolvedAbility, targets: &[TargetRef]) {
     let mut cursor = ability;
     while matches!(cursor.effect, Effect::Shuffle { .. }) {
@@ -9036,6 +9227,30 @@ mod tests {
     use crate::types::proposed_event::ReplacementId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{ProhibitionScope, StaticMode};
+
+    /// CR 701.23a + CR 701.24a: A search whose continuation begins with a
+    /// parent-target shuffle must retain the player target after replacing the
+    /// found-card object targets. A normal found-card delivery is a ChangeZone
+    /// head, so this deliberately does not retain players for arbitrary heads.
+    #[test]
+    fn search_selection_targets_preserves_player_for_leading_parent_target_shuffle() {
+        let chain = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(90_100),
+            PlayerId(0),
+        );
+
+        assert_eq!(
+            search_selection_targets(&chain, PlayerId(0), &[ObjectId(90_101)]),
+            vec![
+                TargetRef::Object(ObjectId(90_101)),
+                TargetRef::Player(PlayerId(1)),
+            ]
+        );
+    }
 
     fn resolution_choice_source(
         state: &GameState,

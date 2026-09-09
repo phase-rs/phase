@@ -62,6 +62,12 @@
     "updateIssue": "Update-Problem",
     "updated": "aktualisiert"
   },
+  "offlineBadge": {
+    "label": "Offline",
+    "servicesPaused": "Online-Aktualisierungen und Dienste sind pausiert.",
+    "forced": "Offline arbeiten ist aktiviert.",
+    "connection": "Keine Netzwerkverbindung."
+  },
   "comboDetector": {
     "label": "Combo-Detektor (experimentell)",
     "title": "Unendliche Schleifen erkennen: Pflichtschleifen automatisch beenden und ∞-Ressourcen anzeigen (standardmäßig aus)",

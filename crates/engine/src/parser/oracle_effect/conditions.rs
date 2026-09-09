@@ -20,10 +20,15 @@ use super::super::oracle_nom::condition::{
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
-use super::super::oracle_target::{parse_target, parse_type_phrase, parse_zone_word};
+use super::super::oracle_target::{
+    parse_target, parse_type_phrase_folding, parse_zone_word, slot_matches_anaphor, AnaphorNoun,
+    AnaphorZoneClass,
+};
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
+#[cfg(test)]
+use super::parse_effect_chain;
 use super::sequence::parse_dig_from_among;
-use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
+use super::{scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
@@ -188,10 +193,10 @@ fn comma_inside_if_creature_subtype_list(lower: &str, comma_idx: usize) -> bool 
     // CR 205.3m + CR 608.2c: target-anaphoric "that creature is a Mutant, Ninja,
     // or Turtle" (Turtle Van). The subtype-list commas separate disjuncts, not
     // the condition from the effect body. Compose the same subject + tense +
-    // article + `parse_type_phrase` span used by
+    // article + `parse_type_phrase_folding` span used by
     // `parse_target_type_membership_condition` and test whether the comma falls
     // inside the matched span. The trailing predicate has no " card" anchor, so
-    // the span ends where `parse_type_phrase` stops consuming type words.
+    // the span ends where `parse_type_phrase_folding` stops consuming type words.
     target_anaphoric_subtype_span(lower, after_prefix)
         .is_some_and(|(start, end)| (start..end).contains(&comma_idx))
 }
@@ -201,11 +206,20 @@ fn comma_inside_if_creature_subtype_list(lower: &str, comma_idx: usize) -> bool 
 /// `[start, end)` offsets (relative to `lower`) of the parsed type phrase, or
 /// `None` when the text is not this shape. `after_prefix` is `lower` with the
 /// leading conditional prefix ("then if " / "if ") already stripped.
+///
+/// Uses the FULL shared `parse_demonstrative_noun` vocabulary with **no** route
+/// or tense check: this computes a LEXICAL span, not a routing decision, and its
+/// contract is to cover every noun the membership arm can consume — so it must
+/// see the divergent nouns too. Widening it can only *prevent* a wrong comma
+/// split, never create one.
 fn target_anaphoric_subtype_span(lower: &str, after_prefix: &str) -> Option<(usize, usize)> {
-    let (after_subject, _) = parse_target_demonstrative_subject(after_prefix).ok()?;
+    let (after_subject, _) = preceded(tag("that "), parse_demonstrative_noun)
+        .parse(after_prefix)
+        .ok()?;
     let (after_tense, _) = parse_target_anaphoric_tense_polarity(after_subject).ok()?;
     let (after_article, _) = opt(nom_primitives::parse_article).parse(after_tense).ok()?;
-    let (filter, remainder) = crate::parser::oracle_target::parse_type_phrase(after_article);
+    let (filter, remainder) =
+        crate::parser::oracle_target::parse_type_phrase_folding(after_article);
     if remainder.len() == after_article.len() || matches!(filter, TargetFilter::Any) {
         return None;
     }
@@ -889,7 +903,7 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
     // The combinator covers past + present tense, single-word imperatives
     // (destroyed/exiled/sacrificed/returned/discarded/milled/countered) AND
     // the multi-word "put onto the battlefield" verb, with subtype filters
-    // (Aura/Equipment/...) via `parse_type_phrase`. Replaces the prior
+    // (Aura/Equipment/...) via `parse_type_phrase_folding`. Replaces the prior
     // hand-rolled past-tense / single-word / top-level-type-only matcher.
     if let Ok((rest, _)) =
         alt((tag::<_, _, OracleError<'_>>("if "), tag("when "))).parse(lower.as_str())
@@ -1367,19 +1381,54 @@ pub(super) fn card_type_condition_as_target_match(
     })
 }
 
-/// CR 608.2c: "If an instant or sorcery card is revealed this way, ..."
-/// (Delver of Secrets class) — gates a sub_ability on the last revealed card's type.
+/// CR 701.20a: `"If a[n] <types> card [<property>] is revealed this way, …"` —
+/// gates a sub_ability on the card the preceding look/reveal step produced.
+/// CR 701.20a ("To reveal a card, show that card to all players…") is the
+/// AUTHORIZING rule for the `"this way"` anaphor this head parses.
+///
+/// Supporting rules, at their own authority levels — deliberately NOT joined to
+/// the line above:
+/// * CR 608.2c (LAYERING) orders the instructions the anaphor points back at.
+/// * CR 202.3 (DEFINITION) defines the mana value the property slot most often
+///   bounds.
+/// * CR 701.20e (EXPLANATION ONLY, never this head's authority) — "Looking at a
+///   card follows the same rules as revealing a card, except that the card is
+///   shown only to the specified player." The ledger this condition reads at
+///   runtime is currently written by the enclosing look as well as by the
+///   reveal, which is the known residual disclosed as DW#5. This head does not,
+///   and must not, try to fix it.
+///
+/// Delver of Secrets carries no property; Runo Stromkirk's "creature card with
+/// mana value 6 or greater" carries `FilterProp::Cmc { GE, Fixed 6 }`. The
+/// property slot delegates to `parse_revealed_card_gate_suffix`, the same
+/// combinator `parse_if_exiled_card_type_conditional` uses — this head simply
+/// welded `" card"` to `" is revealed this way"` and had nowhere to put it.
 fn parse_if_revealed_card_type_conditional(text: &str) -> Option<(AbilityCondition, String)> {
     let lower = text.to_lowercase();
-    let (type_filters, remainder) = nom_on_lower(text, &lower, |input| {
+    let mut ctx = ParseContext::default();
+    let ((type_filters, additional_filter), remainder) = nom_on_lower(text, &lower, |input| {
         let (rest, _) = alt((
             tag::<_, _, OracleError<'_>>("if an "),
             tag::<_, _, OracleError<'_>>("if a "),
         ))
         .parse(input)?;
         let (rest, type_filters) = nom_quantity::parse_type_filter_list(rest)?;
-        let (rest, _) = tag::<_, _, OracleError<'_>>(" card is revealed this way").parse(rest)?;
-        Ok((rest, type_filters))
+        let (rest, _) = tag::<_, _, OracleError<'_>>(" card").parse(rest)?;
+        // CR 202.3 + CR 205.3m: optional postnominal property slot, shared
+        // verbatim with `parse_if_exiled_card_type_conditional`. Called INSIDE
+        // this closure, on the lowercased slice, because the mandatory anchor
+        // below must be matched on the SAME slice for `nom_on_lower`'s
+        // remainder mapping to hold — the exiled head can call it after the
+        // bridge returns, on ORIGINAL-case text, only because its suffix is
+        // that head's LAST step. Running it on lowercased text here is correct
+        // and deliberate, not an oversight: every branch it reaches is a
+        // lowercase-expecting nom parser, so the two heads MUST NOT be
+        // "harmonised" onto one call site.
+        // Safe between these two tags because the helper CONSUMES NOTHING WHEN
+        // IT DOES NOT MATCH (see the invariant recorded on the helper itself).
+        let (rest, additional_filter) = parse_revealed_card_gate_suffix(rest, &mut ctx);
+        let (rest, _) = tag::<_, _, OracleError<'_>>(" is revealed this way").parse(rest)?;
+        Ok((rest, (type_filters, additional_filter)))
     })?;
     let core_types: Vec<CoreType> = type_filters
         .iter()
@@ -1391,7 +1440,7 @@ fn parse_if_revealed_card_type_conditional(text: &str) -> Option<(AbilityConditi
     Some((
         AbilityCondition::RevealedHasCardType {
             card_types: core_types,
-            additional_filter: None,
+            additional_filter,
             subtype_filter: None,
         },
         remainder_after_optional_comma(remainder).to_string(),
@@ -1431,9 +1480,34 @@ fn parse_if_exiled_card_type_conditional(text: &str) -> Option<(AbilityCondition
     ))
 }
 
-/// CR 202.3 + CR 205.3m: Optional property suffix after a revealed-card type gate
-/// (`" with mana value N or less"`, `" of the chosen type"`). Shared by the
-/// exiled-card demonstrative gate and the `"it's a/an … card"` gate body.
+/// CR 202.3 + CR 205.3m: Optional property suffix after a revealed-card type
+/// gate (`" with mana value N or less"`, `" of the chosen type"`). Shared by
+/// the exiled-card demonstrative gate (CR 406.6), the `"it's a/an … card"`
+/// look-head gate body (CR 701.20e), and the `"…is revealed this way"` reveal
+/// head (CR 701.20a).
+///
+/// INVARIANT — load-bearing for `parse_if_revealed_card_type_conditional`:
+/// this helper must CONSUME NOTHING when it does not match. That caller runs it
+/// between `tag(" card")` and a MANDATORY `tag(" is revealed this way")`, so a
+/// branch that consumed without a determiner head would swallow the anchor, the
+/// trailing tag would fail, and that card would lose its ENTIRE condition — the
+/// exact defect this head was fixed for, reintroduced on a different card.
+///
+/// The invariant holds because every consuming branch is fronted by a
+/// determiner: `" of the chosen type"` as a literal here, and inside
+/// `parse_mana_value_suffix` either `parse_suffix_subject_head`
+/// (`"with "`/`"that have "`/`"that each have "`, the parity, elliptical-
+/// possessive and numeric branches), `parse_relative_mana_value_suffix`'s own
+/// `tag("with ")`, or `nom_filter::parse_superlative_property_head`'s
+/// `tag("with the ")`. Note the last two are NOT routed through
+/// `parse_suffix_subject_head` — enumerate all three heads when auditing this.
+///
+/// Consequently, for any input the reveal head accepted before the property
+/// slot existed, the slice handed here begins `" is revealed this way"`, which
+/// no branch above can consume: byte-identity for those cards is a PROOF, not a
+/// measurement. Any change HERE or in `parse_mana_value_suffix` /
+/// `parse_suffix_subject_head` must re-run the card-data structural diff (no
+/// card carrying "is revealed this way" may move except by intent).
 fn parse_revealed_card_gate_suffix<'a>(
     after_type: &'a str,
     ctx: &mut ParseContext,
@@ -1531,12 +1605,12 @@ fn parse_its_a_card_type_gate_body<'a>(
     let type_word = type_str.rsplit(' ').next().unwrap_or(type_str);
     let capitalized = format!("{}{}", &type_word[..1].to_uppercase(), &type_word[1..]);
     // CR 608.2c: "permanent" is not a CoreType (it spans CR 110.1's permanent card
-    // types). Build the condition via the existing parse_type_phrase building block —
+    // types). Build the condition via the existing parse_type_phrase_folding building block —
     // "permanent card" → TargetFilter::Typed(TypeFilter::Permanent) — and gate on it
     // with TargetMatchesFilter (the same condition variant the sibling MV arms use).
     if type_word == "permanent" {
         let (mut filter, leftover) =
-            crate::parser::oracle_target::parse_type_phrase("permanent card");
+            crate::parser::oracle_target::parse_type_phrase_folding("permanent card");
         if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
             let (after_type, chosen_type) = if let Ok((rest_after_chosen, _)) =
                 tag::<_, _, OracleError<'_>>(" of the chosen type").parse(after_type)
@@ -1612,7 +1686,7 @@ pub(super) fn try_parse_moved_card_subtype_attach_followup(
     let (_, (subtype_phrase, body)) = nom_primitives::split_once_on(after_gate, ", ").ok()?;
     // Require a pure subtype gate (Equipment/Aura/Fortification, ...): the type
     // phrase must consume fully and reference at least one CR 205.3 subtype.
-    let (filter, leftover) = parse_type_phrase(subtype_phrase);
+    let (filter, leftover) = parse_type_phrase_folding(subtype_phrase);
     if !leftover.trim().is_empty() {
         return None;
     }
@@ -1812,8 +1886,15 @@ fn parse_target_color_condition(
     ))
 }
 
-/// Demonstrative target-anaphoric subject — "that creature" / "that permanent" /
-/// "that card". Deliberately EXCLUDES the bare "it" pronoun: the "it's a [type]
+/// Demonstrative target-anaphoric subject — the `DemonstrativeRoute::TargetAlways`
+/// nouns "that creature" / "that permanent" / "that card", drawn from the shared
+/// `parse_demonstrative_noun` vocabulary and filtered by route so the accepted
+/// set is byte-identical to the former hand-maintained three-arm `alt`. The six
+/// DIVERGENT nouns are refused here; they reach the target route only through
+/// `parse_target_type_membership_condition`'s present-tense + declared-target
+/// agreement gate.
+///
+/// Deliberately EXCLUDES the bare "it" pronoun: the "it's a [type]
 /// card" / "it's a [subtype] creature card" reveal-conditional forms are already
 /// owned by `RevealedHasCardType` (via `parse_if_revealed_card_type_conditional`
 /// and `strip_card_type_conditional`). Accepting "it" here would preempt those
@@ -1823,15 +1904,11 @@ fn parse_target_color_condition(
 fn parse_target_demonstrative_subject(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, ()> {
-    value(
-        (),
-        alt((
-            tag::<_, _, OracleError<'_>>("that creature"),
-            tag("that permanent"),
-            tag("that card"),
-        )),
-    )
-    .parse(input)
+    let (rest, (_, route)) = preceded(tag("that "), parse_demonstrative_noun).parse(input)?;
+    if !matches!(route, DemonstrativeRoute::TargetAlways) {
+        return Err(oracle_err(input));
+    }
+    Ok((rest, ()))
 }
 
 /// CR 608.2c + CR 205.3m: target-anaphoric card-type / subtype-membership gate —
@@ -1843,22 +1920,51 @@ fn parse_target_demonstrative_subject(
 ///   - tense: present (`is`/`'s`) → current state, past (`was`) → LKI (CR 400.7)
 ///   - polarity: positive (`is`/`was`) vs. negative (`isn't`/`wasn't`/…)
 ///
-/// The predicate tail is parsed by the shared `parse_type_phrase` building block,
+/// The predicate tail is parsed by the shared `parse_type_phrase_folding` building block,
 /// so the full comma + "or" subtype-disjunction grammar (CR 205.3m) is covered:
 /// "a Mutant, Ninja, or Turtle" lowers to `Or[Subtype(Mutant), Subtype(Ninja),
 /// Subtype(Turtle)]`. Emits `TargetMatchesFilter` (wrapped in `Not` when negated)
 /// resolving against the ability's first object target.
-fn parse_target_type_membership_condition(
-    input: &str,
-) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
-    let (rest, _) = parse_target_demonstrative_subject(input)?;
+///
+/// `declared_object_target` is the nearest earlier same-chain clause's declared
+/// object-target filter (`ParseContext::chain_declared_object_target`). It gates
+/// the six DIVERGENT nouns only; the three overlap nouns never consult it.
+fn parse_target_type_membership_condition<'a>(
+    input: &'a str,
+    declared_object_target: Option<&TargetFilter>,
+) -> super::super::oracle_nom::error::OracleResult<'a, AbilityCondition> {
+    let (rest, (noun, route)) = preceded(tag("that "), parse_demonstrative_noun).parse(input)?;
     let (rest, (negated, use_lki)) = parse_target_anaphoric_tense_polarity(rest)?;
+    // CR 608.2c + CR 601.2c + CR 115.1 + CR 400.7: a DIVERGENT noun ("that
+    // token", "that artifact", "that land", …) is claimed by this
+    // target-anaphor route only under a PRESENT-tense copula (`use_lki ==
+    // false`) whose enclosing effect chain declared an object target that
+    // POSITIVELY names the noun. The declared target is the CR 601.2c announced
+    // antecedent the CR 608.2c anaphor binds to.
+    //
+    // The tense guard is the gate's soundness precondition, not a scope
+    // preference: `parse_zone_change_object_type_text`'s copula `alt` has no
+    // ` was ` arm, so declining a PAST-tense divergent gate here would leave a
+    // printed CR 608.2c condition with no owner at all, whereas declining a
+    // present-tense one hands it straight back to the zone-change-event route
+    // exactly as today (CR 400.7 owns the past-tense LKI form separately, via
+    // `strip_target_supertype_conditional`).
+    if matches!(
+        route,
+        DemonstrativeRoute::TargetOnPresentTenseDeclaredTargetAgreement
+    ) && (use_lki
+        || !declared_object_target.is_some_and(|slot| {
+            slot_matches_anaphor(&noun, AnaphorZoneClass::BattlefieldPermanent, slot)
+        }))
+    {
+        return Err(oracle_err(input));
+    }
     // CR 205.3: an optional "a"/"an" article precedes a single type/subtype word
     // ("is a Goblin"); a leading core type with no article ("is artifact") is not
     // real Oracle wording, so the article guard stays inside the combinator.
     let (rest, _) = opt(nom_primitives::parse_article).parse(rest)?;
-    let (filter, remainder) = crate::parser::oracle_target::parse_type_phrase(rest);
-    // Reject when no type word was consumed (parse_type_phrase echoes its input
+    let (filter, remainder) = crate::parser::oracle_target::parse_type_phrase_folding(rest);
+    // Reject when no type word was consumed (parse_type_phrase_folding echoes its input
     // unchanged on failure) so the alt backtracks to the color / quantity arms.
     if remainder.len() == rest.len() || matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -1879,12 +1985,17 @@ fn parse_target_type_membership_condition(
     ))
 }
 
-fn parse_target_type_membership_condition_text(text: &str) -> Option<AbilityCondition> {
+fn parse_target_type_membership_condition_text(
+    text: &str,
+    declared_object_target: Option<&TargetFilter>,
+) -> Option<AbilityCondition> {
     let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
-    let parsed = all_consuming(parse_target_type_membership_condition)
-        .parse(lower.as_str())
-        .ok()
-        .map(|(_, condition)| condition);
+    let parsed = all_consuming(|input| {
+        parse_target_type_membership_condition(input, declared_object_target)
+    })
+    .parse(lower.as_str())
+    .ok()
+    .map(|(_, condition)| condition);
     parsed
 }
 
@@ -2140,11 +2251,11 @@ fn parse_target_attacked_this_turn_condition_text(text: &str) -> Option<AbilityC
 ///   (ii) anaphor — "it" / "that creature" → `creature()` (the sibling
 ///       attacked-this-turn form's default subject).
 /// The returned filter has NO `EnteredThisTurn` property yet — the caller
-/// appends it after matching the verb. `parse_type_phrase` returns a suffix
+/// appends it after matching the verb. `parse_type_phrase_folding` returns a suffix
 /// slice of `input`, so its remainder is a valid nom continuation.
 fn parse_entered_this_turn_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the ").parse(input) {
-        let (filter, remainder) = parse_type_phrase(rest);
+        let (filter, remainder) = parse_type_phrase_folding(rest);
         if matches!(filter, TargetFilter::Typed(_)) && remainder.len() < rest.len() {
             return Ok((remainder, filter));
         }
@@ -2508,7 +2619,7 @@ pub(super) fn strip_property_conditional(
     ] {
         if let Some((before, after)) = tp.rsplit_around(pattern) {
             let type_text = after.lower.trim_end_matches('.').trim();
-            let (filter, leftover) = parse_type_phrase(type_text);
+            let (filter, leftover) = parse_type_phrase_folding(type_text);
             if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
                 return (
                     Some(AbilityCondition::TargetMatchesFilter {
@@ -3870,7 +3981,7 @@ fn parse_controller_controlled_as_cast_condition(
     input: &str,
 ) -> OracleResult<'_, AbilityCondition> {
     let (rest, _) = tag("you controlled ").parse(input)?;
-    let (filter, remainder) = parse_type_phrase(rest);
+    let (filter, remainder) = parse_type_phrase_folding(rest);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(OracleError::new(
             input,
@@ -4136,11 +4247,19 @@ pub(super) fn try_parse_generic_instead_clause(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,
+    parent_target_available: bool,
 ) -> InsteadLowering {
     // Forward form: "If <cond>, [body] instead." — split on the leading "If, "
     // and strip a trailing/leading "instead" from the body.
     if let Some((cond_text, effect_text, order)) = split_forward_instead_clause(text) {
-        return build_instead_def(cond_text, effect_text, kind, ctx, order);
+        return build_instead_def(
+            cond_text,
+            effect_text,
+            kind,
+            ctx,
+            parent_target_available,
+            order,
+        );
     }
 
     // CR 614.1a + CR 608.2c: Inverted form — "[body] instead if <cond>." (e.g.
@@ -4154,6 +4273,7 @@ pub(super) fn try_parse_generic_instead_clause(
             effect_text,
             kind,
             ctx,
+            parent_target_available,
             InsteadClauseOrder::Inverted,
         );
     }
@@ -4281,6 +4401,7 @@ fn build_instead_def(
     effect_text: String,
     kind: AbilityKind,
     ctx: &mut ParseContext,
+    parent_target_available: bool,
     order: InsteadClauseOrder,
 ) -> InsteadLowering {
     // CR 608.2c: An additional-cost-paid "instead" fold ("if it/this spell was
@@ -4321,7 +4442,8 @@ fn build_instead_def(
         };
     };
 
-    let instead_def = parse_effect_chain(&effect_text, kind);
+    let instead_def =
+        super::parse_child_ability_with_parent_target(&effect_text, kind, parent_target_available);
     let mut result = instead_def;
     result.condition = Some(AbilityCondition::ConditionInstead {
         inner: Box::new(condition),
@@ -4558,7 +4680,7 @@ fn parse_control_count_as_ability_condition(text: &str) -> Option<AbilityConditi
     let (type_rest, _) = tag::<_, _, OracleError<'_>>("fewer ").parse(rest).ok()?;
     let pos = type_rest.find(" than ")?;
     let type_text = &type_rest[..pos];
-    let (mut filter, leftover) = parse_type_phrase(type_text);
+    let (mut filter, leftover) = parse_type_phrase_folding(type_text);
     if filter == TargetFilter::Any || !leftover.trim().is_empty() {
         return None;
     }
@@ -5300,7 +5422,7 @@ fn parse_attacked_with_filter_condition(text: &str) -> Option<AbilityCondition> 
         );
     }
     // Type / subtype phrase ("a Wolf or Werewolf", etc.).
-    let (filter, rest) = parse_type_phrase(noun);
+    let (filter, rest) = parse_type_phrase_folding(noun);
     if rest.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
         return make(Some(filter), 1);
     }
@@ -5630,7 +5752,10 @@ pub(super) fn try_nom_condition_as_ability_condition(
     // the more specific anaphoric combat-history form above; its predicate tail is
     // a type/subtype phrase, so it does not collide with the bare-color form
     // (which `parse_condition_text` handles separately).
-    if let Some(condition) = parse_target_type_membership_condition_text(lower.as_str()) {
+    if let Some(condition) = parse_target_type_membership_condition_text(
+        lower.as_str(),
+        ctx.chain_declared_object_target.as_ref(),
+    ) {
         return Some(condition);
     }
 
@@ -6000,13 +6125,14 @@ pub(super) fn try_nom_condition_as_ability_condition(
             value(false, tag("it was an ")),
         ));
         if let Ok((rest, negated_lki)) = lki_prefix.parse(lower.as_str()) {
-            // Strip trailing " card" / " card." before delegating to parse_type_phrase.
+            // Strip trailing " card" / " card." before delegating to parse_type_phrase_folding.
             let type_text = rest
                 .trim_end_matches('.')
                 .trim()
                 .trim_end_matches(" card")
                 .trim();
-            let (filter, leftover) = crate::parser::oracle_target::parse_type_phrase(type_text);
+            let (filter, leftover) =
+                crate::parser::oracle_target::parse_type_phrase_folding(type_text);
             if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
                 return Some(maybe_negate(
                     AbilityCondition::TargetMatchesFilter {
@@ -6089,11 +6215,11 @@ pub(super) fn try_nom_condition_as_ability_condition(
     if let Some(rest) = rest_after_prefix {
         let rest = rest.trim_end_matches(" card").trim();
         // CR 608.2c: "permanent" is not a CoreType — gate on it via the existing
-        // parse_type_phrase building block + TargetMatchesFilter, keeping this handler
+        // parse_type_phrase_folding building block + TargetMatchesFilter, keeping this handler
         // in lockstep with strip_card_type_conditional's "permanent" arm.
         if rest == "permanent" {
             let (filter, leftover) =
-                crate::parser::oracle_target::parse_type_phrase("permanent card");
+                crate::parser::oracle_target::parse_type_phrase_folding("permanent card");
             if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
                 return Some(maybe_negate(
                     AbilityCondition::TargetMatchesFilter {
@@ -6167,18 +6293,18 @@ pub(super) fn try_nom_condition_as_ability_condition(
         }
         // CR 608.2c + CR 205.3a: "it's a [subtype]" (Goblin, Aura, Equipment, ...).
         // The CoreType match above only covers card types; subtypes route through
-        // the parse_type_phrase building block + TargetMatchesFilter, exactly like
+        // the parse_type_phrase_folding building block + TargetMatchesFilter, exactly like
         // the "permanent" arm. Subtype disjunctions ("Goblin or Orc") are handled by
-        // parse_type_phrase's Or support; an unparseable remainder leaves non-empty
+        // parse_type_phrase_folding's Or support; an unparseable remainder leaves non-empty
         // leftover and falls through to parse_inner_condition.
         //
-        // The `references_subtype` gate is load-bearing: parse_type_phrase also
+        // The `references_subtype` gate is load-bearing: parse_type_phrase_folding also
         // consumes CoreType phrases the explicit `match` above already owns
         // (e.g. "creature card of the chosen type" → Creature + IsChosenCreatureType
         // with empty leftover). Those belong to RevealedHasCardType, not the
         // present-target TargetMatchesFilter, so this arm fires only when the parsed
         // filter genuinely references a CR 205.3 subtype.
-        let (filter, leftover) = crate::parser::oracle_target::parse_type_phrase(rest);
+        let (filter, leftover) = crate::parser::oracle_target::parse_type_phrase_folding(rest);
         if let TargetFilter::Typed(typed) = &filter {
             if leftover.trim().is_empty()
                 && typed
@@ -6433,33 +6559,54 @@ fn parse_opponent_controls_target_condition(lower: &str) -> Option<AbilityCondit
         .map(|(_, c)| c)
 }
 
-/// CR 111.1 + CR 608.2c: "the token is a/an <type>" — the token created by the
-/// immediately-preceding `Effect::Token`/`CopyTokenOf` matches `<type>` (Yenna,
-/// Redtooth Regent: "Create a token that's a copy of it ... If the token is an
-/// Aura, untap ~, then scry 2"). Represented as an existential over
-/// `And([LastCreated, <type>])`: `LastCreated` reads `state.last_created_token_ids`,
-/// so the count is 1 exactly when the just-created token matches the type. This is
-/// the field-expressive form — a bare `TargetMatchesFilter{LastCreated}` would test
-/// the ability's chosen target (the copied enchantment), not the created token.
+/// CR 111.1 + CR 608.2c: "the token is[n't] a/an <type>" — the token created by
+/// the immediately-preceding `Effect::Token`/`CopyTokenOf` matches (or fails to
+/// match) `<type>` (Yenna, Redtooth Regent: "Create a token that's a copy of it
+/// ... If the token is an Aura, untap ~, then scry 2"; Ultron, Artificial
+/// Malevolence: "create a token that's a copy of it. If the token isn't a
+/// creature, it becomes a 2/2 Robot Villain creature ..."). Represented as an
+/// existential over `And([LastCreated, <type>])`: `LastCreated` reads
+/// `state.last_created_token_ids`, so the count is 1 exactly when the
+/// just-created token matches the type. This is the field-expressive form — a
+/// bare `TargetMatchesFilter{LastCreated}` would test the ability's chosen target
+/// (the copied permanent), not the created token.
+///
+/// Polarity is a leaf parameterization of the same copula, not a sibling
+/// recognizer: the negated spellings wrap the identical existential in `Not`.
+/// The negated tags are tried FIRST because `"the token is "` is a proper prefix
+/// of `"the token is not "` and would otherwise consume it, leaving an
+/// unparseable `"not a creature"` tail.
 fn parse_the_token_is_type_condition(lower: &str) -> Option<AbilityCondition> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("the token is ")
-        .parse(lower)
-        .ok()?;
-    let (filter, remainder) = parse_type_phrase(rest);
+    let (rest, negated) = alt((
+        value(
+            true,
+            alt((
+                tag::<_, _, OracleError<'_>>("the token isn't "),
+                tag("the token is not "),
+            )),
+        ),
+        value(false, tag("the token is ")),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (filter, remainder) = parse_type_phrase_folding(rest);
     if !matches!(filter, TargetFilter::Typed(_)) || !remainder.trim().is_empty() {
         return None;
     }
-    Some(AbilityCondition::QuantityCheck {
-        lhs: QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCount {
-                filter: TargetFilter::And {
-                    filters: vec![TargetFilter::LastCreated, filter],
+    Some(maybe_negate(
+        AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::And {
+                        filters: vec![TargetFilter::LastCreated, filter],
+                    },
                 },
             },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
         },
-        comparator: Comparator::GE,
-        rhs: QuantityExpr::Fixed { value: 1 },
-    })
+        negated,
+    ))
 }
 
 /// CR 109.4 + CR 608.2c: Recognize a leading **inverse** anaphoric-control
@@ -7191,7 +7338,7 @@ fn parse_entered_or_cast_from_zone_ability_condition(lower: &str) -> Option<Abil
 /// copula form (`is/isn't [a/an] <type>`) carries a type phrase; the keyword
 /// form (`has/doesn't have <keyword>`) carries a keyword name.
 enum ZoneChangeObjectPredicate<'a> {
-    /// Remaining text is a type phrase (parsed via `parse_type_phrase`).
+    /// Remaining text is a type phrase (parsed via `parse_type_phrase_folding`).
     Type(&'a str),
     /// Remaining text is a keyword name (parsed via `Keyword::from_str`).
     Keyword(&'a str),
@@ -7205,7 +7352,7 @@ fn zone_change_object_predicate_filter(
 ) -> Option<TargetFilter> {
     match predicate {
         ZoneChangeObjectPredicate::Type(type_text) => {
-            let (filter, leftover) = parse_type_phrase(type_text);
+            let (filter, leftover) = parse_type_phrase_folding(type_text);
             if matches!(filter, TargetFilter::Any) || !leftover.trim().is_empty() {
                 return None;
             }
@@ -7326,6 +7473,118 @@ fn parse_outcome_this_way_condition(lower: &str) -> Option<AbilityCondition> {
     ))
 }
 
+/// CR 608.2c + CR 400.7: which anaphor route may claim a demonstrative noun.
+///
+/// The routing decision used to be an EMERGENT property of dispatcher line
+/// ordering plus two hand-maintained noun `alt` lists that silently drifted
+/// apart (`parse_target_demonstrative_subject` accepted three nouns;
+/// `parse_zone_change_object_type_text` accepted nine). That drift is the
+/// defect this type names: the precedence is now a property of the noun itself.
+///
+/// Present tense is the divergent route's SOUNDNESS PRECONDITION, not a scope
+/// preference. `parse_zone_change_object_type_text`'s copula `alt` has present
+/// arms (` is `/` isn't `/` is not `) but NO ` was ` arm, so a divergent-noun
+/// gate that declines under a present-tense copula is caught by the zone-change
+/// route exactly as today, whereas declining a PAST-tense gate would leave a
+/// printed CR 608.2c condition with no owner at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DemonstrativeRoute {
+    /// `creature` / `permanent` / `card` — the target-anaphor route owns these
+    /// unconditionally, exactly as it has. Load-bearing: it is what keeps every
+    /// dies-trigger rider ("if that creature was an Elemental") alive, because
+    /// the zone-change route hardcodes `destination: Battlefield` and would
+    /// evaluate false on a Battlefield→Graveyard event.
+    TargetAlways,
+    /// `enchantment` / `artifact` / `equipment` / `aura` / `land` / `token` —
+    /// the nouns the target route never accepted. It claims these only under a
+    /// PRESENT-tense copula and only when the chain's declared object target
+    /// positively names the noun; otherwise the zone-change-event route keeps
+    /// them, byte-identically to today.
+    TargetOnPresentTenseDeclaredTargetAgreement,
+}
+
+/// CR 205.3 + CR 205.3m + CR 111.1: the SINGLE demonstrative-noun vocabulary,
+/// shared by the target-anaphor route and the zone-change-event route.
+///
+/// ONE `alt` over the noun axis; arm order is preserved verbatim from the
+/// former inline list in `parse_zone_change_object_type_text`, so that
+/// function's accepted set stays byte-identical. Parses the NOUN only — callers
+/// supply their own `tag("that ")`, because the definite-anaphor route uses a
+/// different determiner set.
+///
+/// Mapping: `permanent`/`creature`/`card`/`artifact`/`land`/`enchantment` are
+/// core card types (CR 205.2a); `equipment`/`aura` are SUBTYPES (CR 205.3) and
+/// have no `TypeFilter` variant of their own; `token` is neither (CR 111.1) and
+/// becomes `AnaphorNoun::Token`, matched against `FilterProp::Token`.
+fn parse_demonstrative_noun(input: &str) -> OracleResult<'_, (AnaphorNoun, DemonstrativeRoute)> {
+    alt((
+        value(
+            (
+                AnaphorNoun::Type(TypeFilter::Permanent),
+                DemonstrativeRoute::TargetAlways,
+            ),
+            tag::<_, _, OracleError<'_>>("permanent"),
+        ),
+        value(
+            (
+                AnaphorNoun::Type(TypeFilter::Enchantment),
+                DemonstrativeRoute::TargetOnPresentTenseDeclaredTargetAgreement,
+            ),
+            tag("enchantment"),
+        ),
+        value(
+            (
+                AnaphorNoun::Type(TypeFilter::Artifact),
+                DemonstrativeRoute::TargetOnPresentTenseDeclaredTargetAgreement,
+            ),
+            tag("artifact"),
+        ),
+        value(
+            (
+                AnaphorNoun::Type(TypeFilter::Creature),
+                DemonstrativeRoute::TargetAlways,
+            ),
+            tag("creature"),
+        ),
+        value(
+            (
+                AnaphorNoun::Type(TypeFilter::Subtype("Equipment".to_string())),
+                DemonstrativeRoute::TargetOnPresentTenseDeclaredTargetAgreement,
+            ),
+            tag("equipment"),
+        ),
+        value(
+            (
+                AnaphorNoun::Type(TypeFilter::Subtype("Aura".to_string())),
+                DemonstrativeRoute::TargetOnPresentTenseDeclaredTargetAgreement,
+            ),
+            tag("aura"),
+        ),
+        value(
+            (
+                AnaphorNoun::Type(TypeFilter::Land),
+                DemonstrativeRoute::TargetOnPresentTenseDeclaredTargetAgreement,
+            ),
+            tag("land"),
+        ),
+        value(
+            (
+                AnaphorNoun::Token,
+                DemonstrativeRoute::TargetOnPresentTenseDeclaredTargetAgreement,
+            ),
+            tag("token"),
+        ),
+        value(
+            (
+                AnaphorNoun::Type(TypeFilter::Card),
+                DemonstrativeRoute::TargetAlways,
+            ),
+            tag("card"),
+        ),
+    ))
+    .parse(input)
+}
+
 /// Predicate-head discriminant for `parse_zone_change_object_type_text`: whether
 /// the matched head was the copula (type phrase follows) or the "has" form
 /// (keyword follows), plus the negation flag. Local selector so the remainder
@@ -7340,19 +7599,12 @@ enum PredicateHead {
 fn parse_zone_change_object_type_text(
     input: &str,
 ) -> nom::IResult<&str, (ZoneChangeObjectPredicate<'_>, bool), OracleError<'_>> {
-    let (input, _) = tag("that ").parse(input)?;
-    let (input, _) = alt((
-        tag("permanent"),
-        tag("enchantment"),
-        tag("artifact"),
-        tag("creature"),
-        tag("equipment"),
-        tag("aura"),
-        tag("land"),
-        tag("token"),
-        tag("card"),
-    ))
-    .parse(input)?;
+    // CR 205.3: the noun axis is the SHARED `parse_demonstrative_noun`
+    // vocabulary (same nine nouns, same arm order). Both payloads are discarded
+    // here: this route is the zone-change-event owner and takes every noun the
+    // target route declines, so it needs neither the noun's matching axis nor
+    // its precedence.
+    let (input, _) = preceded(tag("that "), parse_demonstrative_noun).parse(input)?;
     // Two predicate forms share the `"that <noun> "` prefix: the copula
     // (`is/isn't [a/an] <type>`) and the keyword form (`has / doesn't have
     // <keyword>`). Composed as one `alt()` over the predicate heads; each arm
@@ -9142,6 +9394,80 @@ mod tests {
         ));
     }
 
+    /// CR 111.1 + CR 608.2c: the "the token is[n't] a <type>" gate is
+    /// parameterized over polarity, not duplicated per spelling. Affirmative is
+    /// Yenna, Redtooth Regent ("If the token is an Aura, untap ~, then scry 2");
+    /// the negated spellings are Ultron, Artificial Malevolence ("If the token
+    /// isn't a creature, it becomes a 2/2 Robot Villain creature in addition to
+    /// its other types"). Both read `LastCreated`, so the copy just minted by the
+    /// preceding `CopyTokenOf` is the subject — not the ability's chosen target.
+    #[test]
+    fn the_token_is_type_gate_covers_both_polarities() {
+        let existential = |filter: TargetFilter| AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::And {
+                        filters: vec![TargetFilter::LastCreated, filter],
+                    },
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        };
+        let creature = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+
+        assert_eq!(
+            try_nom_condition_as_ability_condition(
+                "the token is a creature",
+                &mut ParseContext::default()
+            ),
+            Some(existential(creature.clone()))
+        );
+        for negated in ["the token isn't a creature", "the token is not a creature"] {
+            assert_eq!(
+                try_nom_condition_as_ability_condition(negated, &mut ParseContext::default()),
+                Some(AbilityCondition::Not {
+                    condition: Box::new(existential(creature.clone()))
+                }),
+                "negated spelling {negated:?} must wrap the SAME existential in Not"
+            );
+        }
+    }
+
+    /// Issue #4763 — Ultron, Artificial Malevolence. The negated token gate must
+    /// survive the leading-conditional split; when it is dropped the 2/2 Robot
+    /// Villain override runs unconditionally and overwrites the P/T of a copy
+    /// that was already an artifact creature.
+    #[test]
+    fn leading_the_token_isnt_a_creature_gates_the_becomes_clause() {
+        let (condition, body) = strip_leading_general_conditional(
+            "If the token isn't a creature, it becomes a 2/2 Robot Villain creature in addition \
+             to its other types.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            body,
+            "it becomes a 2/2 Robot Villain creature in addition to its other types."
+        );
+        let Some(AbilityCondition::Not { condition }) = condition else {
+            panic!("expected a negated token-type gate, got {condition:?}");
+        };
+        assert!(
+            matches!(
+                *condition,
+                AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::And { ref filters }
+                        }
+                    },
+                    ..
+                } if filters.contains(&TargetFilter::LastCreated)
+            ),
+            "gate must count the just-created token, got {condition:?}"
+        );
+    }
+
     /// CR 120.3 + CR 608.2c: The Black Arrow — "If a Dragon is dealt damage this
     /// way, destroy it." The Dragon gate must survive as a condition; dropping it
     /// makes the rider destroy every damaged creature.
@@ -9854,15 +10180,133 @@ mod tests {
         assert_eq!(body, "transform this creature.");
     }
 
+    /// CR 701.20a + CR 202.3: issue #8586 — Runo Stromkirk's upkeep gate.
+    /// "If a creature card WITH MANA VALUE 6 OR GREATER is revealed this way"
+    /// welded `" card"` to `" is revealed this way"` as one `tag()`, leaving no
+    /// slot for the postnominal property, so the whole condition was dropped
+    /// (`condition: null`) and the Transform ran ungated.
+    ///
+    /// DISCRIMINATOR: at BASE this head returns `None` and
+    /// `strip_card_type_conditional` falls through every sibling head, so `cond`
+    /// is `None` and `body` is the entire input — both the `let … else` and the
+    /// `body` equality below fail on revert.
+    #[test]
+    fn issue_8586_revealed_creature_card_with_mana_value_floor() {
+        let (cond, body) = strip_card_type_conditional(
+            "If a creature card with mana value 6 or greater is revealed this way, transform ~.",
+        );
+        assert_eq!(body, "transform ~.");
+        let Some(AbilityCondition::RevealedHasCardType {
+            card_types,
+            additional_filter,
+            subtype_filter,
+        }) = cond
+        else {
+            panic!("expected RevealedHasCardType, got {cond:?}");
+        };
+        assert_eq!(card_types, vec![CoreType::Creature]);
+        assert_eq!(
+            additional_filter,
+            Some(FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 6 },
+            })
+        );
+        assert_eq!(subtype_filter, None);
+    }
+
+    /// CR 202.3: class evidence, not an issue-#8586 special case — the property
+    /// slot is the SHARED `parse_revealed_card_gate_suffix`, so the opposite
+    /// comparator arrives through the same head with no extra parser work.
+    ///
+    /// DISCRIMINATOR: `None` with the whole input as `body` at BASE.
+    #[test]
+    fn revealed_card_gate_carries_a_mana_value_ceiling_suffix() {
+        let (cond, body) = strip_card_type_conditional(
+            "If a creature card with mana value 3 or less is revealed this way, draw a card.",
+        );
+        assert_eq!(body, "draw a card.");
+        let Some(AbilityCondition::RevealedHasCardType {
+            card_types,
+            additional_filter,
+            ..
+        }) = cond
+        else {
+            panic!("expected RevealedHasCardType, got {cond:?}");
+        };
+        assert_eq!(card_types, vec![CoreType::Creature]);
+        assert_eq!(
+            additional_filter,
+            Some(FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 3 },
+            })
+        );
+    }
+
+    /// CR 205.3m: class evidence on a SECOND suffix branch — the chosen-type
+    /// literal, which lives in `parse_revealed_card_gate_suffix` itself rather
+    /// than in `parse_mana_value_suffix`. Together with the two mana-value rows
+    /// this proves the slot admits the whole shared cross-product, not one
+    /// comparator.
+    ///
+    /// DISCRIMINATOR: `None` with the whole input as `body` at BASE.
+    #[test]
+    fn revealed_card_gate_carries_a_chosen_type_suffix() {
+        let (cond, body) = strip_card_type_conditional(
+            "If a creature card of the chosen type is revealed this way, draw a card.",
+        );
+        assert_eq!(body, "draw a card.");
+        let Some(AbilityCondition::RevealedHasCardType {
+            card_types,
+            additional_filter,
+            ..
+        }) = cond
+        else {
+            panic!("expected RevealedHasCardType, got {cond:?}");
+        };
+        assert_eq!(card_types, vec![CoreType::Creature]);
+        assert_eq!(additional_filter, Some(FilterProp::IsChosenCreatureType));
+    }
+
+    /// CR 701.20a: HOSTILE FIXTURE for the mandatory `" is revealed this way"`
+    /// anchor — NOT a discriminator, and deliberately so. It passes identically
+    /// at BASE and after the property slot landed (measured on both sides).
+    ///
+    /// Its job is the suffix helper's INVARIANT (recorded on
+    /// `parse_revealed_card_gate_suffix`): the helper must consume NOTHING when
+    /// it does not match. If a future branch there ever consumed without a
+    /// determiner head, it would swallow this input's anchor, the trailing
+    /// `tag(" is revealed this way")` would fail, and Delver of Secrets' entire
+    /// class would silently lose its condition. This row fails the moment that
+    /// happens.
+    #[test]
+    fn revealed_card_gate_without_a_suffix_keeps_additional_filter_none() {
+        let (cond, body) =
+            strip_card_type_conditional("If a creature card is revealed this way, draw a card.");
+        assert_eq!(body, "draw a card.");
+        assert_eq!(
+            cond,
+            Some(AbilityCondition::RevealedHasCardType {
+                card_types: vec![CoreType::Creature],
+                additional_filter: None,
+                subtype_filter: None,
+            })
+        );
+    }
+
     /// CR 205.3m + CR 608.2c: "that creature is a Mutant, Ninja, or Turtle"
     /// (Turtle Van) → `TargetMatchesFilter` over an `Or` of the three subtypes.
-    /// The comma + "or" disjunction is parsed via the shared `parse_type_phrase`
+    /// The comma + "or" disjunction is parsed via the shared `parse_type_phrase_folding`
     /// building block, so the condition covers the whole class of multi-subtype
     /// target-anaphoric gates, not just this card.
     #[test]
     fn target_type_membership_subtype_disjunction() {
+        // `None` declared object target: an OVERLAP noun is claimed
+        // unconditionally, so this keeps asserting today's behavior.
         let cond = parse_target_type_membership_condition_text(
             "that creature is a Mutant, Ninja, or Turtle",
+            None,
         );
         let Some(AbilityCondition::TargetMatchesFilter {
             filter, use_lki, ..
@@ -9893,7 +10337,7 @@ mod tests {
     /// CR 400.7 + CR 608.2c: past-tense "that creature was a Goblin" reads LKI.
     #[test]
     fn target_type_membership_past_tense_uses_lki() {
-        let cond = parse_target_type_membership_condition_text("that creature was a Goblin");
+        let cond = parse_target_type_membership_condition_text("that creature was a Goblin", None);
         let Some(AbilityCondition::TargetMatchesFilter { use_lki, .. }) = cond else {
             panic!("expected TargetMatchesFilter, got {cond:?}");
         };
@@ -9903,7 +10347,8 @@ mod tests {
     /// Negated form "that creature isn't a Turtle" wraps in `Not`.
     #[test]
     fn target_type_membership_negated() {
-        let cond = parse_target_type_membership_condition_text("that creature isn't a Turtle");
+        let cond =
+            parse_target_type_membership_condition_text("that creature isn't a Turtle", None);
         let Some(AbilityCondition::Not { condition }) = cond else {
             panic!("expected Not, got {cond:?}");
         };
@@ -9911,6 +10356,342 @@ mod tests {
             *condition,
             AbilityCondition::TargetMatchesFilter { .. }
         ));
+    }
+
+    // ---- present-tense divergent-noun demonstrative routing ----
+    //
+    // The six DIVERGENT nouns (enchantment/artifact/equipment/aura/land/token)
+    // are claimed by this target-anaphor route only under a PRESENT-tense
+    // copula whose chain declared an object target that positively names the
+    // noun (CR 608.2c + CR 601.2c). Every decline falls through to
+    // `parse_zone_change_object_matches_filter_condition` exactly as before.
+
+    /// A `Typed` battlefield slot carrying `type_filters` — the shape a
+    /// declared object target has for "target artifact" / "target land".
+    fn typed_slot(type_filters: Vec<TypeFilter>) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            ..Default::default()
+        })
+    }
+
+    /// The shape of Hazel of the Rootbloom's own declared target — "target
+    /// token you control": no type filter at all, just `FilterProp::Token`.
+    fn token_slot() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::Token],
+            ..Default::default()
+        })
+    }
+
+    /// CR 111.1 + CR 608.2c: "that token is a Squirrel" is claimed when the
+    /// chain declared a token-property target (Hazel of the Rootbloom). A token
+    /// is not a card type, so the agreement runs on `FilterProp::Token`.
+    #[test]
+    fn divergent_noun_token_claims_against_a_token_property_slot() {
+        let slot = token_slot();
+        let cond =
+            parse_target_type_membership_condition_text("that token is a Squirrel", Some(&slot));
+        let Some(AbilityCondition::TargetMatchesFilter {
+            filter,
+            use_lki,
+            subject_slot,
+        }) = cond
+        else {
+            panic!("expected TargetMatchesFilter, got {cond:?}");
+        };
+        assert!(!use_lki, "present-tense 'is' must read current state");
+        assert_eq!(
+            subject_slot, None,
+            "the anaphor names the first object target"
+        );
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("expected a Typed subtype filter, got {filter:?}");
+        };
+        assert_eq!(
+            tf.type_filters,
+            vec![TypeFilter::Subtype("Squirrel".to_string())]
+        );
+    }
+
+    /// CR 608.2c: an antecedent at a NON-ZERO declared slot still emits
+    /// `subject_slot: None` — the paired half of
+    /// `oracle_effect::chain_declared_object_target_tests::the_antecedent_at_a_non_zero_declared_slot_is_the_most_recent_declarer`,
+    /// which builds the same chain (`destroy target creature` at declared slot
+    /// 0, `gain control of target artifact` at slot 1) and proves the walk hands
+    /// this gate the SLOT-1 artifact.
+    ///
+    /// `None` is the correct emission at every index, not a first-slot
+    /// shorthand: it resolves the condition node's most-recent chain-propagated
+    /// object target (`game::effects::evaluate_condition`'s
+    /// `TargetMatchesFilter` arm), and the fail-closed walk guarantees the
+    /// antecedent IS that most-recent declarer. `Some(1)` would instead index
+    /// the FLATTENED root chain via `resolve_parent_slot_from_root`, drop the
+    /// `TriggeringSource` fallback that `None` carries, and set
+    /// `reads_member_bound` in `game::ability_rw`, refusing batch-T1.
+    ///
+    /// Revert probe: emit `subject_slot: Some(index)` for a non-zero antecedent
+    /// and this assertion fails.
+    #[test]
+    fn a_non_zero_slot_antecedent_still_emits_no_subject_slot() {
+        // The slot-1 antecedent the walk returns for that chain.
+        let artifact = typed_slot(vec![TypeFilter::Artifact]);
+        let cond = parse_target_type_membership_condition_text(
+            "that artifact is an Equipment",
+            Some(&artifact),
+        );
+        let Some(AbilityCondition::TargetMatchesFilter {
+            filter,
+            use_lki,
+            subject_slot,
+        }) = cond
+        else {
+            panic!("expected TargetMatchesFilter, got {cond:?}");
+        };
+        assert!(!use_lki, "present-tense 'is' must read current state");
+        assert_eq!(
+            subject_slot, None,
+            "a non-zero declared-slot antecedent must STILL emit `None`: it is \
+             the chain's most-recent declared object target, which is exactly \
+             what `None` resolves",
+        );
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("expected a Typed subtype filter, got {filter:?}");
+        };
+        assert_eq!(
+            tf.type_filters,
+            vec![TypeFilter::Subtype("Equipment".to_string())]
+        );
+    }
+
+    /// The same text with NO declared object target declines, so the
+    /// zone-change-event route keeps it — byte-identically to before the fix.
+    #[test]
+    fn divergent_noun_declines_without_a_declared_target() {
+        assert_eq!(
+            parse_target_type_membership_condition_text("that token is a Squirrel", None),
+            None,
+        );
+        assert_eq!(
+            parse_target_type_membership_condition_text("that artifact is an Equipment", None),
+            None,
+        );
+        // Paired positives, so the two `None`s above are not a dead instrument:
+        // the SAME input text with an agreeing declared slot IS claimed, proving
+        // each string reaches the declared-target gate rather than failing
+        // upstream in the copula/noun parse.
+        assert!(
+            matches!(
+                parse_target_type_membership_condition_text(
+                    "that token is a Squirrel",
+                    Some(&token_slot())
+                ),
+                Some(AbilityCondition::TargetMatchesFilter { .. })
+            ),
+            "'that token is a Squirrel' must reach the gate and be claimed on an \
+             agreeing token-property slot",
+        );
+        assert!(
+            matches!(
+                parse_target_type_membership_condition_text(
+                    "that artifact is an Equipment",
+                    Some(&typed_slot(vec![TypeFilter::Artifact]))
+                ),
+                Some(AbilityCondition::TargetMatchesFilter { .. })
+            ),
+            "'that artifact is an Equipment' must reach the gate and be claimed on \
+             an agreeing artifact slot",
+        );
+    }
+
+    /// A declared target that names a DIFFERENT type declines (Jackknight /
+    /// Emeria Shepherd / Guardian of Tazeem preservation).
+    #[test]
+    fn divergent_noun_declines_against_a_disagreeing_slot() {
+        let creature = typed_slot(vec![TypeFilter::Creature]);
+        assert_eq!(
+            parse_target_type_membership_condition_text("that land is an Island", Some(&creature)),
+            None,
+            "'that land' must not bind to a declared creature target",
+        );
+        // A token-property slot does not answer a core-type noun either.
+        let token = token_slot();
+        assert_eq!(
+            parse_target_type_membership_condition_text(
+                "that artifact is an Equipment",
+                Some(&token)
+            ),
+            None,
+        );
+        // Paired positives, so the two `None`s above are not a dead instrument:
+        // the SAME input texts with AGREEING slots are claimed, so each decline
+        // is the agreement conjunct talking, not an upstream parse failure.
+        assert!(
+            matches!(
+                parse_target_type_membership_condition_text(
+                    "that land is an Island",
+                    Some(&typed_slot(vec![TypeFilter::Land]))
+                ),
+                Some(AbilityCondition::TargetMatchesFilter { .. })
+            ),
+            "'that land is an Island' must reach the gate and be claimed on an \
+             agreeing land slot",
+        );
+        assert!(
+            matches!(
+                parse_target_type_membership_condition_text(
+                    "that artifact is an Equipment",
+                    Some(&typed_slot(vec![TypeFilter::Artifact]))
+                ),
+                Some(AbilityCondition::TargetMatchesFilter { .. })
+            ),
+            "'that artifact is an Equipment' must reach the gate and be claimed on \
+             an agreeing artifact slot",
+        );
+    }
+
+    /// CR 400.1: a bare demonstrative names a battlefield permanent, so a slot
+    /// scoped to a non-battlefield zone declines on the ZONE conjunct even when
+    /// its type agrees (Emeria Shepherd's graveyard slot).
+    #[test]
+    fn divergent_noun_declines_against_a_card_zone_slot() {
+        let graveyard_land = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Land],
+            properties: vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }],
+            ..Default::default()
+        });
+        assert_eq!(
+            parse_target_type_membership_condition_text(
+                "that land is a Forest",
+                Some(&graveyard_land)
+            ),
+            None,
+            "a graveyard-scoped card slot must not answer a bare demonstrative",
+        );
+        // Paired positive, so the `None` above is not a dead instrument: the SAME
+        // input text with a battlefield-scoped land slot IS claimed, so the
+        // decline is the ZONE conjunct talking, not an upstream parse failure.
+        assert!(
+            matches!(
+                parse_target_type_membership_condition_text(
+                    "that land is a Forest",
+                    Some(&typed_slot(vec![TypeFilter::Land]))
+                ),
+                Some(AbilityCondition::TargetMatchesFilter { .. })
+            ),
+            "'that land is a Forest' must reach the gate and be claimed on an \
+             unscoped (battlefield) land slot",
+        );
+    }
+
+    /// **T11 — SHAPE.** The tense conjunct: a PAST-tense divergent-noun gate is
+    /// declined even when the declared target agrees, because the zone-change
+    /// route has no ` was ` arm and `strip_target_supertype_conditional` /
+    /// `nonbasic_land_lki_condition` still own that half (CR 400.7).
+    ///
+    /// Revert probe: delete `use_lki ||` from the gate and all three `None`s
+    /// below become `Some`, which would strip Choking Sands / Molten Rain /
+    /// Helldozer of their `[Land]` type filter and give Feast of Worms /
+    /// Icequake / Thermokarst a brand-new condition node.
+    #[test]
+    fn divergent_noun_past_tense_gate_is_declined() {
+        let land = typed_slot(vec![TypeFilter::Land]);
+        for text in [
+            "that land was nonbasic",
+            "that land was a snow land",
+            "that land was legendary",
+        ] {
+            assert_eq!(
+                parse_target_type_membership_condition_text(text, Some(&land)),
+                None,
+                "past-tense divergent-noun gate must decline: {text}",
+            );
+        }
+        // Paired positives, so the three `None`s above are not a dead
+        // instrument: the same noun in the PRESENT tense with the same
+        // agreeing slot IS claimed, ...
+        assert!(
+            matches!(
+                parse_target_type_membership_condition_text("that land is a Forest", Some(&land)),
+                Some(AbilityCondition::TargetMatchesFilter { use_lki: false, .. })
+            ),
+            "a present-tense divergent noun with agreement must be claimed",
+        );
+        // ... and the OVERLAP noun keeps its unconditional past-tense claim
+        // with no declared target at all (Overgrowth Elemental's rider).
+        assert!(
+            matches!(
+                parse_target_type_membership_condition_text("that creature was an Elemental", None),
+                Some(AbilityCondition::TargetMatchesFilter { use_lki: true, .. })
+            ),
+            "the overlap-noun route must be unchanged",
+        );
+    }
+
+    /// **T10 — SHAPE, explicitly labelled.** Hazel of the Rootbloom's rider
+    /// condition is a target anaphor, not a zone-change-event gate.
+    ///
+    /// This pins the PARSE only. It does **not** satisfy the runtime-semantics
+    /// requirement — `hazel_end_step_copies_squirrel_token_twice` and
+    /// `hazel_end_step_copies_non_squirrel_token_once` (integration) do.
+    /// The surviving `ConditionInstead` wrapper is asserted because it proves
+    /// the producer was `try_parse_generic_instead_clause` (CR 614.1a).
+    #[test]
+    fn hazel_rider_condition_is_a_target_anaphor() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let parsed = parse_oracle_text(
+            "{T}, Pay 2 life, Tap X untapped tokens you control: Add X mana in any combination \
+             of colors.\nAt the beginning of your end step, create a token that's a copy of \
+             target token you control. If that token is a Squirrel, instead create two tokens \
+             that are copies of it.",
+            "Hazel of the Rootbloom",
+            &[],
+            &["Creature".to_string()],
+            &["Squirrel".to_string(), "Druid".to_string()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.execute.is_some())
+            .expect("the end-step trigger must parse");
+        let execute = trigger.execute.as_ref().expect("trigger body");
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("the 'instead create two tokens' rider must be a sub-ability");
+        let condition = sub
+            .condition
+            .as_ref()
+            .expect("the rider must carry its printed CR 608.2c condition");
+        // CR 614.1a: the "instead" wrapper survives; CR 608.2c: its inner gate
+        // is the target anaphor, NOT `ZoneChangeObjectMatchesFilter`.
+        let AbilityCondition::ConditionInstead { inner } = condition else {
+            panic!("expected ConditionInstead, got {condition:?}");
+        };
+        let AbilityCondition::TargetMatchesFilter {
+            filter,
+            use_lki,
+            subject_slot,
+        } = inner.as_ref()
+        else {
+            panic!("expected TargetMatchesFilter inside ConditionInstead, got {inner:?}");
+        };
+        assert!(
+            !use_lki,
+            "the copula is present-tense 'is', so CR 400.7 LKI must NOT be used"
+        );
+        assert_eq!(*subject_slot, None);
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected a Typed subtype filter, got {filter:?}");
+        };
+        assert_eq!(
+            tf.type_filters,
+            vec![TypeFilter::Subtype("Squirrel".to_string())]
+        );
     }
 
     // ---- reflexive-if-rider recognizer (S01) ----
@@ -10235,7 +11016,7 @@ mod tests {
     }
 
     /// CR 608.2c: "permanent" is not a CoreType — strip_card_type_conditional must
-    /// still gate on it via TargetMatchesFilter (parse_type_phrase building block).
+    /// still gate on it via TargetMatchesFilter (parse_type_phrase_folding building block).
     /// Covers Primal Surge's "If it's a permanent card, you may put it onto the
     /// battlefield."
     #[test]
@@ -10304,7 +11085,7 @@ mod tests {
     }
 
     /// CR 608.2c + CR 205.3a: "If it's a [subtype]" gates the parent target on a
-    /// subtype via parse_type_phrase + TargetMatchesFilter. Pre-fix this dropped to
+    /// subtype via parse_type_phrase_folding + TargetMatchesFilter. Pre-fix this dropped to
     /// `None` (only CoreType words matched), which silently dropped the else-branch.
     #[test]
     fn if_its_a_subtype_parses_condition() {
@@ -10585,7 +11366,7 @@ mod tests {
         );
     }
 
-    /// CR 608.2c: Regression guard for the subtype fall-through. parse_type_phrase
+    /// CR 608.2c: Regression guard for the subtype fall-through. parse_type_phrase_folding
     /// fully consumes "creature card of the chosen type" (CoreType + chosen-type
     /// property, empty leftover), but that phrase belongs to RevealedHasCardType
     /// (produced by strip_card_type_conditional in the chain path), not the
@@ -10640,6 +11421,7 @@ mod tests {
             "If it entered from your library or was cast from your library, draw two cards instead.",
             AbilityKind::Spell,
             &mut ParseContext::default(),
+            false,
         ) else {
             panic!("instead clause must lower to a conditional branch");
         };

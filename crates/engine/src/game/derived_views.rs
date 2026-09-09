@@ -588,6 +588,48 @@ pub struct DungeonRoomView {
     /// CR 309.4: total rooms on the dungeon card, so the badge can place the
     /// marker ("room 3 of 7") rather than showing a naked index.
     pub room_count: u8,
+    /// The printed dungeon card's Scryfall identity, so the client can show the
+    /// card the venture marker moves across.
+    ///
+    /// CR 309.2b: a dungeon card brought into the game is put into the command
+    /// zone, so it is never a battlefield object and no `printed_ref`-carrying
+    /// object exists for the client to resolve art from. (Matches the citation
+    /// on `dungeon_rooms` below.) The ids themselves implement no rule.
+    pub card: DungeonCardView,
+    /// CR 309.4a-c: every room on the card, in printed order, each with the
+    /// rooms it leads to and where it sits on the card face. This is what lets
+    /// the client draw the venture marker in the right place and show the path
+    /// taken; without it the frontend would need its own copy of the dungeon
+    /// tables, which the display-layer rule forbids.
+    pub rooms: Vec<DungeonRoomNodeView>,
+}
+
+/// The printed dungeon card, as the client looks it up on Scryfall.
+///
+/// Identity plumbing, not a rule — deliberately unannotated.
+///
+/// Both ids ride along because the five dungeons are not indexed uniformly by
+/// the client's Scryfall sidecars — Undercity is a `double_faced_token` that
+/// only `scryfall-token-images.json` carries. See `dungeon::DungeonCardRef`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DungeonCardView {
+    pub oracle_id: String,
+    pub scryfall_id: String,
+    pub face_name: String,
+}
+
+/// CR 309.4: One room as the client draws it — its preview, its outgoing
+/// edges, and its position on the printed card face.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DungeonRoomNodeView {
+    #[serde(flatten)]
+    pub room: crate::game::dungeon::RoomPreview,
+    /// CR 309.5a: the rooms the venture marker may move to from here. Empty
+    /// for the bottommost room (CR 309.5).
+    pub next_rooms: Vec<u8>,
+    /// Where this room is drawn on the card. Permille of the image — see
+    /// `RoomMarkerPoint`, which documents why it is not a fraction.
+    pub marker: crate::game::dungeon::RoomMarkerPoint,
 }
 
 /// Engine-authored projections used by the display layer. Keep this struct
@@ -1185,6 +1227,40 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
     ))
 }
 
+/// Project the printed dungeon card's Scryfall identity.
+fn dungeon_card_view(dungeon: crate::game::dungeon::DungeonId) -> DungeonCardView {
+    let card = crate::game::dungeon::card_ref(dungeon);
+    DungeonCardView {
+        oracle_id: card.oracle_id.to_string(),
+        scryfall_id: card.scryfall_id.to_string(),
+        face_name: card.face_name.to_string(),
+    }
+}
+
+/// CR 309.4 + CR 309.5a: Project the whole dungeon graph — every room, its
+/// outgoing edges, and where it is drawn on the card.
+///
+/// The client needs all of it at once: it places the marker on the current room
+/// and marks the rooms reachable from it (CR 309.5a), and neither is derivable
+/// from the current room alone.
+fn dungeon_room_nodes(dungeon: crate::game::dungeon::DungeonId) -> Vec<DungeonRoomNodeView> {
+    let markers = crate::game::dungeon::marker_points(dungeon);
+    (0..crate::game::dungeon::room_count(dungeon))
+        .filter_map(|index| {
+            // `dungeon_marker_points_cover_every_room` pins these lists to the
+            // same length, so a miss is unreachable. Skipping rather than
+            // indexing keeps a future table edit from panicking the whole state
+            // projection on a purely cosmetic field.
+            let marker = *markers.get(index as usize)?;
+            Some(DungeonRoomNodeView {
+                room: crate::game::dungeon::room_preview(dungeon, index),
+                next_rooms: crate::game::dungeon::next_rooms(dungeon, index).to_vec(),
+                marker,
+            })
+        })
+        .collect()
+}
+
 /// CR 309.4a-c: name the room each venturing player's marker currently sits on.
 ///
 /// `dungeon_progress` may keep an entry with `current_dungeon: None` after a
@@ -1206,6 +1282,8 @@ fn dungeon_rooms(state: &GameState) -> BTreeMap<PlayerId, DungeonRoomView> {
                         .to_string(),
                     room: crate::game::dungeon::room_preview(dungeon, progress.current_room),
                     room_count: crate::game::dungeon::room_count(dungeon),
+                    card: dungeon_card_view(dungeon),
+                    rooms: dungeon_room_nodes(dungeon),
                 },
             ))
         })
@@ -3206,6 +3284,69 @@ mod tests {
         assert_eq!(room.room.name, "Mine Tunnels");
         assert_eq!(room.room.text, "Create a Treasure token.");
         assert_eq!(room.room_count, 7);
+
+        // The card identity and the room graph are the two fields the client
+        // cannot function without: the popover destructures `card` to resolve
+        // the art and indexes `rooms` to place the venture marker. They are
+        // also the fields that forced the protocol bump, so a silent
+        // regression here is a wire break, not a cosmetic one.
+        assert_eq!(room.card.oracle_id, "5c446a7f-0301-4343-b0df-146cf2db605b");
+        assert_eq!(
+            room.card.scryfall_id,
+            "59b11ff8-f118-4978-87dd-509dc0c8c932"
+        );
+        assert_eq!(room.card.face_name, "Lost Mine of Phandelver");
+
+        assert_eq!(
+            room.rooms.len(),
+            7,
+            "the whole graph ships, not just the current room"
+        );
+        // CR 309.5a: Mine Tunnels (index 2) leads to Dark Pool and Fungi Cavern.
+        let current = &room.rooms[2];
+        assert_eq!(current.room.name, "Mine Tunnels");
+        assert_eq!(current.next_rooms, vec![4, 5]);
+        // The bottommost room has no outgoing arrows (CR 309.5).
+        assert!(room.rooms[6].next_rooms.is_empty());
+        // Every room carries a marker inside the card face.
+        for node in &room.rooms {
+            assert!(node.marker.x_permille <= 1000 && node.marker.y_permille <= 1000);
+        }
+    }
+
+    /// The double-faced dungeon is the reason `DungeonCardView` carries two ids
+    /// rather than one: `Undercity // The Initiative` is a `double_faced_token`,
+    /// which `gen-scryfall-images.sh` excludes from `scryfall-data.json`, so the
+    /// client resolves it through the token table by printing id. If this
+    /// projection ever emitted only an oracle id, Undercity would render artless
+    /// and nothing else would fail.
+    #[test]
+    fn dungeon_rooms_projects_the_double_faced_undercity_card_identity() {
+        use crate::game::dungeon::{DungeonId, DungeonProgress};
+
+        let mut state = GameState::new_two_player(42);
+        state.dungeon_progress.insert(
+            PlayerId(0),
+            DungeonProgress {
+                current_dungeon: Some(DungeonId::Undercity),
+                current_room: 0,
+                ..Default::default()
+            },
+        );
+
+        let views = derive_views(&state, None);
+        let room = views
+            .dungeon_rooms
+            .get(&PlayerId(0))
+            .expect("venturing player is projected");
+
+        assert_eq!(
+            room.card.scryfall_id,
+            "2c65185b-6cf0-451d-985e-56aa45d9a57d"
+        );
+        // Selects the dungeon half of `Undercity // The Initiative`.
+        assert_eq!(room.card.face_name, "Undercity");
+        assert_eq!(room.rooms.len(), 9);
     }
 
     /// CR 309.7: a completed dungeon leaves a `current_dungeon: None` entry

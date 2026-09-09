@@ -6,8 +6,8 @@
 //! into the flat `deferred_triggers` vec on a target pause; the re-drain
 //! (`drain_deferred_trigger_queue_unchecked`) re-runs `begin_trigger_ordering` on the
 //! still-order-dependent tail and RE-PROMPTS — a second `OrderTriggers` popup on a batch
-//! the player already ordered. CR 603.3b: a simultaneous batch is
-//! ordered once in the two-part APNAP process, never re-ordered per target.
+//! the player already ordered. CR 603.3b: a simultaneous batch is ordered once in the
+//! two-part APNAP process, never re-ordered per target.
 //!
 //! Fix: an ephemeral `DecisionTemplate` coverage marker registered when the group is
 //! ordered lets the gate's 3rd arm auto-apply the chosen order (coverage-only) to every

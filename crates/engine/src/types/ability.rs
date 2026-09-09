@@ -728,8 +728,7 @@ pub enum ChoiceType {
     /// CR 205.3m: A choice among creature types. `options`, when non-empty,
     /// narrows the offered set below the full creature-type list to an explicit
     /// Oracle-listed candidate set (e.g. A Killer Among Us' "secretly choose
-    /// Human, Merfolk, or Goblin") — mirrors the `Color { excluded }` /
-    /// `CardType { excluded }` restriction axis. Empty ⇒ all creature types
+    /// Human, Merfolk, or Goblin"). Empty ⇒ all creature types
     /// (Morophon / Changeling), which keeps existing card-data JSON byte-stable.
     CreatureType {
         options: Vec<String>,
@@ -743,12 +742,12 @@ pub enum ChoiceType {
     },
     OddOrEven,
     BasicLandType,
-    /// CR 205.2a: A choice among card types. `excluded` narrows the offered
-    /// set below the full seven-type list (e.g. Archon of Valor's Reach
-    /// excludes Creature and Land, leaving "artifact, enchantment, instant,
-    /// sorcery, or planeswalker") — mirrors the `Color { excluded }` axis.
+    /// CR 205.2a: A choice among card types. The full rule has more card types
+    /// than the engine's generic policy offers; empty `options` therefore means
+    /// `CoreType::CHOOSABLE_TYPES`, while non-empty options are the exact
+    /// Oracle-listed legal domain in printed order.
     CardType {
-        excluded: Vec<CoreType>,
+        options: Vec<CoreType>,
     },
     CardName,
     /// "Choose a number between X and Y" — generates string options "0", "1", ..., "Y".
@@ -924,12 +923,24 @@ impl ChoiceType {
 
     pub fn card_type() -> Self {
         Self::CardType {
-            excluded: Vec::new(),
+            options: Vec::new(),
         }
     }
 
-    pub fn card_type_excluding(excluded: Vec<CoreType>) -> Self {
-        Self::CardType { excluded }
+    /// Card-type choice restricted to an explicit Oracle-listed candidate set.
+    pub fn card_type_from(options: Vec<CoreType>) -> Self {
+        Self::CardType { options }
+    }
+
+    /// The authoritative legal domain for a `CardType` prompt. Empty options
+    /// are the generic engine policy; non-empty options are already exact.
+    pub fn legal_card_type_options(options: &[CoreType]) -> Vec<CoreType> {
+        if options.is_empty() {
+            &CoreType::CHOOSABLE_TYPES
+        } else {
+            options
+        }
+        .to_vec()
     }
 
     /// Unrestricted "choose an opponent" (CR 102.3), independent of any other
@@ -1115,16 +1126,13 @@ impl Serialize for ChoiceType {
             Self::BasicLandType => {
                 serializer.serialize_unit_variant("ChoiceType", 3, "BasicLandType")
             }
-            // Serialize the unrestricted form as the legacy unit variant
-            // "CardType" so existing card-data JSON stays byte-stable; only
-            // emit the struct form when a restriction is present.
-            Self::CardType { excluded } => {
-                if excluded.is_empty() {
+            Self::CardType { options } => {
+                if options.is_empty() {
                     serializer.serialize_unit_variant("ChoiceType", 4, "CardType")
                 } else {
                     let mut variant =
                         serializer.serialize_struct_variant("ChoiceType", 4, "CardType", 1)?;
-                    variant.serialize_field("excluded", excluded)?;
+                    variant.serialize_field("options", options)?;
                     variant.end()
                 }
             }
@@ -1282,6 +1290,10 @@ impl<'de> Deserialize<'de> for ChoiceType {
             },
             CardType {
                 #[serde(default)]
+                options: Vec<CoreType>,
+                // Compatibility-only legacy wire form. It is normalized to a
+                // positive, ordered domain below and is never re-serialized.
+                #[serde(default)]
                 excluded: Vec<CoreType>,
             },
             NumberRange {
@@ -1365,7 +1377,28 @@ impl<'de> Deserialize<'de> for ChoiceType {
             ChoiceTypeRepr::Data(data) => match data {
                 ChoiceTypeData::CreatureType { options } => Ok(Self::CreatureType { options }),
                 ChoiceTypeData::Color { excluded } => Ok(Self::Color { excluded }),
-                ChoiceTypeData::CardType { excluded } => Ok(Self::CardType { excluded }),
+                ChoiceTypeData::CardType { options, excluded } => {
+                    if !options.is_empty() && !excluded.is_empty() {
+                        return Err(de::Error::custom(
+                            "CardType options and legacy excluded cannot be combined",
+                        ));
+                    }
+                    if excluded.is_empty() {
+                        Ok(Self::card_type_from(options))
+                    } else {
+                        let options = CoreType::CHOOSABLE_TYPES
+                            .iter()
+                            .copied()
+                            .filter(|card_type| !excluded.contains(card_type))
+                            .collect::<Vec<_>>();
+                        if options.is_empty() {
+                            return Err(de::Error::custom(
+                                "legacy CardType exclusions leave no legal choices",
+                            ));
+                        }
+                        Ok(Self::card_type_from(options))
+                    }
+                }
                 ChoiceTypeData::NumberRange {
                     min,
                     max,
@@ -1507,6 +1540,227 @@ impl DieRollModifier {
     pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
         match self {
             DieRollModifier::Add { value } | DieRollModifier::Subtract { value } => f(value),
+        }
+    }
+}
+
+/// CR 706.6: What a die-roll replacement does with the extra dice it caused to
+/// be rolled. "If a player is instructed to ignore a roll, that roll is
+/// considered to have never happened. No abilities trigger because of the
+/// ignored roll, and no effects apply to that roll." When the lowest is tied
+/// among several, the player chooses which to ignore (CR 706.6, 2nd sentence).
+///
+/// Distinct axis from [`DieRollModifier`] (CR 706.2), which adjusts a roll's
+/// RESULT rather than removing a roll. The two must not be unified: CR 706.2b
+/// governs the case where two or more effects contend to modify the SAME
+/// natural result (the player who rolled picks one to apply, considering
+/// reroll effects before increase/decrease effects) — a contention procedure
+/// with no analogue for ignoring, since CR 706.6 removes the roll from
+/// consideration entirely rather than competing to change its value.
+///
+/// The ignore set is decided on NATURAL results (CR 706.2 — "the number
+/// indicated on the top face of the die before any modifiers") before any
+/// modifier is applied, because CR 706.6 forbids ANY effect applying to an
+/// ignored roll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum DieRollIgnoreRule {
+    /// "and ignore the lowest roll" — Barbarian Class, Pixie Guide, Wyll.
+    ///
+    /// The symmetric `Highest` leaf is deliberately absent: a Scryfall corpus
+    /// check for `o:"ignore the highest roll"` returns ZERO cards, while
+    /// `o:"ignore the lowest roll"` returns exactly the three above. Adding an
+    /// unprinted leaf would be speculative surface threaded through
+    /// `ignorable_indices`, `ignorable_indices_for_rules`, and the roll-to-visit
+    /// auto-pick with no card to validate it — the same policy that makes the
+    /// parser reject "that many dice plus N" for N > 1. If a card ever prints
+    /// it, add the leaf and the matching `alt()` arm together.
+    ///
+    /// The same policy retired the former `PlayerChoice` ("and ignore one")
+    /// leaf. A corpus query for the exact grammar the parser accepted —
+    /// `instead roll that many dice plus one and ignore one` — returns ZERO
+    /// cards, and each nearby printing needs work this leaf did not do:
+    /// Ichor Elixir is planar (CR 706.7), Krark's Other Thumb uses neither the
+    /// "that many dice plus one" count form nor the " and ignore one" tail,
+    /// Probability Flux is a duration-bounded ANY-player form the
+    /// controller-scoped antecedent does not match, and Bamboozling Beeble /
+    /// Squid Fire Knight are one-shot targeted activated abilities whose
+    /// chooser is the ability's CONTROLLER, not the roller — a distinction
+    /// `WaitingFor::DieKeepChoice` cannot express, since it carries one
+    /// `player` who both rolls and ignores. Keeping the leaf also forced
+    /// `ignore_outcome_for_rules` to model a mixed `[Lowest, PlayerChoice]`
+    /// run, and that path dropped the `Lowest` forcing — offering the roller a
+    /// set that let them KEEP a roll CR 706.6 requires them to ignore. Whoever
+    /// prints the first real card here needs the chooser axis designed first.
+    Lowest,
+}
+
+/// CR 706.6: The result of applying a run of die-roll ignore rules to a set of
+/// natural results — split into the rolls that MUST be ignored and the tie the
+/// roller breaks.
+///
+/// The split is the whole point of the type. CR 706.6's second sentence gives
+/// the roller a choice only "if multiple results are tied"; every roll that is
+/// strictly lower than the tie boundary is determined, not chosen. Collapsing
+/// both into one candidate list would let a roller ignore a roll the rules
+/// forced them to keep.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DieRollIgnoreOutcome {
+    /// Rolls that must be ignored regardless of any choice.
+    pub forced: Vec<usize>,
+    /// Rolls tied at the boundary, among which the roller chooses. Empty when
+    /// the outcome is fully determined.
+    pub tied: Vec<usize>,
+    /// Total rolls to ignore — `forced.len()` plus how many of `tied` are picked.
+    pub ignore_count: usize,
+}
+
+impl DieRollIgnoreOutcome {
+    /// Every index the roller may legally end up ignoring, forced and tied
+    /// alike. Sorted and deduplicated.
+    pub fn candidates(&self) -> Vec<usize> {
+        let mut all = self.forced.clone();
+        all.extend(self.tied.iter().copied());
+        all.sort_unstable();
+        all.dedup();
+        all
+    }
+
+    /// CR 706.6: whether the roller has a real decision. False when the ignored
+    /// set is fully determined, which is what lets the caller skip the prompt.
+    pub fn needs_choice(&self) -> bool {
+        !self.tied.is_empty() && self.forced.len() < self.ignore_count
+    }
+
+    /// How many of the tied rolls the roller must pick.
+    pub fn picks_from_tied(&self) -> usize {
+        self.ignore_count.saturating_sub(self.forced.len())
+    }
+}
+
+impl DieRollIgnoreRule {
+    /// CR 706.6: Which of `naturals` this rule permits the roller to ignore.
+    ///
+    /// Computed over the NATURAL results (CR 706.2) — never the post-modifier
+    /// actuals — because CR 706.6 says no effects apply to an ignored roll, and
+    /// applying a modifier to it in order to rank it would be such an effect.
+    ///
+    /// `Lowest` returns every index tied at the extreme, which is exactly
+    /// CR 706.6's second sentence: with a unique lowest the returned slice has
+    /// length 1 and the engine resolves it with no prompt; with a tie the roller
+    /// chooses among them.
+    ///
+    /// # Single-roll invariant
+    ///
+    /// The returned slice is the CANDIDATE SET for ignoring exactly ONE roll,
+    /// never for ignoring several. CR 706.6 removes a single roll and breaks a
+    /// tie by having the player choose "one of those rolls"; there is no
+    /// printed "ignore the two lowest" form, and `DieRollIgnoreRule` carries no
+    /// count. `Lowest` therefore returns only the indices tied at the ONE
+    /// extreme — for `[1, 2, 5]` it yields `[0]`, not the two smallest. The
+    /// parser enforces the matching half by rejecting "that many dice plus N"
+    /// for N > 1.
+    ///
+    /// Ignoring SEVERAL rolls is expressed by having several rules — CR 706.6
+    /// applies once per instructing effect, so two stacked replacements
+    /// (Barbarian Class + Pixie Guide) each contribute one rule and each removes
+    /// one roll. Use [`Self::ignorable_indices_for_rules`] for that case; it
+    /// composes this single-roll method rather than reinterpreting its slice.
+    pub fn ignorable_indices(self, naturals: &[u8]) -> Vec<usize> {
+        // One arm, and deliberately an exhaustive `match` rather than a direct
+        // `naturals.iter().min()`: a new leaf must not compile until someone
+        // decides which extreme (if any) it ranks by. A free-choice leaf in
+        // particular ranks by NONE, and `attractions::unprompted_ignored_indices`
+        // documents why that case needs a prompt rather than a silent pick.
+        let extreme = match self {
+            DieRollIgnoreRule::Lowest => naturals.iter().min(),
+        };
+        let Some(&extreme) = extreme else {
+            return Vec::new();
+        };
+        naturals
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &value)| (value == extreme).then_some(index))
+            .collect()
+    }
+
+    /// CR 706.6: The candidate set for ignoring one roll per rule in `rules`,
+    /// together with how many rolls must be ignored.
+    ///
+    /// CR 706.6 applies once per INSTRUCTING effect, so N applied die-roll
+    /// replacements ignore N rolls. The rules are applied in order, each one
+    /// consuming a roll from the pool the earlier ones left behind: a `Lowest`
+    /// rule takes the lowest REMAINING natural, so `[Lowest, Lowest]` over
+    /// `[1, 3, 6]` yields candidates `{0, 1}` and a count of 2 — never the
+    /// lowest roll twice.
+    ///
+    /// Returns `(candidates, ignore_count)` where `candidates` is sorted and
+    /// deduplicated. `ignore_count` is clamped to `candidates.len()`, because a
+    /// rule that finds an empty remaining pool (more rules than dice) can ignore
+    /// nothing.
+    ///
+    /// When `candidates.len() == ignore_count` the roller has no decision — the
+    /// set is forced and the caller resolves it with no prompt. A larger
+    /// candidate set is a genuine CR 706.6 tie-break ("the player chooses one of
+    /// those rolls to be ignored"), extended to `ignore_count` picks.
+    pub fn ignorable_indices_for_rules(rules: &[Self], naturals: &[u8]) -> (Vec<usize>, usize) {
+        let outcome = Self::ignore_outcome_for_rules(rules, naturals);
+        (outcome.candidates(), outcome.ignore_count)
+    }
+
+    /// CR 706.6: The full outcome of applying `rules` to `naturals` — which
+    /// rolls are FORCED to be ignored, which are merely tied candidates the
+    /// roller picks among, and how many must go in total.
+    ///
+    /// Splitting forced from tied is what keeps a stacked run honest. Barbarian
+    /// Class's own Gatherer ruling states the multi-copy case plainly: "if you
+    /// have multiple Barbarian Class cards, you roll that many additional dice
+    /// and ignore that many of the lowest rolls" — with two copies over naturals
+    /// `[4, 7, 7]` the 4 is not a choice, and only the tie between the two 7s
+    /// is. A flat candidate list cannot express that: it would offer `{0, 1, 2}`
+    /// for two picks and let the roller ignore both 7s while KEEPING the 4,
+    /// which CR 706.6 does not permit.
+    ///
+    /// For a homogeneous run of `Lowest` the forced/tied split is computed in
+    /// one pass over the sorted naturals rather than by accumulating each rule's
+    /// tied set into a union — the N lowest rolls are one determined set, and
+    /// only the tie AT the Nth boundary is a genuine player decision.
+    pub fn ignore_outcome_for_rules(rules: &[Self], naturals: &[u8]) -> DieRollIgnoreOutcome {
+        let ignore_count = rules.len().min(naturals.len());
+        if ignore_count == 0 {
+            return DieRollIgnoreOutcome::default();
+        }
+
+        // Homogeneous `Lowest` run: the N lowest naturals are the ignored set.
+        // Everything strictly below the Nth-lowest value must go; everything
+        // equal to it is the tie the roller breaks.
+        let mut order: Vec<usize> = (0..naturals.len()).collect();
+        order.sort_unstable_by_key(|&index| naturals[index]);
+        let boundary = naturals[order[ignore_count - 1]];
+
+        let mut forced = Vec::new();
+        let mut tied = Vec::new();
+        for (index, &value) in naturals.iter().enumerate() {
+            if value < boundary {
+                forced.push(index);
+            } else if value == boundary {
+                tied.push(index);
+            }
+        }
+
+        // A clean split with no tie at the boundary leaves `tied` holding
+        // exactly the rolls still owed; fold it into `forced` so the caller sees
+        // a fully determined set and raises no prompt.
+        if forced.len() + tied.len() == ignore_count {
+            forced.append(&mut tied);
+            forced.sort_unstable();
+        }
+
+        DieRollIgnoreOutcome {
+            forced,
+            tied,
+            ignore_count,
         }
     }
 }
@@ -2006,13 +2260,16 @@ impl CastFromZoneDriver {
     }
 
     /// CR 611.2a: Reconcile this driver with a durational scope the parser
-    /// stamped on the grant AFTER the clause body was lowered (a leading
-    /// "Until end of turn, …" via `with_clause_duration`, or a stripped trailing
-    /// "… this turn"). A stated duration means the controller casts at a LATER
-    /// priority window, which is the defining property of a lingering
-    /// permission — so a resolution-scoped window degrades to one. The two
-    /// single-card mechanisms are unchanged here; the paid-cast downgrade has
-    /// its own narrower guard at the clause seam.
+    /// stamped on the grant AFTER the clause body was lowered — a leading
+    /// "Until end of turn, …", a stripped trailing "… this turn", or a duration
+    /// carried onto a coordinated cast conjunct. Every seam that stamps one
+    /// calls this. A stated duration means the controller casts at a LATER
+    /// priority window (CR 117.1a), which is the defining property of a
+    /// lingering permission — so both resolution-scoped mechanisms are asked to
+    /// degrade, the batch window and the single card alike. CR 118.9 governs
+    /// what the permission costs, never when it is exercised, so payment is not
+    /// part of this question. Only the batch window can REFUSE, and only when it
+    /// carries a bound; see the next paragraph.
     ///
     /// `None` is a REFUSAL, and the fallible return type is the point: the
     /// degrade is expressed as `for_batch_bounds(LingeringPermission, …)`, so a
@@ -2028,12 +2285,24 @@ impl CastFromZoneDriver {
             CastFromZoneDriver::ResolutionWindow { bounds } => {
                 Self::for_batch_bounds(CastMechanism::LingeringPermission, bounds)
             }
-            // CR 608.2g: the two single-card mechanisms carry no batch bound to
-            // lose, so a stated duration leaves them untouched (the paid
-            // `DuringResolution` → lingering move for a chosen single target
-            // — Emry, Lurker in the Loch — has its own narrower guard at the
-            // trailing-duration seam, which runs before this call).
-            other => Some(other),
+            // CR 608.2g + CR 117.1a: a during-resolution cast happens AS the
+            // ability resolves, with no priority window in between. A stated
+            // lifetime says the opposite, so the two are mutually exclusive and
+            // the single-card mechanism degrades as well — carrying no batch
+            // bound, it can never refuse. This arm used to answer
+            // `Some(DuringResolution)`, with the degrade hand-written at ONE
+            // seam behind a `without_paying_mana_cost: false` guard, so every
+            // FREE single-card grant with a printed lifetime kept a one-shot
+            // mechanism its own text contradicts. CR 118.9 governs what the
+            // permission COSTS, not when it is exercised. The affected cards are
+            // measured in the double parse cited by the change that moved this
+            // arm, not listed here, where the list would go stale unnoticed.
+            CastFromZoneDriver::DuringResolution => Some(CastFromZoneDriver::LingeringPermission),
+            // Already the lingering mechanism; a stated duration only stamps its
+            // lifetime.
+            CastFromZoneDriver::LingeringPermission => {
+                Some(CastFromZoneDriver::LingeringPermission)
+            }
         }
     }
 }
@@ -2308,9 +2577,11 @@ impl ChoiceValue {
             ChoiceType::BasicLandType => {
                 value.parse::<BasicLandType>().ok().map(Self::BasicLandType)
             }
-            ChoiceType::CardType { excluded } => {
+            ChoiceType::CardType { options } => {
                 let core_type = value.parse::<CoreType>().ok()?;
-                (!excluded.contains(&core_type)).then_some(Self::CardType(core_type))
+                ChoiceType::legal_card_type_options(options)
+                    .contains(&core_type)
+                    .then_some(Self::CardType(core_type))
             }
             ChoiceType::OddOrEven => value.parse::<Parity>().ok().map(Self::OddOrEven),
             ChoiceType::CardName => Some(Self::CardName(value.to_string())),
@@ -5690,6 +5961,22 @@ pub enum FilterProp {
     /// it", and the broader "<subject> gets +N/+M for each Aura/Equipment
     /// attached to it" family.
     AttachedToRecipient,
+    /// CR 303.4 + CR 301.5: True when the matched object's `attached_to` field
+    /// resolves to a PLAYER equal to the player identified by `player`. This is
+    /// the player-referent counterpart of `AttachedToSource`/`AttachedToRecipient`
+    /// (both of which resolve against an OBJECT referent) — a Curse (or any
+    /// other player-enchanting Aura) needs to count SIBLING permanents attached
+    /// to a specific player, not to a creature. Reuses `ControllerRef` (resolved
+    /// via `controller_ref_player`/`source_enchanted_player`) rather than adding
+    /// a narrower "which player" type, since every "which player" axis this
+    /// needs (the enchanted player, a target player, "you", …) is already
+    /// expressed there. Powers "the number of Curses attached to [enchanted
+    /// player]" (Curse of Thirst, Curse of Surveillance) — `player` is
+    /// `ControllerRef::EnchantedPlayer` there, resolved against the counting
+    /// ability's own source (itself a Curse attached to the same player).
+    AttachedToPlayer {
+        player: ControllerRef,
+    },
     /// CR 303.4 + CR 301.5: Matches objects that have at least one attachment of the
     /// given kind whose controller matches `controller`. Unlike `EnchantedBy`/`EquippedBy`
     /// (which are source-relative — match when THIS source is attached to the object),
@@ -5972,11 +6259,39 @@ pub enum FilterProp {
     /// scanning `state.damage_dealt_this_turn` for a record whose `source_id`
     /// is this object.
     ///
-    /// Parameterization note: these two form a damage-role pair. If a third
-    /// damage-role filter appears (e.g. "dealt combat damage this turn"), fold
-    /// the pair into `DamageThisTurn { role: {Dealt, Received}, combat_only }`
-    /// per the /add-engine-variant sibling-cluster threshold.
-    DealtDamageThisTurn,
+    /// CR 608.2i: a look-back predicate — the record ledger is authoritative, so
+    /// a source that has since left the battlefield or changed characteristics
+    /// still matches. CR 514.2 clears the ledger, scoping it to the turn.
+    ///
+    /// Parameterized along the two axes the printed clause varies on, rather
+    /// than grown as siblings (`DealtCombatDamageThisTurn`,
+    /// `DealtDamageToYouThisTurn`, …):
+    ///
+    /// - `kind` (CR 120.2a / CR 120.2b) restricts to combat or noncombat damage.
+    /// - `recipient` (CR 120.1 "Objects can deal damage to … players") restricts
+    ///   WHO the damage was dealt to. `None` leaves the recipient unconstrained
+    ///   (Red Guardian's bare "dealt damage this turn").
+    ///
+    /// Covers "that dealt damage to you this turn" (Reciprocate, Retaliate,
+    /// Spear of Heliod, Giltspire Avenger, Otherworldly Escort) and
+    /// "that dealt combat damage to you this turn" (Witch-king of Angmar).
+    ///
+    /// The object-recipient forms ("that dealt damage to it this turn", Brine
+    /// Hag / Giant Albatross) are a THIRD axis and deliberately not modeled
+    /// here: they resolve against the trigger's event context, not a player
+    /// scope. Widen `recipient` to an object-or-player reference when that class
+    /// is built, rather than adding a sibling variant.
+    DealtDamageThisTurn {
+        /// CR 120.2a / CR 120.2b: which damage class counts. `Any` (the default,
+        /// and what a bare unit-variant record deserializes to) accepts both.
+        #[serde(default)]
+        kind: DamageKindFilter,
+        /// CR 120.1: the required damage recipient, as a player scope resolved
+        /// against the ability's controller ("to you" → `PlayerFilter::Controller`).
+        /// `None` = any recipient, preserving the unparameterized semantics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recipient: Option<PlayerFilter>,
+    },
     /// CR 400.7: Object entered the battlefield during this turn.
     /// Checks `entered_battlefield_turn == Some(current_turn)`.
     EnteredThisTurn,
@@ -6520,6 +6835,10 @@ pub mod source_exclusion_bool_compat {
 /// action), distinguished by destination (battlefield vs. hand).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThisWayCause {
+    /// CR 701.24c-e + CR 400.3: the member (or an explicitly designated empty
+    /// population) is the subject of a compound instruction that moves cards
+    /// into their owners' libraries and then shuffles those libraries.
+    OwnerLibraryShuffleSubject,
     /// CR 701.13a: the member was exiled this way.
     Exiled,
     /// CR 701.21a: the member was sacrificed this way (cause survives a
@@ -8960,10 +9279,133 @@ pub enum UntilCondition {
 /// CR 117.1 + CR 400.7j + CR 608.2k: Public characteristics of an object paid
 /// as a cost for the resolving spell or ability. Effects can later refer to
 /// that object even after the cost moved it to a public zone.
+///
+/// CR 400.7 + CR 608.2k: `incarnation` is the referent's
+/// `GameObject::incarnation` at binding time. CR 608.2k keeps the reference
+/// alive across *characteristic* changes, but an object that changes zones
+/// becomes a new object (CR 400.7) that the reference must no longer name.
+/// Because the engine reuses `ObjectId` as stable storage identity, the id
+/// alone cannot distinguish "still the bound object" from "a new object at the
+/// same id"; the incarnation epoch is what separates them. Consumers that act
+/// on the *live* object (identity reads) must gate on
+/// [`CostPaidObjectSnapshot::is_current`]. Consumers that read the frozen
+/// `lki` are unaffected — LKI is the departed object's recorded state and is
+/// incarnation-safe by construction (CR 608.2h).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CostPaidObjectSnapshot {
     pub object_id: ObjectId,
     pub lki: LKISnapshot,
+    /// CR 400.7: incarnation epoch captured at binding time. Legacy saves that
+    /// predate this field deserialize to [`LEGACY_INCARNATION`], which can
+    /// never equal a live object's incarnation, so such records are treated as
+    /// stale (fail-closed) rather than silently naming a new object.
+    #[serde(default = "legacy_incarnation")]
+    pub incarnation: u64,
+}
+
+/// Serde default for [`CostPaidObjectSnapshot::incarnation`] on pre-migration
+/// saves. Mirrors `ObjectIncarnationRefCompat`'s legacy arm
+/// (`types/identifiers.rs`): a record written before the incarnation was
+/// captured cannot prove which incarnation it bound, so it is pinned to a
+/// sentinel that never matches a live object.
+fn legacy_incarnation() -> u64 {
+    crate::types::identifiers::LEGACY_INCARNATION
+}
+
+impl CostPaidObjectSnapshot {
+    /// CR 400.7j + CR 608.2k: Capture the cost-paid referent from a
+    /// live object, pinning its current incarnation. The single construction
+    /// seam for production binding sites, so no seam can forget the epoch.
+    pub fn capture(object: &crate::game::game_object::GameObject, lki: LKISnapshot) -> Self {
+        Self {
+            object_id: object.id,
+            lki,
+            incarnation: object.incarnation,
+        }
+    }
+
+    /// CR 608.2c + CR 608.2h + CR 400.7: Bind a referent whose object has
+    /// already left the zone the parent instruction moved it from, so its
+    /// characteristics come from last known information rather than a live
+    /// read. The object row survives the move with its incarnation already
+    /// bumped (`game/zones.rs`), so `state_incarnation` is that post-move
+    /// epoch: the reference names the object as the parent instruction left
+    /// it, and goes stale if it moves again.
+    ///
+    /// Returns a snapshot pinned to [`LEGACY_INCARNATION`] when the row is
+    /// gone entirely (ceased to exist), which no live object can match.
+    pub fn capture_departed(
+        state: &crate::types::game_state::GameState,
+        object_id: ObjectId,
+        lki: LKISnapshot,
+    ) -> Self {
+        let incarnation = state
+            .objects
+            .get(&object_id)
+            .map_or(crate::types::identifiers::LEGACY_INCARNATION, |object| {
+                object.incarnation
+            });
+        Self {
+            object_id,
+            lki,
+            incarnation,
+        }
+    }
+
+    /// CR 400.7: True when this snapshot still names the live object it was
+    /// bound to. False when the referent left and returned (a new object at the
+    /// same storage id), when it is gone entirely, or when the record is a
+    /// pre-migration save with no captured incarnation.
+    ///
+    /// This is a strict full-pair compare and is deliberately NOT
+    /// `ResolvedAbility::target_pin_is_current`, which fails *open* when no pin
+    /// is recorded — a `CostPaidObject` referent never has an ordinary target
+    /// pin, so that check would pass for free.
+    pub fn is_current(&self, state: &crate::types::game_state::GameState) -> bool {
+        crate::types::identifiers::ObjectIncarnationRef::of(self.object_id, self.incarnation)
+            .is_current(state)
+    }
+
+    /// CR 400.7 + CR 608.2k: Re-pin this snapshot to the referent's CURRENT
+    /// incarnation, keeping the characteristics captured at binding time.
+    ///
+    /// Cost-payment seams necessarily capture the referent BEFORE the cost moves
+    /// it (the `lki` must record its pre-move characteristics — CR 608.2h), but
+    /// that move is the cost's own and must NOT invalidate the reference: CR
+    /// 608.2k exists so an effect can still refer to the object its cost moved.
+    /// Re-pinning once the cost's moves are complete makes the pin mean "this
+    /// object, as the cost left it", so only a LATER zone change reads as stale.
+    ///
+    /// Deliberately re-reads the live incarnation rather than assuming a fixed
+    /// increment: a cost move may be redirected by a replacement effect or pass
+    /// through more than one zone, so the delta is not reliably one.
+    ///
+    /// Leaves the pin untouched when the object no longer exists — the recorded
+    /// epoch then still cannot match any live object, which is the correct
+    /// fail-closed reading.
+    pub fn repin_to_current_incarnation(&mut self, state: &crate::types::game_state::GameState) {
+        if let Some(object) = state.objects.get(&self.object_id) {
+            self.incarnation = object.incarnation;
+        }
+    }
+
+    /// CR 400.7 + CR 608.2k: The single authority for resolving this snapshot to
+    /// a LIVE object id. Yields the id only while the snapshot still names the
+    /// object it was bound to; a referent that left (with or without returning
+    /// under the same storage id) yields `None`, and there is deliberately NO
+    /// fallback to a same-id object.
+    ///
+    /// Every live-object consumer of a `CostPaidObject` / `AmassedArmy`
+    /// referent must resolve through here rather than reading `object_id`
+    /// directly, so the identity rule has one implementation instead of one per
+    /// call site.
+    ///
+    /// This is NOT for readers of the frozen `lki`: CR 608.2h requires those to
+    /// keep reporting the departed object's recorded characteristics, so they
+    /// read `self.lki` and never call this.
+    pub fn live_object_id(&self, state: &crate::types::game_state::GameState) -> Option<ObjectId> {
+        self.is_current(state).then_some(self.object_id)
+    }
 }
 
 /// CR 106.1b + CR 400.7 + CR 602.2b (issue #6504): The mana type(s) spent to
@@ -13185,6 +13627,23 @@ pub enum LibraryPosition {
     },
 }
 
+/// CR 701.24a + CR 701.24d: Whether a mass move into a library is the move
+/// component of one parser-emitted “shuffle this set into that library” action.
+/// Ordinary mass moves retain the zone pipeline's per-object library behavior;
+/// `TerminalShuffle` reserves the single shuffle for the chained `Shuffle`
+/// instruction after every member has moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum MassLibraryShuffleMode {
+    #[default]
+    PerObject,
+    TerminalShuffle,
+}
+
+fn is_default_mass_library_shuffle_mode(mode: &MassLibraryShuffleMode) -> bool {
+    matches!(mode, MassLibraryShuffleMode::PerObject)
+}
+
 /// CR 401.4 + CR 701.23a + CR 608.2c: Presentation metadata for a library-search
 /// choice. The engine supplies this because the continuation determines whether
 /// the owner may arrange the selected cards in one library position.
@@ -13452,6 +13911,113 @@ pub enum CopyManaValueLimit {
     AmountSpentToCastSource,
 }
 
+/// CR 707.2 + CR 115.1 + CR 611.2c: WHICH object(s) become the copy.
+///
+/// A bare `TargetFilter` cannot express this axis, because the two non-source
+/// readings are spelled with the SAME filter shape and differ only in whether
+/// the object is announced as a target:
+///
+/// - Shuri, Wakandan Inventor — "**Target** artifact you control becomes a copy
+///   of a second target artifact you control" — recipient `Typed(Artifact, You)`,
+///   **announced** (CR 115.1: declared as the ability is put on the stack, so it
+///   takes a target slot and is rechecked for legality on resolution per
+///   CR 608.2b).
+/// - Mirrorweave — "**Each other** creature becomes a copy of target
+///   nonlegendary creature" — recipient `Typed(Creature, [Other])`, **not
+///   announced**; the set is determined as the spell resolves (CR 611.2c).
+///
+/// Collapsing both onto `TargetFilter` forced the parser to throw one of them
+/// away, which is exactly the defect this axis fixes. `SubjectApplication`
+/// already draws this trichotomy at parse time; it previously had nowhere to
+/// record it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", content = "filter")]
+pub enum CopyRecipient {
+    /// CR 707.2: the ability's own source — `~`, or an anaphoric "it"/"this
+    /// creature" naming it. Every self-copy card (Mirage Mirror, Thespian's
+    /// Stage, Lazav, Volrath, Clone-style ETB replacements, …). This is the
+    /// default and is skipped during serialization, so those cards round-trip
+    /// byte-identically.
+    #[default]
+    Source,
+    /// CR 115.1: an announced target, declared BEFORE the copy source in the
+    /// printed order (CR 601.2c). Shuri, True Polymorph, Shapesharer, Saheeli
+    /// Sublime Artificer, The Animus, Reflection Net, Kaya Spirits' Justice.
+    Target(TargetFilter),
+    /// CR 611.2c: an untargeted recipient set, determined only as the effect
+    /// resolves and then locked. Covers mass subjects (Mirrorweave, Mirrorform,
+    /// Niko's "Shards you control") and untargeted single-object anaphors such
+    /// as `AttachedTo` (Assimilation Aegis' enchanted/equipped host).
+    Untargeted(TargetFilter),
+}
+
+impl CopyRecipient {
+    /// The recipient's selection filter, when it has one. `Source` carries no
+    /// filter — it names the ability source directly.
+    pub fn filter(&self) -> Option<&TargetFilter> {
+        match self {
+            CopyRecipient::Source => None,
+            CopyRecipient::Target(filter) | CopyRecipient::Untargeted(filter) => Some(filter),
+        }
+    }
+
+    /// CR 115.1: the filter that is ANNOUNCED as a target slot, if any.
+    ///
+    /// `Target` is *defined* as the announced reading, so this is unconditional
+    /// for that variant. Six authorities key off this one function — both slot
+    /// builders, both target assigners, the chain target-sink predicate, and
+    /// the resolver's copy-source index — and they are consistent only if all
+    /// six agree on whether slot 0 is the recipient. A predicate that could
+    /// decline a `Target` here (e.g. a context-ref guard) would silently
+    /// collapse the recipient and the copy source onto the same declared
+    /// object, so the context-ref case is excluded by [`Self::targeted`]
+    /// instead — at construction and on deserialization, never here.
+    pub fn announced_filter(&self) -> Option<&TargetFilter> {
+        match self {
+            CopyRecipient::Target(filter) => Some(filter),
+            CopyRecipient::Source | CopyRecipient::Untargeted(_) => None,
+        }
+    }
+
+    /// CR 115.1 + CR 608.2k: build the recipient for a DECLARED-target subject,
+    /// routing a context ref to [`Self::Untargeted`].
+    ///
+    /// A context ref (`SelfRef`, `TriggeringSource`, `ParentTarget`, …) resolves
+    /// from chain or event context rather than a player's announcement, so it
+    /// can never occupy a target slot. This constructor is the single place that
+    /// decision is made, which is what lets [`Self::announced_filter`] stay
+    /// unconditional; see its doc for why a guard there would be wrong.
+    pub fn targeted(filter: TargetFilter) -> Self {
+        if filter.is_context_ref() {
+            CopyRecipient::Untargeted(filter)
+        } else {
+            CopyRecipient::Target(filter)
+        }
+    }
+
+    pub fn is_source(&self) -> bool {
+        matches!(self, CopyRecipient::Source)
+    }
+}
+
+/// CR 115.1: re-apply [`CopyRecipient::targeted`]'s invariant on the way in.
+///
+/// The parser can never emit a context-ref `Target`, but `Deserialize` is a
+/// second entry point: a hand-edited or corrupted mid-resolution snapshot could
+/// otherwise introduce `Target(TriggeringSource)`, which would collapse the
+/// recipient and the copy source onto one declared object across all six
+/// authorities. Normalizing here keeps the invariant a property of the type
+/// rather than of one construction site.
+fn deserialize_copy_recipient<'de, D>(deserializer: D) -> Result<CopyRecipient, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match CopyRecipient::deserialize(deserializer)? {
+        CopyRecipient::Target(filter) => CopyRecipient::targeted(filter),
+        other => other,
+    })
+}
+
 /// CR 702.179c-d: Direction of a speed change. Typed (not a bool) so the
 /// `Effect::ChangeSpeed` handler dispatches exhaustively.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -13698,6 +14264,160 @@ impl FaceDownProfile {
     }
 }
 
+/// Digital-only Alchemy (no CR entry for "perpetually"): the CLOSED set of
+/// quoted-ability grant kinds that `GameObject::apply_perpetual_modification`
+/// can install onto a persistent baseline.
+///
+/// `ContinuousModification` is the engine-wide 57-variant layer vocabulary; only
+/// three of its kinds have a persistent-baseline installer. Carrying that subset
+/// as its OWN type (rather than a `Vec<ContinuousModification>` guarded by a
+/// separate predicate) makes the acceptance gate and the installer the same
+/// authority: [`PerpetualModification::GrantAbility`] cannot be constructed
+/// holding a kind the installer does not handle, and adding a variant here is a
+/// compile error in `apply_perpetual_modification` until it is installed. The
+/// previous shape — a `matches!` gate in the parser plus a wildcard arm in the
+/// installer — could drift silently: widening the gate recorded the modification
+/// in `perpetual_mods` while installing nothing.
+///
+/// Wire-compatible with the `ContinuousModification` subset it mirrors: same
+/// `#[serde(tag = "type")]`, same variant names, same field names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PerpetualGrantModification {
+    /// A bare evergreen/parameterized keyword ("~ has flying") — installed onto
+    /// `keywords` + `base_keywords`.
+    AddKeyword { keyword: Keyword },
+    /// A restriction/permission static ("~ can't block", CR 509.1b) — installed
+    /// as a synthetic self-affecting `StaticDefinition` onto `static_definitions`
+    /// + `base_static_definitions`.
+    AddStaticMode {
+        #[serde(deserialize_with = "crate::types::statics::deserialize_static_mode_fwd")]
+        mode: StaticMode,
+    },
+    /// A full spell/activated ability body (Topsoil Turner's "{T}: Add {G}{G}."
+    /// and Ethereal Grasp's "{8}: Untap this creature.") — installed onto
+    /// `abilities` + `base_abilities`. Agent of Raffine's superficially similar
+    /// "You may spend mana as though it were mana of any color to cast this
+    /// spell." is REJECTED before it ever reaches this variant — see
+    /// `TryFrom<ContinuousModification>`'s `GenericEffect`-static gate below,
+    /// which fails the whole grant closed rather than install a board-wide
+    /// mana concession under a "this spell only" card.
+    GrantAbility { definition: Box<AbilityDefinition> },
+}
+
+impl TryFrom<ContinuousModification> for PerpetualGrantModification {
+    /// The rejected modification, returned intact so a caller can report which
+    /// kind failed the gate.
+    type Error = ContinuousModification;
+
+    /// Fail-closed: any kind without a persistent-baseline installer is rejected,
+    /// so a newly added `ContinuousModification` variant defaults to "not
+    /// perpetually installable" — the safe answer — rather than to a silent no-op
+    /// at install time. The parser turns a rejection into a whole-clause parse
+    /// failure (`Effect::Unimplemented`), never a partially applied grant.
+    fn try_from(modification: ContinuousModification) -> Result<Self, Self::Error> {
+        match modification {
+            ContinuousModification::AddKeyword { keyword } => Ok(Self::AddKeyword { keyword }),
+            ContinuousModification::AddStaticMode { mode } => Ok(Self::AddStaticMode { mode }),
+            // Fail-closed: a `GrantAbility` whose nested tree contains
+            // `Effect::Unimplemented` did not actually parse -- the quoted body
+            // fell through to the parser's honest "couldn't classify this" stub
+            // (e.g. Boareskyr Tollkeeper's "~ enters tapped." is a standalone
+            // sentence with no static/trigger/keyword recognizer). Accepting it
+            // here would install a no-op ability while the top-level effect
+            // stays `Effect::ApplyPerpetual` (never `Effect::Unimplemented`), so
+            // coverage/`cargo semantic-audit` would keep reporting the card as
+            // fully supported. Reuse `game::coverage::ability_tree_any` -- the
+            // single walker authority -- rather than reimplementing tree
+            // recursion here. Rejecting here propagates through the `Result`
+            // collect in `try_parse_perpetual_grant_ability`, which fails the
+            // whole clause closed (falls back to `Effect::unimplemented`) rather
+            // than installing a partial grant. Catch-all grants that DO fully
+            // parse (Topsoil Turner's "{T}: Add {G}{G}.", Ethereal Grasp's "{8}:
+            // Untap this creature.") carry no `Effect::Unimplemented` node and
+            // are unaffected.
+            //
+            // The predicate also checks `d.cost` for `AbilityCost::Unimplemented`
+            // (review follow-up, PR #8494, matthewevans): the catch-all's
+            // activated-ability path (`parse_quoted_ability`'s cost-separator
+            // branch, `oracle_static/grammar.rs`) sets `def.cost =
+            // Some(parse_oracle_cost(cost_text))`, and `parse_oracle_cost`
+            // returns `AbilityCost::Unimplemented` on an unrecognized leading
+            // cost verb -- the same coverage-invisible shape as an unparsed
+            // effect, just on the other half of the "[Cost]: [Effect]" pair (CR
+            // 113.3b). A parsed effect alongside an unparsed cost must fail
+            // closed exactly like an unparsed effect; checking only `d.effect`
+            // would leave that shape green. Mirrors
+            // `game::coverage::collect_unimplemented_from_tree`, which checks
+            // both `def.effect` and `def.cost` for the same reason.
+            ContinuousModification::GrantAbility { definition }
+                if crate::game::coverage::ability_tree_any(&definition, &|d| {
+                    matches!(&*d.effect, Effect::Unimplemented { .. })
+                        || matches!(&d.cost, Some(AbilityCost::Unimplemented { .. }))
+                }) =>
+            {
+                Err(ContinuousModification::GrantAbility { definition })
+            }
+            // Fail-closed (Blocker 2, PR #8494, matthewevans): a `GrantAbility`
+            // whose tree carries a nested `Effect::GenericEffect` with populated
+            // `static_abilities` describes a RESOLUTION-TIME continuous-effect
+            // grant (the Chromatic-Orrery shape: "when this ability resolves,
+            // install this static"), not a persistent baseline this installer
+            // can route. `GameObject::apply_perpetual_modification`'s
+            // `GrantAbility` arm only ever pushes the WHOLE `AbilityDefinition`
+            // onto `abilities` / `base_abilities` -- it never inspects `.effect`
+            // to extract a nested `GenericEffect`'s statics into
+            // `static_definitions` / `base_static_definitions` at grant time, so
+            // the static this clause describes is never installed as a
+            // functioning ability by that arm.
+            //
+            // Agent of Raffine (MTGJSON-verified) is the regression case: "It
+            // perpetually gains \"You may spend mana as though it were mana of
+            // any color to cast this spell.\"" has no cost separator, so
+            // `parse_quoted_ability` treats the whole quoted sentence as a
+            // spell-like effect chain and `classify_quoted_inner` falls through
+            // its default `GrantAbility` fallback (no static/trigger/keyword
+            // recognizer matched), wrapping
+            // `Effect::GenericEffect { static_abilities: [SpendManaAsAnyColor
+            // { spell_filter: None, .. }], target: Some(Controller), .. }`.
+            // Accepting it here would look green (`Effect::ApplyPerpetual`,
+            // never `Effect::Unimplemented`) while being wrong on TWO independent
+            // axes: (1) `spell_filter: None` is the documented BOARD-WIDE path
+            // (every spell the controller casts), not "this spell" -- a real
+            // rules defect, not just a coverage gap; and (2) even a correctly
+            // self-scoped static would still need a NEW self-referential runtime
+            // check, because `player_can_spend_as_any_color_for_spell_object`
+            // (static_abilities.rs) only scans `game_active_statics`
+            // (battlefield + command zone) for a granting permanent's OWN
+            // static, while CR 113.6e says an ability that modifies how that
+            // particular object can be played or cast "functions in any zone
+            // from which it could be played or cast and also on the stack" --
+            // the recipient's own hand, then briefly the stack while its own
+            // cost is paid, neither of which `game_active_statics` ever
+            // reaches. Properly threading both the self-scope AND that new
+            // check (mirroring `casting::collect_self_spell_cost_modifiers`'s
+            // existing self-referential `ModifyCost` precedent) is a separate,
+            // larger project; reject here for now rather than ship a false
+            // green, mirroring the sibling `Effect::Unimplemented` gate above.
+            ContinuousModification::GrantAbility { definition }
+                if crate::game::coverage::ability_tree_any(&definition, &|d| {
+                    matches!(
+                        &*d.effect,
+                        Effect::GenericEffect { static_abilities, .. }
+                            if !static_abilities.is_empty()
+                    )
+                }) =>
+            {
+                Err(ContinuousModification::GrantAbility { definition })
+            }
+            ContinuousModification::GrantAbility { definition } => {
+                Ok(Self::GrantAbility { definition })
+            }
+            other => Err(other),
+        }
+    }
+}
+
 /// The typed effect enum. Each variant corresponds to an effect handler.
 /// Zero HashMap<String, String> fields.
 // clippy::large_enum_variant: `Effect` is the engine's central 100+ variant
@@ -13752,6 +14472,44 @@ pub enum PerpetualModification {
     ModifyCost {
         mode: crate::types::statics::CostModifyMode,
         amount: ManaCost,
+    },
+    /// Digital-only Alchemy (no CR entry for "perpetually"): "[object] perpetually
+    /// gains \"<ability text>\"[ and \"<ability text>\"]*" — a permanent grant of
+    /// one or more FULL abilities (not just evergreen keywords or a self-cost
+    /// modifier), e.g. Ethereal Grasp's targeted creature perpetually gaining
+    /// "This creature doesn't untap during your untap step" and "{8}: Untap
+    /// this creature." or Karlach, Tiefling Berserker's returned creature
+    /// perpetually gaining "~ can't block." (CR 509.1b blocking restriction).
+    ///
+    /// Each quoted ability text is classified through the SAME single authority
+    /// used by every other quoted-ability grant
+    /// (`oracle_static::keyword_grant::classify_quoted_inner`), so the granted
+    /// text's OWN self-reference (`~`) is resolved the ordinary way once the
+    /// modification is installed on the recipient — no separate pronoun-binding
+    /// step is needed for the INNER text. What this variant exists to carry is
+    /// the OUTER grant's applied-to target, resolved by the parser
+    /// (`parse_perpetual_self_subject`) to the correct antecedent: the
+    /// ability's own parent target for a bare self-referential grant (Karlach),
+    /// or `TargetFilter::LastCreated` when the immediately preceding clause in
+    /// the same chain created the object being granted to. Agent of Raffine's
+    /// conjured duplicate is the architectural motivator for that LastCreated
+    /// antecedent, but Agent of Raffine's OWN granted ability text ("You may
+    /// spend mana as though it were mana of any color to cast this spell.") is
+    /// currently REJECTED by `PerpetualGrantModification::try_from`'s
+    /// `GenericEffect`-static gate (see its doc comment), so Agent of Raffine
+    /// does not itself reach `Effect::ApplyPerpetual` — it fails closed to
+    /// `Effect::Unimplemented` — a future card whose conjured-duplicate grant
+    /// classifies to an installable kind would exercise this binding end to
+    /// end.
+    ///
+    /// Typed as [`PerpetualGrantModification`] — the closed set of kinds the
+    /// perpetual runtime can install onto a persistent baseline — rather than
+    /// the full `ContinuousModification` vocabulary, so an uninstallable kind
+    /// cannot be represented here at all. A granted ability text that
+    /// classifies to one (e.g. a full triggered ability) fails the parse closed
+    /// rather than silently dropping part of the grant.
+    GrantAbility {
+        modifications: Vec<PerpetualGrantModification>,
     },
 }
 
@@ -14474,6 +15232,11 @@ pub enum Effect {
         /// graveyard on the bottom of their library in a random order."
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library_position: Option<LibraryPosition>,
+        /// CR 701.24a + CR 701.24d: `TerminalShuffle` marks the mass-move
+        /// component of a parser-emitted "shuffle [set] into [library]"
+        /// operation. Its chained `Shuffle` owns the one library randomization.
+        #[serde(default, skip_serializing_if = "is_default_mass_library_shuffle_mode")]
+        library_shuffle: MassLibraryShuffleMode,
         /// CR 401.4: When `true`, the objects are placed in a random order
         /// (e.g. Endurance). When `false`, the owner chooses the order per
         /// CR 401.4's default rule. Independent of `library_position`.
@@ -14947,8 +15710,8 @@ pub enum Effect {
     /// of a creature card chosen from a format-defined pool whose mana value
     /// satisfies `mv <comparator> mv_bound`. The canonical card is the Momir
     /// Basic emblem ("Create a token that's a copy of a creature card with mana
-    /// value X chosen at random"). The pool is the engine's creature corpus
-    /// (`GameState::momir_pool` / `momir_pool_faces`). `selection` chooses how a
+    /// value X chosen at random"). The pool is the engine's creature corpus,
+    /// drawn from `GameState::card_db` at resolution time. `selection` chooses how a
     /// candidate is picked from the matching set: `Random` (CR 701.9a is the
     /// discard keyword action; the random *selection* here is analogous to the
     /// random-choice idiom) or `Chosen`. Built as a reusable primitive so the
@@ -15070,17 +15833,19 @@ pub enum Effect {
     BecomeCopy {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
-        /// CR 707.2 + CR 611.2c: the object(s) that BECOME the copy. `SelfRef`
-        /// (default) = the source `~` (all existing single-subject cards,
-        /// byte-identical). A typed group filter ("Shards you control", Niko) or
-        /// `ParentTarget` selects a mass recipient set, snapshotted to concrete
-        /// ids at resolution (locked per 611.2c). Mirrors
-        /// `GainActivatedAbilitiesOfTarget.recipient`.
+        /// CR 707.2 + CR 115.1 + CR 611.2c: the object(s) that BECOME the copy.
+        /// `Source` (default) = the ability's own source `~` — every existing
+        /// single-subject copy card, byte-identical. `Target(..)` is an
+        /// announced recipient declared BEFORE the copy source (Shuri, True
+        /// Polymorph); `Untargeted(..)` is a resolution-time recipient set
+        /// (Mirrorweave, Niko's "Shards you control", Assimilation Aegis'
+        /// attached host). See [`CopyRecipient`].
         #[serde(
-            default = "default_target_filter_self_ref",
-            skip_serializing_if = "target_filter_is_self_ref"
+            default,
+            skip_serializing_if = "CopyRecipient::is_source",
+            deserialize_with = "deserialize_copy_recipient"
         )]
-        recipient: TargetFilter,
+        recipient: CopyRecipient,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration: Option<Duration>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -17141,11 +17906,17 @@ pub enum Effect {
         profile: Option<FaceDownProfile>,
     },
     /// CR 500.7: Take an extra turn after this one. The target determines who
-    /// takes the extra turn (usually Controller for "take an extra turn").
-    /// Extra turns are stored as a LIFO stack — most recently created taken first.
+    /// takes the extra turn (usually Controller for "take an extra turn"). `count`
+    /// defaults to one for legacy serialized effects. Extra turns are stored as a
+    /// LIFO stack — most recently created taken first.
     ExtraTurn {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
+        #[serde(
+            default = "default_quantity_one",
+            skip_serializing_if = "is_default_quantity_one"
+        )]
+        count: QuantityExpr,
     },
     /// CR 606.3: Grant the resolved target player the right to activate each of
     /// their planeswalkers' loyalty abilities `amount` additional times this
@@ -17622,6 +18393,10 @@ fn default_quantity_one() -> QuantityExpr {
     QuantityExpr::Fixed { value: 1 }
 }
 
+fn is_default_quantity_one(quantity: &QuantityExpr) -> bool {
+    matches!(quantity, QuantityExpr::Fixed { value: 1 })
+}
+
 fn default_duration_until_end_of_turn() -> Duration {
     Duration::UntilEndOfTurn
 }
@@ -17707,9 +18482,9 @@ fn default_distinct_names() -> Vec<SharedQuality> {
 /// the current reading first, that collision can only ever mis-read a LEGACY
 /// payload, and no legacy writer emitted either shape here. The two legacy
 /// producers were `parse_number_of_distinct_colors_among_permanents_tail`
-/// (craft materials → `And { [ExiledBySource, Typed] }`, or a `parse_type_phrase`
+/// (craft materials → `And { [ExiledBySource, Typed] }`, or a `parse_type_phrase_folding`
 /// object filter) and `parse_for_each_distinct_colors_among_permanents`
-/// (`parse_type_phrase` only) — neither can yield a BARE `ExiledBySource` /
+/// (`parse_type_phrase_folding` only) — neither can yield a BARE `ExiledBySource` /
 /// `TrackedSet` filter.
 fn deserialize_distinct_colors_population<'de, D>(
     deserializer: D,
@@ -18223,6 +18998,47 @@ pub enum VoteVisibility {
 }
 
 impl TargetFilter {
+    /// CR 608.2c + CR 701.24c: True only for the mixed-zone owner population
+    /// used by compound all-player shuffles. One operand is the iterated
+    /// player's hand; the other is every permanent that player owns. Ordinary
+    /// private-zone wheels retain explicit origins and do not use this shape.
+    pub(crate) fn is_all_player_owner_shuffle_population(&self) -> bool {
+        let TargetFilter::Or { filters } = self else {
+            return false;
+        };
+        if filters.len() != 2 {
+            return false;
+        }
+
+        let is_scoped_hand = |filter: &TargetFilter| {
+            matches!(
+                filter,
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::ScopedPlayer),
+                    properties,
+                }) if type_filters.is_empty()
+                    && properties.as_slice() == [FilterProp::InZone { zone: Zone::Hand }]
+            )
+        };
+        let is_owned_permanent = |filter: &TargetFilter| {
+            matches!(
+                filter,
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: None,
+                    properties,
+                }) if type_filters.as_slice() == [TypeFilter::Permanent]
+                    && properties.as_slice() == [FilterProp::Owned {
+                        controller: ControllerRef::ScopedPlayer,
+                    }]
+            )
+        };
+
+        (is_scoped_hand(&filters[0]) && is_owned_permanent(&filters[1]))
+            || (is_scoped_hand(&filters[1]) && is_owned_permanent(&filters[0]))
+    }
+
     /// CR 508.3d + CR 508.5a: True when this filter denotes a PLAYER population
     /// rather than an object population — the distinction
     /// `trigger_matchers::matching_attack_events` uses to decide whether an
@@ -18661,6 +19477,77 @@ impl TargetFilter {
         )
     }
 
+    /// CR 115.10a + CR 608.2d: True when this filter DESCRIBES a population that
+    /// a resolver may enumerate against the live board — the non-targeted
+    /// counterpart of a chosen target (CR 115.10a: being affected by a spell or
+    /// ability does not make an object a target unless it is identified by the
+    /// word "target"; CR 608.2d: an untargeted choice is made while the effect is
+    /// applied).
+    ///
+    /// POSITIVE and FAIL-CLOSED by design. A mass resolver that keys off "the
+    /// filter is not one of these bad shapes" is one unhandled shape away from a
+    /// battlefield-wide sweep: `TargetFilter::Any` matches every object
+    /// (the `TargetFilter::Any => true` arm of `game::filter::filter_inner_for_
+    /// object`), and so does a CONTENTLESS `Typed` — with empty `type_filters`
+    /// and `properties` and no `controller`, the type loop iterates nothing, the
+    /// controller check is skipped on `None`, and `properties.iter().all(..)` is
+    /// vacuously true. Those two shapes are what the parser emits for a recipient
+    /// phrase it could not classify AT ALL, so both must be refused here, and any
+    /// variant added later must be refused until someone opts it in.
+    ///
+    /// SCOPE — what this does NOT do. It refuses a recipient that parses to a
+    /// CONTENTLESS `Typed` or to `Any`. It does NOT refuse a PARTIALLY classified
+    /// recipient, and it is not a correctness check on the filter's CONTENT.
+    /// Measured examples that answer TRUE here and still resolve against a wrong
+    /// population: "each permanent that isn't a creature you control" parses to
+    /// `Typed{[Permanent], controller: None}` and "each creature and each
+    /// planeswalker you control" to `Typed{[Creature], controller: None}` — both
+    /// enumerate BOTH players' permanents; "each Spider you control and each
+    /// legendary creature you control" parses to `Typed{[Spider], You}`, silently
+    /// dropping its second conjunct. Those are pre-existing recipient misparses
+    /// (see `docs/parser-misparse-backlog.md` root cause 6 and the repeated-`each`
+    /// class), not defects of this predicate. The contract is "this filter names
+    /// SOME population", never "this filter names the RIGHT population".
+    ///
+    /// `Or`/`And` require EVERY leg to qualify — one contentless leg inside an
+    /// `Or` matches everything, so `any` (which the parse-time shape check
+    /// `oracle_target::target_filter_has_meaningful_content` uses for a
+    /// different question) would be unsound for a sweep gate.
+    ///
+    /// `Not` admits a COMPLEMENT population ("every non-creature"). That is the
+    /// one arm where "every leg enumerable" is not the same as "bounded
+    /// description"; it is kept for uniformity with `Or`/`And` rather than
+    /// silently defaulted to `false`. No counter-multiplication parse path
+    /// produces a top-level `Not` (the recipient comes from `parse_target`), so
+    /// a future consumer must re-argue this arm rather than inherit it.
+    ///
+    /// ZONE CAVEAT: this answers "is it a describable population", not "which
+    /// zone". A zone-qualified filter such as "each creature in your graveyard"
+    /// (`Typed{[Creature], You, InZone(Graveyard)}`) answers TRUE here, but a
+    /// caller that enumerates only `battlefield_phased_in_ids()` will resolve it
+    /// to nothing — which is exactly today's `MultiplyCounter` tier behaviour, so
+    /// it is no regression. Callers that must honour the zone should follow
+    /// `game::effects::resolved_battlefield_object_ids`, which reads
+    /// [`TargetFilter::extract_in_zone`].
+    ///
+    /// Deterministic anaphors (`SelfRef`, `TriggeringSource`, `ParentTarget`,
+    /// `TrackedSet`, ...) are NOT populations; they answer `false` here and are
+    /// resolved by their own tiers. Callers that accept both ask
+    /// `is_context_ref() || names_enumerable_population()`.
+    pub fn names_enumerable_population(&self) -> bool {
+        match self {
+            TargetFilter::Typed(tf) => !tf.type_filters.is_empty() || !tf.properties.is_empty(),
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                !filters.is_empty()
+                    && filters
+                        .iter()
+                        .all(TargetFilter::names_enumerable_population)
+            }
+            TargetFilter::Not { filter } => filter.names_enumerable_population(),
+            _ => false,
+        }
+    }
+
     /// CR 115.1a + CR 109.5: Returns true when this filter's TARGET SLOT holds a
     /// player rather than an object — "target player", "target opponent", a
     /// snapshotted specific player.
@@ -18928,6 +19815,29 @@ impl Effect {
             }
             _ => {}
         }
+    }
+
+    /// CR 701.10e: true for the two effects that express "double the number of
+    /// counters on ..." — the typed form (`MultiplyCounter`, "+1/+1 counters")
+    /// and the untyped form (`Double { DoubleTarget::Counters }`, "each kind of
+    /// counter"). Both carry the multiplier intrinsically in the resolver
+    /// ("give as many of those counters as already present"), never as a
+    /// `QuantityExpr`, and both share `counters::nontargeted_counter_population_ids`
+    /// for the non-targeted population tier. Their targeted/anaphoric recipients
+    /// are resolved on separate paths: `MultiplyCounter` through
+    /// `counters::resolve_defined_or_targets`, `Double { Counters }` through
+    /// `effects::double::resolve_object_targets` → `targeting::resolved_targets`.
+    /// Single authority for that pair so the swallow detector and the
+    /// multi-target fixup cannot drift apart.
+    pub(crate) fn is_counter_multiplication(&self) -> bool {
+        matches!(
+            self,
+            Effect::MultiplyCounter { .. }
+                | Effect::Double {
+                    target_kind: DoubleTarget::Counters { .. },
+                    ..
+                }
+        )
     }
 
     pub fn target_filter(&self) -> Option<&TargetFilter> {
@@ -20603,6 +21513,9 @@ impl Effect {
             Effect::GrantExtraLoyaltyActivations { amount, .. } => {
                 f(amount);
             }
+            Effect::ExtraTurn { count, .. } => {
+                f(count);
+            }
             Effect::SkipNextTurn { count, .. } => {
                 f(count);
             }
@@ -20785,7 +21698,6 @@ impl Effect {
             | Effect::ManifestDread
             | Effect::TurnFaceUp { .. }
             | Effect::TurnFaceDown { .. }
-            | Effect::ExtraTurn { .. }
             | Effect::Double { .. }
             | Effect::RuntimeHandled { .. }
             | Effect::Specialize
@@ -20855,6 +21767,7 @@ impl Effect {
             | Effect::ChooseDrawnThisTurnPayOrTopdeck { count, .. }
             | Effect::Manifest { count, .. }
             | Effect::Cloak { count, .. }
+            | Effect::ExtraTurn { count, .. }
             | Effect::SkipNextTurn { count, .. }
             | Effect::SkipNextStep { count, .. }
             | Effect::AdditionalPhase { count, .. }
@@ -20964,7 +21877,6 @@ impl Effect {
             | Effect::Goad { .. }
             | Effect::Detain { .. }
             | Effect::SetRoomDoorLock { .. }
-            | Effect::ExtraTurn { .. }
             | Effect::Transform { .. }
             | Effect::FlipPermanent { .. }
             | Effect::RevealTop { .. }
@@ -21119,6 +22031,7 @@ impl Effect {
             | Effect::ChooseDrawnThisTurnPayOrTopdeck { count, .. }
             | Effect::Manifest { count, .. }
             | Effect::Cloak { count, .. }
+            | Effect::ExtraTurn { count, .. }
             | Effect::SkipNextTurn { count, .. }
             | Effect::SkipNextStep { count, .. }
             | Effect::AdditionalPhase { count, .. }
@@ -21228,7 +22141,6 @@ impl Effect {
             | Effect::Goad { .. }
             | Effect::Detain { .. }
             | Effect::SetRoomDoorLock { .. }
-            | Effect::ExtraTurn { .. }
             | Effect::Transform { .. }
             | Effect::FlipPermanent { .. }
             | Effect::RevealTop { .. }
@@ -25524,13 +26436,18 @@ pub enum ReplacementCondition {
     /// shared `GameState::players_who_created_token_this_turn` primitive: it is
     /// consumed by the first token the controller creates this turn, so a source
     /// that enters mid-turn AFTER an earlier creation does NOT fire (official
-    /// ruling). `player` carries the reusable you/opponent axis (`ControllerRef`),
-    /// mirroring the other controller-relative conditions; the eval arm ignores it
-    /// because ownership is enforced by the replacement's `token_owner_scope`, but
-    /// keeping the field preserves the you/opponent axis for a future
-    /// opponent-scoped "first time an opponent would create…" variant (which would
-    /// also parameterize the eval's player resolution) rather than adding a sibling.
-    FirstTokenCreationEachTurn { player: ControllerRef },
+    /// ruling). `active_player_req` optionally scopes the window to whose turn it is
+    /// (CR 102.1: the active player is the player whose turn it is): `None` = any
+    /// turn (Moonlit Meditation's bare "each turn"); `Some(You)` = the controller's
+    /// own turns only ("during each of your turns"). The orthogonal WHOSE-TOKENS
+    /// axis is owned by the replacement's `token_owner_scope`, which is why there is
+    /// no second `ControllerRef` here: the window key is the event's creating player
+    /// (`players_who_created_token_this_turn`), which is a `PlayerId`, not a
+    /// `ControllerRef`.
+    FirstTokenCreationEachTurn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_player_req: Option<ControllerRef>,
+    },
     /// CR 121.1 + CR 504.1 + CR 614.6: "except the first one you draw in each
     /// of your draw steps" — the replacement applies to every card-draw EXCEPT
     /// the draw step's mandatory first draw (the active player's CR 504.1
@@ -27403,6 +28320,39 @@ pub enum PostReplacementContinuation {
     Resolved(Box<ResolvedAbility>),
 }
 
+/// CR 611.2c vs CR 613.1: where a `ReplacementDefinition` on an object came from.
+///
+/// CR 613.1 determines the values of an object's CHARACTERISTICS, starting from
+/// the printed card — so the layer engine reseeds `replacement_definitions` from
+/// `base_replacement_definitions` every pass. CR 611.2c settles that a prevention
+/// shield is not one of those characteristics; its example says so outright:
+/// "An effect that reads 'Prevent all damage creatures would deal this turn'
+/// doesn't modify any object's characteristics, so it's modifying the rules of
+/// the game."
+///
+/// A continuous effect created by the RESOLUTION of a spell or ability (CR 611.2a)
+/// is merely STORED on a host object so the replacement pipeline can find it. It
+/// lasts as long as the ability stated (CR 611.2a) and ends when it is used up or
+/// its duration expires (CR 615.3) — not at the next layer pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ReplacementOrigin {
+    /// A printed/copiable characteristic (CR 613.1), or a per-pass static
+    /// derivation. Reset away and re-derived by every layer pass.
+    #[default]
+    Characteristic,
+    /// A continuous effect created by resolution (CR 611.2a). Survives the
+    /// CR 613.1 reset; removed only by an expiry prune or a zone change.
+    Resolution,
+}
+
+impl ReplacementOrigin {
+    /// `skip_serializing_if` predicate: the default origin emits no key, so every
+    /// pre-existing serialized `ReplacementDefinition` is byte-identical.
+    pub fn is_characteristic(&self) -> bool {
+        matches!(self, ReplacementOrigin::Characteristic)
+    }
+}
+
 /// Replacement effect definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplacementDefinition {
@@ -27454,6 +28404,17 @@ pub struct ReplacementDefinition {
     /// every declared scope against an independently derived one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw_scope: Option<DrawReplacementScope>,
+    /// CR 706.6: What to do with the extra dice a count-raising die-roll
+    /// replacement caused to be rolled ("instead roll that many dice plus one
+    /// and ignore the lowest roll"). `Some` only when `event` is
+    /// [`ReplacementEvent::RollDice`]; `None` otherwise.
+    ///
+    /// Read by exactly one consumer, `roll_dice_applier`
+    /// (`game/replacement.rs`), which snapshots it onto
+    /// `ProposedEvent::RollDice.ignore_rule` — `ApplyResult` carries nothing but
+    /// the modified event, so that field is the only channel to `roll_die.rs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub die_ignore_rule: Option<DieRollIgnoreRule>,
     /// CR 701.31 + CR 901.9c: which planeswalk cause this definition watches.
     /// `None` means [`PlaneswalkReplacementScope::Any`]. Set to
     /// [`PlaneswalkReplacementScope::PlanarDieOnly`] for Fixed Point in Time.
@@ -27587,6 +28548,83 @@ pub struct ReplacementDefinition {
     /// as before (every object-attached replacement; unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_controller: Option<crate::types::player::PlayerId>,
+    /// CR 113.7a + CR 109.1: Installing SOURCE anchor for global pending damage
+    /// replacements whose filters, conditions, or exclusions are HOST-RELATIVE.
+    ///
+    /// The object half of `source_controller` (directly above), added for the same
+    /// reason and by the same mechanism. Global replacements live in
+    /// `pending_damage_replacements` under the sentinel `ObjectId(0)`, which has no
+    /// entry in `state.objects`, so every host-relative reference silently
+    /// mis-resolves there: `TargetFilter::SelfRef` in `damage_source_filter`
+    /// (Mercenaries, "the next time THIS CREATURE would deal damage to you"),
+    /// `SourceExclusion::Exclude` in `DamageTargetFilter::PlayerOrPermanentsControlledBy`
+    /// ("you and OTHER permanents you control"), `DamageTargetPlayerScope::SourceChosenPlayer`,
+    /// and every `ReplacementCondition` that reads its source object.
+    ///
+    /// CR 113.7a: "Once activated or triggered, an ability exists on the stack
+    /// independently of its source. Destruction or removal of the source after that
+    /// time won't affect the ability. ... if the source is no longer in the zone
+    /// it's expected to be in at that time, its last known information is used."
+    /// The effect is independent of its source but still REFERS to it, so the
+    /// reference must be carried rather than dropped.
+    ///
+    /// NOT last-known information, despite the clause the quote above ends on.
+    /// This field carries an ID, not a snapshot of the object's characteristics:
+    /// once the anchored object is gone, `state.objects.get(anchor)` is `None`, so
+    /// IDENTITY comparisons keep working on the id alone (`TargetFilter::SelfRef`
+    /// -> `object_matches_trigger_source`; `SourceExclusion::Exclude`'s
+    /// `*oid != repl_source`) while PROPERTY-READING filters and conditions fail
+    /// CLOSED. The CR 113.7a quote is cited here for its source-independence half;
+    /// implementing LKI itself is out of scope and is not claimed.
+    ///
+    /// Set at install time by `effects::install_floating_damage_replacement`, and
+    /// ONLY when the source is an object in the zone set that caller passed as
+    /// `anchor_zones` -- which is exactly the zone set THAT CALLER used to decide
+    /// object-hosting before the authority existed: `Zone::Battlefield` for
+    /// `prevent_damage::resolve`'s untargeted branch, `Zone::Battlefield |
+    /// Zone::Command` for `push_player_scoped_shield`, and EMPTY for
+    /// `create_damage_replacement`'s already-registry arm. A shield created by a
+    /// resolving instant never had a host, so it has no host identity to anchor and
+    /// keeps `None`; so does an untargeted shield from a Command-zone emblem, which
+    /// that branch already routed to the registry before this field existed.
+    /// `None` therefore reproduces the pre-anchor sentinel behavior exactly, for
+    /// every replacement that existed before this field.
+    ///
+    /// Consumed by the pending scan in `game::replacement::find_applicable_replacements`,
+    /// which fills with `source_object.unwrap_or(ObjectId(0))` every argument
+    /// position that `object_replacement_candidate_applies` fills with `obj.id`.
+    /// `ReplacementId::source` is NOT this field: it stays `ObjectId(0)`, because it
+    /// is the STORAGE discriminator that routes ~14 downstream consumers to the
+    /// registry rather than to `state.objects`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_object: Option<ObjectId>,
+    /// CR 611.2a + CR 611.2c + CR 613.1: provenance of this definition — a printed
+    /// characteristic (or per-pass derived grant) versus a continuous effect
+    /// created by the resolution of a spell or ability. See [`ReplacementOrigin`].
+    ///
+    /// Stamped ONLY by `GameObject::install_resolution_replacement`, which is the
+    /// single authority for resolution-time object installs; every parser/printed
+    /// construction leaves the `Characteristic` default. Read by
+    /// `game_object::reseed_replacements_carrying_resolution_effects` (the CR 613.1
+    /// carry-over) and `layers::settle_resolution_replacements_to_tail`.
+    ///
+    /// `origin` participates in the derived `PartialEq`, and that is LOAD-BEARING.
+    /// `layers.rs` dedups both per-pass derivation sites by whole-definition
+    /// structural equality over the LIVE set (the Riot as-enters derivation and the
+    /// `ContinuousModification::GrantReplacement` arm, both
+    /// `replacement_definitions.iter_all().any(|r| r == &replacement)`). Without
+    /// `origin` in that comparison, a CARRIED resolution shield could compare equal
+    /// to a per-pass derived grant and SUPPRESS it — the grant would silently stop
+    /// being installed while its static was still active. The dual consequence is
+    /// accepted deliberately: in the structurally-identical-but-for-`origin` case
+    /// the dedup necessarily leaves TWO entries. In practice `expiry` already
+    /// discriminates (a resolution shield carries `Some(..)`, a derived grant
+    /// `None`), so that case is synthetic; the hostile fixture
+    /// `carried_resolution_def_does_not_suppress_an_identical_derived_grant`
+    /// (`layers.rs`) pins it anyway. `source_object` (directly above) joins
+    /// `PartialEq` on exactly the same terms.
+    #[serde(default, skip_serializing_if = "ReplacementOrigin::is_characteristic")]
+    pub origin: ReplacementOrigin,
     /// CR 614.1a: For `AddCounter` replacements, whether `valid_player` scopes by
     /// the counter *recipient* (default — prevention/affected-controller doublers)
     /// or by the *actor* putting the counters (Vorinclex/Halving Season, per the
@@ -27665,6 +28703,7 @@ impl ReplacementDefinition {
             event,
             draw_scope: None,
             planeswalk_scope: None,
+            die_ignore_rule: None,
             execute: None,
             runtime_execute: None,
             mode: ReplacementMode::Mandatory,
@@ -27692,6 +28731,8 @@ impl ReplacementDefinition {
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            source_object: None,
+            origin: ReplacementOrigin::Characteristic,
             counter_replacement_subject: CounterReplacementSubject::Recipient,
         }
     }
@@ -27794,6 +28835,14 @@ impl ReplacementDefinition {
             self.stamp_default_turn_expiry();
         }
         self
+    }
+
+    /// CR 611.2a + CR 611.2c: was this definition created by the RESOLUTION of a
+    /// spell or ability (rather than being a printed characteristic or a per-pass
+    /// derived grant)? Such a definition is carried across the CR 613.1 layer
+    /// reset by `game_object::reseed_replacements_carrying_resolution_effects`.
+    pub fn is_resolution_installed(&self) -> bool {
+        self.origin == ReplacementOrigin::Resolution
     }
 
     pub fn combat_scope(mut self, scope: CombatDamageScope) -> Self {
@@ -28056,7 +29105,9 @@ pub struct LatchedCopiableSnapshot {
 /// enter-as-a-copy waits) resolves the entering object into a copy of the
 /// chosen permanent. `PersistChosenAttribute` (Metamorphic Alteration) latches
 /// the chosen permanent's copiable values onto the source Aura and installs a
-/// copy effect on the Aura's enchanted host instead.
+/// copy effect on the Aura's enchanted host instead. `CopyTokenSource` (Esix,
+/// Fractal Bloom) uses the chosen permanent as the copy SOURCE for a token-creation
+/// substitution, transforming nothing and latching nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "type")]
 pub enum CopyTargetPurpose {
@@ -28069,6 +29120,11 @@ pub enum CopyTargetPurpose {
     /// latched and applied to a *separate* recipient (the source Aura's host)
     /// rather than to the entering object. Metamorphic Alteration.
     PersistChosenAttribute,
+    /// CR 707.1 + CR 614.1a: the chosen permanent is the **copy source** for a
+    /// token-creation substitution — the replacement creates that many tokens
+    /// that are copies of it (Esix, Fractal Bloom). Unlike `BecomeCopy`, nothing
+    /// is transformed; unlike `PersistChosenAttribute`, nothing is latched.
+    CopyTokenSource,
 }
 
 /// CR 702.143d + CR 702 (alternative-cost cast-from-off-zone family): how a
@@ -30008,6 +31064,27 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 400.7 + CR 608.2k: Re-pin this ability's (and every sub/else branch's)
+    /// cost-paid referent to its current incarnation, once the cost's own object
+    /// moves are complete. Mirrors `set_cost_paid_object_recursive`'s traversal.
+    ///
+    /// See `CostPaidObjectSnapshot::repin_to_current_incarnation`: the cost's own
+    /// move must not make the reference stale, only a later one.
+    pub fn repin_cost_paid_object_recursive(
+        &mut self,
+        state: &crate::types::game_state::GameState,
+    ) {
+        if let Some(snapshot) = self.cost_paid_object.as_mut() {
+            snapshot.repin_to_current_incarnation(state);
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.repin_cost_paid_object_recursive(state);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.repin_cost_paid_object_recursive(state);
+        }
+    }
+
     /// CR 106.1b + CR 400.7 + CR 602.2b (issue #6504): Stamp this activation's
     /// noted-mana-payment snapshot across this ability and every sub/else
     /// branch — mirrors `set_cost_paid_object_recursive`. Necessary because
@@ -30434,6 +31511,43 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    /// Issue #8485: `origin` and `source_object` are additive and wire-compatible.
+    ///
+    /// Both carry `#[serde(default, skip_serializing_if = ..)]`, so a plain printed
+    /// definition emits NEITHER key (every existing serialized state, including
+    /// `card-data.json`, stays byte-identical) and an old payload carrying neither
+    /// loads as `Characteristic` / `None`.
+    #[test]
+    fn replacement_origin_and_source_object_are_wire_compatible() {
+        let plain =
+            ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone);
+        let json = serde_json::to_string(&plain).expect("serializes");
+        assert!(
+            !json.contains("origin"),
+            "a Characteristic def must emit no `origin` key: {json}"
+        );
+        assert!(
+            !json.contains("source_object"),
+            "an unanchored def must emit no `source_object` key: {json}"
+        );
+
+        // An old payload with neither key loads as Characteristic / None.
+        let loaded: ReplacementDefinition = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(loaded.origin, ReplacementOrigin::Characteristic);
+        assert_eq!(loaded.source_object, None);
+        assert!(!loaded.is_resolution_installed());
+
+        // A Resolution def with an anchor round-trips faithfully.
+        let mut stamped = plain.clone();
+        stamped.origin = ReplacementOrigin::Resolution;
+        stamped.source_object = Some(ObjectId(42));
+        let round_tripped: ReplacementDefinition =
+            serde_json::from_str(&serde_json::to_string(&stamped).expect("serializes"))
+                .expect("deserializes");
+        assert_eq!(round_tripped, stamped);
+        assert!(round_tripped.is_resolution_installed());
+    }
 
     #[test]
     fn when_you_do_marker_with_guard_is_a_flat_root_and() {
@@ -32269,6 +33383,90 @@ mod tests {
     }
 
     #[test]
+    fn card_type_choice_serde_preserves_legacy_and_explicit_domains() {
+        let generic: ChoiceType = serde_json::from_str(r#""CardType""#).unwrap();
+        assert_eq!(generic, ChoiceType::card_type());
+        assert_eq!(serde_json::to_string(&generic).unwrap(), r#""CardType""#);
+
+        let old_restricted = r#"{"CardType":{"excluded":["Creature","Land"]}}"#;
+        let decoded: ChoiceType = serde_json::from_str(old_restricted).unwrap();
+        assert_eq!(
+            decoded,
+            ChoiceType::CardType {
+                options: vec![
+                    CoreType::Artifact,
+                    CoreType::Enchantment,
+                    CoreType::Instant,
+                    CoreType::Planeswalker,
+                    CoreType::Sorcery,
+                ],
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&decoded).unwrap(),
+            r#"{"CardType":{"options":["Artifact","Enchantment","Instant","Planeswalker","Sorcery"]}}"#
+        );
+
+        let explicit = r#"{"CardType":{"options":["Sorcery","Artifact"]}}"#;
+        let decoded: ChoiceType = serde_json::from_str(explicit).unwrap();
+        assert_eq!(
+            decoded,
+            ChoiceType::CardType {
+                options: vec![CoreType::Sorcery, CoreType::Artifact],
+            }
+        );
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), explicit);
+
+        assert!(serde_json::from_str::<ChoiceType>(
+            r#"{"CardType":{"options":["Artifact"],"excluded":["Land"]}}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<ChoiceType>(
+            r#"{"CardType":{"excluded":["Artifact","Creature","Enchantment","Instant","Land","Planeswalker","Sorcery"]}}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn card_type_choice_value_uses_the_authoritative_legal_domain() {
+        let generic = ChoiceType::card_type();
+        let ChoiceType::CardType { options } = &generic else {
+            panic!("card_type() must construct CardType");
+        };
+        assert_eq!(
+            ChoiceType::legal_card_type_options(options),
+            CoreType::CHOOSABLE_TYPES.to_vec()
+        );
+        assert_eq!(
+            ChoiceValue::from_choice(&generic, "Battle"),
+            None,
+            "generic engine policy must reject Battle"
+        );
+        assert_eq!(
+            ChoiceValue::from_choice(&generic, "Kindred"),
+            None,
+            "generic engine policy must reject Kindred"
+        );
+
+        let explicit = ChoiceType::CardType {
+            options: vec![CoreType::Sorcery, CoreType::Artifact],
+        };
+        assert_eq!(
+            ChoiceType::legal_card_type_options(&[CoreType::Sorcery, CoreType::Artifact]),
+            vec![CoreType::Sorcery, CoreType::Artifact]
+        );
+        assert_eq!(
+            ChoiceValue::from_choice(&explicit, "Sorcery"),
+            Some(ChoiceValue::CardType(CoreType::Sorcery))
+        );
+        assert_eq!(
+            ChoiceValue::from_choice(&explicit, "Artifact"),
+            Some(ChoiceValue::CardType(CoreType::Artifact))
+        );
+        assert_eq!(ChoiceValue::from_choice(&explicit, "Land"), None);
+    }
+
+    #[test]
     fn target_ref_object_variant() {
         let t = TargetRef::Object(ObjectId(5));
         assert_eq!(t, TargetRef::Object(ObjectId(5)));
@@ -32943,6 +34141,40 @@ mod tests {
         let json = serde_json::to_string(&mods).unwrap();
         let deserialized: Vec<ContinuousModification> = serde_json::from_str(&json).unwrap();
         assert_eq!(mods, deserialized);
+    }
+
+    /// Non-blocking item 3 (review round on PR #8494, matthewevans): the
+    /// `AbilityCost::Unimplemented` half of `PerpetualGrantModification::
+    /// try_from`'s `ContinuousModification::GrantAbility` fail-closed gate
+    /// (see its doc comment) had no dedicated test -- only the
+    /// `Effect::Unimplemented` half was exercised end-to-end via the Agent of
+    /// Raffine runtime test in `effects/perpetual.rs`. A granted ability whose
+    /// COST half never parsed (an unrecognized leading cost verb, CR 113.3b)
+    /// must fail the whole grant closed exactly like an unparsed EFFECT would
+    /// -- checking only `d.effect` would leave this shape green.
+    #[test]
+    fn perpetual_grant_modification_try_from_rejects_unimplemented_cost() {
+        let granted = AbilityDefinition {
+            cost: Some(AbilityCost::Unimplemented {
+                description: "some unrecognized cost verb".to_string(),
+            }),
+            ..AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: default_quantity_one(),
+                    target: default_target_filter_controller(),
+                },
+            )
+        };
+        let modification = ContinuousModification::GrantAbility {
+            definition: Box::new(granted),
+        };
+        let result = PerpetualGrantModification::try_from(modification.clone());
+        assert_eq!(
+            result,
+            Err(modification),
+            "a granted ability with an unparsed COST must fail the whole perpetual grant closed, not install an ability that silently ignores its own printed cost"
+        );
     }
 
     #[test]
@@ -33846,6 +35078,61 @@ mod tests {
                 scope: ObjectScope::Target,
             }
         );
+    }
+
+    #[test]
+    fn extra_turn_quantity_serde_is_backward_compatible() {
+        let legacy: Effect = serde_json::from_str(r#"{"type":"ExtraTurn"}"#).unwrap();
+        assert!(matches!(
+            &legacy,
+            Effect::ExtraTurn {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+            }
+        ));
+        let legacy_json = serde_json::to_value(&legacy).unwrap();
+        assert!(legacy_json.get("count").is_none());
+
+        let two = Effect::ExtraTurn {
+            target: TargetFilter::Player,
+            count: QuantityExpr::Fixed { value: 2 },
+        };
+        let json = serde_json::to_value(&two).unwrap();
+        assert_eq!(json["count"]["value"], serde_json::json!(2));
+        assert_eq!(serde_json::from_value::<Effect>(json).unwrap(), two);
+
+        let dynamic = Effect::ExtraTurn {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            },
+        };
+        let dynamic_json = serde_json::to_value(&dynamic).unwrap();
+        assert!(dynamic_json.get("count").is_some());
+        assert_eq!(
+            serde_json::from_value::<Effect>(dynamic_json).unwrap(),
+            dynamic
+        );
+    }
+
+    #[test]
+    fn extra_turn_quantity_is_reached_by_all_generic_authorities() {
+        let mut effect = Effect::ExtraTurn {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            },
+        };
+        let dynamic = effect.count_expr().cloned().unwrap();
+        let mut visited = Vec::new();
+        effect.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
+        assert_eq!(visited, vec![dynamic]);
+
+        *effect.count_expr_mut().unwrap() = QuantityExpr::Fixed { value: 2 };
+        assert_eq!(effect.count_expr(), Some(&QuantityExpr::Fixed { value: 2 }));
+        visited.clear();
+        effect.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
+        assert_eq!(visited, vec![QuantityExpr::Fixed { value: 2 }]);
     }
 
     #[test]
@@ -35639,5 +36926,63 @@ mod static_condition_traversal_tests {
             assert!(!nested_at_depth(leaf.clone())
                 .requires_unavailable_continuation(&StaticMode::CantUntap));
         }
+    }
+
+    /// Existing card-data rows omit the parser-provenance field. They must keep
+    /// their historical per-object library behavior, while a parser-produced
+    /// terminal-shuffle operation preserves its explicit marker on the wire.
+    #[test]
+    fn change_zone_all_terminal_shuffle_mode_serde_is_backward_compatible() {
+        let legacy: Effect =
+            serde_json::from_str(r#"{"type":"ChangeZoneAll","destination":"Library"}"#)
+                .expect("pre-marker ChangeZoneAll payload deserializes");
+        let Effect::ChangeZoneAll {
+            library_shuffle, ..
+        } = legacy
+        else {
+            panic!("expected ChangeZoneAll");
+        };
+        assert_eq!(library_shuffle, MassLibraryShuffleMode::PerObject);
+        let legacy_json = serde_json::to_value(Effect::ChangeZoneAll {
+            origin: None,
+            destination: Zone::Library,
+            target: TargetFilter::None,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: MassLibraryShuffleMode::PerObject,
+            random_order: false,
+        })
+        .expect("default mode serializes");
+        assert!(
+            legacy_json.get("library_shuffle").is_none(),
+            "the default provenance must not churn existing serialized card data"
+        );
+
+        let terminal = Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::Controller,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            random_order: false,
+        };
+        let terminal_json = serde_json::to_value(&terminal).expect("terminal mode serializes");
+        assert_eq!(
+            terminal_json["library_shuffle"]["type"], "TerminalShuffle",
+            "the parser-produced provenance must survive the serialization boundary"
+        );
+        assert_eq!(
+            serde_json::from_value::<Effect>(terminal_json).expect("terminal mode deserializes"),
+            terminal
+        );
     }
 }

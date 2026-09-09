@@ -12,6 +12,7 @@ import { DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../constants/storage";
 import type { LocalDeckBuilderController } from "../../components/draft/LimitedDeckBuilder";
 import type { PackDisplayController, PackDisplayPresentation } from "../../components/draft/PackDisplay";
 import { projectWorkspaceLandCounts } from "../../components/draft/workspace/workspaceProjection";
+import { ShellProvider } from "../../components/chrome/ShellContext";
 
 interface DraftIntroCapture {
   mode: string;
@@ -63,11 +64,12 @@ const persistence = vi.hoisted(() => ({
 const captured = vi.hoisted(() => ({
   local: null as LocalDeckBuilderController | null,
   preview: null as { mode?: string; hoverDelayMs?: number } | null,
-  menuShell: null as { layout?: string; contentWidthClass?: string; compactTopPadding?: boolean } | null,
+  menuShell: null as { layout?: string; contentWidthClass?: string; compactTopPadding?: boolean; fillEmbeddedHeight?: boolean } | null,
   pack: null as PackDisplayController | null,
   presentation: null as PackDisplayPresentation | null,
   phoneToolbarPinned: null as boolean | null,
   shellMode: null as string | null,
+  showProgress: null as boolean | null,
   steps: null as { phase?: string; compact?: boolean; arrowSeparators?: boolean } | null,
   intro: null as DraftIntroCapture | null,
 }));
@@ -85,9 +87,12 @@ vi.mock("../../hooks/useCardImage", () => ({ useCardImage: () => ({ src: null, i
 vi.mock("../../components/chrome/ScreenChrome", () => ({ ScreenChrome: () => null }));
 vi.mock("../../components/chrome/ShellContext", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../components/chrome/ShellContext")>(),
-  useDraftShellChrome: (mode: string) => { captured.shellMode = mode; },
+  useDraftShellChrome: (mode: string, _phoneAction?: unknown, _progressVariant?: string, showProgress?: boolean) => {
+    captured.shellMode = mode;
+    captured.showProgress = showProgress ?? true;
+  },
 }));
-vi.mock("../../components/menu/MenuShell", () => ({ MenuShell: (props: { children: ReactNode; layout?: string; contentWidthClass?: string; compactTopPadding?: boolean }) => {
+vi.mock("../../components/menu/MenuShell", () => ({ MenuShell: (props: { children: ReactNode; layout?: string; contentWidthClass?: string; compactTopPadding?: boolean; fillEmbeddedHeight?: boolean }) => {
   captured.menuShell = props;
   return <>{props.children}</>;
 } }));
@@ -168,6 +173,7 @@ describe("DraftPage local deckbuilding wiring", () => {
     captured.presentation = null;
     captured.phoneToolbarPinned = null;
     captured.shellMode = null;
+    captured.showProgress = null;
     captured.steps = null;
     captured.intro = null;
     usePreferencesStore.setState({ draftCardPreviewMode: "none", draftDoubleClickConfirmPick: true });
@@ -272,6 +278,7 @@ describe("DraftPage local deckbuilding wiring", () => {
     expect(captured.menuShell).toMatchObject({ compactTopPadding: true });
     expect(captured.phoneToolbarPinned).toBe(true);
     expect(captured.shellMode).toBe("phone-drafting");
+    expect(captured.showProgress).toBe(false);
     expect(captured.steps).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Show Deck workspace" }));
     expect(captured.phoneToolbarPinned).toBe(false);
@@ -304,10 +311,34 @@ describe("DraftPage local deckbuilding wiring", () => {
     const { container } = render(<MemoryRouter><DraftPage /></MemoryRouter>);
 
     expect(captured.shellMode).toBe("phone-deckbuilding");
+    expect(captured.showProgress).toBe(false);
     expect(captured.steps).toBeNull();
     expect(container.querySelector("[data-draft-steps-spacing]")).not.toBeInTheDocument();
     expect(captured.menuShell).toMatchObject({ compactTopPadding: true });
     expect(screen.getByTestId("limited-deck-builder")).toBeInTheDocument();
+  });
+
+  it("forwards embedded fill only for responsive workspace phases", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 768 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 1024 });
+    wasm.start_quick_draft.mockReturnValue(view({ current_pack: [card("c1")] }));
+    await act(async () => useDraftStore.getState().startDraft("pool", "TST", "Test", 2));
+
+    const { rerender } = render(
+      <ShellProvider value>
+        <MemoryRouter><DraftPage /></MemoryRouter>
+      </ShellProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(captured.menuShell).toMatchObject({ fillEmbeddedHeight: true });
+
+    act(() => { useDraftStore.setState({ phase: "deckbuilding" }); });
+    rerender(
+      <ShellProvider value>
+        <MemoryRouter><DraftPage /></MemoryRouter>
+      </ShellProvider>,
+    );
+    expect(captured.menuShell).toMatchObject({ fillEmbeddedHeight: true });
   });
 
   it.each([
@@ -360,6 +391,7 @@ describe("DraftPage local deckbuilding wiring", () => {
             (phoneLayout && (phase === "drafting" || phase === "deckbuilding"))
             || tabletDeckbuilding
           }
+          fillEmbeddedHeight={fillEmbeddedHeight}
         >`);
   });
 

@@ -1,6 +1,12 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { applyBackup, buildBackup, mergeDeckCollections, type PhaseBackup } from "../services/backup";
+import {
+  applyBackup,
+  buildCloudBackup,
+  mergeDeckCollections,
+  projectCloudBackup,
+  type PhaseBackup,
+} from "../services/backup";
 import {
   getCloudSyncProvider,
   isCloudSyncConfigured,
@@ -31,6 +37,7 @@ interface CloudSyncState {
   error: string | null;
   dirty: boolean;
   lastSyncedRevision: number | null;
+  lastSyncedDigest: string | null;
   lastSyncedAt: string | null;
   conflict: RemoteSnapshot | null;
   conflictDiff: ConflictDiffSummary | null;
@@ -241,11 +248,22 @@ function publishConflict(generation: Generation, auth: number, write: number, lo
   return true;
 }
 
-function applyRemote(generation: Generation, auth: number, write: number, remote: RemoteSnapshot): boolean {
+async function pullCloudSnapshot(provider: CloudSyncProvider): Promise<RemoteSnapshot | null> {
+  const remote = await provider.pull();
+  return remote === null ? null : { ...remote, backup: projectCloudBackup(remote.backup) };
+}
+
+function applyRemote(
+  generation: Generation,
+  auth: number,
+  write: number,
+  remote: RemoteSnapshot,
+  digest: string,
+): boolean {
   if (!current(generation, auth) || localWriteVersion !== write) return false;
   withStorageWatchSuppressed(() => applyBackup(remote.backup, "overwrite"));
   conflictWriteVersion = null;
-  useCloudSyncStore.setState({ status: "synced", error: null, dirty: false, conflict: null, conflictDiff: null, lastSyncedRevision: remote.meta.revision, lastSyncedAt: new Date().toISOString() });
+  useCloudSyncStore.setState({ status: "synced", error: null, dirty: false, conflict: null, conflictDiff: null, lastSyncedRevision: remote.meta.revision, lastSyncedDigest: digest, lastSyncedAt: new Date().toISOString() });
   void usePreferencesStore.persist.rehydrate();
   window.dispatchEvent(new CustomEvent(PROFILE_REPLACED_EVENT));
   return true;
@@ -257,11 +275,18 @@ function applyMerged(backup: PhaseBackup): void {
   window.dispatchEvent(new CustomEvent(PROFILE_REPLACED_EVENT));
 }
 
-function acknowledgePush(generation: Generation, auth: number, write: number, meta: RemoteMeta, mergeSnapshot: RemoteSnapshot | null = null): void {
+function acknowledgePush(
+  generation: Generation,
+  auth: number,
+  write: number,
+  meta: RemoteMeta,
+  digest: string,
+  mergeSnapshot: RemoteSnapshot | null = null,
+): void {
   if (!current(generation, auth)) return;
-  const state: Partial<CloudSyncState> = { lastSyncedRevision: meta.revision, lastSyncedAt: new Date().toISOString() };
+  const state: Partial<CloudSyncState> = { lastSyncedRevision: meta.revision, lastSyncedDigest: digest, lastSyncedAt: new Date().toISOString() };
   if (mergeSnapshot) {
-    const local = buildBackup();
+    const local = buildCloudBackup();
     conflictWriteVersion = localWriteVersion;
     Object.assign(state, { status: "conflict", dirty: true, conflict: mergeSnapshot, conflictDiff: summarizeBackupDiff(local, mergeSnapshot.backup) });
   } else if (localWriteVersion !== write) {
@@ -281,16 +306,36 @@ function restorePreservedAuthError(generation: Generation, auth: number, write: 
   }
 }
 
-type PullConflictResult = "published" | "vanished" | "stale";
+type PullConflictResult = "equivalent" | "published" | "vanished" | "stale";
 
 async function pullConflict(generation: Generation, auth: number): Promise<PullConflictResult> {
-  const remote = await generation.provider.pull();
+  const remote = await pullCloudSnapshot(generation.provider);
   if (!current(generation, auth)) return "stale";
   if (!remote) return "vanished";
   // Re-capture after the await. A newer local write requires a new truthful
   // conflict/diff, not the pre-CAS snapshot and never a false reseed.
   const currentWrite = localWriteVersion;
-  return publishConflict(generation, auth, currentWrite, buildBackup(), remote) ? "published" : "stale";
+  const local = buildCloudBackup();
+  const [localDigest, remoteDigest] = await Promise.all([
+    computeBackupDigest(local),
+    computeBackupDigest(remote.backup),
+  ]);
+  if (!current(generation, auth) || localWriteVersion !== currentWrite) return "stale";
+  if (localDigest === remoteDigest) {
+    conflictWriteVersion = null;
+    useCloudSyncStore.setState({
+      status: "synced",
+      error: null,
+      dirty: false,
+      conflict: null,
+      conflictDiff: null,
+      lastSyncedRevision: remote.meta.revision,
+      lastSyncedDigest: remoteDigest,
+      lastSyncedAt: new Date().toISOString(),
+    });
+    return "equivalent";
+  }
+  return publishConflict(generation, auth, currentWrite, local, remote) ? "published" : "stale";
 }
 
 async function reconcile(generation: Generation, preserveError = false): Promise<void> {
@@ -299,7 +344,7 @@ async function reconcile(generation: Generation, preserveError = false): Promise
   const identity = generation.provider.identity();
   if (!identity) return;
   const write = localWriteVersion;
-  const local = buildBackup();
+  const local = buildCloudBackup();
   const oldError = useCloudSyncStore.getState().error;
   useCloudSyncStore.setState({ status: "syncing", identity, ...(preserveError ? {} : { error: null }) });
   try {
@@ -307,19 +352,23 @@ async function reconcile(generation: Generation, preserveError = false): Promise
     if (!current(generation, auth)) return;
     const { lastSyncedRevision, dirty } = useCloudSyncStore.getState();
     if (!meta) {
+      const localDigest = await computeBackupDigest(local);
+      if (!current(generation, auth) || localWriteVersion !== write) return;
       const pushed = await generation.provider.push(local, null);
-      acknowledgePush(generation, auth, write, pushed);
+      acknowledgePush(generation, auth, write, pushed, localDigest);
       restorePreservedAuthError(generation, auth, write, preserveError, oldError);
       return;
     }
     const remoteAhead = meta.revision !== lastSyncedRevision;
     const localChanged = dirty || (lastSyncedRevision === null && hasUserData(local));
-    if (remoteAhead && localChanged) {
-      const remote = await generation.provider.pull();
+    if (remoteAhead) {
+      const remote = await pullCloudSnapshot(generation.provider);
       if (!current(generation, auth)) return;
       if (!remote) {
+        const localDigest = await computeBackupDigest(local);
+        if (!current(generation, auth) || localWriteVersion !== write) return;
         const pushed = await generation.provider.push(local, null);
-        acknowledgePush(generation, auth, write, pushed);
+        acknowledgePush(generation, auth, write, pushed, localDigest);
         restorePreservedAuthError(generation, auth, write, preserveError, oldError);
         return;
       }
@@ -327,44 +376,55 @@ async function reconcile(generation: Generation, preserveError = false): Promise
       if (!current(generation, auth) || localWriteVersion !== write) return;
       if (localDigest === remoteDigest) {
         conflictWriteVersion = null;
-        useCloudSyncStore.setState({ status: preserveError && oldError ? "error" : "synced", error: preserveError ? oldError : null, dirty: false, conflict: null, conflictDiff: null, lastSyncedRevision: remote.meta.revision, lastSyncedAt: new Date().toISOString() });
-      } else {
+        useCloudSyncStore.setState({ status: preserveError && oldError ? "error" : "synced", error: preserveError ? oldError : null, dirty: false, conflict: null, conflictDiff: null, lastSyncedRevision: remote.meta.revision, lastSyncedDigest: remoteDigest, lastSyncedAt: new Date().toISOString() });
+      } else if (localChanged) {
         publishConflict(generation, auth, write, local, remote);
-      }
-      return;
-    }
-    if (remoteAhead) {
-      const remote = await generation.provider.pull();
-      if (!current(generation, auth)) return;
-      if (remote) {
-        applyRemote(generation, auth, write, remote);
-        restorePreservedAuthError(generation, auth, write, preserveError, oldError);
-      }
-      else {
-        const pushed = await generation.provider.push(local, null);
-        acknowledgePush(generation, auth, write, pushed);
+      } else {
+        applyRemote(generation, auth, write, remote, remoteDigest);
         restorePreservedAuthError(generation, auth, write, preserveError, oldError);
       }
       return;
     }
     if (localChanged) {
+      const localDigest = await computeBackupDigest(local);
+      if (!current(generation, auth) || localWriteVersion !== write) return;
+      if (localDigest === useCloudSyncStore.getState().lastSyncedDigest) {
+        conflictWriteVersion = null;
+        useCloudSyncStore.setState({
+          status: preserveError && oldError ? "error" : "synced",
+          error: preserveError ? oldError : null,
+          dirty: false,
+          conflict: null,
+          conflictDiff: null,
+          lastSyncedAt: new Date().toISOString(),
+        });
+        return;
+      }
       const pushed = await generation.provider.push(local, meta.revision);
-      acknowledgePush(generation, auth, write, pushed);
+      acknowledgePush(generation, auth, write, pushed, localDigest);
       restorePreservedAuthError(generation, auth, write, preserveError, oldError);
       return;
     }
     if (current(generation, auth) && localWriteVersion === write) {
-      useCloudSyncStore.setState({ status: preserveError && oldError ? "error" : "synced", error: preserveError ? oldError : null, lastSyncedAt: new Date().toISOString() });
+      const localDigest = await computeBackupDigest(local);
+      if (!current(generation, auth) || localWriteVersion !== write) return;
+      useCloudSyncStore.setState({ status: preserveError && oldError ? "error" : "synced", error: preserveError ? oldError : null, lastSyncedDigest: localDigest, lastSyncedAt: new Date().toISOString() });
     }
   } catch (error) {
     if (!current(generation, auth)) return;
     if (error instanceof SyncConflictError) {
       try {
         const result = await pullConflict(generation, auth);
+        if (result === "equivalent") {
+          restorePreservedAuthError(generation, auth, localWriteVersion, preserveError, oldError);
+          return;
+        }
         if (result !== "vanished") return;
         if (!current(generation, auth)) return;
+        const localDigest = await computeBackupDigest(local);
+        if (!current(generation, auth) || localWriteVersion !== write) return;
         const pushed = await generation.provider.push(local, null);
-        acknowledgePush(generation, auth, write, pushed);
+        acknowledgePush(generation, auth, write, pushed, localDigest);
         restorePreservedAuthError(generation, auth, write, preserveError, oldError);
       } catch (reseedError) {
         if (current(generation, auth)) useCloudSyncStore.setState({ status: "error", error: message(reseedError) });
@@ -455,6 +515,7 @@ export const useCloudSyncStore = create<CloudSyncState>()(persist((set, get) => 
   error: null,
   dirty: false,
   lastSyncedRevision: null,
+  lastSyncedDigest: null,
   lastSyncedAt: null,
   conflict: null,
   conflictDiff: null,
@@ -608,7 +669,7 @@ export const useCloudSyncStore = create<CloudSyncState>()(persist((set, get) => 
     if (!generation || !conflict) return;
     if (generation.inFlight) return generation.inFlight;
     const auth = generation.authVersion;
-    const local = buildBackup();
+    const local = buildCloudBackup();
     const write = localWriteVersion;
     // A conflict normally originates from publishConflict, which records the
     // write version. Treat a freshly restored/injected conflict equivalently
@@ -626,9 +687,9 @@ export const useCloudSyncStore = create<CloudSyncState>()(persist((set, get) => 
           return;
         }
         if (meta.revision !== conflict.meta.revision) {
-          const remote = await generation.provider.pull();
+          const remote = await pullCloudSnapshot(generation.provider);
           if (!current(generation, auth)) return;
-          if (remote) publishConflict(generation, auth, localWriteVersion, buildBackup(), remote);
+          if (remote) publishConflict(generation, auth, localWriteVersion, buildCloudBackup(), remote);
           else {
             conflictWriteVersion = null;
             set({ conflict: null, conflictDiff: null, status: "idle" });
@@ -639,7 +700,7 @@ export const useCloudSyncStore = create<CloudSyncState>()(persist((set, get) => 
         if (choice === "cloud") {
           // The row can disappear after metadata revalidation. Pull the body
           // before replacing local storage; null releases into a fresh seed.
-          const remote = await generation.provider.pull();
+          const remote = await pullCloudSnapshot(generation.provider);
           if (!current(generation, auth)) return;
           if (!remote) {
             conflictWriteVersion = null;
@@ -648,23 +709,29 @@ export const useCloudSyncStore = create<CloudSyncState>()(persist((set, get) => 
             return;
           }
           if (localWriteVersion !== write) {
-            publishConflict(generation, auth, localWriteVersion, buildBackup(), remote);
+            publishConflict(generation, auth, localWriteVersion, buildCloudBackup(), remote);
             return;
           }
           if (remote.meta.revision !== conflict.meta.revision) {
             publishConflict(generation, auth, write, local, remote);
             return;
           }
-          applyRemote(generation, auth, write, remote);
+          const remoteDigest = await computeBackupDigest(remote.backup);
+          if (!current(generation, auth) || localWriteVersion !== write) return;
+          applyRemote(generation, auth, write, remote, remoteDigest);
           return;
         }
-        const next = choice === "merge" ? mergeDeckCollections(local, conflict.backup) : local;
+        const next = choice === "merge"
+          ? projectCloudBackup(mergeDeckCollections(local, projectCloudBackup(conflict.backup)))
+          : local;
+        const nextDigest = await computeBackupDigest(next);
+        if (!current(generation, auth) || localWriteVersion !== write) return;
         set({ status: "syncing" }); // retain conflict/diff while publication is pending
         const pushed = await generation.provider.push(next, conflict.meta.revision);
         if (!current(generation, auth)) return;
         const staleMerge = choice === "merge" && localWriteVersion !== write ? { backup: next, meta: pushed } : null;
         if (choice === "merge" && !staleMerge && localWriteVersion === write) applyMerged(next);
-        acknowledgePush(generation, auth, write, pushed, staleMerge);
+        acknowledgePush(generation, auth, write, pushed, nextDigest, staleMerge);
       } catch (error) {
         if (!current(generation, auth)) return;
         if (error instanceof SyncConflictError) {
@@ -685,7 +752,12 @@ export const useCloudSyncStore = create<CloudSyncState>()(persist((set, get) => 
   },
 }), {
   name: "phase-cloud-sync",
-  partialize: (state) => ({ dirty: state.dirty, lastSyncedRevision: state.lastSyncedRevision, lastSyncedAt: state.lastSyncedAt }),
+  partialize: (state) => ({
+    dirty: state.dirty,
+    lastSyncedRevision: state.lastSyncedRevision,
+    lastSyncedDigest: state.lastSyncedDigest,
+    lastSyncedAt: state.lastSyncedAt,
+  }),
 }));
 
 function disposeCloudSyncModule(data: { cloudSyncLifecycle?: CloudSyncHmrState }): void {

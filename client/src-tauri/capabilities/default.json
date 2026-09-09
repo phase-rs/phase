@@ -70,7 +70,8 @@
       "core:window:allow-set-fullscreen",
       "process:allow-exit",
       "process:allow-restart",
-      "updater:default"
+      "updater:default",
+      "allow-lan"
     ]
   }
 ]

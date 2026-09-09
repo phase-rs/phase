@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Phase
+Comment=Play Magic: The Gathering against AI opponents and other players
+Exec=phase-tauri
+Icon=rs.phase.app
+Terminal=false
+Categories=Game;CardGame;
+Keywords=magic;mtg;cards;tcg;
+# The Tauri window reports WM_CLASS "phase-tauri"; without this the shell shows
+# up as an unmatched window rather than under its own launcher icon. The
+# AppImage's generated .desktop pins the same value.
+StartupWMClass=phase-tauri
