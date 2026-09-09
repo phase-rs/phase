@@ -874,10 +874,16 @@ describe("TournamentPage v6 affordances", () => {
   it("renders the resolved scoring policy from the summary", async () => {
     const fake = makeFakeSocket();
     primeSocket(fake);
+    // A policy no arity default (`{2n-1, 1, 0}`) and not the former client-side
+    // h2h default (`{3, 1, 0}`) could produce: `win_points` is even (defaults
+    // are always odd), `draw_points` is 2 (defaults are 1), `loss_points` is 1
+    // (defaults are 0). Asserting all three label/value pairs is what proves the
+    // page renders the broker's wire data verbatim — the test would otherwise
+    // pass if the page reintroduced a local default or dropped draw/loss.
     const view = h2hView("TOUR01", {
       summary: {
         ...summaryFor("TOUR01"),
-        scoring: { win_points: 3, draw_points: 1, loss_points: 0 },
+        scoring: { win_points: 4, draw_points: 2, loss_points: 1 },
       },
     });
     const { container } = await mountWith(fake, view);
@@ -886,8 +892,9 @@ describe("TournamentPage v6 affordances", () => {
     // title (`standings.matchPointsTitle`).
     const readout = container.querySelector('span[title="Match points"]');
     expect(readout).not.toBeNull();
-    expect(readout?.textContent).toContain("Win");
-    expect(readout?.textContent).toContain("3");
+    expect(readout?.textContent).toContain("Win 4");
+    expect(readout?.textContent).toContain("Draw 2");
+    expect(readout?.textContent).toContain("Loss 1");
   });
 
   // Absent from a pre-v6 broker's summary → nothing rendered, never recomputed.

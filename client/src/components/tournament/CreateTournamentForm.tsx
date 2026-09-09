@@ -18,14 +18,18 @@ interface CreateTournamentFormProps {
 }
 
 /**
- * Parses a numeric field, keeping the previous value when the field is not a
- * number. Deliberately does not clamp or validate a range — `MatchArity::new`
- * (`crates/lobby-broker/src/tournament.rs:96-113`) and `ScoringPolicy::new`
- * are the broker's, and duplicating their bounds here would be a second,
- * drifting copy of a rule the server already owns.
+ * Parses a numeric field, keeping `fallback` when the field is blank or not a
+ * number. Uses `Number` rather than `parseInt` so the COMPLETE value is read:
+ * a `type="number"` input accepts exponent notation (`1e2`) and fractions, both
+ * of which `parseInt` would silently truncate (`1e2` -> `1`) before the value
+ * reaches the broker. Deliberately does not clamp or validate a range —
+ * `MatchArity::new` (`crates/lobby-broker/src/tournament.rs:96-113`) and
+ * `ScoringPolicy::new` are the broker's, and duplicating their bounds here would
+ * be a second, drifting copy of a rule the server already owns.
  */
 function parsedOr(raw: string, fallback: number): number {
-  const parsed = Number.parseInt(raw, 10);
+  if (raw.trim() === "") return fallback;
+  const parsed = Number(raw);
   return Number.isNaN(parsed) ? fallback : parsed;
 }
 

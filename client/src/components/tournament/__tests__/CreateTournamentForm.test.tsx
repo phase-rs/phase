@@ -107,6 +107,29 @@ describe("CreateTournamentForm", () => {
     expect(onSubmit.mock.calls[0][0].scoring.draw_points).toBe(2);
   });
 
+  // Regression: a `type="number"` input accepts exponent notation, so `1e2` is a
+  // valid entry that a real browser resolves to the integer 100 and submits.
+  // `parseInt` would truncate it to `1` before the broker — the only scoring
+  // authority — ever saw it. The complete value must reach `onSubmit` unchanged.
+  //
+  // Submitted via `fireEvent.submit` rather than clicking the button: jsdom runs
+  // constraint validation on the click→submit path and (unlike a browser) blocks
+  // a number control whose raw string is `1e2`, which would swallow the very
+  // submission this asserts. Dispatching the submit event directly reproduces
+  // the browser outcome for a value the browser considers valid.
+  it("preserves an exponent-notation scoring value to the wire", () => {
+    const onSubmit = vi.fn();
+    const { container } = render(<CreateTournamentForm onSubmit={onSubmit} />);
+
+    fireEvent.click(screen.getByLabelText("Automatic"));
+    fireEvent.change(screen.getByLabelText("Win"), { target: { value: "1e2" } });
+
+    const form = container.querySelector("form");
+    expect(form).not.toBeNull();
+    fireEvent.submit(form as HTMLFormElement);
+    expect(onSubmit.mock.calls[0][0].scoring.win_points).toBe(100);
+  });
+
   // V21 — "Automatic" is the wire's `total_rounds: null`, the one
   // `CreateTournament` field that is `#[serde(default)]`.
   it("submits null rounds when the organizer leaves the field automatic", () => {
