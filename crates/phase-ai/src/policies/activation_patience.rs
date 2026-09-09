@@ -128,6 +128,20 @@ fn ability_is_deferrable(ability: &AbilityDefinition) -> bool {
 /// it is the *patient* window, the one a held ability is being saved for, and
 /// `FetchLandPatiencePolicy` already treats it as the correct time to act.
 ///
+/// # Why this must be `ai_player`'s OWN upkeep
+///
+/// CR 117.4 rotates priority among every living player in turn
+/// (`crates/engine/src/game/priority.rs`'s `priority_pass_participants`), not
+/// just the active player — so the AI can hold `WaitingFor::Priority` with an
+/// empty stack during an OPPONENT's upkeep too. The whole premise here is
+/// "wait, you haven't drawn yet" — which only describes the AI's OWN draw
+/// still being ahead of it. During an opponent's upkeep the AI's next draw is
+/// no closer for having waited, and deferring costs something real: this
+/// priority window is the AI's chance to act BEFORE the opponent's draw and
+/// combat, and passing it up to "wait for information" trades away a live
+/// interaction window for no informational gain at all. `state.active_player
+/// == ai_player` is therefore a hard requirement, not a refinement.
+///
 /// # Why `ai_player` must control no beginning-of-upkeep trigger
 ///
 /// CR 503.1a: "at the beginning of your upkeep" triggers are put on the stack
@@ -150,6 +164,7 @@ fn ability_is_deferrable(ability: &AbilityDefinition) -> bool {
 /// case being given up.
 fn is_low_information_window(state: &GameState, ai_player: PlayerId) -> bool {
     state.phase == Phase::Upkeep
+        && state.active_player == ai_player
         && state.stack.is_empty()
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
         && !controls_beginning_of_upkeep_trigger(state, ai_player)

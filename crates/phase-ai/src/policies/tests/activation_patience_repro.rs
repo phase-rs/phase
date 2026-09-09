@@ -423,3 +423,51 @@ fn an_upkeep_trigger_source_disables_the_whole_gate() {
     );
     assert_eq!(delta, 0.0);
 }
+
+/// Review finding: `is_low_information_window` checked `phase`, `stack`, and
+/// `WaitingFor::Priority`, but never `state.active_player == ai_player`. CR
+/// 117.4 rotates priority among every living player in turn
+/// (`crates/engine/src/game/priority.rs`'s `priority_pass_participants`), so
+/// the AI can hold `WaitingFor::Priority { player: AI }` with an empty stack
+/// during the OPPONENT's upkeep too — a perfectly normal instant-speed
+/// response window. The "wait, you haven't drawn yet" premise only describes
+/// the AI's OWN draw step; during the opponent's upkeep the AI's next draw
+/// is no closer for having waited, and deferring here trades away a live
+/// interaction window — a chance to act before the opponent's draw and
+/// combat — for zero informational gain. Unguarded, the gate penalised this
+/// exactly as if it were the AI's own upkeep.
+#[test]
+fn a_deferrable_ping_is_not_held_during_the_opponents_upkeep() {
+    let mut ids = Ids::new();
+    let mut state = GameState::new_two_player(4242);
+    state.phase = Phase::Upkeep;
+    // The OPPONENT is active — it is their upkeep — but the AI is the one
+    // currently holding priority (CR 117.4's normal rotation).
+    state.active_player = OPP;
+    state.priority_player = AI;
+
+    let pinger = creature(
+        &mut state,
+        &mut ids,
+        AI,
+        "Prodigal Sorcerer",
+        1,
+        1,
+        Some("{T}: This creature deals 1 damage to any target."),
+    );
+    creature(&mut state, &mut ids, OPP, "Wall", 1, 5, None);
+
+    state.players[AI.0 as usize].life = 20;
+    state.players[OPP.0 as usize].life = 20;
+    state.waiting_for = WaitingFor::Priority { player: AI };
+    let board = Board { state, pinger };
+
+    let (delta, reason) = score_and_reason(&verdict_for(&board));
+    assert_eq!(
+        reason, "activation_patience_na",
+        "the patience gate must be silent during an OPPONENT's upkeep — the AI's own draw \
+         is not what this priority window precedes, so there is nothing to wait for and \
+         deferring only gives up a live response window"
+    );
+    assert_eq!(delta, 0.0);
+}

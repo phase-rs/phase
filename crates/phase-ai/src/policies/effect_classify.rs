@@ -731,6 +731,150 @@ impl FilterDomain {
     }
 }
 
+/// The domain of a [`TypeFilter`] — one CONJUNCT of a `Typed` filter's
+/// `type_filters` list — evaluated structurally, the same existential-domain
+/// approach `FilterDomain` takes one level up. Independent booleans rather
+/// than a flat enum for the same reason: `AnyOf` is a union and the list-level
+/// conjunction (see `filter_domain`'s `Typed` arm) is an intersection, and
+/// both compose field-wise this way with no hand-written combination table.
+///
+/// Review finding on this PR: the predecessor of this type answered only for
+/// a LITERAL `TypeFilter::Creature` and treated every other variant as
+/// creature-EXCLUDING by omission. `Permanent`, `Card`, `Any` and `AnyOf` are
+/// not narrower categories that merely CO-OCCUR with `Creature` on some
+/// cards — CR 608.2b makes `AnyOf` an explicit disjunction, and
+/// `engine::game::filter::type_filter_matches` implements `Permanent` as a
+/// union that lists `CoreType::Creature` as one of its six admitted core
+/// types, and `Card`/`Any` as unconditionally `true` — so a creature is
+/// STRUCTURALLY one of the alternatives these four accept, not an incidental
+/// overlap. `filter_admits_creature(TargetFilter::Typed { type_filters:
+/// vec![TypeFilter::Permanent], .. })` must therefore be `true`, and it was
+/// `false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TypeDomain {
+    /// A creature could satisfy this `TypeFilter`.
+    admits_creature: bool,
+    /// A non-creature object could satisfy this `TypeFilter`.
+    admits_non_creature: bool,
+}
+
+impl TypeDomain {
+    /// Satisfying this ALONE proves creature — never a non-creature.
+    const CREATURE_ONLY: Self = Self {
+        admits_creature: true,
+        admits_non_creature: false,
+    };
+    /// Structurally incapable of admitting a creature.
+    const NON_CREATURE_ONLY: Self = Self {
+        admits_creature: false,
+        admits_non_creature: true,
+    };
+    /// Admits nothing — the identity element for [`Self::union`] (an empty or
+    /// not-yet-folded disjunction), symmetric with [`Self::UNCONSTRAINED`]
+    /// being the identity for [`Self::intersect`].
+    const NEITHER: Self = Self {
+        admits_creature: false,
+        admits_non_creature: false,
+    };
+    /// Could go either way — the safe default whenever a `TypeFilter` cannot
+    /// be resolved to one of the two categorical extremes above from its
+    /// shape alone. Never produces a false `is_creature_only`, and never
+    /// produces a false "no creature possible" whiff-detector veto.
+    const EITHER: Self = Self {
+        admits_creature: true,
+        admits_non_creature: true,
+    };
+    /// The identity element for [`Self::intersect`] — the fold seed for a
+    /// non-empty conjunction, standing in for "no constraint imposed yet".
+    const UNCONSTRAINED: Self = Self::EITHER;
+
+    /// Union — [`TypeFilter::AnyOf`] (CR 608.2b: disjunction).
+    fn union(self, other: Self) -> Self {
+        Self {
+            admits_creature: self.admits_creature || other.admits_creature,
+            admits_non_creature: self.admits_non_creature || other.admits_non_creature,
+        }
+    }
+
+    /// Intersection — one `TypeFilter` narrowing another inside the SAME
+    /// `type_filters` conjunction (e.g. `[Artifact, Creature]`, "target
+    /// artifact creature"). Every conjunct must be satisfied by the same
+    /// object at once, so a category this predicate cannot verify admits
+    /// creatures (like plain `Artifact`) does not by itself disqualify a
+    /// LITERAL `Creature` conjunct sitting beside it: `intersect` only
+    /// narrows `admits_creature` to `false` when SOME conjunct is
+    /// `NON_CREATURE_ONLY` — provably, not merely unverified.
+    fn intersect(self, other: Self) -> Self {
+        Self {
+            admits_creature: self.admits_creature && other.admits_creature,
+            admits_non_creature: self.admits_non_creature && other.admits_non_creature,
+        }
+    }
+}
+
+/// The domain of one `TypeFilter` conjunct. Exhaustive over `TypeFilter` with
+/// no wildcard arm, mirroring `filter_domain`'s own discipline one level down.
+fn type_filter_domain(tf: &TypeFilter) -> TypeDomain {
+    match tf {
+        TypeFilter::Creature => TypeDomain::CREATURE_ONLY,
+
+        // CR 300.1: a card resolving as one of these two spell-only types is
+        // never simultaneously a creature permanent — no printed card
+        // combines Instant or Sorcery with Creature, and this engine's
+        // `core_types` set does not carry both at once for any live object.
+        // Provably creature-excluding, unlike the permanent types below.
+        TypeFilter::Instant | TypeFilter::Sorcery => TypeDomain::NON_CREATURE_ONLY,
+
+        // These five permanent types are NOT structurally creature-excluding
+        // — real printed cards double them with Creature (Dryad Arbor is a
+        // Land Creature; artifact creatures and enchantment creatures are
+        // commonplace; creature planeswalkers and creature battles exist).
+        // `EITHER` is the correct domain, not an over-cautious fallback: a
+        // bare `TypeFilter::Artifact` conjunct genuinely admits BOTH a plain
+        // artifact and an artifact creature.
+        TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred => TypeDomain::EITHER,
+
+        // CR 403.3 (as implemented, zone-agnostic — see
+        // `engine::game::filter::type_filter_matches`): `Permanent` is a
+        // union over six core types that explicitly lists `Creature` as one
+        // of them, so it admits creatures by construction, not by omission.
+        TypeFilter::Permanent => TypeDomain::EITHER,
+        // Unconditionally `true` in `type_filter_matches` — admits anything.
+        TypeFilter::Card | TypeFilter::Any => TypeDomain::EITHER,
+
+        // CR 608.2b: disjunction — the domain is the union of every branch.
+        // `AnyOf([Creature, Enchantment])` is the review's worked example:
+        // union(CREATURE_ONLY, EITHER) = EITHER, so `admits_creature` is
+        // `true` and `is_creature_only` stays `false` — reached exactly.
+        TypeFilter::AnyOf(filters) => filters
+            .iter()
+            .map(type_filter_domain)
+            .fold(TypeDomain::NEITHER, TypeDomain::union),
+
+        // CR 205.2a + CR 205.3: negation. One case resolves cleanly without
+        // deeper semantic modeling: `Non(Creature)` ("noncreature") — EVERY
+        // creature trivially satisfies the un-negated `Creature`, so NO
+        // creature can satisfy its negation. Every other inner filter is at
+        // best `EITHER` under this same function, which carries no universal
+        // ("does EVERY creature satisfy it") fact to negate — so the general
+        // case falls open to `EITHER` rather than guess. `Subtype` is the
+        // same shape as the general `Non` case: MTG has 250+ creature
+        // subtypes (CR 205.3m) and at least as many non-creature ones with no
+        // catalog available here to tell them apart, so `EITHER` is the only
+        // sound answer without one.
+        TypeFilter::Non(inner) => match inner.as_ref() {
+            TypeFilter::Creature => TypeDomain::NON_CREATURE_ONLY,
+            _ => TypeDomain::EITHER,
+        },
+        TypeFilter::Subtype(_) => TypeDomain::EITHER,
+    }
+}
+
 /// The domain of a [`TargetFilter`], evaluated structurally.
 ///
 /// Exhaustive over `TargetFilter` with no wildcard arm, so a new variant is a
@@ -817,14 +961,18 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
             if typed.type_filters.is_empty() {
                 return FilterDomain::ANYTHING;
             }
-            let names_creature = typed
+            // Every element of the conjunction must admit the SAME object
+            // simultaneously, so the list's domain is the AND (not the OR) of
+            // each element's own domain — mirroring `TypeDomain::intersect`'s
+            // doc, one level down from `FilterDomain::intersect` above.
+            let domain = typed
                 .type_filters
                 .iter()
-                .any(|t| matches!(t, TypeFilter::Creature));
+                .map(type_filter_domain)
+                .fold(TypeDomain::UNCONSTRAINED, TypeDomain::intersect);
             FilterDomain {
-                creatures: names_creature,
-                // With `Creature` in the conjunction every match IS a creature.
-                non_creature_objects: !names_creature,
+                creatures: domain.admits_creature,
+                non_creature_objects: domain.admits_non_creature,
                 // A `Typed` filter carrying a type line never matches a player.
                 players: false,
             }
@@ -3879,5 +4027,89 @@ mod filter_domain_tests {
         assert!(!filter_admits_creature(&TargetFilter::None));
         assert!(!filter_admits_player(&TargetFilter::None));
         assert!(!filter_is_creature_only(&TargetFilter::None));
+    }
+
+    /// Review finding: `filter_domain`'s `Typed` arm answered only for a
+    /// LITERAL `TypeFilter::Creature` and treated every other `TypeFilter`
+    /// as creature-excluding by omission. `AnyOf` (CR 608.2b's own
+    /// disjunction) and `Permanent` (a union that lists `CoreType::Creature`
+    /// as one of its six admitted core types in
+    /// `engine::game::filter::type_filter_matches`) both admit a creature by
+    /// construction, not incidentally — so both must report
+    /// `filter_admits_creature == true`.
+    #[test]
+    fn any_of_creature_and_enchantment_admits_a_creature() {
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::AnyOf(vec![
+                TypeFilter::Creature,
+                TypeFilter::Enchantment,
+            ])));
+        assert!(
+            filter_admits_creature(&filter),
+            "AnyOf([Creature, Enchantment]) must admit a creature — Creature is literally              one of its two disjuncts (CR 608.2b)"
+        );
+        assert!(
+            !filter_is_creature_only(&filter),
+            "the Enchantment branch means a non-creature (a plain enchantment) can ALSO              satisfy this filter, so it must not read as creature-only"
+        );
+    }
+
+    #[test]
+    fn permanent_admits_a_creature() {
+        let filter = TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Permanent));
+        assert!(
+            filter_admits_creature(&filter),
+            "TypeFilter::Permanent's own matcher lists CoreType::Creature as one of the six              core types it admits — a creature satisfies 'target permanent' by construction"
+        );
+        assert!(
+            !filter_is_creature_only(&filter),
+            "a land, artifact, enchantment, planeswalker or battle ALSO satisfies              'target permanent', so it must not read as creature-only"
+        );
+    }
+
+    /// A conjunction (NOT a disjunction) of two categorical `TypeFilter`s
+    /// where one is the literal `Creature` — "target artifact creature"
+    /// (`type_filters: [Artifact, Creature]`). Discriminates
+    /// `TypeDomain::intersect` from a hypothetical implementation that
+    /// treated any non-`CREATURE_ONLY` conjunct as disqualifying: `Artifact`
+    /// alone is `EITHER` (real artifact creatures exist), and ANDing it with
+    /// `Creature`'s `CREATURE_ONLY` must still land on creature-only, not on
+    /// "admits neither".
+    #[test]
+    fn artifact_creature_conjunction_is_still_creature_only() {
+        let filter = TargetFilter::Typed(
+            TypedFilter::default()
+                .with_type(TypeFilter::Artifact)
+                .with_type(TypeFilter::Creature),
+        );
+        assert!(filter_admits_creature(&filter));
+        assert!(
+            filter_is_creature_only(&filter),
+            "'target artifact creature' is creature-only: the literal Creature conjunct              proves it regardless of what the Artifact conjunct alone could admit"
+        );
+    }
+
+    /// The provably creature-excluding categories stay excluded: no printed
+    /// card combines a spell-only type with Creature (CR 300.1).
+    #[test]
+    fn instant_and_sorcery_stay_non_creature_only() {
+        for tf in [TypeFilter::Instant, TypeFilter::Sorcery] {
+            let filter = TargetFilter::Typed(TypedFilter::default().with_type(tf.clone()));
+            assert!(!filter_admits_creature(&filter), "{tf:?}");
+            assert!(!filter_is_creature_only(&filter), "{tf:?}");
+        }
+    }
+
+    /// "target noncreature permanent" — `Non(Creature)` is the one negation
+    /// shape this module resolves precisely rather than falling open: every
+    /// creature trivially satisfies the un-negated `Creature`, so none can
+    /// satisfy its negation.
+    #[test]
+    fn non_creature_excludes_creatures() {
+        let filter = TargetFilter::Typed(
+            TypedFilter::default().with_type(TypeFilter::Non(Box::new(TypeFilter::Creature))),
+        );
+        assert!(!filter_admits_creature(&filter));
+        assert!(!filter_is_creature_only(&filter));
     }
 }
