@@ -25103,7 +25103,7 @@ impl AbilityCondition {
             | AbilityCondition::Or { .. }
             | AbilityCondition::Not { .. }
             | AbilityCondition::DayNightIs { .. }
-            | AbilityCondition::NthResolutionThisTurn { .. }
+            | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ScopedPlayerMatches { .. } => false,
         }
