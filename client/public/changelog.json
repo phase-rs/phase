@@ -1,6 +1,21 @@
 {
   "entries": [
     {
+      "id": 208,
+      "date": "2026-09-09",
+      "title": "P2P hosting finds your LAN",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Extra-turn effects now keep the quantity they print, while plural turn-skipping and \"at the beginning of each upkeep\" abilities are recognized across their card classes\n\n🛠️ Cards That Now Work Right\n• Chandra, Flame's Catalyst lets you cast spells from your hand for free for the whole stated turn, even after Chandra leaves the battlefield\n• Dragon Whelp, Nalathni Dragon, Farrelite Priest, and Initiates of the Ebon Hand wait for their printed activation threshold before creating a sacrifice trigger\n• Griffin Guide still makes its 2/2 flying Griffin when the enchanted creature and the Aura leave together; Grip of Phyresis keeps its Equipment attached\n• Fateful Hour correctly changes Gather the Townsfolk's token count, Curse of Thirst counts the player its Curse enchants, and edicts preserve their opponent-only targets\n• Random-discard costs, exploit sacrifice filters, and moves involving a targeted player's library now retain the exact player, card, and choice their text names\n• Copy effects that make exceptions keep the copied card's other characteristics intact, including token-copy cases\n\n⚔️ Combat & Gameplay\n• Optional counter moves that cannot happen no longer present a misleading choice\n• Mass library shuffles preserve every card's owner, including effects that shuffle several players' libraries\n\n🖥️ Interface\n• The Draft workspace is steadier and easier to use at narrow screen sizes, with more reliable drag placement and card images\n• Joining a sandbox game now confirms what you are entering, and opening the debug console no longer scrolls the game board\n\n🤖 AI\n• Medium and harder AI makes more cautious combat attacks around open mana, combat tricks, and lands that can become blockers, while still taking favorable trades\n• The AI is better at selecting beneficial targets, avoids own-board-only activations, and stops casting spells proven to have no effect\n\n🌐 Multiplayer\n• New desktop games default to P2P hosting, and the app can discover LAN servers on your local network\n• Tournament organizers can choose best-of-one or best-of-three matches per event; reporting and standings use that match structure",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424"
+    },
+    {
       "id": 207,
       "date": "2026-09-07",
       "title": "Hazel doubles down on Squirrels",
