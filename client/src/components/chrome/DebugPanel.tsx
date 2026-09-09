@@ -88,7 +88,6 @@ export function DebugPanel({
     () => new Set<ConsoleLevel>(["log", "warn", "error"]),
   );
   const consoleContainerRef = useRef<HTMLDivElement>(null);
-  const consoleEndRef = useRef<HTMLDivElement>(null);
 
   // Smart scroll tracking: only auto-scroll if user is at the bottom
   const isAtBottomRef = useRef(true);
@@ -192,11 +191,20 @@ export function DebugPanel({
     useUiStore.getState().openCardReportDialog();
   }, []);
 
+  // Do not use `scrollIntoView()` here. The panel is rendered inside the
+  // paint-contained game board, so that method can also scroll the locked game
+  // viewport and leave the battlefield displaced after the panel closes.
+  const scrollConsoleToBottom = useCallback(() => {
+    const container = consoleContainerRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+  }, []);
+
   const scrollToBottom = useCallback(() => {
-    consoleEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    scrollConsoleToBottom();
     setNewMessageCount(0);
     setShowJumpToBottom(false);
-  }, []);
+  }, [scrollConsoleToBottom]);
 
   const visibleEntries = consoleSnapshot.filter((e) => enabledLevels.has(e.level));
 
@@ -290,11 +298,11 @@ export function DebugPanel({
     if (added <= 0) return;
 
     if (isAtBottomRef.current) {
-      consoleEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      scrollConsoleToBottom();
     } else {
       setNewMessageCount((prev) => prev + added);
     }
-  }, [visibleEntries]);
+  }, [scrollConsoleToBottom, visibleEntries]);
 
   if (!open) return null;
 
@@ -622,7 +630,6 @@ export function DebugPanel({
                   {entry.message}
                 </div>
               ))}
-              <div ref={consoleEndRef} />
             </div>
             {showJumpToBottom && (
               <button
