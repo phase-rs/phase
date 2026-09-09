@@ -176,8 +176,10 @@ fn zemo_grants_the_permission_without_paying_out_the_counter() {
 ///   pre-#8721 branch discarded.
 /// - The negative test above is NOT the discriminating one. Zero counters is the
 ///   outcome on `main`, with the gate disabled, and as shipped, so it is green in
-///   every configuration. Its job is the early-fire guard, which is what the
-///   pre-cast assertion inside THIS test also does.
+///   every configuration PROBED HERE — not in every configuration, since it is
+///   exactly what goes red if the family allowlist ever grows a counter-placing
+///   family while this gate is absent. That early-fire guard is its job, and the
+///   pre-cast assertion inside THIS test does the same work.
 #[test]
 fn zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast() {
     let mut scenario = GameScenario::new_n_player(2, 42);
@@ -418,6 +420,11 @@ fn ogre_battlecaster_lowers_its_gate_to_a_delayed_trigger() {
         runner.state().objects[&ogre].power,
         Some(3),
         "and no spell was cast under the permission, so nothing pumped — kept as the \
-         companion check, NOT as evidence: X resolves to 0 either way (measured)"
+         companion check, NOT as evidence. MEASURED END TO END, with the granted Bolt \
+         actually cast and layers re-evaluated, Ogre is `Some(3)` both with this change and \
+         with the parser gate textually removed: `ObjectManaValue` with an `EventSource` scope \
+         resolves to 0 in the delayed trigger, so the printed card cannot discriminate the \
+         wording and the stand-in below carries that evidence. This change fixes the TIMING \
+         of Ogre's consequent, not the value of its X (issue #8775)"
     );
 }

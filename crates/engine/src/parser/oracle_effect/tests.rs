@@ -62980,35 +62980,70 @@ fn dragon_whelp_activation_threshold_gates_the_sacrifice_rider() {
 /// everything satisfies the inclusion. The first draft of this fix wrapped both
 /// categories and changed cards whose consequent is a casting property; the
 /// exclusion half is the one that would have caught it.
+/// Did the CR 603.7 cast-permission recognizer fire on this chain?
+///
+/// Strict on purpose: a `WhenNextEvent` SpellCast trigger only counts when it
+/// also carries the `ParentTarget` scope the recognizer emits, so a neighbouring
+/// delayed trigger of the same mode cannot be mistaken for this one. One
+/// definition rather than a copy per test — two neighbours with one name must
+/// not be able to drift into meaning two things.
+fn wraps_a_spell_cast_delayed_trigger(def: &AbilityDefinition) -> bool {
+    fn walk(def: &AbilityDefinition) -> bool {
+        if let Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenNextEvent { trigger, .. },
+            ..
+        } = &*def.effect
+        {
+            if matches!(trigger.mode, TriggerMode::SpellCast)
+                && trigger.valid_card == Some(TargetFilter::ParentTarget)
+            {
+                return true;
+            }
+        }
+        def.sub_ability.as_deref().is_some_and(walk)
+            || def.else_ability.as_deref().is_some_and(walk)
+    }
+    walk(def)
+}
+
 #[test]
 fn a_targetless_cast_permission_keeps_its_consequent_unwrapped() {
     // Review of PR #8749: a chain that never declared an object referent has
     // nothing for `valid_card: ParentTarget` to bind to, so wrapping its
     // consequent in a delayed trigger does not RE-TIME the consequent — the
     // engine's over-fire guard refuses to install it and the consequent is lost.
-    // MEASURED over the corpus, Discord, Lord of Disharmony is the only card of
-    // that shape, and it keeps exactly the lowering it has on `main`.
+    // MEASURED over the corpus, Discord, Lord of Disharmony is the only card whose
+    // PARSE this decline changes (a third bake with the arm disabled and the
+    // recognizer otherwise intact moves exactly that one entry), and it keeps
+    // exactly the lowering it has on `main`. NOT claimed, because it is false:
+    // that Discord is the only carrier without a declared object referent — 24 of
+    // the 33 prefix carriers print no "target" at all. For every other one the
+    // decline lands where the consequent discriminator would have landed anyway,
+    // which is why the corpus diff moves by this one card.
     //
     // Both directions in one test, because either alone is trivially satisfiable:
     // a recognizer that never fires passes the first half, one that always fires
     // passes the second.
-    fn wraps_a_spell_cast_delayed_trigger(def: &AbilityDefinition) -> bool {
+
+    // The consequent as it lowers on `main`, asserted POSITIVELY. Review of
+    // `b1208c82a`: the negative assertion below is green in TWO worlds — the
+    // correct one, and the one where Discord's consequent was dropped or
+    // degraded to `Effect::Unimplemented`. Only a positive half can tell them
+    // apart, and it has to run on the SAME input: the targeted fixture further
+    // down reaches a different parser path and proves nothing about this one.
+    //
+    // Measured on this branch, the targetless chain lowers to
+    // `Unimplemented(choose)` -> `GenericEffect(SpendManaAsAnyColor)` ->
+    // `CopySpell { target: Any, retarget: KeepOriginalTargets }`, the last link
+    // joined as a `SequentialSibling`. The shape guard is part of the claim: a
+    // `CopySpell` re-linked as a `ContinuationStep` would resolve under a
+    // declined optional parent instead of on its own, which is a different card.
+    fn keeps_its_copy_spell_consequent(def: &AbilityDefinition) -> bool {
         fn walk(def: &AbilityDefinition) -> bool {
-            if let Effect::CreateDelayedTrigger {
-                condition: DelayedTriggerCondition::WhenNextEvent { trigger, .. },
-                ..
-            } = &*def.effect
+            if matches!(*def.effect, Effect::CopySpell { .. })
+                && def.sub_link == SubAbilityLink::SequentialSibling
             {
-                // Same strictness as the identically-named helper in the sibling
-                // test below: a `WhenNextEvent` SpellCast trigger only counts as
-                // "this recognizer fired" when it also carries the
-                // `ParentTarget` scope the recognizer emits. Two neighbours with
-                // one name must not mean two things.
-                if matches!(trigger.mode, TriggerMode::SpellCast)
-                    && trigger.valid_card == Some(TargetFilter::ParentTarget)
-                {
-                    return true;
-                }
+                return true;
             }
             def.sub_ability.as_deref().is_some_and(walk)
                 || def.else_ability.as_deref().is_some_and(walk)
@@ -63026,6 +63061,24 @@ fn a_targetless_cast_permission_keeps_its_consequent_unwrapped() {
          copy of a spell with that name, and mana of any type can be spent to cast it. If you \
          cast a spell this way, copy this ability if Discord is on the battlefield.",
         AbilityKind::Spell,
+    );
+    // REACH GUARD ON THIS INPUT, not on the sibling fixture below. The recognizer
+    // must actually match Discord's own gate chunk — otherwise the exclusion
+    // asserted below would be held back by chunking rather than by the decline,
+    // and a future chunking change would retire this test silently.
+    assert!(
+        super::lower::strip_cast_this_way_gate(
+            "If you cast a spell this way, copy this ability if Discord is on the battlefield."
+        )
+        .is_some(),
+        "reach guard: the recognizer must match this card's own gate chunk, so the decline is \
+         what holds it back"
+    );
+    assert!(
+        keeps_its_copy_spell_consequent(&targetless),
+        "Discord's \"copy this ability\" consequent must survive this change exactly as it \
+         lowers on `main`: `Effect::CopySpell` joined as a `SequentialSibling`. Without this \
+         half the negative assertion below is also green when the consequent is gone"
     );
     assert!(
         !wraps_a_spell_cast_delayed_trigger(&targetless),
@@ -63053,25 +63106,6 @@ fn a_targetless_cast_permission_keeps_its_consequent_unwrapped() {
 
 #[test]
 fn a_cast_this_way_gate_defers_a_consequence_but_never_a_casting_property() {
-    fn wraps_a_spell_cast_delayed_trigger(def: &AbilityDefinition) -> bool {
-        fn walk(def: &AbilityDefinition) -> bool {
-            if let Effect::CreateDelayedTrigger {
-                condition: DelayedTriggerCondition::WhenNextEvent { trigger, .. },
-                ..
-            } = &*def.effect
-            {
-                if matches!(trigger.mode, TriggerMode::SpellCast)
-                    && trigger.valid_card == Some(TargetFilter::ParentTarget)
-                {
-                    return true;
-                }
-            }
-            def.sub_ability.as_deref().is_some_and(walk)
-                || def.else_ability.as_deref().is_some_and(walk)
-        }
-        walk(def)
-    }
-
     // Oracle body from `client/public/card-data.json`, without the trigger head.
     // A CONSEQUENCE of the cast: the counter is placed because a spell was cast,
     // so it must wait for that cast (Helmut Zemo, Mastermind).

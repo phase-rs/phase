@@ -36988,10 +36988,15 @@ pub(crate) fn parse_effect_chain_ir(
                     // accepted branch parses `body` a second time below.
                     //
                     // Named consequence of that second parse: `clone_throwaway`
-                    // deliberately drops `ChainBound` and the pending printed
-                    // colour choice, so in principle the probe and the shipped
-                    // lowering could differ and the discriminator would then have
-                    // classified a text it is not shipping. Site without a
+                    // resets `chosen_color_qualifier` to `Unbound` (so a
+                    // `ChainBound` qualifier does not reach the probe), and
+                    // everything the probe itself accumulates — diagnostics,
+                    // `chosen_player_count`, any `pending_printed_color_choice`
+                    // it sets — is discarded with the clone. It does NOT start
+                    // without the caller's pending choice; that field rides in on
+                    // `..self.clone()`. Either way the probe and the shipped
+                    // lowering could in principle differ, and the discriminator
+                    // would then have classified a text it is not shipping. Site without a
                     // demonstrated consequence — the corpus double bake bounds it
                     // to zero.
                     let mut probe_ctx = ctx.clone_throwaway();

@@ -109,8 +109,9 @@ pub fn resolve(
     // reference (Human Torch's "he", whose empty `ability.targets` is normal) still
     // installs.
     //
-    // CR 603.7 (issue #8721): `WhenNextEvent` is bound by the SAME
-    // `bind_contextual_filter_to_condition` call below and degrades identically,
+    // CR 603.7c (issue #8721): `WhenNextEvent` refers to a particular object and
+    // is bound by the SAME `bind_contextual_filter_to_condition` call below,
+    // where it degrades identically —
     // so it is gated here too. It is listed second because it also carries an
     // `or_trigger`, whose filters go through the same rewrite.
     //
@@ -1412,7 +1413,7 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::triggers::{PlaneswalkRole, TriggerMode};
 
-    /// CR 603.7 (issue #8721): the over-fire guard covers `WhenNextEvent`, not
+    /// CR 603.7c (issue #8721): the over-fire guard covers `WhenNextEvent`, not
     /// only `WheneverEvent`.
     ///
     /// A POLICY PIN, not behaviour coverage, and labelled as one before anyone
@@ -1428,10 +1429,14 @@ mod tests {
     /// `WhenNextEvent` with a bare `ParentTarget` and no chosen target installs a
     /// trigger that fires on every matching event instead of on one object.
     ///
-    /// The EXTENSION's refusal path is not reached by any card today — the older
-    /// `WheneverEvent` arm very much is (MEASURED: 15 corpus cards carry a bare
-    /// `ParentTarget` in a `WheneverEvent` trigger filter, so the `(false, false)`
-    /// case below is a live printed shape). For `WhenNextEvent` the only corpus
+    /// The EXTENSION's refusal path is not reached by any card today. The older
+    /// `WheneverEvent` arm's INPUT SHAPE is live (MEASURED: 15 corpus cards carry
+    /// a bare `ParentTarget` in a `WheneverEvent` trigger filter, across
+    /// `valid_card` and `valid_source`), so the `(false, false)` case below is a
+    /// printed shape rather than an invention. Whether one of those 15 reaches
+    /// the refusal with an empty `ability.targets` is UNMEASURED — the same gap
+    /// this file states for the four filter-carrying variants, held to the same
+    /// standard. For `WhenNextEvent` the only corpus
     /// carriers are the two cards this PR itself creates, and both resolve with
     /// non-empty `ability.targets`, so that half is unreachable from a printed
     /// card. The extension exists so the parser-side decline (a

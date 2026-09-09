@@ -14204,16 +14204,20 @@ fn resolve_chain_body(
             // `complete_hand_pick_cast_from_zone`, which requires it to still be
             // an `Effect::CastFromZone` (issue #5945). Taking the tail out of the
             // chain at all would break that, so the extraction is skipped
-            // wholesale for that state rather than merely re-timed. MEASURED, and in the
-            // form that card data can actually settle: no corpus member carries
-            // BOTH a tail and a private-zone pick. Four of the six tail carriers
-            // declare a stack-time target; the other two (Invasion of Alara, The
-            // Great Work) declare none, but pick from or grant over a PUBLIC zone
-            // — exile and "any graveyard" — never the hand or library this
-            // continuation serves. (Whether a head routes through a private-zone
-            // pick is a runtime decision, not a readable field, so the
-            // stronger-sounding "no member of the class is a pick" would be a
-            // claim the data cannot support.) This guards a shape, not a card.
+            // wholesale for that state rather than merely re-timed. MEASURED, and in
+            // the form that card data can actually settle: not one of the six tail
+            // carriers declares a hand- or library-restricted pick. Three restrict
+            // their target to the graveyard (Sins of the Past, Helmut Zemo, Ogre
+            // Battlecaster); the other three carry no zone restriction at all —
+            // `Typed` instant/sorcery on The Great Work, a bare `Any` on Invasion
+            // of Alara and Finale of Promise. An earlier version of this comment
+            // split the six four-and-two and put The Great Work on the wrong side;
+            // the split is dropped rather than repaired, because the zone
+            // restriction is the only half that bears on this guard. (Whether a
+            // head routes through a private-zone pick is a runtime decision, not a
+            // readable field, so the stronger-sounding "no member of the class is a
+            // pick" would be a claim the data cannot support.) This guards a shape,
+            // not a card.
             //
             // The dedicated hand-pick guard
             // ~100 lines below computes the same three conjuncts; this branch
