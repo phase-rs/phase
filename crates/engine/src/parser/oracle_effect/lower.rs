@@ -6789,13 +6789,11 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
 /// triggered ability keyed to that later cast, and lowering it as a sequential
 /// instruction of this resolution applies it unconditionally (issue #8721).
 ///
-/// Deliberately stated about the PERMISSION, not about one effect variant: the
-/// three cards this recognizer changes do not share a head. The recognizer
-/// itself checks only the two wordings — it does not verify that a permission is
-/// present; only the EXCLUSION below asks the parsed consequent anything. Helmut Zemo and Ogre
-/// Battlecaster carry `Effect::CastFromZone { driver: None }`; Discord, Lord of
-/// Disharmony carries no `CastFromZone` at all (its head lowers to
-/// `Unimplemented` plus a `GenericEffect` mana permission).
+/// Deliberately stated about the PERMISSION, not about one effect variant. The
+/// recognizer itself checks only the two wordings — it does not verify that a
+/// permission is present; the call site's two EXCLUSIONS do the deciding: one
+/// asks the parsed consequent what it is, the other asks whether the chain
+/// declared an object referent at all.
 ///
 /// `valid_card: ParentTarget` is what scopes it to THAT spell: at delayed-trigger
 /// creation `bind_contextual_filter_to_condition` rewrites it through
@@ -6803,15 +6801,26 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
 /// (NOT `parent_target_snapshot` — `condition_uses_creation_time_provenance`
 /// returns false for `WhenNextEvent`, so that path never runs here.)
 ///
-/// It FAILS OPEN, and that is named rather than hidden: with no object target on
-/// the granting chain, `parent_targets_filter` returns `TargetFilter::Any`, and
-/// the trigger then fires on any spell its controller casts that turn. Of the
-/// three cards this recognizer changes, Discord, Lord of Disharmony is exactly
-/// that case — issue #8721 carries it as an open gap.
+/// It FAILS OPEN, and that is why the call site declines a chain with no declared
+/// object referent: with no object target, `parent_targets_filter` returns
+/// `TargetFilter::Any`, `delayed_trigger::resolve`'s over-fire guard then refuses
+/// installation, and the consequent is LOST rather than re-timed. Measured, one
+/// corpus card is that shape (Discord, Lord of Disharmony) and it is left
+/// unchanged; see the decline at the call site in `oracle_effect::mod`.
 ///
-/// `ThisTurn` rather than `Reflexive` for exactly that reason: `Reflexive` gets
-/// one shot on its creation resolution's own event batch (CR 603.12), which is
-/// precisely the batch in which this cast CANNOT occur.
+/// `ThisTurn` rather than `Reflexive` for exactly that reason: CR 603.12 has a
+/// reflexive ability "checked immediately after being created" and triggering on
+/// whether its event occurred EARLIER DURING THE RESOLUTION that created it —
+/// precisely the window in which this cast cannot occur. (Not "one shot":
+/// CR 603.12a triggers it once per occurrence.)
+///
+/// And `ThisTurn` rather than a persistent lifetime, which is the other question
+/// a hard-coded lifetime invites: MEASURED, the permission itself expires at
+/// cleanup. `cast_from_zone::record_lingering_permissions` caps an in-place
+/// graveyard grant with `duration: None` at `UntilEndOfTurn` (`granted_duration`'s
+/// `None => in_place.then_some(...)` arm), and both cards this recognizer changes
+/// carry `duration: None`. A longer-lived trigger could never fire, because the
+/// cast it waits for can no longer happen.
 ///
 /// Two prefixes, not three: `"if you cast it this way, "` has ZERO corpus
 /// members (26 cards print `"if you cast a spell this way, "`, 7 print

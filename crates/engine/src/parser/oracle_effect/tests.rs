@@ -62420,6 +62420,77 @@ fn collect_cast_from_zone_defs(def: &AbilityDefinition, out: &mut Vec<AbilityDef
 /// categories and changed cards whose consequent is a casting property; the
 /// exclusion half is the one that would have caught it.
 #[test]
+fn a_targetless_cast_permission_keeps_its_consequent_unwrapped() {
+    // Review of PR #8749: a chain that never declared an object referent has
+    // nothing for `valid_card: ParentTarget` to bind to, so wrapping its
+    // consequent in a delayed trigger does not RE-TIME the consequent — the
+    // engine's over-fire guard refuses to install it and the consequent is lost.
+    // MEASURED over the corpus, Discord, Lord of Disharmony is the only card of
+    // that shape, and it keeps exactly the lowering it has on `main`.
+    //
+    // Both directions in one test, because either alone is trivially satisfiable:
+    // a recognizer that never fires passes the first half, one that always fires
+    // passes the second.
+    fn wraps_a_spell_cast_delayed_trigger(def: &AbilityDefinition) -> bool {
+        fn walk(def: &AbilityDefinition) -> bool {
+            if let Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenNextEvent { trigger, .. },
+                ..
+            } = &*def.effect
+            {
+                // Same strictness as the identically-named helper in the sibling
+                // test below: a `WhenNextEvent` SpellCast trigger only counts as
+                // "this recognizer fired" when it also carries the
+                // `ParentTarget` scope the recognizer emits. Two neighbours with
+                // one name must not mean two things.
+                if matches!(trigger.mode, TriggerMode::SpellCast)
+                    && trigger.valid_card == Some(TargetFilter::ParentTarget)
+                {
+                    return true;
+                }
+            }
+            def.sub_ability.as_deref().is_some_and(walk)
+                || def.else_ability.as_deref().is_some_and(walk)
+        }
+        walk(def)
+    }
+
+    // Discord's FULL trigger body from `client/public/card-data.json`, with only
+    // the trigger head ("At the beginning of your end step, ") removed — the
+    // leading "choose a random ..." sentence is kept, so the clause history this
+    // decision walks back over is the card's own.
+    // TARGETLESS: "a copy of a spell with that name" declares no object referent.
+    let targetless = parse_effect_chain(
+        "Choose a random nonland Magic card name. Until your next end step, you may cast a \
+         copy of a spell with that name, and mana of any type can be spent to cast it. If you \
+         cast a spell this way, copy this ability if Discord is on the battlefield.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        !wraps_a_spell_cast_delayed_trigger(&targetless),
+        "a permission with no declared object referent must keep its consequent exactly as it \
+         lowered before this change — wrapping it would suppress the consequent outright, not \
+         defer it"
+    );
+
+    // TARGETED: the same wording, but the permission declares "target instant or
+    // sorcery card". This half is the reach guard: it proves the recognizer is
+    // reachable at all with this oracle shape, so the negative above is a
+    // decision rather than a dead branch.
+    let targeted = parse_effect_chain(
+        "You may cast target instant or sorcery card with mana value less than or equal to \
+         his power from your graveyard. If that spell would be put into your graveyard, exile \
+         it instead. If you cast a spell this way, put a +1/+1 counter on Helmut Zemo.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        wraps_a_spell_cast_delayed_trigger(&targeted),
+        "reach guard: the same wording on a permission that DOES declare an object referent \
+         must still be deferred, or the negative assertion above proves nothing"
+    );
+}
+
+#[test]
 fn a_cast_this_way_gate_defers_a_consequence_but_never_a_casting_property() {
     fn wraps_a_spell_cast_delayed_trigger(def: &AbilityDefinition) -> bool {
         fn walk(def: &AbilityDefinition) -> bool {
@@ -62454,9 +62525,12 @@ fn a_cast_this_way_gate_defers_a_consequence_but_never_a_casting_property() {
         "\"put a +1/+1 counter\" happens BECAUSE of the cast, so it must be deferred to it"
     );
 
-    // A PROPERTY of the cast: CR 601.2 makes this part of casting the spell, so it
-    // must be live before the cast and cannot be deferred past it (Brilliant
-    // Ultimatum).
+    // A PROPERTY of the cast: "you cast it without paying its mana cost" is an
+    // alternative cost (CR 118.9), announced during casting (CR 118.9a), and
+    // CR 601.2 puts cost determination and payment inside casting — so it must be
+    // live before the cast and cannot be deferred past it (Brilliant Ultimatum).
+    // Not CR 601.2a: that arm is about effects making a spell GAIN ABILITIES,
+    // which is not what an alternative cost does.
     let property = parse_effect_chain(
         "Exile the top five cards of your library. An opponent separates those cards into two \
          piles. You may play lands and cast spells from one of those piles. If you cast a \

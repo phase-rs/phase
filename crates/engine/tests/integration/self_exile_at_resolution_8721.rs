@@ -308,8 +308,15 @@ this way on the bottom of your library in a random order.";
 /// printed chapter text is carried by a sorcery here. Only the zone outcome is
 /// under test, not the Saga machinery.
 ///
+/// Said plainly, in the house style of the neighbours in this file: this test is
+/// GREEN on `origin/main` too. There the whole tail is dropped, so the source
+/// reaches the graveyard for a different reason, and The Great Work is not one of
+/// the two cards whose parse this PR changes. It is a BOUNDARY marker, not a
+/// proof of the fix.
+///
 /// Counter-probe: dropping the `tail.sub_ability.is_none()` filter turns this
-/// red — the source lands in `Exile` and stays there.
+/// red — the source lands in `Exile` and stays there. That single filter is the
+/// only thing it discriminates.
 #[test]
 fn a_tail_that_chains_further_instructions_is_out_of_scope() {
     use engine::types::actions::GameAction;

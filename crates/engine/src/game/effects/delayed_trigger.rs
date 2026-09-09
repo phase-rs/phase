@@ -1414,11 +1414,29 @@ mod tests {
     /// CR 603.7 (issue #8721): the over-fire guard covers `WhenNextEvent`, not
     /// only `WheneverEvent`.
     ///
+    /// A POLICY PIN, not behaviour coverage, and labelled as one before anyone
+    /// asks: it builds a `ResolvedAbility` by hand and calls `resolve` directly
+    /// rather than driving `GameScenario`/`GameRunner`. That is unavoidable here —
+    /// the refusal path is corpus-unreachable (see below), so no printed card can
+    /// drive it, and a test that cannot be driven from a card is the one place a
+    /// hand-built ability is the honest instrument rather than a shortcut.
+    ///
     /// Both conditions are bound by the same `bind_contextual_filter_to_condition`
     /// call, whose empty-parent rewrite turns `ParentTarget` into
     /// `TargetFilter::Any`. The guard above therefore has to see both, or a
     /// `WhenNextEvent` with a bare `ParentTarget` and no chosen target installs a
     /// trigger that fires on every matching event instead of on one object.
+    ///
+    /// The EXTENSION's refusal path is not reached by any card today — the older
+    /// `WheneverEvent` arm very much is (MEASURED: 15 corpus cards carry a bare
+    /// `ParentTarget` in a `WheneverEvent` trigger filter, so the `(false, false)`
+    /// case below is a live printed shape). For `WhenNextEvent` the only corpus
+    /// carriers are the two cards this PR itself creates, and both resolve with
+    /// non-empty `ability.targets`, so that half is unreachable from a printed
+    /// card. The extension exists so the parser-side decline (a
+    /// chain with no declared object referent is left unwrapped) stays TRUE if a
+    /// card ever does reach it — it is the fail-closed floor under that decision,
+    /// not coverage of a live defect.
     ///
     /// Both directions, because either half alone is trivially satisfiable: a
     /// guard that refuses everything passes the first assertion, one that refuses
@@ -1428,36 +1446,55 @@ mod tests {
     ///
     /// Not covered, and named rather than implied: the `or_trigger` slot that
     /// this arm also feeds through the same rewrite. MEASURED over the corpus, no
-    /// `WhenNextEvent.or_trigger` carries a `ParentTarget` or `ParentTargetSlot`
-    /// filter — 59 `WhenNextEvent` conditions exist, 5 carry an `or_trigger`, and
-    /// none of those 5 uses either filter — so there is nothing to drive it with
-    /// today.
+    /// `WhenNextEvent.or_trigger` in the corpus carries a `ParentTarget` or
+    /// `ParentTargetSlot` filter, so there is nothing to drive it with today.
+    /// (Stated without a total on purpose: an earlier revision quoted a count of
+    /// all `WhenNextEvent` conditions that was already stale one round later,
+    /// because this PR's own card set had changed underneath it.)
     #[test]
     fn the_over_fire_guard_covers_both_delayed_conditions() {
-        fn condition(next: bool) -> DelayedTriggerCondition {
-            let trigger = Box::new(
-                TriggerDefinition::new(TriggerMode::SpellCast)
-                    .valid_card(TargetFilter::ParentTarget),
-            );
+        // `on_or_trigger` puts the bare `ParentTarget` in the ALTERNATIVE slot
+        // instead of the primary one. Without that case the `.chain(or_trigger)`
+        // in the guard is executing code no probe can fall: deleting it would
+        // leave every assertion green while a `WhenNextEvent` whose `or_trigger`
+        // carries a bare `ParentTarget` installs and fires on everything.
+        fn condition(next: bool, on_or_trigger: bool) -> DelayedTriggerCondition {
+            let bare = || {
+                Box::new(
+                    TriggerDefinition::new(TriggerMode::SpellCast)
+                        .valid_card(TargetFilter::ParentTarget),
+                )
+            };
+            let harmless = || {
+                Box::new(
+                    TriggerDefinition::new(TriggerMode::SpellCast)
+                        .valid_card(TargetFilter::Controller),
+                )
+            };
             if next {
+                let (trigger, or_trigger) = if on_or_trigger {
+                    (harmless(), Some(bare()))
+                } else {
+                    (bare(), None)
+                };
                 DelayedTriggerCondition::WhenNextEvent {
                     trigger,
-                    or_trigger: None,
+                    or_trigger,
                     lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
                 }
             } else {
                 DelayedTriggerCondition::WheneverEvent {
-                    trigger,
+                    trigger: bare(),
                     expiry: crate::types::ability::WheneverEventExpiry::default(),
                 }
             }
         }
 
-        for next in [false, true] {
+        for (next, on_or_trigger) in [(false, false), (true, false), (true, true)] {
             let mut state = GameState::new_two_player(42);
             let ability = ResolvedAbility::new(
                 Effect::CreateDelayedTrigger {
-                    condition: condition(next),
+                    condition: condition(next, on_or_trigger),
                     effect: Box::new(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::Draw {
@@ -1475,7 +1512,7 @@ mod tests {
             resolve(&mut state, &ability, &mut events).expect("resolution must not error");
             assert!(
                 state.delayed_triggers.is_empty(),
-                "next={next}: a bare ParentTarget with no chosen target must not install — \
+                "next={next} or_trigger={on_or_trigger}: a bare ParentTarget with no chosen target must not install — \
                  the empty-parent rewrite would widen it to Any"
             );
         }
@@ -1487,7 +1524,7 @@ mod tests {
             let mut state = GameState::new_two_player(42);
             let ability = ResolvedAbility::new(
                 Effect::CreateDelayedTrigger {
-                    condition: condition(next),
+                    condition: condition(next, false),
                     effect: Box::new(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::Draw {

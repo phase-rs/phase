@@ -15,20 +15,25 @@
 //! moment the permission was granted, whether or not the player ever cast
 //! anything.
 //!
-//! Helmut Zemo is tested in both directions. Ogre Battlecaster has only the
-//! negative direction — its positive one is blocked by a separate open defect
-//! (its "+X/+0 … where X is that spell's mana value" binds X against a spell not
-//! yet cast). Discord, Lord of Disharmony is covered only by the parse dump, not
-//! by a runtime test. Said here rather than left to be discovered: a negative
-//! direction alone would also pass if the consequent were dropped entirely.
+//! Both wordings are tested in both directions. Helmut Zemo carries the first;
+//! the second is carried by a labelled stand-in, because Ogre Battlecaster — the
+//! only printed card that reaches this recognizer with that wording — cannot
+//! discriminate: its "+X/+0 … where X is that spell's mana value" binds X against
+//! a spell not yet cast and resolves to 0 either way (a separate open defect).
+//! Said here rather than left to be discovered: one direction alone would also
+//! pass if the consequent were dropped entirely.
 //!
-//! Corpus reach: three cards change parse (Helmut Zemo, Ogre Battlecaster,
-//! Discord, Lord of Disharmony). Discord's consequent is "copy this ability",
-//! which the parser lowers to `CopySpell` — a pre-existing mis-lowering this
-//! change neither introduces nor repairs. Discord also has no object target, so
-//! the over-fire guard in `delayed_trigger::resolve` refuses to install its
-//! trigger at all — its consequent is suppressed rather than re-scoped, which is
-//! the fail-closed side of the same defect.
+//! Corpus reach: two cards change parse — Helmut Zemo and Ogre Battlecaster.
+//!
+//! Discord, Lord of Disharmony USED to be a third. Review of PR #8749 found that
+//! wrapping its consequent turned a wrong consequent into no consequent at all:
+//! its permission ("you may cast a COPY of a spell with that name") declares no
+//! object referent, so `valid_card: ParentTarget` binds to nothing and the
+//! over-fire guard in `delayed_trigger::resolve` refuses to install the trigger.
+//! The recognizer now declines a chain that declared no object referent, and
+//! Discord keeps its `main` lowering — still mis-lowered to `CopySpell`, which is
+//! pre-existing and untouched here. Pinned by
+//! `oracle_effect::tests::a_targetless_cast_permission_keeps_its_consequent_unwrapped`.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
@@ -156,13 +161,23 @@ fn zemo_grants_the_permission_without_paying_out_the_counter() {
     );
 }
 
-/// CR 603.7 (issue #8721): the positive direction — the over-suppression guard.
+/// CR 603.7 (issue #8721): the positive direction, and the DISCRIMINATING half of
+/// this pair.
 ///
-/// COUNTER-PROBE: this test stays GREEN without the fix (before it, the counter
-/// was placed at grant time, so it was also 1 by the end). It is therefore not a
-/// proof of the fix; its job is the opposite one — to fail if the fix ever
-/// suppresses the payout instead of deferring it. The discriminating test is the
-/// negative one above, which goes red when the gate is removed.
+/// CORRECTED after review — the first version of this comment said the opposite
+/// on all three counts, and every correction is a measurement:
+///
+/// - It does NOT stay green without the fix. Both probes turn it red: disabling
+///   the engine's rider-tail handling, and disabling `strip_cast_this_way_gate`.
+///   Both fail on the POST-cast assertion (`left: 0, right: 1`).
+/// - On `main` the counter was not placed "too early" — it was never placed at
+///   all. MEASURED in the baseline corpus bake: Zemo's `PutCounter` hangs as a
+///   `SequentialSibling` UNDER the rider, which is exactly the position the
+///   pre-#8721 branch discarded.
+/// - The negative test above is NOT the discriminating one. Zero counters is the
+///   outcome on `main`, with the gate disabled, and as shipped, so it is green in
+///   every configuration. Its job is the early-fire guard, which is what the
+///   pre-cast assertion inside THIS test also does.
 #[test]
 fn zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast() {
     let mut scenario = GameScenario::new_n_player(2, 42);
@@ -190,6 +205,15 @@ fn zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast() {
         1,
         "reach guard: the permission must exist before the cast can use it"
     );
+    // BOTH SIDES IN ONE RUN. The permission now exists and has NOT been used.
+    // Asserting zero here is what makes the post-cast assertion below mean
+    // "because of the cast" rather than "at some point during this test" — a
+    // consequent that fired at grant time would already have placed the counter.
+    assert_eq!(
+        p1p1(&runner, zemo),
+        0,
+        "the permission is granted but unused, so the gated counter must not be placed yet"
+    );
 
     runner
         .cast(bolt)
@@ -204,23 +228,115 @@ fn zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast() {
     );
 }
 
-/// CR 603.7 (issue #8721): the "when you cast that spell" wording, same class.
+/// CR 603.7, review of PR #8749: the "when you cast that spell" wording, proven
+/// with an OBSERVABLE consequent in both directions.
 ///
-/// COUNTER-PROBE, stated plainly: this test stays GREEN without the fix, so it
-/// proves nothing on its own. The reason is a SECOND, pre-existing gap, MEASURED
-/// rather than assumed: driving the granted cast for real leaves the creature at
-/// its printed 3 power, so "+X/+0 … where X is that spell's mana value" resolves
-/// X to 0 whether the pump is gated or not. What this test buys is the wording
-/// coverage ("when you cast that spell" takes the same branch as "if you cast a
-/// spell this way") plus the reach guard, and it will start discriminating once
-/// that X binding is repaired. It is kept for that, not offered as evidence.
+/// A STAND-IN, and said plainly: this creature is a synthetic composite, not a
+/// printed card. It exists because the corpus cannot supply the proof —
+/// MEASURED, seven cards print "when you cast that spell," and only ONE of them
+/// reaches this recognizer. The rest carry it inside parenthetical reminder text
+/// (Crackling Spellslinger, Dark Apostle, "Elda, Conjurer of Spectacle",
+/// "TARDIS Bay", The Twelfth Doctor) or lower through `parse_static_ability`,
+/// which never reaches `parse_effect_chain_ir` ("Yume, Chronicler of Valor",
+/// whose printing is NOT reminder text). The one that does reach it is Ogre
+/// Battlecaster, whose
+/// consequent is "+X/+0 … where X is that spell's mana value" and resolves X to 0
+/// either way (a separate, pre-existing defect). So no printed card can
+/// distinguish this wording at runtime today.
 ///
-/// Where the evidence for this effect family actually lives, so nobody has to
-/// go looking: `zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast`
-/// is the `CreateDelayedTrigger` tail driven end to end, and it is what turns
-/// red when the rider-tail branch is reverted.
+/// Its permission and rider are Helmut Zemo's shape verbatim; only the gate
+/// wording is swapped to Ogre's, and the consequent is a +1/+1 counter, which is
+/// observable. That isolates the wording as the single difference from
+/// `zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast`.
+///
+/// Both directions in one run: zero after the grant, one after the cast. A
+/// dropped consequent fails the second assertion; a consequent that fires at
+/// grant time fails the first.
+///
+/// Counter-probe, MEASURED rather than predicted — and the obvious guess is
+/// wrong: disabling `strip_cast_this_way_gate` turns the SECOND assertion red
+/// (`left: 0, right: 1`), not the first. Without the gate the consequent lowers
+/// to a bare `PutCounter` tail, and the rider-tail allowlist
+/// (`tail_family_has_runtime_evidence`) does not admit that family — so the
+/// counter is never placed at all rather than placed too early. The first
+/// assertion still earns its place: it is the guard that catches an EARLY fire,
+/// which is exactly what would happen if that allowlist ever grew a
+/// counter-placing family while this gate was absent.
 #[test]
-fn ogre_battlecaster_does_not_pump_on_the_grant_alone() {
+fn the_when_you_cast_that_spell_wording_pays_out_only_after_the_cast() {
+    // Synthetic: Zemo's permission and rider with Ogre's gate wording.
+    const WHEN_YOU_CAST_STAND_IN: &str =
+        "Whenever Gate Wording Stand-In attacks, you may cast target instant or sorcery card \
+from your graveyard. If that spell would be put into your graveyard, exile it instead. When \
+you cast that spell, put a +1/+1 counter on Gate Wording Stand-In.";
+
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let standin = scenario
+        .add_creature_from_oracle(P0, "Gate Wording Stand-In", 2, 2, WHEN_YOU_CAST_STAND_IN)
+        .id();
+    // The grant does not waive the cost, so the cast needs real mana.
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    let bolt = scenario
+        .add_spell_to_graveyard(P0, "Lightning Bolt", true)
+        .id();
+
+    let mut runner = scenario.build();
+    to_declare_attackers(&mut runner, P0);
+    runner
+        .declare_attackers(&[(standin, AttackTarget::Player(P1))])
+        .expect("the stand-in must be a legal attacker");
+    settle_attack_trigger(&mut runner, true);
+
+    assert_eq!(
+        runner.state().objects[&bolt].casting_permissions.len(),
+        1,
+        "reach guard: the permission must exist before the cast can use it"
+    );
+    assert_eq!(
+        p1p1(&runner, standin),
+        0,
+        "\"when you cast that spell\" is gated on the CAST, so granting the permission alone \
+         must not place the counter"
+    );
+
+    runner
+        .cast(bolt)
+        .target_players(&[P1])
+        .try_resolve()
+        .expect("the granted graveyard cast must succeed");
+
+    assert_eq!(
+        p1p1(&runner, standin),
+        1,
+        "casting the granted spell must place exactly the one printed counter — a dropped \
+         consequent leaves this at zero"
+    );
+}
+
+/// CR 603.7 (issue #8721): Ogre Battlecaster itself — the one PRINTED card whose
+/// parse this recognizer changes with the "when you cast that spell" wording.
+///
+/// It asserts the LOWERING, not a runtime payoff, and that is a deliberate
+/// change from an earlier revision of this test. Ogre's consequent is "+X/+0 …
+/// where X is that spell's mana value", and MEASURED, X binds against a spell not
+/// yet cast and resolves to 0 whether the pump is gated or not — so any
+/// power-based assertion here stays green with the fix removed and answers "yes"
+/// to the only question a reviewer asks. The parsed shape does not: without the
+/// recognizer the consequent is a sequential instruction with no delayed trigger
+/// at all.
+///
+/// The runtime half of this wording is proved by
+/// `the_when_you_cast_that_spell_wording_pays_out_only_after_the_cast`, whose
+/// stand-in swaps Ogre's consequent for an observable one.
+///
+/// Counter-probe: disabling `strip_cast_this_way_gate` turns the lowering
+/// assertion red.
+#[test]
+fn ogre_battlecaster_lowers_its_gate_to_a_delayed_trigger() {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -241,12 +357,67 @@ fn ogre_battlecaster_does_not_pump_on_the_grant_alone() {
     assert_eq!(
         runner.state().objects[&bolt].casting_permissions.len(),
         1,
-        "reach guard: the trigger must have granted its cast permission"
+        "reach guard: the trigger must have granted its cast permission, so the printed \
+         ability really resolved through the production pipeline"
     );
+
+    // The discriminating assertion: Ogre's own printed consequent must have been
+    // lowered to a delayed trigger keyed to the later cast, rather than placed as
+    // a sequential instruction of the granting resolution.
+    // Exact rather than shape-matching: the delayed trigger must be keyed to a
+    // SpellCast AND carry Ogre's own printed payload, a `Pump` on `SelfRef`.
+    // MEASURED, that `SelfRef` is a SECOND parse change on this card — the old
+    // lowering produced `target: Any` for "this creature" — so asserting it here
+    // pins that change instead of leaving it silent.
+    fn walk(def: &engine::types::ability::AbilityDefinition) -> bool {
+        use engine::types::ability::{DelayedTriggerCondition, Effect, TargetFilter};
+        if let Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenNextEvent { trigger, .. },
+            effect,
+            ..
+        } = &*def.effect
+        {
+            if matches!(
+                trigger.mode,
+                engine::types::triggers::TriggerMode::SpellCast
+            ) && matches!(
+                &*effect.effect,
+                Effect::Pump {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ) {
+                return true;
+            }
+        }
+        def.sub_ability.as_deref().is_some_and(walk)
+            || def.else_ability.as_deref().is_some_and(walk)
+    }
+    // `Definitions` deliberately exposes no `iter()` (its module doc explains
+    // why: iterating must go through the CR-gated `functioning_abilities`), so
+    // read the one printed trigger positionally, the way the neighbouring
+    // integration tests do.
+    let attack_trigger = runner.state().objects[&ogre]
+        .trigger_definitions
+        .first()
+        .expect("Ogre must carry its printed attack trigger")
+        .clone();
+    assert!(
+        attack_trigger
+            .definition
+            .execute
+            .as_ref()
+            .is_some_and(|body| walk(body)),
+        "\"when you cast that spell\" must lower to a delayed trigger keyed to the later cast \
+         (CR 603.7) carrying Ogre's own `Pump` on `SelfRef` — not to a sequential instruction \
+         of the granting resolution, and not to a pump aimed at anything else"
+    );
+
     engine::game::layers::evaluate_layers(runner.state_mut());
     assert_eq!(
         runner.state().objects[&ogre].power,
         Some(3),
-        "no spell was cast under the permission, so the gated pump must not apply"
+        "and no spell was cast under the permission, so nothing pumped — kept as the \
+         companion check, NOT as evidence: X resolves to 0 either way (measured)"
     );
 }

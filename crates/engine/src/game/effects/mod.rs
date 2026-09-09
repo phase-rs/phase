@@ -11491,10 +11491,23 @@ fn is_bound_attach_remainder_for(pending: &PendingContinuation, ability: &Resolv
 ///
 /// Absent on purpose: `PutAtLibraryPosition` (Invasion of Alara) and `CopySpell`
 /// (Finale of Promise). Both are single-link tails, so the rule above would
-/// admit them, but neither could be driven to its tail in a `GameScenario` —
-/// their behaviour stays exactly as it is on main until that measurement exists
-/// (issue #8750). Adding a variant here without a test that fails when the
-/// branch is reverted is the mistake this list was introduced to prevent.
+/// admit them — and for both, admitting them is measurably WRONG, not merely
+/// unmeasured. That is the first reason and it is stated first, because "no
+/// runtime evidence" alone would be the excuse rule L3 rejects:
+///
+/// - Invasion of Alara's tail is `PutAtLibraryPosition { target: ExiledBySource,
+///   count: Ref(CardsExiledBySource) }` — it names EVERY card the source exiled,
+///   not "the other cards", so running it would also bottom the card the player
+///   may still cast under the permission it just granted.
+/// - Finale of Promise's tail targets `TrackedSetFiltered { id: 0 }`, the
+///   parser's sentinel, whose documented fallback in
+///   `targeting::resolve_tracked_set_id` is the latest non-empty published set —
+///   so it can copy an unrelated set from earlier in the same resolution.
+///
+/// The second reason is that neither could be driven to its tail in a
+/// `GameScenario`, so neither repair can be measured here either (issue #8750).
+/// Adding a variant to this list without a test that fails when the branch is
+/// reverted is the mistake it was introduced to prevent.
 fn tail_family_has_runtime_evidence(effect: &Effect) -> bool {
     matches!(
         effect,
@@ -13822,10 +13835,19 @@ fn resolve_chain_body(
             // `complete_hand_pick_cast_from_zone`, which requires it to still be
             // an `Effect::CastFromZone` (issue #5945). Taking the tail out of the
             // chain at all would break that, so the extraction is skipped
-            // wholesale for that state rather than merely re-timed. MEASURED: no
-            // corpus member of the rider class is a private-zone pick, so this
-            // guards a shape rather than a card. The dedicated hand-pick guard
-            // ~45 lines below computes the same three conjuncts; this branch
+            // wholesale for that state rather than merely re-timed. MEASURED, and in the
+            // form that card data can actually settle: no corpus member carries
+            // BOTH a tail and a private-zone pick. Four of the six tail carriers
+            // declare a stack-time target; the other two (Invasion of Alara, The
+            // Great Work) declare none, but pick from or grant over a PUBLIC zone
+            // — exile and "any graveyard" — never the hand or library this
+            // continuation serves. (Whether a head routes through a private-zone
+            // pick is a runtime decision, not a readable field, so the
+            // stronger-sounding "no member of the class is a pick" would be a
+            // claim the data cannot support.) This guards a shape, not a card.
+            //
+            // The dedicated hand-pick guard
+            // ~100 lines below computes the same three conjuncts; this branch
             // returns before reaching it, which is why they are spelled out
             // twice. If either changes, this is the site to re-read.
             let hand_pick_continuation_is_active = waits_for_resolution_choice(&state.waiting_for)
@@ -13866,6 +13888,40 @@ fn resolve_chain_body(
             // handled here. Resolving the tail inline against a window the player
             // has not answered yet would read a state that does not exist, so
             // park it behind that head instead.
+            //
+            // NARROWER than the states a `CastFromZone` head can leave, and named
+            // rather than hidden: `cast_from_zone::resolve` can also leave a
+            // `CastOfferKind::GraveyardPaidCast`, an in-resolution cast from
+            // `initiate_cast_during_resolution`, or a
+            // `LingeringPermissionGrantResult::NeedsChoice`.
+            //
+            // CORRECTED after review: an earlier version credited the driver for
+            // this ("all six carriers drive `LingeringPermission`"), which is not
+            // what gates those paths — `immediate_graveyard_free_cast` never
+            // consults the driver, and Finale of Promise satisfies its conditions.
+            // The load-bearing facts are per card, and only three heads reach this
+            // decision at all (the other three tails are stopped one step earlier
+            // by the two scope rules): Sins of the Past carries
+            // `duration: UntilEndOfTurn`, so the free-cast-during-resolution gate
+            // is false; Helmut Zemo and Ogre Battlecaster carry
+            // `without_paying_mana_cost: false`, so both free-cast gates are
+            // false; and all three target a card already in a graveyard, which
+            // `grant_lingering_permissions` routes in place, so `NeedsChoice`
+            // cannot fire.
+            //
+            // One correction to that correction, because over-correcting is its
+            // own failure: for the PAID offer (`CastOfferKind::GraveyardPaidCast`)
+            // `without_paying_mana_cost: false` is the SATISFIED first conjunct,
+            // not an exclusion. What keeps Zemo and Ogre out of that one is the
+            // driver after all — it also requires `driver.is_during_resolution()`,
+            // and both carry the default `LingeringPermission`. The driver is
+            // simply not what gates the two FREE-cast paths, which is what the
+            // first correction was about.
+            //
+            // Site without a demonstrated consequence, so this stays
+            // the pre-#8721 condition rather than being widened on speculation;
+            // the broader idiom further down this function is
+            // `!matches!(state.waiting_for, WaitingFor::Priority { .. })`.
             if let Some(tail) = direct_sequential_tail {
                 if matches!(
                     state.waiting_for,
@@ -16720,8 +16776,9 @@ mod tests {
     /// tail families some integration test drives end to end, and it is meant to
     /// go red when a variant is added without one.
     ///
-    /// The four effects below are the lowered tails of the four corpus cards that
-    /// reach the branch with a single-link tail, taken from
+    /// The four effects below are one lowered tail per FAMILY among the corpus
+    /// cards that reach the branch with a single-link tail (there are five such
+    /// cards; Ogre Battlecaster shares Helmut Zemo's family), taken from
     /// `client/public/card-data.json` — ABRIDGED to the fields that identify the
     /// variant, the rest supplied by serde defaults. Said plainly, because an
     /// earlier version of this comment called them verbatim: only Invasion of

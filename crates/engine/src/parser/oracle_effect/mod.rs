@@ -36695,9 +36695,17 @@ pub(crate) fn parse_effect_chain_ir(
         // wordings):
         //   * a PROPERTY of the granted cast — "you cast it without paying its
         //     mana cost" (Brilliant Ultimatum, X), "mana of any type can be spent
-        //     to cast it" (Bloodsoaked Insight). CR 601.2 makes this part of
-        //     casting the spell, so it must be live BEFORE the cast; a delayed
-        //     trigger firing after it would be too late. These lower to
+        //     to cast it" (Bloodsoaked Insight). Both are COST rules rather than
+        //     ability grants, which is why an earlier revision's CR 601.2a
+        //     ("effects that cause the spell to GAIN ABILITIES") was the wrong
+        //     anchor: CR 118.9 names "you may cast [this object] without paying
+        //     its mana cost" as an alternative cost, announced during casting per
+        //     CR 118.9a, and CR 118.14 is the "mana of any type can be spent"
+        //     rule, which says outright that where the effect also grants
+        //     permission to cast, it applies to the mana spent casting that way.
+        //     CR 601.2 puts cost determination and payment inside casting, so both
+        //     must be live BEFORE the cast; a delayed trigger firing after it
+        //     would be too late. These lower to
         //     `CastFromZone` (the cast restated) or `GenericEffect` (a static
         //     modification of the grant), and are left exactly as they parsed
         //     before this change.
@@ -36710,6 +36718,56 @@ pub(crate) fn parse_effect_chain_ir(
         // and is excluded for free, where a wording list would miss it.
         let (text_after_prefix, prefix_delayed) = match prefix_delayed {
             Some(condition) => (text_after_prefix, Some(condition)),
+            // TARGETLESS GRANTS ARE LEFT ALONE (review of PR #8749).
+            //
+            // The condition this recognizer emits scopes itself with
+            // `valid_card: ParentTarget`, which binds at delayed-trigger creation
+            // to the granting ability's chosen target. A chain that never
+            // declared an object target has nothing for it to bind to: the
+            // engine's over-fire guard then refuses to install the trigger at all
+            // (`delayed_trigger::resolve`), and the printed consequent is lost
+            // rather than re-timed.
+            //
+            // MEASURED over the full corpus, exactly one card's PARSE is changed
+            // by this decline — Discord, Lord of Disharmony, whose permission is
+            // "you may cast a COPY of a spell with that name" with no target. Its
+            // consequent is not scoped by a chosen object at all but by the
+            // permission itself ("a spell cast this way"), which is provenance
+            // this seam does not carry yet. Until it does, Discord keeps exactly
+            // the lowering it has on `main` — wrong in its own pre-existing way,
+            // but not newly suppressed by this change.
+            //
+            // Deliberately NOT claimed: that Discord is the only prefix-carrying
+            // card without a declared object referent. It is not — many of the 33
+            // print no "target" at all. For every other one the decline lands
+            // where the consequent discriminator below would have landed anyway,
+            // which is why the corpus diff moves by exactly this one card.
+            //
+            // `chain_declared_object_target` is the existing authority for "what
+            // object target has this chain declared", asked here rather than
+            // re-derived and rather than matched on the absence of the word
+            // "target" in the surrounding text.
+            //
+            // Named imprecision: it answers about the DECLARED target, while the
+            // runtime guard tests `ability.targets.is_empty()`. A declared target
+            // that becomes illegal before resolution would still read as "yes"
+            // here. That is the dangerous direction — proxy says yes, runtime has
+            // no targets, the guard refuses, and the consequent is lost, which is
+            // the Discord failure again — so it is named rather than glossed.
+            //
+            // CORRECTED after review, twice, and both corrections are recorded
+            // because the wrong reasons were plausible. An earlier revision used
+            // the sibling walk `chain_has_prior_typed_referent(.., true)` and
+            // claimed this one "bails on the graveyard rider's condition" and so
+            // could not serve. MEASURED, that is false: it serves, and the two
+            // walks produce BYTE-IDENTICAL `card-data.json` over all 35804 corpus
+            // entries. This one ships because it is the tighter question — it
+            // returns the declared `Typed` filter itself, where the sibling also
+            // accepts compound and non-target referents that never reach
+            // `ability.targets`.
+            None if chain_declared_object_target(builder.clauses()).is_none() => {
+                (text_after_prefix, None)
+            }
             None => match crate::parser::oracle_effect::lower::strip_cast_this_way_gate(&text) {
                 Some((body, condition)) => {
                     // This parse exists only to ASK what the consequent is; its
@@ -36719,6 +36777,14 @@ pub(crate) fn parse_effect_chain_ir(
                     // greppable). Passing the live `ctx` would leave this probe's
                     // diagnostics and `chosen_player_count` behind, and the
                     // accepted branch parses `body` a second time below.
+                    //
+                    // Named consequence of that second parse: `clone_throwaway`
+                    // deliberately drops `ChainBound` and the pending printed
+                    // colour choice, so in principle the probe and the shipped
+                    // lowering could differ and the discriminator would then have
+                    // classified a text it is not shipping. Site without a
+                    // demonstrated consequence — the corpus double bake bounds it
+                    // to zero.
                     let mut probe_ctx = ctx.clone_throwaway();
                     let probe =
                         lower_effect_chain_ir(&parse_effect_chain_ir(body, kind, &mut probe_ctx));
@@ -41261,8 +41327,9 @@ mod chain_declared_object_target_tests {
 /// deferred into a CR 603.7 delayed triggered ability.
 ///
 /// The consequents this actually defers, measured as the full diff of two corpus
-/// parses, are `PutCounter` (Helmut Zemo), `Pump` (Ogre Battlecaster) and
-/// `CopySpell` (Discord, Lord of Disharmony) — three cards, no more.
+/// parses, are `PutCounter` (Helmut Zemo) and `Pump` (Ogre Battlecaster) — two
+/// cards, no more. Discord, Lord of Disharmony's `CopySpell` was a third until
+/// the call site began declining chains with no declared object referent.
 ///
 /// Known imprecision, named rather than hidden, and it cuts both ways.
 /// `GenericEffect` carries any static modification, not only casting ones, so a
