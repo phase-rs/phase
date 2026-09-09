@@ -1019,6 +1019,25 @@ pub fn old_school_95() -> CustomFormatDef {
     def
 }
 
+/// Every bundled preset CONSIDERED for registration, before either gate runs.
+///
+/// Split out from [`custom_format_registry`] so the two reasons a preset can
+/// be absent from the registry stay distinguishable — from the outside they
+/// look identical, and only one of them is the gates doing their job:
+///
+/// - **Listed here and filtered out** — it declares something the engine does
+///   not implement yet. The gate is the mechanism, and the preset registers
+///   itself the moment that changes.
+/// - **Not listed here at all** — it would PASS the gates, so being listed
+///   would register it. This is the only way to express a blocker that is not
+///   about engine capability, which is [`swedish_old_school`]'s situation.
+///
+/// A test asserting only that the registry is empty cannot tell those apart,
+/// and would keep passing if a preset were quietly dropped from this list.
+pub fn bundled_presets() -> Vec<CustomFormatDef> {
+    vec![old_school_93_94(), old_school_95()]
+}
+
 /// Authoritative list of bundled custom-format presets, filtered through
 /// both registration gates.
 ///
@@ -1036,7 +1055,7 @@ pub fn old_school_95() -> CustomFormatDef {
 /// separately. A documentation blocker has no gate to express it, so omission
 /// is the only mechanism — see that constructor.
 pub fn custom_format_registry() -> Vec<CustomFormatDef> {
-    let presets: Vec<CustomFormatDef> = vec![old_school_93_94(), old_school_95()];
+    let presets = bundled_presets();
     assert_no_lobby_save_sentinel_collision(&presets);
     presets
         .into_iter()

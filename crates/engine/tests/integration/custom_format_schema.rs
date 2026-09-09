@@ -11,7 +11,7 @@
 //! private items directly.
 
 use engine::types::custom_format::{
-    assert_no_lobby_save_sentinel_collision, old_school_93_94, old_school_95,
+    assert_no_lobby_save_sentinel_collision, bundled_presets, old_school_93_94, old_school_95,
     passes_legacy_axis_gate, passes_reprint_fidelity_gate, swedish_old_school,
     validate_custom_rules_consistency, AntePolicy, CombatDamageTiming, CommandZoneMode,
     CommanderEligibilityRule, CustomFormatDef, CustomFormatId, CustomFormatRules, LegacyRuleSet,
@@ -385,7 +385,22 @@ fn old_school_95_extends_93_94_by_exactly_its_declared_deltas() {
 /// implement, so `custom_format_registry()` must list and then reject them.
 #[test]
 fn the_eternal_central_presets_are_listed_but_withheld_by_the_legacy_axis_gate() {
-    for preset in [old_school_93_94(), old_school_95()] {
+    // "Listed but withheld" is a claim about `bundled_presets()`, so assert it
+    // there. Checking only that the registry is empty would keep passing if
+    // both presets were quietly dropped from the list — the registry would
+    // still be empty, and independently-constructed presets would still fail
+    // the gate, so nothing would catch it.
+    let listed: BTreeSet<u16> = bundled_presets().iter().map(|def| def.rules.id.0).collect();
+    assert!(
+        listed.contains(&old_school_93_94().rules.id.0)
+            && listed.contains(&old_school_95().rules.id.0),
+        "both EC presets must be CONSIDERED for registration; got ids {listed:?}"
+    );
+    // The other half of the mechanism: Swedish is absent from the list
+    // entirely, because it would pass the gates. See its own test.
+    assert!(!listed.contains(&swedish_old_school().rules.id.0));
+
+    for preset in bundled_presets() {
         let label = preset.label.clone();
         assert!(
             !passes_legacy_axis_gate(&preset.rules.legality.legacy),
@@ -465,6 +480,15 @@ fn custom_format_registry_withholds_swedish_old_school_on_open_item_6() {
     let preset = swedish_old_school();
     assert!(passes_legacy_axis_gate(&preset.rules.legality.legacy));
     assert!(passes_reprint_fidelity_gate(&preset));
+
+    // Absent from the CONSIDERED list, not merely from the filtered result —
+    // that absence IS the withholding mechanism here, so it is what to assert.
+    assert!(
+        !bundled_presets()
+            .iter()
+            .any(|def| def.rules.id == preset.rules.id),
+        "Swedish passes both gates, so listing it in bundled_presets() would register it"
+    );
 
     let registry = engine::types::custom_format::custom_format_registry();
     assert!(
