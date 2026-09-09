@@ -584,7 +584,7 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
         | AbilityCondition::SourceAttachedToCreature
         | AbilityCondition::DayNightIsNeither
         | AbilityCondition::DayNightIs { .. }
-        | AbilityCondition::NthResolutionThisTurn { .. }
+        | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. }
         | AbilityCondition::ScopedPlayerMatches { .. } => {}
     }

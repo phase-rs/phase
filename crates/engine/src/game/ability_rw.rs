@@ -1996,7 +1996,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
-        | AbilityCondition::NthResolutionThisTurn { .. }
+        | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::RevealedHasCardType { .. }
         | AbilityCondition::SourceEnteredThisTurn
         | AbilityCondition::AdditionalCostPaid { .. }
@@ -6582,10 +6582,19 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         // CR 705.2: reads resolution-local `state.resolution_coin_flip` — a live
         // in-resolution signal, same read-bucket as `EventOutcomeWon`.
         AbilityCondition::CoinFlipOutcome { result: _ } => reads_event_live(),
+        // Both `AbilityUseCountThisTurn` tallies read a per-turn journal keyed
+        // by this ability's own `(source_id, ability_index)` — the same read
+        // bucket for `Resolved` (`ability_resolutions_this_turn`) and
+        // `Activated` (`activated_abilities_this_turn`). Neither field selects a
+        // different KIND or SCOPE of state, so the profile is unchanged by the
+        // tally axis; both are destructured without `..` so a future field
+        // forces re-classification.
         AbilityCondition::SpellCastWithVariantThisTurn { variant: _ }
-        | AbilityCondition::NthResolutionThisTurn { n: _ } => {
-            reads_player_of(StateKind::JournalCast)
-        }
+        | AbilityCondition::AbilityUseCountThisTurn {
+            tally: _,
+            comparator: _,
+            n: _,
+        } => reads_player_of(StateKind::JournalCast),
         // CR 701.20 + CR 603.3b: "if a card revealed THIS WAY has card type T" —
         // a read of the card the member's OWN parent reveal surfaced (a per-
         // resolution local, like an `ObjectScope::Recipient` read-modify-write:

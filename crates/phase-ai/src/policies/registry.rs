@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use super::activation_patience::ActivationPatiencePolicy;
 use super::aggro_pressure::AggroPressurePolicy;
 use super::anthem_priority::AnthemPriorityPolicy;
 use super::anti_self_harm::AntiSelfHarmPolicy;
@@ -104,6 +105,7 @@ pub enum PolicyId {
     SweeperTiming,
     FreeOutletActivation,
     FetchLandPatience,
+    ActivationPatience,
     AristocratsKeepablesMulligan,
     AggroPressure,
     AggroKeepablesMulligan,
@@ -401,6 +403,7 @@ impl Default for PolicyRegistry {
             Box::new(FreeOutletActivationPolicy),
             Box::new(MomirCurvePolicy),
             Box::new(FetchLandPatiencePolicy),
+            Box::new(ActivationPatiencePolicy),
             Box::new(AggroPressurePolicy),
             Box::new(TokensWidePolicy),
             Box::new(AnthemPriorityPolicy),

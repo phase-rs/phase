@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-09-08T00:00:00Z",
+  "updated": "2026-09-09T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -457,7 +457,7 @@
       ],
       "main": [
         {
-          "count": 3,
+          "count": 4,
           "name": "Burst Lightning"
         },
         {
@@ -473,20 +473,16 @@
           "name": "Kumano Faces Kakkazan"
         },
         {
-          "count": 1,
-          "name": "Mountain"
+          "count": 4,
+          "name": "Monastery Swiftspear"
         },
         {
           "count": 4,
           "name": "Monstrous Rage"
         },
         {
-          "count": 4,
-          "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 1,
-          "name": "Burst Lightning"
+          "count": 15,
+          "name": "Mountain"
         },
         {
           "count": 2,
@@ -497,11 +493,7 @@
           "name": "Reckless Rage"
         },
         {
-          "count": 1,
-          "name": "Rockface Village"
-        },
-        {
-          "count": 4,
+          "count": 2,
           "name": "Screaming Nemesis"
         },
         {
@@ -509,78 +501,50 @@
           "name": "Sokenzan, Crucible of Defiance"
         },
         {
-          "count": 4,
+          "count": 3,
           "name": "Soul-Scar Mage"
         },
         {
-          "count": 4,
+          "count": 3,
           "name": "Sunspine Lynx"
         },
         {
-          "count": 1,
-          "name": "The Legend of Roku"
-        },
-        {
-          "count": 3,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
           "count": 2,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Mountain"
+          "name": "Screaming Nemesis"
         },
         {
           "count": 4,
           "name": "Mutavault"
+        },
+        {
+          "count": 1,
+          "name": "Sunspine Lynx"
+        },
+        {
+          "count": 2,
+          "name": "Eidolon of the Great Revel"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Flowstone Infusion"
+          "count": 3,
+          "name": "Scorching Shot"
         },
         {
           "count": 4,
           "name": "Magebane Lizard"
         },
         {
-          "count": 1,
+          "count": 3,
           "name": "Pyroclasm"
-        },
-        {
-          "count": 2,
-          "name": "Redcap Melee"
         },
         {
           "count": 3,
-          "name": "Scorching Shot"
-        },
-        {
-          "count": 2,
           "name": "Weathered Runestone"
         },
         {
-          "count": 1,
-          "name": "Pyroclasm"
+          "count": 2,
+          "name": "The Legend of Roku"
         }
       ]
     },
@@ -1288,11 +1252,10 @@
       ]
     },
     {
-      "name": "Izzet Lessons",
+      "name": "Mono-White Humans",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
-        "R"
+        "W"
       ],
       "tags": [
         "metagame"
@@ -1300,125 +1263,117 @@
       "main": [
         {
           "count": 4,
-          "name": "Abandon Attachments"
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
         },
         {
           "count": 3,
-          "name": "Accumulate Wisdom"
+          "name": "Kytheon, Hero of Akros"
         },
         {
           "count": 4,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 4,
-          "name": "Divide by Zero"
-        },
-        {
-          "count": 4,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 4,
-          "name": "Gran-Gran"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 4,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 2,
-          "name": "Ral, Crackling Wit"
-        },
-        {
-          "count": 4,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 2,
-          "name": "Shivan Reef"
+          "name": "Thalia's Lieutenant"
         },
         {
           "count": 1,
-          "name": "Shivan Reef"
+          "name": "Shefet Dunes"
         },
         {
           "count": 4,
-          "name": "Island"
+          "name": "Dauntless Bodyguard"
         },
         {
           "count": 4,
-          "name": "Tablet of Discovery"
+          "name": "Mox Amber"
         },
         {
           "count": 4,
-          "name": "Steam Vents"
+          "name": "Adeline, Resplendent Cathar"
         },
         {
-          "count": 1,
-          "name": "Stock Up"
+          "count": 3,
+          "name": "Brutal Cathar"
         },
         {
-          "count": 1,
-          "name": "Thor, God of Thunder"
+          "count": 4,
+          "name": "Eiganjo, Seat of the Empire"
+        },
+        {
+          "count": 3,
+          "name": "Coppercoat Vanguard"
         },
         {
           "count": 2,
-          "name": "Thor, God of Thunder"
+          "name": "Basri, Tomorrow's Champion"
+        },
+        {
+          "count": 3,
+          "name": "Zack Fair"
+        },
+        {
+          "count": 3,
+          "name": "Erode"
+        },
+        {
+          "count": 3,
+          "name": "The Queen of Dale"
+        },
+        {
+          "count": 4,
+          "name": "Thalia, Guardian of Thraben"
+        },
+        {
+          "count": 2,
+          "name": "Cavern of Souls"
+        },
+        {
+          "count": 4,
+          "name": "Mutavault"
+        },
+        {
+          "count": 1,
+          "name": "Spectacular Spider-Man"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Accumulate Wisdom"
+          "count": 2,
+          "name": "Morningtide's Light"
         },
         {
-          "count": 1,
-          "name": "Anger of the Gods"
+          "count": 3,
+          "name": "Wedding Announcement"
         },
         {
           "count": 2,
-          "name": "Avengers Disassembled"
+          "name": "Get Lost"
         },
         {
           "count": 2,
-          "name": "Quantum Riddler"
+          "name": "Scout for Survivors"
         },
         {
-          "count": 1,
-          "name": "Abrade"
-        },
-        {
-          "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 1,
-          "name": "Price of Freedom"
-        },
-        {
-          "count": 1,
-          "name": "Flashfreeze"
+          "count": 3,
+          "name": "Seam Rip"
         },
         {
           "count": 2,
-          "name": "Unable to Scream"
-        },
-        {
-          "count": 2,
-          "name": "Ghost Vacuum"
+          "name": "Rest in Peace"
         },
         {
           "count": 1,
-          "name": "Improvisation Capstone"
+          "name": "Spectacular Spider-Man"
         }
       ]
     }

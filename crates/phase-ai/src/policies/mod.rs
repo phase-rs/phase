@@ -1,4 +1,5 @@
 pub(crate) mod activation;
+pub mod activation_patience;
 mod aggro_pressure;
 mod anthem_priority;
 mod anti_self_harm;

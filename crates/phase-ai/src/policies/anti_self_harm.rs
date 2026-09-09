@@ -4,6 +4,7 @@ use engine::ai_support::{
     certify_pact_plan, current_target_selection_targets, find_copy_targets, is_pact_payment_cast,
 };
 use engine::game::combat;
+use engine::game::effects::draw::can_draw_at_least_one;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords;
 use engine::game::life_safety::{preview_candidate_life_safety, CandidateLifeSafety};
@@ -53,6 +54,7 @@ use super::registry::{
     DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy, CRITICAL_MAX,
 };
 use super::removal_lethality;
+use super::self_cost::count_death_triggers_on_board;
 use super::strategy_helpers::can_pay_ward_cost;
 use crate::features::DeckFeatures;
 #[cfg(test)]
@@ -155,6 +157,7 @@ fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
         {
             Some(PolicyReason::new("anti_self_harm_extra_turn_self_loss"))
         }
+        GameAction::ActivateAbility { .. } => harmful_activation_reaches_only_own_board(ctx),
         GameAction::DecideOptionalEffect { accept: true }
             if optional_effect_life_cost_is_lethal(ctx) =>
         {
@@ -810,6 +813,226 @@ fn own_permanent_with_opponent_alternative(
             TargetRef::Player(_) => false,
         })
         .then(|| PolicyReason::new("anti_self_harm_own_permanent_with_opponent_target"))
+}
+
+/// Refuse an ACTIVATION whose every legal target is a permanent the AI itself
+/// controls, and whose effect on that permanent is harmful.
+///
+/// # Activation only, deliberately
+///
+/// There is no `CastSpell` arm, and adding one is a mistake this function
+/// already made once. [`PolicyContext::effects`]'s `CastSpell` arm walks every
+/// printed `AbilityDefinition` on the source with no `kind` filter — activated
+/// abilities included — unlike [`action_ability_definitions`], whose own
+/// `CastSpell` arm carries `.filter(|ability| ability.kind == AbilityKind::Spell)`.
+/// So a cast read its source's ACTIVATED abilities: casting Royal Assassin
+/// ("{T}: Destroy target tapped creature") while the AI controlled a tapped
+/// creature and the opponent controlled none produced an own-board-only pool
+/// from an ability that was not even activatable yet, and hard-rejected the
+/// spell — deleting the candidate, since a `Reject` is `-inf`. The AI refused
+/// to deploy Royal Assassin exactly when it was ahead on board.
+///
+/// The CR argument below reaches only the activation case, and the cast case is
+/// already priced: `score_pre_cast` charges `wasted_cast_penalty` for a harmful
+/// creature-only spell with no reachable opponent target, softly and by
+/// deliberate design. See `cast_arm` in
+/// `policies/tests/own_board_only_activation_repro.rs`.
+///
+/// CR 601.2c + CR 601.2h + CR 602.2b: targets are announced at 601.2c and costs
+/// are paid at 601.2h, and CR 602.2b applies that whole 601.2b–i sequence to
+/// activating an ability. Both steps therefore happen inside ONE atomic
+/// process. By the time any target-step policy is consulted the activation cost
+/// is already spent and the ability is on the stack, so a veto there cannot give
+/// back a sacrificed creature. **The activation decision is the last window in
+/// which the AI can decline**, which is why this lives on the pre-cast arm
+/// rather than beside its target-step sibling.
+///
+/// [`own_permanent_with_opponent_alternative`] is that sibling, and it cannot
+/// cover this case by construction: it fires only while the SAME slot still
+/// offers an opponent-controlled object to prefer instead. When the AI's own
+/// board is the ENTIRE legal target pool there is no alternative, so it stands
+/// down — which is how a "{T}, Sacrifice this creature: it deals 2 damage to
+/// target attacking or blocking creature" outlet came to be spent shooting the
+/// AI's own lone attacker.
+///
+/// Board-wide by design, unlike that slot-local sibling: the question here is
+/// "does this action have anywhere worth going at all", and CR 115.2 makes
+/// target legality the engine's to answer — so it asks `find_legal_targets`,
+/// which already honours hexproof, shroud, protection and ward.
+fn harmful_activation_reaches_only_own_board(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
+    let source = ctx.source_object()?;
+    let effects = ctx.effects();
+
+    // Own bounce / flicker: aiming these at one's own permanent IS the play.
+    if effects.iter().any(is_deliberate_self_target_rider) {
+        return None;
+    }
+
+    // CR 115.10a: a MASS leg (`DestroyAll`, `DamageAll`) is NON-targeted, so it
+    // clears an opposing population that targeting cannot reach at all —
+    // hexproof (CR 702.11b gates targeting only), shroud, protection. A chain
+    // carrying one is a real removal line no matter what its targeted leg can
+    // see, so consult the same resolver-mirroring mass seam `score_pre_cast`
+    // uses for its own no-target branch rather than re-deriving it.
+    if ctx.has_opposing_mass_population() {
+        return None;
+    }
+
+    // A chained leg like `Effect::Draw` carries NO target slot
+    // (`extract_target_filter` returns `None` for it — the field exists on
+    // the type, defaulting to `Controller`, but the variant is simply absent
+    // from that function's match arms), so it is invisible to the per-effect
+    // loop below by construction. "Destroy target creature. Draw a card."
+    // (Garruk, Cursed Huntsman's [-3], and the same shape on Vraska, Relic
+    // Seeker and Teferi, Time Raveler) is a real, engine-guaranteed payoff
+    // this veto must not blind itself to just because the Destroy leg's only
+    // legal target is the AI's own creature — the same reasoning
+    // `score_selected_modes` already uses one level up: "the engine has
+    // already removed modes with no legal target at all ... so this mode IS
+    // playable."
+    //
+    // Global `effect_polarity` alone is NOT sufficient evidence, though:
+    // `effect_polarity(Effect::Draw)` is unconditionally `Beneficial`
+    // regardless of WHO draws, and `extract_target_filter` never surfaces
+    // that recipient for the loop to check either — so a blanket
+    // "no target filter + Beneficial" reading would ALSO stand down for
+    // "Destroy target creature. Target opponent draws a card" (a pure gift,
+    // not a payoff) and for an AI-directed draw off an empty library (no
+    // payoff, and CR 121.3's own SBA loss risk). `untargeted_effect_confirms_ai_payoff`
+    // resolves the actual recipient for each such shape and, for Draw
+    // specifically, also requires the engine's own delivery authority.
+    if effects
+        .iter()
+        .any(|effect| untargeted_effect_confirms_ai_payoff(ctx, effect))
+    {
+        return None;
+    }
+
+    let mut harmful_own_board_effects = 0i64;
+    for effect in &effects {
+        let Some(filter) = extract_target_filter(effect) else {
+            continue;
+        };
+        let targets = find_legal_targets(ctx.state, filter, ctx.ai_player, source.id);
+        // An EMPTY pool is the WHIFF case, already priced by `score_pre_cast`'s
+        // `wasted_cast_penalty` branches. Charging it again here would
+        // double-book one mistake as two.
+        if targets.is_empty() {
+            continue;
+        }
+
+        let reaches_beyond_own_board = targets.iter().any(|target| match target {
+            TargetRef::Object(id) => ctx
+                .state
+                .objects
+                .get(id)
+                .is_none_or(|object| object.controller != ctx.ai_player),
+            // CR 115.4: a player slot the AI can point somewhere other than
+            // itself is a real alternative, so the pool is not own-board-only.
+            TargetRef::Player(player) => *player != ctx.ai_player,
+        });
+        if reaches_beyond_own_board {
+            return None;
+        }
+
+        match effect_polarity(effect) {
+            EffectPolarity::Harmful => harmful_own_board_effects += 1,
+            // A beneficial or contextual leg confined to the AI's own board is
+            // the ability working exactly as printed — a self-pump, a regrowth,
+            // a counter placed on its own source. Never veto those.
+            EffectPolarity::Beneficial | EffectPolarity::Contextual => return None,
+        }
+    }
+
+    if harmful_own_board_effects == 0 {
+        return None;
+    }
+
+    // An aristocrats board turns the AI's own creature dying into a PAYOFF
+    // (CR 603.2 death triggers), so pointing a harmful effect at its own
+    // creature can be the correct line there. Reuses the same death-trigger
+    // census `FreeOutletActivationPolicy` gates on rather than re-deriving it.
+    let features = ctx
+        .context
+        .session
+        .features
+        .get(&ctx.ai_player)
+        .cloned()
+        .unwrap_or_default();
+    if count_death_triggers_on_board(
+        ctx.state,
+        ctx.ai_player,
+        &features.aristocrats.death_trigger_names,
+    ) > 0
+    {
+        return None;
+    }
+
+    Some(
+        PolicyReason::new("anti_self_harm_harmful_activation_own_board_only")
+            .with_fact("harmful_own_board_effects", harmful_own_board_effects),
+    )
+}
+
+/// Does `effect` deliver a real, AI-received payoff, for the untargeted
+/// resource shapes `extract_target_filter` never exposes a slot for
+/// (`Draw`, `GainLife`, `Token`, `Mana`, `SearchLibrary`)?
+///
+/// `effect_polarity` alone answers a DIFFERENT, WEAKER question — "is this
+/// kind of effect beneficial in the abstract" — true for `Effect::Draw`
+/// regardless of who draws. This function answers the one
+/// [`harmful_activation_reaches_only_own_board`] actually needs: does the
+/// AI, specifically, receive it, and — where the engine exposes a delivery
+/// authority — can it actually be delivered rather than fizzle as a no-op.
+///
+/// Every field checked here (`target`/`player`/`owner`/`target_player`) is a
+/// PLAYER-SCOPE role, never a CR 115 target: none of these effects announce a
+/// target, so there is nothing wrong with `extract_target_filter` omitting
+/// them — the bug this closes is upstream of that, in treating "beneficial in
+/// the abstract" as "beneficial to the AI".
+fn untargeted_effect_confirms_ai_payoff(ctx: &PolicyContext<'_>, effect: &Effect) -> bool {
+    // CR 601.2c + CR 115: none of these five roles are ever announced as a
+    // target, so resolving "is it the AI" is exactly `TargetFilter::Controller`
+    // — the activating player — with everything else read conservatively as
+    // NOT provably the AI, matching this function's fail-closed contract.
+    let resolves_to_ai = |role: &TargetFilter| matches!(role, TargetFilter::Controller);
+
+    match effect {
+        // CR 121.1 + CR 121.3: a draw is a payoff only if the AI is the one
+        // drawing AND the draw can actually be delivered — an empty library,
+        // an exhausted per-turn limit, a `CantDraw` static, or a replacement
+        // that removes the draw all make it a no-op (and an empty-library draw
+        // is a state-based LOSS, the opposite of a payoff). `resolves_to_ai`
+        // mirrors `draw_payoff::draws_controller`'s exact check; `can_draw_at_least_one`
+        // is the same delivery authority that policy pays for its bonus with.
+        Effect::Draw { target, .. } => {
+            resolves_to_ai(target) && can_draw_at_least_one(ctx.state, ctx.ai_player)
+        }
+        // CR 119.3: same recipient shape as Draw. No engine delivery authority
+        // exists for lifegain (unlike drawing from an empty library, CR 119
+        // has no analogous SBA risk from gaining zero life), so ownership is
+        // the whole question here.
+        Effect::GainLife { player, .. } => resolves_to_ai(player),
+        // CR 111.7: the player who creates/owns the token(s).
+        Effect::Token { owner, .. } => resolves_to_ai(owner),
+        // CR 605: the common, unmarked shape adds to the ACTIVATING player's
+        // own pool (no explicit role at all). An explicit `ManaTargetRole`
+        // (Jetfire-class "target player adds...") names some OTHER player's
+        // pool or count source and is not provably AI-directed, so it fails
+        // closed rather than assume the common case.
+        Effect::Mana { target, .. } => target.is_none(),
+        // CR 701.23a: whose library is searched (defaults to the controller's
+        // — the AI's, for an ability the AI is activating). Says nothing about
+        // the DESTINATION of what's found; that is a separate, chained
+        // `ChangeZone` effect this same effect list carries as its own entry,
+        // which `extract_target_filter` already covers and this loop already
+        // visits on its own iteration — so this arm answers only the
+        // ownership half, by design, not the whole tutor.
+        Effect::SearchLibrary { target_player, .. } => {
+            target_player.as_ref().is_none_or(resolves_to_ai)
+        }
+        _ => false,
+    }
 }
 
 /// CR 601.2b + CR 700.2a: a mode is chosen while the spell is being cast (or
@@ -1553,7 +1776,7 @@ fn cost_includes_sacrifice_self(cost: &AbilityCost) -> bool {
 
 /// Extract the fixed damage amount from the pending spell's DealDamage effect.
 /// Returns None for variable damage or non-damage spells.
-fn extract_damage_amount(effects: &[&Effect]) -> Option<i32> {
+pub(crate) fn extract_damage_amount(effects: &[&Effect]) -> Option<i32> {
     effects.iter().find_map(|effect| match effect {
         Effect::DealDamage {
             amount: QuantityExpr::Fixed { value },

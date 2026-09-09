@@ -17,17 +17,18 @@ use crate::parser::oracle_casting::parse_casting_restriction_line;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
-    CoinFlipResult, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
-    CountScope, CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
-    DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
-    EffectScope, FilterProp, ForEachCategoryAction, GameRestriction, LibraryPosition,
-    ManaProduction, MassLibraryShuffleMode, ObjectProperty, ObjectScope,
-    ObjectSelectionCardinality, ObjectSelectionEligibility, ParsedCondition, PerpetualModification,
-    PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
-    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection,
-    SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
+    ActivationRestriction, AdditionalCost, AggregateFunction, AttackScope, AttackSubject,
+    CardTypeSetSource, ChoiceType, CoinFlipResult, CommanderOwnership, Comparator,
+    ContinuousModification, ControllerRef, CountScope, CounterKindChooser, CounterKindDomain,
+    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
+    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction,
+    MassLibraryShuffleMode, ObjectProperty, ObjectScope, ObjectSelectionCardinality,
+    ObjectSelectionEligibility, ParsedCondition, PerpetualModification, PlayerFilter,
+    PlayerRelation, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
+    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
     SpellStackToGraveyardReplacement, StackAbilityKind, StaticCondition, StaticDefinition,
     TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, VoteSubject, ZoneRef,
 };
@@ -4514,8 +4515,19 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         }
         AbilityCondition::DayNightIsNeither => "neither day nor night".into(),
         AbilityCondition::DayNightIs { state } => format!("it is {state:?}"),
-        AbilityCondition::NthResolutionThisTurn { n } => {
-            format!("{n} resolution this turn")
+        AbilityCondition::AbilityUseCountThisTurn {
+            tally,
+            comparator,
+            n,
+        } => {
+            let verb = match tally {
+                AbilityUseTally::Resolved => "resolved",
+                AbilityUseTally::Activated => "activated",
+            };
+            format!(
+                "this ability {verb} {} {n} times this turn",
+                fmt_comparator(comparator)
+            )
         }
         AbilityCondition::SourceLacksKeyword { keyword } => {
             format!("source lacks {}", keyword_label(keyword))
@@ -9502,7 +9514,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // CR 731.1: Day/night designation check — handled by evaluate_condition.
         AbilityCondition::DayNightIs { .. } => ("DayNightIs", Handled),
         // CR 603.4: Per-ability per-turn resolution counter — handled by evaluate_condition.
-        AbilityCondition::NthResolutionThisTurn { .. } => ("NthResolutionThisTurn", Handled),
+        AbilityCondition::AbilityUseCountThisTurn { .. } => ("AbilityUseCountThisTurn", Handled),
         AbilityCondition::CostPaidObjectMatchesFilter { .. } => {
             ("CostPaidObjectMatchesFilter", Handled)
         }
@@ -11991,8 +12003,6 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             // typically on triggers that the auditor already checks. The ability description
             // uses the keyword name, not a standalone condition. Mark as structural.
             || (lower.starts_with("coven") && lower.contains("if "))
-            // --- Activation/resolution count conditions ---
-            || lower.contains("this ability has been activated")
             // --- Zone-referential conditions (structural, not board-state) ---
             // "if this card is suspended" / "if this card is in your graveyard"
             || lower.contains("is suspended")

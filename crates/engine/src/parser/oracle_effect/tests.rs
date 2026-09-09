@@ -10,7 +10,7 @@ use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
-    AttachmentKind, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric,
+    AbilityUseTally, AttachmentKind, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric,
     CommanderOwnership, DigRestOrder, ExcessRecipient, ForEachCategoryAction,
     MassLibraryShuffleMode, ModalChoice, PerpetualModification, SeatDirection, TurnJournalKind,
 };
@@ -49706,7 +49706,7 @@ fn veil_of_summer_effect_chain_parses_supported_clauses() {
     )));
 }
 
-// CR 603.4: Parser arms for `AbilityCondition::NthResolutionThisTurn`.
+// CR 603.4: Parser arms for `AbilityCondition::AbilityUseCountThisTurn`.
 // Covers Omnath / Ashling / Nissa / Sephiroth / Teething Wurmlet class.
 
 #[test]
@@ -49717,10 +49717,7 @@ fn nth_resolution_first_full_form() {
         "this is the first time this ability has resolved this turn",
         &mut ParseContext::default(),
     );
-    assert_eq!(
-        result,
-        Some(AbilityCondition::NthResolutionThisTurn { n: 1 })
-    );
+    assert_eq!(result, Some(AbilityCondition::nth_resolution_this_turn(1)));
 }
 
 #[test]
@@ -49730,10 +49727,7 @@ fn nth_resolution_third_full_form() {
         "this is the third time this ability has resolved this turn",
         &mut ParseContext::default(),
     );
-    assert_eq!(
-        result,
-        Some(AbilityCondition::NthResolutionThisTurn { n: 3 })
-    );
+    assert_eq!(result, Some(AbilityCondition::nth_resolution_this_turn(3)));
 }
 
 #[test]
@@ -49744,20 +49738,14 @@ fn nth_resolution_anaphoric_second() {
         "it's the second time",
         &mut ParseContext::default(),
     );
-    assert_eq!(
-        result,
-        Some(AbilityCondition::NthResolutionThisTurn { n: 2 })
-    );
+    assert_eq!(result, Some(AbilityCondition::nth_resolution_this_turn(2)));
 }
 
 #[test]
 fn nth_resolution_anaphoric_third() {
     let result =
         try_nom_condition_as_ability_condition("it's the third time", &mut ParseContext::default());
-    assert_eq!(
-        result,
-        Some(AbilityCondition::NthResolutionThisTurn { n: 3 })
-    );
+    assert_eq!(result, Some(AbilityCondition::nth_resolution_this_turn(3)));
 }
 
 #[test]
@@ -49767,10 +49755,109 @@ fn nth_resolution_fourth() {
         "this is the fourth time this ability has resolved this turn",
         &mut ParseContext::default(),
     );
+    assert_eq!(result, Some(AbilityCondition::nth_resolution_this_turn(4)));
+}
+
+// CR 602.2a: Parser arms for the ACTIVATION tally of
+// `AbilityCondition::AbilityUseCountThisTurn` — the four-card class printing
+// "If this ability has been activated four or more times this turn, sacrifice
+// this creature at the beginning of the next end step" (Dragon Whelp, Nalathni
+// Dragon, Farrelite Priest, Initiates of the Ebon Hand).
+
+#[test]
+fn activation_count_four_or_more() {
+    // Dragon Whelp / Nalathni Dragon / Farrelite Priest / Initiates of the
+    // Ebon Hand — all four print this clause verbatim.
+    let result = try_nom_condition_as_ability_condition(
+        "this ability has been activated four or more times this turn",
+        &mut ParseContext::default(),
+    );
     assert_eq!(
         result,
-        Some(AbilityCondition::NthResolutionThisTurn { n: 4 })
+        Some(AbilityCondition::AbilityUseCountThisTurn {
+            tally: AbilityUseTally::Activated,
+            comparator: Comparator::GE,
+            n: 4,
+        })
     );
+}
+
+#[test]
+fn activation_count_reads_the_whole_comparison_class() {
+    // The count phrase is delegated to the shared `parse_comparison_suffix`
+    // authority, so the comparator axis is covered for the class rather than
+    // for the one printed comparator. These forms are not printed today; the
+    // point of the assertion is that no per-comparator parser edit is needed
+    // when one is.
+    for (text, comparator, n) in [
+        (
+            "this ability has been activated two or fewer times this turn",
+            Comparator::LE,
+            2,
+        ),
+        (
+            "this ability has been activated greater than three times this turn",
+            Comparator::GT,
+            3,
+        ),
+        (
+            "this ability has been activated 4 times this turn",
+            Comparator::EQ,
+            4,
+        ),
+    ] {
+        assert_eq!(
+            try_nom_condition_as_ability_condition(text, &mut ParseContext::default()),
+            Some(AbilityCondition::AbilityUseCountThisTurn {
+                tally: AbilityUseTally::Activated,
+                comparator,
+                n,
+            }),
+            "failed for {text}"
+        );
+    }
+}
+
+#[test]
+fn activation_count_does_not_collapse_into_the_resolution_tally() {
+    // The two tallies are rules-distinct (CR 602.2a announcement vs CR 608.2c
+    // resolution): a countered activation counts for one and not the other. A
+    // parser that mapped both templates onto one tally would pass every
+    // single-template test above, so pin the discrimination directly.
+    let activated = try_nom_condition_as_ability_condition(
+        "this ability has been activated four or more times this turn",
+        &mut ParseContext::default(),
+    );
+    let resolved = try_nom_condition_as_ability_condition(
+        "this is the fourth time this ability has resolved this turn",
+        &mut ParseContext::default(),
+    );
+    assert!(matches!(
+        activated,
+        Some(AbilityCondition::AbilityUseCountThisTurn {
+            tally: AbilityUseTally::Activated,
+            ..
+        })
+    ));
+    assert!(matches!(
+        resolved,
+        Some(AbilityCondition::AbilityUseCountThisTurn {
+            tally: AbilityUseTally::Resolved,
+            ..
+        })
+    ));
+    assert_ne!(activated, resolved);
+}
+
+#[test]
+fn activation_count_partial_text_returns_none() {
+    // Shares the "this ability has been activated " prefix but is not a count
+    // clause — must not match rather than silently dropping the tail.
+    let result = try_nom_condition_as_ability_condition(
+        "this ability has been activated four or more times this game",
+        &mut ParseContext::default(),
+    );
+    assert!(result.is_none());
 }
 
 #[test]
@@ -49787,7 +49874,7 @@ fn nth_resolution_partial_text_returns_none() {
 #[test]
 fn nth_resolution_omnath_chain_populates_three_branches() {
     // End-to-end: Omnath's landfall trigger description should chain three
-    // sub-abilities, each gated on `NthResolutionThisTurn { n: 1/2/3 }`.
+    // sub-abilities, each gated on `AbilityUseCountThisTurn { n: 1/2/3 }`.
     std::thread::Builder::new()
         .name("omnath-nth".into())
         .stack_size(32 * 1024 * 1024)
@@ -49805,21 +49892,21 @@ fn nth_resolution_omnath_chain_populates_three_branches() {
             );
             assert_eq!(
                 def.condition,
-                Some(AbilityCondition::NthResolutionThisTurn { n: 1 }),
+                Some(AbilityCondition::nth_resolution_this_turn(1)),
                 "first branch must gate on n=1, got {:?}",
                 def.condition
             );
             let sub_n2 = def.sub_ability.as_ref().expect("must have n=2 branch");
             assert_eq!(
                 sub_n2.condition,
-                Some(AbilityCondition::NthResolutionThisTurn { n: 2 }),
+                Some(AbilityCondition::nth_resolution_this_turn(2)),
                 "second branch must gate on n=2, got {:?}",
                 sub_n2.condition
             );
             let sub_n3 = sub_n2.sub_ability.as_ref().expect("must have n=3 branch");
             assert_eq!(
                 sub_n3.condition,
-                Some(AbilityCondition::NthResolutionThisTurn { n: 3 }),
+                Some(AbilityCondition::nth_resolution_this_turn(3)),
                 "third branch must gate on n=3, got {:?}",
                 sub_n3.condition
             );
@@ -62803,4 +62890,84 @@ fn collect_cast_from_zone_defs(def: &AbilityDefinition, out: &mut Vec<AbilityDef
     if let Some(sub) = def.sub_ability.as_ref() {
         collect_cast_from_zone_defs(sub, out);
     }
+}
+
+/// CR 602.2a: Dragon Whelp (issue #8388) — the whole printed activated ability,
+/// not just the condition fragment.
+///
+/// The reported defect was that the sacrifice fired after three activations. The
+/// cause was that the threshold clause reached no condition parser at all (the
+/// phrase was on `coverage.rs`'s structural-exemption list, so the gap did not
+/// even surface as unsupported), leaving the sacrifice rider ungated. Asserting
+/// the fragment alone would not have caught that: the fragment parser can be
+/// correct while the clause never reaches it. So this walks the parsed ability
+/// and requires the threshold to be attached to a real gate somewhere in the
+/// chain.
+///
+/// All four cards in the class print this second sentence verbatim; the first
+/// sentence differs (a pump for Dragon Whelp and Nalathni Dragon, a mana ability
+/// for Farrelite Priest and Initiates of the Ebon Hand), which is why the
+/// assertion is on the gated rider rather than on the ability root.
+#[test]
+fn dragon_whelp_activation_threshold_gates_the_sacrifice_rider() {
+    let parsed = parse_oracle_text(
+        "Flying\n{R}: This creature gets +1/+0 until end of turn. If this ability has been \
+         activated four or more times this turn, sacrifice this creature at the beginning of \
+         the next end step.",
+        "Dragon Whelp",
+        // Production supplies MTGJSON's keyword list; passing `&[]` here would
+        // leave the "Flying" line as `Effect::Unimplemented` for a reason that
+        // has nothing to do with the clause under test.
+        &["Flying".to_string()],
+        &["Creature".to_string()],
+        &["Dragon".to_string()],
+    );
+
+    let expected = AbilityCondition::AbilityUseCountThisTurn {
+        tally: AbilityUseTally::Activated,
+        comparator: Comparator::GE,
+        n: 4,
+    };
+
+    fn chain_conditions(def: &AbilityDefinition, out: &mut Vec<AbilityCondition>) {
+        if let Some(condition) = def.condition.as_ref() {
+            out.push(condition.clone());
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            chain_conditions(sub, out);
+        }
+        if let Some(alt) = def.else_ability.as_deref() {
+            chain_conditions(alt, out);
+        }
+    }
+
+    fn assert_no_unimplemented(def: &AbilityDefinition) {
+        assert!(
+            !matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+            "coverage honesty: the whole line must lower, got {def:#?}"
+        );
+        if let Some(sub) = def.sub_ability.as_deref() {
+            assert_no_unimplemented(sub);
+        }
+        if let Some(alt) = def.else_ability.as_deref() {
+            assert_no_unimplemented(alt);
+        }
+    }
+
+    let mut conditions = Vec::new();
+    for ability in &parsed.abilities {
+        // Removing the `line_has_condition_text` structural exemption only makes
+        // coverage honest if the clause genuinely lowers. If it degraded to
+        // `Effect::Unimplemented` instead, the card would flip to unsupported —
+        // which is honest but is NOT this fix's claim.
+        assert_no_unimplemented(ability);
+        chain_conditions(ability, &mut conditions);
+    }
+
+    assert!(
+        conditions.contains(&expected),
+        "the four-or-more-activations threshold must gate a clause in the parsed \
+         chain; got conditions {conditions:#?} from {:#?}",
+        parsed.abilities
+    );
 }

@@ -652,30 +652,374 @@ pub(crate) fn lethal_to_creature(
     Some(false)
 }
 
+/// What a [`TargetFilter`] can select, as three independent axes.
+///
+/// A filter is a *set* of legal targets, so the three composite variants are
+/// exactly set operations on that set: [`TargetFilter::Or`] is a union,
+/// [`TargetFilter::And`] an intersection, and [`TargetFilter::Not`] a
+/// complement. Representing the domain as independent booleans rather than a
+/// flat enum is what makes those three compose field-wise instead of needing a
+/// hand-written combination table.
+///
+/// This exists because the predicates below used to answer only for
+/// [`TargetFilter::Typed`] and silently returned "no" for every composite. A
+/// card as ordinary as "target attacking or blocking creature" parses to an
+/// `Or` of two `Typed` legs, so every consumer of `targets_creatures_only`
+/// — the anti-self-harm whiff gate, removal timing — read it as
+/// *not* creature-targeting and skipped its own logic entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FilterDomain {
+    /// A creature could be selected.
+    creatures: bool,
+    /// An object that is not a creature could be selected.
+    non_creature_objects: bool,
+    /// A player could be selected (CR 115.4).
+    players: bool,
+}
+
+impl FilterDomain {
+    /// Nothing is selectable.
+    const NOTHING: Self = Self {
+        creatures: false,
+        non_creature_objects: false,
+        players: false,
+    };
+    /// Anything is selectable — also the fail-open answer for a filter whose
+    /// domain is not statically knowable.
+    const ANYTHING: Self = Self {
+        creatures: true,
+        non_creature_objects: true,
+        players: true,
+    };
+    /// Some object, of statically unknown type. Runtime-bound object references
+    /// (`SelfRef`, `LastCreated`, a tracked set) land here: they never name a
+    /// player, but which object they resolve to is not knowable from the filter.
+    const SOME_OBJECT: Self = Self {
+        creatures: true,
+        non_creature_objects: true,
+        players: false,
+    };
+    /// Exactly one player.
+    const SOME_PLAYER: Self = Self {
+        creatures: false,
+        non_creature_objects: false,
+        players: true,
+    };
+    /// An object on the stack (CR 405.1) — never a creature permanent.
+    const STACK_OBJECT: Self = Self {
+        creatures: false,
+        non_creature_objects: true,
+        players: false,
+    };
+
+    /// Union — [`TargetFilter::Or`].
+    fn union(self, other: Self) -> Self {
+        Self {
+            creatures: self.creatures || other.creatures,
+            non_creature_objects: self.non_creature_objects || other.non_creature_objects,
+            players: self.players || other.players,
+        }
+    }
+
+    /// Intersection — [`TargetFilter::And`].
+    fn intersect(self, other: Self) -> Self {
+        Self {
+            creatures: self.creatures && other.creatures,
+            non_creature_objects: self.non_creature_objects && other.non_creature_objects,
+            players: self.players && other.players,
+        }
+    }
+}
+
+/// The domain of a [`TypeFilter`] — one CONJUNCT of a `Typed` filter's
+/// `type_filters` list — evaluated structurally, the same existential-domain
+/// approach `FilterDomain` takes one level up. Independent booleans rather
+/// than a flat enum for the same reason: `AnyOf` is a union and the list-level
+/// conjunction (see `filter_domain`'s `Typed` arm) is an intersection, and
+/// both compose field-wise this way with no hand-written combination table.
+///
+/// Review finding on this PR: the predecessor of this type answered only for
+/// a LITERAL `TypeFilter::Creature` and treated every other variant as
+/// creature-EXCLUDING by omission. `Permanent`, `Card`, `Any` and `AnyOf` are
+/// not narrower categories that merely CO-OCCUR with `Creature` on some
+/// cards — CR 608.2b makes `AnyOf` an explicit disjunction, and
+/// `engine::game::filter::type_filter_matches` implements `Permanent` as a
+/// union that lists `CoreType::Creature` as one of its six admitted core
+/// types, and `Card`/`Any` as unconditionally `true` — so a creature is
+/// STRUCTURALLY one of the alternatives these four accept, not an incidental
+/// overlap. `filter_admits_creature(TargetFilter::Typed { type_filters:
+/// vec![TypeFilter::Permanent], .. })` must therefore be `true`, and it was
+/// `false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TypeDomain {
+    /// A creature could satisfy this `TypeFilter`.
+    admits_creature: bool,
+    /// A non-creature object could satisfy this `TypeFilter`.
+    admits_non_creature: bool,
+}
+
+impl TypeDomain {
+    /// Satisfying this ALONE proves creature — never a non-creature.
+    const CREATURE_ONLY: Self = Self {
+        admits_creature: true,
+        admits_non_creature: false,
+    };
+    /// Structurally incapable of admitting a creature.
+    const NON_CREATURE_ONLY: Self = Self {
+        admits_creature: false,
+        admits_non_creature: true,
+    };
+    /// Admits nothing — the identity element for [`Self::union`] (an empty or
+    /// not-yet-folded disjunction), symmetric with [`Self::UNCONSTRAINED`]
+    /// being the identity for [`Self::intersect`].
+    const NEITHER: Self = Self {
+        admits_creature: false,
+        admits_non_creature: false,
+    };
+    /// Could go either way — the safe default whenever a `TypeFilter` cannot
+    /// be resolved to one of the two categorical extremes above from its
+    /// shape alone. Never produces a false `is_creature_only`, and never
+    /// produces a false "no creature possible" whiff-detector veto.
+    const EITHER: Self = Self {
+        admits_creature: true,
+        admits_non_creature: true,
+    };
+    /// The identity element for [`Self::intersect`] — the fold seed for a
+    /// non-empty conjunction, standing in for "no constraint imposed yet".
+    const UNCONSTRAINED: Self = Self::EITHER;
+
+    /// Union — [`TypeFilter::AnyOf`] (CR 608.2b: disjunction).
+    fn union(self, other: Self) -> Self {
+        Self {
+            admits_creature: self.admits_creature || other.admits_creature,
+            admits_non_creature: self.admits_non_creature || other.admits_non_creature,
+        }
+    }
+
+    /// Intersection — one `TypeFilter` narrowing another inside the SAME
+    /// `type_filters` conjunction (e.g. `[Artifact, Creature]`, "target
+    /// artifact creature"). Every conjunct must be satisfied by the same
+    /// object at once, so a category this predicate cannot verify admits
+    /// creatures (like plain `Artifact`) does not by itself disqualify a
+    /// LITERAL `Creature` conjunct sitting beside it: `intersect` only
+    /// narrows `admits_creature` to `false` when SOME conjunct is
+    /// `NON_CREATURE_ONLY` — provably, not merely unverified.
+    fn intersect(self, other: Self) -> Self {
+        Self {
+            admits_creature: self.admits_creature && other.admits_creature,
+            admits_non_creature: self.admits_non_creature && other.admits_non_creature,
+        }
+    }
+}
+
+/// The domain of one `TypeFilter` conjunct. Exhaustive over `TypeFilter` with
+/// no wildcard arm, mirroring `filter_domain`'s own discipline one level down.
+fn type_filter_domain(tf: &TypeFilter) -> TypeDomain {
+    match tf {
+        TypeFilter::Creature => TypeDomain::CREATURE_ONLY,
+
+        // CR 300.1: a card resolving as one of these two spell-only types is
+        // never simultaneously a creature permanent — no printed card
+        // combines Instant or Sorcery with Creature, and this engine's
+        // `core_types` set does not carry both at once for any live object.
+        // Provably creature-excluding, unlike the permanent types below.
+        TypeFilter::Instant | TypeFilter::Sorcery => TypeDomain::NON_CREATURE_ONLY,
+
+        // These five permanent types are NOT structurally creature-excluding
+        // — real printed cards double them with Creature (Dryad Arbor is a
+        // Land Creature; artifact creatures and enchantment creatures are
+        // commonplace; creature planeswalkers and creature battles exist).
+        // `EITHER` is the correct domain, not an over-cautious fallback: a
+        // bare `TypeFilter::Artifact` conjunct genuinely admits BOTH a plain
+        // artifact and an artifact creature.
+        TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred => TypeDomain::EITHER,
+
+        // CR 403.3 (as implemented, zone-agnostic — see
+        // `engine::game::filter::type_filter_matches`): `Permanent` is a
+        // union over six core types that explicitly lists `Creature` as one
+        // of them, so it admits creatures by construction, not by omission.
+        TypeFilter::Permanent => TypeDomain::EITHER,
+        // Unconditionally `true` in `type_filter_matches` — admits anything.
+        TypeFilter::Card | TypeFilter::Any => TypeDomain::EITHER,
+
+        // CR 608.2b: disjunction — the domain is the union of every branch.
+        // `AnyOf([Creature, Enchantment])` is the review's worked example:
+        // union(CREATURE_ONLY, EITHER) = EITHER, so `admits_creature` is
+        // `true` and `is_creature_only` stays `false` — reached exactly.
+        TypeFilter::AnyOf(filters) => filters
+            .iter()
+            .map(type_filter_domain)
+            .fold(TypeDomain::NEITHER, TypeDomain::union),
+
+        // CR 205.2a + CR 205.3: negation. One case resolves cleanly without
+        // deeper semantic modeling: `Non(Creature)` ("noncreature") — EVERY
+        // creature trivially satisfies the un-negated `Creature`, so NO
+        // creature can satisfy its negation. Every other inner filter is at
+        // best `EITHER` under this same function, which carries no universal
+        // ("does EVERY creature satisfy it") fact to negate — so the general
+        // case falls open to `EITHER` rather than guess. `Subtype` is the
+        // same shape as the general `Non` case: MTG has 250+ creature
+        // subtypes (CR 205.3m) and at least as many non-creature ones with no
+        // catalog available here to tell them apart, so `EITHER` is the only
+        // sound answer without one.
+        TypeFilter::Non(inner) => match inner.as_ref() {
+            TypeFilter::Creature => TypeDomain::NON_CREATURE_ONLY,
+            _ => TypeDomain::EITHER,
+        },
+        TypeFilter::Subtype(_) => TypeDomain::EITHER,
+    }
+}
+
+/// The domain of a [`TargetFilter`], evaluated structurally.
+///
+/// Exhaustive over `TargetFilter` with no wildcard arm, so a new variant is a
+/// compile error here rather than a silent fail-open at the three call sites.
+pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
+    match filter {
+        TargetFilter::None => FilterDomain::NOTHING,
+
+        // CR 115.4: "any target" admits creatures, players, planeswalkers and
+        // battles.
+        TargetFilter::Any => FilterDomain::ANYTHING,
+
+        // CR 115.10a: a compound "you and permanents you control" recipient.
+        TargetFilter::ControllerAndControlledPermanents { .. } => FilterDomain::ANYTHING,
+
+        TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::Opponent
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => FilterDomain::SOME_PLAYER,
+
+        // CR 405.1: objects on the stack are spells and abilities, never
+        // creature permanents — a counterspell does not target creatures.
+        TargetFilter::StackAbility { .. } | TargetFilter::StackSpell => FilterDomain::STACK_OBJECT,
+
+        // CR 120.1 + CR 614.1: a damage event's recipient may be a permanent or
+        // a player, so these two reach both axes.
+        TargetFilter::EventTarget | TargetFilter::PostReplacementDamageTarget => {
+            FilterDomain::ANYTHING
+        }
+
+        // Runtime-bound object references. The filter names no type line, so the
+        // object axis stays open and the player axis is closed.
+        TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSource
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. } => FilterDomain::SOME_OBJECT,
+
+        // A tracked set narrowed by an inner filter — the narrowing decides.
+        TargetFilter::TrackedSetFiltered { filter, .. } => filter_domain(filter),
+
+        TargetFilter::Typed(typed) => {
+            // Repo invariant (not a CR rule): `type_filters` is a CONJUNCTION,
+            // and an EMPTY list is an empty conjunction — "no type-line
+            // constraint", not "matches nothing" (see the invariant on
+            // `TypedFilter::type_filters`). An unrestricted `Typed` therefore
+            // also matches players, in the same direction as
+            // `engine::game::filter::player_matches_target_filter_with`.
+            if typed.type_filters.is_empty() {
+                return FilterDomain::ANYTHING;
+            }
+            // Every element of the conjunction must admit the SAME object
+            // simultaneously, so the list's domain is the AND (not the OR) of
+            // each element's own domain — mirroring `TypeDomain::intersect`'s
+            // doc, one level down from `FilterDomain::intersect` above.
+            let domain = typed
+                .type_filters
+                .iter()
+                .map(type_filter_domain)
+                .fold(TypeDomain::UNCONSTRAINED, TypeDomain::intersect);
+            FilterDomain {
+                creatures: domain.admits_creature,
+                non_creature_objects: domain.admits_non_creature,
+                // A `Typed` filter carrying a type line never matches a player.
+                players: false,
+            }
+        }
+
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .map(filter_domain)
+            .fold(FilterDomain::NOTHING, FilterDomain::union),
+
+        TargetFilter::And { filters } => filters
+            .iter()
+            .map(filter_domain)
+            .fold(FilterDomain::ANYTHING, FilterDomain::intersect),
+
+        // The complement of a set is not recoverable from these three axes —
+        // "not a creature card" and "not a Goblin" negate to very different
+        // domains. Fail open rather than guess.
+        TargetFilter::Not { .. } => FilterDomain::ANYTHING,
+    }
+}
+
+/// Could a creature be a legal target under this filter?
+pub(crate) fn filter_admits_creature(filter: &TargetFilter) -> bool {
+    filter_domain(filter).creatures
+}
+
+/// Is EVERY legal target under this filter a creature?
+pub(crate) fn filter_is_creature_only(filter: &TargetFilter) -> bool {
+    let domain = filter_domain(filter);
+    domain.creatures && !domain.non_creature_objects && !domain.players
+}
+
+/// Could a player be a legal target under this filter? (CR 115.4)
+pub(crate) fn filter_admits_player(filter: &TargetFilter) -> bool {
+    filter_domain(filter).players
+}
+
 /// Returns true if the effect exclusively targets creatures (not "any target").
 /// Used for harmful spells: burn with TargetFilter::Any can still go face.
 pub(crate) fn targets_creatures_only(effect: &Effect) -> bool {
-    let filter = extract_target_filter(effect);
-    matches!(
-        filter,
-        Some(TargetFilter::Typed(typed))
-            if typed.type_filters.iter().any(|t| matches!(t, TypeFilter::Creature))
-    )
+    extract_target_filter(effect).is_some_and(filter_is_creature_only)
 }
 
-/// Returns true if an effect's target filter is creature-typed (or Any).
+/// Returns true if an effect's target filter can admit a creature.
 pub(crate) fn targets_creatures(effect: &Effect) -> bool {
-    let Some(filter) = extract_target_filter(effect) else {
-        return false;
-    };
-    match filter {
-        TargetFilter::Any => true,
-        TargetFilter::Typed(typed) => typed
-            .type_filters
-            .iter()
-            .any(|t| matches!(t, TypeFilter::Creature)),
-        _ => false,
-    }
+    extract_target_filter(effect).is_some_and(filter_admits_creature)
 }
 
 /// Returns true if the pending spell's dominant effect is beneficial to its target.
@@ -3480,5 +3824,292 @@ mod counter_polarity_tests {
             effect_polarity(&put(CounterType::Loyalty)),
             EffectPolarity::Contextual
         );
+    }
+}
+
+#[cfg(test)]
+mod filter_domain_tests {
+    use super::*;
+    use engine::parser::oracle::parse_oracle_text;
+    use engine::types::ability::{AbilityDefinition, TypedFilter};
+
+    /// The shipped parse of a real card's Oracle text. Anchoring on this rather
+    /// than a hand-written AST means a parser shape change fails these tests
+    /// instead of leaving them green on a shape no card actually produces.
+    fn parsed_abilities(
+        card_name: &str,
+        oracle_text: &str,
+        keywords: &[&str],
+        types: &[&str],
+    ) -> Vec<AbilityDefinition> {
+        let keywords: Vec<String> = keywords.iter().map(|k| (*k).to_string()).collect();
+        let types: Vec<String> = types.iter().map(|t| (*t).to_string()).collect();
+        parse_oracle_text(oracle_text, card_name, &keywords, &types, &[]).abilities
+    }
+
+    fn creature_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..Default::default()
+        })
+    }
+
+    fn land_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Land],
+            ..Default::default()
+        })
+    }
+
+    /// The regression this whole seam exists for. Expendable Troops' "{T},
+    /// Sacrifice this creature: It deals 2 damage to target attacking or
+    /// blocking creature" parses its target to an `Or` of two `Typed` legs.
+    /// Before composite support, `targets_creatures_only` matched only bare
+    /// `Typed` and answered **false** here, which silently disabled
+    /// `anti_self_harm::score_pre_cast`'s entire whiff gate and let
+    /// `effect_timing::removal_score` fall back to scoring the activation by
+    /// opponent creatures the ability cannot legally target.
+    #[test]
+    fn attacking_or_blocking_creature_is_creature_only() {
+        let abilities = parsed_abilities(
+            "Expendable Troops",
+            "{T}, Sacrifice this creature: It deals 2 damage to target attacking or blocking creature.",
+            &[],
+            &["Creature"],
+        );
+        let effect = &*abilities
+            .first()
+            .expect("Expendable Troops parses one activated ability")
+            .effect;
+        let filter = extract_target_filter(effect).expect("DealDamage carries a target filter");
+
+        assert!(
+            matches!(filter, TargetFilter::Or { .. }),
+            "premise of this test: the parser emits a composite Or here, got {filter:?}"
+        );
+        assert!(
+            filter_is_creature_only(filter),
+            "every leg names Creature, so every legal target is a creature"
+        );
+        assert!(filter_admits_creature(filter));
+        assert!(
+            !filter_admits_player(filter),
+            "CR 115.4: a typed creature filter never admits a player — this is the \
+             answer `self_cost::deal_damage_is_trivial` used to fail open on, letting an \
+             opponent's life total decide a verdict the ability could never act on"
+        );
+        assert!(targets_creatures_only(effect));
+        assert!(targets_creatures(effect));
+    }
+
+    /// Serra Advocate is the polarity twin: identical `Or` filter, beneficial
+    /// effect. Both halves of the reported board must read as creature-only.
+    #[test]
+    fn beneficial_twin_reads_the_same_filter_the_same_way() {
+        let abilities = parsed_abilities(
+            "Serra Advocate",
+            "Flying\n{T}: Target attacking or blocking creature gets +2/+2 until end of turn.",
+            &["Flying"],
+            &["Creature"],
+        );
+        let effect = &*abilities
+            .iter()
+            .find(|a| extract_target_filter(&a.effect).is_some())
+            .expect("Serra Advocate parses a targeted pump")
+            .effect;
+        assert!(filter_is_creature_only(
+            extract_target_filter(effect).expect("pump carries a filter")
+        ));
+        assert!(targets_creatures(effect));
+    }
+
+    #[test]
+    fn any_target_admits_everything_but_is_not_creature_only() {
+        // CR 115.4: "any target" is the burn-can-go-face case the creature-only
+        // gate must keep answering `false` for.
+        assert!(filter_admits_creature(&TargetFilter::Any));
+        assert!(filter_admits_player(&TargetFilter::Any));
+        assert!(!filter_is_creature_only(&TargetFilter::Any));
+    }
+
+    #[test]
+    fn player_filters_admit_no_objects() {
+        for filter in [
+            TargetFilter::Player,
+            TargetFilter::Opponent,
+            TargetFilter::Controller,
+            TargetFilter::AllPlayers,
+        ] {
+            assert!(filter_admits_player(&filter), "{filter:?}");
+            assert!(!filter_admits_creature(&filter), "{filter:?}");
+            assert!(!filter_is_creature_only(&filter), "{filter:?}");
+        }
+    }
+
+    #[test]
+    fn or_is_a_union() {
+        // Creature ∪ Land reaches creatures, but not ONLY creatures.
+        let mixed = TargetFilter::Or {
+            filters: vec![creature_filter(), land_filter()],
+        };
+        assert!(filter_admits_creature(&mixed));
+        assert!(!filter_is_creature_only(&mixed));
+
+        // Creature ∪ Player reaches a player, so it is not creature-only either.
+        let with_player = TargetFilter::Or {
+            filters: vec![creature_filter(), TargetFilter::Player],
+        };
+        assert!(filter_admits_player(&with_player));
+        assert!(!filter_is_creature_only(&with_player));
+    }
+
+    #[test]
+    fn and_is_an_intersection() {
+        // Narrowing a creature filter by a second creature filter stays
+        // creature-only; narrowing "any target" by a creature filter BECOMES
+        // creature-only, because the intersection drops the player leg.
+        let narrowed = TargetFilter::And {
+            filters: vec![TargetFilter::Any, creature_filter()],
+        };
+        assert!(filter_is_creature_only(&narrowed));
+        assert!(!filter_admits_player(&narrowed));
+    }
+
+    #[test]
+    fn nested_composites_recurse() {
+        let nested = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Or {
+                    filters: vec![creature_filter(), creature_filter()],
+                },
+                creature_filter(),
+            ],
+        };
+        assert!(filter_is_creature_only(&nested));
+    }
+
+    #[test]
+    fn negation_fails_open() {
+        // The complement of a set is not recoverable from three booleans:
+        // "not a creature" and "not a Goblin" negate to very different domains.
+        // Fail open rather than guess — never claim creature-only.
+        let negated = TargetFilter::Not {
+            filter: Box::new(creature_filter()),
+        };
+        assert!(!filter_is_creature_only(&negated));
+        assert!(filter_admits_creature(&negated));
+        assert!(filter_admits_player(&negated));
+    }
+
+    #[test]
+    fn stack_filters_are_not_creatures() {
+        // CR 405.1: objects on the stack are spells and abilities. A
+        // counterspell must not read as creature-targeting.
+        assert!(!filter_admits_creature(&TargetFilter::StackSpell));
+        assert!(!filter_is_creature_only(&TargetFilter::StackSpell));
+        assert!(!filter_admits_player(&TargetFilter::StackSpell));
+    }
+
+    #[test]
+    fn untyped_typed_filter_still_reaches_players() {
+        // Repo invariant (not a CR rule): an EMPTY `type_filters` is an empty
+        // conjunction — "no type-line constraint" — and the engine's own player
+        // matcher admits a player for it. The old `Typed(_) => false` blanket
+        // answered this wrong.
+        let untyped = TargetFilter::Typed(TypedFilter::default());
+        assert!(filter_admits_player(&untyped));
+        assert!(filter_admits_creature(&untyped));
+        assert!(!filter_is_creature_only(&untyped));
+    }
+
+    #[test]
+    fn nothing_admits_nothing() {
+        assert!(!filter_admits_creature(&TargetFilter::None));
+        assert!(!filter_admits_player(&TargetFilter::None));
+        assert!(!filter_is_creature_only(&TargetFilter::None));
+    }
+
+    /// Review finding: `filter_domain`'s `Typed` arm answered only for a
+    /// LITERAL `TypeFilter::Creature` and treated every other `TypeFilter`
+    /// as creature-excluding by omission. `AnyOf` (CR 608.2b's own
+    /// disjunction) and `Permanent` (a union that lists `CoreType::Creature`
+    /// as one of its six admitted core types in
+    /// `engine::game::filter::type_filter_matches`) both admit a creature by
+    /// construction, not incidentally — so both must report
+    /// `filter_admits_creature == true`.
+    #[test]
+    fn any_of_creature_and_enchantment_admits_a_creature() {
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::AnyOf(vec![
+                TypeFilter::Creature,
+                TypeFilter::Enchantment,
+            ])));
+        assert!(
+            filter_admits_creature(&filter),
+            "AnyOf([Creature, Enchantment]) must admit a creature — Creature is literally              one of its two disjuncts (CR 608.2b)"
+        );
+        assert!(
+            !filter_is_creature_only(&filter),
+            "the Enchantment branch means a non-creature (a plain enchantment) can ALSO              satisfy this filter, so it must not read as creature-only"
+        );
+    }
+
+    #[test]
+    fn permanent_admits_a_creature() {
+        let filter = TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Permanent));
+        assert!(
+            filter_admits_creature(&filter),
+            "TypeFilter::Permanent's own matcher lists CoreType::Creature as one of the six              core types it admits — a creature satisfies 'target permanent' by construction"
+        );
+        assert!(
+            !filter_is_creature_only(&filter),
+            "a land, artifact, enchantment, planeswalker or battle ALSO satisfies              'target permanent', so it must not read as creature-only"
+        );
+    }
+
+    /// A conjunction (NOT a disjunction) of two categorical `TypeFilter`s
+    /// where one is the literal `Creature` — "target artifact creature"
+    /// (`type_filters: [Artifact, Creature]`). Discriminates
+    /// `TypeDomain::intersect` from a hypothetical implementation that
+    /// treated any non-`CREATURE_ONLY` conjunct as disqualifying: `Artifact`
+    /// alone is `EITHER` (real artifact creatures exist), and ANDing it with
+    /// `Creature`'s `CREATURE_ONLY` must still land on creature-only, not on
+    /// "admits neither".
+    #[test]
+    fn artifact_creature_conjunction_is_still_creature_only() {
+        let filter = TargetFilter::Typed(
+            TypedFilter::default()
+                .with_type(TypeFilter::Artifact)
+                .with_type(TypeFilter::Creature),
+        );
+        assert!(filter_admits_creature(&filter));
+        assert!(
+            filter_is_creature_only(&filter),
+            "'target artifact creature' is creature-only: the literal Creature conjunct              proves it regardless of what the Artifact conjunct alone could admit"
+        );
+    }
+
+    /// The provably creature-excluding categories stay excluded: no printed
+    /// card combines a spell-only type with Creature (CR 300.1).
+    #[test]
+    fn instant_and_sorcery_stay_non_creature_only() {
+        for tf in [TypeFilter::Instant, TypeFilter::Sorcery] {
+            let filter = TargetFilter::Typed(TypedFilter::default().with_type(tf.clone()));
+            assert!(!filter_admits_creature(&filter), "{tf:?}");
+            assert!(!filter_is_creature_only(&filter), "{tf:?}");
+        }
+    }
+
+    /// "target noncreature permanent" — `Non(Creature)` is the one negation
+    /// shape this module resolves precisely rather than falling open: every
+    /// creature trivially satisfies the un-negated `Creature`, so none can
+    /// satisfy its negation.
+    #[test]
+    fn non_creature_excludes_creatures() {
+        let filter = TargetFilter::Typed(
+            TypedFilter::default().with_type(TypeFilter::Non(Box::new(TypeFilter::Creature))),
+        );
+        assert!(!filter_admits_creature(&filter));
+        assert!(!filter_is_creature_only(&filter));
     }
 }

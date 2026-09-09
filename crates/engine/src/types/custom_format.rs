@@ -842,17 +842,220 @@ pub fn swedish_old_school() -> CustomFormatDef {
     }
 }
 
+/// Registry id for [`old_school_93_94`]. See [`SWEDISH_OLD_SCHOOL_ID`] on why
+/// these are stable and never renumbered.
+pub const OLD_SCHOOL_93_94_ID: CustomFormatId = CustomFormatId(2);
+
+/// Registry id for [`old_school_95`].
+pub const OLD_SCHOOL_95_ID: CustomFormatId = CustomFormatId(3);
+
+/// The reprint-fidelity disclosure every `SetCodeApproximation` preset's
+/// `description` must carry, per PLAN.md §1's pairing rule.
+///
+/// Both Eternal Central Old School rulesets define legality partly by
+/// PRINTING — "all non-foil cards from the sets above, that were reprinted in
+/// any language with the original frame and original art" — while this engine
+/// knows only set-code membership (`printed_in_any_set`). Two concrete
+/// divergences, both verified against Scryfall at implementation time rather
+/// than asserted:
+///
+/// - **Frame/foil is not enforced.** A foil or modern-frame copy of a legal
+///   card passes here and would not pass in paper. Over-permissive.
+/// - **The promo carve-outs are not included.** Both rulesets name specific
+///   legal promos — Arena, Sewers of Estark and Nalathni Dragon for 93/94,
+///   plus Giant Badger, Windseeker Centaur and Mana Crypt for 95 — and their
+///   sets are NOT in `legal_sets`, so those cards are rejected. Under-
+///   permissive, and not fixable at set-code granularity for 93/94: four of
+///   those six live in `PHPR` (HarperPrism Book Promos, 5 cards), of which
+///   only Arena and Sewers of Estark are 93/94-legal, so admitting the set
+///   would admit three cards the format does not allow — one of them Mana
+///   Crypt. See this phase's PR discussion.
+const SET_CODE_APPROXIMATION_DISCLOSURE: &str =
+    "Legality is approximated at the set-code level; original-printing frame/foil and the \
+     ruleset's named promo cards are not enforced.";
+
+fn set_codes(codes: &[&str]) -> Vec<SetCode> {
+    codes.iter().map(|code| SetCode(code.to_string())).collect()
+}
+
+fn card_names(names: &[&str]) -> Vec<CardName> {
+    names.iter().map(|name| CardName::from(*name)).collect()
+}
+
+/// Eternal Central's Old School 93/94, per the primary source
+/// (`raw.githubusercontent.com/northern-information/lordsofthepit.com/main/src/pages/formats.md`,
+/// re-fetched 2026-09-09 and matching RESEARCH.md §1 verbatim: 11 legal sets,
+/// 22 restricted, 7 banned, mana burn as the only legacy exception).
+///
+/// **A different ruleset from [`swedish_old_school`], not a duplicate** —
+/// different legal sets (this one includes Revised, Fallen Empires and the
+/// Collectors' Editions but not Summer Magic), a different restricted list,
+/// and a real banned list where the Swedish rules ban nothing.
+///
+/// Its seven banned cards are exactly the CR 407.3 ante class within this
+/// era's pool. `game::ante` already bars them from every deck; the entries are
+/// kept because the source states them, and because they must survive a future
+/// format that legitimately plays for ante.
+///
+/// **Not registerable yet:** `mana_burn: Obsolete` is a `LegacyRuleSet` axis
+/// the engine does not implement, so `custom_format_registry`'s legacy-axis
+/// gate filters this out until Phase 2b lands. That is the gate working as
+/// designed, not a defect — see the registry's own doc comment.
+pub fn old_school_93_94() -> CustomFormatDef {
+    CustomFormatDef {
+        rules: CustomFormatRules {
+            id: OLD_SCHOOL_93_94_ID,
+            structural: StructuralRules::from_format_config(
+                &FormatConfig::standard(),
+                CommandZoneMode::Disabled,
+            ),
+            legality: LegalityRules {
+                // Alpha, Beta, Unlimited, Collectors' Edition, Intl.
+                // Collectors' Edition, Arabian Nights, Antiquities, Revised,
+                // Legends, The Dark, Fallen Empires. Every code verified
+                // against Scryfall's live set list at implementation time.
+                legal_sets: Some(set_codes(&[
+                    "LEA", "LEB", "2ED", "CED", "CEI", "ARN", "ATQ", "3ED", "LEG", "DRK", "FEM",
+                ])),
+                banned: card_names(&[
+                    "Bronze Tablet",
+                    "Contract from Below",
+                    "Darkpact",
+                    "Demonic Attorney",
+                    "Jeweled Bird",
+                    "Rebirth",
+                    "Tempest Efreet",
+                ]),
+                restricted: card_names(&[
+                    "Ancestral Recall",
+                    "Balance",
+                    "Black Lotus",
+                    "Braingeyser",
+                    "Chaos Orb",
+                    "Channel",
+                    "Demonic Tutor",
+                    "Library of Alexandria",
+                    "Mana Drain",
+                    "Mind Twist",
+                    "Mox Emerald",
+                    "Mox Jet",
+                    "Mox Pearl",
+                    "Mox Ruby",
+                    "Mox Sapphire",
+                    "Recall",
+                    "Regrowth",
+                    "Sol Ring",
+                    "Time Vault",
+                    "Time Walk",
+                    "Timetwister",
+                    "Wheel of Fortune",
+                ]),
+                // The source states mana burn as this format's ONLY legacy
+                // exception — no damage on the stack, no pre-M10 Wish
+                // templating, no legend-rule reversion, and it is not played
+                // for ante.
+                legacy: LegacyRuleSet {
+                    mana_burn: ManaBurnPolicy::Obsolete,
+                    ..LegacyRuleSet::default()
+                },
+            },
+        },
+        label: "Old School 93/94".to_string(),
+        short_label: "O94".to_string(),
+        description: format!(
+            "Alpha through Fallen Empires, 22 restricted, 7 banned, mana burn. \
+             {SET_CODE_APPROXIMATION_DISCLOSURE}"
+        ),
+        // The source's reprint rule admits reprints in any language with the
+        // original frame and art, which includes the Collectors' Editions
+        // already present in `legal_sets`.
+        reprint_policy: Some(ReprintPolicy::AllowSpecialReprintSets),
+        printing_fidelity: PrintingFidelity::SetCodeApproximation,
+    }
+}
+
+/// Eternal Central's Old School 95 — published on the same page as an
+/// incremental extension of 93/94's own lists, and built here the same way, so
+/// the shared base can never drift between the two.
+///
+/// Adds five sets (Fourth Edition, Ice Age, Chronicles, Renaissance,
+/// Homelands), two restricted cards (Demonic Consultation, Mana Crypt) and two
+/// banned cards (Amulet of Quoz, Timmerian Fiends) — the last two being the
+/// remaining CR 407.3 ante cards, which this era's pool newly contains.
+///
+/// Everything else is inherited verbatim, including `mana_burn: Obsolete`, so
+/// this preset is withheld by the same legacy-axis gate until Phase 2b.
+pub fn old_school_95() -> CustomFormatDef {
+    let mut def = old_school_93_94();
+
+    // A registry-stable id of its own — inheriting the base's would make two
+    // presets indistinguishable to `GameFormat::Custom(id)`.
+    def.rules.id = OLD_SCHOOL_95_ID;
+
+    // `get_or_insert_with` rather than unwrapping: `legal_sets` is
+    // `Option<Vec<_>>`, and while the base always sets `Some(..)` (a
+    // pool-restricting preset never leaves it `None`), extending in place stays
+    // correct if that invariant ever changes rather than assuming it silently.
+    def.rules
+        .legality
+        .legal_sets
+        .get_or_insert_with(Vec::new)
+        .extend(set_codes(&["4ED", "ICE", "CHR", "REN", "HML"]));
+    def.rules
+        .legality
+        .restricted
+        .extend(card_names(&["Demonic Consultation", "Mana Crypt"]));
+    def.rules
+        .legality
+        .banned
+        .extend(card_names(&["Amulet of Quoz", "Timmerian Fiends"]));
+
+    def.label = "Old School 95".to_string();
+    def.short_label = "O95".to_string();
+    def.description = format!(
+        "Old School 93/94 plus Fourth Edition through Homelands, 24 restricted, 9 banned, \
+         mana burn. {SET_CODE_APPROXIMATION_DISCLOSURE}"
+    );
+    def
+}
+
+/// Every bundled preset CONSIDERED for registration, before either gate runs.
+///
+/// Split out from [`custom_format_registry`] so the two reasons a preset can
+/// be absent from the registry stay distinguishable — from the outside they
+/// look identical, and only one of them is the gates doing their job:
+///
+/// - **Listed here and filtered out** — it declares something the engine does
+///   not implement yet. The gate is the mechanism, and the preset registers
+///   itself the moment that changes.
+/// - **Not listed here at all** — it would PASS the gates, so being listed
+///   would register it. This is the only way to express a blocker that is not
+///   about engine capability, which is [`swedish_old_school`]'s situation.
+///
+/// A test asserting only that the registry is empty cannot tell those apart,
+/// and would keep passing if a preset were quietly dropped from this list.
+pub fn bundled_presets() -> Vec<CustomFormatDef> {
+    vec![old_school_93_94(), old_school_95()]
+}
+
 /// Authoritative list of bundled custom-format presets, filtered through
 /// both registration gates.
 ///
-/// Still empty, but no longer for Phase 1a's reason ("no presets exist").
-/// [`swedish_old_school`] exists and passes both gates; it is withheld
-/// because CONTEXT.md Open item 6 blocks its REGISTRATION specifically — see
-/// that constructor. A preset is listed here only once every claim it makes
-/// about a paper ruleset is sourced, so the gates below are the last line of
-/// defense, not the only one.
+/// **Still resolves to empty, and every preset here is withheld for a stated
+/// reason rather than by omission.** The two Eternal Central presets are
+/// listed and then REJECTED by `passes_legacy_axis_gate`, because both declare
+/// `mana_burn: Obsolete` and the engine implements no mana burn yet; Phase 2b
+/// adds `LegacyAxis::ManaBurn` to `IMPLEMENTED_LEGACY_AXES` and they become
+/// selectable with no edit here. Listing them is the point — until now the
+/// gates filtered an empty vector and could not fail.
+///
+/// [`swedish_old_school`] is the exception, and is deliberately NOT in this
+/// list: it PASSES both gates, so listing it would register it, and CONTEXT.md
+/// Open item 6 (its unconfirmed reprint-policy metadata) blocks that
+/// separately. A documentation blocker has no gate to express it, so omission
+/// is the only mechanism — see that constructor.
 pub fn custom_format_registry() -> Vec<CustomFormatDef> {
-    let presets: Vec<CustomFormatDef> = Vec::new();
+    let presets = bundled_presets();
     assert_no_lobby_save_sentinel_collision(&presets);
     presets
         .into_iter()

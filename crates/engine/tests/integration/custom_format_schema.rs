@@ -11,11 +11,12 @@
 //! private items directly.
 
 use engine::types::custom_format::{
-    assert_no_lobby_save_sentinel_collision, passes_legacy_axis_gate, passes_reprint_fidelity_gate,
-    swedish_old_school, validate_custom_rules_consistency, AntePolicy, CombatDamageTiming,
-    CommandZoneMode, CommanderEligibilityRule, CustomFormatDef, CustomFormatId, CustomFormatRules,
-    LegacyRuleSet, LegalityRules, ManaBurnPolicy, PrintingFidelity, ReprintPolicy, SetCode,
-    StructuralRules, WishOutsideGameScope, LOBBY_SAVE_CUSTOM_FORMAT_ID,
+    assert_no_lobby_save_sentinel_collision, bundled_presets, old_school_93_94, old_school_95,
+    passes_legacy_axis_gate, passes_reprint_fidelity_gate, swedish_old_school,
+    validate_custom_rules_consistency, AntePolicy, CombatDamageTiming, CommandZoneMode,
+    CommanderEligibilityRule, CustomFormatDef, CustomFormatId, CustomFormatRules, LegacyRuleSet,
+    LegalityRules, ManaBurnPolicy, PrintingFidelity, ReprintPolicy, SetCode, StructuralRules,
+    WishOutsideGameScope, LOBBY_SAVE_CUSTOM_FORMAT_ID,
 };
 use engine::types::format::{
     DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, RangeOfInfluenceConfig, SelectedFormat,
@@ -233,18 +234,261 @@ fn reprint_fidelity_gate_accepts_agreement() {
     assert!(passes_reprint_fidelity_gate(&def2));
 }
 
+/// Names, not counts. A same-length substitution anywhere in these rosters
+/// changes legal deck construction, and a test that only counted would sail
+/// straight past it — the lesson from the Swedish preset's first review.
+fn names(entries: &[String]) -> BTreeSet<&str> {
+    entries.iter().map(String::as_str).collect()
+}
+
+fn codes(entries: &[SetCode]) -> BTreeSet<&str> {
+    entries.iter().map(|code| code.0.as_str()).collect()
+}
+
+#[test]
+fn old_school_93_94_declares_its_sourced_card_pool() {
+    // Verbatim from `lordsofthepit.com/src/pages/formats.md` (RESEARCH.md §1),
+    // re-fetched 2026-09-09. Every set code checked against Scryfall's live
+    // set list at implementation time.
+    let preset = old_school_93_94();
+    let legality = &preset.rules.legality;
+
+    let sets = legality
+        .legal_sets
+        .as_ref()
+        .expect("Old School 93/94 restricts its pool, so legal_sets is Some(_)");
+    assert_eq!(
+        codes(sets),
+        BTreeSet::from([
+            "LEA", "LEB", "2ED", "CED", "CEI", "ARN", "ATQ", "3ED", "LEG", "DRK", "FEM",
+        ]),
+        "Alpha, Beta, Unlimited, both Collectors' Editions, Arabian Nights, Antiquities, \
+         Revised, Legends, The Dark, Fallen Empires"
+    );
+    assert_eq!(sets.len(), 11, "no duplicate set codes");
+
+    assert_eq!(
+        names(&legality.restricted),
+        BTreeSet::from([
+            "Ancestral Recall",
+            "Balance",
+            "Black Lotus",
+            "Braingeyser",
+            "Chaos Orb",
+            "Channel",
+            "Demonic Tutor",
+            "Library of Alexandria",
+            "Mana Drain",
+            "Mind Twist",
+            "Mox Emerald",
+            "Mox Jet",
+            "Mox Pearl",
+            "Mox Ruby",
+            "Mox Sapphire",
+            "Recall",
+            "Regrowth",
+            "Sol Ring",
+            "Time Vault",
+            "Time Walk",
+            "Timetwister",
+            "Wheel of Fortune",
+        ])
+    );
+    assert_eq!(legality.restricted.len(), 22, "the source states 22");
+
+    assert_eq!(
+        names(&legality.banned),
+        BTreeSet::from([
+            "Bronze Tablet",
+            "Contract from Below",
+            "Darkpact",
+            "Demonic Attorney",
+            "Jeweled Bird",
+            "Rebirth",
+            "Tempest Efreet",
+        ])
+    );
+    assert_eq!(legality.banned.len(), 7, "the source states 7");
+
+    // Mana burn is the source's ONLY stated legacy exception — pinned axis by
+    // axis so a future edit cannot quietly add damage-on-the-stack or a Wish
+    // reversion this ruleset never asked for.
+    assert_eq!(legality.legacy.mana_burn, ManaBurnPolicy::Obsolete);
+    assert_eq!(
+        legality.legacy,
+        LegacyRuleSet {
+            mana_burn: ManaBurnPolicy::Obsolete,
+            ..LegacyRuleSet::default()
+        }
+    );
+}
+
+/// PLAN.md §2's preset-inheritance requirement: 95 must carry every 93/94
+/// entry PLUS exactly its own declared additions. Asserting only that the
+/// additions are present would let a future edit silently drop or duplicate
+/// the inherited base.
+#[test]
+fn old_school_95_extends_93_94_by_exactly_its_declared_deltas() {
+    let base = old_school_93_94();
+    let extended = old_school_95();
+
+    let base_sets = codes(base.rules.legality.legal_sets.as_ref().unwrap());
+    let extended_sets = codes(extended.rules.legality.legal_sets.as_ref().unwrap());
+    assert!(
+        base_sets.is_subset(&extended_sets),
+        "95 must inherit every 93/94 set"
+    );
+    assert_eq!(
+        &extended_sets - &base_sets,
+        BTreeSet::from(["4ED", "ICE", "CHR", "REN", "HML"]),
+        "Fourth Edition, Ice Age, Chronicles, Renaissance, Homelands — and nothing else"
+    );
+
+    let base_restricted = names(&base.rules.legality.restricted);
+    let extended_restricted = names(&extended.rules.legality.restricted);
+    assert!(base_restricted.is_subset(&extended_restricted));
+    assert_eq!(
+        &extended_restricted - &base_restricted,
+        BTreeSet::from(["Demonic Consultation", "Mana Crypt"])
+    );
+
+    let base_banned = names(&base.rules.legality.banned);
+    let extended_banned = names(&extended.rules.legality.banned);
+    assert!(base_banned.is_subset(&extended_banned));
+    assert_eq!(
+        &extended_banned - &base_banned,
+        BTreeSet::from(["Amulet of Quoz", "Timmerian Fiends"])
+    );
+
+    // Set semantics would hide a duplicated inherited entry, which is a real
+    // authoring defect even though it changes no verdict.
+    assert_eq!(
+        extended.rules.legality.legal_sets.as_ref().unwrap().len(),
+        16
+    );
+    assert_eq!(extended.rules.legality.restricted.len(), 24);
+    assert_eq!(extended.rules.legality.banned.len(), 9);
+
+    // Inherited verbatim, not re-declared.
+    assert_eq!(extended.rules.legality.legacy, base.rules.legality.legacy);
+    assert_eq!(extended.printing_fidelity, base.printing_fidelity);
+    assert_eq!(extended.reprint_policy, base.reprint_policy);
+
+    // ...but NOT the identity, which must be its own.
+    assert_ne!(extended.rules.id, base.rules.id);
+    assert_ne!(extended.label, base.label);
+    assert_ne!(extended.short_label, base.short_label);
+}
+
+/// The legacy-axis gate, exercised against real entries for the first time.
+/// Both EC presets declare `mana_burn: Obsolete`, which the engine does not
+/// implement, so `custom_format_registry()` must list and then reject them.
+#[test]
+fn the_eternal_central_presets_are_listed_but_withheld_by_the_legacy_axis_gate() {
+    // "Listed but withheld" is a claim about `bundled_presets()`, so assert it
+    // there. Checking only that the registry is empty would keep passing if
+    // both presets were quietly dropped from the list — the registry would
+    // still be empty, and independently-constructed presets would still fail
+    // the gate, so nothing would catch it.
+    let listed: BTreeSet<u16> = bundled_presets().iter().map(|def| def.rules.id.0).collect();
+    assert!(
+        listed.contains(&old_school_93_94().rules.id.0)
+            && listed.contains(&old_school_95().rules.id.0),
+        "both EC presets must be CONSIDERED for registration; got ids {listed:?}"
+    );
+    // The other half of the mechanism: Swedish is absent from the list
+    // entirely, because it would pass the gates. See its own test.
+    assert!(!listed.contains(&swedish_old_school().rules.id.0));
+
+    for preset in bundled_presets() {
+        let label = preset.label.clone();
+        assert!(
+            !passes_legacy_axis_gate(&preset.rules.legality.legacy),
+            "{label} declares mana burn, which IMPLEMENTED_LEGACY_AXES does not cover yet"
+        );
+        // The OTHER gate must pass, so the rejection above is attributable to
+        // the unimplemented axis and not to mismatched reprint metadata.
+        assert!(passes_reprint_fidelity_gate(&preset), "{label}");
+        assert_no_lobby_save_sentinel_collision(&[preset]);
+    }
+
+    assert!(
+        engine::types::custom_format::custom_format_registry().is_empty(),
+        "neither EC preset is selectable until mana burn lands (Phase 2b)"
+    );
+}
+
+/// PLAN.md §1's pairing rule, run offline: a preset that declares reprint
+/// intent must admit the approximation in text a player can read, or the
+/// label misleads about what the engine actually enforces.
+#[test]
+fn set_code_approximation_presets_disclose_the_limitation() {
+    for preset in [old_school_93_94(), old_school_95(), swedish_old_school()] {
+        let discloses = preset
+            .description
+            .contains("approximated at the set-code level");
+        match preset.printing_fidelity {
+            PrintingFidelity::SetCodeApproximation => assert!(
+                discloses,
+                "{} declares SetCodeApproximation but its description does not say so: {:?}",
+                preset.label, preset.description
+            ),
+            // Paired negative: a preset claiming no printing intent must not
+            // carry the disclosure either, or the text is boilerplate rather
+            // than a real signal.
+            PrintingFidelity::NotApplicable => assert!(
+                !discloses,
+                "{} is NotApplicable but discloses an approximation it does not make",
+                preset.label
+            ),
+        }
+    }
+}
+
+/// Registry ids are persisted in `GameFormat::Custom(id)`, so a collision
+/// between two presets would make saved games ambiguous. Checked across every
+/// bundled constructor, registered or not.
+#[test]
+fn every_bundled_preset_has_a_distinct_non_sentinel_id() {
+    let presets = [old_school_93_94(), old_school_95(), swedish_old_school()];
+    let ids: BTreeSet<u16> = presets.iter().map(|def| def.rules.id.0).collect();
+    assert_eq!(
+        ids.len(),
+        presets.len(),
+        "two bundled presets share a CustomFormatId: {:?}",
+        presets
+            .iter()
+            .map(|def| (&def.label, def.rules.id.0))
+            .collect::<Vec<_>>()
+    );
+    assert!(!ids.contains(&LOBBY_SAVE_CUSTOM_FORMAT_ID.0));
+}
+
 #[test]
 fn custom_format_registry_withholds_swedish_old_school_on_open_item_6() {
-    // The registry is still empty, but no longer because no preset exists:
-    // `swedish_old_school()` is built and passes both registration gates. It
-    // is withheld because its reprint policy is unconfirmed against the
-    // primary source (CONTEXT.md Open item 6), which PLAN.md §7/§8 make a
-    // registration blocker in its own right. Asserting BOTH halves is the
-    // point — an empty-registry assertion alone would keep passing if the
-    // preset silently stopped passing the gates.
+    // Swedish is withheld by a DIFFERENT mechanism from its EC siblings, and
+    // the distinction is the whole point of this test. The EC presets are
+    // listed in the registry and rejected by the legacy-axis gate. Swedish
+    // PASSES both gates, so listing it would register it — its blocker is
+    // CONTEXT.md Open item 6 (unconfirmed reprint-policy metadata), a
+    // documentation-accuracy blocker with no gate to express it, leaving
+    // omission from the list as the only mechanism.
+    //
+    // Asserting both halves is what makes that meaningful: an empty-registry
+    // assertion alone would keep passing if the preset silently started
+    // FAILING a gate, which would hide the real reason it is absent.
     let preset = swedish_old_school();
     assert!(passes_legacy_axis_gate(&preset.rules.legality.legacy));
     assert!(passes_reprint_fidelity_gate(&preset));
+
+    // Absent from the CONSIDERED list, not merely from the filtered result —
+    // that absence IS the withholding mechanism here, so it is what to assert.
+    assert!(
+        !bundled_presets()
+            .iter()
+            .any(|def| def.rules.id == preset.rules.id),
+        "Swedish passes both gates, so listing it in bundled_presets() would register it"
+    );
 
     let registry = engine::types::custom_format::custom_format_registry();
     assert!(

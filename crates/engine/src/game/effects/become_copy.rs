@@ -1,9 +1,12 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::DisplaySource;
-use crate::game::layers::compute_current_copiable_values;
+use crate::game::layers::{
+    compute_current_copiable_values, remove_subtype_set, subtype_matches_core_types,
+};
+use crate::game::printed_cards::ensure_keyword_triggers_for_copiable_values;
 use crate::types::ability::{
     ContinuousModification, CopiableValues, CopyRecipient, Duration, Effect, EffectError,
-    EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    EffectKind, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::card::{PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use crate::types::events::GameEvent;
@@ -143,40 +146,83 @@ pub(crate) fn apply_precomputed_copy_values(
         effect_kind,
     } = copy;
 
+    let classified_modifications: Vec<_> = additional_modifications
+        .iter()
+        .map(CopyExceptionOperation::classify)
+        .collect();
+
     // CR 202.1b + CR 707.9: "except it has no mana cost" is a copy-value
     // exception consumed at resolution — strip the copied mana cost from the
     // values themselves so the continuous copy carries mana value 0 on every
     // layer pass (BecomeCopy re-applies `CopyValues` each pass; a one-shot bake
     // would be overwritten). Mirrors token_copy.rs, which bakes the strip into
     // the freshly created token's base mana cost.
-    if additional_modifications
+    //
+    // `CopyExceptionOperation::classify` is the sole authority for deciding
+    // which modifications are resolution-time exceptions. It is exhaustive over
+    // `ContinuousModification`, so adding a new variant cannot silently drift
+    // from the snapshot-folding decision below.
+    if classified_modifications
         .iter()
-        .any(|m| matches!(m, ContinuousModification::RemoveManaCost))
+        .any(|operation| matches!(operation, CopyExceptionOperation::RemoveManaCost))
     {
         values.mana_cost = crate::types::mana::ManaCost::NoCost;
     }
-    if let Some(loyalty) =
-        super::token_copy::copy_starting_loyalty_override(&additional_modifications)
-    {
+    if let Some(loyalty) = classified_modifications.iter().rev().find_map(|operation| {
+        if let CopyExceptionOperation::SetStartingLoyalty { value } = operation {
+            Some(*value)
+        } else {
+            None
+        }
+    }) {
         values.loyalty = Some(loyalty);
         values.printed_loyalty = Some(PrintedLoyalty::Fixed(loyalty));
     }
 
-    // CR 122.1 + CR 614.1c + CR 202.1b + CR 707.9b: `AddCounterOnEnter`
-    // (counter placement), `RemoveManaCost`, and `SetStartingLoyalty` are
-    // resolution-time exceptions, not layered modifications — partition them
-    // out so the layer pipeline only sees layered variants. Counter-on-enter is
-    // applied via the counter primitive after layer evaluation; the mana-cost
-    // and starting-loyalty exceptions were already consumed into `values`.
-    let (resolution_mods, layered_mods): (Vec<_>, Vec<_>) =
-        additional_modifications.into_iter().partition(|m| {
-            matches!(
-                m,
-                ContinuousModification::AddCounterOnEnter { .. }
-                    | ContinuousModification::RemoveManaCost
-                    | ContinuousModification::SetStartingLoyalty { .. }
-            )
-        });
+    // CR 122.1 + CR 614.1c + CR 202.1b + CR 707.9b: resolution-time
+    // exceptions never enter the continuous-layer list. Retain every
+    // non-resolution modification in its original order, so an unsupported
+    // snapshot fold can install the exact legacy representation.
+    let layered_operations: Vec<_> = classified_modifications
+        .iter()
+        .copied()
+        .filter(|operation| operation.is_layered())
+        .collect();
+    let legacy_layered_modifications: Vec<_> = additional_modifications
+        .iter()
+        .zip(&classified_modifications)
+        .filter_map(|(modification, operation)| operation.legacy_modification(modification))
+        .collect();
+
+    // CR 707.9d: A supplied characteristic excludes the copied CDA that
+    // defines it, even when another exception rider must remain layered. This
+    // pruning is independent of snapshot folding: a mixed exception such as a
+    // name change plus a dynamic P/T value cannot fold all of its riders, but
+    // a subsequent copy must still not inherit the source P/T CDA.
+    let cda_pruning = super::copy_exception::prune_copy_exception_overridden_cdas(
+        &values.static_definitions,
+        &additional_modifications,
+    );
+    values.static_definitions = std::sync::Arc::new(cda_pruning.definitions);
+
+    // CR 707.9a + CR 707.9b: Ability grants and characteristic modifications
+    // made during copying become copiable values. The layer pipeline used to
+    // install these riders after `CopyValues`; that realizes the first copy
+    // correctly, but a later copy snapshots only the unmodified source values.
+    // Fold the supported permanent-copy exception vocabulary into the one
+    // `CopyValues` payload instead. This is deliberately all-or-nothing: an
+    // unfamiliar modification keeps the historical layered representation,
+    // rather than making a partial snapshot with silently different semantics.
+    // If any CDA classification failed, retain that same fallback so its
+    // unknown source definition is never folded around selectively. Classified
+    // sibling CDAs have still been pruned above.
+    let folded = cda_pruning.all_definitions_classified
+        && fold_admitted_copy_exceptions_into_values(
+            &mut values,
+            state.objects.get(&source_id),
+            &layered_operations,
+            &state.all_creature_types,
+        );
 
     let mut modifications = vec![ContinuousModification::CopyValues {
         values: Box::new(values),
@@ -184,7 +230,9 @@ pub(crate) fn apply_precomputed_copy_values(
         printed_ref,
         token_image_ref,
     }];
-    modifications.extend(layered_mods);
+    if !folded {
+        modifications.extend(legacy_layered_modifications.into_iter().cloned());
+    }
 
     let recipient = ObjectIncarnationRef::from_object(
         state
@@ -214,20 +262,17 @@ pub(crate) fn apply_precomputed_copy_values(
     // apply normally).
     crate::game::layers::flush_layers(state);
 
-    if !resolution_mods.is_empty() {
+    if !classified_modifications.is_empty() {
         let mut additions = Vec::new();
-        for modification in resolution_mods {
-            // RemoveManaCost was already consumed into `values`; only the
-            // counter-placement exceptions remain to apply here.
-            if let ContinuousModification::AddCounterOnEnter {
+        for operation in classified_modifications {
+            if let CopyExceptionOperation::AddCounterOnEnter {
                 counter_type,
                 count,
                 if_type,
-            } = modification
+            } = operation
             {
-                let n =
-                    crate::game::quantity::resolve_quantity(state, &count, controller, source_id)
-                        .max(0) as u32;
+                let n = crate::game::quantity::resolve_quantity(state, count, controller, source_id)
+                    .max(0) as u32;
                 if n == 0 {
                     continue;
                 }
@@ -236,7 +281,7 @@ pub(crate) fn apply_precomputed_copy_values(
                     Some(t) => state
                         .objects
                         .get(&recipient_id)
-                        .map(|obj| obj.card_types.core_types.contains(&t))
+                        .map(|obj| obj.card_types.core_types.contains(t))
                         .unwrap_or(false),
                 };
                 if !gate_passes {
@@ -245,7 +290,7 @@ pub(crate) fn apply_precomputed_copy_values(
                 additions.push(PendingCounterAddition::Object {
                     actor: controller,
                     object_id: recipient_id,
-                    counter_type,
+                    counter_type: counter_type.clone(),
                     count: n,
                 });
             }
@@ -285,6 +330,400 @@ pub(crate) fn apply_precomputed_copy_values(
     });
 
     Ok(())
+}
+
+/// Fold the permanent `BecomeCopy` exception vocabulary into `values`.
+///
+/// CR 707.9a + CR 707.9b: Ability grants and characteristic modifications made
+/// during copying become copiable values. This helper has a closed admission
+/// set on purpose: callers must retain the legacy layer sequence for any shape
+/// it cannot model completely.
+fn fold_admitted_copy_exceptions_into_values(
+    values: &mut CopiableValues,
+    source: Option<&crate::game::game_object::GameObject>,
+    operations: &[CopyExceptionOperation<'_>],
+    all_creature_types: &[String],
+) -> bool {
+    let Some(foldable_operations) = operations
+        .iter()
+        .copied()
+        .map(CopyExceptionOperation::foldable)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+
+    let mut candidate = values.clone();
+    for operation in foldable_operations {
+        operation.apply(&mut candidate, source, all_creature_types);
+    }
+
+    ensure_keyword_triggers_for_copiable_values(&mut candidate);
+    *values = candidate;
+    true
+}
+
+/// One compiler-audited classification of every copy exception modification.
+///
+/// The public `ContinuousModification` enum also serves effects that cannot
+/// become copiable values. This private view separates the permanent-copy
+/// vocabulary, resolution-time exceptions, and legacy layered operations
+/// without adding a second, drifting admission predicate.
+#[derive(Clone, Copy)]
+enum CopyExceptionOperation<'a> {
+    Fold(FoldableCopyException<'a>),
+    AddCounterOnEnter {
+        counter_type: &'a crate::types::counter::CounterType,
+        count: &'a crate::types::ability::QuantityExpr,
+        if_type: Option<&'a crate::types::card_type::CoreType>,
+    },
+    SetStartingLoyalty {
+        value: u32,
+    },
+    RemoveManaCost,
+    Layered(&'a ContinuousModification),
+}
+
+impl<'a> CopyExceptionOperation<'a> {
+    fn classify(modification: &'a ContinuousModification) -> Self {
+        match modification {
+            ContinuousModification::CopyValues { .. }
+            | ContinuousModification::CopyChosen
+            | ContinuousModification::SetTextName { .. }
+            | ContinuousModification::AddPower { .. }
+            | ContinuousModification::AddToughness { .. }
+            | ContinuousModification::RemoveKeyword { .. }
+            | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+            | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+            | ContinuousModification::GrantReplacement { .. }
+            | ContinuousModification::RemoveAllAbilities
+            | ContinuousModification::RemoveType { .. }
+            | ContinuousModification::RemoveSubtype { .. }
+            | ContinuousModification::SetDynamicPower { .. }
+            | ContinuousModification::SetDynamicToughness { .. }
+            | ContinuousModification::SetPowerDynamic { .. }
+            | ContinuousModification::SetToughnessDynamic { .. }
+            | ContinuousModification::AddDynamicPower { .. }
+            | ContinuousModification::AddDynamicToughness { .. }
+            | ContinuousModification::AddDynamicKeyword { .. }
+            | ContinuousModification::AddKeywordWithDerivedCost { .. }
+            | ContinuousModification::AddAllCreatureTypes
+            | ContinuousModification::AddAllBasicLandTypes
+            | ContinuousModification::AddAllLandTypes
+            | ContinuousModification::AddChosenSubtype { .. }
+            | ContinuousModification::AddChosenColor { .. }
+            | ContinuousModification::RemoveChosenKeyword
+            | ContinuousModification::AddChosenKeyword
+            | ContinuousModification::AddStaticMode { .. }
+            | ContinuousModification::SwitchPowerToughness
+            | ContinuousModification::AssignDamageFromToughness
+            | ContinuousModification::AssignDamageAsThoughUnblocked
+            | ContinuousModification::AssignNoCombatDamage
+            | ContinuousModification::ChangeController
+            | ContinuousModification::SetBasicLandType { .. }
+            | ContinuousModification::SetChosenBasicLandType
+            | ContinuousModification::SetChosenName => Self::Layered(modification),
+            ContinuousModification::SetName { name } => {
+                Self::Fold(FoldableCopyException::SetName { name })
+            }
+            ContinuousModification::SetPower { value } => {
+                Self::Fold(FoldableCopyException::SetPower { value })
+            }
+            ContinuousModification::SetToughness { value } => {
+                Self::Fold(FoldableCopyException::SetToughness { value })
+            }
+            ContinuousModification::AddKeyword { keyword } => {
+                Self::Fold(FoldableCopyException::AddKeyword { keyword })
+            }
+            ContinuousModification::GrantAbility { definition } => {
+                Self::Fold(FoldableCopyException::GrantAbility { definition })
+            }
+            ContinuousModification::GrantTrigger { trigger } => {
+                Self::Fold(FoldableCopyException::GrantTrigger { trigger })
+            }
+            ContinuousModification::AddType { core_type } => {
+                Self::Fold(FoldableCopyException::AddType { core_type })
+            }
+            ContinuousModification::AddSubtype { subtype } => {
+                Self::Fold(FoldableCopyException::AddSubtype { subtype })
+            }
+            ContinuousModification::SetCardTypes { core_types } => {
+                Self::Fold(FoldableCopyException::SetCardTypes { core_types })
+            }
+            ContinuousModification::RemoveAllSubtypes { set } => {
+                Self::Fold(FoldableCopyException::RemoveAllSubtypes { set })
+            }
+            ContinuousModification::AddColor { color } => {
+                Self::Fold(FoldableCopyException::AddColor { color })
+            }
+            ContinuousModification::SetColor { colors } => {
+                Self::Fold(FoldableCopyException::SetColor { colors })
+            }
+            ContinuousModification::GrantStaticAbility { definition } => {
+                Self::Fold(FoldableCopyException::GrantStaticAbility { definition })
+            }
+            ContinuousModification::RetainPrintedTriggerFromSource {
+                source_trigger_index,
+            } => Self::Fold(FoldableCopyException::RetainPrintedTriggerFromSource {
+                source_trigger_index,
+            }),
+            ContinuousModification::RetainPrintedAbilityFromSource {
+                source_ability_index,
+            } => Self::Fold(FoldableCopyException::RetainPrintedAbilityFromSource {
+                source_ability_index,
+            }),
+            ContinuousModification::RetainAllOtherAbilitiesFromSource => {
+                Self::Fold(FoldableCopyException::RetainAllOtherAbilitiesFromSource)
+            }
+            ContinuousModification::AddSupertype { supertype } => {
+                Self::Fold(FoldableCopyException::AddSupertype { supertype })
+            }
+            ContinuousModification::RemoveSupertype { supertype } => {
+                Self::Fold(FoldableCopyException::RemoveSupertype { supertype })
+            }
+            ContinuousModification::AddCounterOnEnter {
+                counter_type,
+                count,
+                if_type,
+            } => Self::AddCounterOnEnter {
+                counter_type,
+                count,
+                if_type: if_type.as_ref(),
+            },
+            ContinuousModification::SetStartingLoyalty { value } => {
+                Self::SetStartingLoyalty { value: *value }
+            }
+            ContinuousModification::RemoveManaCost => Self::RemoveManaCost,
+        }
+    }
+
+    fn is_layered(self) -> bool {
+        match self {
+            Self::Fold(_) | Self::Layered(_) => true,
+            Self::AddCounterOnEnter { .. }
+            | Self::SetStartingLoyalty { .. }
+            | Self::RemoveManaCost => false,
+        }
+    }
+
+    fn foldable(self) -> Option<FoldableCopyException<'a>> {
+        match self {
+            Self::Fold(operation) => Some(operation),
+            Self::Layered(_)
+            | Self::AddCounterOnEnter { .. }
+            | Self::SetStartingLoyalty { .. }
+            | Self::RemoveManaCost => None,
+        }
+    }
+
+    fn legacy_modification(
+        self,
+        original: &'a ContinuousModification,
+    ) -> Option<&'a ContinuousModification> {
+        match self {
+            Self::Fold(_) => Some(original),
+            Self::Layered(modification) => Some(modification),
+            Self::AddCounterOnEnter { .. }
+            | Self::SetStartingLoyalty { .. }
+            | Self::RemoveManaCost => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FoldableCopyException<'a> {
+    SetName {
+        name: &'a String,
+    },
+    SetPower {
+        value: &'a i32,
+    },
+    SetToughness {
+        value: &'a i32,
+    },
+    AddKeyword {
+        keyword: &'a crate::types::keywords::Keyword,
+    },
+    GrantAbility {
+        definition: &'a crate::types::ability::AbilityDefinition,
+    },
+    GrantTrigger {
+        trigger: &'a crate::types::ability::TriggerDefinition,
+    },
+    AddType {
+        core_type: &'a crate::types::card_type::CoreType,
+    },
+    AddSubtype {
+        subtype: &'a String,
+    },
+    SetCardTypes {
+        core_types: &'a Vec<crate::types::card_type::CoreType>,
+    },
+    RemoveAllSubtypes {
+        set: &'a crate::types::card_type::SubtypeSet,
+    },
+    AddColor {
+        color: &'a crate::types::mana::ManaColor,
+    },
+    SetColor {
+        colors: &'a Vec<crate::types::mana::ManaColor>,
+    },
+    GrantStaticAbility {
+        definition: &'a StaticDefinition,
+    },
+    RetainPrintedTriggerFromSource {
+        source_trigger_index: &'a usize,
+    },
+    RetainPrintedAbilityFromSource {
+        source_ability_index: &'a usize,
+    },
+    RetainAllOtherAbilitiesFromSource,
+    AddSupertype {
+        supertype: &'a crate::types::card_type::Supertype,
+    },
+    RemoveSupertype {
+        supertype: &'a crate::types::card_type::Supertype,
+    },
+}
+
+impl FoldableCopyException<'_> {
+    fn apply(
+        self,
+        values: &mut CopiableValues,
+        source: Option<&crate::game::game_object::GameObject>,
+        all_creature_types: &[String],
+    ) {
+        match self {
+            Self::SetName { name } => {
+                values.name = name.clone();
+                values.name_origin = crate::types::ability::CopiedNameOrigin::Exception;
+            }
+            Self::SetPower { value } => values.power = Some(*value),
+            Self::SetToughness { value } => values.toughness = Some(*value),
+            Self::AddKeyword { keyword } => {
+                if keyword.instances_must_coexist() {
+                    values.keywords.push(keyword.clone());
+                } else if keyword.overrides_same_kind_on_grant() {
+                    values.keywords.retain(|existing| {
+                        std::mem::discriminant(existing) != std::mem::discriminant(keyword)
+                    });
+                    values.keywords.push(keyword.clone());
+                } else if !values.keywords.contains(keyword) {
+                    values.keywords.push(keyword.clone());
+                }
+            }
+            Self::GrantAbility { definition } => {
+                let abilities = std::sync::Arc::make_mut(&mut values.abilities);
+                if !abilities.contains(definition) {
+                    abilities.push(definition.clone());
+                }
+            }
+            Self::GrantTrigger { trigger } => {
+                let triggers = std::sync::Arc::make_mut(&mut values.trigger_definitions);
+                if !triggers.contains(trigger) {
+                    triggers.push(trigger.clone());
+                }
+            }
+            Self::AddType { core_type } => {
+                if !values.card_types.core_types.contains(core_type) {
+                    values.card_types.core_types.push(*core_type);
+                }
+            }
+            Self::AddSubtype { subtype } => {
+                if !values.card_types.subtypes.contains(subtype) {
+                    values.card_types.subtypes.push(subtype.clone());
+                }
+            }
+            Self::SetCardTypes { core_types } => {
+                values.card_types.core_types = core_types.clone();
+                values.card_types.subtypes.retain(|subtype| {
+                    subtype_matches_core_types(subtype, core_types, all_creature_types)
+                });
+            }
+            Self::RemoveAllSubtypes { set } => {
+                remove_subtype_set(&mut values.card_types.subtypes, *set, all_creature_types);
+            }
+            Self::AddColor { color } => {
+                if !values.color.contains(color) {
+                    values.color.push(*color);
+                }
+            }
+            Self::SetColor { colors } => values.color = colors.clone(),
+            Self::GrantStaticAbility { definition } => {
+                let statics = std::sync::Arc::make_mut(&mut values.static_definitions);
+                if !statics.contains(definition) {
+                    // This is a copiable static definition, not an outer
+                    // layer-6 grant. Preserve the inner definition verbatim.
+                    statics.push(definition.clone());
+                }
+            }
+            Self::RetainPrintedTriggerFromSource {
+                source_trigger_index,
+            } => {
+                if let Some(trigger) = source.and_then(|source| {
+                    source
+                        .base_trigger_definitions
+                        .get(*source_trigger_index)
+                        .cloned()
+                }) {
+                    let triggers = std::sync::Arc::make_mut(&mut values.trigger_definitions);
+                    if !triggers.contains(&trigger) {
+                        triggers.push(trigger);
+                    }
+                }
+            }
+            Self::RetainPrintedAbilityFromSource {
+                source_ability_index,
+            } => {
+                if let Some(ability) = source
+                    .and_then(|source| source.base_abilities.get(*source_ability_index).cloned())
+                {
+                    let abilities = std::sync::Arc::make_mut(&mut values.abilities);
+                    if !abilities.contains(&ability) {
+                        abilities.push(ability);
+                    }
+                }
+            }
+            Self::RetainAllOtherAbilitiesFromSource => {
+                if let Some(source) = source {
+                    let abilities = std::sync::Arc::make_mut(&mut values.abilities);
+                    for ability in source.base_abilities.iter() {
+                        if !abilities.contains(ability) {
+                            abilities.push(ability.clone());
+                        }
+                    }
+                    let triggers = std::sync::Arc::make_mut(&mut values.trigger_definitions);
+                    for trigger in source.base_trigger_definitions.iter() {
+                        if !triggers.contains(trigger) {
+                            triggers.push(trigger.clone());
+                        }
+                    }
+                    let statics = std::sync::Arc::make_mut(&mut values.static_definitions);
+                    for static_definition in source.base_static_definitions.iter() {
+                        if !statics.contains(static_definition) {
+                            statics.push(static_definition.clone());
+                        }
+                    }
+                    for keyword in &source.base_keywords {
+                        if !values.keywords.contains(keyword) {
+                            values.keywords.push(keyword.clone());
+                        }
+                    }
+                }
+            }
+            Self::AddSupertype { supertype } => {
+                if !values.card_types.supertypes.contains(supertype) {
+                    values.card_types.supertypes.push(*supertype);
+                }
+            }
+            Self::RemoveSupertype { supertype } => {
+                values
+                    .card_types
+                    .supertypes
+                    .retain(|existing| existing != supertype);
+            }
+        }
+    }
 }
 
 fn apply_copy_values_to_recipients(
@@ -1834,6 +2273,125 @@ mod tests {
                 },
             ),
             "LegendRuleDoesntApply static must be retained on the copy"
+        );
+    }
+
+    /// CR 707.9b + CR 707.9d: Machine God's Effigy's `SetCardTypes` copy
+    /// exception provides Artifact as the copied card-type set, so a donor's
+    /// type-defining Changeling CDA is not copied. A later Copy Artifact copy
+    /// must snapshot that pruned copiable-value set rather than restore the
+    /// donor's CDA or its creature subtypes.
+    #[test]
+    fn machine_gods_effigy_type_replacement_prunes_changeling_cda_for_later_copies() {
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec!["Dragon".to_string(), "Elf".to_string()];
+
+        let donor = create_creature(&mut state, 1, PlayerId(0), "Changeling Donor", 2, 2);
+        let changeling_cda = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddAllCreatureTypes])
+            .cda();
+        state
+            .objects
+            .get_mut(&donor)
+            .unwrap()
+            .base_static_definitions = Arc::new(vec![changeling_cda]);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&donor]
+                .card_types
+                .subtypes
+                .contains(&"Dragon".to_string()),
+            "reach guard: the donor's characteristic-defining Changeling static must apply"
+        );
+
+        let effigy = create_creature(&mut state, 2, PlayerId(0), "Machine God's Effigy", 0, 0);
+        let effigy_copy = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                recipient: crate::types::ability::CopyRecipient::Source,
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![ContinuousModification::SetCardTypes {
+                    core_types: vec![CoreType::Artifact],
+                }],
+            },
+            vec![TargetRef::Object(donor)],
+            effigy,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &effigy_copy, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let copied_effigy = &state.objects[&effigy];
+        assert_eq!(
+            copied_effigy.card_types.core_types,
+            vec![CoreType::Artifact]
+        );
+        assert!(
+            !copied_effigy
+                .card_types
+                .subtypes
+                .contains(&"Dragon".to_string()),
+            "the noncreature Artifact copy must not retain a creature subtype from the donor CDA"
+        );
+        assert!(
+            !copied_effigy
+                .static_definitions
+                .iter_all()
+                .any(|definition| definition.characteristic_defining),
+            "CR 707.9d: the type-defining donor CDA must be absent from Effigy's copiable values"
+        );
+
+        let copy_artifact = create_creature(&mut state, 3, PlayerId(0), "Copy Artifact", 0, 0);
+        let copy_artifact_copy = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                recipient: crate::types::ability::CopyRecipient::Source,
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![ContinuousModification::AddType {
+                    core_type: CoreType::Enchantment,
+                }],
+            },
+            vec![TargetRef::Object(effigy)],
+            copy_artifact,
+            PlayerId(0),
+        );
+        resolve(&mut state, &copy_artifact_copy, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let copied_artifact = &state.objects[&copy_artifact];
+        assert!(copied_artifact
+            .card_types
+            .core_types
+            .contains(&CoreType::Artifact));
+        assert!(copied_artifact
+            .card_types
+            .core_types
+            .contains(&CoreType::Enchantment));
+        assert!(
+            !copied_artifact
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "a later Copy Artifact copy must not regain Creature"
+        );
+        assert!(
+            !copied_artifact
+                .card_types
+                .subtypes
+                .contains(&"Dragon".to_string()),
+            "a later Copy Artifact copy must not regain the donor's creature subtype"
+        );
+        assert!(
+            !copied_artifact
+                .static_definitions
+                .iter_all()
+                .any(|definition| definition.characteristic_defining),
+            "a later Copy Artifact copy must not regain the pruned donor CDA"
         );
     }
 
