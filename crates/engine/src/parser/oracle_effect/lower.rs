@@ -3318,6 +3318,11 @@ pub(super) fn relink_gated_token_referent_consumers(defs: &mut [AbilityDefinitio
         else {
             continue;
         };
+        // CR 603.12 + CR 603.4 + CR 609.3: a root `WhenYouDo` marker identifies
+        // the separately-created reflexive trigger even when its flat `And`
+        // also carries an intervening-if guard; a referent consumer stays
+        // inside that trigger so it cannot read a stale created object when the
+        // guarded publisher did nothing.
         if !defs[publisher].condition.as_ref().is_some_and(|condition| {
             condition.has_when_you_do_marker() || condition.is_affirmative_reflexive_gate()
         }) {
@@ -3584,6 +3589,10 @@ pub(super) fn clone_would_transplant_gated_referent(
     else {
         return false;
     };
+    // CR 603.12 + CR 603.4 + CR 609.3: use the same guarded-reflexive
+    // classification as the production re-link pass before deciding whether a
+    // clone would move a referent consumer outside the trigger that created it
+    // and let it act on a stale created object.
     if !defs[publisher].condition.as_ref().is_some_and(|condition| {
         condition.has_when_you_do_marker() || condition.is_affirmative_reflexive_gate()
     }) {

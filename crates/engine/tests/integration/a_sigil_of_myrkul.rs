@@ -1,8 +1,9 @@
 //! A-Sigil of Myrkul's guarded reflexive combat trigger.
 //!
 //! CR 603.12: after the parent trigger mills, its "When you do" rider is a
-//! separately created reflexive trigger. CR 608.2c: that rider's graveyard
-//! threshold is checked when the separate trigger resolves, after the mill.
+//! separately created reflexive trigger. CR 603.4 checks that rider's
+//! intervening-if graveyard threshold when the trigger would be created;
+//! CR 608.2a checks it again when the separate trigger resolves.
 
 use engine::game::keywords::has_keyword;
 use engine::game::layers::evaluate_layers;

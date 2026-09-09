@@ -3360,9 +3360,10 @@ fn parse_clone_replacement(
     )
     .description(original_text.to_string());
 
-    // CR 603.12 + CR 608.2c: Preserve literal `When` as a reflexive trigger and
-    // consume literal `If` only at this accepted replacement branch. The parent's
-    // copied-card referent is forwarded to either rider.
+    // CR 603.12 + CR 603.4 + CR 608.2a: Preserve literal `When` as a reflexive
+    // trigger, including its intervening-if guard, and consume literal `If`
+    // only at this accepted replacement branch. The parent's copied-card
+    // referent is forwarded to either rider.
     if let Some(rider) = post_replacement_rider {
         copy_effect = copy_effect.sub_ability(rider);
     }
@@ -3569,8 +3570,9 @@ fn parse_post_replacement_rider(post_period: &str) -> Result<Option<AbilityDefin
     // seam for future reflexive-clause variants ("when that happens", etc.)
     // without reshaping the guard.
     let lower = trimmed.to_lowercase();
-    // CR 603.12 + CR 608.2c: admit the two typed connector classes;
-    // classification remains owned by the shared effect-chain parser below.
+    // CR 603.12 + CR 603.4 / CR 608.2c: admit the reflexive-trigger and inline
+    // performed-gate connector classes; classification remains owned by the
+    // shared effect-chain parser below.
     if nom_on_lower(trimmed, &lower, |i| {
         value(
             (),

@@ -1044,11 +1044,11 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
     (None, text.to_string())
 }
 
-/// CR 603.12 + CR 608.2c: A reflexive connector can introduce a separate
-/// triggered ability whose body is also guarded by an ordinary resolution-time
-/// condition: "When you do, if <condition>, <body>." Keep the creation marker
-/// and the guard as a flat root `And`, so the runtime can materialize the
-/// reflexive trigger first and then evaluate the guard on that stack object.
+/// CR 603.12 + CR 603.4 + CR 608.2a: A reflexive connector can introduce a
+/// separate triggered ability with an intervening-if condition: "When you do,
+/// if <condition>, <body>." Keep the creation marker and the guard as a flat
+/// root `And`, so the runtime checks the guard when the trigger would be created
+/// and checks it again as that stack object resolves.
 ///
 /// The general conditional parser is deliberately conservative. If it cannot
 /// represent the guard, the deferred variant retains both the reflexive marker
@@ -8976,6 +8976,22 @@ mod tests {
         };
         assert_eq!(condition, AbilityCondition::WhenYouDo);
         assert_eq!(remainder, "if the moon is blue, draw a card");
+    }
+
+    #[test]
+    fn reflexive_connector_defers_a_specialized_card_type_guard() {
+        let text = "When you do, if it's a creature card, draw a card";
+        let stripped = strip_if_you_do_conditional_with_context(text, &mut ParseContext::default());
+
+        let ReflexiveConditionalStrip::DeferredWhenYouDoGuard {
+            condition,
+            remainder,
+        } = stripped
+        else {
+            panic!("the specialized card-type guard must remain available to its ordered parser");
+        };
+        assert_eq!(condition, AbilityCondition::WhenYouDo);
+        assert_eq!(remainder, "if it's a creature card, draw a card");
     }
 
     #[test]

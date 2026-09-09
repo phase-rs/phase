@@ -16502,9 +16502,10 @@ fn earthbender_ascension_landfall_chain() {
     }
 }
 
-/// SHAPE — CR 603.12 + CR 608.2c: the reflexive marker and its ordinary
-/// graveyard threshold are distinct facts. The marker creates the separate
-/// trigger; the quantity check remains on that trigger for resolution.
+/// SHAPE — CR 603.12 + CR 603.4 + CR 608.2a: the reflexive marker and its
+/// intervening-if graveyard threshold are distinct facts. The marker creates
+/// the separate trigger; the quantity check is checked when that trigger would
+/// be created and again when it resolves.
 #[test]
 fn a_sigil_of_myrkul_keeps_reflexive_marker_and_graveyard_guard() {
     use crate::types::ability::{
@@ -16548,7 +16549,7 @@ fn a_sigil_of_myrkul_keeps_reflexive_marker_and_graveyard_guard() {
                 rhs: QuantityExpr::Fixed { value: 4 },
             },
         )),
-        "the rider must be a CR 603.12 reflexive trigger with its own CR 608.2c guard"
+        "the rider must be a CR 603.12 reflexive trigger with its own CR 603.4 guard"
     );
     assert!(
         matches!(*rider.effect, Effect::PutCounter { .. }),
@@ -16556,10 +16557,10 @@ fn a_sigil_of_myrkul_keeps_reflexive_marker_and_graveyard_guard() {
     );
 }
 
-/// CR 614.1c + CR 603.12 + CR 608.2c: a copy-replacement rider may carry the
-/// same reflexive marker plus generic resolution guard as an ordinary effect
-/// chain. The replacement parser must attach the complete rider rather than
-/// accepting only a bare `WhenYouDo` condition.
+/// CR 614.1c + CR 603.12 + CR 603.4 + CR 608.2a: a copy-replacement rider may
+/// carry the same reflexive marker plus intervening-if guard as an ordinary
+/// effect chain. The replacement parser must attach the complete rider rather
+/// than accepting only a bare `WhenYouDo` condition.
 #[test]
 fn guarded_clone_replacement_rider_keeps_reflexive_marker_and_guard() {
     use crate::types::ability::AbilityCondition;
@@ -16593,7 +16594,7 @@ fn guarded_clone_replacement_rider_keeps_reflexive_marker_and_guard() {
         Some(AbilityCondition::when_you_do_with_guard(
             AbilityCondition::IsMonarch
         )),
-        "the CR 603.12 marker and CR 608.2c guard must both survive"
+        "the CR 603.12 marker and CR 603.4 guard must both survive"
     );
     assert!(
         matches!(*rider.effect, Effect::Draw { .. }),
@@ -16601,10 +16602,11 @@ fn guarded_clone_replacement_rider_keeps_reflexive_marker_and_guard() {
     );
 }
 
-/// CR 603.12 + CR 608.2c: an unmodeled guard between a reflexive connector
-/// and an optional body is not an optional bare `WhenYouDo` rider. Once every
-/// specialized guard parser has declined, retain it as an explicit gap rather
-/// than letting the optional-clause shell discard the guard.
+/// CR 603.12 + CR 603.4: an unmodeled intervening-if condition between a
+/// reflexive connector and an optional body is not an optional bare
+/// `WhenYouDo` rider. Once every specialized guard parser has declined, retain
+/// it as an explicit gap rather than letting the optional-clause shell discard
+/// the guard.
 #[test]
 fn unmodeled_guarded_reflexive_optional_fails_closed() {
     use crate::parser::oracle_effect::parse_effect_chain;
@@ -16633,10 +16635,10 @@ fn unmodeled_guarded_reflexive_optional_fails_closed() {
     );
 }
 
-/// CR 614.1c + CR 603.12 + CR 608.2c: clone-replacement riders use the same
-/// effect-chain path. An unsupported guard must reject the entire replacement
-/// so the source remains an explicit parser gap rather than a supported clone
-/// with its rider silently discarded.
+/// CR 614.1c + CR 603.12 + CR 603.4: clone-replacement riders use the same
+/// effect-chain path. An unsupported intervening-if condition must reject the
+/// entire replacement so the source remains an explicit parser gap rather than
+/// a supported clone with its rider silently discarded.
 #[test]
 fn unmodeled_guarded_clone_replacement_rider_fails_closed() {
     let parsed = parse(
@@ -16658,6 +16660,66 @@ fn unmodeled_guarded_clone_replacement_rider_fails_closed() {
             .any(|ability| matches!(&*ability.effect, Effect::Unimplemented { .. })),
         "the rejected clone source must remain an explicit Effect::Unimplemented gap, got {:?}",
         parsed.abilities
+    );
+}
+
+/// SHAPE — CR 603.12 + CR 603.4 + CR 608.2a: the general condition parser
+/// deliberately defers "if it's a creature card" to the ordered specialized
+/// card-type parser. The specialized parser must preserve both that guard and
+/// the separate reflexive-trigger marker.
+#[test]
+fn deferred_reflexive_card_type_guard_reaches_specialized_parser() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityCondition, AbilityKind};
+    use crate::types::card_type::CoreType;
+
+    let def = parse_effect_chain(
+        "reveal the top card of your library. When you do, if it's a creature card, draw a card",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(*def.effect, Effect::RevealTop { .. }));
+
+    let rider = def
+        .sub_ability
+        .as_deref()
+        .expect("the reflexive draw must remain attached to the reveal");
+    assert_eq!(
+        rider.condition,
+        Some(AbilityCondition::when_you_do_with_guard(
+            AbilityCondition::RevealedHasCardType {
+                card_types: vec![CoreType::Creature],
+                additional_filter: None,
+                subtype_filter: None,
+            }
+        )),
+        "the deferred guard must be claimed by the specialized card-type parser"
+    );
+    assert!(matches!(*rider.effect, Effect::Draw { .. }));
+}
+
+/// Dominion Saboteur's verified Oracle text carries a clone rider whose
+/// counter-copying instruction is not represented yet. The recognized rider
+/// must therefore reject the partial CR 614.1c replacement and remain an
+/// explicit parser gap instead of silently dropping printed rules text.
+#[test]
+fn dominion_saboteur_unsupported_clone_rider_fails_closed() {
+    let parsed = parse(
+        "You may have this creature enter as a copy of any artifact or creature on the battlefield, except it isn't legendary. If you do, it enters with additional counters on it equal to the same number and kinds of counters the copied permanent has on it.",
+        "Dominion Saboteur",
+        &[],
+        &["Creature"],
+        &["Shapeshifter"],
+    );
+    assert!(
+        parsed.replacements.is_empty(),
+        "the unsupported counter-copying rider must reject the partial clone replacement"
+    );
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .any(|ability| matches!(&*ability.effect, Effect::Unimplemented { .. })),
+        "the rejected Dominion Saboteur text must remain an explicit parser gap"
     );
 }
 

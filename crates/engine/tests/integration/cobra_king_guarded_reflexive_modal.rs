@@ -54,6 +54,15 @@ fn cobra_king_does_not_create_a_reflexive_modal_below_five() {
     let runner = cobra_king_upkeep(2);
 
     assert!(
+        runner
+            .state()
+            .battlefield
+            .iter()
+            .any(|id| runner.state().objects[id].name == "Cobra Coil"),
+        "the parent trigger must create Cobra Coil before the reflexive guard fails"
+    );
+
+    assert!(
         !matches!(
             runner.state().waiting_for,
             WaitingFor::AbilityModeChoice { .. }

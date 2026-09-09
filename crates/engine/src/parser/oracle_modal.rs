@@ -1011,8 +1011,8 @@ fn classify_reflexive_modal_parent(trigger_line: String) -> (String, Option<Refl
     (trigger_line, None)
 }
 
-/// CR 603.12 + CR 608.2c: A reflexive modal can retain an ordinary
-/// resolution-time guard between its connector and modal header, as in
+/// CR 603.12 + CR 603.4 + CR 608.2a: A reflexive modal can retain an
+/// intervening-if condition between its connector and modal header, as in
 /// `When you do, if <condition>, choose one`. The modal splitter keeps that
 /// condition in `header.raw`, so parse it through the shared conditional
 /// parser and compose it with the reflexive marker rather than discarding it.
