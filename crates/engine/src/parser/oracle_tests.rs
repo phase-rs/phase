@@ -16638,7 +16638,10 @@ fn unmodeled_guarded_reflexive_optional_fails_closed() {
 /// CR 614.1c + CR 603.12 + CR 603.4: clone-replacement riders use the same
 /// effect-chain path. An unsupported intervening-if condition must reject the
 /// entire replacement so the source remains an explicit parser gap rather than
-/// a supported clone with its rider silently discarded.
+/// a supported clone with its rider silently discarded. Once the replacement
+/// parser rejects that partial result, the outer static router owns the whole
+/// source line and records `static_structure`; the standalone test above checks
+/// the inner effect-chain parser's `when_you_do_guard` identity directly.
 #[test]
 fn unmodeled_guarded_clone_replacement_rider_fails_closed() {
     let parsed = parse(
@@ -16660,12 +16663,13 @@ fn unmodeled_guarded_clone_replacement_rider_fails_closed() {
             .any(|ability| matches!(
                 &*ability.effect,
                 Effect::Unimplemented { name, description }
-                    if name == "when_you_do_guard"
+                    if name == "static_structure"
                         && description.as_deref().is_some_and(|fragment| {
-                            fragment.contains("if the moon is full")
+                            fragment.contains("enter as a copy of any creature")
+                                && fragment.contains("if the moon is full")
                         })
             )),
-        "the rejected clone source must retain the unsupported guard as a when_you_do_guard gap, got {:?}",
+        "the rejected clone source must retain both the clone and its unsupported guard in the outer static-structure gap, got {:?}",
         parsed.abilities
     );
 }
