@@ -19,7 +19,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::analysis::decision_template::DecisionSlot;
 use crate::game::game_object::GameObject;
-use crate::types::ability::{ActivationRestriction, DamageModification};
+use crate::types::ability::{
+    AbilityCondition, AbilityDefinition, AbilityUseTally, ActivationRestriction, DamageModification,
+};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{loop_states_equal, GameState, StackEntry, StackEntryKind};
@@ -7170,18 +7172,19 @@ fn project_out_resources(state: &GameState) -> GameState {
     //      `ability_has_per_turn_activation_gate` is the single authority.
     //   2. `AbilityCondition::AbilityUseCountThisTurn { tally: Activated }` — a
     //      branch condition (Dragon Whelp's "activated four or more times this
-    //      turn"), which does NOT block repetition and so belongs to the cleared
-    //      "pure pumped history" class, exactly like the `Resolved` tally cleared
-    //      below. Its downstream effect is a delayed sacrifice trigger, i.e. a
-    //      board change caught by `objects_content_eq`. The threshold is also
-    //      MONOTONE under a `GE` comparator: once the count passes n it stays
-    //      passed for the turn, so every post-threshold cycle behaves identically
-    //      and genuinely compares equal. Projecting it out is sound, not merely
-    //      tolerable.
+    //      turn"). This does NOT block repetition, but it is retained anyway,
+    //      via `ability_reads_own_activation_count`, because clearing it would
+    //      make two counts that STRADDLE the printed threshold compare equal
+    //      while `evaluate_condition` answers differently for them. See that
+    //      function for why the straddle argument, and not a per-comparator
+    //      monotonicity argument, is what governs here.
     let keep_turn: HashSet<(ObjectId, usize)> = s
         .activated_abilities_this_turn
         .keys()
-        .filter(|key| ability_has_per_turn_activation_gate(&s, key))
+        .filter(|key| {
+            ability_has_per_turn_activation_gate(&s, key)
+                || ability_reads_own_activation_count(&s, key)
+        })
         .copied()
         .collect();
     s.activated_abilities_this_turn
@@ -7498,6 +7501,68 @@ fn ability_has_per_turn_activation_gate(state: &GameState, key: &(ObjectId, usiz
                 )
             })
         })
+}
+
+/// CR 602.2a + CR 608.2c: does the printed ability at `key` gate anything on its
+/// own per-turn ACTIVATION count (`AbilityUseCountThisTurn { tally: Activated }`,
+/// Dragon Whelp's "activated four or more times this turn")?
+///
+/// Retention rule, and why it is not the `== n` argument used for the `Resolved`
+/// tally below: projecting a count out makes two states compare EQUAL, so it is
+/// only sound while every condition reading that count returns the same answer
+/// for both. That holds once both counts sit on the same side of a threshold,
+/// but NOT for two counts that straddle one — 3 vs 4 under `GE 4` project equal
+/// and evaluate differently, and `EQ`/`LT`/`LE` straddle their thresholds the
+/// same way. Rather than reason per comparator about which straddles are
+/// reachable, retain the count for any ability that reads it at all: retention
+/// can only make states compare DIFFERENT, which is the fail-closed direction
+/// (a loop is rejected, never falsely certified).
+fn ability_reads_own_activation_count(state: &GameState, key: &(ObjectId, usize)) -> bool {
+    fn condition_reads_activation_tally(condition: &AbilityCondition) -> bool {
+        match condition {
+            AbilityCondition::AbilityUseCountThisTurn {
+                tally: AbilityUseTally::Activated,
+                ..
+            } => true,
+            AbilityCondition::AbilityUseCountThisTurn { .. } => false,
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions.iter().any(condition_reads_activation_tally)
+            }
+            AbilityCondition::Not { condition }
+            | AbilityCondition::ConditionInstead { inner: condition } => {
+                condition_reads_activation_tally(condition)
+            }
+            _ => false,
+        }
+    }
+
+    // The condition lives on whichever chain node carries the gated clause — for
+    // the Dragon Whelp class it is the `SequentialSibling` holding
+    // `CreateDelayedTrigger`, not the ability root — so the whole definition tree
+    // is walked, not just `def.condition`.
+    fn definition_reads_activation_tally(def: &AbilityDefinition) -> bool {
+        def.condition
+            .as_ref()
+            .is_some_and(condition_reads_activation_tally)
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(definition_reads_activation_tally)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(definition_reads_activation_tally)
+            || def
+                .mode_abilities
+                .iter()
+                .any(definition_reads_activation_tally)
+    }
+
+    state
+        .objects
+        .get(&key.0)
+        .and_then(|o| o.abilities.get(key.1))
+        .is_some_and(definition_reads_activation_tally)
 }
 
 /// CR 602.5b: per-GAME activation gate. Single authority.
@@ -12735,6 +12800,77 @@ mod tests {
     /// `projected_only_leaves_carry_no_sibling_axis` (`Axes` is private there).
     ///
     /// REVERT-PROBE: repoint the four conjunct-(a) sites to a `.sibling`-only reader ⇒ both
+    /// CR 602.2a: an ability that gates on its OWN per-turn activation count
+    /// (Dragon Whelp's "activated four or more times this turn") must keep that
+    /// count through `project_out_resources`, even though the count is not a
+    /// CR 602.5b legality gate.
+    ///
+    /// Clearing it would make two counts that STRADDLE the printed threshold
+    /// project equal while `evaluate_condition` answers differently for them
+    /// (3 vs 4 under `GE 4`). The paired negative is what gives the positive its
+    /// meaning: an ability that neither gates nor reads the count is still
+    /// projected out, so this is a targeted retention and not a blanket one that
+    /// would stop unrestricted loops from ever comparing equal.
+    #[test]
+    fn projection_retains_activation_counts_an_ability_gates_itself_on() {
+        use crate::types::ability::{
+            AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally, Comparator, Effect,
+            EffectScope, TapStateChange, TargetFilter, TypedFilter,
+        };
+        use std::sync::Arc;
+
+        let mut state = GameState::new_two_player(7);
+        state.phase = Phase::PreCombatMain;
+
+        let gated = inert_token(&mut state, 901, 0, "Dragon Whelp");
+        let plain = inert_token(&mut state, 902, 0, "Ungated Pumper");
+
+        let inert = || Effect::SetTapState {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            scope: EffectScope::All,
+            state: TapStateChange::Untap,
+        };
+
+        // The threshold sits on the chain node carrying the gated clause, not on
+        // the ability root — the shape the parser actually produces for this class.
+        let mut whelp_ability = AbilityDefinition::new(AbilityKind::Activated, inert());
+        let mut rider = AbilityDefinition::new(AbilityKind::Spell, inert());
+        rider.condition = Some(AbilityCondition::AbilityUseCountThisTurn {
+            tally: AbilityUseTally::Activated,
+            comparator: Comparator::GE,
+            n: 4,
+        });
+        whelp_ability.sub_ability = Some(Box::new(rider));
+        state.objects.get_mut(&gated).unwrap().abilities = Arc::new(vec![whelp_ability]);
+        state.objects.get_mut(&plain).unwrap().abilities = Arc::new(vec![AbilityDefinition::new(
+            AbilityKind::Activated,
+            inert(),
+        )]);
+
+        state.activated_abilities_this_turn.insert((gated, 0), 3);
+        state.activated_abilities_this_turn.insert((plain, 0), 3);
+
+        let projected = project_out_resources(&state);
+
+        assert_eq!(
+            projected
+                .activated_abilities_this_turn
+                .get(&(gated, 0))
+                .copied(),
+            Some(3),
+            "a count the ability's own condition reads must survive projection"
+        );
+        assert_eq!(
+            projected
+                .activated_abilities_this_turn
+                .get(&(plain, 0))
+                .copied(),
+            None,
+            "an ability that neither gates nor reads the count keeps the existing \
+             pumped-history projection"
+        );
+    }
+
     /// predicates relieve their fixtures ⇒ **FAILS**.
     #[test]
     fn residual_probe_refuses_a_def_with_a_projected_read_elsewhere() {
