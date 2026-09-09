@@ -23,6 +23,7 @@ mod ajani_nacatl_pariah_co_departure_6427;
 mod ajani_nacatl_pariah_sacrifice_outlet_6018;
 mod ajani_nacatl_pariah_transform;
 mod alchemists_gift_pump_modal_keyword_choice;
+mod all_player_library_wheel;
 mod ambuscade_one_sided_fight_anaphoric;
 mod amphin_mutineer_regression;
 mod anax_instead_branch_not_chain;

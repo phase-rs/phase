@@ -13,10 +13,10 @@ use crate::types::ability::{
     CastFromZoneDriver, ChosenAttribute, CommanderOwnership, ControllerRef, CopyRetargetPermission,
     CostPaidObjectSnapshot, CounterKindDomain, DetachedRemainder, EachDamageRecipient, Effect,
     EffectError, EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
-    ForEachCategoryAction, ForwardedResultContext, ManaProduction, ObjectSelectionCardinality,
-    OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, QuantityExpr,
-    QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility,
-    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
+    ForEachCategoryAction, ForwardedResultContext, ManaProduction, MassLibraryShuffleMode,
+    ObjectSelectionCardinality, OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope,
+    PossessionAxis, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation,
+    ResolvedAbility, RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
     SharedQualityRelation, SiblingCondition, StaticDefinition, SubAbilityLink, TapStateChange,
     TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause,
     ZoneChoiceCandidateSource, ZoneChoiceChooser,
@@ -4556,12 +4556,27 @@ fn is_player_scope_local_continuation(
     }
 
     // CR 608.2c + CR 701.24a: "<each subject> shuffles the cards from their hand
-    // into their library, then draws that many cards" is one per-player
-    // instruction. Keep the terminal shuffle and its EventContextAmount draw in
-    // the current iteration so the draw observes that player's moved count.
+    // and graveyard into their library, then draws" is one per-player
+    // instruction. Keep every parser-marked origin move, the terminal shuffle,
+    // and its fixed or EventContextAmount draw in the current iteration.
     let is_scoped_library_shuffle_chain = matches!(
         (parent, child),
         (
+            Effect::ChangeZoneAll {
+                origin: Some(_),
+                destination: Zone::Library,
+                target: TargetFilter::ScopedPlayer,
+                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                ..
+            },
+            Effect::ChangeZoneAll {
+                origin: Some(_),
+                destination: Zone::Library,
+                target: TargetFilter::ScopedPlayer,
+                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                ..
+            }
+        ) | (
             Effect::ChangeZoneAll {
                 destination: Zone::Library,
                 ..
@@ -4578,6 +4593,14 @@ fn is_player_scope_local_continuation(
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::EventContextAmount,
                 },
+            }
+        ) | (
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            },
+            Effect::Draw {
+                target: TargetFilter::ScopedPlayer,
+                count: QuantityExpr::Fixed { .. },
             }
         )
     );

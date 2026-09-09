@@ -114,13 +114,13 @@ use crate::types::ability::{
     DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
     DieResultBranch, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     GameRestriction, GuessSubject, IntensityScope, IterationKindBinding, KeeperConstraint,
-    LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole, MultiTargetSpec,
-    NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope,
-    PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter,
-    PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity,
-    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
-    ReplacementCondition, ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry,
-    RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
+    LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole, MassLibraryShuffleMode,
+    MultiTargetSpec, NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint,
+    PerPlayerScope, PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness,
+    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
+    ReciprocalZoneChoiceRole, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
+    RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
     SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
     StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
     TargetFilter, TargetSelectionMode, ThisWayCause, TrackedAnaphorSource, TriggerCondition,
@@ -30912,10 +30912,91 @@ fn is_all_player_owner_shuffle_population(filter: &TargetFilter) -> bool {
 /// instruction per player. Normalize only its immediate structural chain:
 /// the ordinary target walker intentionally excludes `Shuffle`, and an
 /// EventContextAmount draw after that shuffle belongs to the same iteration.
+fn normalize_all_player_ordinary_library_wheel_chain(def: &mut AbilityDefinition) {
+    let actor_default_target = |target: &TargetFilter| {
+        matches!(
+            target,
+            TargetFilter::Controller | TargetFilter::Any | TargetFilter::ScopedPlayer
+        )
+    };
+
+    // CR 608.2c + CR 701.24a: An ordinary all-player wheel lowers each private
+    // origin as a consecutive terminal-shuffle-suppressed move. Validate the
+    // complete marked chain before changing any target so an unrelated library
+    // move or concrete/anaphoric player target cannot be partially rebound.
+    if !matches!(
+        def.effect.as_ref(),
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Hand),
+            destination: Zone::Library,
+            target,
+            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            ..
+        } if actor_default_target(target)
+    ) {
+        return;
+    }
+
+    let mut current: &AbilityDefinition = def;
+    loop {
+        match current.effect.as_ref() {
+            Effect::ChangeZoneAll {
+                origin: Some(_),
+                destination: Zone::Library,
+                target,
+                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                ..
+            } if actor_default_target(target) => {
+                let Some(next) = current.sub_ability.as_deref() else {
+                    return;
+                };
+                current = next;
+            }
+            Effect::Shuffle { target } if actor_default_target(target) => break,
+            _ => return,
+        }
+    }
+
+    let mut current: &mut AbilityDefinition = def;
+    loop {
+        match current.effect.as_mut() {
+            Effect::ChangeZoneAll { target, .. } => {
+                if matches!(target, TargetFilter::Controller | TargetFilter::Any) {
+                    *target = TargetFilter::ScopedPlayer;
+                }
+                current = current
+                    .sub_ability
+                    .as_deref_mut()
+                    .expect("ordinary all-player wheel chain validated above");
+            }
+            Effect::Shuffle { target } => {
+                if matches!(target, TargetFilter::Controller | TargetFilter::Any) {
+                    *target = TargetFilter::ScopedPlayer;
+                }
+                if let Some(draw) = current.sub_ability.as_deref_mut() {
+                    if let Effect::Draw {
+                        count: QuantityExpr::Fixed { .. },
+                        target,
+                    } = draw.effect.as_mut()
+                    {
+                        if matches!(target, TargetFilter::Controller | TargetFilter::Any) {
+                            *target = TargetFilter::ScopedPlayer;
+                        }
+                    }
+                }
+                break;
+            }
+            _ => unreachable!("ordinary all-player wheel chain validated above"),
+        }
+    }
+}
+
 fn normalize_all_player_library_shuffle_chain(def: &mut AbilityDefinition) {
     if !matches!(def.player_scope, Some(PlayerFilter::All)) {
         return;
     }
+
+    normalize_all_player_ordinary_library_wheel_chain(def);
 
     let Some(shuffle) = def.sub_ability.as_deref_mut() else {
         return;

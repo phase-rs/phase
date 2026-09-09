@@ -13582,11 +13582,11 @@ fn effect_its_controller_manifests_top_card() {
     );
 }
 
-/// The all-player shuffle target normalizer owns only its immediate
-/// hand-to-library move/shuffle pair. It must neither retarget nearby library
+/// The all-player shuffle target normalizer owns the complete parser-marked
+/// hand-to-library wheel chain. It must neither retarget unrelated library
 /// moves nor overwrite a concrete/anaphoric player target.
 #[test]
-fn all_player_hand_shuffle_normalizer_requires_an_immediate_defaulted_pair() {
+fn all_player_hand_shuffle_normalizer_scopes_only_the_complete_marked_wheel() {
     fn move_to_library(origin: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZoneAll {
             origin: Some(origin),
@@ -13598,7 +13598,7 @@ fn all_player_hand_shuffle_normalizer_requires_an_immediate_defaulted_pair() {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: Default::default(),
+            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
             random_order: false,
         }
     }
@@ -13687,40 +13687,53 @@ fn all_player_hand_shuffle_normalizer_requires_an_immediate_defaulted_pair() {
         }
     ));
 
-    let mut intervening_move = all_player_chain(vec![
+    let mut multi_origin_wheel = all_player_chain(vec![
         move_to_library(Zone::Hand, TargetFilter::Controller),
         move_to_library(Zone::Graveyard, TargetFilter::Any),
         Effect::Shuffle {
             target: TargetFilter::Controller,
         },
-    ]);
-    normalize_all_player_library_shuffle_chain(&mut intervening_move);
-    assert!(matches!(
-        &*intervening_move.effect,
-        Effect::ChangeZoneAll {
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 7 },
             target: TargetFilter::Controller,
+        },
+    ]);
+    normalize_all_player_library_shuffle_chain(&mut multi_origin_wheel);
+    assert!(matches!(
+        &*multi_origin_wheel.effect,
+        Effect::ChangeZoneAll {
+            target: TargetFilter::ScopedPlayer,
             ..
         }
     ));
-    let intermediate = intervening_move
+    let graveyard = multi_origin_wheel
         .sub_ability
         .as_deref()
-        .expect("intervening library move");
+        .expect("same-wheel graveyard move");
     assert!(matches!(
-        &*intermediate.effect,
+        &*graveyard.effect,
         Effect::ChangeZoneAll {
-            target: TargetFilter::Any,
+            target: TargetFilter::ScopedPlayer,
             ..
         }
     ));
+    let shuffle = graveyard.sub_ability.as_deref().expect("terminal shuffle");
     assert!(matches!(
-        &*intermediate
+        shuffle.effect.as_ref(),
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer,
+        }
+    ));
+    assert!(matches!(
+        shuffle
             .sub_ability
             .as_deref()
-            .expect("terminal shuffle")
-            .effect,
-        Effect::Shuffle {
-            target: TargetFilter::Controller,
+            .expect("wheel draw")
+            .effect
+            .as_ref(),
+        Effect::Draw {
+            target: TargetFilter::ScopedPlayer,
+            ..
         }
     ));
 
