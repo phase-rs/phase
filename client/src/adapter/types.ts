@@ -196,11 +196,22 @@ export type WishOutsideGameScope = "PostM10SideboardOnly" | "PreM10ReachesExile"
  *  all-controllers form. Schema only — unenforced. */
 export type LegendRuleScope = "Modern" | "PreM14AnyController";
 
+/** CR 407: whether the format is played for ante. `Excluded` is the modern
+ *  default and the only value the engine implements; unlike its sibling axes
+ *  it is enforced, at deck construction (CR 407.3). */
+export type AntePolicy = "Excluded" | "Enabled";
+
 export interface LegacyRuleSet {
   mana_burn: ManaBurnPolicy;
   damage_timing: CombatDamageTiming;
   wish_scope: WishOutsideGameScope;
   legend_rule_scope: LegendRuleScope;
+  /** Optional because this axis postdates the Axis-A save path: a definition
+   *  persisted before it existed carries no `ante` key. Mirrors the engine's
+   *  `#[serde(default)]` on the same field, where absent likewise means
+   *  `"Excluded"` — which is what such a save meant. The engine always emits
+   *  it, so only a locally-persisted definition can be missing it. */
+  ante?: AntePolicy;
 }
 
 /** CR 903.3 and the Tiny Leaders / Oathbreaker / Brawl deck-construction

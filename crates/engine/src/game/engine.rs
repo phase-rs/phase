@@ -9530,8 +9530,6 @@ fn apply_action(
     }
 
     let mut events = Vec::new();
-    let mut triggers_processed_inline = false;
-    let skip_deferred_trigger_drain = false;
     // The trigger-construction finisher runs at most once per reducer action, at
     // the outermost handler return of its enumerated seams. Reset the witness
     // here rather than at the outer boundary so a direct `apply_action` caller
@@ -9862,7 +9860,6 @@ fn apply_action(
     // the two can differ. The simultaneous mulligan arms below do not read it —
     // they resolve their per-player state from the `actor` parameter.
     let semantic_actor = state.waiting_for.acting_player().unwrap_or(actor);
-    let action_for_divergence = action.clone();
 
     // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass.
     // CR 723.1: A Priority-window action belongs to the semantic priority
@@ -9945,36 +9942,60 @@ fn apply_action(
         _ => {}
     }
 
+    if let (WaitingFor::Priority { player }, GameAction::PassPriority) =
+        (&state.waiting_for, &action)
+    {
+        // CR 117.3d + CR 723.5 + CR 732.2a-c: single authority, shared with the
+        // AI candidate-legality hatch and the projection fast path so the three
+        // cannot drift.
+        super::priority::pass_priority_legality(state, *player)?;
+        // An explicit pass can be the final CR 117.4 pass. Route it through the
+        // same fenced session seam as an installed auto-pass, so its resolved-entry
+        // count advances the persisted cursor rather than silently bypassing a live
+        // stack-resolution authorization.
+        if stack_resolution_limit.is_some() {
+            let outcome =
+                pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit)?;
+            advance_stack_resolution_session_after_priority_pass(
+                state,
+                outcome.consumed_stack_entries,
+                &outcome.waiting_for,
+            );
+            return Ok(ActionResult {
+                events,
+                waiting_for: outcome.waiting_for,
+                log_entries: vec![],
+            });
+        }
+        return pass_installed_auto_pass_priority(state, *player, &mut events);
+    }
+
+    apply_non_priority_pass_action(
+        state,
+        actor,
+        action,
+        events,
+        semantic_actor,
+        answering_forced_window,
+        stack_len_before_action,
+    )
+}
+
+fn apply_non_priority_pass_action(
+    state: &mut GameState,
+    actor: PlayerId,
+    action: GameAction,
+    mut events: Vec<GameEvent>,
+    semantic_actor: PlayerId,
+    answering_forced_window: bool,
+    stack_len_before_action: usize,
+) -> Result<ActionResult, EngineError> {
+    let mut triggers_processed_inline = false;
+    let skip_deferred_trigger_drain = false;
+    let action_for_divergence = action.clone();
+
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
-        (WaitingFor::Priority { player }, GameAction::PassPriority) => {
-            // CR 117.3d + CR 723.5 + CR 732.2a-c: single authority, shared with the
-            // AI candidate-legality hatch and the projection fast path so the
-            // three cannot drift.
-            super::priority::pass_priority_legality(state, *player)?;
-            // An explicit pass can be the final CR 117.4 pass. Route it
-            // through the same fenced session seam as an installed auto-pass,
-            // so its resolved-entry count advances the persisted cursor rather
-            // than silently bypassing a live stack-resolution authorization.
-            if stack_resolution_limit.is_some() {
-                let outcome = pass_priority_once_with_pipeline(
-                    state,
-                    &mut events,
-                    stack_resolution_limit,
-                )?;
-                advance_stack_resolution_session_after_priority_pass(
-                    state,
-                    outcome.consumed_stack_entries,
-                    &outcome.waiting_for,
-                );
-                return Ok(ActionResult {
-                    events,
-                    waiting_for: outcome.waiting_for,
-                    log_entries: vec![],
-                });
-            }
-            return pass_installed_auto_pass_priority(state, *player, &mut events);
-        }
         (
             WaitingFor::Priority { player },
             GameAction::BeginResolveAll {

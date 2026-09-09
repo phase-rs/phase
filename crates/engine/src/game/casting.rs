@@ -3298,6 +3298,44 @@ fn object_may_enter_cast_path(obj: &GameObject) -> bool {
         .contains(&crate::types::card_type::CoreType::Land)
 }
 
+/// Returns whether an object-carried permission could authorize `player` to
+/// cast this visible spell from its current zone if a dynamic payload becomes
+/// true. This keeps analysis consumers bound to the casting authority's zone,
+/// grantee, land, and companion-grant boundaries without predicting a later
+/// game state.
+pub fn has_potentially_authorizing_object_cast_permission(
+    obj: &GameObject,
+    player: PlayerId,
+) -> bool {
+    matches!(obj.zone, Zone::Exile | Zone::Graveyard)
+        && object_may_enter_cast_path(obj)
+        && obj
+            .casting_permissions
+            .iter()
+            .any(|permission| match permission {
+                CastingPermission::AdventureCreature
+                | CastingPermission::ExileWithEnergyCost
+                | CastingPermission::WarpExile { .. }
+                | CastingPermission::Plotted { .. }
+                | CastingPermission::Foretold { .. } => obj.owner == player,
+                CastingPermission::ExileWithAltCost { granted_to, .. }
+                | CastingPermission::ExileWithAltAbilityCost { granted_to, .. } => {
+                    exile_alt_cost_permission_grants_to_player(player, *granted_to)
+                }
+                CastingPermission::PlayFromExile {
+                    granted_to,
+                    provenance,
+                    ..
+                } => {
+                    *granted_to == player
+                        && !matches!(
+                            provenance,
+                            crate::types::ability::PlayFromExileProvenance::LandLookCompanion
+                        )
+                }
+            })
+}
+
 /// CR 305.9 + CR 601.2a: Lands in exile may be played by permissions that say
 /// "play", but they never enter the spell-cast path.
 ///
@@ -6081,6 +6119,221 @@ pub fn effective_spell_cost(
         .map(|p| p.mana_cost)
 }
 
+/// Returns whether the player's current mana pool can pay this spell's exact
+/// engine-effective normal casting cost. This is read-only: it neither predicts
+/// automatic mana activation nor authorizes a cast.
+pub fn spell_cost_is_payable_from_pool(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    effective_spell_cost(state, player, object_id).is_some_and(|cost| {
+        super::casting_costs::spell_cost_is_payable_from_pool(state, player, object_id, &cost)
+    })
+}
+
+#[cfg(test)]
+mod pool_payability_tests {
+    use std::sync::Arc;
+
+    use super::spell_cost_is_payable_from_pool;
+    use crate::ai_support::legal_actions;
+    use crate::game::mana_sources::activatable_mana_source_selections;
+    use crate::game::scenario::GameScenario;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, CounterCostSelection, Effect, ManaProduction,
+        QuantityExpr, QuantityRef, TargetFilter, REMOVE_COUNTER_COST_X,
+    };
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::CastPaymentMode;
+    use crate::types::identifiers::CardId;
+    use crate::types::mana::{
+        ManaColor, ManaCost, ManaCostShard, ManaSourceOutput, ManaType, ManaUnit,
+    };
+    use crate::types::phase::Phase;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    #[test]
+    fn pool_funded_cast_does_not_activate_available_impure_mana_source() {
+        let caster = PlayerId(0);
+        let target = PlayerId(1);
+        let storage = CounterType::Generic("storage".to_string());
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let creature = scenario.add_creature(caster, "Bear", 2, 2).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                caster,
+                "Congregate",
+                true,
+                "Target player gains 2 life for each creature on the battlefield.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3,
+            })
+            .id();
+        scenario.with_mana_pool(
+            caster,
+            vec![
+                ManaUnit::new(ManaType::White, spell, false, Vec::new()),
+                ManaUnit::new(ManaType::Colorless, spell, false, Vec::new()),
+                ManaUnit::new(ManaType::Colorless, spell, false, Vec::new()),
+                ManaUnit::new(ManaType::Colorless, spell, false, Vec::new()),
+            ],
+        );
+
+        let slagheap = create_object(
+            &mut scenario.state,
+            CardId(9_001),
+            caster,
+            "Molten Slagheap stand-in".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = scenario
+                .state
+                .objects
+                .get_mut(&slagheap)
+                .expect("the hostile mana source exists");
+            object.card_types.core_types.push(CoreType::Land);
+            object.tapped = true;
+            object.counters.insert(storage.clone(), 7);
+            Arc::make_mut(&mut object.abilities).extend([
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::PutCounter {
+                        counter_type: storage.clone(),
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::SelfRef,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::generic(1),
+                        },
+                        AbilityCost::Tap,
+                    ],
+                }),
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyCombination {
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable {
+                                    name: "X".to_string(),
+                                },
+                            },
+                            color_options: vec![ManaColor::Black, ManaColor::Red],
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::generic(1),
+                        },
+                        AbilityCost::RemoveCounter {
+                            target: None,
+                            count: REMOVE_COUNTER_COST_X,
+                            counter_type: CounterMatch::OfType(storage.clone()),
+                            selection: CounterCostSelection::SingleObject,
+                        },
+                    ],
+                }),
+            ]);
+        }
+
+        let slagheap_selection = activatable_mana_source_selections(&scenario.state, caster)
+            .into_iter()
+            .find(|selection| {
+                selection.source.object_id == slagheap && selection.ability_index == Some(2)
+            })
+            .expect("the tapped archive-shaped no-tap storage ability remains available");
+        assert_eq!(
+            slagheap_selection.output,
+            ManaSourceOutput::DeferredColorChoice
+        );
+        assert_eq!(slagheap_selection.mana_type, ManaType::Colorless);
+
+        assert!(
+            spell_cost_is_payable_from_pool(&scenario.state, caster, spell),
+            "the public predicate must reuse the exact production pool-payment authority"
+        );
+        let mut unfunded = scenario.state.clone();
+        unfunded.players[caster.0 as usize].mana_pool.mana.clear();
+        assert!(
+            !spell_cost_is_payable_from_pool(&unfunded, caster, spell),
+            "removing only pool coverage makes the exact predicate false"
+        );
+        assert!(
+            legal_actions(&scenario.state).iter().any(|action| {
+                matches!(
+                    action,
+                    GameAction::CastSpell {
+                        object_id,
+                        payment_mode: CastPaymentMode::Auto,
+                        ..
+                    } if *object_id == spell
+                )
+            }),
+            "the engine-issued ordinary cast must retain its Auto payment mode"
+        );
+
+        let mut runner = scenario.build();
+        let outcome = runner.cast(spell).target_player(target).resolve();
+
+        outcome.assert_life_delta(target, 2);
+        assert_eq!(outcome.zone_of(creature), Zone::Battlefield);
+        assert_eq!(
+            outcome.mana_pool_total(caster),
+            0,
+            "the cast spends the exact pool"
+        );
+        assert!(outcome.state().objects[&slagheap].tapped);
+        assert_eq!(outcome.counters(slagheap, storage.clone()), 7);
+        assert!(
+            !outcome.events().iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::ManaAbilityProduced { source_id, .. } if *source_id == slagheap
+                )
+            }),
+            "an exact pool payment must not activate the available indexed mana source"
+        );
+    }
+}
+
+/// Returns whether the spell currently has any effective keyword abilities in
+/// its present zone. This is read-only and preserves the off-zone continuous
+/// characteristic authority used by casting.
+pub fn spell_has_effective_keywords(state: &GameState, object_id: ObjectId) -> bool {
+    !crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id).is_empty()
+}
+
 pub(crate) fn effective_spell_cost_for_variant(
     state: &GameState,
     player: PlayerId,
@@ -6176,6 +6429,121 @@ struct CastingVariantChoiceSet {
 struct PreparedCastingVariant {
     transformed_state: GameState,
     prepared: PreparedSpellCast,
+}
+
+/// CR 601.2b: A player chooses an alternative casting method while casting,
+/// before mutable cost and condition checks determine whether it is payable.
+///
+/// An independently stored spell-definition payload that the current casting
+/// routes can select before cast-time affordability and other mutable checks.
+///
+/// These are deliberately definition payloads rather than prepared variants:
+/// a consumer deciding whether a prospective cast can change a later payoff
+/// must not discard a route merely because its cost or condition is false now.
+pub enum StructurallySelectableAlternateSpellPayload<'a> {
+    /// CR 715.3a + CR 720.3a + CR 712.8c: Adventure and Omen casts evaluate
+    /// their alternative characteristics, while transformed or converted
+    /// double-faced casts use their back-face characteristics.
+    ///
+    /// An Adventure/Omen, More Than Meets the Eye, or Disturb route swaps to
+    /// the stored face before the spell is prepared.
+    BackFace(&'a super::game_object::BackFaceData),
+    /// CR 702.102a: Fuse lets a player cast both halves of a split card from
+    /// their hand, appending the right-half spell instructions.
+    FuseRightSpellAbility(&'a AbilityDefinition),
+    /// CR 702.148a: Cleave replaces the card's normal spell text with its
+    /// bracketless alternate definition while casting it.
+    ///
+    /// Cleave replaces all four stored definition classes before preparation.
+    Cleave(&'a crate::types::card::CleaveVariant),
+}
+
+/// Visits alternate variant or offer payloads beyond ordinary face choice that
+/// are structurally selectable by the existing cast routes for `player`.
+///
+/// The route gates intentionally precede dynamic preparation and payment. A
+/// cast made now can alter a condition or cost that makes one of these routes
+/// available later in the same turn.
+pub fn for_each_structurally_selectable_alternate_spell_payload(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    mut visit: impl FnMut(StructurallySelectableAlternateSpellPayload<'_>),
+) {
+    let Some(object) = state.objects.get(&object_id) else {
+        return;
+    };
+    let owned_hand_card = object.zone == Zone::Hand && object.owner == player;
+    let owned_commander = state.format_config.command_zone
+        && object.zone == Zone::Command
+        && object.owner == player
+        && object.is_commander;
+
+    if (owned_hand_card || owned_commander) && alternative_spell_layout(object).is_some() {
+        if let Some(back_face) = object.back_face.as_ref() {
+            visit(StructurallySelectableAlternateSpellPayload::BackFace(
+                back_face,
+            ));
+        }
+    }
+
+    if owned_hand_card
+        && object
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Fuse))
+        && object
+            .back_face
+            .as_ref()
+            .is_some_and(|back_face| back_face.layout_kind == Some(LayoutKind::Split))
+    {
+        if let Some(back_face) = object.back_face.as_ref() {
+            for ability in back_face
+                .abilities
+                .iter()
+                .filter(|ability| ability.kind == AbilityKind::Spell)
+            {
+                visit(StructurallySelectableAlternateSpellPayload::FuseRightSpellAbility(ability));
+            }
+        }
+    }
+
+    if owned_hand_card
+        && object
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::MoreThanMeetsTheEye(_)))
+    {
+        if let Some(back_face) = object.back_face.as_ref() {
+            visit(StructurallySelectableAlternateSpellPayload::BackFace(
+                back_face,
+            ));
+        }
+    }
+
+    if object.zone == Zone::Graveyard
+        && object.owner == player
+        && super::keywords::effective_disturb_cost(state, object_id).is_some()
+    {
+        if let Some(back_face) = object.back_face.as_ref() {
+            visit(StructurallySelectableAlternateSpellPayload::BackFace(
+                back_face,
+            ));
+        }
+    }
+
+    if owned_hand_card
+        && object
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Cleave(_)))
+    {
+        if let Some(cleave_variant) = object.cleave_variant.as_ref() {
+            visit(StructurallySelectableAlternateSpellPayload::Cleave(
+                cleave_variant,
+            ));
+        }
+    }
 }
 
 struct CastableSpellVerdict {
@@ -9835,7 +10203,7 @@ fn is_castable_split_face(types: &crate::types::card_type::CardType) -> bool {
 
 /// CR 712.11b + CR 709.3: Cast-time face choice for spell//spell MDFCs and
 /// spell//spell split cards.
-fn cast_spell_face_choice_available(obj: &crate::game::game_object::GameObject) -> bool {
+pub fn cast_spell_face_choice_available(obj: &crate::game::game_object::GameObject) -> bool {
     // CR 601.2b (#7565): a choice already made for the CURRENT cast is not
     // offered again on pipeline re-entry; the transient flag clears once the
     // cast conversation ends, so a later recast prompts afresh.
@@ -19548,6 +19916,67 @@ fn player_may_begin_activating(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivationStructuralEligibility {
+    Eligible,
+    WrongActivator,
+    NinjutsuFamily,
+    WrongZone(Zone),
+}
+
+/// CR 113.6 + CR 113.6b + CR 602.2: Classifies the immutable source-zone and activator
+/// prerequisites shared by activation legality and pre-cast payoff discovery.
+/// This deliberately runs before mutable restrictions, targets, and costs: a
+/// currently false restriction may be the payoff of the spell being assessed.
+fn activation_structural_eligibility(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_def: &AbilityDefinition,
+) -> ActivationStructuralEligibility {
+    let Some(obj) = state.objects.get(&source_id) else {
+        return ActivationStructuralEligibility::WrongActivator;
+    };
+
+    // CR 602.2 + CR 108.4a: use controller_or_owner so off-zone cards and
+    // command-zone emblems retain their respective activation authorities.
+    if !player_may_begin_activating(
+        state,
+        player,
+        obj.controller_or_owner(),
+        ability_def.activator_filter.as_ref(),
+    ) {
+        return ActivationStructuralEligibility::WrongActivator;
+    }
+    // CR 702.49a: Ninjutsu is an activated ability with a dedicated
+    // GameAction::ActivateNinjutsu route, never the generic ActivateAbility route.
+    if super::keywords::is_ninjutsu_family_marker_ability(ability_def) {
+        return ActivationStructuralEligibility::NinjutsuFamily;
+    }
+    // CR 113.6 + CR 113.6b: activated abilities default to functioning only
+    // on the battlefield unless their definition names another activation zone.
+    let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
+    if obj.zone != required_zone {
+        return ActivationStructuralEligibility::WrongZone(required_zone);
+    }
+    ActivationStructuralEligibility::Eligible
+}
+
+/// CR 113.6 + CR 113.6b + CR 602.2: Public structural activation predicate for consumers
+/// that must discover possible activated-ability payoffs without evaluating
+/// mutable restrictions, targets, or costs.
+pub fn activation_source_and_activator_are_structurally_eligible(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_def: &AbilityDefinition,
+) -> bool {
+    matches!(
+        activation_structural_eligibility(state, player, source_id, ability_def),
+        ActivationStructuralEligibility::Eligible
+    )
+}
+
 /// CR 602.5 + CR 118.3: what the activation gate was asked to decide.
 ///
 /// The gate has one body and two consumers. `Legality` is enforcement: it
@@ -19662,20 +20091,10 @@ pub(crate) fn activation_verdict(
     else {
         return ActivationVerdict::Illegal;
     };
-    // CR 602.2 + CR 108.4a: the permission reference point is the source's
-    // controller, or its owner when it has none — this gate runs ahead of the
-    // `activation_zone` check below, so it sees hand / graveyard / exile sources.
-    if !player_may_begin_activating(
-        state,
-        player,
-        obj.controller_or_owner(),
-        ability_def.activator_filter.as_ref(),
+    if !matches!(
+        activation_structural_eligibility(state, player, source_id, &ability_def),
+        ActivationStructuralEligibility::Eligible
     ) {
-        return ActivationVerdict::Illegal;
-    }
-    // CR 702.49: Ninjutsu-family marker abilities are not normal activated
-    // abilities — they must route through `GameAction::ActivateNinjutsu`.
-    if super::keywords::is_ninjutsu_family_marker_ability(&ability_def) {
         return ActivationVerdict::Illegal;
     }
 
@@ -19687,11 +20106,6 @@ pub(crate) fn activation_verdict(
         return ActivationVerdict::Illegal;
     }
 
-    // CR 602.1: Check activation zone — default to battlefield.
-    let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
-    if obj.zone != required_zone {
-        return ActivationVerdict::Illegal;
-    }
     // CR 701.35a: Detained permanents' activated abilities can't be activated.
     if !obj.detained_by.is_empty() {
         return ActivationVerdict::Illegal;
@@ -20163,10 +20577,9 @@ pub fn handle_activate_ability(
     ability_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let obj = state
-        .objects
-        .get(&source_id)
-        .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+    if !state.objects.contains_key(&source_id) {
+        return Err(EngineError::InvalidAction("Object not found".to_string()));
+    }
 
     // CR 602.2: Only players permitted by `activator_filter` may begin activation.
     let Some(mut ability_def) = activation_ability_definition(state, source_id, ability_index)
@@ -20175,32 +20588,23 @@ pub fn handle_activate_ability(
             "Invalid ability index".to_string(),
         ));
     };
-    // CR 602.2 + CR 108.4a: the permission reference point is the source's
-    // controller, or its owner when it has none — this gate runs ahead of the
-    // `activation_zone` check below, so it sees hand / graveyard / exile sources.
-    if !player_may_begin_activating(
-        state,
-        player,
-        obj.controller_or_owner(),
-        ability_def.activator_filter.as_ref(),
-    ) {
-        return Err(EngineError::NotYourPriority);
-    }
-    // CR 702.49: Ninjutsu-family marker abilities must not use the generic
-    // activated-ability stack path — mana is only paid in `activate_ninjutsu`.
-    if super::keywords::is_ninjutsu_family_marker_ability(&ability_def) {
-        return Err(EngineError::InvalidAction(
-            "Ninjutsu-family abilities must be activated via ActivateNinjutsu (CR 702.49)"
-                .to_string(),
-        ));
-    }
-    // CR 602.1: Check activation zone — default to battlefield.
-    let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
-    if obj.zone != required_zone {
-        return Err(EngineError::InvalidAction(format!(
-            "Object is not in the correct zone (expected {:?})",
-            required_zone
-        )));
+    match activation_structural_eligibility(state, player, source_id, &ability_def) {
+        ActivationStructuralEligibility::Eligible => {}
+        ActivationStructuralEligibility::WrongActivator => {
+            return Err(EngineError::NotYourPriority)
+        }
+        ActivationStructuralEligibility::NinjutsuFamily => {
+            return Err(EngineError::InvalidAction(
+                "Ninjutsu-family abilities must be activated via ActivateNinjutsu (CR 702.49)"
+                    .to_string(),
+            ));
+        }
+        ActivationStructuralEligibility::WrongZone(required_zone) => {
+            return Err(EngineError::InvalidAction(format!(
+                "Object is not in the correct zone (expected {:?})",
+                required_zone
+            )));
+        }
     }
 
     // CR 702.170b + CR 116.2k + CR 602.1c: Plot is a SPECIAL ACTION, not the
@@ -22576,10 +22980,13 @@ mod tests;
 /// fact removed.
 #[cfg(test)]
 mod castable_zone_authority_tests {
-    use super::{cast_permissions_name_their_grantee, castable_from_current_zone};
+    use super::{
+        cast_permissions_name_their_grantee, castable_from_current_zone,
+        has_potentially_authorizing_object_cast_permission,
+    };
     use crate::game::game_object::GameObject;
     use crate::types::ability::{
-        CardPlayMode, CastingPermission, ExileGrantCostProvenance, StaticDefinition,
+        AbilityCost, CardPlayMode, CastingPermission, ExileGrantCostProvenance, StaticDefinition,
     };
     use crate::types::game_state::GameState;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -22664,6 +23071,158 @@ mod castable_zone_authority_tests {
             cast_permissions_name_their_grantee(&granteed),
             "PAIRED POSITIVE: the same permission naming a grantee passes — the field is the \
              only difference between this arm and the one above"
+        );
+    }
+
+    #[test]
+    fn potential_alt_cost_authority_matches_graveyard_and_exile_admission() {
+        let mut state = GameState::new_two_player(7);
+        let id = card(&mut state, 1, PlayerId(1), Zone::Graveyard);
+        let mut granted = state.objects[&id].clone();
+        granted.casting_permissions = vec![CastingPermission::ExileWithAltCost {
+            source_id: None,
+            cost: ManaCost::default(),
+            cost_provenance: ExileGrantCostProvenance::Alternative,
+            cast_transformed: false,
+            constraint: None,
+            granted_to: None,
+            resolution_cleanup: None,
+            duration: None,
+            graveyard_replacement: None,
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission: None,
+        }];
+
+        assert!(
+            has_potentially_authorizing_object_cast_permission(&granted, PlayerId(0)),
+            "an unnamed alt-cost grant potentially authorizes a nonowner from the graveyard"
+        );
+        assert!(
+            castable_from_current_zone(&state, &granted, PlayerId(0), None),
+            "paired production admission consumes the same unnamed graveyard grant"
+        );
+        assert!(has_potentially_authorizing_object_cast_permission(
+            &granted,
+            PlayerId(1)
+        ));
+        assert!(
+            castable_from_current_zone(&state, &granted, PlayerId(1), None),
+            "the owner remains eligible for the same unnamed graveyard grant"
+        );
+
+        {
+            let CastingPermission::ExileWithAltCost { granted_to, .. } =
+                &mut granted.casting_permissions[0]
+            else {
+                unreachable!("fixture contains an alt-cost permission");
+            };
+            *granted_to = Some(PlayerId(0));
+        }
+        assert!(
+            has_potentially_authorizing_object_cast_permission(&granted, PlayerId(0)),
+            "a named standing graveyard grant authorizes its grantee"
+        );
+        assert!(
+            castable_from_current_zone(&state, &granted, PlayerId(0), None),
+            "paired production admission consumes the same named standing grant"
+        );
+        {
+            let CastingPermission::ExileWithAltCost {
+                resolution_cleanup, ..
+            } = &mut granted.casting_permissions[0]
+            else {
+                unreachable!("fixture still contains an alt-cost permission");
+            };
+            *resolution_cleanup = Some(crate::types::ability::ResolutionCastCleanup {
+                source_id: ObjectId(2),
+                exiled_misses: Vec::new(),
+                reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+            });
+        }
+        assert!(
+            has_potentially_authorizing_object_cast_permission(&granted, PlayerId(0)),
+            "a named cast-during-resolution grant remains potentially authorizing in graveyard"
+        );
+        assert!(
+            castable_from_current_zone(&state, &granted, PlayerId(0), None),
+            "paired production admission preserves the zone-independent resolution grant"
+        );
+
+        let CastingPermission::ExileWithAltCost {
+            granted_to,
+            resolution_cleanup,
+            ..
+        } = &mut granted.casting_permissions[0]
+        else {
+            unreachable!("fixture still contains an alt-cost permission");
+        };
+        *granted_to = None;
+        *resolution_cleanup = None;
+        granted.zone = Zone::Exile;
+        assert!(
+            has_potentially_authorizing_object_cast_permission(&granted, PlayerId(0)),
+            "the nonowner exile grant remains potentially authorizing"
+        );
+        assert!(
+            castable_from_current_zone(&state, &granted, PlayerId(0), None),
+            "paired production admission preserves the existing unnamed Exile route"
+        );
+
+        granted.zone = Zone::Graveyard;
+        granted.casting_permissions = vec![CastingPermission::ExileWithAltAbilityCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            constraint: None,
+            granted_to: Some(PlayerId(0)),
+            duration: None,
+            source_id: None,
+        }];
+        assert!(
+            has_potentially_authorizing_object_cast_permission(&granted, PlayerId(0)),
+            "the non-mana standing grant authorizes its graveyard grantee"
+        );
+        assert!(
+            castable_from_current_zone(&state, &granted, PlayerId(0), None),
+            "paired production admission consumes the same nonowner non-mana grant"
+        );
+
+        {
+            let CastingPermission::ExileWithAltAbilityCost { granted_to, .. } =
+                &mut granted.casting_permissions[0]
+            else {
+                unreachable!("fixture contains a non-mana alt-cost permission");
+            };
+            *granted_to = Some(PlayerId(1));
+        }
+        assert!(
+            !has_potentially_authorizing_object_cast_permission(&granted, PlayerId(0)),
+            "a standing grant naming another player does not authorize P0"
+        );
+        assert!(
+            !castable_from_current_zone(&state, &granted, PlayerId(0), None),
+            "paired production admission rejects the same wrong-grantee permission"
+        );
+
+        {
+            let CastingPermission::ExileWithAltAbilityCost { granted_to, .. } =
+                &mut granted.casting_permissions[0]
+            else {
+                unreachable!("fixture still contains a non-mana alt-cost permission");
+            };
+            *granted_to = Some(PlayerId(0));
+        }
+
+        granted.zone = Zone::Exile;
+        assert!(
+            has_potentially_authorizing_object_cast_permission(&granted, PlayerId(0)),
+            "the non-mana Exile grant preserves its named-grantee route"
+        );
+        assert!(
+            castable_from_current_zone(&state, &granted, PlayerId(0), None),
+            "paired production admission preserves the non-mana Exile grant"
         );
     }
 

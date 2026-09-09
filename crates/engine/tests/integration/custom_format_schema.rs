@@ -11,8 +11,9 @@
 //! private items directly.
 
 use engine::types::custom_format::{
-    assert_no_lobby_save_sentinel_collision, passes_legacy_axis_gate, passes_reprint_fidelity_gate,
-    validate_custom_rules_consistency, CombatDamageTiming, CommandZoneMode,
+    assert_no_lobby_save_sentinel_collision, bundled_presets, old_school_93_94, old_school_95,
+    passes_legacy_axis_gate, passes_reprint_fidelity_gate, swedish_old_school,
+    validate_custom_rules_consistency, AntePolicy, CombatDamageTiming, CommandZoneMode,
     CommanderEligibilityRule, CustomFormatDef, CustomFormatId, CustomFormatRules, LegacyRuleSet,
     LegalityRules, ManaBurnPolicy, PrintingFidelity, ReprintPolicy, SetCode, StructuralRules,
     WishOutsideGameScope, LOBBY_SAVE_CUSTOM_FORMAT_ID,
@@ -22,7 +23,7 @@ use engine::types::format::{
     SideboardPolicy,
 };
 use engine::types::player::PlayerId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn sample_structural() -> StructuralRules {
     StructuralRules {
@@ -52,6 +53,7 @@ fn sample_rules(id: u16) -> CustomFormatRules {
                 damage_timing: CombatDamageTiming::default(),
                 wish_scope: WishOutsideGameScope::default(),
                 legend_rule_scope: engine::types::custom_format::LegendRuleScope::default(),
+                ante: AntePolicy::default(),
             },
         },
     }
@@ -172,6 +174,43 @@ fn legacy_axis_gate_accepts_all_default_axes() {
 }
 
 #[test]
+fn ante_enabled_is_gated_but_ante_excluded_is_not() {
+    // CR 407.2/407.4: `Enabled` promises an ante zone and the ante action,
+    // which no engine code provides — so it is a declared-but-unbuilt axis
+    // like any other, and the gate must reject it.
+    let mut def = sample_def(1);
+    def.rules.legality.legacy.ante = AntePolicy::Enabled;
+    assert!(!passes_legacy_axis_gate(&def.rules.legality.legacy));
+
+    // CR 407.3's exclusion, by contrast, IS enforced (in `DeclaredPool`), and
+    // is the default every custom format carries — including every Axis-A
+    // lobby save, whose whole LegacyRuleSet is `Default`. Gating it would
+    // reject every custom format in existence.
+    assert_eq!(AntePolicy::default(), AntePolicy::Excluded);
+    def.rules.legality.legacy.ante = AntePolicy::Excluded;
+    assert!(passes_legacy_axis_gate(&def.rules.legality.legacy));
+}
+
+#[test]
+fn a_legacy_rule_set_saved_before_the_ante_axis_still_deserializes() {
+    // Backward compatibility for a `CustomFormatDef` a client persisted
+    // before this axis existed (Phase 1c shipped the Axis-A save path): the
+    // payload has no `ante` key, and must resolve to the modern `Excluded` —
+    // which is exactly what such a save meant.
+    let legacy: LegacyRuleSet = serde_json::from_str(
+        r#"{
+            "mana_burn": "Modern",
+            "damage_timing": "Modern",
+            "wish_scope": "PostM10SideboardOnly",
+            "legend_rule_scope": "Modern"
+        }"#,
+    )
+    .expect("a pre-ante LegacyRuleSet payload must still deserialize");
+    assert_eq!(legacy.ante, AntePolicy::Excluded);
+    assert_eq!(legacy, LegacyRuleSet::default());
+}
+
+#[test]
 fn reprint_fidelity_gate_rejects_mismatch() {
     let mut def = sample_def(3);
     def.reprint_policy = Some(ReprintPolicy::OriginalPrintingsOnly);
@@ -195,9 +234,391 @@ fn reprint_fidelity_gate_accepts_agreement() {
     assert!(passes_reprint_fidelity_gate(&def2));
 }
 
+/// Names, not counts. A same-length substitution anywhere in these rosters
+/// changes legal deck construction, and a test that only counted would sail
+/// straight past it — the lesson from the Swedish preset's first review.
+fn names(entries: &[String]) -> BTreeSet<&str> {
+    entries.iter().map(String::as_str).collect()
+}
+
+fn codes(entries: &[SetCode]) -> BTreeSet<&str> {
+    entries.iter().map(|code| code.0.as_str()).collect()
+}
+
 #[test]
-fn custom_format_registry_is_empty_in_phase_1a() {
-    assert!(engine::types::custom_format::custom_format_registry().is_empty());
+fn old_school_93_94_declares_its_sourced_card_pool() {
+    // Verbatim from `lordsofthepit.com/src/pages/formats.md` (RESEARCH.md §1),
+    // re-fetched 2026-09-09. Every set code checked against Scryfall's live
+    // set list at implementation time.
+    let preset = old_school_93_94();
+    let legality = &preset.rules.legality;
+
+    let sets = legality
+        .legal_sets
+        .as_ref()
+        .expect("Old School 93/94 restricts its pool, so legal_sets is Some(_)");
+    assert_eq!(
+        codes(sets),
+        BTreeSet::from([
+            "LEA", "LEB", "2ED", "CED", "CEI", "ARN", "ATQ", "3ED", "LEG", "DRK", "FEM",
+        ]),
+        "Alpha, Beta, Unlimited, both Collectors' Editions, Arabian Nights, Antiquities, \
+         Revised, Legends, The Dark, Fallen Empires"
+    );
+    assert_eq!(sets.len(), 11, "no duplicate set codes");
+
+    assert_eq!(
+        names(&legality.restricted),
+        BTreeSet::from([
+            "Ancestral Recall",
+            "Balance",
+            "Black Lotus",
+            "Braingeyser",
+            "Chaos Orb",
+            "Channel",
+            "Demonic Tutor",
+            "Library of Alexandria",
+            "Mana Drain",
+            "Mind Twist",
+            "Mox Emerald",
+            "Mox Jet",
+            "Mox Pearl",
+            "Mox Ruby",
+            "Mox Sapphire",
+            "Recall",
+            "Regrowth",
+            "Sol Ring",
+            "Time Vault",
+            "Time Walk",
+            "Timetwister",
+            "Wheel of Fortune",
+        ])
+    );
+    assert_eq!(legality.restricted.len(), 22, "the source states 22");
+
+    assert_eq!(
+        names(&legality.banned),
+        BTreeSet::from([
+            "Bronze Tablet",
+            "Contract from Below",
+            "Darkpact",
+            "Demonic Attorney",
+            "Jeweled Bird",
+            "Rebirth",
+            "Tempest Efreet",
+        ])
+    );
+    assert_eq!(legality.banned.len(), 7, "the source states 7");
+
+    // Mana burn is the source's ONLY stated legacy exception — pinned axis by
+    // axis so a future edit cannot quietly add damage-on-the-stack or a Wish
+    // reversion this ruleset never asked for.
+    assert_eq!(legality.legacy.mana_burn, ManaBurnPolicy::Obsolete);
+    assert_eq!(
+        legality.legacy,
+        LegacyRuleSet {
+            mana_burn: ManaBurnPolicy::Obsolete,
+            ..LegacyRuleSet::default()
+        }
+    );
+}
+
+/// PLAN.md §2's preset-inheritance requirement: 95 must carry every 93/94
+/// entry PLUS exactly its own declared additions. Asserting only that the
+/// additions are present would let a future edit silently drop or duplicate
+/// the inherited base.
+#[test]
+fn old_school_95_extends_93_94_by_exactly_its_declared_deltas() {
+    let base = old_school_93_94();
+    let extended = old_school_95();
+
+    let base_sets = codes(base.rules.legality.legal_sets.as_ref().unwrap());
+    let extended_sets = codes(extended.rules.legality.legal_sets.as_ref().unwrap());
+    assert!(
+        base_sets.is_subset(&extended_sets),
+        "95 must inherit every 93/94 set"
+    );
+    assert_eq!(
+        &extended_sets - &base_sets,
+        BTreeSet::from(["4ED", "ICE", "CHR", "REN", "HML"]),
+        "Fourth Edition, Ice Age, Chronicles, Renaissance, Homelands — and nothing else"
+    );
+
+    let base_restricted = names(&base.rules.legality.restricted);
+    let extended_restricted = names(&extended.rules.legality.restricted);
+    assert!(base_restricted.is_subset(&extended_restricted));
+    assert_eq!(
+        &extended_restricted - &base_restricted,
+        BTreeSet::from(["Demonic Consultation", "Mana Crypt"])
+    );
+
+    let base_banned = names(&base.rules.legality.banned);
+    let extended_banned = names(&extended.rules.legality.banned);
+    assert!(base_banned.is_subset(&extended_banned));
+    assert_eq!(
+        &extended_banned - &base_banned,
+        BTreeSet::from(["Amulet of Quoz", "Timmerian Fiends"])
+    );
+
+    // Set semantics would hide a duplicated inherited entry, which is a real
+    // authoring defect even though it changes no verdict.
+    assert_eq!(
+        extended.rules.legality.legal_sets.as_ref().unwrap().len(),
+        16
+    );
+    assert_eq!(extended.rules.legality.restricted.len(), 24);
+    assert_eq!(extended.rules.legality.banned.len(), 9);
+
+    // Inherited verbatim, not re-declared.
+    assert_eq!(extended.rules.legality.legacy, base.rules.legality.legacy);
+    assert_eq!(extended.printing_fidelity, base.printing_fidelity);
+    assert_eq!(extended.reprint_policy, base.reprint_policy);
+
+    // ...but NOT the identity, which must be its own.
+    assert_ne!(extended.rules.id, base.rules.id);
+    assert_ne!(extended.label, base.label);
+    assert_ne!(extended.short_label, base.short_label);
+}
+
+/// The legacy-axis gate, exercised against real entries for the first time.
+/// Both EC presets declare `mana_burn: Obsolete`, which the engine does not
+/// implement, so `custom_format_registry()` must list and then reject them.
+#[test]
+fn the_eternal_central_presets_are_listed_but_withheld_by_the_legacy_axis_gate() {
+    // "Listed but withheld" is a claim about `bundled_presets()`, so assert it
+    // there. Checking only that the registry is empty would keep passing if
+    // both presets were quietly dropped from the list — the registry would
+    // still be empty, and independently-constructed presets would still fail
+    // the gate, so nothing would catch it.
+    let listed: BTreeSet<u16> = bundled_presets().iter().map(|def| def.rules.id.0).collect();
+    assert!(
+        listed.contains(&old_school_93_94().rules.id.0)
+            && listed.contains(&old_school_95().rules.id.0),
+        "both EC presets must be CONSIDERED for registration; got ids {listed:?}"
+    );
+    // The other half of the mechanism: Swedish is absent from the list
+    // entirely, because it would pass the gates. See its own test.
+    assert!(!listed.contains(&swedish_old_school().rules.id.0));
+
+    for preset in bundled_presets() {
+        let label = preset.label.clone();
+        assert!(
+            !passes_legacy_axis_gate(&preset.rules.legality.legacy),
+            "{label} declares mana burn, which IMPLEMENTED_LEGACY_AXES does not cover yet"
+        );
+        // The OTHER gate must pass, so the rejection above is attributable to
+        // the unimplemented axis and not to mismatched reprint metadata.
+        assert!(passes_reprint_fidelity_gate(&preset), "{label}");
+        assert_no_lobby_save_sentinel_collision(&[preset]);
+    }
+
+    assert!(
+        engine::types::custom_format::custom_format_registry().is_empty(),
+        "neither EC preset is selectable until mana burn lands (Phase 2b)"
+    );
+}
+
+/// PLAN.md §1's pairing rule, run offline: a preset that declares reprint
+/// intent must admit the approximation in text a player can read, or the
+/// label misleads about what the engine actually enforces.
+#[test]
+fn set_code_approximation_presets_disclose_the_limitation() {
+    for preset in [old_school_93_94(), old_school_95(), swedish_old_school()] {
+        let discloses = preset
+            .description
+            .contains("approximated at the set-code level");
+        match preset.printing_fidelity {
+            PrintingFidelity::SetCodeApproximation => assert!(
+                discloses,
+                "{} declares SetCodeApproximation but its description does not say so: {:?}",
+                preset.label, preset.description
+            ),
+            // Paired negative: a preset claiming no printing intent must not
+            // carry the disclosure either, or the text is boilerplate rather
+            // than a real signal.
+            PrintingFidelity::NotApplicable => assert!(
+                !discloses,
+                "{} is NotApplicable but discloses an approximation it does not make",
+                preset.label
+            ),
+        }
+    }
+}
+
+/// Registry ids are persisted in `GameFormat::Custom(id)`, so a collision
+/// between two presets would make saved games ambiguous. Checked across every
+/// bundled constructor, registered or not.
+#[test]
+fn every_bundled_preset_has_a_distinct_non_sentinel_id() {
+    let presets = [old_school_93_94(), old_school_95(), swedish_old_school()];
+    let ids: BTreeSet<u16> = presets.iter().map(|def| def.rules.id.0).collect();
+    assert_eq!(
+        ids.len(),
+        presets.len(),
+        "two bundled presets share a CustomFormatId: {:?}",
+        presets
+            .iter()
+            .map(|def| (&def.label, def.rules.id.0))
+            .collect::<Vec<_>>()
+    );
+    assert!(!ids.contains(&LOBBY_SAVE_CUSTOM_FORMAT_ID.0));
+}
+
+#[test]
+fn custom_format_registry_withholds_swedish_old_school_on_open_item_6() {
+    // Swedish is withheld by a DIFFERENT mechanism from its EC siblings, and
+    // the distinction is the whole point of this test. The EC presets are
+    // listed in the registry and rejected by the legacy-axis gate. Swedish
+    // PASSES both gates, so listing it would register it — its blocker is
+    // CONTEXT.md Open item 6 (unconfirmed reprint-policy metadata), a
+    // documentation-accuracy blocker with no gate to express it, leaving
+    // omission from the list as the only mechanism.
+    //
+    // Asserting both halves is what makes that meaningful: an empty-registry
+    // assertion alone would keep passing if the preset silently started
+    // FAILING a gate, which would hide the real reason it is absent.
+    let preset = swedish_old_school();
+    assert!(passes_legacy_axis_gate(&preset.rules.legality.legacy));
+    assert!(passes_reprint_fidelity_gate(&preset));
+
+    // Absent from the CONSIDERED list, not merely from the filtered result —
+    // that absence IS the withholding mechanism here, so it is what to assert.
+    assert!(
+        !bundled_presets()
+            .iter()
+            .any(|def| def.rules.id == preset.rules.id),
+        "Swedish passes both gates, so listing it in bundled_presets() would register it"
+    );
+
+    let registry = engine::types::custom_format::custom_format_registry();
+    assert!(
+        registry.is_empty(),
+        "swedish_old_school() must not be selectable while Open item 6 is unresolved; got {:?}",
+        registry.iter().map(|def| &def.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn swedish_old_school_declares_its_sourced_card_pool() {
+    // Preset integrity against `docs/proposals/custom-format-engine/CONTEXT.md`'s
+    // captured lists, themselves re-verified against the primary source
+    // (oldschool-mtg.blogspot.com/p/banrestriction.html). Every set code was
+    // checked against Scryfall's set list at implementation time.
+    let preset = swedish_old_school();
+    let legality = &preset.rules.legality;
+
+    let sets = legality
+        .legal_sets
+        .as_ref()
+        .expect("Swedish Old School restricts its pool, so legal_sets is Some(_), never None");
+    assert_eq!(
+        sets.iter().map(|code| code.0.as_str()).collect::<Vec<_>>(),
+        ["LEA", "LEB", "2ED", "ARN", "ATQ", "LEG", "DRK", "SUM"],
+        "Alpha, Beta, Unlimited, Arabian Nights, Antiquities, Legends, The Dark, Summer Magic"
+    );
+
+    // A genuinely empty list, not an unpopulated one: the format bans nothing
+    // and restricts instead. The schema must carry that faithfully.
+    assert!(legality.banned.is_empty());
+
+    // The COMPLETE authoritative roster, not a count plus spot-checks: a
+    // same-length substitution in any entry changes legal deck construction,
+    // and a test that only counted to 25 would pass straight through it.
+    // Order-independent so the constructor stays free to reorder, but exact in
+    // both directions — nothing missing, nothing extra.
+    let expected_restricted: BTreeSet<&str> = [
+        "Ancestral Recall",
+        "Balance",
+        "Black Lotus",
+        "Braingeyser",
+        "Channel",
+        "Chaos Orb",
+        "Contract from Below",
+        "Darkpact",
+        "Demonic Tutor",
+        "Library of Alexandria",
+        "Mana Drain",
+        "Mind Twist",
+        "Mishra's Workshop",
+        "Mox Emerald",
+        "Mox Jet",
+        "Mox Pearl",
+        "Mox Ruby",
+        "Mox Sapphire",
+        "Regrowth",
+        "Sol Ring",
+        "Strip Mine",
+        "Tempest Efreet",
+        "Time Walk",
+        "Timetwister",
+        "Wheel of Fortune",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        expected_restricted.len(),
+        25,
+        "the source's restricted list is 25 cards (CONTEXT.md corrected an earlier 23 miscount) — \
+         if this trips, the literal above gained a duplicate"
+    );
+    let actual_restricted: BTreeSet<&str> =
+        legality.restricted.iter().map(String::as_str).collect();
+    assert_eq!(
+        actual_restricted, expected_restricted,
+        "swedish_old_school()'s restricted list must match the primary source exactly"
+    );
+    // A set comparison would hide a duplicated entry in the constructor, which
+    // would be a real authoring defect even though it changes no verdict.
+    assert_eq!(legality.restricted.len(), 25);
+
+    // Three of the 25 (Contract from Below, Darkpact, Tempest Efreet) are also
+    // ante cards, exactly as the source spells it — the ante exclusion is what
+    // actually keeps those three out of a deck, ahead of this list.
+    assert!(actual_restricted.contains("Contract from Below"));
+
+    // An old card pool played under modern rules: the source mentions no mana
+    // burn, damage on the stack, pre-M10 Wish templating or modified legend
+    // rule. This is what makes it the one Axis-B preset needing zero
+    // LegacyRuleSet engine wiring.
+    assert_eq!(legality.legacy, LegacyRuleSet::default());
+}
+
+#[test]
+fn swedish_old_school_carries_honest_unresolved_reprint_metadata() {
+    let preset = swedish_old_school();
+    // Open item 6: the primary source states only "Only English versions are
+    // allowed in Oldschool". `None` says "no confirmed authored intent to
+    // declare" rather than inventing OriginalPrintingsOnly from a secondary
+    // source, and NotApplicable is the pairing PLAN.md §1 requires of it.
+    assert_eq!(preset.reprint_policy, None);
+    assert_eq!(preset.printing_fidelity, PrintingFidelity::NotApplicable);
+
+    // A registry-stable id of its own, never the Axis-A lobby-save sentinel.
+    assert_ne!(preset.rules.id, LOBBY_SAVE_CUSTOM_FORMAT_ID);
+    assert_no_lobby_save_sentinel_collision(&[preset]);
+}
+
+#[test]
+fn swedish_old_school_inherits_the_shared_constructed_structural_shape() {
+    // The primary source states pool and restriction rules only. Rather than
+    // invent structural values, the preset projects `FormatConfig::standard()`
+    // — the shape every built-in 60-card constructed format spreads. This
+    // pins that they stay identical.
+    let preset = swedish_old_school();
+    let structural = &preset.rules.structural;
+    let base = FormatConfig::standard();
+
+    assert_eq!(structural.starting_life, base.starting_life);
+    assert_eq!(structural.deck_size, base.deck_size);
+    assert_eq!(structural.min_players, base.min_players);
+    assert_eq!(structural.max_players, base.max_players);
+    assert_eq!(structural.sideboard_policy, base.sideboard_policy);
+    assert_eq!(
+        structural.default_deck_copy_limit,
+        base.default_deck_copy_limit
+    );
+    assert!(!structural.singleton);
+    assert_eq!(structural.command_zone_mode, CommandZoneMode::Disabled);
 }
 
 #[test]

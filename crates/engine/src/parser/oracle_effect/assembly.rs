@@ -1108,6 +1108,7 @@ impl AssemblyEnv {
                 Effect::ChangeZoneAll {
                     face_down_profile: Some(_),
                     library_position: None,
+                    library_shuffle: _,
                     random_order: false,
                     ..
                 } | Effect::ChangeZone {

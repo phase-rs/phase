@@ -171,6 +171,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
+            library_shuffle: Default::default(),
             random_order: false,
         },
         // Effects without an all-matching counterpart (e.g. `Counter` for

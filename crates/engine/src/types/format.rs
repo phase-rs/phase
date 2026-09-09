@@ -1050,7 +1050,7 @@ impl<'de> Deserialize<'de> for FormatConfig {
                         "FormatConfig.custom_rules declares a LegacyRuleSet axis the engine does \
                          not implement yet — accepting it would promise historical rules \
                          behavior (mana burn, combat-damage timing, Wish reach, legend-rule \
-                         scope) that no engine code enforces",
+                         scope, an ante zone) that no engine code enforces",
                     ));
                 }
                 let mut expected = FormatConfig::for_custom_rules(rules);
