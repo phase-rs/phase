@@ -62915,7 +62915,10 @@ fn dragon_whelp_activation_threshold_gates_the_sacrifice_rider() {
          activated four or more times this turn, sacrifice this creature at the beginning of \
          the next end step.",
         "Dragon Whelp",
-        &[],
+        // Production supplies MTGJSON's keyword list; passing `&[]` here would
+        // leave the "Flying" line as `Effect::Unimplemented` for a reason that
+        // has nothing to do with the clause under test.
+        &["Flying".to_string()],
         &["Creature".to_string()],
         &["Dragon".to_string()],
     );
@@ -62938,8 +62941,26 @@ fn dragon_whelp_activation_threshold_gates_the_sacrifice_rider() {
         }
     }
 
+    fn assert_no_unimplemented(def: &AbilityDefinition) {
+        assert!(
+            !matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+            "coverage honesty: the whole line must lower, got {def:#?}"
+        );
+        if let Some(sub) = def.sub_ability.as_deref() {
+            assert_no_unimplemented(sub);
+        }
+        if let Some(alt) = def.else_ability.as_deref() {
+            assert_no_unimplemented(alt);
+        }
+    }
+
     let mut conditions = Vec::new();
     for ability in &parsed.abilities {
+        // Removing the `line_has_condition_text` structural exemption only makes
+        // coverage honest if the clause genuinely lowers. If it degraded to
+        // `Effect::Unimplemented` instead, the card would flip to unsupported —
+        // which is honest but is NOT this fix's claim.
+        assert_no_unimplemented(ability);
         chain_conditions(ability, &mut conditions);
     }
 
