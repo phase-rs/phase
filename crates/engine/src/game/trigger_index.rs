@@ -590,7 +590,11 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
             push(TriggerEventKey::ManaProduced);
             push(TriggerEventKey::TapsForMana);
         }
-        GameEvent::ManaPoolEmptied { .. } | GameEvent::ManaRecolored { .. } => {}
+        // No trigger key: no card triggers on mana burn. The life loss it
+        // causes is itself a `LifeChanged` event, which carries its own keys.
+        GameEvent::ManaPoolEmptied { .. }
+        | GameEvent::ManaBurn { .. }
+        | GameEvent::ManaRecolored { .. } => {}
         GameEvent::PermanentTapped { .. } => push(TriggerEventKey::Taps),
         GameEvent::PlayerLost { .. } => push(TriggerEventKey::PlayerLost),
         // CR 800.4: Administrative control transfers on elimination do NOT

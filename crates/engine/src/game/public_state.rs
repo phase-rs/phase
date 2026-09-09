@@ -333,6 +333,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             }
             GameEvent::ManaAdded { player_id, .. }
             | GameEvent::ManaPoolEmptied { player_id, .. }
+            | GameEvent::ManaBurn { player_id, .. }
             | GameEvent::ManaRecolored { player_id, .. } => {
                 mark_public_state_player_dirty(state, *player_id);
                 mark_mana_display_dirty(state);

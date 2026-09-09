@@ -21161,7 +21161,18 @@ pub enum PhaseTransitionDrainState {
 pub struct PhaseTransitionProgress {
     pub remaining_players: VecDeque<PlayerId>,
     pub next_phase: Phase,
-    pub in_combat: bool,
+    /// The phase the turn is leaving, paired with `next_phase` to identify the
+    /// boundary being crossed. Replaces a derived `in_combat: bool`, which
+    /// carried strictly less information than the phase it was computed from
+    /// and could contradict `next_phase` if either were ever set separately —
+    /// CR 500.1's phase-group crossing cannot be recovered from the
+    /// destination alone.
+    ///
+    /// `#[serde(default)]` `None` for a `GameState` saved before this field
+    /// existed; see `ManaPool::clear_expired_retention_markers` for why that
+    /// resolves conservatively rather than guessing a crossing.
+    #[serde(default)]
+    pub previous_phase: Option<Phase>,
     pub entering_cleanup: bool,
     #[serde(default)]
     pub drain_state: PhaseTransitionDrainState,
@@ -21176,7 +21187,7 @@ mod phase_transition_progress_serde_tests {
         let progress = PhaseTransitionProgress {
             remaining_players: VecDeque::from([PlayerId(1)]),
             next_phase: Phase::Upkeep,
-            in_combat: false,
+            previous_phase: Some(Phase::Untap),
             entering_cleanup: false,
             drain_state: PhaseTransitionDrainState::AwaitingPostReplacementContinuation,
         };

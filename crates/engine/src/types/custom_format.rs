@@ -644,7 +644,12 @@ pub enum LegacyAxis {
 
 /// Axes of `LegacyRuleSet` the engine actually enforces at runtime. Empty in
 /// Phase 1a; later phases populate this as each axis's behavior is wired in.
-pub const IMPLEMENTED_LEGACY_AXES: &[LegacyAxis] = &[];
+///
+/// `ManaBurn` joined in Phase 2b, which is what makes the Eternal Central Old
+/// School presets selectable — they were listed in `custom_format_registry`
+/// and rejected here from the moment they existed, and this one entry is the
+/// whole of what changed for them. See `game::mana_burn`.
+pub const IMPLEMENTED_LEGACY_AXES: &[LegacyAxis] = &[LegacyAxis::ManaBurn];
 
 fn declared_legacy_axes(rules: &LegacyRuleSet) -> Vec<LegacyAxis> {
     let mut axes = Vec::new();
@@ -897,10 +902,10 @@ fn card_names(names: &[&str]) -> Vec<CardName> {
 /// kept because the source states them, and because they must survive a future
 /// format that legitimately plays for ante.
 ///
-/// **Not registerable yet:** `mana_burn: Obsolete` is a `LegacyRuleSet` axis
-/// the engine does not implement, so `custom_format_registry`'s legacy-axis
-/// gate filters this out until Phase 2b lands. That is the gate working as
-/// designed, not a defect — see the registry's own doc comment.
+/// **Selectable as of Phase 2b.** `mana_burn: Obsolete` held this preset out
+/// of the registry from the moment it existed; adding `LegacyAxis::ManaBurn`
+/// to [`IMPLEMENTED_LEGACY_AXES`] is the entire change that released it — this
+/// constructor was not touched. See `game::mana_burn`.
 pub fn old_school_93_94() -> CustomFormatDef {
     CustomFormatDef {
         rules: CustomFormatRules {
@@ -984,7 +989,7 @@ pub fn old_school_93_94() -> CustomFormatDef {
 /// remaining CR 407.3 ante cards, which this era's pool newly contains.
 ///
 /// Everything else is inherited verbatim, including `mana_burn: Obsolete`, so
-/// this preset is withheld by the same legacy-axis gate until Phase 2b.
+/// this preset became selectable alongside its base in Phase 2b.
 pub fn old_school_95() -> CustomFormatDef {
     let mut def = old_school_93_94();
 
@@ -1041,13 +1046,12 @@ pub fn bundled_presets() -> Vec<CustomFormatDef> {
 /// Authoritative list of bundled custom-format presets, filtered through
 /// both registration gates.
 ///
-/// **Still resolves to empty, and every preset here is withheld for a stated
-/// reason rather than by omission.** The two Eternal Central presets are
-/// listed and then REJECTED by `passes_legacy_axis_gate`, because both declare
-/// `mana_burn: Obsolete` and the engine implements no mana burn yet; Phase 2b
-/// adds `LegacyAxis::ManaBurn` to `IMPLEMENTED_LEGACY_AXES` and they become
-/// selectable with no edit here. Listing them is the point — until now the
-/// gates filtered an empty vector and could not fail.
+/// **As of Phase 2b this returns the two Eternal Central presets** — the first
+/// custom formats the engine actually offers. They were listed here from the
+/// start and rejected by `passes_legacy_axis_gate` for declaring
+/// `mana_burn: Obsolete`; adding `LegacyAxis::ManaBurn` to
+/// [`IMPLEMENTED_LEGACY_AXES`] released both without touching either
+/// constructor, which is exactly what listing-then-filtering was for.
 ///
 /// [`swedish_old_school`] is the exception, and is deliberately NOT in this
 /// list: it PASSES both gates, so listing it would register it, and CONTEXT.md

@@ -162,9 +162,22 @@ fn validate_custom_rules_consistency_accepts_every_builtin_default() {
 
 #[test]
 fn legacy_axis_gate_rejects_undeclared_axis() {
+    // Uses damage timing, not mana burn: Phase 2b implemented mana burn, so it
+    // is no longer an example of an UNimplemented axis. The gate's job is
+    // unchanged — the set it checks against simply grew.
+    let mut def = sample_def(1);
+    def.rules.legality.legacy.damage_timing = CombatDamageTiming::OnStack;
+    assert!(!passes_legacy_axis_gate(&def.rules.legality.legacy));
+}
+
+/// The other side of that change: an axis the engine now DOES implement must
+/// pass. Without this, `IMPLEMENTED_LEGACY_AXES` could be emptied again and
+/// only the EC presets' registry test would notice.
+#[test]
+fn legacy_axis_gate_accepts_the_implemented_mana_burn_axis() {
     let mut def = sample_def(1);
     def.rules.legality.legacy.mana_burn = ManaBurnPolicy::Obsolete;
-    assert!(!passes_legacy_axis_gate(&def.rules.legality.legacy));
+    assert!(passes_legacy_axis_gate(&def.rules.legality.legacy));
 }
 
 #[test]
@@ -380,16 +393,16 @@ fn old_school_95_extends_93_94_by_exactly_its_declared_deltas() {
     assert_ne!(extended.short_label, base.short_label);
 }
 
-/// The legacy-axis gate, exercised against real entries for the first time.
-/// Both EC presets declare `mana_burn: Obsolete`, which the engine does not
-/// implement, so `custom_format_registry()` must list and then reject them.
+/// Phase 2b's payoff: the two EC presets are now SELECTABLE. They were listed
+/// in `bundled_presets()` and rejected by the legacy-axis gate from the moment
+/// they existed; implementing mana burn released them without either
+/// constructor changing.
 #[test]
-fn the_eternal_central_presets_are_listed_but_withheld_by_the_legacy_axis_gate() {
-    // "Listed but withheld" is a claim about `bundled_presets()`, so assert it
-    // there. Checking only that the registry is empty would keep passing if
-    // both presets were quietly dropped from the list — the registry would
-    // still be empty, and independently-constructed presets would still fail
-    // the gate, so nothing would catch it.
+fn the_eternal_central_presets_are_registered_once_mana_burn_is_implemented() {
+    // Still asserted against the pre-gate list, for the same reason as before:
+    // "registered" is only meaningful if they were considered in the first
+    // place, and a registry assertion alone cannot tell a listed-and-passing
+    // preset from one that was never listed.
     let listed: BTreeSet<u16> = bundled_presets().iter().map(|def| def.rules.id.0).collect();
     assert!(
         listed.contains(&old_school_93_94().rules.id.0)
@@ -403,18 +416,20 @@ fn the_eternal_central_presets_are_listed_but_withheld_by_the_legacy_axis_gate()
     for preset in bundled_presets() {
         let label = preset.label.clone();
         assert!(
-            !passes_legacy_axis_gate(&preset.rules.legality.legacy),
-            "{label} declares mana burn, which IMPLEMENTED_LEGACY_AXES does not cover yet"
+            passes_legacy_axis_gate(&preset.rules.legality.legacy),
+            "{label} declares only mana burn, which IMPLEMENTED_LEGACY_AXES now covers"
         );
-        // The OTHER gate must pass, so the rejection above is attributable to
-        // the unimplemented axis and not to mismatched reprint metadata.
         assert!(passes_reprint_fidelity_gate(&preset), "{label}");
         assert_no_lobby_save_sentinel_collision(&[preset]);
     }
 
-    assert!(
-        engine::types::custom_format::custom_format_registry().is_empty(),
-        "neither EC preset is selectable until mana burn lands (Phase 2b)"
+    let registry = engine::types::custom_format::custom_format_registry();
+    let registered: BTreeSet<u16> = registry.iter().map(|def| def.rules.id.0).collect();
+    assert_eq!(
+        registered,
+        BTreeSet::from([old_school_93_94().rules.id.0, old_school_95().rules.id.0]),
+        "exactly the two EC presets are selectable; got {:?}",
+        registry.iter().map(|def| &def.label).collect::<Vec<_>>()
     );
 }
 
@@ -490,9 +505,13 @@ fn custom_format_registry_withholds_swedish_old_school_on_open_item_6() {
         "Swedish passes both gates, so listing it in bundled_presets() would register it"
     );
 
+    // The registry is no longer empty as of Phase 2b, so absence has to be
+    // asserted by identity rather than by emptiness — which is the stronger
+    // assertion anyway, and would have caught a Swedish entry appearing
+    // alongside the EC ones.
     let registry = engine::types::custom_format::custom_format_registry();
     assert!(
-        registry.is_empty(),
+        !registry.iter().any(|def| def.rules.id == preset.rules.id),
         "swedish_old_school() must not be selectable while Open item 6 is unresolved; got {:?}",
         registry.iter().map(|def| &def.label).collect::<Vec<_>>()
     );
@@ -1262,12 +1281,16 @@ fn format_config_deserialization_rejects_a_custom_payload_forging_a_looser_copy_
 fn format_config_deserialization_rejects_a_custom_payload_declaring_an_unimplemented_legacy_axis() {
     // Hostile fixture: structurally self-consistent (the resolver check
     // would pass), but custom_rules.legality.legacy declares
-    // ManaBurnPolicy::Obsolete — a LegacyAxis not in IMPLEMENTED_LEGACY_AXES.
-    // Accepting it would promise mana-burn behavior no engine code enforces.
-    // The registry gate alone does not cover this: a deserialized Custom
-    // config never passes through custom_format_registry().
+    // CombatDamageTiming::OnStack — a LegacyAxis not in
+    // IMPLEMENTED_LEGACY_AXES. Accepting it would promise damage-on-the-stack
+    // behavior no engine code enforces. The registry gate alone does not cover
+    // this: a deserialized Custom config never passes through
+    // custom_format_registry().
+    //
+    // Was mana burn until Phase 2b implemented it; the axis had to change for
+    // the fixture to stay hostile, which is the gate auto-narrowing as designed.
     let mut rules = sample_rules(5);
-    rules.legality.legacy.mana_burn = ManaBurnPolicy::Obsolete;
+    rules.legality.legacy.damage_timing = CombatDamageTiming::OnStack;
     let config = FormatConfig::for_custom_rules(&rules);
     let json = serde_json::to_value(&config).unwrap();
     let error = serde_json::from_value::<FormatConfig>(json)
@@ -2503,6 +2526,8 @@ fn a_preset_claiming_the_lobby_save_sentinel_id_trips_the_registration_assert() 
 fn presets_with_ordinary_ids_pass_the_sentinel_guard() {
     // Paired positive control: the guard must not reject every preset.
     assert_no_lobby_save_sentinel_collision(&[sample_def(1), sample_def(2)]);
-    // And the real registry construction path still runs it without firing.
-    assert!(engine::types::custom_format::custom_format_registry().is_empty());
+    // And the real registry construction path still runs it without firing —
+    // now over real entries rather than an empty vector, which is what makes
+    // this a live check on the shipped presets.
+    assert!(!engine::types::custom_format::custom_format_registry().is_empty());
 }

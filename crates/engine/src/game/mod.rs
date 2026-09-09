@@ -86,6 +86,7 @@ pub mod life_safety;
 mod lifecycle;
 pub mod log;
 pub mod mana_abilities;
+pub(crate) mod mana_burn;
 pub mod mana_payment;
 pub mod mana_sources;
 pub mod match_flow;

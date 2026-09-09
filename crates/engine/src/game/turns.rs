@@ -374,6 +374,12 @@ fn enter_phase(
     //     the line below can therefore no longer have come from that door.
     state.pending_combat_lifelink = None;
 
+    // CR 500.1: captured BEFORE the assignment below, which is the only place
+    // the outgoing phase still exists. A phase-group crossing is a property of
+    // the pair, and every later reader of `state.phase` sees the destination on
+    // both sides.
+    let previous = state.phase;
+
     state.phase = next;
     if next == Phase::BeginCombat {
         state.combat_phases_started_this_turn =
@@ -387,23 +393,17 @@ fn enter_phase(
         state.end_steps_started_this_turn = state.end_steps_started_this_turn.saturating_add(1);
     }
 
-    // CR 500.5: Mana pools empty between phases/steps.
-    // Firebending mana (EndOfCombat expiry) persists within combat steps.
-    let in_combat = matches!(
-        next,
-        Phase::BeginCombat
-            | Phase::DeclareAttackers
-            | Phase::DeclareBlockers
-            | Phase::CombatDamage
-            | Phase::EndCombat
-    );
+    // CR 500.5: Mana pools empty between phases/steps. Retention-bound mana
+    // (Firebending's `EndOfCombat`, mana burn's `EndOfPhaseGroup`) survives
+    // until its own boundary, which is identified by the PAIR of phases — see
+    // `ManaPool::clear_expired_retention_markers`.
     let entering_cleanup = next == Phase::Cleanup;
 
     state.pending_phase_transition_progress =
         Some(crate::types::game_state::PhaseTransitionProgress {
             remaining_players: VecDeque::from(super::players::apnap_order(state)),
             next_phase: next,
-            in_combat,
+            previous_phase: Some(previous),
             entering_cleanup,
             drain_state: crate::types::game_state::PhaseTransitionDrainState::Ready,
         });
@@ -462,11 +462,45 @@ pub(super) fn apply_empty_mana_pool_event(
     // player's aggregate empty-pool event.
     let causes_life_loss =
         crate::game::static_abilities::player_unspent_mana_loss_causes_life_loss(state, player_id);
+    // Mana burn is a property of the FORMAT, read from the same resolved rules
+    // the deck gate uses, and is deliberately independent of the Yurlok-class
+    // query above: a card-granted static and an older rules set are different
+    // reasons to lose life, and neither implies the other.
+    let burns = crate::game::mana_burn::applies(state);
     let amount =
         crate::types::mana::apply_empty_mana_pool_decisions(state, player_id, &units, events);
     state.pending_step_end_mana_handlers.clear();
 
-    if !causes_life_loss || amount == 0 {
+    if amount == 0 {
+        return EmptyManaPoolApplyOutcome::Applied;
+    }
+
+    // Mana burn first, so its event precedes any Yurlok-class loss in the log
+    // and reads in rules order: the format's own rule, then a card's ability.
+    //
+    // A deferral here returns before the Yurlok branch runs, which would drop
+    // that loss for this event. That combination is unreachable rather than
+    // handled: the only formats declaring `mana_burn` are the Old School
+    // presets, whose card pools end decades before any Yurlok-class card was
+    // printed, and a lobby-saved custom format cannot declare the axis at all
+    // while `passes_legacy_axis_gate` rejects it. Left explicit instead of
+    // silently coincidental — if a format ever makes both reachable, this
+    // needs a continuation, not a reordering.
+    if burns {
+        events.push(GameEvent::ManaBurn { player_id, amount });
+        match crate::game::effects::life::apply_life_loss(state, player_id, amount, events) {
+            Ok(_) => {}
+            Err(crate::game::effects::life::ReplacementDeferred::ReplacementChoice) => {
+                return EmptyManaPoolApplyOutcome::Deferred
+            }
+            Err(crate::game::effects::life::ReplacementDeferred::SubstitutionContinuation) => {
+                mark_phase_transition_awaiting_post_replacement(state);
+                return EmptyManaPoolApplyOutcome::Deferred;
+            }
+        }
+    }
+
+    if !causes_life_loss {
         return EmptyManaPoolApplyOutcome::Applied;
     }
 
@@ -639,15 +673,28 @@ pub(super) fn drain_pending_phase_transition_progress(
             finish_enter_phase(state, next_phase, events);
             return;
         };
-        let in_combat = progress.in_combat;
+        let (previous_phase, next_phase_for_retention) =
+            (progress.previous_phase, progress.next_phase);
+        // Mana burn (pre-M10) holds unspent mana across the steps within one of
+        // CR 500.1's five phases, so it reaches the empty-pool pipeline only at
+        // the phase boundary. Marking runs BEFORE the clearing pass below: on an
+        // intra-phase step the marks are applied and then survive it, and at a
+        // crossing nothing is marked and the pass clears the marks left by
+        // earlier steps — so the units drop, and the drop count IS the burn.
+        let burns = crate::game::mana_burn::applies(state);
         // CR 500.5 + CR 703.4q: End reached retention durations first, then
         // route the still-unspent units through the ordinary empty-pool event.
         // Clearing only the marker preserves composition with any other active
         // retain / transform handler and lets Yurlok count actual loss.
         if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
+            if burns {
+                player
+                    .mana_pool
+                    .retain_across_phase_group_steps(previous_phase, next_phase_for_retention);
+            }
             player
                 .mana_pool
-                .clear_expired_end_of_combat_retention_markers(in_combat);
+                .clear_expired_retention_markers(previous_phase, next_phase_for_retention);
         }
 
         // Scan active step-end mana handlers for this player. Inlines the
