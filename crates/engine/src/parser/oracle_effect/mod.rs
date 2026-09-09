@@ -131,7 +131,7 @@ use crate::types::ability::{
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
 // `tests` module still names it through `use super::*`.
 #[cfg(test)]
-use crate::types::ability::{AttackScope, AttackSubject, DoubleTarget, PossessionAxis};
+use crate::types::ability::{AttackScope, AttackSubject, DoubleTarget};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{NextSpellModifier, RetargetScope};
@@ -30867,47 +30867,6 @@ fn rewrite_condition_quantity_expr(expr: &mut QuantityExpr) {
     }
 }
 
-/// CR 608.2c + CR 701.24c: Identify the mixed-zone owner population used by
-/// compound all-player shuffles. One operand is the iterated player's hand;
-/// the other is every permanent that player owns. Ordinary private-zone wheels
-/// retain explicit `origin` fields and therefore never enter this path.
-fn is_all_player_owner_shuffle_population(filter: &TargetFilter) -> bool {
-    let TargetFilter::Or { filters } = filter else {
-        return false;
-    };
-    if filters.len() != 2 {
-        return false;
-    }
-
-    let is_scoped_hand = |filter: &TargetFilter| {
-        matches!(
-            filter,
-            TargetFilter::Typed(TypedFilter {
-                type_filters,
-                controller: Some(ControllerRef::ScopedPlayer),
-                properties,
-            }) if type_filters.is_empty()
-                && properties.as_slice() == [FilterProp::InZone { zone: Zone::Hand }]
-        )
-    };
-    let is_owned_permanent = |filter: &TargetFilter| {
-        matches!(
-            filter,
-            TargetFilter::Typed(TypedFilter {
-                type_filters,
-                controller: None,
-                properties,
-            }) if type_filters.as_slice() == [TypeFilter::Permanent]
-                && properties.as_slice() == [FilterProp::Owned {
-                    controller: ControllerRef::ScopedPlayer,
-                }]
-        )
-    };
-
-    (is_scoped_hand(&filters[0]) && is_owned_permanent(&filters[1]))
-        || (is_scoped_hand(&filters[1]) && is_owned_permanent(&filters[0]))
-}
-
 /// CR 608.2c + CR 701.24a: An all-player library shuffle is one local
 /// instruction per player. Normalize only its immediate structural chain:
 /// the ordinary target walker intentionally excludes `Shuffle`, and an
@@ -31024,7 +30983,7 @@ fn normalize_all_player_library_shuffle_chain(def: &mut AbilityDefinition) {
     // population filter onto the draw. Bind the move, shuffle, and draw to the
     // enclosing All iteration instead of starting fresh nested iterations.
     let keeps_draw_in_outer_iteration = origin.is_none()
-        && is_all_player_owner_shuffle_population(move_target)
+        && move_target.is_all_player_owner_shuffle_population()
         && shuffle.sub_ability.as_deref().is_some_and(|draw| {
             matches!(
                 &*draw.effect,
@@ -40822,17 +40781,9 @@ fn issue_2406_chaos_warp_owner_library_shuffle_and_reveal() {
     let shuffle = def.sub_ability.as_ref().expect("shuffle sub");
     assert_eq!(
         shuffle.effect.target_filter(),
-        Some(&TargetFilter::ScopedPlayer)
+        Some(&TargetFilter::ParentTargetOwner)
     );
-    assert!(matches!(
-        shuffle.player_scope,
-        Some(PlayerFilter::TrackedSetPossessor {
-            relation: PlayerRelation::All,
-            possession: PossessionAxis::Owner,
-            filter: TargetFilter::Any,
-            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
-        })
-    ));
+    assert_eq!(shuffle.player_scope, None);
     let reveal = shuffle
         .sub_ability
         .as_ref()

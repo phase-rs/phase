@@ -4555,6 +4555,29 @@ fn is_player_scope_local_continuation(
         return true;
     }
 
+    // CR 608.2c + CR 701.24c: The Great Aurora class has no single origin:
+    // its exact typed population combines the scoped player's hand with every
+    // permanent that player owns. Keep that population's terminal shuffle in
+    // the same player iteration so its following EventContextAmount draw reads
+    // the per-player move count.
+    if matches!(
+        (parent, child),
+        (
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Library,
+                target,
+                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                ..
+            },
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            }
+        ) if target.is_all_player_owner_shuffle_population()
+    ) {
+        return scope_keeps_scoped_whole_hand_shuffle_local(scope);
+    }
+
     // CR 608.2c + CR 701.24a: "<each subject> shuffles the cards from their hand
     // and graveyard into their library, then draws" is one per-player
     // instruction. Keep every parser-marked origin move, the terminal shuffle,
@@ -4578,7 +4601,20 @@ fn is_player_scope_local_continuation(
             }
         ) | (
             Effect::ChangeZoneAll {
+                origin: Some(Zone::Hand),
                 destination: Zone::Library,
+                target: TargetFilter::ScopedPlayer,
+                ..
+            },
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            }
+        ) | (
+            Effect::ChangeZoneAll {
+                origin: Some(_),
+                destination: Zone::Library,
+                target: TargetFilter::ScopedPlayer,
+                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
                 ..
             },
             Effect::Shuffle {
@@ -13627,17 +13663,36 @@ fn resolve_chain_body(
         ability.source_id,
         parent_events,
     );
-    // No `fill_zero_contributors` here, unlike the `player_scope` loop: the
-    // reduction domain of a fan-out is the set of players the clause applied to,
-    // and this path has no such set to fill from — a bare effect applies to whom
-    // its own target names, and a player who emitted no event was never in the
-    // domain rather than being a zero contributor within it.
-    let preserve_counts_for_current_consumer =
-        ability.player_scope.is_none() && effect_consumes_event_context_amount(&ability.effect);
+    // CR 608.2c + CR 109.5: `split_player_scope_chain` clears `player_scope`
+    // from the per-player template but retains `scoped_player`. A completed
+    // count producer in that template therefore has one known reduction-domain
+    // member even when it emitted no event; publish that player's explicit zero.
+    // A genuinely bare effect has no scoped player and keeps the event-derived
+    // domain unchanged.
+    let counts_by_player = counts_by_player.map(|counts| match ability.scoped_player {
+        Some(player) => fill_zero_contributors(counts, &[player]),
+        None => counts,
+    });
+    // Preserve the completed table only across the terminal Shuffle bridge of
+    // a local wheel and through its terminal consumer. A consumer with another
+    // child must clear before handing off, so a scoped zero cannot leak through
+    // an unrelated later instruction.
+    let preserve_counts_for_next_consumer = ability.player_scope.is_none()
+        && ((matches!(
+            ability.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            }
+        ) && ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| effect_consumes_event_context_amount(&sub.effect)))
+            || (ability.sub_ability.is_none()
+                && effect_consumes_event_context_amount(&ability.effect)));
     if !install_previous_effect_counts_by_player(
         state,
         counts_by_player,
-        preserve_counts_for_current_consumer,
+        preserve_counts_for_next_consumer,
     ) {
         if let Some(amount) = previous_effect_amount_from_events(state, ability, parent_events) {
             state.last_effect_amount = Some(amount);

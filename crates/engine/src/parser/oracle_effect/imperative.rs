@@ -8973,13 +8973,19 @@ fn lower_target_referenced_search_library(
 
 /// Wrap an effect with a `Shuffle` sub_ability for compound "X into library" operations.
 pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause {
-    let owner_library = matches!(
-        &effect,
+    let shuffle_target = match &effect {
+        // CR 400.3: A single object going to its owner's library keeps that
+        // object's owner as the anaphoric shuffle subject. Unlike a mass move,
+        // this already has one exact parent object and needs no tracked-set
+        // population fan-out (Chaos Warp and prevention follow-ups).
         Effect::ChangeZone {
             owner_library: true,
             ..
-        }
-    ) || matches!(&effect, Effect::ChangeZoneAll { .. });
+        } => TargetFilter::ParentTargetOwner,
+        Effect::ChangeZoneAll { .. } => TargetFilter::ScopedPlayer,
+        _ => TargetFilter::Controller,
+    };
+    let tracks_owner_population = matches!(&effect, Effect::ChangeZoneAll { .. });
     if let Effect::ChangeZoneAll {
         destination: Zone::Library,
         library_shuffle,
@@ -8994,14 +9000,10 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
     let mut shuffle = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Shuffle {
-            target: if owner_library {
-                TargetFilter::ScopedPlayer
-            } else {
-                TargetFilter::Controller
-            },
+            target: shuffle_target,
         },
     );
-    if owner_library {
+    if tracks_owner_population {
         shuffle.player_scope = Some(PlayerFilter::TrackedSetPossessor {
             relation: PlayerRelation::All,
             possession: PossessionAxis::Owner,

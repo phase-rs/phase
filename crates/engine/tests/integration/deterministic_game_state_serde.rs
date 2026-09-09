@@ -96,6 +96,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::attribution", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::tracked_object_sets", map_key_types: &["TrackedSetId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::tracked_set_member_causes", map_key_types: &["TrackedSetId", "ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::tracked_set_participants", map_key_types: &["TrackedSetId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::commander_cast_count", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::commander_cast_owners", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::auto_pass", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -264,6 +265,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "stack_paid_facts",
         "liminal_entries",
         "tracked_object_sets",
+        "tracked_set_participants",
         "commander_cast_count",
         "commander_cast_owners",
         "auto_pass",
@@ -1158,7 +1160,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        51,
+        52,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -1489,6 +1491,19 @@ fn build_all_direct_numeric_maps_state() -> GameState {
             ]),
         ),
     ]);
+    state.tracked_set_participants = HashMap::from([
+        (
+            TrackedSetId(1),
+            vec![
+                (PlayerId(0), ThisWayCause::OwnerLibraryShuffleSubject),
+                (PlayerId(1), ThisWayCause::OwnerLibraryShuffleSubject),
+            ],
+        ),
+        (
+            TrackedSetId(2),
+            vec![(PlayerId(1), ThisWayCause::OwnerLibraryShuffleSubject)],
+        ),
+    ]);
     state.commander_cast_count = HashMap::from([(ObjectId(1), 1), (ObjectId(2), 2)]);
     state.commander_cast_owners =
         HashMap::from([(ObjectId(1), PlayerId(0)), (ObjectId(2), PlayerId(1))]);
@@ -1719,6 +1734,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "attribution",
         "tracked_object_sets",
         "tracked_set_member_causes",
+        "tracked_set_participants",
         "commander_cast_count",
         "commander_cast_owners",
         "auto_pass",
@@ -1756,7 +1772,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     ];
     assert_eq!(
         direct_fields.len(),
-        40,
+        41,
         "private stack_trigger_firings is covered by its unit test"
     );
     for field in direct_fields {
