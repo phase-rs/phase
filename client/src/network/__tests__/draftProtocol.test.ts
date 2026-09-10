@@ -943,6 +943,7 @@ describe("draftProtocol", () => {
         },
         draft_reconnect_rejected: { kind: "NoReconnectWindow", reason: "No grace window" },
         draft_deck_submit_ack: { submissionId: "submission-1", view: validDraftView },
+        draft_match_start: { launch: { type: "Bot", deckPayload: {} } },
         draft_commander_launch: { launch: commanderLaunch() },
       };
       const msg = validateDraftMessage(

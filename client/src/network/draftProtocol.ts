@@ -159,7 +159,8 @@ import type {
  *  28 — authoritative per-seat Auto Lands requests and correlated results,
  *       including explicit rejection so an older peer cannot leave a waiter
  *       pending after an otherwise exact handshake.
- *  29 — cube entries are host-only rather than part of the public draft view.
+ *  29 — original Cube entries reach the selected match authority, while they
+ *       remain absent from public draft views.
  *       Older hosts would silently discard the in-game booster source.
  */
 export const DRAFT_PROTOCOL_VERSION = 29 as const;
@@ -209,11 +210,7 @@ export interface DraftMatchDeckPayload {
   player: DraftDeckPayload;
   opponent: DraftDeckPayload;
   ai_decks: DraftDeckPayload[];
-  /**
-   * The host-only original cube multiset used to reconstruct in-game boosters.
-   * It must never be published on `DraftPlayerView`: clients receive it only
-   * through the typed match payload builders that need to start the game.
-   */
+  /** Original Cube entries, including duplicates, for in-game pack generation. */
   booster_pack_pool?: string[] | null;
   /**
    * Every set whose draft boosters these decks' draft CONTAINED, supplied

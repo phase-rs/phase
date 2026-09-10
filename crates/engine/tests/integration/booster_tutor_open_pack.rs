@@ -19,8 +19,8 @@ use engine::types::actions::{GameAction, OutsideGameSelection};
 use engine::types::card::{CardFace, Rarity};
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::custom_format::{swedish_old_school, AntePolicy};
-use engine::types::format::FormatConfig;
 use engine::types::events::GameEvent;
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{
     BoosterProduct, BoosterShelf, GameState, OutsideGameChoiceSource, WaitingFor,
 };
@@ -96,6 +96,7 @@ fn ante_face(name: &str) -> CardFace {
 /// assertion below has a live non-ante control in the same pack.
 fn ante_shelf() -> BoosterShelf {
     BoosterShelf {
+        card_pool: None,
         products: vec![BoosterProduct {
             set_code: PACK_SET.to_string(),
             commons: (0..20).map(|i| face(&format!("Test Common {i}"))).collect(),
