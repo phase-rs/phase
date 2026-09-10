@@ -6505,8 +6505,10 @@ fn copy_spell_self_ref_keeps_resolving_spell_source(sub: &ResolvedAbility) -> bo
 /// ACTION that made it part of the tracked set, mirroring
 /// [`affected_objects_from_events`] one-for-one but retaining a per-object
 /// [`ThisWayCause`] so [`publish_tracked_set_with_causes`] can stamp the
-/// member-cause side map. The cause is derived from the resolving EFFECT KIND,
-/// NOT the member's final landing zone, so it is stable under a replacement that
+/// member-cause side map. The cause is derived from the resolving EFFECT KIND —
+/// plus, for `Effect::Counter`, its CR 614.1a rider (see
+/// `this_way_cause_for_resolved`) — NOT the member's final landing zone, so
+/// it is stable under a replacement that
 /// redirects the destination (CR 614.1 / CR 614.6) and never collides with
 /// another action that shares the same destination:
 ///
@@ -6522,7 +6524,8 @@ fn copy_spell_self_ref_keeps_resolving_spell_source(sub: &ResolvedAbility) -> bo
 ///   - BounceAll → `Bounced` if its destination is Hand, `Returned` if
 ///     Battlefield (default Hand → `Bounced`, CR 400.7 / CR 611.2c).
 ///   - ExileTop / ExileFromTopUntil → `Exiled` (CR 701.13a).
-///   - RevealUntil's kept card / counter / reveal / tap-untap producers do not
+///   - RevealUntil's kept card / counter without the CR 614.1a exile rider (see
+///     `this_way_cause_for_resolved`) / reveal / tap-untap producers do not
 ///     name a "<verb>ed this way" set; they carry no cause and are consumed only
 ///     by `caused_by: None` (selection-set) downstream references.
 fn affected_objects_with_causes(
@@ -6535,11 +6538,65 @@ fn affected_objects_with_causes(
     // CR 608.2c: the cause is a property of the EFFECT being resolved, not of any
     // individual member's event — so every member of this publish shares one
     // cause. `None` for producers that do not name a "this way" verb (reveals,
-    // taps, counters, the RevealUntil kept card, and zone changes to a
-    // destination no consumer references), which are read only by
+    // taps, counters without the exile rider, the RevealUntil kept card, and
+    // zone changes to a destination no consumer references), which are read only by
     // `caused_by: None`.
-    let cause = this_way_cause_for_effect(effect);
+    let cause = this_way_cause_for_resolved(ability, effect);
     ids.into_iter().map(|id| (id, cause)).collect()
+}
+
+/// CR 608.2c + CR 614.1a (issue #8762): the producer-action cause for a
+/// RESOLVED ability. `this_way_cause_for_effect` reads the cause off the effect
+/// kind and its declared destination — which is where every producer declares
+/// its OWN move's destination (`CastFromZone`'s graveyard rider declares a
+/// FUTURE move's, and is permission metadata). `Effect::Counter` declares its
+/// exile destination in a rider SUB-ABILITY ("If that spell is countered this
+/// way, exile it instead of putting it into its owner's graveyard"), consumed
+/// by `counter::resolve` as the move's own destination, so the effect-only
+/// authority cannot see it and left the countered card unstamped. A downstream
+/// "for as long as it remains exiled" grant (Spelljack, Thranduil's Decree,
+/// Kheru Spellsnatcher) reads the chain set with `caused_by: Exiled` and
+/// therefore matched nothing.
+///
+/// Same rule, same vocabulary: the declared destination maps through
+/// `this_way_cause_for_zone` as the `ChangeZone` arm does — here as the
+/// constant `Zone::Exile`, because the predicate below admits only the exile
+/// rider, so the two are provably the same.
+///
+/// The rider
+/// is recognised by the SAME predicate the rider branch in `resolve_chain_body`
+/// uses, so the two cannot drift apart. A counter without the exile rider keeps
+/// `None`: it names no "this way" population (its library / hand redirect rides
+/// `countered_spell_zone`, a destination no consumer references).
+///
+/// Reads `ability.sub_ability`, so `effect` must be `ability`'s own effect —
+/// both callers pass exactly that. The player-scope publish site passes the
+/// scoped TEMPLATE, whose tail `split_player_scope_chain` has detached; no
+/// corpus counter is player-scoped, so the stamp is unaffected today, and a
+/// player-scoped counter would have to publish the rider with the template.
+///
+/// Deliberately condition-BLIND, unlike the tail gate in `resolve_chain_body`:
+/// the stamp describes the destination the rider DECLARES — the one
+/// `counter::resolve` enters the pipeline with, from the rider's presence
+/// alone — not the member's landing zone. Thranduil's Decree on an
+/// instant is therefore stamped `Exiled` while its tail is correctly withheld;
+/// no reader sees the difference today (the only `caused_by: Exiled` readers
+/// under these heads are the three gated tails).
+///
+/// Deliberately NOT applied to `linked_exile_producer_barrier`, which still
+/// asks the effect-only authority: it decides whether a producer's exile joins a
+/// LINKED-EXILE batch, and the counter path moves its spell through
+/// `counter::resolve`'s own request rather than that batch. Widening it is a
+/// separate measurement, not this change.
+fn this_way_cause_for_resolved(ability: &ResolvedAbility, effect: &Effect) -> Option<ThisWayCause> {
+    match effect {
+        Effect::Counter { .. } => ability
+            .sub_ability
+            .as_deref()
+            .filter(|sub| cast_from_zone::is_graveyard_exile_rider_subability(sub))
+            .and_then(|_| this_way_cause_for_zone(Zone::Exile)),
+        other => this_way_cause_for_effect(other),
+    }
 }
 
 /// CR 608.2c + CR 614.6: Map a resolving effect to the producer-action cause
@@ -6573,7 +6630,8 @@ pub(crate) fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause>
         // "those creatures" is a bare frozen population, so its members carry no
         // cause and are matched only by the punisher's `caused_by: None`.
         Effect::GenericEffect { .. } => None,
-        // Reveals, taps, counter producers, the RevealUntil kept card, and any
+        // Reveals, taps, counter producers (the exile-rider case is lifted out
+        // by `this_way_cause_for_resolved`), the RevealUntil kept card, and any
         // other producer do not name a "<verb>ed this way" set — leave them
         // unstamped (matched only by `caused_by: None`).
         _ => None,
@@ -6838,8 +6896,10 @@ fn affected_objects_from_events(
         // and a stack->graveyard `ZoneChanged`, but this arm reads only
         // `SpellCountered`, so each countered object contributes exactly one id
         // (no double-count vs a `tracked_object_sets` Vec). Cause stays `None`
-        // (`this_way_cause_for_effect(Counter) => None`), so Test of Talents'
-        // `FilteredTrackedSetSize { caused_by: Exiled }` never matches these.
+        // for a counter without the exile rider, and always for `CounterAll`
+        // (`this_way_cause_for_resolved` lifts the rider for `Effect::Counter`
+        // only; no corpus `CounterAll` carries one); with the rider, the
+        // countered card is stamped `Exiled` for the rider's own tail.
         // (A countered spell COPY still emits its own `ZoneChanged{Graveyard}`
         // before the CR 704.5e cease-to-exist SBA, so both the old and new count
         // already include copies — copies are not the delta here; abilities are.)
@@ -11884,6 +11944,50 @@ fn tail_family_has_runtime_evidence(effect: &Effect) -> bool {
     )
 }
 
+/// Issue #8762: the tail families the counter rider branch in
+/// [`resolve_chain_body`] runs — a POLICY pin, not behaviour coverage. It admits
+/// exactly the families an integration test drives end to end through that
+/// branch (`counter_rider_tail_8762`), so that a family can only be added
+/// together with its evidence:
+///
+/// - `CastFromZone` — one effect family, two modes: Spelljack (`mode: Play`,
+///   "you may play it …") and Thranduil's Decree / Kheru Spellsnatcher
+///   (`mode: Cast`, "you may cast that card …"), all "without paying its mana
+///   cost for as long as it remains exiled". Driven by the Spelljack and
+///   Thranduil's Decree tests, which assert the countered card becomes
+///   castable; Kheru Spellsnatcher's copy sits under its turn-face-up trigger
+///   and is not driven separately.
+/// - `Scry` — No Escape ("Scry 1."); driven by its test, which asserts the
+///   `PlayerPerformedAction { Scry }` event.
+///
+/// NOT admitted, each MEASURED under a probe that ran the tail with the
+/// allowlist open AND the parent context supplied — with
+/// `should_propagate_parent_targets` and `apply_parent_chain_context`, the way
+/// the `CastFromZone` fanout above runs its tail — so the null results below
+/// are about the tails, not about withheld context:
+/// - `GenericEffect` — Delay ("If it doesn't have suspend, it gains suspend").
+///   With the countered card bound as its subject, the exiled card still had no
+///   suspend after layer evaluation. Its rider's "with three time counters" IS
+///   carried by the parse (`enter_with_counters: [[time, 3]]`) and dropped by
+///   `counter::resolve`, which consumes the rider as a destination only — a
+///   separate gap. Running the tail changes nothing observable, so it has no
+///   evidence.
+/// - `ChangeZone` — Devious Cover-Up ("You may shuffle up to four target cards
+///   from your graveyard into your library", a two-link tail `ChangeZone` →
+///   `Shuffle`). Its own "up to four target cards" slots are never announced:
+///   casting it with graveyard cards offered as targets records a
+///   `BecomesTarget` for the countered spell only, so the tail has no targets of
+///   its own and moves nothing — a target-collection gap for a third-link sub,
+///   outside this branch. No evidence either way.
+///
+/// Deliberately a separate list from the `CastFromZone` branch's
+/// `tail_family_has_runtime_evidence` above (#8721): each names the families
+/// with evidence through ITS branch, and the two sets differ because the tests
+/// do.
+fn counter_tail_family_has_runtime_evidence(effect: &Effect) -> bool {
+    matches!(effect, Effect::CastFromZone { .. } | Effect::Scry { .. })
+}
+
 /// One full pass of an ability's resolution chain — the parent effect (with its
 /// `repeat_for` count loop) and the entire `sub_ability` chain. This is one
 /// "process" for the purposes of "repeat this process" (CR 608.2c). Extracted
@@ -14344,9 +14448,117 @@ fn resolve_chain_body(
             }
             return Ok(());
         }
+        // CR 608.2c + CR 614.1a (issue #8762): the exile rider is metadata on
+        // the counter — `counter::resolve` already moved the countered spell to
+        // exile — and is not resolved again here. The instruction printed AFTER
+        // it is still an instruction of this resolution: Spelljack's "You may
+        // play it without paying its mana cost for as long as it remains
+        // exiled.", No Escape's "Scry 1." Returning at the rider discarded it —
+        // the same shape #8721 repaired for the `CastFromZone` branch above
+        // (which had run such a tail for Diluvian Primordial's fanout alone,
+        // #6945).
+        //
+        // Scope, measured over the corpus (20 counter heads carry the exile
+        // rider, 6 of them a tail): the rider's DIRECT sequential tail, and only
+        // when its family is one an integration test drives end to end through
+        // this branch (`counter_tail_family_has_runtime_evidence`). Four of the
+        // six tails are admitted; Delay and Devious Cover-Up are named there,
+        // not here. No separate last-link rule: a multi-link tail is admitted
+        // with its evidence like any other, or not at all.
+        //
+        // The rider's own condition gates a tail that reads the countered card
+        // (CR 608.2c: "If that spell is countered this way" / Thranduil's
+        // Decree's "If a PERMANENT spell is countered this way" —
+        // `ZoneChangedThisWay` on the rider, evaluated with `evaluate_condition`
+        // against the parent's context, as the generic sub loop below does for
+        // the ordinary — non-`WhenYouDo`, non-reveal — case); an independent
+        // tail runs either way — see the branch body.
+        // A tail with a printed condition of its own would be gated by
+        // `resolve_chain_body`'s top-level `ability.condition` read, with the
+        // tail as its own context; no admitted tail carries one (Delay's is the
+        // only conditioned tail in the corpus).
+        //
+        // NAMED, pre-existing, not repaired here: the
+        // EXILE itself is decided in `counter::resolve` from the rider's
+        // presence alone, without that condition — Thranduil's Decree exiles a
+        // countered instant on `main` too. This gate keeps the tail honest to
+        // the printed condition even where the exile is not, so a wrongly
+        // exiled instant is at least not also made free to cast.
+        //
+        // No park site, and none is needed. `counter::resolve` returns early on
+        // `ZoneMoveResult::NeedsChoice` so a CR 616.1 ordering choice can be
+        // parked centrally. By the rules the exile rider IS a replacement effect
+        // (CR 614.1a, "instead") and would be ordered against Rest in Peace by
+        // the spell's controller under CR 616.1; the ENGINE, though, models it as a
+        // static destination rule — `counter::resolve` enters the zone pipeline
+        // with `dest = Exile` before any replacement is consulted (its own
+        // comment says so) — a pre-existing modelling choice this branch
+        // inherits, not one it makes. MEASURED over the corpus: of 2353 `Moved`
+        // replacements, none names exile as the replaced destination; 2138 are
+        // battlefield-bound, 145 graveyard-bound, and of the 70
+        // destination-agnostic ones 65 are unearth-class `SelfRef` grants scoped
+        // `UntilHostLeavesPlay` and 5 are unscoped `SelfRef` battlefield→exile
+        // replacements (Realmbreaker class); all 70 are `valid_card: SelfRef`,
+        // so each can only ever apply to its own host permanent, never to a
+        // spell leaving the stack (their moves run battlefield→exile). The 65
+        // replacements on the separate `ChangeZone` event — a different
+        // population that happens to share the count — are all
+        // battlefield-bound. Spelljack with Rest in Peace on the battlefield
+        // resolves with no choice pending. `NeedsAuraAttachmentChoice` needs an Aura
+        // entering the battlefield and cannot arise from a spell leaving the
+        // stack for exile. So a pending resolution choice here is not reachable
+        // from a printed card; if one ever is, the tail is left as it was on
+        // `main` — dropped — rather than resolved against an unanswered choice.
+        //
+        // Neither admitted family's tails read any inherited chain context: `Controller`
+        // and a tracked-set anaphor resolve from the sub's own controller and
+        // the chain set. So `should_propagate_parent_targets` and
+        // `apply_parent_chain_context`, which the generic sub loop below applies,
+        // are deliberately not called; a family that reads either must add both
+        // together with its evidence.
         if matches!(&ability.effect, Effect::Counter { .. })
             && cast_from_zone::is_graveyard_exile_rider_subability(sub)
         {
+            // Not pinned by a test: no printed card reaches this state
+            // (measured above), and returning here preserves `main`'s
+            // behaviour rather than adding one. Checked FIRST, before the
+            // rider's condition is read: the generic sub loop below defers a
+            // `ZoneChangedThisWay` condition while a choice is pending, because
+            // `last_zone_changed_ids` is not final mid-choice, and this branch
+            // must not read that ledger in the one state the loop declines to.
+            if waits_for_resolution_choice(&state.waiting_for) {
+                return Ok(());
+            }
+            let direct_sequential_tail = sub
+                .sub_ability
+                .as_deref()
+                .filter(|tail| tail.sub_link == SubAbilityLink::SequentialSibling)
+                .filter(|tail| counter_tail_family_has_runtime_evidence(&tail.effect))
+                .cloned();
+            if let Some(tail) = direct_sequential_tail {
+                // The rider's condition gates only a tail that READS the
+                // countered card ("you may cast THAT CARD" — a tracked-set
+                // anaphor, asked of the existing authority
+                // `ability_or_branch_references_tracked_set`). That covers the
+                // tracked-set route only: a tail reading the card through
+                // `ParentTarget` (Delay's shape) is NOT caught, so admitting such
+                // a family means widening this predicate with it. A tail that does
+                // not (No Escape's "Scry 1.", printed unconditionally) runs
+                // regardless — CR 608.2c, the instructions are followed in
+                // order and only the rider's own sentence carries the "if".
+                // MEASURED: against a CR 101.2 uncounterable spell the counter
+                // moves nothing, the rider's condition is false, and the scry
+                // must still happen.
+                let tail_reads_the_countered_card = ability_or_branch_references_tracked_set(&tail);
+                let rider_applied = sub
+                    .condition
+                    .as_ref()
+                    .is_none_or(|condition| evaluate_condition(condition, state, ability));
+                if tail_reads_the_countered_card && !rider_applied {
+                    return Ok(());
+                }
+                resolve_ability_chain(state, &tail, events, depth + 1)?;
+            }
             return Ok(());
         }
 
@@ -17120,6 +17332,77 @@ fn resolve_add_pending_enters_modifications(
 mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
+
+    /// Issue #8762: the counter rider branch's tail allowlist is a POLICY pin —
+    /// it admits only the families `counter_rider_tail_8762` drives end to end
+    /// and goes red when one is added without evidence. One lowered tail per
+    /// family from `client/public/card-data.json`, ABRIDGED to the fields that
+    /// identify the variant (the predicate reads the discriminant only).
+    #[test]
+    fn the_counter_rider_tail_allowlist_admits_only_the_families_a_test_drives() {
+        fn effect(json: &str) -> Effect {
+            serde_json::from_str(json).expect("tail effect lifted from card-data.json must parse")
+        }
+        // Spelljack (`mode: Play`); Thranduil's Decree and Kheru Spellsnatcher
+        // print the same family as `mode: Cast`.
+        let spelljack = effect(
+            r#"{"type":"CastFromZone","target":{"type":"TrackedSetFiltered","id":0,"filter":{"type":"Any"},"caused_by":"Exiled"},"without_paying_mana_cost":true,"mode":"Play"}"#,
+        );
+        // No Escape.
+        let no_escape = effect(
+            r#"{"type":"Scry","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}}"#,
+        );
+        // Delay — no runtime evidence (see the predicate's doc).
+        let delay = effect(
+            r#"{"type":"GenericEffect","static_abilities":[],"duration":"Permanent","target":{"type":"ParentTarget"}}"#,
+        );
+        // Devious Cover-Up — the first link of its two-link tail.
+        let devious_cover_up = effect(
+            r#"{"type":"ChangeZone","origin":"Graveyard","destination":"Library","target":{"type":"Typed","type_filters":["Card"],"controller":"You","properties":[{"type":"InZone","zone":"Graveyard"}]}}"#,
+        );
+
+        assert!(counter_tail_family_has_runtime_evidence(&spelljack));
+        assert!(counter_tail_family_has_runtime_evidence(&no_escape));
+        assert!(
+            !counter_tail_family_has_runtime_evidence(&delay),
+            "GenericEffect has no test that fails when the branch is reverted — admitting it \
+             would change Delay on an unmeasured path"
+        );
+        assert!(
+            !counter_tail_family_has_runtime_evidence(&devious_cover_up),
+            "ChangeZone has no test that fails when the branch is reverted — admitting it \
+             would change Devious Cover-Up on an unmeasured path"
+        );
+    }
+
+    /// Issue #8762: a counter that carries the exile rider stamps its countered
+    /// card `Exiled`; without the rider it stays unstamped. Both halves on the
+    /// same head, so a predicate that stamped every counter would fail the
+    /// second assertion and one that stamped none would fail the first.
+    #[test]
+    fn a_counter_with_the_exile_rider_stamps_its_countered_card_exiled() {
+        fn resolved(json: &str) -> ResolvedAbility {
+            let effect: Effect = serde_json::from_str(json).expect("effect must parse");
+            ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0))
+        }
+        let counter = r#"{"type":"Counter","target":{"type":"StackSpell"}}"#;
+        let exile_rider = r#"{"type":"ChangeZone","origin":"Graveyard","destination":"Exile","target":{"type":"ParentTarget"}}"#;
+
+        let mut with_rider = resolved(counter);
+        with_rider.sub_ability = Some(Box::new(resolved(exile_rider)));
+        assert_eq!(
+            this_way_cause_for_resolved(&with_rider, &with_rider.effect),
+            Some(ThisWayCause::Exiled),
+            "the exile rider is the counter's declared destination"
+        );
+
+        let without_rider = resolved(counter);
+        assert_eq!(
+            this_way_cause_for_resolved(&without_rider, &without_rider.effect),
+            None,
+            "a plain counter names no \"this way\" population"
+        );
+    }
 
     fn real_sacrifice_events() -> (ObjectId, ObjectId, Vec<GameEvent>, Box<ZoneChangeRecord>) {
         let mut state = GameState::new_two_player(42);
