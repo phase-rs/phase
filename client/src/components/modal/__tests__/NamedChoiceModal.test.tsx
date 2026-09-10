@@ -4,6 +4,62 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WaitingFor } from "../../../adapter/types.ts";
 import { NamedChoiceModal } from "../NamedChoiceModal.tsx";
 
+vi.mock("../ChoiceOverlay.tsx", () => ({
+  ChoiceOverlay: ({
+    title,
+    children,
+    footer,
+  }: {
+    title: string;
+    children: React.ReactNode;
+    footer?: React.ReactNode;
+  }) => (
+    <div>
+      <h1>{title}</h1>
+      {children}
+      {footer}
+    </div>
+  ),
+  ConfirmButton: ({
+    onClick,
+    disabled,
+    label = "Confirm",
+  }: {
+    onClick?: () => void;
+    disabled?: boolean;
+    label?: string;
+  }) => (
+    <button type="button" onClick={onClick} disabled={disabled}>
+      {label}
+    </button>
+  ),
+}));
+
+vi.mock("framer-motion", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("framer-motion")>();
+  return {
+    ...actual,
+    motion: {
+      ...actual.motion,
+      button: ({
+        children,
+        onClick,
+        className,
+        style,
+      }: {
+        children: React.ReactNode;
+        onClick?: () => void;
+        className?: string;
+        style?: React.CSSProperties;
+      }) => (
+        <button type="button" className={className} style={style} onClick={onClick}>
+          {children}
+        </button>
+      ),
+    },
+  };
+});
+
 const dispatchMock = vi.fn();
 
 vi.mock("../../../hooks/useGameDispatch.ts", () => ({
@@ -37,6 +93,38 @@ describe("NamedChoiceModal", () => {
       type: "ChooseOption",
       data: { choice: "Blue" },
     });
+  });
+
+  it("shows filtered creature-type options immediately", () => {
+    const creatureTypes = [
+      "Ape",
+      "Bear",
+      "Cat",
+      "Dog",
+      "Elf",
+      "Goblin",
+      "Human",
+      "Kithkin",
+      "Lizard",
+      "Merfolk",
+      "Naga",
+      "Orc",
+      "Sliver",
+    ];
+    const data: NamedChoiceData = {
+      player: 0,
+      choice_type: "CreatureType",
+      options: creatureTypes,
+    };
+
+    render(<NamedChoiceModal data={data} />);
+
+    fireEvent.change(screen.getByPlaceholderText("Filter options..."), {
+      target: { value: "sliver" },
+    });
+
+    expect(screen.getByRole("button", { name: "Sliver" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Ape" })).not.toBeInTheDocument();
   });
 
   // CR 107.1a/b. The engine publishes `free_entry` for a choice whose answer is
