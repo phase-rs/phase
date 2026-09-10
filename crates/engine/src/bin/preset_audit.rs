@@ -68,6 +68,16 @@ fn scryfall_names(query: &str) -> Result<BTreeSet<String>, String> {
                 "--retry-all-errors",
                 "--retry-delay",
                 "2",
+                // BOUNDED. An audit that hangs is worse than one that fails:
+                // it blocks a preset change with no verdict and no error. These
+                // cap a single attempt and the whole retry sequence, so the
+                // tool always terminates with an actionable result.
+                "--connect-timeout",
+                "10",
+                "--max-time",
+                "30",
+                "--retry-max-time",
+                "120",
                 "-A",
                 USER_AGENT,
                 "--get",
@@ -103,16 +113,35 @@ fn scryfall_names(query: &str) -> Result<BTreeSet<String>, String> {
             ));
         }
 
-        for card in body["data"].as_array().into_iter().flatten() {
-            if let Some(name) = card["name"].as_str() {
-                names.insert(name.to_string());
-            }
+        // FAIL CLOSED on a shape we do not recognise. Silently skipping a
+        // malformed `data`, a card with no `name`, or an absent `has_more`
+        // would report DRIFT — a wrong, actionable-looking verdict about the
+        // preset — when the truth is that the audit could not read the answer.
+        let Some(data) = body.get("data").and_then(|d| d.as_array()) else {
+            return Err(format!(
+                "Scryfall response for {query:?} has no `data` array (page {page})"
+            ));
+        };
+        for card in data {
+            let Some(name) = card.get("name").and_then(|n| n.as_str()) else {
+                return Err(format!(
+                    "Scryfall returned a card with no `name` for {query:?} (page {page})"
+                ));
+            };
+            names.insert(name.to_string());
         }
 
-        if body["has_more"].as_bool() != Some(true) {
-            return Ok(names);
+        match body.get("has_more").and_then(|m| m.as_bool()) {
+            Some(true) => page += 1,
+            Some(false) => return Ok(names),
+            // Absent/non-bool: the page may or may not be the last, and
+            // guessing "last" would silently truncate the authority's list.
+            None => {
+                return Err(format!(
+                    "Scryfall response for {query:?} has no boolean `has_more` (page {page})"
+                ))
+            }
         }
-        page += 1;
     }
 }
 

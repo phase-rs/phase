@@ -309,6 +309,7 @@ mod external_format_config_tests {
                 },
                 legality: LegalityRules {
                     legal_sets: None,
+                    legal_cards: Vec::new(),
                     banned: Vec::new(),
                     restricted: Vec::new(),
                     legacy: LegacyRuleSet::default(),

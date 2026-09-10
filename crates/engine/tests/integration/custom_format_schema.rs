@@ -971,6 +971,94 @@ fn plains_only_db_json() -> String {
 /// `default_deck_copy_limit`, ...) is self-consistent with `sample_rules`'
 /// declared structural rules, exactly as `validate_custom_rules_consistency`
 /// demands of a trusted, non-deserialized config.
+/// `legal_cards` through the AUTHORITATIVE deck-admission entry point, not the
+/// private pool.
+///
+/// A field can serialize, validate and pass a unit test on `DeclaredPool` while
+/// being dropped or bypassed where decks are actually admitted — so this drives
+/// `validate_name_deck_for_format_full` and asserts the admit and the reject on
+/// the same deck, changing only whether the card is named.
+#[test]
+fn validate_name_deck_for_format_full_admits_a_card_only_named_in_legal_cards() {
+    use engine::database::CardDatabase;
+    use engine::game::deck_validation::validate_name_deck_for_format_full;
+
+    let db = CardDatabase::from_json_str(&plains_only_db_json()).expect("card database");
+    let main_deck: Vec<String> = std::iter::repeat_n("Plains".to_string(), 60).collect();
+
+    // A finite pool the card is NOT in: the fixture records no printings, so
+    // `printed_in_any_set` fails closed against any restrictive `legal_sets`.
+    // That is the whole point — the card can reach the deck ONLY by being
+    // named, so an admit here cannot come from the set check.
+    let mut rules = sample_rules(1);
+    rules.legality.legal_sets = Some(vec![SetCode("LEA".to_string())]);
+
+    let reject_config = FormatConfig::for_custom_rules(&rules);
+    let rejected = validate_name_deck_for_format_full(
+        &db,
+        &main_deck,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &reject_config,
+        None,
+        2,
+    );
+    assert!(
+        rejected.is_err(),
+        "a card outside legal_sets and not named must be rejected"
+    );
+
+    // Same deck, same sets, same everything — one name added.
+    rules.legality.legal_cards = vec!["Plains".to_string()];
+    let admit_config = FormatConfig::for_custom_rules(&rules);
+    assert_eq!(
+        validate_name_deck_for_format_full(
+            &db,
+            &main_deck,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &admit_config,
+            None,
+            2,
+        ),
+        Ok(()),
+        "naming the card must admit it through the production validator"
+    );
+
+    // ...and naming it does NOT override the ban lists, which apply after the
+    // pool check. Without this, `legal_cards` could be read as "always legal".
+    rules.legality.banned = vec!["Plains".to_string()];
+    let banned_config = FormatConfig::for_custom_rules(&rules);
+    assert!(
+        validate_name_deck_for_format_full(
+            &db,
+            &main_deck,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &banned_config,
+            None,
+            2,
+        )
+        .is_err(),
+        "legal_cards widens the pool; it must not override `banned`"
+    );
+}
+
 #[test]
 fn validate_name_deck_for_format_full_evaluates_a_resolved_custom_format() {
     use engine::database::CardDatabase;

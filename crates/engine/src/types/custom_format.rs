@@ -347,10 +347,12 @@ pub struct LegalityRules {
     /// Exists because real rulesets name cards, not only sets. Both Eternal
     /// Central Old School lists declare specific promos legal (Arena, Sewers of
     /// Estark, Nalathni Dragon; 95 adds Giant Badger, Windseeker Centaur, Mana
-    /// Crypt), and set-code granularity cannot express that: four of those six
-    /// share one 5-card set (`PHPR`) whose other members are legal in 95 but
-    /// NOT in 93/94 — so admitting the set would admit cards 93/94 forbids,
-    /// while omitting it rejects cards it allows. Neither is the ruleset.
+    /// Crypt), and set-code granularity cannot express that: FIVE of those six
+    /// share one 5-card set (`PHPR` — Arena, Sewers of Estark, Giant Badger,
+    /// Windseeker Centaur, Mana Crypt; only Nalathni Dragon is elsewhere, alone
+    /// in `PDRC`). Two of those five are legal in 93/94 and three are not, so
+    /// admitting `PHPR` would admit cards 93/94 forbids while omitting it
+    /// rejects cards it allows. Neither is the ruleset.
     ///
     /// Additive only, and deliberately so. It widens the pool; it never
     /// narrows it, and it never overrides `banned`/`restricted`, which are
