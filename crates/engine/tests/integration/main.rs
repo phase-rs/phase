@@ -331,6 +331,7 @@ mod gideon_jura_forced_attack_planeswalker;
 mod gideon_trials_emblem;
 mod gift_delivery_draw_sequence_migration;
 mod gift_recipient_phased_out_opponent;
+mod gifts_ungiven_duplicate_candidates_8135;
 mod giggling_skitterspike_issue_890;
 mod gimbal_gremlin_prodigy;
 mod glen_elendras_answer_counter_all_conjunction;
