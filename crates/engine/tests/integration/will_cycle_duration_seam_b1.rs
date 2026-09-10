@@ -12,21 +12,29 @@
 //!   unstamped window is not "missing", it is PERMANENT, because CR 611.2a
 //!   makes an unstated duration last until the end of the game.
 //!
-//! **Honesty statement.** B1 alone makes ZERO cards supported: it opens the
-//! duration seam, and the permission body it unblocks was still refused when
-//! this file was written. The `v5` row pins the cycle's status as a REGRESSION
+//! **Honesty statement.** B1 makes ZERO cards supported. It opens the duration
+//! seam; the permission body it unblocks is still refused, so
+//! `v5_will_cycle_cards_remain_honestly_unsupported` pins that as a REGRESSION
 //! GUARD, not as a discriminating test.
 //!
-//! **Amended by B2.** Two claims in the original statement were wrong, and the
-//! correction is recorded here rather than quietly dropped:
+//! **One precision on that statement.** "These cards parse to
+//! `Effect::Unimplemented`" is only half true, and the nuance matters for
+//! anyone who later closes this gap. The CAST half of "you may play lands and
+//! cast spells from your graveyard" ALREADY lowers to `Effect::CastFromZone`,
+//! in `sub_ability` — a position the instrument originally used to write this
+//! file never read. Only the LAND half is refused, as the bare fragment
+//! `"play lands"`, which `try_parse_cast_effect`'s guard declines because a
+//! zone-less "play lands" genuinely is not a grant. So these cards are HALF
+//! parsed, and `v5` below asserts only that a refusal is still present.
 //!
-//! * "still parse to `Effect::Unimplemented`" was only ever half true. The CAST
-//!   half of "you may play lands and cast spells from your graveyard" already
-//!   lowered to `Effect::CastFromZone` — in `sub_ability`, which the instrument
-//!   used to write this file never read. These cards were HALF supported.
-//! * The remaining refusal, the land half, is recovered by B2
-//!   (`will_cycle_permission_b2.rs`), so v5's assertion (i) is now INVERTED.
-//!   B2 owns the recovered half's shape; v5 keeps only the arrival-shape guard.
+//! **Parsing the land half is NOT sufficient to support these cards.**
+//! MEASURED: `graveyard_lands_playable_by_permission` returns `[]` after
+//! resolving the real Yawgmoth's Will even when both halves parse, because
+//! `Effect::CastFromZone` is not a channel any land-permission consumer reads.
+//! The consumers (`casting::graveyard_permission_sources`) read
+//! `StaticMode::GraveyardCastPermission` instead. Closing this gap therefore
+//! needs a DELIVERY seam, not another parser arm — see the U1 note below, which
+//! is that seam's prerequisite.
 //!
 //! **Stack size.** `parse_oracle_text` overflows the default 8 MB test stack
 //! and prints a convincing PARTIAL negative on the way down. Every body that
@@ -429,7 +437,7 @@ const GAEAS_WILL: &str = "Suspend 4—{G}\nUntil end of turn, you may play lands
 const MAGUS_OF_THE_WILL: &str = "{2}{B}, {T}, Exile this creature: Until end of turn, you may play lands and cast spells from your graveyard. If a card would be put into your graveyard from anywhere this turn, exile that card instead.";
 
 #[test]
-fn v5_will_cycle_permission_body_parses_on_every_arrival_shape() {
+fn v5_will_cycle_cards_remain_honestly_unsupported() {
     // MULTI-AUTHORITY hostile fixture: three different arrival shapes — a bare
     // sorcery, a sorcery preceded by a Suspend line, and a creature's activated
     // ability. All three must yield the SAME verdict, proving the outcome keys
@@ -449,24 +457,13 @@ fn v5_will_cycle_permission_body_parses_on_every_arrival_shape() {
     ] {
         let parsed = parse_with_types(text, name, types);
 
-        // (i) The permission body is no longer refused at the root.
-        //
-        // This assertion was INVERTED by B2. It previously read "must still
-        // report an Unimplemented effect", pinning B1's honest claim that it
-        // made zero cards supported. B2 (`will_cycle_permission_b2.rs`)
-        // recovers the coordinated grant's land half from its `CastFromZone`
-        // sibling, so the refused fragment `"play lands"` is gone.
-        //
-        // The row stays a REGRESSION GUARD rather than a duplicate of B2's
-        // discriminating test: B2 owns the land half's SHAPE (type axis, zone
-        // anchor, controller, window); this only pins that the duration seam
-        // still delivers a usable body on all three arrival shapes.
+        // (i) coverage stays RED — the permission body is still unimplemented.
         assert!(
-            !parsed
+            parsed
                 .abilities
                 .iter()
                 .any(|a| matches!(&*a.effect, Effect::Unimplemented { .. })),
-            "{name}: the permission body must not be refused at the root"
+            "{name}: must still report an Unimplemented effect"
         );
         // (ii) B1 fabricates no emblem.
         assert!(

@@ -2007,8 +2007,14 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     // end of the game") makes the captured window load-bearing, but
     // `StaticDefinition` has no duration/expiry field, so there is no storage
     // site at this layer. The value is consumed and EXPLICITLY DISCARDED to make
-    // the body reachable; the window is carried on the effect path's
-    // `Effect::CastFromZone { duration }`, which this class also emits.
+    // the body reachable.
+    //
+    // DISCARDING IT IS SAFE ONLY BECAUSE NO CARD ROUTES HERE YET. Measured: the
+    // corpus contains zero `GraveyardCastPermission` statics, because the Will
+    // cycle's sentence reaches the EFFECT path, not this static path. Any future
+    // change that routes a windowed permission through here must thread the
+    // window to a real expiry first — otherwise CR 611.2a makes the grant last
+    // until end of GAME, which is strictly worse than not parsing it.
     let lower = {
         use crate::parser::oracle_nom::duration::parse_duration;
         match nom_on_lower(lower, lower, |i| {

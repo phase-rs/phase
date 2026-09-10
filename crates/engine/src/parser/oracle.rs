@@ -11,13 +11,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CardPlayMode,
-    CastTimingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind,
-    ContinuousModification, ControllerRef, CostReduction, DelayedTriggerCondition, Duration,
-    Effect, EffectScope, FilterProp, ManaProduction, ModalChoice, ParsedCondition, PlayerFilter,
-    QuantityExpr, QuantityRef, ReplacementDefinition, SolveCondition, SpellCastingOption,
-    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CastTimingPermission,
+    CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification, ControllerRef,
+    CostReduction, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
+    ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
+    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
 use crate::types::card::DraftEffect;
@@ -2199,230 +2198,6 @@ fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinit
     }
 }
 
-// --- CR 116.2a + CR 601.2a: recover the land half of a coordinated grant ---
-
-/// CR 116.2a + CR 601.2a: "you may play lands **and** cast spells from `<zone>`"
-/// (Yawgmoth's Will, Gaea's Will, Magus of the Will) is ONE permission naming two
-/// actions. `"cast "` is a bare-`and` clause starter, so the sequence splitter
-/// separates the halves; the cast half keeps the zone clause and lowers correctly
-/// to `Effect::CastFromZone`, while the land half is left as the bare fragment
-/// `"play lands"` — which `try_parse_cast_effect`'s CR 305.2a guard then refuses,
-/// because a zone-less "play lands" really is not a grant.
-///
-/// The guard is CORRECT and stays: it cannot see the sibling clause that carries
-/// the zone, because it runs per-clause with no forward view. This pass runs after
-/// the chain is assembled, where both halves are adjacent, and recovers the land
-/// half from the `CastFromZone` its own sentence produced — the same lookback shape
-/// as `nearest_dig_rest_zone_in_ability`.
-///
-/// Deliberately narrow. It fires ONLY when the refused fragment is immediately
-/// followed by a `CastFromZone` sibling from the same sentence, so it cannot
-/// invent a permission for a genuinely zone-less "play lands", and it copies the
-/// sibling's zone/duration rather than re-deriving them — a coordinated grant's
-/// single stated window scopes both halves (CR 611.2a).
-fn recover_coordinated_land_play_in_ability(def: &mut AbilityDefinition) {
-    // The land half is what the CR 305.2a guard refused, so it arrives as an
-    // `Unimplemented` whose fragment is exactly the bare "play lands" phrase.
-    let head_is_refused_land_play = matches!(
-        &*def.effect,
-        Effect::Unimplemented { description, .. }
-            if description
-                .as_deref()
-                .is_some_and(|d| d.eq_ignore_ascii_case("play lands"))
-    );
-
-    if head_is_refused_land_play {
-        // Read the sibling's grant. CR 115.1: a TARGETED permission names specific
-        // objects chosen on announcement (Sins of the Past, Rat in the Hat), so it
-        // is NOT a class-wide grant and its land half must not be synthesized —
-        // leave those refused rather than widening them to every land in the zone.
-        let recovered = def
-            .sub_ability
-            .as_deref()
-            .and_then(|sub| match &*sub.effect {
-                Effect::CastFromZone {
-                    target,
-                    without_paying_mana_cost,
-                    alt_ability_cost,
-                    constraint,
-                    duration,
-                    driver,
-                    mana_spend_permission,
-                    ..
-                } => duration
-                    .as_ref()
-                    // CR 611.2a: "If no duration is stated, it lasts until the end
-                    // of the game." A sibling that lowered WITHOUT a window did not
-                    // capture whatever the card printed, so copying that absence
-                    // would synthesize a PERMANENT land permission — strictly worse
-                    // than leaving the fragment refused.
-                    //
-                    // MEASURED: Shaman's Trance prints "this turn" but its cast
-                    // sibling carries `duration: None`, so it declines here. Its
-                    // filter is independently unfaithful too — `controller: You`
-                    // selects YOUR graveyard (the consumer at
-                    // `casting.rs::graveyard_lands_playable_by_permission` iterates
-                    // `player_data.graveyard` and uses `controller` to pick which
-                    // objects match, not who acts), which contradicts the card's
-                    // "other players' graveyards". Making that card correct needs a
-                    // runtime widening to other players' graveyards, not a filter
-                    // copy.
-                    //
-                    // WHY `controller: You` IS NOT A LATENT HAZARD HERE. Nine corpus
-                    // cards carry the refused `"play lands"` fragment and so can
-                    // reach this branch; measured, exactly four produce a land half:
-                    //
-                    //   Yawgmoth's Will / Gaea's Will / Magus of the Will
-                    //       You + Graveyard — and each PRINTS "your graveyard", so
-                    //       `You` is FAITHFUL, not an inherited mistake.
-                    //   Sen Triplets
-                    //       None + Hand (see the player-axis note on the CR 115.1
-                    //       guard in `land_half_filter`).
-                    //
-                    // The other five decline: Shaman's Trance, Brilliant Ultimatum
-                    // and Gix on the absent window, Magus of the Mind on the zone
-                    // anchor, Elder Brain on having no `CastFromZone` sibling. So no
-                    // printed card reaches this branch with a `You`-scoped graveyard
-                    // filter that contradicts its own text — the unfaithful shape is
-                    // not currently producible, which is why this documents the axis
-                    // rather than gating on it.
-                    //
-                    // Corpus census over graveyard-anchored `CastFromZone` grants,
-                    // counted as DISTINCT CARDS: 43 `You`, 15 `None`, zero
-                    // `Opponent`. Every genuine cross-player card (Chancellor of the
-                    // Spires, Memory Plunder, Havengul Lich) sits in the `None`
-                    // bucket. Count cards, not grants: a per-grant count includes the
-                    // land halves this pass itself adds and so drifts with its own
-                    // behaviour.
-                    .and_then(|_| land_half_filter(target))
-                    .map(|land_target| Effect::CastFromZone {
-                        // CR 116.2a / CR 701.18a: "To play a land, a player puts that
-                        // land onto the battlefield FROM THE ZONE IT WAS IN (usually
-                        // that player's hand)" — the zone-general definition, which is
-                        // what licenses a land half anchored to the graveyard. NOT
-                        // CR 305.1, which states the default permission as being
-                        // "from their hand" and so does not cover this grant; no
-                        // 305.x subrule licenses playing a land from another zone.
-                        // The permission to use a different zone comes from the
-                        // card's own granted effect, which is exactly what this pass
-                        // reconstructs.
-                        //
-                        // The sibling's filter carries the zone anchor; only the
-                        // card-type axis differs between the two halves.
-                        target: land_target,
-                        without_paying_mana_cost: *without_paying_mana_cost,
-                        mode: CardPlayMode::Play,
-                        cast_transformed: false,
-                        alt_ability_cost: alt_ability_cost.clone(),
-                        constraint: constraint.clone(),
-                        // CR 611.2a: one stated window scopes both halves.
-                        duration: duration.clone(),
-                        driver: *driver,
-                        mana_spend_permission: *mana_spend_permission,
-                    }),
-                _ => None,
-            });
-
-        if let Some(effect) = recovered {
-            *def.effect = effect;
-        }
-    }
-
-    if let Some(sub) = def.sub_ability.as_mut() {
-        recover_coordinated_land_play_in_ability(sub);
-    }
-}
-
-/// CR 116.2a: Build the land half's filter from the cast half's, changing ONLY the
-/// card-type axis and preserving the zone anchor (`InZone`), the controller scope
-/// and every other property.
-///
-/// Returns `None` for any shape this pass does not model, so an unrecognized cast
-/// filter leaves the land half refused rather than widened:
-///
-/// * a filter whose type axis is anything but the bare `Card` of a class-wide
-///   grant — CR 115.1: "you may cast TARGET instant or sorcery card from your
-///   graveyard" (Sins of the Past) and "target creature card that has a hat"
-///   (Rat in the Hat) name specific objects chosen on announcement, so they are
-///   not a class-wide permission and have no land half to synthesize. (Measured:
-///   those two cards lower their permission as the ability's HEAD effect, so the
-///   caller's `Unimplemented` gate already excludes them; this is the second,
-///   structural guard so the pass cannot widen a narrowed grant even if the head
-///   shape changes.)
-/// * a non-`Typed` filter, which carries no type axis to swap.
-/// * a filter with no `InZone` anchor at all (Brilliant Ultimatum's chosen pile).
-/// * a filter anchored to a zone NO land-permission consumer serves — today only
-///   Graveyard, Exile and Library are represented, so a Hand-anchored grant
-///   (Sen Triplets) fails closed rather than becoming a typed permission the
-///   runtime silently ignores.
-fn land_half_filter(cast_target: &TargetFilter) -> Option<TargetFilter> {
-    let TargetFilter::Typed(typed) = cast_target else {
-        return None;
-    };
-    // A class-wide "cast spells from <zone>" lowers to the bare `Card` type axis.
-    // Anything narrower is a specific grant, not the sibling of a "play lands".
-    if typed.type_filters != vec![TypeFilter::Card] {
-        return None;
-    }
-    // CR 116.2a: the recovered half is a permission to PLAY A LAND, which without
-    // a zone anchor reads as "play lands from anywhere". Require the sibling to
-    // name the zone rather than copying an empty property list.
-    //
-    // MEASURED: Brilliant Ultimatum's grant is scoped to "one of those piles",
-    // which is a chosen subset rather than a zone, so its `CastFromZone` carries
-    // no `InZone` and this returns `None`. Its `"play lands"` fragment therefore
-    // stays refused — the honest outcome, since the engine cannot express that
-    // pile restriction and a zone-less land grant would be strictly too broad.
-    //
-    // The check FAILS CLOSED on zones no land-permission consumer can serve.
-    // Exactly three exist in `game::casting`, each keyed to the ACTING player's
-    // own zone:
-    //
-    //     graveyard_lands_playable_by_permission      (Graveyard)
-    //     exile_lands_playable_by_permission          (Exile)
-    //     top_of_library_land_playable_by_permission  (Library)
-    //
-    // There is NO hand consumer. The hand branch of the land-availability path
-    // (`casting.rs`, the `player.hand` loop) walks the acting player's own hand
-    // and consults no `CastFromZone` permission at all. A recovered `Play` half
-    // anchored to the Hand therefore can never be delivered, and emitting one
-    // would trade an honest unsupported gap for a typed grant the runtime
-    // silently ignores.
-    //
-    // MEASURED: Sen Triplets ("play lands and cast spells from THAT PLAYER'S
-    // hand") lowers its sibling to `InZone{Hand}` with `controller: None` — no
-    // selected-player binding, so the filter cannot express whose hand is meant
-    // even in principle. Its fragment stays refused until a selected-player
-    // permission authority and its runtime coverage exist. Pinned by `g7`.
-    let zone_is_served = typed.properties.iter().any(|p| {
-        matches!(
-            p,
-            FilterProp::InZone {
-                zone: Zone::Graveyard | Zone::Exile | Zone::Library,
-                ..
-            }
-        )
-    });
-    if !zone_is_served {
-        return None;
-    }
-    let mut land = typed.clone();
-    land.type_filters = vec![TypeFilter::Land];
-    Some(TargetFilter::Typed(land))
-}
-
-/// CR 116.2a + CR 601.2a: entry point for [`recover_coordinated_land_play_in_ability`].
-fn recover_coordinated_land_play(result: &mut ParsedAbilities) {
-    for ability in &mut result.abilities {
-        recover_coordinated_land_play_in_ability(ability);
-    }
-    for trigger in &mut result.triggers {
-        if let Some(execute) = trigger.execute.as_mut() {
-            recover_coordinated_land_play_in_ability(execute);
-        }
-    }
-}
-
 /// CR 702.26a + CR 603.7c: Upgrade bare one-shot `PhaseOut` ETB effects that
 /// carry a host-bound re-entry rider ("Tap that creature as it phases in this
 /// way", Oubliette) into PhaseOut + CantPhaseIn + delayed PhaseIn/Tap.
@@ -3910,10 +3685,6 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         &static_ids,
     );
     reconcile_host_bound_phase_outs(&mut result);
-    // CR 116.2a + CR 601.2a: recover the land half of a coordinated "play lands and
-    // cast spells from <zone>" grant, which the bare-`and` split leaves as a
-    // zone-less fragment the CR 305.2a guard correctly refuses per-clause.
-    recover_coordinated_land_play(&mut result);
     apply_linked_choice_persisted_player(&mut result, &ir.relations, &ability_ids, &trigger_ids);
 
     // Architectural rule: the parser must never silently discard Oracle text. Run
