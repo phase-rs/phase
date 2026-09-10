@@ -135,16 +135,17 @@
 //! the deepest disturbed byte. That yields a *number* rather than the
 //! survive/abort bit this test produces, which means it (a) fails politely,
 //! naming the measured high-water against its 8 MiB portable ceiling, instead
-//! of a bare SIGABRT, (b) runs on 64-bit Linux, Android and macOS, because the
-//! assertion is on the measured value rather than on a target-calibrated bound,
+//! of a bare SIGABRT, (b) runs on 64-bit Linux — including CI's x86_64, which
+//! this file has never run on — because the assertion is on the measured value
+//! rather than on a target-calibrated bound,
 //! and (c) makes the 1.36x-vs-2.42x ratio above *trackable over time* instead
 //! of something that has to be re-bisected by hand. Do not read the `cfg` below
 //! as a claim that target-gating was the only available design.
 //!
-//! Its target list is worth reading carefully, because it is **not** the same
-//! kind of gate as the one below. That file needs a platform call to learn
-//! where the running thread's stack is; nothing in it is calibrated to a
-//! target, and adding one means adding a stack-bounds query rather than
+//! Its target gate is worth reading carefully, because it is **not** the same
+//! kind of gate as the one below. Nothing in that file is calibrated to a
+//! target: it is gated to where its stack-bounds query has actually been run,
+//! so widening it means adding a query and executing the test there, not
 //! re-running a bisection. CI's `ubuntu-latest` x86_64 is covered, which is the
 //! point — this file is not.
 //!
