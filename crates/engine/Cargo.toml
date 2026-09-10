@@ -119,6 +119,11 @@ serde_json = "1"
 
 [dev-dependencies]
 flate2 = "1"
+# Test-only. `game_state_stack_high_water.rs` queries the running thread's real
+# stack bounds (`pthread_getattr_np` / `pthread_get_stackaddr_np`) instead of
+# inferring them from a local address. Already in Cargo.lock transitively, so
+# this vendors nothing new.
+libc = "0.2"
 engine = { path = ".", package = "phase-engine", features = ["test-support"] }
 tempfile = "3"
 insta = { version = "1", features = ["json"] }

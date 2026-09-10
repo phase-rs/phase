@@ -133,18 +133,25 @@
 //! since built as `game_state_stack_high_water.rs`. Spawn a thread with a known
 //! large stack, fill it with a sentinel pattern, run the fixture, then scan for
 //! the deepest disturbed byte. That yields a *number* rather than the
-//! survive/abort bit this test produces, which means it (a) fails politely with
-//! "high-water 2,410 KiB exceeds budget 3,072 KiB" instead of a bare SIGABRT,
-//! (b) runs on every target, because the assertion is on the measured value
-//! rather than on a target-calibrated bound, and (c) makes the
-//! 1.36x-vs-2.42x ratio above *trackable over time* instead of something that
-//! has to be re-bisected by hand. Do not read the `cfg` below as a claim that
-//! target-gating was the only available design.
+//! survive/abort bit this test produces, which means it (a) fails politely,
+//! naming the measured high-water against its 8 MiB portable ceiling, instead
+//! of a bare SIGABRT, (b) runs on 64-bit Linux, Android and macOS, because the
+//! assertion is on the measured value rather than on a target-calibrated bound,
+//! and (c) makes the 1.36x-vs-2.42x ratio above *trackable over time* instead
+//! of something that has to be re-bisected by hand. Do not read the `cfg` below
+//! as a claim that target-gating was the only available design.
+//!
+//! Its target list is worth reading carefully, because it is **not** the same
+//! kind of gate as the one below. That file needs a platform call to learn
+//! where the running thread's stack is; nothing in it is calibrated to a
+//! target, and adding one means adding a stack-bounds query rather than
+//! re-running a bisection. CI's `ubuntu-latest` x86_64 is covered, which is the
+//! point — this file is not.
 //!
 //! **It does not replace this file, and the two are not redundant.** That one
 //! runs the same fixture on a 64 MiB stack and asserts a loose, portable
-//! ceiling, so it can run in CI on every target — which this file, gated to a
-//! target this repository has no runner for, has never done. What it gives up
+//! ceiling, so it can run in CI on the targets it supports — which this file,
+//! gated to a target this repository has no runner for, has never done. What it gives up
 //! is exactly what the calibration above buys: the 3 MiB bound below is a
 //! *discrimination* dial, sharp enough that reverting the boxing flips it red,
 //! and no portable assertion can be that sharp. Keep both: this one for

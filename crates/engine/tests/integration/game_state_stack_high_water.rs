@@ -1,5 +1,5 @@
-//! Portable stack **high-water measurement** for the four-player Commander
-//! fixture that `game_state_stack_budget.rs` guards with a survive/abort bit.
+//! Stack **high-water measurement** for the four-player Commander fixture that
+//! `game_state_stack_budget.rs` guards with a survive/abort bit.
 //!
 //! This is the instrument that file's module docs record as the better
 //! available design and deliberately do not build:
@@ -12,25 +12,64 @@
 //! `#![cfg(all(target_arch = "aarch64", target_os = "macos"))]`, and this
 //! repository's CI has no macOS runner — every workflow in `.github/workflows/`
 //! is `ubuntu-latest` or an Android cross-build — so that guard has **never
-//! executed in CI**. It compiles out on every job. A measurement asserts on a
-//! value rather than on a target-calibrated bound, so it runs everywhere the
-//! engine builds, this repository's CI included.
+//! executed in CI**. It compiles out on every job. This file's assertion is on
+//! a measured value rather than on a target-calibrated bound, so it runs on
+//! every target it supports, CI's `ubuntu-latest` x86_64 included.
+//!
+//! # Which targets, and why not all of them
+//!
+//! 64-bit Linux, Android and macOS — see the `cfg` below. The gate is **not**
+//! a calibration gate like the sibling file's; nothing here is tuned to a
+//! target. It is a gate on [`stack_bounds`], which needs a platform call to
+//! learn where the running thread's stack actually is. Adding a target means
+//! adding its query to that function, not re-running a bisection.
 //!
 //! # Method
 //!
 //! 1. Spawn a thread with an explicit `MEASURE_STACK_BYTES` stack.
-//! 2. Take `anchor`, the address of a local in the measuring frame. The stack
-//!    grows down, so every frame the fixture pushes lies below it.
-//! 3. Paint `[low, anchor - FRAME_GAP)` with `SENTINEL`. `FRAME_GAP` keeps the
-//!    measuring frame's own live locals out of the painted region; `low` keeps
-//!    `GUARD_MARGIN` of clearance above the guard page.
+//! 2. Ask the platform for that thread's real stack bounds, and check the
+//!    answer against a local of the asking frame before trusting it.
+//! 3. Descend one frame into [`measure`], leaving the fixture's `GameRunner` in
+//!    the caller's frame, and paint `[low, hi)` with `SENTINEL`.
 //! 4. Run the fixture.
 //! 5. Scan up from `low` for the deepest byte that is no longer `SENTINEL`.
 //!
+//! # Why the paint cannot corrupt live state
+//!
+//! Painting a span of the running thread's own stack earns its safety
+//! argument, so here it is in full. Three claims, each checked at runtime
+//! rather than assumed:
+//!
+//! - **The span is inside the mapping.** `low` comes from
+//!   `pthread_getattr_np` / `pthread_get_stackaddr_np` — the thread's real
+//!   bounds — not from `anchor` arithmetic against the requested
+//!   `Builder::stack_size`, which is a *request* and tells you nothing about
+//!   where the allocation landed or how the guard page was carved out of it.
+//!   [`stack_bounds`] then refuses to return a range that does not contain a
+//!   local of its caller's frame, so a platform whose query describes some
+//!   other stack fails loudly instead of handing back an address to write to.
+//!
+//! - **Only values live at paint time can be damaged.** This is the load-bearing
+//!   one. Everything the fixture allocates *after* the paint — every frame it
+//!   pushes, every temporary in the `cast(..).resolve()` chain — is written into
+//!   the painted region on purpose. That is the measurement. So the exclusion
+//!   set is not "every local in this test", it is exactly "the values alive at
+//!   the instant `paint` runs", which is a short enumerable list.
+//!
+//! - **That list is enumerated and asserted.** In [`measure`] it is `probe`,
+//!   the `&mut GameRunner` and its pointee, `murder` and `victim`. Each is
+//!   checked to lie above the painted region before anything is written. The
+//!   `GameRunner` itself — by far the largest — is held by reference from a
+//!   *shallower* frame precisely so that it cannot be in range: whether a
+//!   captured value lands in the closure's frame or its caller's is the
+//!   compiler's choice, and this design removes the choice instead of betting
+//!   on it.
+//!
 //! # What the number is, and is not
 //!
-//! It is the deepest byte the fixture **wrote**, relative to `anchor`. Two
-//! honest caveats, neither of which affects its use as a regression signal:
+//! It is the deepest byte the fixture **wrote**, relative to the painting
+//! frame. Two honest caveats, neither of which affects its use as a regression
+//! signal:
 //!
 //! - **It is a lower bound.** A frame that reserves space without writing every
 //!   byte of it leaves sentinel behind, so the true reserved depth can exceed
@@ -45,6 +84,21 @@
 //! decisions) and `[profile.test]` inherits `dev`, so nothing is optimized
 //! away. Compare numbers **within** a target, never across targets.
 //!
+//! # Reading the number
+//!
+//! It is printed, and both harnesses hide stdout for a test that passes — which
+//! this one normally does. To actually see it:
+//!
+//! ```text
+//! cargo test -p phase-engine --test integration -- --nocapture \
+//!     --exact game_state_stack_high_water::four_player_commander_action_stack_high_water
+//! cargo nextest run -p phase-engine --success-output immediate -E 'test(stack_high_water)'
+//! ```
+//!
+//! So a default CI run asserts the ceiling but does not surface the value.
+//! Surfacing it per-run — and ratcheting on it — is the follow-up this file is
+//! the prerequisite for, not something it claims to have done.
+//!
 //! # Why the assertion is loose, and what it is for
 //!
 //! The number is the product; [`HIGH_WATER_CEILING_BYTES`] only stops the run
@@ -57,11 +111,9 @@
 //! target, where CI never runs it.
 //!
 //! So the split is deliberate: **assert** the thing that is true on every
-//! target (a single un-nested `apply()` must not approach the production stack
-//! budget), and **print** the thing that is only comparable within a target.
-//! Tightening the printed number into a per-target ratchet is the follow-up
-//! once it has a run history in CI to set rows from — see the drift figures in
-//! <https://github.com/phase-rs/phase/issues/8376>.
+//! supported target (a single un-nested `apply()` must not approach the
+//! production stack budget), and **print** the thing that is only comparable
+//! within a target.
 //!
 //! # A note on severity, so nobody reads this test as a fire alarm
 //!
@@ -73,23 +125,22 @@
 //! `phase-server/src/main.rs`: **32 MiB**, on the runtime owner thread and on
 //! every Tokio worker and blocking thread.
 //!
-//! That distinction is why this file's ceiling is nowhere near 3 MiB. Crossing
-//! 3 MiB means the *discriminating gate* has lost its calibration, which is
-//! worth knowing and is what issue #8376 reports. Crossing this file's ceiling
-//! would mean something much worse.
-//!
 //! The 32 MiB figure is also not headroom to spend: the server docs record
 //! that AI search keeps one live `Option<GameState>` per ply and that search
 //! depth is data-driven, so production depth is this fixture's number times a
 //! multiplier no static bound covers. The risk that matters is the multiplier,
-//! not the linear drift.
+//! not the linear drift — and the drift is not even monotonic. See
+//! <https://github.com/phase-rs/phase/issues/8376>.
 
-#![cfg(target_pointer_width = "64")]
+#![cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "android", target_os = "macos")
+))]
 
 use std::ptr;
 use std::sync::atomic::{compiler_fence, Ordering};
 
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::format::FormatConfig;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -105,8 +156,8 @@ use engine::types::{PlayerId, WaitingFor};
 /// from "recurses without bound" only if this stack is not itself the bound.
 const MEASURE_STACK_BYTES: usize = 64 << 20;
 
-/// Ceiling for the measured high-water. Fails the test, portably, on every
-/// target the engine builds for.
+/// Ceiling for the measured high-water. Fails the test on every supported
+/// target, without being tuned to any of them.
 ///
 /// **Derivation, so this is a stated policy and not a magic number.**
 /// Production runs the engine on 32 MiB threads (`RUNTIME_THREAD_STACK_BYTES`,
@@ -126,14 +177,15 @@ const MEASURE_STACK_BYTES: usize = 64 << 20;
 /// nearly 3x — both are findings, not calibration errors.
 const HIGH_WATER_CEILING_BYTES: usize = 8 << 20;
 
-/// Clearance kept above the low end of the thread stack. Covers the guard page
-/// and whatever std's thread-entry frames sit below `anchor`, so the paint
-/// never writes outside the mapping.
-const GUARD_MARGIN: usize = 256 << 10;
-
-/// Clearance kept below `anchor`. The measuring frame's own locals live in
-/// here and must survive the paint; the cost is that depths shallower than
-/// this are indistinguishable.
+/// Clearance kept below [`measure`]'s own locals.
+///
+/// This bounds one small frame — [`measure`] holds a reference, two ids and a
+/// few `usize`s — not a frame carrying a `GameRunner`, which is why it can be
+/// this generous. Every value alive in that frame at paint time is asserted to
+/// sit above the painted region anyway, so the constant is slack on a checked
+/// invariant rather than the invariant itself. The cost is that depths
+/// shallower than this are indistinguishable, which the saturation assertion
+/// turns into a loud failure rather than a small number.
 const FRAME_GAP: usize = 32 << 10;
 
 const SENTINEL: u8 = 0xAB;
@@ -146,30 +198,93 @@ const MURDER_ORACLE: &str = "Destroy target creature.";
 const DEATH_TRIGGER_ORACLE: &str =
     "Whenever this creature or another creature dies, you gain 1 life.";
 
-/// What the measuring thread hands back.
-struct Measurement<R> {
-    runner: R,
-    /// Deepest written byte, as a depth below `anchor`.
+/// What [`measure`] hands back.
+struct Measurement {
+    /// Deepest written byte, as a depth below the painting frame.
     high_water: usize,
+    /// The validated `[low, high)` from [`stack_bounds`]. Reported so that a
+    /// run on a newly enabled target shows what its query actually returned,
+    /// rather than only that the run agreed with it.
+    bounds: (usize, usize),
     /// The depth the scan saturates at, i.e. what `high_water` equals when
     /// nothing in the painted region was disturbed. Derived from the *aligned*
-    /// `hi`, not from `FRAME_GAP`, because rounding moves it by up to 7 bytes
+    /// `hi`, not from [`FRAME_GAP`], because rounding moves it by up to 7 bytes
     /// and a saturation check against the unrounded constant would miss.
     saturation_floor: usize,
 }
 
-/// Paints `[low, hi)` with `SENTINEL`.
+/// The running thread's usable stack as `[low, high)`, from the platform.
+///
+/// `probe` must be the address of a local in the caller's frame. It is not used
+/// to *derive* the bounds — that is the whole point — but to **validate** them:
+/// a query that does not describe the stack this code is running on panics here
+/// rather than returning a range the caller will write into.
+///
+/// Only ever called on a thread this file spawned. That matters on Linux, where
+/// the main thread's stack is reported from `RLIMIT_STACK` and is not fully
+/// mapped; a spawned thread's is a single mapping, so every byte in `[low,
+/// high)` is writable.
+fn stack_bounds(probe: *const u8) -> (usize, usize) {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let (low, high) = unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        let rc = libc::pthread_getattr_np(libc::pthread_self(), &mut attr);
+        assert_eq!(rc, 0, "pthread_getattr_np failed with {rc}");
+
+        let mut base: *mut libc::c_void = ptr::null_mut();
+        let mut size: libc::size_t = 0;
+        let rc = libc::pthread_attr_getstack(&attr, &mut base, &mut size);
+        assert_eq!(rc, 0, "pthread_attr_getstack failed with {rc}");
+
+        let mut guard: libc::size_t = 0;
+        let rc = libc::pthread_attr_getguardsize(&attr, &mut guard);
+        assert_eq!(rc, 0, "pthread_attr_getguardsize failed with {rc}");
+
+        libc::pthread_attr_destroy(&mut attr);
+
+        // Skipping `guard` bytes above the reported base is correct when the
+        // guard is carved out of the reported block, and merely costs one guard
+        // page of range when the platform already excluded it. Both directions
+        // are safe; only the other rounding would not be.
+        (base as usize + guard, base as usize + size)
+    };
+
+    #[cfg(target_os = "macos")]
+    let (low, high) = unsafe {
+        let this = libc::pthread_self();
+        // Returns the *high* end on Darwin, unlike the POSIX call above.
+        let top = libc::pthread_get_stackaddr_np(this) as usize;
+        let size = libc::pthread_get_stacksize_np(this);
+        (top - size, top)
+    };
+
+    assert!(
+        low < high,
+        "platform reported an empty stack range [{low:#x}, {high:#x})"
+    );
+    let probe = probe as usize;
+    assert!(
+        probe >= low && probe < high,
+        "the platform stack query does not contain this frame's own local \
+         ({probe:#x} is outside [{low:#x}, {high:#x})), so the bounds are wrong \
+         for this target — refusing to paint"
+    );
+    (low, high)
+}
+
+/// Paints `[low, hi)` with [`SENTINEL`].
 ///
 /// # Safety
 ///
-/// `[low, hi)` must lie inside the current thread's stack mapping, strictly
-/// below every live local of the caller's frame and strictly above the guard
-/// page. The caller derives both bounds from `anchor` for exactly that reason.
+/// `[low, hi)` must lie inside the current thread's stack mapping and hold no
+/// value that is live at the moment of the call. [`measure`] establishes both:
+/// the first from [`stack_bounds`], the second by asserting every value alive
+/// in its frame lies above `hi`.
 unsafe fn paint(low: usize, hi: usize) {
     ptr::write_bytes(low as *mut u8, SENTINEL, hi - low);
 }
 
-/// Lowest address in `[low, hi)` whose byte is no longer `SENTINEL`, or `hi`
+/// Lowest address in `[low, hi)` whose byte is no longer [`SENTINEL`], or `hi`
 /// if the whole region survived.
 ///
 /// Word-scans first so 64 MiB is cheap, then narrows to the byte. Volatile
@@ -200,6 +315,75 @@ unsafe fn deepest_disturbed(low: usize, hi: usize) -> usize {
     hi
 }
 
+/// Paint, run the measured action, scan.
+///
+/// `#[inline(never)]` and taking `runner` by reference are both load-bearing,
+/// not style: they keep the `GameRunner` in a shallower frame than the painted
+/// region, so the largest live value in the test provably cannot be in range.
+/// See the safety argument in the module docs.
+#[inline(never)]
+fn measure(runner: &mut GameRunner, murder: ObjectId, victim: ObjectId) -> Measurement {
+    let probe = 0u8;
+    let probe_addr = &probe as *const u8 as usize;
+    let bounds = stack_bounds(&probe);
+    let (stack_low, _stack_high) = bounds;
+
+    // Word-align both ends: `deepest_disturbed` scans `u64`s.
+    let low = stack_low.next_multiple_of(8);
+    let hi = (probe_addr - FRAME_GAP) & !7;
+    assert!(
+        low < hi,
+        "no room to paint between the stack floor ({low:#x}) and this frame \
+         ({hi:#x})"
+    );
+
+    // The enumerated live set, checked before anything is written. Everything
+    // the fixture creates *after* the paint is what we are measuring; only what
+    // is alive right now could be corrupted, and this is all of it.
+    let runner_lo = runner as *mut GameRunner as usize;
+    let live: [(&str, usize, usize); 4] = [
+        ("probe", probe_addr, probe_addr + size_of::<u8>()),
+        (
+            "&mut GameRunner",
+            &runner as *const _ as usize,
+            &runner as *const _ as usize + size_of::<&mut GameRunner>(),
+        ),
+        ("GameRunner", runner_lo, runner_lo + size_of::<GameRunner>()),
+        (
+            "murder/victim",
+            &murder as *const _ as usize,
+            &victim as *const _ as usize + size_of::<ObjectId>(),
+        ),
+    ];
+    for (name, value_lo, value_hi) in live {
+        assert!(
+            value_hi <= low || value_lo >= hi,
+            "{name} ({value_lo:#x}..{value_hi:#x}) overlaps the paint region \
+             ({low:#x}..{hi:#x}); raise FRAME_GAP rather than painting over \
+             live state"
+        );
+    }
+
+    // SAFETY: `[low, hi)` is inside the mapping `stack_bounds` reported and
+    // validated against this frame, and the loop above has just established
+    // that nothing live occupies it.
+    unsafe { paint(low, hi) };
+    compiler_fence(Ordering::SeqCst);
+
+    runner.cast(murder).target_objects(&[victim]).resolve();
+    runner.advance_until_stack_empty();
+
+    compiler_fence(Ordering::SeqCst);
+    // SAFETY: same region just painted, still owned by this thread.
+    let deepest = unsafe { deepest_disturbed(low, hi) };
+
+    Measurement {
+        high_water: probe_addr - deepest,
+        bounds,
+        saturation_floor: probe_addr - hi,
+    }
+}
+
 #[test]
 fn four_player_commander_action_stack_high_water() {
     let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 4, 42);
@@ -221,7 +405,7 @@ fn four_player_commander_action_stack_high_water() {
             .collect(),
     );
 
-    let mut runner = scenario.build();
+    let runner = scenario.build();
 
     // Reach-guards: without these, a fixture that never reached the cast would
     // measure a no-op and report a flatteringly small high-water.
@@ -244,62 +428,21 @@ fn four_player_commander_action_stack_high_water() {
     let handle = std::thread::Builder::new()
         .stack_size(MEASURE_STACK_BYTES)
         .spawn(move || {
-            let anchor_local = 0u8;
-            let anchor = &anchor_local as *const u8 as usize;
-            // Word-align both ends: `deepest_disturbed` scans `u64`s, and
-            // `anchor` is the address of a `u8` so it carries no alignment.
-            let low = (anchor + GUARD_MARGIN - MEASURE_STACK_BYTES).next_multiple_of(8);
-            let hi = (anchor - FRAME_GAP) & !7;
-
-            // The paint's safety contract says `[low, hi)` holds nothing live.
-            // `runner` is the one capture large enough to reach past FRAME_GAP
-            // if it were laid out below `anchor`, and painting over it would
-            // corrupt the fixture silently rather than fail. Check rather than
-            // reason about a layout no rule pins: whether a captured value
-            // lands in this frame or in the caller's is the compiler's choice.
-            let runner_lo = ptr::addr_of!(runner) as usize;
-            let runner_hi = runner_lo + std::mem::size_of_val(&runner);
-            assert!(
-                runner_hi <= low || runner_lo >= hi,
-                "the fixture ({runner_lo:#x}..{runner_hi:#x}) overlaps the paint \
-                 region ({low:#x}..{hi:#x}); raise FRAME_GAP rather than \
-                 painting over live state"
-            );
-
-            // SAFETY: `anchor` is a local of this frame, so the stack mapping
-            // runs from below it down to `anchor - MEASURE_STACK_BYTES` plus
-            // whatever std's entry frames occupy above `anchor`. `low` sits
-            // `GUARD_MARGIN` above that floor and `hi` sits `FRAME_GAP` below
-            // this frame's locals, so `[low, hi)` is stack this thread owns and
-            // nothing live occupies — the assertion above checks the one
-            // capture big enough to make that last clause false.
-            unsafe { paint(low, hi) };
-            compiler_fence(Ordering::SeqCst);
-
-            runner.cast(murder).target_objects(&[victim]).resolve();
-            runner.advance_until_stack_empty();
-
-            compiler_fence(Ordering::SeqCst);
-            // SAFETY: same region just painted, still owned by this thread.
-            let deepest = unsafe { deepest_disturbed(low, hi) };
-
-            Measurement {
-                runner,
-                high_water: anchor - deepest,
-                saturation_floor: anchor - hi,
-            }
+            let mut runner = runner;
+            let measurement = measure(&mut runner, murder, victim);
+            (runner, measurement)
         })
         .expect("spawn measuring thread");
 
-    let measurement = handle.join().expect(
+    let (runner, measurement) = handle.join().expect(
         "the measured action panicked. Unlike game_state_stack_budget.rs this \
          thread has 64 MiB — more than production's 32 MiB — so an overflow \
          here would mean genuinely unbounded recursion rather than a budget \
          overrun.",
     );
     let Measurement {
-        runner,
         high_water,
+        bounds: (stack_low, stack_high),
         saturation_floor,
     } = measurement;
 
@@ -343,10 +486,16 @@ fn four_player_commander_action_stack_high_water() {
         HIGH_WATER_CEILING_BYTES / 1024
     );
 
-    // The product. Stable, greppable, and the only line here that is worth
-    // comparing across commits — within a target.
+    // The product, and the only line here worth comparing across commits —
+    // within a target. Both harnesses capture stdout for a passing test, so
+    // reading it needs `cargo test -- --nocapture` or
+    // `cargo nextest run --success-output immediate`; see the module docs.
     println!(
         "STACK_HIGH_WATER_BYTES={high_water} ({} KiB)",
         high_water / 1024
+    );
+    println!(
+        "STACK_BOUNDS_VALIDATED=[{stack_low:#x}, {stack_high:#x}) ({} MiB requested)",
+        MEASURE_STACK_BYTES >> 20
     );
 }
