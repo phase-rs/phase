@@ -107,7 +107,12 @@ pub fn resolve(
     // ANY of them is over-fire prone and must gate installation — not just
     // `valid_source`. Scoped to a pre-bind `ParentTarget` only, so a `SelfRef`
     // reference (Human Torch's "he", whose empty `ability.targets` is normal) still
-    // installs.
+    // installs. "Bare" means the reference, not its position: the bind recurses
+    // into `And` / `Or` / `Not`, and a `ParentTarget` it reaches there is
+    // rewritten to `Any` just like a top-level one, so the guard refuses those
+    // too — `reaches_bare_parent_target_bind` mirrors the binder's recursion
+    // shape, and its doc names the shapes deliberately NOT gated (review of PR
+    // #8749; the guard originally tested the top level only).
     //
     // CR 603.7c (issue #8721): `WhenNextEvent` refers to a particular object and
     // is bound by the SAME `bind_contextual_filter_to_condition` call below,
@@ -172,7 +177,7 @@ pub fn resolve(
                     &trigger.valid_target,
                 ]
                 .iter()
-                .any(|filter| matches!(filter, Some(TargetFilter::ParentTarget)))
+                .any(|filter| filter.as_ref().is_some_and(reaches_bare_parent_target_bind))
             });
         if references_empty_parent {
             events.push(GameEvent::EffectResolved {
@@ -794,6 +799,63 @@ pub(crate) fn concrete_parent_target_filter(
                 .collect(),
         },
         other => other,
+    }
+}
+
+/// Would binding this filter with an EMPTY parent set reach
+/// `concrete_parent_target_filter`'s `ParentTarget => parent_targets_filter` arm?
+/// That arm rewrites the reference to `TargetFilter::Any`, so the bound filter
+/// no longer refers to the parent at all: under `And` / `Or` it widens (the
+/// trigger over-fires), under an odd number of `Not`s it over-excludes. Either
+/// way the install cannot be faithful without a parent, so the guard in
+/// [`resolve`] refuses every reference this recursion can reach (review of PR
+/// #8749; the guard originally tested the top level only).
+///
+/// This mirrors the binder's recursion SHAPE — `And` / `Or` / `Not` and nothing
+/// else — not its decision set. The nearest existing walkers,
+/// `effects::filter_refs_parent_target` and
+/// `effects::filter_requires_parent_target_object`, answer a different question
+/// (does this tree reference a parent, for target inheritance and snapshotting)
+/// and also descend into `TrackedSetFiltered` and `DistinctFrom`, which the
+/// binder never rewrites; reusing either would refuse installs that bind fine.
+///
+/// The shapes that deliberately answer `false`:
+/// - `Not { ParentTarget }` / `Not { ParentTargetSlot }`: claimed FIRST by
+///   `game::filter::normalize_contextual_filter`, which turns an exclusion of no
+///   parent objects into `Any` on purpose — the exclusion's own meaning, not a
+///   widened reference. Only the DIRECT child form is claimed there; a
+///   reference deeper under a `Not` is bound by the arm above. (Named, unpinned,
+///   zero corpus carriers: `Not { Not { ParentTarget } }` therefore normalises to
+///   `Not { Any }` and installs a trigger that can never fire.)
+/// - `ParentTargetSlot { .. }`: degrades to `Any` for an out-of-range slot and is
+///   NOT gated by this PR — issue #8758, measured and filed separately.
+/// - `TrackedSetFiltered { .. }`: the binder does not descend into it, so a
+///   `ParentTarget` inside never degrades; unbound it under-matches, not over.
+///
+/// The one printed carrier of a nested reference is Rhino's Rampage,
+/// `And { ParentTarget, Typed(creature an opponent controls) }`; it declares two
+/// targets, and `reflexive_this_way_delayed_s25::rhinos_rampage_*` drive it end
+/// to end. A new composite variant must be added to BOTH this match and the
+/// binder's; neither will remind you of the other.
+fn reaches_bare_parent_target_bind(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Not { filter: inner }
+            if matches!(
+                inner.as_ref(),
+                TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+            ) =>
+        {
+            false
+        }
+        TargetFilter::ParentTarget => true,
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(reaches_bare_parent_target_bind)
+        }
+        TargetFilter::Not { filter } => reaches_bare_parent_target_bind(filter),
+        // Catch-all on purpose: `TargetFilter` has dozens of leaf variants and
+        // the mirrored binder ends in `other => other` — only composites matter
+        // here, and they are enumerated above.
+        _ => false,
     }
 }
 
@@ -2338,8 +2400,9 @@ mod tests {
 
         assert!(
             state.delayed_triggers.is_empty(),
-            "an empty anaphoric ParentTarget in ANY WheneverEvent slot must not install \
-             (else it binds to Any and over-fires)"
+            "an empty anaphoric ParentTarget in ANY WheneverEvent slot, bare or nested, must \
+             not install (the empty-parent bind rewrites it to Any, and the filter no longer \
+             refers to the parent)"
         );
     }
 
@@ -2362,6 +2425,156 @@ mod tests {
         empty_parent_target_in_slot_skips_install(|trigger| {
             trigger.valid_target = Some(TargetFilter::ParentTarget);
         });
+    }
+
+    /// Review of PR #8749: the bind recurses into `And` / `Or` / `Not`, so a
+    /// `ParentTarget` nested in a composite widens to `Any` on an empty parent set
+    /// exactly like a bare one — but the guard tested only the top level, so the
+    /// composite installed and over-fired. Both conditions share the one
+    /// predicate, so the `WheneverEvent` fixture is enough to drive it;
+    /// `the_over_fire_guard_covers_both_delayed_conditions` proves that both
+    /// conditions (and `WhenNextEvent`'s `or_trigger`) reach the guard, and the
+    /// `WheneverEvent` siblings above pin the three-slot enumeration.
+    ///
+    /// The printed shape is Rhino's Rampage's `valid_card`,
+    /// `And { ParentTarget, Typed(creature an opponent controls) }`; the sibling
+    /// here is a placeholder because the guard reads the shape, not the sibling.
+    #[test]
+    fn a_parent_target_nested_in_a_composite_is_gated_like_a_bare_one() {
+        // One constructor per composite the binder recurses into, each taking
+        // the reference so the SAME shape can be built pre-bind (`ParentTarget`)
+        // and post-bind (`SpecificObject`). Sub-case one kills a top-level-only
+        // guard, two an `And`-only recursion, three a predicate that never
+        // descends into `Not`.
+        let shapes: [fn(TargetFilter) -> TargetFilter; 3] = [
+            |reference| TargetFilter::And {
+                filters: vec![reference, TargetFilter::Player],
+            },
+            |reference| TargetFilter::Or {
+                filters: vec![reference, TargetFilter::Player],
+            },
+            |reference| TargetFilter::Not {
+                filter: Box::new(TargetFilter::And {
+                    filters: vec![reference, TargetFilter::Player],
+                }),
+            },
+        ];
+        for shape in shapes {
+            empty_parent_target_in_slot_skips_install(|trigger| {
+                trigger.valid_card = Some(shape(TargetFilter::ParentTarget));
+                trigger.valid_target = Some(TargetFilter::Player);
+            });
+        }
+
+        // POSITIVE HALF ON THE SAME INPUTS: with a chosen parent each composite
+        // installs, and the nested reference is bound to that object — so the
+        // negatives above are the guard deciding, not the shapes being
+        // unparseable.
+        for shape in shapes {
+            let mut state = GameState::new_two_player(42);
+            let target = ObjectId(10);
+            let mut trigger = TriggerDefinition::new(TriggerMode::DamageDone);
+            trigger.damage_kind = DamageKindFilter::CombatOnly;
+            trigger.valid_card = Some(shape(TargetFilter::ParentTarget));
+            trigger.valid_target = Some(TargetFilter::Player);
+            let ability = ResolvedAbility::new(
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::WheneverEvent {
+                        trigger: Box::new(trigger),
+                        expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
+                    },
+                    effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    )),
+                    uses_tracked_set: false,
+                },
+                vec![TargetRef::Object(target)],
+                ObjectId(5),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            assert_eq!(
+                state.delayed_triggers.len(),
+                1,
+                "with a chosen parent the composite must install"
+            );
+            let DelayedTriggerCondition::WheneverEvent { trigger, .. } =
+                &state.delayed_triggers[0].condition
+            else {
+                panic!(
+                    "expected WheneverEvent, got {:?}",
+                    state.delayed_triggers[0].condition
+                );
+            };
+            assert_eq!(
+                trigger.valid_card,
+                Some(shape(TargetFilter::SpecificObject { id: target })),
+                "with a chosen parent the nested reference must bind to that object"
+            );
+        }
+    }
+
+    /// The one composite the guard must NOT gate: `Not { ParentTarget }` is
+    /// claimed first by `normalize_contextual_filter`, which turns "other than the
+    /// parent objects" with no parent objects into `Any` on purpose — an exclusion
+    /// of nothing. That is the filter's own meaning, not a widened reference, so
+    /// the trigger installs. Pinned because a predicate that simply recursed into
+    /// every `Not` would refuse it, and this assertion would go red. It pins the
+    /// EXEMPTION only — with the guard deleted outright it stays green, because
+    /// the normaliser still yields `Any`; the guard itself is pinned next door.
+    #[test]
+    fn an_exclusion_of_the_parent_still_installs_on_an_empty_parent_set() {
+        let mut state = GameState::new_two_player(42);
+        let mut trigger = TriggerDefinition::new(TriggerMode::DamageDone);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+        trigger.valid_source = Some(TargetFilter::Not {
+            filter: Box::new(TargetFilter::ParentTarget),
+        });
+        trigger.valid_target = Some(TargetFilter::Player);
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WheneverEvent {
+                    trigger: Box::new(trigger),
+                    expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
+                },
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )),
+                uses_tracked_set: false,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            state.delayed_triggers.len(),
+            1,
+            "an exclusion of the parent must install even with no parent to exclude"
+        );
+        let DelayedTriggerCondition::WheneverEvent { trigger, .. } =
+            &state.delayed_triggers[0].condition
+        else {
+            panic!(
+                "expected WheneverEvent, got {:?}",
+                state.delayed_triggers[0].condition
+            );
+        };
+        assert_eq!(
+            trigger.valid_source,
+            Some(TargetFilter::Any),
+            "an exclusion of no parent objects normalises to Any and is installed, not refused"
+        );
     }
 
     /// CR 603.7b: an "until your next turn" `WheneverEvent` is a multi-fire trigger

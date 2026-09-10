@@ -36974,6 +36974,12 @@ pub(crate) fn parse_effect_chain_ir(
             // returns the declared `Typed` filter itself, where the sibling also
             // accepts compound and non-target referents that never reach
             // `ability.targets`.
+            //
+            // CR 603.7 (the delayed-trigger reading is stated at the top of this
+            // block): this arm declines it on an engine limit — nothing for
+            // `valid_card: ParentTarget` to bind to — not on a different reading
+            // of the rule. The NEXT `None` arm is the one that lowers the
+            // consequent as that trigger; the gap left here is named in the PR.
             None if chain_declared_object_target(builder.clauses()).is_none() => {
                 (text_after_prefix, None)
             }
