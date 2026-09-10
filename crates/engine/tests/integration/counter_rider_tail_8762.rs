@@ -203,14 +203,15 @@ fn thranduils_decree_grants_the_cast_permission_after_exiling_a_permanent_spell(
 /// The rider's condition gates the tail. Thranduil's Decree names "a PERMANENT
 /// spell": countering an INSTANT must not grant the permission.
 ///
-/// NAMED, pre-existing, not repaired here: the instant is still EXILED —
-/// `counter::resolve` decides the exile from the rider's presence alone and
-/// ignores the rider's `ZoneChangedThisWay { Permanent }` condition, on `main`
-/// too (measured). So the zone assertion below pins today's wrong exile as a
-/// reach guard, and the permission assertion is the claim: the tail follows the
-/// printed condition even where the exile does not. Without the gate this test
-/// is red on the permission — the wrongly exiled instant would become free to
-/// cast.
+/// NAMED, pre-existing, not repaired here (issue #8795): the instant is today
+/// still EXILED — `counter::resolve` decides the exile from the rider's
+/// presence alone, before the move, and ignores the rider's
+/// `ZoneChangedThisWay { Permanent }` condition. This test deliberately does
+/// NOT pin that zone: its reach guard is only that the counter resolved and the
+/// spell left the stack, so it survives the #8795 repair (graveyard) unchanged.
+/// The claim is the permission half: the tail follows the printed condition
+/// even where the exile does not. Without the gate this test is red on the
+/// permission — the wrongly exiled instant would become free to cast.
 #[test]
 fn thranduils_decree_does_not_grant_when_the_countered_spell_is_not_a_permanent() {
     let (runner, countered, _) = counter_with(
@@ -219,8 +220,17 @@ fn thranduils_decree_does_not_grant_when_the_countered_spell_is_not_a_permanent(
         CoreType::Instant,
         |_| {},
     );
-    // Reach guard on today's behaviour, not an endorsement of it.
-    assert_countered_into_exile(&runner, countered);
+    // Reach guard, zone-agnostic on purpose (see the doc comment): the counter
+    // resolved and the spell is no longer on the stack.
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach guard: the counter must resolve and take the spell off the stack"
+    );
+    assert_ne!(
+        runner.state().objects[&countered].zone,
+        Zone::Stack,
+        "reach guard: the countered instant must have left the stack"
+    );
 
     assert!(
         !can_cast(&runner, countered),
