@@ -39,6 +39,20 @@ describe("NamedChoiceModal", () => {
     });
   });
 
+  it("does not fade in every option in a searchable long list", () => {
+    const data: NamedChoiceData = {
+      player: 0,
+      choice_type: { CreatureType: { options: [] } },
+      options: Array.from({ length: 13 }, (_, index) => `Creature type ${index}`),
+    };
+
+    render(<NamedChoiceModal data={data} />);
+
+    expect(screen.getByRole("button", { name: "Creature type 12" })).not.toHaveStyle({
+      opacity: "0",
+    });
+  });
+
   // CR 107.1a/b. The engine publishes `free_entry` for a choice whose answer is
   // typed rather than picked, and enforces exactly those bounds. These pin that
   // the modal RENDERS the contract rather than re-deriving one: the numeric form
