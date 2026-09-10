@@ -9514,6 +9514,73 @@ mod tests {
         );
     }
 
+    /// CR 407.3 must reach the SUMMARY dispatch too, not only the
+    /// authoritative one.
+    ///
+    /// `evaluate_selected_format_summary` carries its own copy of the check,
+    /// with a comment promising the UI hint cannot disagree with the
+    /// game-creation gate about an ante card. Nothing tested that promise:
+    /// every other ante test drives `validate_deck_for_format`, and
+    /// `summary_only` defaults to `false`, so deleting that block left the
+    /// whole suite green while the deck builder silently showed a deck as
+    /// legal that game creation would then refuse.
+    ///
+    /// Loops the flag rather than testing the summary path alone, matching
+    /// `commander_listed_by_composite_and_front_name_is_one_card` — the two
+    /// verdicts agreeing is the property worth pinning, and asserting the
+    /// summary result in isolation would not catch the two drifting apart.
+    #[test]
+    fn both_dispatches_agree_that_an_ante_card_is_illegal() {
+        let db = CardDatabase::from_json_str(&ante_db_json()).unwrap();
+        let config = FormatConfig::for_custom_rules(
+            &crate::types::custom_format::swedish_old_school().rules,
+        );
+
+        for summary_only in [false, true] {
+            // Paired control FIRST, on the same config and flag: a legal deck
+            // is accepted. The summary path answers `None` ("no opinion") for
+            // several shapes, and a `None` would satisfy neither assertion
+            // below — this proves the path is actually forming a verdict
+            // rather than declining to.
+            let legal = DeckCompatibilityRequest {
+                main_deck: expand("Plains", 60),
+                selected_format: Some(SelectedFormat::Resolved(Box::new(config.clone()))),
+                summary_only,
+                player_count: default_player_count(),
+                ..Default::default()
+            };
+            assert_eq!(
+                evaluate_deck_compatibility(&db, &legal).selected_format_compatible,
+                Some(true),
+                "summary_only={summary_only}: a clean deck must be accepted"
+            );
+
+            let with_ante = DeckCompatibilityRequest {
+                main_deck: legal_60_main("Jeweled Bird"),
+                selected_format: Some(SelectedFormat::Resolved(Box::new(config.clone()))),
+                summary_only,
+                player_count: default_player_count(),
+                ..Default::default()
+            };
+            let result = evaluate_deck_compatibility(&db, &with_ante);
+            assert_eq!(
+                result.selected_format_compatible,
+                Some(false),
+                "summary_only={summary_only}: CR 407.3 must reject the deck on BOTH dispatches, \
+                 got reasons {:?}",
+                result.selected_format_reasons
+            );
+            assert!(
+                result
+                    .selected_format_reasons
+                    .iter()
+                    .any(|reason| reason.contains("Jeweled Bird")),
+                "summary_only={summary_only}: the rejection must name the ante card, got {:?}",
+                result.selected_format_reasons
+            );
+        }
+    }
+
     /// CR 407.3 across the routes that decide deck admission by DIFFERENT
     /// authorities: permissive formats with no card-pool check at all
     /// (FreeForAll / TwoHeadedGiant answer `true` unconditionally) and a custom
