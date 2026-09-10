@@ -46,6 +46,7 @@ fn sample_rules(id: u16) -> CustomFormatRules {
         structural: sample_structural(),
         legality: LegalityRules {
             legal_sets: None,
+            legal_cards: Vec::new(),
             banned: Vec::new(),
             restricted: Vec::new(),
             legacy: LegacyRuleSet {
@@ -90,6 +91,7 @@ fn custom_format_def_serde_roundtrip() {
 fn legal_sets_none_and_some_are_distinguishable() {
     let unrestricted = LegalityRules {
         legal_sets: None,
+        legal_cards: Vec::new(),
         banned: Vec::new(),
         restricted: Vec::new(),
         legacy: sample_rules(0).legality.legacy,
@@ -327,6 +329,22 @@ fn old_school_93_94_declares_its_sourced_card_pool() {
 /// entry PLUS exactly its own declared additions. Asserting only that the
 /// additions are present would let a future edit silently drop or duplicate
 /// the inherited base.
+/// The promo carve-out, asserted as DATA on the shipped preset: both EC
+/// rulesets name specific cards legal, and `legal_sets` cannot express it.
+#[test]
+fn the_eternal_central_presets_name_their_legal_promos() {
+    assert_eq!(
+        names(&old_school_93_94().rules.legality.legal_cards),
+        BTreeSet::from(["Arena", "Sewers of Estark", "Nalathni Dragon"]),
+        "the three promos the 93/94 source declares legal"
+    );
+
+    // Swedish names none — the carve-out is an Eternal Central thing, and an
+    // empty list here is the honest value rather than an unfilled one. Without
+    // this, `legal_cards` could be populated for every preset by reflex.
+    assert!(swedish_old_school().rules.legality.legal_cards.is_empty());
+}
+
 #[test]
 fn old_school_95_extends_93_94_by_exactly_its_declared_deltas() {
     let base = old_school_93_94();
@@ -352,6 +370,15 @@ fn old_school_95_extends_93_94_by_exactly_its_declared_deltas() {
         BTreeSet::from(["Demonic Consultation", "Mana Crypt"])
     );
 
+    // The promo carve-out the set list cannot express: 95 names three more.
+    let base_named = names(&base.rules.legality.legal_cards);
+    let extended_named = names(&extended.rules.legality.legal_cards);
+    assert!(base_named.is_subset(&extended_named));
+    assert_eq!(
+        &extended_named - &base_named,
+        BTreeSet::from(["Giant Badger", "Windseeker Centaur", "Mana Crypt"])
+    );
+
     let base_banned = names(&base.rules.legality.banned);
     let extended_banned = names(&extended.rules.legality.banned);
     assert!(base_banned.is_subset(&extended_banned));
@@ -366,6 +393,7 @@ fn old_school_95_extends_93_94_by_exactly_its_declared_deltas() {
         extended.rules.legality.legal_sets.as_ref().unwrap().len(),
         16
     );
+    assert_eq!(extended.rules.legality.legal_cards.len(), 6);
     assert_eq!(extended.rules.legality.restricted.len(), 24);
     assert_eq!(extended.rules.legality.banned.len(), 9);
 

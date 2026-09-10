@@ -340,6 +340,34 @@ impl StructuralRules {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LegalityRules {
     pub legal_sets: Option<Vec<SetCode>>,
+    /// Cards legal in this format REGARDLESS of `legal_sets`, named
+    /// individually — unioned with the set-code check, never subtracted from
+    /// it.
+    ///
+    /// Exists because real rulesets name cards, not only sets. Both Eternal
+    /// Central Old School lists declare specific promos legal (Arena, Sewers of
+    /// Estark, Nalathni Dragon; 95 adds Giant Badger, Windseeker Centaur, Mana
+    /// Crypt), and set-code granularity cannot express that: four of those six
+    /// share one 5-card set (`PHPR`) whose other members are legal in 95 but
+    /// NOT in 93/94 — so admitting the set would admit cards 93/94 forbids,
+    /// while omitting it rejects cards it allows. Neither is the ruleset.
+    ///
+    /// Additive only, and deliberately so. It widens the pool; it never
+    /// narrows it, and it never overrides `banned`/`restricted`, which are
+    /// applied afterwards. Old School 95 depends on exactly that ordering: it
+    /// names Mana Crypt here AND restricts it, so the card becomes legal at one
+    /// copy rather than legal outright.
+    ///
+    /// Not gated by `IMPLEMENTED_LEGACY_AXES`, for the same reason
+    /// `legal_sets`/`banned`/`restricted` are not: this is declarative
+    /// card-pool data the evaluator applies in full, not a promise of runtime
+    /// behavior that might be unbuilt. See `passes_legacy_axis_gate`.
+    ///
+    /// `#[serde(default)]` because it postdates the Axis-A save path; an
+    /// already-persisted definition carries no `legal_cards` key, and an empty
+    /// list means exactly what such a save meant.
+    #[serde(default)]
+    pub legal_cards: Vec<CardName>,
     pub banned: Vec<CardName>,
     pub restricted: Vec<CardName>,
     pub legacy: LegacyRuleSet,
@@ -592,6 +620,7 @@ impl CustomFormatDef {
                 structural,
                 legality: LegalityRules {
                     legal_sets: None,
+                    legal_cards: Vec::new(),
                     banned: Vec::new(),
                     restricted: Vec::new(),
                     legacy: LegacyRuleSet::default(),
@@ -795,6 +824,10 @@ pub fn swedish_old_school() -> CustomFormatDef {
                         .map(|code| SetCode(code.to_string()))
                         .collect(),
                 ),
+                // The Swedish source names no card outside its set list — the
+                // promo carve-outs are an Eternal Central thing. An empty list
+                // is the honest value, not an unfilled one.
+                legal_cards: Vec::new(),
                 banned: Vec::new(),
                 restricted: [
                     "Ancestral Recall",
@@ -871,8 +904,8 @@ pub const OLD_SCHOOL_95_ID: CustomFormatId = CustomFormatId(3);
 ///   would admit three cards the format does not allow — one of them Mana
 ///   Crypt. See this phase's PR discussion.
 const SET_CODE_APPROXIMATION_DISCLOSURE: &str =
-    "Legality is approximated at the set-code level; original-printing frame/foil and the \
-     ruleset's named promo cards are not enforced.";
+    "Legality is approximated at the set-code level; original-printing frame/foil is not \
+     enforced.";
 
 fn set_codes(codes: &[&str]) -> Vec<SetCode> {
     codes.iter().map(|code| SetCode(code.to_string())).collect()
@@ -917,6 +950,10 @@ pub fn old_school_93_94() -> CustomFormatDef {
                 legal_sets: Some(set_codes(&[
                     "LEA", "LEB", "2ED", "CED", "CEI", "ARN", "ATQ", "3ED", "LEG", "DRK", "FEM",
                 ])),
+                // The source names these three promos legal outright. Their
+                // sets are not in `legal_sets` and cannot be: `PHPR` holds two
+                // of them plus three cards this format forbids.
+                legal_cards: card_names(&["Arena", "Sewers of Estark", "Nalathni Dragon"]),
                 banned: card_names(&[
                     "Bronze Tablet",
                     "Contract from Below",
@@ -1001,6 +1038,16 @@ pub fn old_school_95() -> CustomFormatDef {
         .legal_sets
         .get_or_insert_with(Vec::new)
         .extend(set_codes(&["4ED", "ICE", "CHR", "REN", "HML"]));
+    // The three promos 95 adds to 93/94's own three. Mana Crypt is named here
+    // AND restricted below, which is the whole reason the two lists are applied
+    // in that order: without the entry its only era printing (`PHPR`) is in no
+    // legal set, so the restriction below would name a card that could never
+    // reach the deck — a dead list entry rather than a one-copy limit.
+    def.rules.legality.legal_cards.extend(card_names(&[
+        "Giant Badger",
+        "Windseeker Centaur",
+        "Mana Crypt",
+    ]));
     def.rules
         .legality
         .restricted

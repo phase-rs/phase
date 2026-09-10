@@ -255,6 +255,10 @@ export interface StructuralRules {
 /** `legal_sets: null` means unrestricted; a list restricts to exactly it. */
 export interface LegalityRules {
   legal_sets: SetCode[] | null;
+  /** Cards legal regardless of `legal_sets`, unioned with it — a ruleset can
+   *  name a card its set list cannot express. Optional because it postdates
+   *  the Axis-A save path; absent means an empty list. */
+  legal_cards?: string[];
   banned: string[];
   restricted: string[];
   legacy: LegacyRuleSet;
