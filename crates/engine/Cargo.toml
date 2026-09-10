@@ -63,6 +63,11 @@ name = "set-check"
 path = "src/bin/set_check.rs"
 
 [[bin]]
+name = "preset-audit"
+path = "src/bin/preset_audit.rs"
+test = false
+
+[[bin]]
 name = "parser-gap-analyzer"
 path = "src/bin/parser_gap_analyzer.rs"
 test = false

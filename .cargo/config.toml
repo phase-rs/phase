@@ -9,6 +9,7 @@ deck-check = "run --profile tool -p phase-engine --features cli --bin deck-check
 serve = "run --release --bin phase-server"
 coverage = "run --profile tool --bin coverage-report -- data/"
 parser-gaps = "run --profile tool --bin parser-gap-analyzer -- data/"
+preset-audit = "run --profile tool --bin preset-audit --"
 rules-audit = "run --profile tool --bin rules-audit --features audit --"
 semantic-audit = "run --profile tool --features cli --bin oracle-gen -- semantic-audit"
 combo-verify = "run --profile tool --features combo-verify --bin combo-verify -- data/"
