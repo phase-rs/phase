@@ -7194,7 +7194,15 @@ pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<Objec
     // between exile and hand-fallback must not wipe the exiled card).
     // Storm Herald mid-pause empty publishes are skipped at the EffectZoneChoice
     // site; CreateDelayedTrigger also prefers a nonempty chain id.
-    // CR 608.2c: Chain unification is a set UNION, not a concatenation. Two
+    // Chain unification is a set UNION, not a concatenation. Deliberately
+    // carries no CR citation: set identity is an engine data-structure
+    // invariant, not a game rule. CR 608.2c governs the ORDER instructions are
+    // followed in during resolution and says nothing about membership identity,
+    // so citing it here would be a false verification signal (CLAUDE.md: a wrong
+    // CR number is worse than no CR number, and plumbing is not annotated).
+    // What the rules do supply is the anaphor this set serves — "those cards" /
+    // "<verb> this way" naming a population — and an object is in that
+    // population once or not at all. Two
     // producers in one chain legitimately publish the SAME object when both
     // name the same population — Gifts Ungiven's "search your library for up to
     // four cards ... and reveal them" both finds and reveals the identical four

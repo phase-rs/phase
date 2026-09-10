@@ -97,9 +97,15 @@ fn gifts_ungiven_offers_each_revealed_card_exactly_once() {
          click appears to select both while the submitted pick stays correct. \
          offered={offered:?}"
     );
+    // Identity, not cardinality. A payload of four DIFFERENT unique ids — the
+    // resolving Gifts Ungiven card itself, say, swapped in for a revealed one —
+    // has four unique members and would satisfy a count-only check while
+    // offering the opponent a card that was never revealed.
+    let mut expected = found.clone();
+    expected.sort();
     assert_eq!(
-        deduped.len(),
-        found.len(),
-        "exactly the four searched-and-revealed cards may be offered"
+        deduped, expected,
+        "exactly the searched-and-revealed cards may be offered, and nothing \
+         else; offered={offered:?} found={found:?}"
     );
 }
