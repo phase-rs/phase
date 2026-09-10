@@ -21157,10 +21157,41 @@ pub enum PhaseTransitionDrainState {
     AwaitingPostReplacementContinuation,
 }
 
+/// Why an empty-pool event is costing a player life. Two independent causes
+/// can apply to the SAME event, and they are not interchangeable: one is the
+/// format's rules being older, the other is a card doing something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EmptyPoolLifeLossCause {
+    /// The pre-M10 mana-burn rule, per `LegacyRuleSet.mana_burn`. Emits
+    /// `GameEvent::ManaBurn` once the loss actually completes.
+    ManaBurn,
+    /// A Yurlok-class static ability that makes unspent mana cost life.
+    UnspentManaStatic,
+}
+
+/// A life loss an empty-pool event still owes, carried across a replacement
+/// deferral.
+///
+/// CR 616.1 life-loss replacement can pause mid-event, and the player was
+/// already popped from the APNAP queue by then — so without this the rest of
+/// that player's operation would be silently skipped when the transition
+/// resumes, and the next player would be processed instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingEmptyPoolLifeLoss {
+    pub player_id: PlayerId,
+    pub amount: u32,
+    pub cause: EmptyPoolLifeLossCause,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseTransitionProgress {
     pub remaining_players: VecDeque<PlayerId>,
     pub next_phase: Phase,
+    /// Life losses this transition still owes, in the order they must apply.
+    /// Non-empty only between a deferral and its resume; the drain discharges
+    /// it before advancing to the next player.
+    #[serde(default)]
+    pub owed_life_loss: VecDeque<PendingEmptyPoolLifeLoss>,
     /// The phase the turn is leaving, paired with `next_phase` to identify the
     /// boundary being crossed. Replaces a derived `in_combat: bool`, which
     /// carried strictly less information than the phase it was computed from
@@ -21188,6 +21219,7 @@ mod phase_transition_progress_serde_tests {
             remaining_players: VecDeque::from([PlayerId(1)]),
             next_phase: Phase::Upkeep,
             previous_phase: Some(Phase::Untap),
+            owed_life_loss: VecDeque::new(),
             entering_cleanup: false,
             drain_state: PhaseTransitionDrainState::AwaitingPostReplacementContinuation,
         };

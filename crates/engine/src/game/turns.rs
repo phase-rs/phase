@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use crate::analysis::resource::ResourceAxis;
 use crate::game::filter::{matches_target_filter_including_phased_out, FilterContext};
@@ -10,8 +10,9 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
-    AutoPassMode, ExtraPhase, ExtraTurn, GameState, LoopCollapseAxis, PayableResource,
-    PendingCounterAddition, PendingEffectResolved, TurnBoundary, WaitingFor,
+    AutoPassMode, EmptyPoolLifeLossCause, ExtraPhase, ExtraTurn, GameState, LoopCollapseAxis,
+    PayableResource, PendingCounterAddition, PendingEffectResolved, PendingEmptyPoolLifeLoss,
+    TurnBoundary, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
@@ -404,6 +405,7 @@ fn enter_phase(
             remaining_players: VecDeque::from(super::players::apnap_order(state)),
             next_phase: next,
             previous_phase: Some(previous),
+            owed_life_loss: VecDeque::new(),
             entering_cleanup,
             drain_state: crate::types::game_state::PhaseTransitionDrainState::Ready,
         });
@@ -475,44 +477,103 @@ pub(super) fn apply_empty_mana_pool_event(
         return EmptyManaPoolApplyOutcome::Applied;
     }
 
-    // Mana burn first, so its event precedes any Yurlok-class loss in the log
-    // and reads in rules order: the format's own rule, then a card's ability.
+    // Both causes can apply to the same event and neither implies the other, so
+    // they are queued as independent losses rather than summed: a replacement
+    // effect sees two loss events in paper, and summing would show it one.
     //
-    // A deferral here returns before the Yurlok branch runs, which would drop
-    // that loss for this event. That combination is unreachable rather than
-    // handled: the only formats declaring `mana_burn` are the Old School
-    // presets, whose card pools end decades before any Yurlok-class card was
-    // printed, and a lobby-saved custom format cannot declare the axis at all
-    // while `passes_legacy_axis_gate` rejects it. Left explicit instead of
-    // silently coincidental — if a format ever makes both reachable, this
-    // needs a continuation, not a reordering.
+    // Mana burn is ordered first so it reads in rules order — the format's own
+    // rule, then a card's ability.
+    let mut owed: VecDeque<PendingEmptyPoolLifeLoss> = VecDeque::new();
     if burns {
-        events.push(GameEvent::ManaBurn { player_id, amount });
-        match crate::game::effects::life::apply_life_loss(state, player_id, amount, events) {
-            Ok(_) => {}
-            Err(crate::game::effects::life::ReplacementDeferred::ReplacementChoice) => {
-                return EmptyManaPoolApplyOutcome::Deferred
-            }
-            Err(crate::game::effects::life::ReplacementDeferred::SubstitutionContinuation) => {
-                mark_phase_transition_awaiting_post_replacement(state);
+        owed.push_back(PendingEmptyPoolLifeLoss {
+            player_id,
+            amount,
+            cause: EmptyPoolLifeLossCause::ManaBurn,
+        });
+    }
+    if causes_life_loss {
+        owed.push_back(PendingEmptyPoolLifeLoss {
+            player_id,
+            amount,
+            cause: EmptyPoolLifeLossCause::UnspentManaStatic,
+        });
+    }
+
+    discharge_owed_life_losses(state, owed, events)
+}
+
+/// Apply each life loss an empty-pool event owes, parking the remainder on the
+/// phase transition if one defers.
+///
+/// A deferral pauses mid-event with the player ALREADY popped from the APNAP
+/// queue, so anything still owed has to outlive this call or it is lost. The
+/// leftovers ride on `PhaseTransitionProgress::owed_life_loss`, which
+/// `drain_pending_phase_transition_progress` discharges before it moves on to
+/// the next player.
+pub(super) fn discharge_owed_life_losses(
+    state: &mut GameState,
+    mut owed: VecDeque<PendingEmptyPoolLifeLoss>,
+    events: &mut Vec<GameEvent>,
+) -> EmptyManaPoolApplyOutcome {
+    while let Some(next) = owed.pop_front() {
+        match crate::game::effects::life::apply_life_loss(
+            state,
+            next.player_id,
+            next.amount,
+            events,
+        ) {
+            // The ACTUAL life lost, which is not always what emptied: CR 119.8
+            // ("a player who can't lose life is unaffected") and prevention or
+            // replacement effects can reduce it, to zero. Narrating the pool
+            // count instead would tell a player they lost life they still have.
+            Ok(actual) => emit_life_loss_cause(next, actual, events),
+            Err(deferred) => {
+                // This loss is mid-flight and will complete through the
+                // replacement pipeline; only what has NOT been attempted is
+                // parked. Re-queuing `next` would apply it twice.
+                park_owed_life_losses(state, owed);
+                if matches!(
+                    deferred,
+                    crate::game::effects::life::ReplacementDeferred::SubstitutionContinuation
+                ) {
+                    mark_phase_transition_awaiting_post_replacement(state);
+                }
                 return EmptyManaPoolApplyOutcome::Deferred;
             }
         }
     }
+    EmptyManaPoolApplyOutcome::Applied
+}
 
-    if !causes_life_loss {
-        return EmptyManaPoolApplyOutcome::Applied;
+/// Emit the event that explains a completed empty-pool life loss.
+///
+/// Only mana burn has one: a Yurlok-class loss is already fully described by
+/// the `LifeChanged` its own resolution emits, whereas nothing else in the log
+/// would say that the FORMAT is why life was lost.
+fn emit_life_loss_cause(loss: PendingEmptyPoolLifeLoss, actual: u32, events: &mut Vec<GameEvent>) {
+    if actual == 0 {
+        return;
     }
+    match loss.cause {
+        EmptyPoolLifeLossCause::ManaBurn => events.push(GameEvent::ManaBurn {
+            player_id: loss.player_id,
+            amount: actual,
+        }),
+        EmptyPoolLifeLossCause::UnspentManaStatic => {}
+    }
+}
 
-    match crate::game::effects::life::apply_life_loss(state, player_id, amount, events) {
-        Ok(_) => EmptyManaPoolApplyOutcome::Applied,
-        Err(crate::game::effects::life::ReplacementDeferred::ReplacementChoice) => {
-            EmptyManaPoolApplyOutcome::Deferred
-        }
-        Err(crate::game::effects::life::ReplacementDeferred::SubstitutionContinuation) => {
-            mark_phase_transition_awaiting_post_replacement(state);
-            EmptyManaPoolApplyOutcome::Deferred
-        }
+fn park_owed_life_losses(state: &mut GameState, owed: VecDeque<PendingEmptyPoolLifeLoss>) {
+    if owed.is_empty() {
+        return;
+    }
+    if let Some(progress) = state.pending_phase_transition_progress.as_mut() {
+        progress.owed_life_loss = owed;
+    } else {
+        debug_assert!(
+            false,
+            "an empty-pool life loss deferred with no phase transition to park the remainder on"
+        );
     }
 }
 
@@ -572,6 +633,21 @@ pub(super) fn drain_pending_phase_transition_progress(
         .is_some_and(|progress| {
             progress.drain_state != crate::types::game_state::PhaseTransitionDrainState::Ready
         })
+    {
+        return;
+    }
+
+    // Finish the previous player's operation before starting anyone else's. A
+    // life loss that deferred through the replacement pipeline left the rest of
+    // its event parked here; the APNAP player it belongs to was popped before
+    // the pause, so nothing else would ever come back for it.
+    let owed = state
+        .pending_phase_transition_progress
+        .as_mut()
+        .map(|progress| std::mem::take(&mut progress.owed_life_loss))
+        .unwrap_or_default();
+    if !owed.is_empty()
+        && discharge_owed_life_losses(state, owed, events) == EmptyManaPoolApplyOutcome::Deferred
     {
         return;
     }

@@ -154,3 +154,70 @@ fn a_custom_format_without_the_axis_does_not_burn() {
     );
     assert_eq!(runner.life(P0), life_before);
 }
+
+/// Diagnostic: is the missing cleanup-exit drain pre-existing, or introduced by
+/// mana burn? `EndOfTurn` retention (Klauth) has nothing to do with this PR —
+/// its marker is cleared by the cleanup action itself, leaving an ordinary
+/// unspent unit that the ending phase should empty. Under a MODERN format.
+#[test]
+fn diagnostic_end_of_turn_mana_does_not_survive_into_the_next_turn() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::End);
+    scenario.with_library_top(P0, &["Mountain", "Mountain", "Mountain"]);
+    let mut retained = ManaUnit::new(ManaType::Red, ObjectId(9_002), false, vec![]);
+    retained.expiry = Some(engine::types::mana::ManaExpiry::EndOfTurn);
+    scenario.with_mana_pool(P0, vec![retained]);
+    let mut runner = scenario.build();
+    runner.state_mut().format_config = FormatConfig::standard();
+
+    let turn_before = runner.state().turn_number;
+    runner.advance_to_phase(Phase::Untap);
+    assert_ne!(
+        runner.state().turn_number,
+        turn_before,
+        "the turn must actually roll over; halted on {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        unspent(&runner),
+        0,
+        "CR 106.4: the ending phase must empty the pool before the next turn"
+    );
+}
+
+/// The review's HIGH finding, tested directly: mana produced during the END
+/// step is retained across End -> Cleanup (both inside CR 512.1's ending
+/// phase), so the ending phase's own boundary — Cleanup -> Untap — is the one
+/// that must empty it and charge the burn.
+#[test]
+fn mana_held_through_the_ending_phase_burns_before_the_next_turn() {
+    let format = FormatConfig::for_custom_rules(&old_school_93_94().rules);
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::End);
+    scenario.with_library_top(P0, &["Mountain", "Mountain", "Mountain"]);
+    scenario.with_mana_pool(P0, pool(POOL));
+    let mut runner = scenario.build();
+    runner.state_mut().format_config = format;
+
+    let life_before = runner.life(P0);
+    let turn_before = runner.state().turn_number;
+    assert_eq!(unspent(&runner), POOL);
+
+    runner.advance_to_phase(Phase::Untap);
+    assert_ne!(
+        runner.state().turn_number,
+        turn_before,
+        "the turn must roll over; halted on {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        unspent(&runner),
+        0,
+        "mana must not survive the ending phase into the next turn"
+    );
+    assert_eq!(
+        runner.life(P0),
+        life_before - POOL as i32,
+        "the ending phase's boundary charges the burn like any other"
+    );
+}
