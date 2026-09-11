@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act } from "react";
+import { act, useState } from "react";
 import i18n from "i18next";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -85,6 +85,8 @@ vi.mock("../../../adapter/wasm-adapter", () => ({
 }));
 
 import { HostSetup } from "../HostSetup";
+import * as serverDirectory from "../../../services/serverDirectory";
+import type { ConnectionMode, LobbySourceStatus } from "../../../stores/multiplayerStore";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../../stores/multiplayerStore";
 import {
   DIRECTORY_VERSION,
@@ -106,6 +108,8 @@ import {
 
 describe("HostSetup", () => {
   beforeEach(() => {
+    vi.spyOn(serverDirectory, "refreshServerDirectory").mockResolvedValue(undefined);
+    vi.spyOn(useMultiplayerStore.getState(), "ensureSubscriptionSocket").mockResolvedValue(null);
     localStorageItems.clear();
     useMultiplayerStore.setState({
       displayName: "",
@@ -154,6 +158,16 @@ describe("HostSetup", () => {
   const BAD_LOBBY = "wss://badlobby.example/ws";
   const BAD_FULL = "wss://badfull.example/ws";
 
+  function connectedServer(): LobbySourceStatus {
+    return {
+      state: "open", playerCount: 0,
+      serverInfo: {
+        version: "test", buildCommit: "test", mode: "Full",
+        protocolVersion: PROTOCOL_VERSION, lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+      },
+    };
+  }
+
   /** Two hostable servers, one high-scoring `LobbyOnly` broker, and the two
    * `Full` servers this client cannot handshake with — one on each surface.
    *
@@ -171,7 +185,7 @@ describe("HostSetup", () => {
       median_rtt_ms: 50,
     });
     useMultiplayerStore.setState({
-      sourceStatus: new Map(),
+      sourceStatus: new Map([[FAST, connectedServer()], [SLOW, connectedServer()]]),
       directorySources: directoryEntries(
         // Fails the LOBBY window: below the lobby protocol floor, so
         // `ensureSubscriptionSocket` refuses it the browse socket.
@@ -276,6 +290,7 @@ describe("HostSetup", () => {
       // A LIVE, fully compatible handshake for the official preset — the
       // authority that actually decides whether this client can speak to it.
       sourceStatus: new Map([
+        [SLOW, connectedServer()],
         [
           OFFICIAL_MULTIPLAYER_SERVER_URL,
           {
@@ -349,7 +364,7 @@ describe("HostSetup", () => {
   // true whoever owns the source, and it only ever ADMITS a candidate. Keying
   // it on the shadowing-aware list instead drops a pinned row out of the
   // picker entirely while it has no live `kind` to be admitted by.
-  it("keeps a pinned row the directory announces as Full in the picker before its handshake", async () => {
+  it("requires a live handshake even for a pinned Full directory announcement", async () => {
     const user = userEvent.setup();
     const onHost = vi.fn().mockResolvedValue(false);
     const pinned = "wss://pinned.example/ws";
@@ -371,12 +386,11 @@ describe("HostSetup", () => {
 
     render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
-    await user.click(screen.getByRole("button", { name: "Host on" }));
-    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
-      "pinned.example — not yet rated",
-    ]);
-
-    await user.click(screen.getByRole("option", { name: /pinned\.example/ }));
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), null);
+    act(() => useMultiplayerStore.setState({ sourceStatus: new Map([[pinned, connectedServer()]]) }));
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Host Game" }));
     expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), pinned);
   });
@@ -415,9 +429,11 @@ describe("HostSetup", () => {
 
     render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
-    expect(screen.getByRole("button", { name: "Host Game" })).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "Host Game" }));
-    expect(onHost).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "You host (P2P)" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), null);
+    onHost.mockClear();
 
     // The directory lands a moment later, exactly as `refreshServerDirectory`
     // delivers it.
@@ -466,7 +482,70 @@ describe("HostSetup", () => {
 
   afterEach(async () => {
     cleanup();
+    vi.restoreAllMocks();
     await i18n.changeLanguage("en");
+  });
+
+  it("keeps P2P usable through discovery, disconnect and recovery without switching back automatically", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn().mockResolvedValue(false);
+    seedCandidates();
+    const live = useMultiplayerStore.getState().sourceStatus;
+    useMultiplayerStore.setState({ sourceStatus: new Map() });
+    function ControlledSetup() {
+      const [mode, setMode] = useState<ConnectionMode>("server");
+      return <HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={mode} onConnectionModeChange={setMode} />;
+    }
+    render(<ControlledSetup />);
+    expect(useMultiplayerStore.getState().ensureSubscriptionSocket).toHaveBeenCalledWith(FAST);
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeDisabled();
+    expect(screen.getByText(enMultiplayer.hostSetup.dedicatedUnavailable)).toBeInTheDocument();
+    vi.mocked(useMultiplayerStore.getState().ensureSubscriptionSocket).mockClear();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(useMultiplayerStore.getState().ensureSubscriptionSocket).toHaveBeenCalledWith(FAST);
+    expect(screen.getByText("List in lobby")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+    expect(onHost).toHaveBeenLastCalledWith(expect.objectContaining({}), null);
+
+    act(() => useMultiplayerStore.setState({ sourceStatus: live }));
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "You host (P2P)" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "Dedicated server" }));
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).toHaveBeenLastCalledWith(expect.objectContaining({}), FAST);
+
+    act(() => useMultiplayerStore.setState({ sourceStatus: new Map([[FAST, {
+      state: "reconnecting", serverInfo: null, playerCount: null,
+    }]]) }));
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeDisabled();
+    act(() => useMultiplayerStore.setState({ sourceStatus: live }));
+    expect(screen.getByRole("button", { name: "You host (P2P)" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+    expect(onHost).toHaveBeenLastCalledWith(expect.objectContaining({}), null);
+  });
+
+  it("rejects an open lobby connection with an incompatible full-game protocol", () => {
+    const status = connectedServer();
+    useMultiplayerStore.setState({ sourceStatus: new Map([[DEFAULT_MULTIPLAYER_SERVER_URL, {
+      ...status, serverInfo: { ...status.serverInfo!, protocolVersion: PROTOCOL_VERSION + 1 },
+    }]]) });
+    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Host P2P Game" })).toBeEnabled();
+  });
+
+  it("uses another connected dedicated server when the selected one drops", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn().mockResolvedValue(false);
+    seedCandidates();
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
+    act(() => useMultiplayerStore.setState({ sourceStatus: new Map([[SLOW, connectedServer()]]) }));
+    expect(screen.getByRole("button", { name: "Dedicated server" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Host on" }));
+    expect(screen.getByRole("option", { name: /fast\.example/ })).toBeDisabled();
+    await user.click(screen.getByRole("option", { name: /slow\.example/ }));
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).toHaveBeenCalledWith(expect.objectContaining({}), SLOW);
   });
 
   it("uses P2P labeling/theme and still offers the lobby listing in p2p mode", () => {
@@ -660,6 +739,7 @@ describe("HostSetup", () => {
   it("keeps sandbox descriptions associated with their own mounted form", () => {
     const first = render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
     const second = render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />);
+    expect(within(second.container).getByRole("region", { name: "Local network" })).toBeInTheDocument();
 
     const descriptionIds = [first, second].map(({ container }) => {
       const control = within(container).getByRole("switch", { name: "Sandbox Mode — allow debug actions" });

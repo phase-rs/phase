@@ -214,6 +214,7 @@ fn candidate_discards_controller(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::SelectCards { .. }
         | GameAction::ChooseRemoveCounterCostDistribution { .. }
         | GameAction::SelectCoinFlips { .. }
+        | GameAction::SelectDieRolls { .. }
         | GameAction::ChooseOutsideGameCards { .. }
         | GameAction::SelectTargets { .. }
         | GameAction::ChooseTarget { .. }

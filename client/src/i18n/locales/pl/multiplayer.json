@@ -1,4 +1,22 @@
 {
+  "lan": {
+    "title": "Sieć lokalna",
+    "guidance": "Wpisz adres serwera, aby dołączyć ręcznie. Strony HTTPS wymagają bezpiecznego serwera wss://; użyj aplikacji komputerowej dla lokalnych adresów ws://.",
+    "unavailable": "Hostowanie i wyszukiwanie LAN wymaga aktualnej aplikacji komputerowej.",
+    "checking": "Sprawdzanie obsługi LAN…",
+    "start": "Rozpocznij hostowanie LAN",
+    "stop": "Zatrzymaj hostowanie LAN",
+    "scan": "Znajdź serwery LAN",
+    "pending": "Przetwarzanie…",
+    "running": "Hostowanie LAN jest aktywne. Udostępnij adres graczom w swojej sieci.",
+    "empty": "Nie znaleziono serwerów LAN. Sprawdź, czy gospodarz działa w tej samej sieci, i spróbuj ponownie.",
+    "add": "Dodaj serwer",
+    "copy": "Kopiuj adres",
+    "copied": "Adres skopiowany",
+    "error": "Operacja LAN nie powiodła się. {{detail}}",
+    "added": "Dodano serwer. Użyj serwera dedykowanego, gdy połączenie będzie zgodne i gotowe.",
+    "originUnavailable": "Hostowanie LAN jest niedostępne dla tej wersji lub pochodzenia aplikacji."
+  },
   "concedeDialog": {
     "title": "Poddać grę?",
     "game": {
@@ -206,6 +224,7 @@
     "invalidJoinServer": "Adres serwera w tym kodzie jest nieprawidłowy."
   },
   "hostSetup": {
+    "dedicatedUnavailable": "Żaden serwer dedykowany nie jest teraz dostępny. Możesz hostować grę przez P2P.",
     "hostDirectMatch": "Hostuj mecz bezpośredni",
     "hostMatch": "Hostuj mecz",
     "p2pNotice": "Tryb peer-to-peer. Ten pokój łączy graczy bezpośrednio, zamiast działać na serwerze.",

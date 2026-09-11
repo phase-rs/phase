@@ -15,6 +15,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::actions::{GameAction, OutsideGameSelection};
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
+use engine::types::custom_format::{swedish_old_school, AntePolicy};
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{
     BoosterProduct, BoosterShelf, OutsideGameChoiceSource, WaitingFor,
 };
@@ -60,6 +62,117 @@ fn test_shelf() -> BoosterShelf {
 
 fn black_pool(count: usize) -> Vec<ManaUnit> {
     vec![ManaUnit::new(ManaType::Black, ObjectId(9_999), false, vec![]); count]
+}
+
+/// CR 407.3 identifies the ante class by this printed clause, so the fixture
+/// carries the real text rather than relying on the card's name.
+const ANTE_CLAUSE: &str =
+    "Remove this card from your deck before playing if you're not playing for ante.";
+
+const ANTE_CARD: &str = "Jeweled Bird";
+
+fn ante_face(name: &str) -> CardFace {
+    CardFace {
+        name: name.to_string(),
+        card_type: CardType {
+            core_types: vec![CoreType::Artifact],
+            ..Default::default()
+        },
+        oracle_text: Some(ANTE_CLAUSE.to_string()),
+        ..Default::default()
+    }
+}
+
+/// The same product as [`test_shelf`], except the rare slot's ONLY candidate is
+/// an ante card. With one rare for one rare slot, the collated pack contains it
+/// deterministically — the commons and uncommons stay ordinary, so every
+/// assertion below has a live non-ante control in the same pack.
+fn ante_shelf() -> BoosterShelf {
+    BoosterShelf {
+        products: vec![BoosterProduct {
+            set_code: PACK_SET.to_string(),
+            commons: (0..20).map(|i| face(&format!("Test Common {i}"))).collect(),
+            uncommons: (0..8)
+                .map(|i| face(&format!("Test Uncommon {i}")))
+                .collect(),
+            rares: vec![ante_face(ANTE_CARD)],
+            mythics: Vec::new(),
+        }],
+    }
+}
+
+/// Opens a pack containing one ante card under a custom format declaring
+/// `ante`, and returns the offered choices.
+fn open_ante_pack_under(
+    ante: AntePolicy,
+) -> Vec<engine::types::game_state::OutsideGameChoiceEntry> {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tutor = scenario
+        .add_spell_to_hand_from_oracle(P0, "Booster Tutor", true, BOOSTER_TUTOR_ORACLE)
+        .id();
+    scenario.with_mana_pool(P0, black_pool(1));
+    let mut runner = scenario.build();
+    runner.state_mut().booster_shelf = Arc::new(ante_shelf());
+
+    // `for_custom_rules` is total and applies no gate of its own, which is what
+    // lets this reach `AntePolicy::Enabled` — a value `passes_legacy_axis_gate`
+    // refuses on every production path today.
+    let mut rules = swedish_old_school().rules;
+    rules.legality.legacy.ante = ante;
+    runner.state_mut().format_config = FormatConfig::for_custom_rules(&rules);
+
+    let outcome = runner.cast(tutor).resolve();
+    let WaitingFor::OutsideGameChoice { choices, .. } = outcome.state().waiting_for.clone() else {
+        panic!(
+            "opening a pack must raise an outside-the-game choice, got {:?}",
+            outcome.state().waiting_for
+        );
+    };
+    choices
+}
+
+fn choice_names(choices: &[engine::types::game_state::OutsideGameChoiceEntry]) -> Vec<String> {
+    choices.iter().map(|choice| choice.name.clone()).collect()
+}
+
+/// CR 407.3: "these cards can't be brought into the game from outside the
+/// game." A booster pack is drawn from a set's whole card pool, so nothing the
+/// deck-construction rules vetted stands between it and the battlefield — this
+/// is the clause a banned/restricted list could never have covered.
+#[test]
+fn booster_pack_does_not_offer_an_ante_card_while_not_playing_for_ante() {
+    let choices = open_ante_pack_under(AntePolicy::Excluded);
+    let names = choice_names(&choices);
+
+    assert!(
+        !names.iter().any(|name| name == ANTE_CARD),
+        "an ante card must not be offered from a pack (CR 407.3), got {names:?}"
+    );
+    // Discriminating on both sides: the rest of the pack is still selectable,
+    // so this is the ante class being excluded and not the choice collapsing.
+    assert_eq!(
+        choices.len(),
+        13,
+        "10 commons + 3 uncommons, with only the ante rare withheld: {names:?}"
+    );
+    assert!(names.iter().any(|name| name.starts_with("Test Common")));
+    assert!(names.iter().any(|name| name.starts_with("Test Uncommon")));
+}
+
+/// CR 407.2: playing for ante makes the class legal again. Paired with the test
+/// above on the same fixture, so the exclusion is proven to follow the declared
+/// policy rather than being a blanket filter on the card.
+#[test]
+fn booster_pack_offers_an_ante_card_when_the_format_plays_for_ante() {
+    let choices = open_ante_pack_under(AntePolicy::Enabled);
+    let names = choice_names(&choices);
+
+    assert!(
+        names.iter().any(|name| name == ANTE_CARD),
+        "playing for ante, the pack's ante card is selectable again, got {names:?}"
+    );
+    assert_eq!(choices.len(), 14, "the whole pack: {names:?}");
 }
 
 /// Cast Booster Tutor and stop at the pack choice.

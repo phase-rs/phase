@@ -63,6 +63,7 @@ afterEach(() => {
   useGameStore.setState({ gameState: null, spellCosts: {} });
   useUiStore.setState({
     inspectedObjectId: null,
+    inspectedCardName: null,
     inspectedFaceIndex: 0,
     previewPlacement: "cursor",
     isDragging: false,
@@ -78,6 +79,19 @@ afterEach(() => {
 describe("GameCardPreview", () => {
   it("forwards the inspected object's name to the preview", () => {
     inspect(battlefieldObject());
+
+    render(<GameCardPreview />);
+
+    expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
+  });
+
+  it("previews a public historical log card after its live object is gone", () => {
+    useGameStore.setState({ gameState: null, spellCosts: {} });
+    useUiStore.setState({
+      inspectedObjectId: 999,
+      inspectedCardName: "Pithing Needle",
+      previewSticky: true,
+    });
 
     render(<GameCardPreview />);
 

@@ -1376,9 +1376,6 @@ function GamePageContent({
   const gamePageStyle = {
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
     "--game-split-safe-top": "0px",
-    // Fixed board tools are descendants of the game column, while the log is
-    // its sibling. Keep those tools out of the dedicated log column.
-    "--game-right-rail-offset": logPanelOpen && !isMobile ? "20rem" : "0px",
     "--game-left-rail-offset": "0px",
     // Where the targeting prompt starts, which is the only part of its
     // placement this page can state: the split layout puts seat panes at the
@@ -1478,7 +1475,7 @@ function GamePageContent({
     >
       <div
         ref={containerRef}
-        className="relative z-0 isolate min-h-0 min-w-0 flex-1 overflow-hidden"
+        className="relative min-h-0 min-w-0 flex-1 overflow-hidden contain-paint"
         style={gamePageStyle}
       onContextMenu={(e) => {
         e.preventDefault();
@@ -1995,10 +1992,6 @@ function GamePageContent({
       <AttackRequirementBadges />
       <BlockerConstraintBadges />
 
-      {/* Card preview overlay. Owns its own inspect-state subscriptions so a
-          hover doesn't re-render GamePageContent (and the whole battlefield). */}
-      <GameCardPreview />
-
       {/* WaitingFor-driven prompt overlays (only for human player).
           Wrapped in DialogHost so any active dialog can be peeked away to
           reveal the battlefield underneath; peek state resets on every
@@ -2346,6 +2339,9 @@ function GamePageContent({
       />
       </div>
       <GameLogPanel />
+      {/* This is a peer of the board and log columns: a preview opened from a
+          log card must not be clipped by the paint-contained board column. */}
+      <GameCardPreview />
     </div>
   );
 }

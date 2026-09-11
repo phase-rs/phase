@@ -56,6 +56,7 @@ import { CategoryChoiceModal } from "./CategoryChoiceModal.tsx";
 import { EachPlayerCopyChosenModal } from "./EachPlayerCopyChosenModal.tsx";
 import {
   CoinFlipKeepModal,
+  DieKeepModal,
   DigModal,
   RevealModal,
   RippleBottomOrderModal,
@@ -146,6 +147,9 @@ export function CardChoiceModal() {
     case "CoinFlipKeepChoice":
       if (!canActForWaitingState) return null;
       return <CoinFlipKeepModal data={waitingFor.data} />;
+    case "DieKeepChoice":
+      if (!canActForWaitingState) return null;
+      return <DieKeepModal data={waitingFor.data} />;
     case "DigChoice":
       if (!canActForWaitingState) return null;
       return <DigModal data={waitingFor.data} />;

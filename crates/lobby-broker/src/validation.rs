@@ -831,6 +831,7 @@ mod tests {
             total_rounds: None,
             plus_rounds: None,
             format: None,
+            match_type: None,
         }
     }
 
@@ -947,6 +948,7 @@ mod tests {
             total_rounds: Some(5),
             plus_rounds: None,
             format: None,
+            match_type: None,
         };
         let plus = M::CreateTournament {
             name: "Friday Night".to_string(),
@@ -956,6 +958,7 @@ mod tests {
             total_rounds: None,
             plus_rounds: Some(1),
             format: None,
+            match_type: None,
         };
         assert!(validate_lobby_message(&exact).is_ok());
         assert!(validate_lobby_message(&plus).is_ok());
@@ -968,6 +971,7 @@ mod tests {
             total_rounds: Some(5),
             plus_rounds: Some(1),
             format: None,
+            match_type: None,
         };
         let err = validate_lobby_message(&both).expect_err("both set is rejected");
         assert!(err.contains("mutually exclusive"), "{err}");

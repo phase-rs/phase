@@ -186,6 +186,7 @@ describe("GameLogPanel", () => {
     await user.click(within(log).getByRole("button", { name: "Clear filters" }));
     expect(screen.getByRole("searchbox", { name: "Search game log" })).toHaveValue("");
     expect(screen.getByRole("button", { name: "Life" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Details" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("Life event")).toBeInTheDocument();
     expect(log.scrollTop).toBe(40);
   });
@@ -206,10 +207,39 @@ describe("GameLogPanel", () => {
     render(<GameLogPanel />);
 
     await user.click(screen.getByRole("button", { name: "Filters (0)" }));
-    await user.click(screen.getByRole("button", { name: "Turn" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Filter by turn" }), "2");
 
-    expect(screen.getByText("T2 · Upkeep")).toBeInTheDocument();
+    expect(screen.getByText("Turn 2 · Upkeep")).toBeInTheDocument();
     expect(screen.queryByText("No matching events")).not.toBeInTheDocument();
+  });
+
+  it("keeps an engine-authored active player in a coalesced timeline divider", () => {
+    useGameStore.setState({
+      logHistory: [
+        entry(0, "", {
+          turn: 2,
+          phase: "Untap",
+          category: "Turn",
+          segments: [
+            { type: "Text", value: "Turn " },
+            { type: "Number", value: 2 },
+            { type: "Text", value: " — " },
+            { type: "PlayerName", value: { name: "Chandra", player_id: 1 } },
+          ],
+          presentation: { importance: "Context", tone: "Neutral", boundary: "Turn", visibility: "Public" },
+        }),
+        entry(1, "", {
+          turn: 2,
+          phase: "DeclareAttackers",
+          category: "Turn",
+          presentation: { importance: "Context", tone: "Neutral", boundary: "Phase", visibility: "Public" },
+        }),
+        entry(2, "Balduvian Bears attacks Chandra", { turn: 2, category: "Combat" }),
+      ],
+    });
+    render(<GameLogPanel />);
+
+    expect(screen.getByText(/Turn 2 — Chandra · Declare Attackers/)).toBeInTheDocument();
   });
 
   it("opens a closed panel when the game ends and can then be dismissed", () => {
@@ -401,6 +431,7 @@ describe("GameLogPanel", () => {
 
     expect(useUiStore.getState()).toMatchObject({
       inspectedObjectId: 42,
+      inspectedCardName: "Pithing Needle",
       previewSticky: true,
     });
   });

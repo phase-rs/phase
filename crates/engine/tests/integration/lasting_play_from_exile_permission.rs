@@ -140,8 +140,38 @@
 //! the authority the block is now redundant for a cast clause: neutralizing it
 //! entirely leaves every cast grant in the corpus byte-identical.)
 //!
-//! NOT REPAIRED, and named because it is reachable and wrong rather than
-//! merely untested: the HAND-RESIDENT members. Chandra, Flame's Catalyst's
+//! REPAIRED SINCE, in `lasting_cast_from_hand_permission`, and NOT by giving
+//! Chandra the lingering `CastFromZone` mechanism this module is about: her
+//! ultimate is promoted out of `CastFromZone` altogether, into
+//! `StaticMode::CastFromHandFree` — Omniscience's mechanism — carried as a
+//! duration-bound player grant. A per-object permission was never going to be
+//! right for her: it is stamped once per card at resolution, so a card DRAWN
+//! LATER in the same turn is not covered, and "Until end of turn, you may cast
+//! spells from your hand" covers it.
+//!
+//! The paragraph below is kept as written because it is the measurement that
+//! identified the seam, and because its diagnosis still stands: the resolver
+//! routed the hand by ZONE alone and never asked whether the grant stated a
+//! lifetime.
+//!
+//! KARLACH IS NOT COVERED THERE, and the sentence below overstates what was
+//! measured about her, so read it with this correction. What IS measured: her
+//! grant carries `target: ParentTarget`, which is neither a `TargetFilter::Typed`
+//! (so the promotion's gate declines it) nor a filter `extract_in_zone()` can
+//! answer for (so this resolver's hand tail never sees it either). What is NOT
+//! measured: whether she is broken at all. The reading below was taken by
+//! driving her grant clause in isolation, where the parent target is unbound and
+//! the resolver exits at "No targets resolved". In a real specialize chain the
+//! seam may bind the sought card, in which case the ordinary target path reaches
+//! `grant_lingering_permissions` and stamps a correct in-place hand permission.
+//! Driving the real trigger is the measurement nobody has made; until then she
+//! is untested, not established as wrong.
+//!
+//! THE STATE AT THE TIME OF THIS CHANGE — every sentence from here to the end of
+//! this paragraph is in the PRESENT TENSE OF THEN, not of now: Chandra's half is
+//! since repaired (she no longer reaches this resolver at all), and Karlach's
+//! half stands subject to the correction above. It concerns the HAND-RESIDENT
+//! members. Chandra, Flame's Catalyst's
 //! ultimate offers the hand through a filter; Karlach, Tiefling Spellrager's
 //! sought card lands there by a different road. (Twinning Glass is hand-origin
 //! too, but it loses an invented duration and keeps its during-resolution
@@ -160,8 +190,7 @@
 //! all, before or after, so nothing outlives anything. The card already carried
 //! `duration: UntilEndOfTurn` on main; what the change buys it is an AST whose
 //! MECHANISM finally matches that printed lifetime, which is the field a runtime
-//! repair would have to read. Its parse side is pinned in
-//! `parser::oracle_effect::tests::a_leading_duration_also_degrades_the_cast_mechanism`.
+//! repair would have to read.
 //!
 //! The `Duration::ForAsLongAs` half of that set IS covered, through Gale's
 //! Redirection — CR 202.3 makes its d20 table deterministic for a countered

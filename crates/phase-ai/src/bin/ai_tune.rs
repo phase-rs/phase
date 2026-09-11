@@ -178,15 +178,14 @@ fn eval_params_to_config(params: &[f64]) -> AiConfig {
     let early = scale_from_ratios(&late, &learned.early, &learned.late);
     let mid = scale_from_ratios(&late, &learned.mid, &learned.late);
 
-    let profile = AiProfile {
-        risk_tolerance: params[9].clamp(0.01, 2.0),
-        interaction_patience: params[10].clamp(0.01, 2.0),
-        stabilize_bias: params[11].clamp(0.01, 3.0),
-    };
-
+    // Seed from the shipped Medium preset and overwrite only the tuned scalars,
+    // so CMA-ES evaluates the same combat model Medium ships with
+    // (`CombatEvModel::DownsideWeighted`), not `AiProfile::default()`'s `Basic`.
     let mut config = create_config(AiDifficulty::Medium, Platform::Native);
+    config.profile.risk_tolerance = params[9].clamp(0.01, 2.0);
+    config.profile.interaction_patience = params[10].clamp(0.01, 2.0);
+    config.profile.stabilize_bias = params[11].clamp(0.01, 3.0);
     config.weights = EvalWeightSet { early, mid, late };
-    config.profile = profile;
     config
 }
 
@@ -347,13 +346,14 @@ fn load_cma_tuned_config(path: &std::path::Path) -> Result<AiConfig, String> {
         card_advantage: field(weights, "card_advantage")?,
         synergy: field(weights, "synergy")?,
     };
-    let profile = AiProfile {
-        risk_tolerance: field(profile, "risk_tolerance")?,
-        interaction_patience: field(profile, "interaction_patience")?,
-        stabilize_bias: field(profile, "stabilize_bias")?,
-    };
+    // Seed from the shipped Medium preset so a loaded tuned artifact keeps
+    // Medium's combat model; only the tuned scalars are restored from the file.
+    let mut restored = create_config(AiDifficulty::Medium, Platform::Native).profile;
+    restored.risk_tolerance = field(profile, "risk_tolerance")?;
+    restored.interaction_patience = field(profile, "interaction_patience")?;
+    restored.stabilize_bias = field(profile, "stabilize_bias")?;
 
-    Ok(config_from_late_weights_and_profile(late, profile))
+    Ok(config_from_late_weights_and_profile(late, restored))
 }
 
 /// Scale a base weight set by the ratio between a target phase and a reference phase.
@@ -1406,6 +1406,50 @@ mod tests {
         assert!(config.weights.late.aggression <= 10.0);
         assert!(config.profile.risk_tolerance >= 0.01);
         assert!(config.profile.interaction_patience <= 2.0);
+    }
+
+    /// Regression: both tuning-config paths must keep Medium's shipped combat
+    /// model (`DownsideWeighted`) rather than reverting to `AiProfile::default()`
+    /// (`Basic`) via an `..AiProfile::default()` spread.
+    #[test]
+    fn tuning_paths_keep_medium_downside_weighted_combat_model() {
+        use phase_ai::config::CombatEvModel;
+
+        let medium = create_config(AiDifficulty::Medium, Platform::Native);
+        assert_eq!(
+            medium.profile.combat_ev_model,
+            CombatEvModel::DownsideWeighted,
+            "precondition: Medium ships DownsideWeighted"
+        );
+
+        // CMA-ES evaluation path.
+        let evaled = params_to_config(&vec![1.0; EVAL_PARAMETER_NAMES.len()]);
+        assert_eq!(
+            evaled.profile.combat_ev_model,
+            CombatEvModel::DownsideWeighted,
+            "eval path must not revert the combat model to Basic"
+        );
+
+        // Load-artifact path — round-trip a minimal eval artifact.
+        let artifact = serde_json::json!({
+            "kind": "cma_tuned_weights",
+            "group": "eval",
+            "weights": serde_json::to_value(&medium.weights.late).unwrap(),
+            "profile": {
+                "risk_tolerance": medium.profile.risk_tolerance,
+                "interaction_patience": medium.profile.interaction_patience,
+                "stabilize_bias": medium.profile.stabilize_bias,
+            },
+        });
+        let path = std::env::temp_dir().join("ai_tune_b2_regression.json");
+        std::fs::write(&path, serde_json::to_string(&artifact).unwrap()).unwrap();
+        let loaded = load_cma_tuned_config(&path).expect("artifact loads");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            loaded.profile.combat_ev_model,
+            CombatEvModel::DownsideWeighted,
+            "load path must seed the profile from the Medium preset"
+        );
     }
 
     #[test]

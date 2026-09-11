@@ -1905,6 +1905,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::Evolved { .. }
         | GameEvent::CounterRemoved { .. }
         | GameEvent::TokenCreated { .. }
+        | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::ObjectConjured { .. }
         | GameEvent::CreatureDestroyed { .. }
         | GameEvent::PermanentSacrificed { .. }

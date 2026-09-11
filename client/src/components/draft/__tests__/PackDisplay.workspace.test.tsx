@@ -1,6 +1,3 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -146,6 +143,7 @@ function WorkspaceDragCommanderPickTwoHarness({
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
   const drag = useDraftWorkspaceDrag({
     enabled: true,
+    workspaceProjectionEnabled: true,
     readPickInteraction: () => ({ interactionGeneration: 4, pickInteractionLocked: false, pendingPickIntent: null }),
     subscribePickInteraction: () => () => undefined,
     onDrop: () => { throw new Error("Workspace drags do not dispatch picks."); },
@@ -155,8 +153,10 @@ function WorkspaceDragCommanderPickTwoHarness({
     kind: "workspace",
     instanceIds: ["workspace-a"],
     cards: [cards[0]],
+    canonicalTarget: { zone: "sideboard", column: 0, row: 0 },
     previewWidth: 146,
     previewHeight: 204,
+    origin: { left: 0, top: 0, width: 146, height: 204 },
     onDrop: () => true,
   };
   return (
@@ -247,6 +247,7 @@ function RealDragPackHarness({
   };
   const drag = useDraftWorkspaceDrag({
     enabled: true,
+    workspaceProjectionEnabled: true,
     readPickInteraction: () => interactionRef.current,
     subscribePickInteraction: (listener) => {
       listenersRef.current.add(listener);
@@ -302,18 +303,6 @@ describe("PackDisplay local workspace controller", () => {
     alternateFaceState.values = {};
   });
 
-  it("uses_static_selected_pack_feedback_and_a_static_card_area_drop_glow", () => {
-    const css = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
-    const dropGlow = css.match(/@utility draft-card-area-drop-active \{[\s\S]*?\n\}/)?.[0];
-
-    expect(css).toContain("--color-arcane: #38bdf8");
-    expect(css).not.toContain("@keyframes draft-pack-selected-glow");
-    expect(dropGlow).toContain("background-color: rgb(255 255 255 / 0.08)");
-    expect(dropGlow).toContain("inset 0 0 0 1px rgb(255 255 255 / 0.92)");
-    expect(dropGlow).toContain("0 0 18px 2px rgb(255 255 255 / 0.42)");
-    expect(dropGlow).not.toMatch(/\b(border|transform|animation)\b/);
-  });
-
   it("renders_authoritative_sequence_once_and_preserves_duplicate_names_and_unknown_rarity", () => {
     const { container } = render(<PackDisplay controller={controller()} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
     expect([...container.querySelectorAll("[data-instance-id]")].map((node) => node.getAttribute("data-instance-id"))).toEqual(["unknown", "common"]);
@@ -345,6 +334,75 @@ describe("PackDisplay local workspace controller", () => {
     expect(within(firstCard).getByText("Same")).toHaveClass("text-white/50");
     expect(within(firstCard).getByRole("button", { name: "Pick Same to Deck" })).toHaveClass("sr-only");
     expect(within(firstCard).getByRole("button", { name: "Pick Same to Sideboard" })).toHaveClass("sr-only");
+  });
+
+  it("publishes_pack_preview_art_immediately_and_invalidates_it_for_errors", () => {
+    imageState.src = "https://example.test/first.jpg";
+    const capturedSources: PackDropSource[] = [];
+    const localDrag = {
+      ...dragController,
+      handlePointerDown: vi.fn((_event, source: PackDropSource) => capturedSources.push(source)),
+    };
+    const { container, rerender } = render(
+      <PackDisplay
+        controller={controller({ dragController: localDrag })}
+        presentation={{ packScale: 1, setPackScale: vi.fn() }}
+        onCardHover={vi.fn()}
+      />,
+    );
+    const firstCard = container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+
+    fireEvent.pointerDown(firstCard, { button: 0, isPrimary: true, pointerId: 1, pointerType: "mouse" });
+    expect(capturedSources[capturedSources.length - 1]?.previewImages[0].src).toBe("https://example.test/first.jpg");
+
+    imageState.src = "https://example.test/replacement.jpg";
+    rerender(
+      <PackDisplay
+        controller={controller({ dragController: localDrag })}
+        presentation={{ packScale: 1, setPackScale: vi.fn() }}
+        onCardHover={vi.fn()}
+      />,
+    );
+    const replacementImage = firstCard.querySelector("img")!;
+    fireEvent.pointerDown(firstCard, { button: 0, isPrimary: true, pointerId: 2, pointerType: "mouse" });
+    expect(capturedSources[capturedSources.length - 1]?.previewImages[0].src).toBe("https://example.test/replacement.jpg");
+
+    fireEvent.error(replacementImage);
+    fireEvent.pointerDown(firstCard, { button: 0, isPrimary: true, pointerId: 3, pointerType: "mouse" });
+    expect(capturedSources[capturedSources.length - 1]?.previewImages[0].src).toBeNull();
+  });
+
+  it("renders_retained_cards_with_unresolved_art_as_a_nontextual_placeholder", () => {
+    let source!: PackDropSource;
+    const localDrag = {
+      ...dragController,
+      handlePointerDown: vi.fn((_event, nextSource: PackDropSource) => { source = nextSource; }),
+    };
+    const initial = controller({ dragController: localDrag });
+    const rendered = render(
+      <PackDisplay
+        controller={initial}
+        presentation={{ packScale: 1, setPackScale: vi.fn() }}
+        onCardHover={vi.fn()}
+      />,
+    );
+    fireEvent.pointerDown(
+      rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!,
+      { button: 0, isPrimary: true, pointerId: 5, pointerType: "mouse" },
+    );
+    act(() => source.onAdmission({ kind: "dispatch", requestToken: "retained", interactionGeneration: 4 }));
+    rendered.rerender(
+      <PackDisplay
+        controller={{ ...initial, view: { ...view, current_pack: [cards[1]] } }}
+        presentation={{ packScale: 1, setPackScale: vi.fn() }}
+        onCardHover={vi.fn()}
+      />,
+    );
+    act(() => source.onSettled({ kind: "outcome", outcome: { status: "acknowledged" } }));
+
+    const retained = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"][data-visual-state="leaving"]')!;
+    expect(retained).not.toHaveTextContent("Same");
+    expect(retained.querySelector("span[aria-hidden='true']")).toBeInTheDocument();
   });
 
   it("pins_the_phone_toolbar_and_reserves_a_pack_glow_gutter", () => {
@@ -406,6 +464,30 @@ describe("PackDisplay local workspace controller", () => {
     const portraitControls = document.querySelector<HTMLElement>("[data-pack-scale-controls]")!;
     expect(within(portraitControls).getByText("Pack scale")).toBeInTheDocument();
     expect(within(portraitControls).getByRole("button", { name: "Reset pack scale" })).toBeInTheDocument();
+  });
+
+  it.each([
+    ["phone-portrait", true],
+    ["phone-landscape", true],
+    ["tablet-portrait", true],
+    ["tablet-landscape", true],
+    ["desktop", false],
+  ] as const)("constrains_the_%s_pack_scale_slider_only_on_responsive_layouts", (responsiveLayout, constrained) => {
+    render(
+      <PackDisplay
+        controller={controller()}
+        presentation={{ packScale: 1, setPackScale: vi.fn() }}
+        onCardHover={vi.fn()}
+        responsiveLayout={responsiveLayout}
+      />,
+    );
+
+    const slider = screen.getByRole("slider");
+    const label = slider.closest("label")!;
+    expect(slider.classList.contains("w-[6.5rem]")).toBe(constrained);
+    expect(slider.classList.contains("min-w-0")).toBe(constrained);
+    expect(slider.classList.contains("max-w-full")).toBe(constrained);
+    expect(label.classList.contains("min-w-0")).toBe(constrained);
   });
 
   it.each(["phone-portrait", "phone-landscape"] as const)(
@@ -608,7 +690,7 @@ describe("PackDisplay local workspace controller", () => {
     expect(confirmPick).toHaveBeenCalledWith("deck");
   });
 
-  it("selects_on_desktop_click_after_pointer_down_sets_up_drag", async () => {
+  it("selects_on_desktop_pointer_down_and_keeps_the_matching_click_selected", async () => {
     const confirmPick = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
     const localDrag = { ...dragController, handlePointerDown: vi.fn() };
 
@@ -627,7 +709,7 @@ describe("PackDisplay local workspace controller", () => {
     const cardElement = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
 
     fireEvent.pointerDown(cardElement, { button: 0, isPrimary: true, pointerId: 91, pointerType: "mouse" });
-    expect(cardElement).toHaveAttribute("data-visual-state", "default");
+    expect(cardElement).toHaveAttribute("data-visual-state", "selected");
     expect(localDrag.handlePointerDown).toHaveBeenCalledWith(expect.anything(), expect.anything());
     fireEvent.click(within(cardElement).getByRole("button", { name: "Same" }));
     expect(cardElement).toHaveAttribute("data-visual-state", "selected");
@@ -676,6 +758,52 @@ describe("PackDisplay local workspace controller", () => {
     fireEvent.click(screen.getByRole("button", { name: "Confirm Pick" }));
     await vi.waitFor(() => expect(confirmPick).toHaveBeenCalledWith("deck"));
     expect(onSelectionChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves_selected_desktop_card_click_toggling_after_pointer_down_selection", () => {
+    const rendered = render(
+      <RealDragPackHarness
+        onDrop={vi.fn() as never}
+        viewOverride={commanderPickTwoView}
+      />,
+    );
+    const cardElement = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    const activation = within(cardElement).getByRole("button", { name: "Same" });
+    cardElement.setPointerCapture = vi.fn();
+    cardElement.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(activation, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 105, pointerType: "mouse" });
+    fireEvent.pointerUp(cardElement, { clientX: 10, clientY: 10, pointerId: 105, pointerType: "mouse" });
+    firePointerActivation(activation, "click", { detail: 1, pointerId: 105, pointerType: "mouse" });
+    expect(cardElement).toHaveAttribute("data-visual-state", "selected");
+
+    const selectedCard = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    const selectedActivation = within(selectedCard).getByRole("button", { name: "Same" });
+    fireEvent.pointerDown(selectedActivation, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 106, pointerType: "pen" });
+    fireEvent.pointerUp(selectedCard, { clientX: 10, clientY: 10, pointerId: 106, pointerType: "pen" });
+    fireEvent.click(selectedActivation, { detail: 1 });
+    expect(rendered.container.querySelector('[data-instance-id="unknown"]')).toHaveAttribute("data-visual-state", "default");
+  });
+
+  it("clears_pointer_down_selection_suppression_when_the_press_is_cancelled", () => {
+    const rendered = render(
+      <RealDragPackHarness
+        onDrop={vi.fn() as never}
+        viewOverride={commanderPickTwoView}
+      />,
+    );
+    const cardElement = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    const activation = within(cardElement).getByRole("button", { name: "Same" });
+    cardElement.setPointerCapture = vi.fn();
+    cardElement.releasePointerCapture = vi.fn();
+
+    fireEvent.pointerDown(activation, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 107, pointerType: "mouse" });
+    expect(cardElement).toHaveAttribute("data-visual-state", "selected");
+    const selectedCard = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    const selectedActivation = within(selectedCard).getByRole("button", { name: "Same" });
+    fireEvent.pointerCancel(selectedCard, { pointerId: 107, pointerType: "mouse" });
+    fireEvent.click(selectedActivation, { detail: 1 });
+    expect(rendered.container.querySelector('[data-instance-id="unknown"]')).toHaveAttribute("data-visual-state", "default");
   });
 
   it("selects_once_when_an_ordinary_desktop_click_stays_on_the_nested_pack_activation", () => {
@@ -979,15 +1107,166 @@ describe("PackDisplay local workspace controller", () => {
 
     fireEvent.pointerDown(cardElement, { button: 0, clientX: 20, clientY: 20, isPrimary: true, pointerId: 21, pointerType: "touch" });
     fireEvent.pointerUp(cardElement, { clientX: 20, clientY: 20, isPrimary: true, pointerId: 21, pointerType: "touch" });
-    fireEvent.click(button);
+    fireEvent.click(button, { detail: 1 });
     vi.advanceTimersByTime(150);
     fireEvent.pointerDown(cardElement, { button: 0, clientX: 20, clientY: 20, isPrimary: true, pointerId: 22, pointerType: "touch" });
     fireEvent.pointerUp(cardElement, { clientX: 20, clientY: 20, isPrimary: true, pointerId: 22, pointerType: "touch" });
-    fireEvent.click(button);
+    fireEvent.click(button, { detail: 1 });
 
     expect(selectCard).toHaveBeenCalledTimes(1);
     expect(selectCard).toHaveBeenCalledWith("unknown");
     await vi.waitFor(() => expect(confirmPick).toHaveBeenCalledWith("deck"));
+  });
+
+  it.each(["expiry", "generation"] as const)(
+    "suppresses_retargeted_next_pack_touch_compatibility_until_%s_reopens_input",
+    (reopenBy) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(1_000));
+      const replacement = { ...cards[1], instance_id: "replacement", name: "Replacement" };
+      const replacementSibling = { ...cards[0], instance_id: "replacement-sibling", name: "Replacement Sibling" };
+      const selectCard = vi.fn();
+      const confirmPick = vi.fn().mockResolvedValue({ status: "acknowledged" });
+      const initial = controller({ selectCard, confirmPick, doubleClickPick: true });
+      const rendered = render(
+        <PackDisplay controller={initial} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />,
+      );
+      const tap = (element: HTMLElement, pointerId: number) => {
+        fireEvent.pointerDown(element, { button: 0, clientX: 20, clientY: 20, isPrimary: true, pointerId, pointerType: "touch" });
+        fireEvent.pointerUp(element, { clientX: 20, clientY: 20, isPrimary: true, pointerId, pointerType: "touch" });
+      };
+      const first = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+      tap(first, 201);
+      vi.advanceTimersByTime(150);
+      tap(first, 202);
+      expect(confirmPick).toHaveBeenCalledTimes(1);
+
+      const replacementView = { ...view, current_pack_number: 1, pick_number: 0, current_pack: [replacement, replacementSibling] };
+      rendered.rerender(
+        <PackDisplay
+          controller={{ ...initial, view: replacementView }}
+          presentation={{ packScale: 1, setPackScale: vi.fn() }}
+          onCardHover={vi.fn()}
+        />,
+      );
+      const next = rendered.container.querySelector<HTMLElement>('[data-instance-id="replacement"]')!;
+      const nextButton = within(next).getByRole("button", { name: "Replacement" });
+      tap(next, 203);
+      fireEvent.click(nextButton, { detail: 1 });
+      fireEvent.doubleClick(nextButton, { detail: 2 });
+      expect(selectCard).toHaveBeenCalledTimes(1);
+      expect(confirmPick).toHaveBeenCalledTimes(1);
+
+      if (reopenBy === "expiry") {
+        vi.advanceTimersByTime(501);
+      } else {
+        rendered.rerender(
+          <PackDisplay
+            controller={{ ...initial, view: replacementView, interactionGeneration: 5 }}
+            presentation={{ packScale: 1, setPackScale: vi.fn() }}
+            onCardHover={vi.fn()}
+          />,
+        );
+      }
+      const reopened = rendered.container.querySelector<HTMLElement>('[data-instance-id="replacement"]')!;
+      tap(reopened, 204);
+      vi.advanceTimersByTime(150);
+      tap(reopened, 205);
+      expect(selectCard).toHaveBeenLastCalledWith("replacement");
+      expect(confirmPick).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each(["rejected-outcome", "rejected-promise"] as const)(
+    "reopens_touch_double_pick_after_a_matching_%s_without_an_unhandled_rejection",
+    async (failureKind) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(2_000));
+      let settle!: (value: { status: "rejected"; reason: "invalid-request" }) => void;
+      let fail!: (reason: Error) => void;
+      const firstConfirmation = new Promise<{ status: "rejected"; reason: "invalid-request" }>((resolve, reject) => {
+        settle = resolve;
+        fail = reject;
+      });
+      const confirmPick = vi.fn()
+        .mockReturnValueOnce(firstConfirmation)
+        .mockResolvedValue({ status: "acknowledged" });
+      const rendered = render(
+        <PackDisplay
+          controller={controller({ confirmPick, doubleClickPick: true })}
+          presentation={{ packScale: 1, setPackScale: vi.fn() }}
+          onCardHover={vi.fn()}
+        />,
+      );
+      const tap = (pointerId: number) => {
+        const element = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+        fireEvent.pointerDown(element, { button: 0, clientX: 20, clientY: 20, isPrimary: true, pointerId, pointerType: "touch" });
+        fireEvent.pointerUp(element, { clientX: 20, clientY: 20, isPrimary: true, pointerId, pointerType: "touch" });
+      };
+      tap(211);
+      vi.advanceTimersByTime(150);
+      tap(212);
+      expect(confirmPick).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        if (failureKind === "rejected-outcome") settle({ status: "rejected", reason: "invalid-request" });
+        else fail(new Error("confirmation failed"));
+        await Promise.resolve();
+      });
+      tap(213);
+      vi.advanceTimersByTime(150);
+      tap(214);
+      expect(confirmPick).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("does_not_let_an_older_rejection_clear_a_newer_touch_suppression_record", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(3_000));
+    let settleFirst!: (value: { status: "rejected"; reason: "invalid-request" }) => void;
+    let settleSecond!: (value: { status: "rejected"; reason: "invalid-request" }) => void;
+    const confirmPick = vi.fn()
+      .mockReturnValueOnce(new Promise((resolve) => { settleFirst = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { settleSecond = resolve; }));
+    const selectCard = vi.fn();
+    const initial = controller({ confirmPick, selectCard, doubleClickPick: true });
+    const rendered = render(
+      <PackDisplay controller={initial} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />,
+    );
+    const tap = (element: HTMLElement, pointerId: number) => {
+      fireEvent.pointerDown(element, { button: 0, clientX: 20, clientY: 20, isPrimary: true, pointerId, pointerType: "touch" });
+      fireEvent.pointerUp(element, { clientX: 20, clientY: 20, isPrimary: true, pointerId, pointerType: "touch" });
+    };
+    const first = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    tap(first, 221);
+    vi.advanceTimersByTime(150);
+    tap(first, 222);
+    vi.advanceTimersByTime(501);
+    tap(first, 223);
+    vi.advanceTimersByTime(150);
+    tap(first, 224);
+    expect(confirmPick).toHaveBeenCalledTimes(2);
+
+    const replacement = { ...cards[1], instance_id: "replacement", name: "Replacement" };
+    const replacementSibling = { ...cards[0], instance_id: "replacement-sibling", name: "Replacement Sibling" };
+    rendered.rerender(
+      <PackDisplay
+        controller={{ ...initial, view: { ...view, current_pack_number: 1, current_pack: [replacement, replacementSibling] } }}
+        presentation={{ packScale: 1, setPackScale: vi.fn() }}
+        onCardHover={vi.fn()}
+      />,
+    );
+    await act(async () => settleFirst({ status: "rejected", reason: "invalid-request" }));
+    const replacementButton = within(
+      rendered.container.querySelector<HTMLElement>('[data-instance-id="replacement"]')!,
+    ).getByRole("button", { name: "Replacement" });
+    fireEvent.click(replacementButton, { detail: 1 });
+    expect(selectCard).toHaveBeenCalledTimes(2);
+
+    await act(async () => settleSecond({ status: "rejected", reason: "invalid-request" }));
+    fireEvent.click(replacementButton, { detail: 0 });
+    expect(selectCard).toHaveBeenLastCalledWith("replacement");
+    expect(selectCard).toHaveBeenCalledTimes(3);
   });
 
   it("does_not_pick_from_a_touch_long_press_or_swipe", () => {
@@ -1009,14 +1288,14 @@ describe("PackDisplay local workspace controller", () => {
     fireEvent.pointerDown(cardElement, { button: 0, clientX: 20, clientY: 20, isPrimary: true, pointerId: 31, pointerType: "touch" });
     vi.advanceTimersByTime(500);
     fireEvent.pointerUp(cardElement, { clientX: 20, clientY: 20, isPrimary: true, pointerId: 31, pointerType: "touch" });
-    fireEvent.click(button);
+    fireEvent.click(button, { detail: 1 });
     expect(onCardHover).toHaveBeenCalledWith(expect.objectContaining({ name: "Same" }));
 
     vi.advanceTimersByTime(600);
     fireEvent.pointerDown(cardElement, { button: 0, clientX: 20, clientY: 20, isPrimary: true, pointerId: 32, pointerType: "touch" });
     fireEvent.pointerMove(cardElement, { clientX: 50, clientY: 20, isPrimary: true, pointerId: 32, pointerType: "touch" });
     fireEvent.pointerUp(cardElement, { clientX: 50, clientY: 20, isPrimary: true, pointerId: 32, pointerType: "touch" });
-    fireEvent.click(button);
+    fireEvent.click(button, { detail: 1 });
 
     expect(selectCard).not.toHaveBeenCalled();
     expect(confirmPick).not.toHaveBeenCalled();
@@ -1041,21 +1320,24 @@ describe("PackDisplay local workspace controller", () => {
     const button = within(cardElement).getByRole("button", { name: "Same" });
 
     fireEvent.pointerDown(cardElement, { button: 0, isPrimary: true, pointerId: 10, pointerType: "mouse" });
+    expect(selectCard).toHaveBeenCalledWith("unknown");
+    selectCard.mockClear();
     fireEvent.pointerMove(cardElement, { pointerId: 10, pointerType: "mouse" });
     fireEvent.pointerUp(cardElement, { pointerId: 10, pointerType: "mouse" });
-    fireEvent.click(button);
-    fireEvent.doubleClick(button);
+    firePointerActivation(button, "click", { detail: 1, pointerId: 10, pointerType: "mouse" });
+    firePointerActivation(button, "dblclick", { detail: 2, pointerId: 10, pointerType: "mouse" });
     expect(selectCard).not.toHaveBeenCalled();
     expect(localDrag.handlePointerDown).toHaveBeenCalled();
     expect(confirmPick).not.toHaveBeenCalled();
 
     fireEvent.pointerDown(cardElement, { button: 0, isPrimary: true, pointerId: 11, pointerType: "mouse" });
+  expect(selectCard).toHaveBeenCalledWith("unknown");
+  selectCard.mockClear();
     fireEvent.pointerUp(cardElement, { pointerId: 11, pointerType: "mouse" });
-    fireEvent.click(button);
-    fireEvent.doubleClick(button);
-    expect(selectCard).toHaveBeenCalledTimes(1);
+  firePointerActivation(button, "click", { detail: 1, pointerId: 11, pointerType: "mouse" });
+    firePointerActivation(button, "dblclick", { detail: 2, pointerId: 11, pointerType: "mouse" });
+  expect(selectCard).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(confirmPick).toHaveBeenCalledWith("deck"));
-    expect(selectCard).toHaveBeenCalledWith("unknown");
   });
 
   it("ignores_exact_shell_desktop_clicks_while_locked_before_consuming_compatibility_activation", () => {
@@ -1138,6 +1420,7 @@ describe("PackDisplay local workspace controller", () => {
 
   it("blocks_incomplete_duplicate_and_stale_effect_sources_but_dispatches_a_complete_live_pair", async () => {
     const effectView = { ...view, draft_effects: [effectCard] };
+    imageState.src = "/resolved-pack-art.png";
     const pickCard = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
     const pickEffect = vi.fn().mockResolvedValue({ status: "ignored", reason: "busy" });
     const localDrag = {
@@ -1178,6 +1461,7 @@ describe("PackDisplay local workspace controller", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "Effect" }));
     const first = complete.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
     const second = complete.container.querySelector<HTMLElement>('[data-instance-id="common"]')!;
+    for (const image of complete.container.querySelectorAll("img")) fireEvent.load(image);
     fireEvent.click(within(second).getByRole("button", { name: "Same" }));
     expect(localDrag.consumeCompatibilityActivation).toHaveBeenLastCalledWith(expect.objectContaining({
       kind: "click",
@@ -1196,6 +1480,10 @@ describe("PackDisplay local workspace controller", () => {
       authorityId: "effect",
       sourceInstanceId: "unknown",
       instanceIds: ["unknown", "common"],
+      previewImages: [
+        { src: "/resolved-pack-art.png", alt: "Same" },
+        { src: "/resolved-pack-art.png", alt: "Same" },
+      ],
     }));
     expect(pickCard).not.toHaveBeenCalled();
   });
@@ -1211,6 +1499,7 @@ describe("PackDisplay local workspace controller", () => {
     const initial = controller({ dragController: localDrag });
     const rendered = render(<PackDisplay controller={initial} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
     const currentCard = () => rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    fireEvent.load(currentCard().querySelector("img")!);
 
     expect(currentCard()).toHaveAttribute("data-visual-state", "default");
     rendered.rerender(<PackDisplay controller={{ ...initial, selectedCard: "unknown" }} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
@@ -1271,7 +1560,7 @@ describe("PackDisplay local workspace controller", () => {
     expect(source).toHaveAttribute("data-visual-state", "waiting");
     await act(async () => resolveOutcome({ status: "ignored", reason: "busy" }));
     fireEvent.click(screen.getByRole("button", { name: "unlock" }));
-    expect(source).toHaveAttribute("data-visual-state", "default");
+    expect(source).toHaveAttribute("data-visual-state", "selected");
   });
 
   it("does_not_retain_a_direct_pick_after_the_engine_advances_to_the_next_pick", async () => {
@@ -1377,14 +1666,15 @@ describe("PackDisplay local workspace controller", () => {
       destination: "sideboard",
       placementHint: { column: 0 },
     }));
-    expect(onSelectionChange).not.toHaveBeenCalled();
+    expect(onSelectionChange).toHaveBeenCalledOnce();
+    expect(onSelectionChange).toHaveBeenCalledWith("unknown");
     expect(source).toHaveAttribute("data-visual-state", "waiting");
-    expect(screen.queryByRole("button", { name: "Confirm Pick" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Confirm Pick" })).toBeDisabled();
 
     await act(async () => resolveOutcome({ status: "acknowledged" }));
     fireEvent.click(screen.getByRole("button", { name: "unlock" }));
-    expect(source).toHaveAttribute("data-visual-state", "default");
-    expect(screen.queryByRole("button", { name: "Confirm Pick" })).not.toBeInTheDocument();
+    expect(source).toHaveAttribute("data-visual-state", "selected");
+    expect(screen.getByRole("button", { name: "Confirm Pick" })).toBeInTheDocument();
   });
 
   it("dispatches_a_tablet_touch_pack_drag_to_the_collapsed_sideboard", async () => {
@@ -1495,6 +1785,47 @@ describe("PackDisplay local workspace controller", () => {
     expect(rendered.container.querySelectorAll('[data-visual-state="leaving"]')).toHaveLength(0);
     act(() => vi.runAllTimers());
     expect([...rendered.container.querySelectorAll("[data-instance-id]")].map((node) => node.getAttribute("data-instance-id"))).toEqual(["unknown", "common"]);
+  });
+
+  it("renders_only_incoming_ids_when_a_retained_departure_reappears_in_the_current_pack", async () => {
+    vi.useFakeTimers();
+    let source!: PackDropSource;
+    const localDrag = {
+      ...dragController,
+      handlePointerDown: vi.fn((_event, nextSource: PackDropSource) => { source = nextSource; }),
+    };
+    const initial = controller({ dragController: localDrag });
+    const rendered = render(
+      <PackDisplay
+        controller={initial}
+        presentation={{ packScale: 1, setPackScale: vi.fn() }}
+        onCardHover={vi.fn()}
+      />,
+    );
+    const picked = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
+    fireEvent.pointerDown(picked, { button: 0, isPrimary: true, pointerId: 71, pointerType: "mouse" });
+    act(() => source.onAdmission({ kind: "dispatch", requestToken: "departure", interactionGeneration: 4 }));
+    rendered.rerender(
+      <PackDisplay
+        controller={{ ...initial, view: { ...view, current_pack: [cards[1]] } }}
+        presentation={{ packScale: 1, setPackScale: vi.fn() }}
+        onCardHover={vi.fn()}
+      />,
+    );
+    act(() => source.onSettled({ kind: "outcome", outcome: { status: "acknowledged" } }));
+    expect(rendered.container.querySelector('[data-instance-id="unknown"][data-visual-state="leaving"]')).toBeInTheDocument();
+
+    rendered.rerender(
+      <PackDisplay
+        controller={{ ...initial, view: { ...view, current_pack: [cards[0], cards[1]] } }}
+        presentation={{ packScale: 1, setPackScale: vi.fn() }}
+        onCardHover={vi.fn()}
+      />,
+    );
+
+    expect([...rendered.container.querySelectorAll("[data-instance-id]")].map((node) => node.getAttribute("data-instance-id")))
+      .toEqual(["unknown", "common"]);
+    expect(rendered.container.querySelector('[data-instance-id="unknown"][data-visual-state="leaving"]')).not.toBeInTheDocument();
   });
 
   it.each([

@@ -13,6 +13,37 @@ use crate::types::ability::{
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::triggers::AttackTargetFilter;
 
+#[test]
+fn teferi_master_of_time_minus_ten_preserves_two_extra_turns() {
+    let oracle = "You may activate loyalty abilities of Teferi on any player's turn any time you could cast an instant.\n\
+[+1]: Draw a card, then discard a card.\n\
+[−3]: Target creature you don't control phases out. (Treat it and anything attached to it as though they don't exist until its controller's next turn.)\n\
+[−10]: Take two extra turns after this one.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Teferi, Master of Time",
+        &[],
+        &["Planeswalker".into()],
+        &["Teferi".into()],
+    );
+    let minus_ten = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(&ability.cost, Some(AbilityCost::Loyalty { amount: -10 })))
+        .expect("Teferi's -10 loyalty ability parses");
+    assert!(matches!(
+        minus_ten.effect.as_ref(),
+        Effect::ExtraTurn {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 2 },
+        }
+    ));
+    assert!(!matches!(
+        minus_ten.effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+}
+
 /// CR 607.2d + CR 614.1c: only an as-enters replacement whose separate static
 /// reads `IsChosenCardType` is promoted from its locally-labeled list.
 #[test]
@@ -944,6 +975,49 @@ fn activation_during_gate_composes_turn_role_and_window_axes() {
             r.abilities[0].activation_restrictions
         );
     }
+}
+
+#[test]
+fn activated_ability_any_upkeep_restriction_uses_unscoped_upkeep_condition() {
+    const DWARVEN_ARMORY: &str =
+        "{2}, Sacrifice a land: Put a +2/+2 counter on target creature. Activate only during any upkeep step.";
+    const TOLARIA: &str = "{T}: Add {U}.\n{T}: Target creature loses banding and all \"bands with other\" abilities until end of turn. Activate only during any upkeep step.";
+    let expected = ActivationRestriction::RequiresCondition {
+        condition: Some(ParsedCondition::IsDuringUpkeep),
+    };
+    fn has_unimplemented(definition: &AbilityDefinition) -> bool {
+        matches!(definition.effect.as_ref(), Effect::Unimplemented { .. })
+            || definition
+                .sub_ability
+                .as_deref()
+                .is_some_and(has_unimplemented)
+    }
+
+    let armory = parse(DWARVEN_ARMORY, "Dwarven Armory", &[], &["Enchantment"], &[]);
+    assert_eq!(armory.abilities.len(), 1, "got {:#?}", armory.abilities);
+    assert!(
+        armory.abilities[0]
+            .activation_restrictions
+            .contains(&expected),
+        "Dwarven Armory must retain its any-upkeep restriction: {:#?}",
+        armory.abilities[0]
+    );
+    assert!(
+        !has_unimplemented(&armory.abilities[0]),
+        "Dwarven Armory's parsed ability must not retain an unimplemented timing tail: {:#?}",
+        armory.abilities[0]
+    );
+
+    let tolaria = parse(TOLARIA, "Tolaria", &[], &["Land"], &[]);
+    assert_eq!(tolaria.abilities.len(), 2, "got {:#?}", tolaria.abilities);
+    assert!(
+        tolaria
+            .abilities
+            .iter()
+            .any(|ability| ability.activation_restrictions.contains(&expected)),
+        "Tolaria's second ability must retain its any-upkeep restriction: {:#?}",
+        tolaria.abilities
+    );
 }
 
 /// CR 508.1: a STANDALONE combat-window activation gate — "Activate only before
@@ -13639,14 +13713,14 @@ fn prevent_all_combat_damage() {
 
 #[test]
 fn prevent_dynamic_amount_where_x_is_counters() {
-    use crate::types::ability::{ObjectScope, PreventionAmount, QuantityExpr, QuantityRef};
+    use crate::types::ability::{
+        CombatDamageScope, DamageModification, DamageTargetFilter, DamageTargetPlayerScope,
+        PreventionFormula, SourceExclusion, TypedFilter,
+    };
     use crate::types::counter::CounterType;
-    // Cover of Winter class: "prevent X … where X is the number of age
-    // counters on this enchantment". The chunk machinery strips the
-    // trailing "where x is …" binding and `apply_where_x_effect_expression`
-    // re-applies it onto `Effect::PreventDamage::amount_dynamic`. Driven
-    // through the full `parse` path because the chunk-level where-X
-    // mechanism does not run inside the single-clause `parse_effect`.
+    // Cover of Winter's static damage prevention installs its own dynamic
+    // `PreventionFormula`; the full parser must retain the creature source,
+    // combat-only scope, and every per-event recipient category.
     let parsed = parse(
         "If a creature would deal combat damage to you and/or one or more creatures \
              you control, prevent X of that damage, where X is the number of age counters \
@@ -13656,26 +13730,38 @@ fn prevent_dynamic_amount_where_x_is_counters() {
         &["Snow", "Enchantment"],
         &[],
     );
-    let prevent = parsed
-        .abilities
-        .iter()
-        .find(|a| matches!(&*a.effect, Effect::PreventDamage { .. }))
-        .expect("expected a PreventDamage ability");
-    match &*prevent.effect {
-        Effect::PreventDamage {
-            amount: PreventionAmount::Next(1),
-            amount_dynamic:
-                Some(QuantityExpr::Ref {
-                    qty:
-                        QuantityRef::CountersOn {
-                            scope: ObjectScope::Source,
-                            counter_type: Some(ct),
-                        },
-                }),
-            ..
-        } => assert_eq!(*ct, CounterType::Age),
-        other => panic!("expected PreventDamage with dynamic age counters, got {other:?}"),
-    }
+    let [replacement] = parsed.replacements.as_slice() else {
+        panic!("expected one Cover of Winter replacement, got {parsed:#?}");
+    };
+    assert_eq!(
+        replacement.combat_scope,
+        Some(CombatDamageScope::CombatOnly)
+    );
+    assert_eq!(
+        replacement.damage_target_filter,
+        Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
+            player: DamageTargetPlayerScope::Controller,
+            permanent_type: Some(CoreType::Creature),
+            source_scope: SourceExclusion::Include,
+        })
+    );
+    assert_eq!(
+        replacement.damage_source_filter,
+        Some(TargetFilter::Typed(TypedFilter::creature()))
+    );
+    assert!(matches!(
+        &replacement.damage_modification,
+        Some(DamageModification::PreventionMinus {
+            value: PreventionFormula::Quantity {
+                quantity: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(CounterType::Age),
+                    },
+                },
+            },
+        })
+    ));
     assert!(
         parsed
             .parse_warnings
@@ -13684,6 +13770,124 @@ fn prevent_dynamic_amount_where_x_is_counters() {
         "DynamicQty swallow warning should clear, got {:?}",
         parsed.parse_warnings
     );
+}
+
+/// Compound damage-recipient filters choose which events a replacement applies
+/// to, while a rider's "that permanent" refers to the particular event that was
+/// prevented. Keep those two semantic roles distinct for every player scope.
+#[test]
+fn compound_damage_recipient_riders_bind_to_the_prevented_event_target() {
+    use crate::types::ability::{DamageTargetFilter, DamageTargetPlayerScope, SourceExclusion};
+
+    let cases = [
+        (
+            "controller",
+            "If a source would deal damage to you and/or one or more creatures you control, prevent that damage. Put a +1/+1 counter on that creature for each 1 damage prevented this way.",
+            DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                player: DamageTargetPlayerScope::Controller,
+                permanent_type: Some(CoreType::Creature),
+                source_scope: SourceExclusion::Include,
+            },
+        ),
+        (
+            "opponent",
+            "If a source would deal damage to an opponent or a permanent an opponent controls, prevent that damage. Put a +1/+1 counter on that permanent for each 1 damage prevented this way.",
+            DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                player: DamageTargetPlayerScope::Opponent,
+                permanent_type: None,
+                source_scope: SourceExclusion::Include,
+            },
+        ),
+        (
+            "source-chosen player",
+            "If a source would deal damage to the chosen player or a permanent they control, prevent that damage. Put a +1/+1 counter on that permanent for each 1 damage prevented this way.",
+            DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                player: DamageTargetPlayerScope::SourceChosenPlayer,
+                permanent_type: None,
+                source_scope: SourceExclusion::Include,
+            },
+        ),
+    ];
+
+    for (label, oracle, expected_filter) in cases {
+        let def = crate::parser::oracle_replacement::parse_replacement_line(
+            oracle,
+            "Compound Recipient Fixture",
+        )
+        .unwrap_or_else(|| panic!("{label}: replacement must parse"));
+        assert_eq!(
+            def.damage_target_filter,
+            Some(expected_filter),
+            "{label}: recipient filter must remain unchanged"
+        );
+        let execute = def
+            .execute
+            .as_ref()
+            .unwrap_or_else(|| panic!("{label}: prevention rider must parse"));
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::PutCounter {
+                    target: TargetFilter::PostReplacementDamageTarget,
+                    ..
+                }
+            ),
+            "{label}: rider must bind to the prevented event target, got {execute:?}"
+        );
+    }
+
+    let bare_pronoun = crate::parser::oracle_replacement::parse_replacement_line(
+        "If a source would deal damage to an opponent or a permanent an opponent controls, prevent that damage. Put a +1/+1 counter on it for each 1 damage prevented this way.",
+        "Compound Recipient Bare Pronoun Fixture",
+    )
+    .expect("opponent compound recipient with a bare-pronoun rider must parse");
+    assert!(matches!(
+        bare_pronoun
+            .execute
+            .as_deref()
+            .map(|execute| execute.effect.as_ref()),
+        Some(Effect::PutCounter {
+            target: TargetFilter::PostReplacementDamageTarget,
+            ..
+        })
+    ));
+}
+
+/// Spell-target and self-scoped prevention are different anaphor cohorts from
+/// event-recipient prevention and must retain their existing bindings.
+#[test]
+fn prevention_rider_binding_keeps_spell_target_and_self_scoped_controls() {
+    let spell_target = crate::parser::oracle_replacement::parse_replacement_line(
+        "Prevent the next 3 damage that would be dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.",
+        "Test of Faith",
+    )
+    .expect("spell-target prevention must parse");
+    assert!(matches!(
+        spell_target
+            .execute
+            .as_deref()
+            .map(|execute| execute.effect.as_ref()),
+        Some(Effect::PutCounter {
+            target: TargetFilter::ParentTarget,
+            ..
+        })
+    ));
+
+    let self_scoped = crate::parser::oracle_replacement::parse_replacement_line(
+        "If damage would be dealt to ~, prevent that damage and put that many +1/+1 counters on it.",
+        "Self-Scoped Prevention Fixture",
+    )
+    .expect("self-scoped prevention must parse");
+    assert!(matches!(
+        self_scoped
+            .execute
+            .as_deref()
+            .map(|execute| execute.effect.as_ref()),
+        Some(Effect::PutCounter {
+            target: TargetFilter::SelfRef,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -13796,26 +14000,32 @@ fn collect_prevent_nodes(
     out
 }
 
-/// Pre-order (self, then sub_ability, then else_ability) flat list of every
-/// effect in the ability/sub-ability tree. Used to assert that non-PreventDamage
-/// sibling clauses on the same card survive the bidirectional split intact and
-/// in the correct chain position — the family assertion only inspects the two
-/// PreventDamage nodes in isolation and cannot detect a dropped/overwritten
-/// sibling rider.
-fn collect_all_effects(abilities: &[crate::types::ability::AbilityDefinition]) -> Vec<Effect> {
-    fn walk(def: &crate::types::ability::AbilityDefinition, out: &mut Vec<Effect>) {
-        out.push((*def.effect).clone());
-        if let Some(sub) = def.sub_ability.as_deref() {
-            walk(sub, out);
-        }
-        if let Some(el) = def.else_ability.as_deref() {
-            walk(el, out);
-        }
+/// Visit every ordinary ability root and every trigger execution root in a
+/// parsed card. The production visitor owns nested ability traversal; these
+/// test collectors only decide which parsed roots to start from.
+fn visit_parsed_effects<F>(parsed: &ParsedAbilities, visit: &mut F)
+where
+    F: FnMut(&Effect) -> std::ops::ControlFlow<()>,
+{
+    for ability in &parsed.abilities {
+        let _ = crate::types::ability_visit::visit_ability_def(ability, visit);
     }
+    for trigger in &parsed.triggers {
+        let _ = crate::types::ability_visit::visit_trigger(trigger, visit);
+    }
+}
+
+/// Flat list of every effect reachable from ordinary ability and trigger roots.
+/// Used to assert that non-PreventDamage sibling clauses on the same card
+/// survive the bidirectional split intact and in the correct chain position —
+/// the family assertion only inspects the two PreventDamage nodes in isolation
+/// and cannot detect a dropped/overwritten sibling rider.
+fn collect_all_effects(parsed: &ParsedAbilities) -> Vec<Effect> {
     let mut out = Vec::new();
-    for a in abilities {
-        walk(a, &mut out);
-    }
+    visit_parsed_effects(parsed, &mut |effect| {
+        out.push(effect.clone());
+        std::ops::ControlFlow::Continue(())
+    });
     out
 }
 
@@ -13946,7 +14156,7 @@ fn foxfire_bidirectional_prevent_the_creature() {
     // (Untap -> to-Prevent -> by-Prevent -> Draw-delayed-trigger), never
     // overwriting/displacing the "by" shield or being dropped.
     let parsed = parse(FOXFIRE, "Foxfire", &[], &["Instant"], &[]);
-    let effects = collect_all_effects(&parsed.abilities);
+    let effects = collect_all_effects(&parsed);
     let prevent_positions: Vec<usize> = effects
         .iter()
         .enumerate()
@@ -13988,7 +14198,7 @@ fn delirium_bidirectional_prevent_the_creature() {
     // damage equal to its power to the player") must still parse and chain ahead
     // of the now-2-node Prevent split, not be dropped or reordered by it.
     let parsed = parse(DELIRIUM, "Delirium", &[], &["Instant"], &[]);
-    let effects = collect_all_effects(&parsed.abilities);
+    let effects = collect_all_effects(&parsed);
     let tap_pos = effects
         .iter()
         .position(|e| matches!(e, Effect::SetTapState { .. }))
@@ -16353,21 +16563,35 @@ fn earthbender_ascension_landfall_chain() {
         def.effect,
     );
 
-    // Node 2: PutCounter(P1P1, 1, Typed(creature+You)), condition = QuantityCheck(quest >= 4)
+    // Node 2: PutCounter(P1P1, 1, Typed(creature+You)), condition = the
+    // reflexive marker plus QuantityCheck(quest >= 4).
     let node2 = def
         .sub_ability
         .as_ref()
         .expect("should have node 2 (P1P1 counter)");
+    let Some(AbilityCondition::And { conditions }) = &node2.condition else {
+        panic!(
+            "Node 2 must keep both the reflexive marker and quest gate, got {:?}",
+            node2.condition
+        );
+    };
     assert!(
-        matches!(
-            &node2.condition,
-            Some(AbilityCondition::QuantityCheck {
+        node2
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::has_when_you_do_marker),
+        "Node 2 must remain a separate reflexive trigger"
+    );
+    assert!(
+        conditions.iter().any(|condition| matches!(
+            condition,
+            AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 4 },
-            }) if *counter_type == crate::types::counter::CounterType::Generic("quest".to_string())
-        ),
-        "Node 2 condition should be QuantityCheck(quest >= 4), got {:?}",
+            } if *counter_type == crate::types::counter::CounterType::Generic("quest".to_string())
+        )),
+        "Node 2 condition should retain QuantityCheck(quest >= 4), got {:?}",
         node2.condition,
     );
     match &*node2.effect {
@@ -16412,6 +16636,248 @@ fn earthbender_ascension_landfall_chain() {
         }
         other => panic!("Node 3 should be GenericEffect(trample), got {other:?}"),
     }
+}
+
+/// SHAPE — CR 603.12 + CR 603.4 + CR 608.2a: the reflexive marker and its
+/// intervening-if graveyard threshold are distinct facts. The marker creates
+/// the separate trigger; the quantity check is checked when that trigger would
+/// be created and again when it resolves.
+#[test]
+fn a_sigil_of_myrkul_keeps_reflexive_marker_and_graveyard_guard() {
+    use crate::types::ability::{
+        AbilityCondition, Comparator, CountScope, QuantityExpr, QuantityRef, TypeFilter, ZoneRef,
+    };
+
+    let parsed = parse_oracle_text(
+        "At the beginning of combat on your turn, mill a card. When you do, if there are four or more creature cards in your graveyard, put a +1/+1 counter on target creature you control and it gains deathtouch until end of turn.",
+        "A-Sigil of Myrkul",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let execute = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .expect("the beginning-of-combat trigger must parse");
+    assert!(
+        matches!(*execute.effect, Effect::Mill { .. }),
+        "the antecedent mill must remain the parent instruction"
+    );
+
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .expect("the counter rider must remain attached to the mill");
+    assert_eq!(
+        rider.condition,
+        Some(AbilityCondition::when_you_do_with_guard(
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Creature],
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            },
+        )),
+        "the rider must be a CR 603.12 reflexive trigger with its own CR 603.4 guard"
+    );
+    assert!(
+        matches!(*rider.effect, Effect::PutCounter { .. }),
+        "the guarded reflexive body must still reach the +1/+1 instruction"
+    );
+}
+
+/// CR 614.1c + CR 603.12 + CR 603.4 + CR 608.2a: a copy-replacement rider may
+/// carry the same reflexive marker plus intervening-if guard as an ordinary
+/// effect chain. The replacement parser must attach the complete rider rather
+/// than accepting only a bare `WhenYouDo` condition.
+#[test]
+fn guarded_clone_replacement_rider_keeps_reflexive_marker_and_guard() {
+    use crate::types::ability::AbilityCondition;
+
+    let parsed = parse(
+        "You may have Guarded Clone enter as a copy of any creature on the battlefield. When you do, if you are the monarch, draw a card.",
+        "Guarded Clone",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    let replacement = parsed
+        .replacements
+        .first()
+        .expect("the clone replacement must parse");
+    let execute = replacement
+        .execute
+        .as_deref()
+        .expect("the clone replacement must have an execute definition");
+    assert!(
+        matches!(*execute.effect, Effect::BecomeCopy { .. }),
+        "the replacement must retain the copy instruction"
+    );
+
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .expect("the guarded reflexive rider must remain attached to the copy instruction");
+    assert_eq!(
+        rider.condition,
+        Some(AbilityCondition::when_you_do_with_guard(
+            AbilityCondition::IsMonarch
+        )),
+        "the CR 603.12 marker and CR 603.4 guard must both survive"
+    );
+    assert!(
+        matches!(*rider.effect, Effect::Draw { .. }),
+        "the guarded rider must retain its draw instruction"
+    );
+}
+
+/// CR 603.12 + CR 603.4: an unmodeled intervening-if condition between a
+/// reflexive connector and an optional body is not an optional bare
+/// `WhenYouDo` rider. Once every specialized guard parser has declined, retain
+/// it as an explicit gap rather than letting the optional-clause shell discard
+/// the guard.
+#[test]
+fn unmodeled_guarded_reflexive_optional_fails_closed() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::AbilityKind;
+
+    let def = parse_effect_chain(
+        "When you do, if the moon is full, you may draw a card",
+        AbilityKind::Spell,
+    );
+
+    let Effect::Unimplemented { name, description } = def.effect.as_ref() else {
+        panic!(
+            "an unmodeled reflexive guard must not become an unconditional optional effect: {def:?}"
+        );
+    };
+    assert_eq!(name, "when_you_do_guard");
+    assert!(
+        description
+            .as_deref()
+            .is_some_and(|fragment| fragment.contains("if the moon is full")),
+        "the explicit gap must retain the unmodeled guard"
+    );
+    assert!(
+        !def.optional,
+        "the unmodeled reflexive rider must not retain an unconditional may-choice"
+    );
+}
+
+/// CR 614.1c + CR 603.12 + CR 603.4: clone-replacement riders use the same
+/// effect-chain path. An unsupported intervening-if condition must reject the
+/// entire replacement so the source remains an explicit parser gap rather than
+/// a supported clone with its rider silently discarded. Once the replacement
+/// parser rejects that partial result, the outer static router owns the whole
+/// source line and records `static_structure`; the standalone test above checks
+/// the inner effect-chain parser's `when_you_do_guard` identity directly.
+#[test]
+fn unmodeled_guarded_clone_replacement_rider_fails_closed() {
+    let parsed = parse(
+        "You may have Guarded Clone enter as a copy of any creature on the battlefield. When you do, if the moon is full, you may draw a card.",
+        "Guarded Clone",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert!(
+        parsed.replacements.is_empty(),
+        "the unsupported rider must prevent a partial clone replacement, got {:?}",
+        parsed.replacements
+    );
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .any(|ability| matches!(
+                &*ability.effect,
+                Effect::Unimplemented { name, description }
+                    if name == "static_structure"
+                        && description.as_deref().is_some_and(|fragment| {
+                            fragment.contains("enter as a copy of any creature")
+                                && fragment.contains("if the moon is full")
+                        })
+            )),
+        "the rejected clone source must retain both the clone and its unsupported guard in the outer static-structure gap, got {:?}",
+        parsed.abilities
+    );
+}
+
+/// SHAPE — CR 603.12 + CR 603.4 + CR 608.2a: the general condition parser
+/// deliberately defers "if a creature card is revealed this way" to the
+/// ordered specialized card-type parser. The specialized parser must preserve
+/// both that guard and the separate reflexive-trigger marker.
+#[test]
+fn deferred_reflexive_card_type_guard_reaches_specialized_parser() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityCondition, AbilityKind};
+    use crate::types::card_type::CoreType;
+
+    let def = parse_effect_chain(
+        "reveal the top card of your library. When you do, if a creature card is revealed this way, draw a card",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(*def.effect, Effect::RevealTop { .. }));
+
+    let rider = def
+        .sub_ability
+        .as_deref()
+        .expect("the reflexive draw must remain attached to the reveal");
+    assert_eq!(
+        rider.condition,
+        Some(AbilityCondition::when_you_do_with_guard(
+            AbilityCondition::RevealedHasCardType {
+                card_types: vec![CoreType::Creature],
+                additional_filter: None,
+                subtype_filter: None,
+            }
+        )),
+        "the deferred guard must be claimed by the specialized card-type parser"
+    );
+    assert!(matches!(*rider.effect, Effect::Draw { .. }));
+}
+
+/// Dominion Saboteur's verified Oracle text carries a clone rider whose
+/// counter-copying instruction is not represented yet. The recognized rider
+/// must therefore reject the partial CR 614.1c replacement and remain an
+/// explicit parser gap instead of silently dropping printed rules text.
+#[test]
+fn dominion_saboteur_unsupported_clone_rider_fails_closed() {
+    let parsed = parse(
+        "You may have this creature enter as a copy of any artifact or creature on the battlefield, except it isn't legendary. If you do, it enters with additional counters on it equal to the same number and kinds of counters the copied permanent has on it.",
+        "Dominion Saboteur",
+        &[],
+        &["Creature"],
+        &["Shapeshifter"],
+    );
+    assert!(
+        parsed.replacements.is_empty(),
+        "the unsupported counter-copying rider must reject the partial clone replacement"
+    );
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .any(|ability| matches!(
+                &*ability.effect,
+                Effect::Unimplemented { name, description }
+                    if name == "static_structure"
+                        && description.as_deref().is_some_and(|fragment| {
+                            fragment.contains(
+                                "additional counters on it equal to the same number and kinds of counters"
+                            )
+                        })
+            )),
+        "the rejected Dominion Saboteur text must retain the unsupported counter-copying rider as the explicit gap, got {:?}",
+        parsed.abilities
+    );
 }
 
 #[test]
@@ -26474,27 +26940,52 @@ fn throne_of_eldraine_parses_all_chosen_color_mana_riders() {
 /// parsed card, so the honesty tests below assert on the pattern-class key
 /// rather than on a Debug substring.
 fn unimplemented_keys(parsed: &ParsedAbilities) -> Vec<String> {
-    fn walk(def: &AbilityDefinition, out: &mut Vec<String>) {
-        if let Effect::Unimplemented { name, .. } = &*def.effect {
-            out.push(name.to_string());
-        }
-        if let Some(sub) = def.sub_ability.as_deref() {
-            walk(sub, out);
-        }
-        if let Some(els) = def.else_ability.as_deref() {
-            walk(els, out);
-        }
-    }
-    let mut out = Vec::new();
-    for def in &parsed.abilities {
-        walk(def, &mut out);
-    }
-    for trig in &parsed.triggers {
-        if let Some(exec) = trig.execute.as_deref() {
-            walk(exec, &mut out);
-        }
-    }
-    out
+    collect_all_effects(parsed)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::Unimplemented { name, .. } => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Both test collectors must include trigger execution roots, otherwise an
+/// unsupported fallback can hide under a parsed trigger while direct ability
+/// roots make the same assertion appear green.
+#[test]
+fn parsed_effect_collectors_include_trigger_execution_trees() {
+    let mut parsed = parse_oracle_text("", "Trigger Collector Fixture", &[], &[], &[]);
+    let nested_prevention = AbilityDefinition::new(
+        AbilityKind::Spell,
+        crate::parser::oracle_effect::parse_effect(
+            "prevent the next 1 damage that would be dealt this turn",
+        ),
+    );
+    let mut execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::unimplemented("prevent", "trigger execute gap"),
+    );
+    execute.sub_ability = Some(Box::new(nested_prevention));
+    let mut trigger = TriggerDefinition::new(TriggerMode::Attacks);
+    trigger.execute = Some(Box::new(execute));
+    parsed.triggers.push(trigger);
+
+    assert!(
+        unimplemented_keys(&parsed)
+            .iter()
+            .any(|key| key == "prevent"),
+        "the named gap in trigger.execute must be collected"
+    );
+    assert!(
+        collect_all_effects(&parsed).iter().any(|effect| matches!(
+            effect,
+            Effect::PreventDamage {
+                amount: PreventionAmount::Next(1),
+                ..
+            }
+        )),
+        "the nested trigger.execute prevention must be collected"
+    );
 }
 
 /// CR 603.7a + CR 603.7c + CR 400.7: The impulse-cleanup sweep must stay HONESTLY
@@ -26825,6 +27316,67 @@ fn bound_delayed_recalls_are_not_demoted() {
             "{name} is expected to parse with zero Unimplemented; keys={keys:?}",
         );
     }
+}
+
+/// CR 615.1a: Tornellan Protector's full activated-ability line reaches the
+/// document parser's imperative dispatch and must report its unsupported
+/// event-relative formula as a named `prevent` gap. This complements the
+/// imperative-level regression by proving the router does not substitute the
+/// historical one-damage fallback on the production Oracle-text path.
+#[test]
+fn tornellan_protector_event_relative_formula_is_an_honest_prevent_gap() {
+    let parsed = parse_oracle_text(
+        "{T}: Until end of turn, each time damage is dealt to target creature or player, \
+         prevent X of that damage, where X is a number from 1 to 3 chosen at random each time.",
+        "Tornellan Protector",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let effects = collect_all_effects(&parsed);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Unimplemented { name, .. } if name == "prevent"
+    )));
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        Effect::PreventDamage {
+            amount: PreventionAmount::Next(1),
+            ..
+        }
+    )));
+}
+
+/// CR 615.1 + CR 615.1a: The production document parser must report the
+/// simple each-time half-damage wording as the same named `prevent` gap. Walk
+/// every nested ability effect so a future partial lowering cannot conceal the
+/// historical `PreventDamage::Next(1)` fallback below a wrapper.
+#[test]
+fn each_time_half_damage_formula_is_an_honest_prevent_gap() {
+    let parsed = parse_oracle_text(
+        "Each time a source would deal damage to you, prevent half that damage.",
+        "Event-Relative Prevention Test",
+        &[],
+        &[],
+        &[],
+    );
+    assert!(
+        unimplemented_keys(&parsed)
+            .iter()
+            .any(|key| key == "prevent"),
+        "the event-relative formula must remain a named prevent gap; keys={:?}",
+        unimplemented_keys(&parsed),
+    );
+    assert!(
+        !collect_all_effects(&parsed).iter().any(|effect| matches!(
+            effect,
+            Effect::PreventDamage {
+                amount: PreventionAmount::Next(1),
+                ..
+            }
+        )),
+        "the production parser must not hide the unsupported formula as PreventDamage::Next(1)"
+    );
 }
 
 // ---------------------------------------------------------------------------

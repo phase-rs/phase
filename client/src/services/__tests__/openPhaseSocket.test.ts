@@ -1,5 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const { lanSupported, probeLan, authorizeLan, invokeLan, channelListener } = vi.hoisted(() => ({
+  lanSupported: vi.fn(), probeLan: vi.fn(), authorizeLan: vi.fn(), invokeLan: vi.fn(),
+  channelListener: { current: null as null | ((event: unknown) => void) },
+}));
+vi.mock("../lan", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lan")>(),
+  canUseLanBridge: lanSupported, initializeLanCapabilities: probeLan, authorizeLanServer: authorizeLan,
+}));
+vi.mock("../platform", () => ({ isDesktopTauri: () => true }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: invokeLan,
+  Channel: class { constructor(callback: (event: unknown) => void) { channelListener.current = callback; } },
+}));
+
 import {
   HandshakeError,
   openPhaseSocket,
@@ -61,6 +75,9 @@ function helloFrame(
 }
 
 beforeEach(() => {
+  lanSupported.mockReturnValue(false); probeLan.mockResolvedValue(false);
+  authorizeLan.mockReset().mockResolvedValue(undefined);
+  invokeLan.mockResolvedValue(41); channelListener.current = null;
   MockWebSocket.instances = [];
   vi.stubGlobal("WebSocket", MockWebSocket);
 });
@@ -449,5 +466,108 @@ describe("withReconnect", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+
+describe("LAN default transport", () => {
+  it("waits for native approval before opening a socket or starting its timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      lanSupported.mockReturnValue(true); probeLan.mockResolvedValue(true);
+      let approve!: () => void;
+      authorizeLan.mockImplementation(() => new Promise<void>((resolve) => { approve = resolve; }));
+      const pending = openPhaseSocket("ws://192.168.1.2:9374/ws", { timeoutMs: 20 });
+      await vi.advanceTimersByTimeAsync(30);
+      expect(authorizeLan).toHaveBeenCalledOnce();
+      expect(channelListener.current).toBeNull();
+      expect(MockWebSocket.instances).toHaveLength(0);
+      approve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(channelListener.current).not.toBeNull();
+      channelListener.current?.({ type: "message", text: helloFrame() });
+      (await pending).close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["resolve", "reject"] as const)("aborts a pending capability probe before its late %s", async (completion) => {
+    lanSupported.mockReturnValue(true);
+    let complete!: () => void;
+    const probe = new Promise<boolean>((resolve, reject) => {
+      complete = () => completion === "resolve" ? resolve(true) : reject(new Error("Late probe failure"));
+    });
+    probeLan.mockReturnValue(probe);
+    const controller = new AbortController();
+    const pending = openPhaseSocket("ws://192.168.1.2:9374/ws", { signal: controller.signal });
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ kind: "aborted" });
+    complete();
+    await probe.catch(() => {});
+    expect(authorizeLan).not.toHaveBeenCalled();
+    expect(channelListener.current).toBeNull();
+    expect(MockWebSocket.instances).toHaveLength(0);
+  });
+
+  it.each(["resolve", "reject"] as const)("aborts pending native approval before its late %s", async (completion) => {
+    lanSupported.mockReturnValue(true); probeLan.mockResolvedValue(true);
+    let complete!: () => void;
+    const approval = new Promise<void>((resolve, reject) => {
+      complete = () => completion === "resolve" ? resolve() : reject(new Error("Late approval failure"));
+    });
+    authorizeLan.mockReturnValue(approval);
+    const controller = new AbortController();
+    const pending = openPhaseSocket("ws://192.168.1.2:9374/ws", { signal: controller.signal });
+    await vi.waitFor(() => expect(authorizeLan).toHaveBeenCalledOnce());
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ kind: "aborted" });
+    complete();
+    await approval.catch(() => {});
+    expect(channelListener.current).toBeNull();
+    expect(MockWebSocket.instances).toHaveLength(0);
+  });
+
+  it("never opens a socket when native approval is rejected", async () => {
+    lanSupported.mockReturnValue(true); probeLan.mockResolvedValue(true);
+    authorizeLan.mockRejectedValue(new Error("LAN approval denied"));
+    await expect(openPhaseSocket("ws://192.168.1.2:9374/ws")).rejects.toThrow("LAN approval denied");
+    expect(channelListener.current).toBeNull();
+    expect(MockWebSocket.instances).toHaveLength(0);
+  });
+
+  it("selects native IPC after its capability probe and negotiates text only", async () => {
+    lanSupported.mockReturnValue(true); probeLan.mockResolvedValue(true);
+    const pending = openPhaseSocket("ws://192.168.1.2:9374/ws");
+    await vi.waitFor(() => expect(channelListener.current).not.toBeNull());
+    channelListener.current?.({ type: "message", text: helloFrame({ wire_formats: ["GzipEnvelopeV1"] }) });
+    const socket = await pending;
+    expect(MockWebSocket.instances).toHaveLength(0);
+    expect(invokeLan).toHaveBeenCalledWith("connect_lan_server", expect.objectContaining({ url: "ws://192.168.1.2:9374/ws" }));
+    expect(invokeLan).toHaveBeenCalledWith("lan_bridge_send", {
+      id: 41, text: expect.stringContaining('"wire_formats":[]'),
+    });
+    socket.close();
+  });
+
+  it("keeps an explicit factory authoritative for a LAN address", async () => {
+    lanSupported.mockReturnValue(true);
+    const factory = vi.fn((url: string) => new MockWebSocket(url) as unknown as WebSocket);
+    const pending = openPhaseSocket("ws://192.168.1.2:9374/ws", { socketFactory: factory });
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame());
+    (await pending).close();
+    expect(factory).toHaveBeenCalledOnce();
+    expect(authorizeLan).not.toHaveBeenCalled();
+    expect(channelListener.current).toBeNull();
+  });
+
+  it("keeps browser and old-shell LAN connections on WebSocket", async () => {
+    const pending = openPhaseSocket("ws://192.168.1.2:9374/ws");
+    await vi.waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    MockWebSocket.instances[0].deliverMessage(helloFrame());
+    (await pending).close();
+    expect(authorizeLan).not.toHaveBeenCalled();
+    expect(channelListener.current).toBeNull();
   });
 });

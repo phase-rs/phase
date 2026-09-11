@@ -12,6 +12,7 @@
 //! identical across modes), so every entry the core sees is a P2P entry.
 
 use engine::types::format::GameFormat;
+use engine::types::match_config::MatchType;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -520,6 +521,7 @@ impl Broker {
                 total_rounds,
                 plus_rounds,
                 format,
+                match_type,
             } => self.handle_create_tournament(
                 conn,
                 name,
@@ -529,6 +531,7 @@ impl Broker {
                 total_rounds,
                 plus_rounds,
                 format,
+                match_type,
                 env,
             ),
 
@@ -1247,6 +1250,7 @@ impl Broker {
         total_rounds: Option<u32>,
         plus_rounds: Option<u32>,
         format: Option<GameFormat>,
+        match_type: Option<MatchType>,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
         // Registry capacity, checked before a code or a token is minted and
@@ -1284,6 +1288,7 @@ impl Broker {
                 total_rounds,
                 plus_rounds,
                 format,
+                match_type,
             },
             env,
         ) {
@@ -2540,6 +2545,7 @@ mod tests {
                 total_rounds: None,
                 plus_rounds: None,
                 format: None,
+                match_type: None,
             },
             env,
         );
@@ -2698,6 +2704,7 @@ mod tests {
                 total_rounds: None,
                 plus_rounds: None,
                 format: None,
+                match_type: None,
             },
             &env,
         );
@@ -3078,6 +3085,7 @@ mod tests {
                 total_rounds: None,
                 plus_rounds: None,
                 format: None,
+                match_type: None,
             },
             env,
         );
@@ -4252,6 +4260,7 @@ mod tests {
                 total_rounds: None,
                 plus_rounds: None,
                 format: None,
+                match_type: None,
             },
             &env,
         );
@@ -4439,6 +4448,7 @@ mod tests {
                 total_rounds: None,
                 plus_rounds: None,
                 format: None,
+                match_type: None,
             },
             env,
         );

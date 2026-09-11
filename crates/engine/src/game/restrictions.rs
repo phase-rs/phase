@@ -1142,12 +1142,13 @@ fn activation_restriction_applies(
             .objects
             .get(&source_id)
             .is_some_and(|obj| obj.harnessed),
-        // CR 716.4: Level N+1 ability can only activate when Class is at level N.
+        // CR 716.2a: "[Cost]: Level N" activates only while the Class is level N-1.
+        // CR 716.2d: a source with no stored level is level 1, so a Class copy
+        // (Mirrormade) can gain its first level like any printed Class.
         ActivationRestriction::ClassLevelIs { level } => state
             .objects
             .get(&source_id)
-            .and_then(|obj| obj.class_level)
-            .is_some_and(|current| current == *level),
+            .is_some_and(|obj| obj.level() == *level),
         // CR 711.2a + CR 711.2b: Leveler counter range — activatable when source has
         // level counters in the specified range [minimum, maximum] (or >= minimum if unbounded).
         ActivationRestriction::LevelCounterRange { minimum, maximum } => {

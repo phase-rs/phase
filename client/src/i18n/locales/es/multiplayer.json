@@ -1,4 +1,22 @@
 {
+  "lan": {
+    "title": "Red local",
+    "guidance": "Introduce una dirección de servidor para unirte manualmente. Las páginas HTTPS requieren un servidor wss:// seguro; usa la aplicación de escritorio para direcciones ws:// locales.",
+    "unavailable": "El alojamiento y la búsqueda LAN requieren una aplicación de escritorio actualizada.",
+    "checking": "Comprobando compatibilidad LAN…",
+    "start": "Iniciar alojamiento LAN",
+    "stop": "Detener alojamiento LAN",
+    "scan": "Buscar servidores LAN",
+    "pending": "Procesando…",
+    "running": "El alojamiento LAN está activo. Comparte una dirección con jugadores de tu red.",
+    "empty": "No se encontraron servidores LAN. Comprueba que el anfitrión esté activo en la misma red e inténtalo de nuevo.",
+    "add": "Añadir servidor",
+    "copy": "Copiar dirección",
+    "copied": "Dirección copiada",
+    "error": "La operación LAN falló. {{detail}}",
+    "added": "Servidor añadido. Usa un servidor dedicado cuando su conexión sea compatible y esté lista.",
+    "originUnavailable": "El alojamiento LAN no está disponible para esta versión u origen de la aplicación."
+  },
   "concedeDialog": {
     "title": "¿Conceder la partida?",
     "game": {
@@ -206,6 +224,7 @@
     "invalidJoinServer": "La dirección del servidor de ese código no es válida."
   },
   "hostSetup": {
+    "dedicatedUnavailable": "No hay ningún servidor dedicado disponible en este momento. Puedes alojar la partida mediante P2P.",
     "hostDirectMatch": "Hospedar partida directa",
     "hostMatch": "Hospedar partida",
     "p2pNotice": "Modo peer-to-peer. Esta sala conecta a los jugadores directamente en lugar de ejecutarse en un servidor.",

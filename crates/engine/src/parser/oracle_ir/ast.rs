@@ -1788,8 +1788,9 @@ pub(crate) enum ZoneCounterImperativeAst {
         /// ("exile a card … with N <type> counters on it"). Empty for the
         /// common no-counter case. Mirrors `Effect::ChangeZone.enter_with_counters`.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
-        /// CR 700.4 (#5649): a counted graveyard exile — "exile <N> cards from
-        /// your graveyard" (Nefarious Lich: "exile that many cards … instead").
+        /// CR 107.1 + CR 608.2c + CR 701.13a: a counted graveyard exile —
+        /// "exile <N> cards from your graveyard" (Nefarious Lich: "exile that
+        /// many cards … instead").
         /// `Effect::ChangeZone` carries no count, so the quantity rides the
         /// clause's `MultiTargetSpec` (mirroring Forage), threaded at lowering by
         /// `lower_imperative_family_ast`. `None` for the ordinary single-object
@@ -2278,6 +2279,9 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
     let mut refused_bound: Option<crate::types::ability::ResolutionCastWindow> = None;
     // CR 611.2a (#7959): the inner lifetime condition the engine cannot evaluate.
     let mut unevaluable_lifetime: Option<String> = None;
+    // CR 601.2b + CR 118.9: the card filter of a hand-origin FREE cast grant that
+    // a stated lifetime turns into a player-scoped permission (see the arm below).
+    let mut hand_free_permission_filter: Option<TargetFilter> = None;
     match effect {
         // CR 611.2a: yield to an explicitly written inner duration. The two
         // parser-default sentinels (`None`, `Some(Permanent)`) still take the
@@ -2354,8 +2358,94 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
         Effect::CastFromZone {
             duration: ref mut effect_duration,
             ref mut driver,
+            ref target,
+            without_paying_mana_cost,
+            mode,
+            cast_transformed,
+            ref alt_ability_cost,
+            ref constraint,
+            ref mana_spend_permission,
             ..
         } => {
+            // CR 601.2b + CR 118.9 + CR 611.2a: "Until end of turn, you may cast
+            // spells FROM YOUR HAND without paying their mana costs" (Chandra,
+            // Flame's Catalyst) is Omniscience for a turn — a PLAYER-scoped
+            // permission over a set the game keeps re-reading, not a per-object
+            // grant handed out once. `CastFromZone` cannot express that: its
+            // permissions are recorded per object at resolution
+            // (`CastFromZoneDriver::for_batch_bounds`' capability table: that
+            // mechanism "writes an INDEPENDENT `CastingPermission` per object"),
+            // so a card drawn later in the same turn is never covered, and the
+            // printed effect says it is.
+            //
+            // The mechanism that CAN express it already exists and is already the
+            // one this exact sentence lowers to when a permanent prints it as a
+            // static: `StaticMode::CastFromHandFree` (Omniscience, the Tamiyo
+            // emblem), built by `oracle_static::restriction::
+            // try_parse_cast_free_permission`. Promote to it here, where the
+            // stated lifetime is in hand, and carry it as the duration-bound
+            // player grant `game/effects/effect.rs` already installs for
+            // `MayLookAtFaceDown` (Lumbering Laundry) — a grant that survives the
+            // source leaving play, which this one MUST: paying Chandra's [-8]
+            // takes her to zero loyalty and CR 704.5i puts her in the graveyard
+            // before her own ability resolves.
+            //
+            // GATED ON THE STATED LIFETIME, and that is the whole point:
+            // Electrodominance prints nearly the same sentence WITHOUT one and is
+            // a genuine CR 608.2g resolution-time pick. It never reaches this
+            // function. `without_paying_mana_cost` is required because
+            // `CastFromHandFree` means exactly "without paying the mana cost";
+            // a full-cost hand grant (Sen Triplets) has no faithful form here and
+            // keeps the per-object mechanism below.
+            //
+            // FAIL-CLOSED ON THE FILTER SHAPE, and that is not decoration. The
+            // promotion drops the zone leg and carries the rest as the
+            // permission's filter, which is only faithful while `extract_zones`
+            // and `without_prop` agree about the tree: `extract_zones` descends
+            // into `Or`/`And`/`Not`, `without_prop` rewrites only a top-level
+            // `Typed`. An `Or[InZone Hand, InZone Graveyard]` grant would
+            // therefore be admitted and silently lose its graveyard leg. Asking
+            // `extract_zones() == [Hand]` on a `Typed` target refuses every such
+            // shape instead. No card in the corpus prints one today — the double
+            // parse moves exactly one card — so this costs nothing now, and when
+            // such a card appears the gate DECLINES the promotion and leaves the
+            // clause on the per-object mechanism rather than lowering it wrong.
+            // That is a fallback, not a CR-level refusal: the per-object mechanism
+            // is the one this change exists to move away from, so a declined
+            // clause is a known-imperfect landing, not a correct one.
+            //
+            // `cast_transformed` and `mana_spend_permission` are in the list for
+            // the same reason: CR 310.12b's "cast it transformed" and CR 609.4b's
+            // "mana of any type can be spent" both ride on the `CastFromZone`
+            // effect and have no home on a `CastFromHandFree` static, so a clause
+            // carrying either keeps the per-object mechanism rather than losing
+            // the instruction. Every payload field the effect owns is now either
+            // checked here or (`driver`) reconciled below; the `..` in the pattern
+            // is what a future field would slip through, so a new one belongs in
+            // this list or in a refusal.
+            if *without_paying_mana_cost
+                && *mode == crate::types::ability::CardPlayMode::Cast
+                && !*cast_transformed
+                && alt_ability_cost.is_none()
+                && constraint.is_none()
+                && mana_spend_permission.is_none()
+                && duration_is_unset_sentinel(effect_duration)
+                && matches!(target, TargetFilter::Typed(_))
+                && target.extract_zones() == vec![crate::types::zones::Zone::Hand]
+            {
+                // The zone leg is discharged by the promotion itself: the runtime
+                // gate `cast_free_origin_admits_object` re-derives hand+owner from
+                // `CastFreeOrigin::Hand`. (`without_prop` removes the exact
+                // `InZone { Hand }` form; an `InAnyZone { [Hand] }` would ride on
+                // intact — harmless, because that same gate enforces it anyway,
+                // but a leftover rather than a discharge.) Every other leg the clause printed (a
+                // type restriction, a colour) rides on as the permission's filter.
+                hand_free_permission_filter = Some(target.without_prop(
+                    &crate::types::ability::FilterProp::InZone {
+                        zone: crate::types::zones::Zone::Hand,
+                    },
+                ));
+            }
             match driver.with_lingering_duration() {
                 Some(reconciled) => *driver = reconciled,
                 None => refused_bound = Some(driver.window_bounds().unwrap_or_default()),
@@ -2435,6 +2525,28 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
         *effect = cast_bound_lost_to_duration_gap(bounds);
     } else if let Some(fragment) = unevaluable_lifetime {
         *effect = Effect::unimplemented("cast_from_zone_unevaluable_lifetime", fragment);
+    } else if let Some(filter) = hand_free_permission_filter {
+        // CR 601.2b + CR 118.9: see the `CastFromZone` arm. `modifications`
+        // carries the mode a second time because that is the shape
+        // `effect.rs::register_transient_effect` dispatches on — the same pairing
+        // `MayLookAtFaceDown` uses. The duration is written here rather than left
+        // as the unset sentinel for the `GenericEffect` arm above to fill: the
+        // `match` is over by the time this replacement happens — exactly as it is
+        // for the two gap outcomes beside it — so no arm will see this effect.
+        let mode = crate::types::statics::StaticMode::CastFromHandFree {
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+            origin: crate::types::statics::CastFreeOrigin::Hand,
+        };
+        *effect = Effect::GenericEffect {
+            static_abilities: vec![crate::types::ability::StaticDefinition::new(mode.clone())
+                .affected(filter)
+                .modifications(vec![
+                    crate::types::ability::ContinuousModification::AddStaticMode { mode },
+                ])],
+            duration: Some(duration.clone()),
+            target: None,
+            end_cost: None,
+        };
     }
 }
 

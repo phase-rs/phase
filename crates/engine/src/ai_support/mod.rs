@@ -1284,6 +1284,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::SelectCards { .. }
         | GameAction::ChooseRemoveCounterCostDistribution { .. }
         | GameAction::SelectCoinFlips { .. }
+        | GameAction::SelectDieRolls { .. }
         | GameAction::ChooseOutsideGameCards { .. }
         | GameAction::SelectTargets { .. }
         | GameAction::ChooseTarget { .. }

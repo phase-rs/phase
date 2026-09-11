@@ -54,6 +54,9 @@
     "lossPointsLabel": "Przegrana",
     "formatLabel": "Format",
     "formatNone": "Nieokreślony",
+    "matchTypeLabel": "Mecz",
+    "matchTypeBo3": "Do dwóch wygranych",
+    "matchTypeBo1": "Pojedyncza gra",
     "plusRoundsLabel": "Dodatkowe rundy",
     "plusRoundsHint": "Dodawane do automatycznej liczby rund (Szwajcarski plus N). Obowiązuje tylko, gdy Rundy pozostają automatyczne.",
     "submit": "Utwórz turniej",
@@ -147,6 +150,7 @@
     "connectionLost": "Utracono połączenie z lobby. Sprawdź adres serwera.",
     "aborted": "To żądanie zostało anulowane.",
     "unsupported": "Żądanie zostało wysłane, ale ten serwer jest zbyt stary, aby je potwierdzić. Sprawdź turniej przed ponowną próbą.",
+    "incompatible": "Ten serwer jest za stary dla tej struktury meczu (wymaga protokołu lobby {{needed}}). Nic nie wysłano.",
     "notFound": "Nie ma turnieju o tym kodzie."
   }
 }

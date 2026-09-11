@@ -196,7 +196,9 @@ export function TournamentLandingPage() {
               {failure !== null
                 ? "message" in failure
                   ? t(failure.key, { message: failure.message })
-                  : t(failure.key)
+                  : "needed" in failure
+                    ? t(failure.key, { needed: failure.needed })
+                    : t(failure.key)
                 : t("errors.connectionLost")}
             </div>
           )}

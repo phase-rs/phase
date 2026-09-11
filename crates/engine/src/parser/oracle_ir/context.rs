@@ -369,6 +369,28 @@ pub(crate) struct ParseContext {
     /// alongside `parent_target_is_chosen` in the chunk loop; `None` on every
     /// standalone and non-chosen parse.
     pub chain_prior_chosen_target: Option<TargetFilter>,
+    /// CR 601.2c + CR 608.2c: the object-target FILTER declared by the nearest
+    /// EARLIER clause of this same effect chain — the antecedent a later
+    /// clause's demonstrative anaphor ("that token", "that artifact") can name.
+    /// Sibling of [`Self::chain_prior_chosen_target`] and of
+    /// [`Self::declared_target_slots`], but single-valued and not restricted to
+    /// `Effect::TargetOnly`: Hazel of the Rootbloom's antecedent is the copy
+    /// source of a `CopyTokenOf`, Thieving Skydiver's the subject of a
+    /// `GainControl`.
+    ///
+    /// LIFECYCLE — leak-proof by construction, not by a set/clear window:
+    /// `parse_effect_chain_ir` `take()`s the caller's value before its chunk
+    /// loop and restores it immediately after; inside the loop the field is
+    /// REASSIGNED UNCONDITIONALLY as the first statement of every iteration, as
+    /// a pure function of `builder.clauses()`. There is therefore no window for
+    /// an early `continue` to escape (the loop body contains no statement-level
+    /// `return`), no stale value can reach the next chunk, and a nested
+    /// `parse_effect_chain_ir` sees `None` from its chunk loop onward; its
+    /// pre-loop special-case IR builders still observe the caller's value
+    /// (measured at zero corpus cards — no divergent-noun demonstrative is
+    /// lowered through them). `None` on the first chunk of every chain and on
+    /// every standalone parse. Never serialized.
+    pub chain_declared_object_target: Option<TargetFilter>,
     /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
     /// "put those cards / put them onto the battlefield" anaphor (a
     /// `TargetFilter::TrackedSet`) must scan. Set by a producer clause that

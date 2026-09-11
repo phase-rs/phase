@@ -1054,10 +1054,17 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
             | GameFormat::Limited => false,
-            // Matches `evaluate_selected_format_summary`'s Custom arm: no
-            // CustomFormatRules resolver exists yet, so eligibility cannot be
-            // answered here. `false` is the fail-closed reading — a permissive
-            // `true` would offer an unvalidated card as a commander.
+            // Phase 1d wired a real custom-format deck-legality evaluator
+            // (`evaluate_custom_format`), but it is scoped to non-command-zone
+            // (constructed-shaped) custom formats — a command-zone custom
+            // (`CommandZoneMode::Enabled`, the shape a saved Commander/Brawl/
+            // Tiny-Leaders/Oathbreaker lobby produces) fails closed there too.
+            // This function also only ever receives a bare `GameFormat`, never
+            // the resolved `CommanderEligibilityRule` a command-zone custom
+            // format declares, so eligibility genuinely cannot be answered
+            // here regardless. `false` is the fail-closed reading — a
+            // permissive `true` would offer an unvalidated card as a
+            // commander.
             GameFormat::Custom(_) => false,
         }
     })
@@ -1265,8 +1272,12 @@ pub fn evaluate_deck_compatibility_js(request: JsValue) -> Result<JsValue, JsVal
 /// (`validateGuestDeck` in `client/src/adapter/p2p-adapter.ts`), which kicks a
 /// guest whose deck is illegal for the room's format. UI-hint callers must keep
 /// using `evaluate_deck_compatibility_js`: that one deliberately answers "no
-/// opinion" (`selected_format_compatible: null`) for a Custom format, which is
-/// the honest answer for a legality chip and an unacceptable one for a kick.
+/// opinion" (`selected_format_compatible: null`) for a Custom format — every
+/// request crossing this WASM boundary carries only a bare `GameFormat` tag
+/// (Wire-Inertness Invariant, `types::format::SelectedFormat`), which can never
+/// resolve real rules even though Phase 1d wired a real evaluator
+/// (`evaluate_custom_format`) for a trusted, already-`Resolved` config — which
+/// is the honest answer for a legality chip and an unacceptable one for a kick.
 #[wasm_bindgen(js_name = evaluateDeckFormatGate)]
 pub fn evaluate_deck_format_gate_js(request: JsValue) -> Result<JsValue, JsValue> {
     let request: DeckCompatibilityRequest = serde_wasm_bindgen::from_value(request)

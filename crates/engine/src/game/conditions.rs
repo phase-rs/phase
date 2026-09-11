@@ -75,14 +75,15 @@ pub(crate) fn eval_chosen_label_is(state: &GameState, source_id: ObjectId, label
 }
 
 /// CR 716.2a: True when the source Class enchantment is at or above the given level.
+/// CR 716.2d: a source with no stored level reads as level 1 (`GameObject::level`),
+/// so a Class copy is gated by its actual level rather than failing every gate.
 /// Does NOT include a battlefield zone guard — callers that require the source to be
 /// on the battlefield (e.g. `replacement.rs`) must apply the guard before calling.
 pub(crate) fn eval_class_level_ge(state: &GameState, source_id: ObjectId, level: u8) -> bool {
     state
         .objects
         .get(&source_id)
-        .and_then(|obj| obj.class_level)
-        .is_some_and(|current| current >= level)
+        .is_some_and(|obj| obj.level() >= level)
 }
 
 /// CR 113.6b: True when the source object is in the specified zone.

@@ -308,6 +308,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::Another
         | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
@@ -706,7 +707,11 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         // CR 302.6: reads the `summoning_sick` continuity flag, which layer 2
         // re-arms for every permanent whose controller changed (CR 613.1b).
         | FilterProp::ControlledContinuouslySinceTurnBegan
-        | FilterProp::CountersPutOnThisTurn { .. } => CharacteristicKinds::CONTROLLER,
+        | FilterProp::CountersPutOnThisTurn { .. }
+        // CR 303.4 + CR 301.5: scopes the attachment-to-player lookup by a
+        // `ControllerRef` (mirrors `Owned`/`ProtectorMatches` above) — layer 2
+        // can move the referenced player's board.
+        | FilterProp::AttachedToPlayer { .. } => CharacteristicKinds::CONTROLLER,
         // CR 702.95e: a pair breaks when either half changes controller (layer 2,
         // CR 613.1b) or stops being a creature (layer 4, CR 613.1d), so the
         // unpaired verdict reads both kinds.
@@ -975,6 +980,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::Another
         | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
@@ -1714,6 +1720,7 @@ pub(crate) fn filter_prop_contains(
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another
@@ -5020,6 +5027,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another
@@ -6020,6 +6028,24 @@ fn matches_filter_prop(
             Some(recipient) => attached_to_referent(state, recipient, obj, object_id),
             None => attached_to_source_referent(state, source, obj, object_id),
         },
+        // CR 303.4 + CR 301.5: Player-referent attachment predicate — the
+        // candidate's `attached_to` must resolve to the SAME player that
+        // `player` (a `ControllerRef`) identifies. This is the player-referent
+        // counterpart of `AttachedToSource`/`AttachedToRecipient` (both resolve
+        // against an OBJECT referent); it reuses the single-authority
+        // `ControllerRef` resolver (`source_controller_ref_player`) every other
+        // player-scoped `FilterProp` arm threads through, so `EnchantedPlayer`,
+        // `TargetPlayer`, `You`, etc. all resolve identically here. Powers "the
+        // number of Curses attached to [enchanted player]" (Curse of Thirst,
+        // Curse of Surveillance): `player` is `ControllerRef::EnchantedPlayer`,
+        // resolved against the counting ability's own source — itself a Curse
+        // attached to the same player.
+        FilterProp::AttachedToPlayer { player } => obj
+            .attached_to
+            .and_then(|t| t.as_player())
+            .is_some_and(|attached_player| {
+                source_controller_ref_player(state, source, player) == Some(attached_player)
+            }),
         // CR 303.4 + CR 301.5: Attachment predicate. Matches objects that have
         // at least one attachment of the given kind whose controller satisfies
         // the optional `ControllerRef`. `exclude_source` preserves "another
@@ -6936,6 +6962,7 @@ fn zone_change_record_matches_property(
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::FaceDown
         | FilterProp::Transformed
         | FilterProp::Foretold
@@ -7395,6 +7422,120 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
     }
 }
 
+/// CR 109.2: does this `TypedFilter` name a zone of its own? A bare descriptive
+/// reference ("a creature you control") names none; one that says "in your
+/// graveyard" / "on the battlefield" carries an `InZone`/`InAnyZone` prop that
+/// `filter_inner` already enforces.
+///
+/// Nearest neighbor: `layers.rs::target_filter_reads_zone` runs the identical
+/// `InZone`/`InAnyZone` prop scan and recurses `Or`/`And`/`Not`. A separate
+/// helper is correct here because it answers a DIFFERENT question — "does the
+/// filter name ANY zone at all?" (a boolean gate on emptiness of the zone
+/// axis) versus that function's "does the filter constrain to this SPECIFIC
+/// `zone`?" — and because `target_filter_reads_zone` is module-private to
+/// `layers.rs` (game must not reach across modules for a private predicate,
+/// and `layers.rs` is out of bounds for this change).
+fn typed_reference_names_zone(tf: &TypedFilter) -> bool {
+    tf.properties
+        .iter()
+        .any(|p| matches!(p, FilterProp::InZone { .. } | FilterProp::InAnyZone { .. }))
+}
+
+/// CR 109.2 + CR 109.2a/b: decide whether `reference_obj` is admitted as the
+/// referent of `reference_filter`, applying the zone default per leg.
+///
+/// * A bare descriptive `Typed` reference that names no zone means a permanent
+///   ON THE BATTLEFIELD (CR 109.2) — the half of the contract this scan
+///   previously left unimplemented (it only excluded the stack, CR 109.2b).
+/// * A `Typed` reference that names a zone keeps it; `filter_inner`'s
+///   `InZone`/`InAnyZone` props are the single authority for that zone (CR 109.2a).
+/// * `Or` recurses so a disjunctive reference ("a creature you control OR a
+///   creature card in your graveyard", Volo) binds the battlefield default to
+///   the zone-less leg only.
+/// * Any other (identity/anaphoric) reference — `SelfRef`, etc. — keeps the
+///   prior "anything but the stack" rule; CR 109.2 scopes only to descriptions
+///   that include a card type or subtype, which "it"/"~" do not.
+///
+/// CR 109.2 PRECONDITION: CR 109.2 applies only to descriptions that include a
+/// card type/subtype, and EXCLUDES descriptions containing the word
+/// "card"/"spell"/"source"/"scheme" (CR 109.2a/b/c). The `Typed` arm below
+/// honors the first half literally — an empty `type_filters` list carries no
+/// type word, so it is NOT given the battlefield default. A corpus census of
+/// `client/public/card-data.json` (measured: 112 `SharesQuality` nodes across 96
+/// cards) shows exactly one such reference: Tiamat's "Dragon cards not named
+/// Tiamat" → `Typed { type_filters: [], properties: [Named "tiamat"] }`, which
+/// therefore keeps the prior "anything but the stack" rule.
+///
+/// The second half — the "card"/"spell"/"source" word exclusion — cannot be
+/// honored literally, because the engine's `TargetFilter` has no representation
+/// for a zone-less "card" word. The census bounds that gap instead: every
+/// `Typed` reference that includes the word "card" (core type `Card`) already
+/// carries an explicit `InZone`, and the only such references (Frostpyre
+/// Arcanist, Pyromancer Ascension) all resolve `InZone Graveyard`, so
+/// `typed_reference_names_zone` keeps their zone rather than defaulting to the
+/// battlefield. Every remaining zone-less, type-bearing `Typed` reference is a
+/// bare permanent description ("a creature/land you control"), for which the
+/// battlefield default is exactly what CR 109.2 prescribes. Re-measure this
+/// census before widening the arm; a new printing is what would invalidate it.
+///
+/// COMPOUND SHAPES (`And` / `Not`) are deliberately left on the `_` arm's prior
+/// "anything but the stack" rule rather than given speculative recursion, and
+/// the bound on that is EMPIRICAL, not structural. `parse_shared_quality_reference`
+/// (`parser/oracle_target.rs`) is the sole producer of this `reference`; its own
+/// arms emit `Typed`, `Or { Typed, Typed }`, and the identity/anaphoric filters
+/// (`CostPaidObject`, `TriggeringSource`, `ParentTarget`, `TrackedSet`), but its
+/// final leg delegates to the general `parse_target`, which CAN build `And`/`Not`
+/// for other noun phrases — so reachability is bounded by which reference
+/// phrasings printed cards actually use, not by construction. The corpus census
+/// above measures that bound: across all 112 `SharesQuality` nodes the only
+/// reference shapes present are `Typed`, a single `Or` (Volo), and anaphors —
+/// zero `And`, zero `Not`. `Not` in particular has no grounded zone semantics
+/// here ("an object that is NOT a creature you control" does not inherit a
+/// battlefield default from the negated description), so inventing one against
+/// no card would be untested rule-making. If a printing ever makes an `And`/`Not`
+/// reference reachable, extend this match with that shape's real zone rule (for
+/// `And`, the natural reading is "apply the battlefield default unless SOME leg
+/// names a zone"; `layers.rs::target_filter_reads_zone` is the syntactic analog)
+/// and add a card-backed test — do not take this comment's parenthetical as the
+/// answer.
+fn reference_leg_admits(
+    state: &GameState,
+    reference_id: ObjectId,
+    reference_obj: &GameObject,
+    reference_filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    match reference_filter {
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|leg| reference_leg_admits(state, reference_id, reference_obj, leg, ctx)),
+        TargetFilter::Typed(tf) => {
+            // CR 109.2's precondition is a description that INCLUDES A CARD TYPE
+            // OR SUBTYPE. An empty `type_filters` list carries no such type word
+            // — the reference is characteristic-only ("not named Tiamat" →
+            // `Typed { type_filters: [], properties: [Named] }`, the corpus's one
+            // instance) — so CR 109.2 does not reach it and it must NOT inherit
+            // the battlefield default. Those keep the prior "anything but the
+            // stack" rule, which is what sources Tiamat's own name for its
+            // "Dragon cards not named Tiamat" search in the CR 113.7a window
+            // where the triggered ability outlives its source — Tiamat having
+            // left the battlefield before its enters trigger resolves.
+            let zone_ok = if tf.type_filters.is_empty() {
+                reference_obj.zone != Zone::Stack
+            } else if typed_reference_names_zone(tf) {
+                true
+            } else {
+                reference_obj.zone == Zone::Battlefield
+            };
+            zone_ok && filter_inner(state, reference_id, reference_filter, ctx)
+        }
+        _ => {
+            reference_obj.zone != Zone::Stack
+                && filter_inner(state, reference_id, reference_filter, ctx)
+        }
+    }
+}
+
 fn object_shares_quality_with_reference_filter(
     state: &GameState,
     obj: &GameObject,
@@ -7446,26 +7587,32 @@ fn object_shares_quality_with_reference_filter(
         recipient_id: source.recipient_id,
         scoped_iteration_player: None,
     };
-    // CR 109.2 + CR 205.3m: a bare type reference such as "a creature you
-    // control" or "a creature card in your graveyard" denotes an object in the
-    // zone that reference implies — a permanent on the battlefield or a card in
-    // the named zone — never a spell on the stack. A creature spell being cast
-    // (Volo, Guide to Monsters; Menagerie Curator) is itself on the stack, and
-    // any sibling creature spell on the stack is likewise not a "creature you
-    // control" permanent. Excluding stack objects from the reference scan keeps
-    // any same-type spell (the one under test AND its siblings) from
-    // self-satisfying the "shares a creature type" test; stack-scoped references
-    // (TriggeringSource / ParentTarget) are resolved by the branches above, so
-    // this scan only ever backs bare permanent/card references. Battlefield- and
+    // CR 109.2 + CR 205.3m: resolve a bare descriptive reference such as "a
+    // creature you control" or "a creature card in your graveyard" to the zone
+    // that description implies, per leg. CR 109.2: a zone-less description that
+    // includes a card type/subtype means a permanent of that type ON THE
+    // BATTLEFIELD — the half of the contract this scan previously left
+    // unimplemented (it only excluded the stack). CR 109.2a: a description that
+    // names a zone keeps it, enforced by `filter_inner`'s `InZone`/`InAnyZone`
+    // props (the single authority for that zone). CR 109.2b: a spell being cast
+    // (Volo, Guide to Monsters; Menagerie Curator) is on the stack and is never
+    // a "creature you control" permanent, and any sibling creature spell on the
+    // stack is likewise excluded — so a same-type spell cannot self-satisfy the
+    // "shares a creature type" test. Stack-scoped references (TriggeringSource /
+    // ParentTarget) are resolved by the branches above, so this scan only ever
+    // backs bare permanent/card references. `Or` is evaluated per leg so a
+    // disjunctive reference (Volo's battlefield-or-graveyard) binds the
+    // battlefield default to the zone-less leg only. Battlefield- and
     // graveyard-to-object comparisons keep their existing self-inclusive
-    // semantics.
+    // semantics; only the previously-unguarded library/hand self-match (the
+    // Descendants' Path defect, where the revealed library card satisfied its
+    // own "a creature you control" reference) is closed.
     state.objects.keys().copied().any(|reference_id| {
         state
             .objects
             .get(&reference_id)
             .is_some_and(|reference_obj| {
-                reference_obj.zone != Zone::Stack
-                    && filter_inner(state, reference_id, reference_filter, &ctx)
+                reference_leg_admits(state, reference_id, reference_obj, reference_filter, &ctx)
                     && {
                         let values = object_shared_quality_values(
                             reference_obj,
@@ -9959,6 +10106,106 @@ mod tests {
         assert!(
             !matches_target_filter(&state, kellan, &filter, kellan),
             "AttachedToSource must NOT match the source itself (it is not attached)"
+        );
+    }
+
+    /// CR 303.4 + CR 301.5: `FilterProp::AttachedToPlayer` — the player-referent
+    /// counterpart of `AttachedToSource`, needed because a Curse (unlike an
+    /// Aura/Equipment on a creature) is attached to a PLAYER, not an object.
+    /// Drives Curse of Thirst / Curse of Surveillance's "the number of Curses
+    /// attached to them"/"to that player".
+    ///
+    /// Covers the 0/1/2+ range at the building-block level (the integration
+    /// tests in `curse_of_thirst_attached_count.rs` cannot reach a literal 0,
+    /// because Curse of Thirst always counts itself): with no qualifying
+    /// candidate present the count is 0; a Curse attached to the SAME player
+    /// as the source raises it; a Curse attached to a DIFFERENT player never
+    /// does, regardless of how many of those exist.
+    #[test]
+    fn attached_to_player_matches_only_the_enchanted_players_attachments() {
+        let mut state = setup();
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+
+        // The counting source: a Curse-like Aura attached to p1 (mirrors Curse
+        // of Thirst's own `EnchantedPlayer` referent — "them"/"that player" is
+        // the player THIS source enchants).
+        let curse_source = state.next_object_id;
+        let curse_source = create_object(
+            &mut state,
+            CardId(curse_source),
+            p0,
+            "Curse of Thirst".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&curse_source).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.attached_to = Some(crate::game::game_object::AttachTarget::Player(p1));
+        }
+
+        let filter = TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+            FilterProp::AttachedToPlayer {
+                player: ControllerRef::EnchantedPlayer,
+            },
+        ]));
+
+        // Zero case: with no OTHER curse on the battlefield, nothing besides
+        // `curse_source` itself could match — and a bare unattached object
+        // must not match either.
+        let unattached = add_creature(&mut state, p0, "Unattached");
+        assert!(
+            !matches_target_filter(&state, unattached, &filter, curse_source),
+            "AttachedToPlayer must NOT match an object with no attachment at all"
+        );
+
+        // A Curse attached to the SAME player (p1) the source enchants matches.
+        let same_player_id = state.next_object_id;
+        let same_player_curse = create_object(
+            &mut state,
+            CardId(same_player_id),
+            p0,
+            "Extra Curse".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&same_player_curse).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.attached_to = Some(crate::game::game_object::AttachTarget::Player(p1));
+        }
+        assert!(
+            matches_target_filter(&state, same_player_curse, &filter, curse_source),
+            "AttachedToPlayer must match a Curse attached to the same enchanted player"
+        );
+
+        // A Curse attached to a DIFFERENT player (p0) must never match, no
+        // matter how many exist — CR 303.4b scopes the count to the ONE
+        // enchanted player, not a global Curse tally.
+        let other_player_id = state.next_object_id;
+        let other_player_curse = create_object(
+            &mut state,
+            CardId(other_player_id),
+            p0,
+            "Elsewhere Curse".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&other_player_curse).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.attached_to = Some(crate::game::game_object::AttachTarget::Player(p0));
+        }
+        assert!(
+            !matches_target_filter(&state, other_player_curse, &filter, curse_source),
+            "AttachedToPlayer must NOT match a Curse attached to a DIFFERENT player"
+        );
+
+        // The source itself also satisfies its own filter (it IS a Curse
+        // attached to the player it enchants) — this is what makes 1 the
+        // real-game floor for Curse of Thirst's own trigger, per the
+        // integration tests.
+        assert!(
+            matches_target_filter(&state, curse_source, &filter, curse_source),
+            "the counting source is itself attached to the player it enchants"
         );
     }
 
@@ -15557,7 +15804,8 @@ mod characteristic_read_classification_tests {
             | FilterProp::HasAnyAttachmentOf { .. }
             | FilterProp::MostPrevalentCreatureTypeIn { .. }
             | FilterProp::AttackedThisTurn { .. }
-            | FilterProp::NameMatchesAnyPermanent { .. } => true,
+            | FilterProp::NameMatchesAnyPermanent { .. }
+            | FilterProp::AttachedToPlayer { .. } => true,
             // Everything else carries no `ControllerRef` of its own. Several
             // still read CONTROLLER for other reasons (`Unpaired` via CR
             // 702.95e, the CR 302.6 continuity props, the nested-filter
@@ -15761,6 +16009,9 @@ mod characteristic_read_classification_tests {
             },
             FilterProp::NameMatchesAnyPermanent {
                 controller: Some(ControllerRef::You),
+            },
+            FilterProp::AttachedToPlayer {
+                player: ControllerRef::You,
             },
         ];
         let mut sampled: Vec<String> = props.iter().map(variant_name).collect();

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
@@ -6,6 +7,7 @@ import { formatMetadata } from "../../data/formatRegistry";
 import { SERVER_PRESETS } from "../../services/serverDetection";
 import type { HealthHint } from "../../services/serverDirectory";
 import type { LobbyGameEntry } from "../../stores/multiplayerStore";
+import { JoinErrorDialog } from "./JoinErrorDialog";
 
 // Re-export so existing `import { LobbyGame } from "./GameListItem"` call
 // sites continue to resolve without needing to update every consumer in
@@ -68,6 +70,7 @@ export function GameListItem({
   healthHint,
 }: GameListItemProps) {
   const { t } = useTranslation("multiplayer");
+  const [sandboxConfirmationOpen, setSandboxConfirmationOpen] = useState(false);
   const { game, source } = entry;
   const format = game.format ?? "Standard";
   const meta = formatMetadata(format);
@@ -114,12 +117,13 @@ export function GameListItem({
         : undefined;
 
   return (
+    <>
     <button
       onClick={() => {
         if (disabled) return;
         if (game.is_sandbox === true) {
-          const ok = window.confirm(t("gameListItem.sandboxConfirm"));
-          if (!ok) return;
+          setSandboxConfirmationOpen(true);
+          return;
         }
         onJoin(entry);
       }}
@@ -271,5 +275,20 @@ export function GameListItem({
         </span>
       </div>
     </button>
+    {sandboxConfirmationOpen && (
+      <JoinErrorDialog
+        title={t("gameListItem.sandboxBadgeTitle")}
+        message={t("gameListItem.sandboxConfirm")}
+        primaryAction={{
+          label: t("gameListItem.join"),
+          onClick: () => {
+            setSandboxConfirmationOpen(false);
+            onJoin(entry);
+          },
+        }}
+        onDismiss={() => setSandboxConfirmationOpen(false)}
+      />
+    )}
+    </>
   );
 }

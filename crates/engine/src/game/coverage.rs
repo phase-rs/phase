@@ -17,13 +17,14 @@ use crate::parser::oracle_casting::parse_casting_restriction_line;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
-    CoinFlipResult, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
-    CountScope, CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
-    DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
-    EffectScope, FilterProp, ForEachCategoryAction, GameRestriction, LibraryPosition,
-    ManaProduction, ObjectProperty, ObjectScope, ObjectSelectionCardinality,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
+    ActivationRestriction, AdditionalCost, AggregateFunction, AttackScope, AttackSubject,
+    CardTypeSetSource, ChoiceType, CoinFlipResult, CommanderOwnership, Comparator,
+    ContinuousModification, ControllerRef, CountScope, CounterKindChooser, CounterKindDomain,
+    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
+    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction,
+    MassLibraryShuffleMode, ObjectProperty, ObjectScope, ObjectSelectionCardinality,
     ObjectSelectionEligibility, ParsedCondition, PerpetualModification, PlayerFilter,
     PlayerRelation, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
     ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
@@ -375,6 +376,10 @@ fn public_gap_details(gaps: &[CoverageGap]) -> Vec<GapDetail> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CardCoverageResult {
+    /// Internal provenance for associating duplicate printed names with their
+    /// authoritative database face. Coverage JSON remains byte-compatible.
+    #[serde(skip)]
+    pub card_face_key: Option<String>,
     pub card_name: String,
     pub set_code: String,
     pub supported: bool,
@@ -844,6 +849,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::EquippedBy => parts.push("equipped by self".into()),
             FilterProp::AttachedToSource => parts.push("attached to self".into()),
             FilterProp::AttachedToRecipient => parts.push("attached to it".into()),
+            FilterProp::AttachedToPlayer { player } => {
+                parts.push(format!("attached to {}", fmt_controller(player)))
+            }
             FilterProp::Unpaired => parts.push("unpaired".into()),
             FilterProp::HasAttachment {
                 kind,
@@ -2454,6 +2462,9 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
             Some(cause) => {
                 use crate::types::ability::ThisWayCause;
                 let verb = match cause {
+                    ThisWayCause::OwnerLibraryShuffleSubject => {
+                        "designated for an owner-library shuffle"
+                    }
                     ThisWayCause::Discarded => "discarded",
                     ThisWayCause::Exiled => "exiled",
                     ThisWayCause::Milled => "milled",
@@ -3100,6 +3111,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             enter_with_counters,
             face_down_profile,
             library_position,
+            library_shuffle,
             random_order,
         } => {
             if let Some(o) = origin {
@@ -3130,6 +3142,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if let Some(lp) = library_position {
                 d.push(("library_position".into(), format!("{lp:?}")));
+            }
+            if matches!(library_shuffle, MassLibraryShuffleMode::TerminalShuffle) {
+                d.push(("library_shuffle".into(), format!("{library_shuffle:?}")));
             }
             if *random_order {
                 d.push(("random_order".into(), "true".into()));
@@ -3917,8 +3932,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             ));
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::ExtraTurn { target } => {
+        Effect::ExtraTurn { target, count } => {
             d.push(("player".into(), fmt_target(target)));
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                d.push(("count".into(), fmt_quantity(count)));
+            }
         }
         Effect::GrantExtraLoyaltyActivations { amount, target } => {
             d.push(("amount".into(), fmt_quantity(amount)));
@@ -4497,8 +4515,19 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         }
         AbilityCondition::DayNightIsNeither => "neither day nor night".into(),
         AbilityCondition::DayNightIs { state } => format!("it is {state:?}"),
-        AbilityCondition::NthResolutionThisTurn { n } => {
-            format!("{n} resolution this turn")
+        AbilityCondition::AbilityUseCountThisTurn {
+            tally,
+            comparator,
+            n,
+        } => {
+            let verb = match tally {
+                AbilityUseTally::Resolved => "resolved",
+                AbilityUseTally::Activated => "activated",
+            };
+            format!(
+                "this ability {verb} {} {n} times this turn",
+                fmt_comparator(comparator)
+            )
         }
         AbilityCondition::SourceLacksKeyword { keyword } => {
             format!("source lacks {}", keyword_label(keyword))
@@ -6519,6 +6548,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             .unwrap_or_default();
 
         cards.push(CardCoverageResult {
+            card_face_key: Some(key.to_owned()),
             card_name: face.name.clone(),
             set_code: String::new(),
             supported,
@@ -9484,7 +9514,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // CR 731.1: Day/night designation check — handled by evaluate_condition.
         AbilityCondition::DayNightIs { .. } => ("DayNightIs", Handled),
         // CR 603.4: Per-ability per-turn resolution counter — handled by evaluate_condition.
-        AbilityCondition::NthResolutionThisTurn { .. } => ("NthResolutionThisTurn", Handled),
+        AbilityCondition::AbilityUseCountThisTurn { .. } => ("AbilityUseCountThisTurn", Handled),
         AbilityCondition::CostPaidObjectMatchesFilter { .. } => {
             ("CostPaidObjectMatchesFilter", Handled)
         }
@@ -9928,7 +9958,14 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
 /// Walk an ability definition tree, visiting all nested `AbilityDefinition`s including
 /// those embedded in compound effects (`FlipCoin`, `RollDie`, `GrantAbility`, etc.).
 /// Returns `true` if the predicate returns `true` for any node in the tree.
-fn ability_tree_any(def: &AbilityDefinition, pred: &impl Fn(&AbilityDefinition) -> bool) -> bool {
+///
+/// `pub(crate)`: also the single-authority walker `PerpetualGrantModification::try_from`
+/// (`types/ability.rs`) reuses to reject a `GrantAbility` whose nested tree contains
+/// `Effect::Unimplemented` -- never reimplement tree-walking at that call site.
+pub(crate) fn ability_tree_any(
+    def: &AbilityDefinition,
+    pred: &impl Fn(&AbilityDefinition) -> bool,
+) -> bool {
     if pred(def) {
         return true;
     }
@@ -11966,8 +12003,6 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             // typically on triggers that the auditor already checks. The ability description
             // uses the keyword name, not a standalone condition. Mark as structural.
             || (lower.starts_with("coven") && lower.contains("if "))
-            // --- Activation/resolution count conditions ---
-            || lower.contains("this ability has been activated")
             // --- Zone-referential conditions (structural, not board-state) ---
             // "if this card is suspended" / "if this card is in your graveyard"
             || lower.contains("is suspended")
@@ -13599,6 +13634,46 @@ mod tests {
         );
     }
 
+    /// The parser-owned terminal shuffle changes the library action from
+    /// per-object randomization to one chained shuffle. It must therefore reach
+    /// coverage signatures, while the default remains absent to avoid churn.
+    #[test]
+    fn change_zone_all_signature_exposes_terminal_shuffle() {
+        let details = |library_shuffle| {
+            effect_details(&Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Library,
+                target: TargetFilter::Controller,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                library_shuffle,
+                random_order: false,
+            })
+        };
+
+        let per_object = details(MassLibraryShuffleMode::PerObject);
+        assert!(
+            !per_object.iter().any(|(key, _)| key == "library_shuffle"),
+            "the default mode must not churn legacy coverage signatures"
+        );
+
+        let terminal = details(MassLibraryShuffleMode::TerminalShuffle);
+        assert!(
+            terminal
+                .iter()
+                .any(|(key, value)| { key == "library_shuffle" && value == "TerminalShuffle" }),
+            "the parser-emitted terminal shuffle must be visible to coverage"
+        );
+        assert_ne!(
+            per_object, terminal,
+            "per-object and terminal library shuffles must not collapse in coverage"
+        );
+    }
+
     #[test]
     fn investigate_signature_exposes_repeat_for() {
         // ASK 2 + #6110 3rd review: a lifted "[once] for each ⟨set⟩" multiplier
@@ -14579,6 +14654,44 @@ mod tests {
             rarities: Default::default(),
             attraction_lights: vec![],
         }
+    }
+
+    #[test]
+    fn extra_turn_coverage_distinguishes_default_one_from_fixed_two() {
+        fn parsed_card(name: &str, oracle: &str) -> CardCoverageResult {
+            let parsed =
+                crate::parser::parse_oracle_text(oracle, name, &[], &["Sorcery".to_string()], &[]);
+            let mut face = make_face();
+            face.name = name.to_string();
+            face.oracle_text = Some(oracle.to_string());
+            face.abilities = parsed.abilities;
+            coverage_result_for_face(face)
+        }
+
+        let warp = parsed_card(
+            "Time Warp",
+            "Target player takes an extra turn after this one.",
+        );
+        let stretch = parsed_card(
+            "Time Stretch",
+            "Target player takes two extra turns after this one.",
+        );
+        let warp_effect = warp
+            .parse_details
+            .iter()
+            .find(|item| item.label == "ExtraTurn")
+            .expect("Time Warp coverage contains ExtraTurn");
+        let stretch_effect = stretch
+            .parse_details
+            .iter()
+            .find(|item| item.label == "ExtraTurn")
+            .expect("Time Stretch coverage contains ExtraTurn");
+        assert!(!warp_effect.details.iter().any(|(key, _)| key == "count"));
+        assert!(stretch_effect
+            .details
+            .iter()
+            .any(|(key, value)| key == "count" && value == "2"));
+        assert_ne!(warp_effect.details, stretch_effect.details);
     }
 
     fn build_test_ability_item(def: &AbilityDefinition) -> ParsedItem {

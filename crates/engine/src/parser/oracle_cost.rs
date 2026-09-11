@@ -924,6 +924,31 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             };
         }
+        // CR 701.9b: Random is a selection mode on an otherwise ordinary
+        // hand-discard cost. Accept only the complete unfiltered grammar used
+        // by the measured card corpus. A typed or malformed random phrase must
+        // fail closed below instead of falling through to the chosen parser and
+        // silently giving the payer a choice.
+        if let Ok((_, count)) =
+            all_consuming(parse_random_discard_cost_body).parse(rest_lower.as_str())
+        {
+            return AbilityCost::Discard {
+                count: QuantityExpr::Fixed {
+                    value: count as i32,
+                },
+                filter: None,
+                selection: crate::types::ability::CardSelectionMode::Random,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            };
+        }
+        if preceded(take_until::<_, _, E<'_>>(" at random"), tag(" at random"))
+            .parse(rest_lower.as_str())
+            .is_ok()
+        {
+            return AbilityCost::Unimplemented {
+                description: text.to_string(),
+            };
+        }
         // CR 701.9a + CR 608.2c: "Discard a/<N> <type> card(s)" — capture the
         // card-type filter so only matching cards can pay the cost (Lotleth
         // Troll: "Discard a creature card:"). Without this the typed
@@ -1384,6 +1409,21 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     AbilityCost::Unimplemented {
         description: text.to_string(),
     }
+}
+
+/// CR 701.9b: Complete grammar for the corpus-supported fixed-count,
+/// unfiltered random discard-cost body. Variable `X` is deliberately excluded:
+/// treating it as the cost parser's usual zero sentinel would make a required
+/// random discard free rather than honestly unsupported.
+fn parse_random_discard_cost_body(input: &str) -> super::oracle_nom::error::OracleResult<'_, u32> {
+    alt((
+        value(1, tag("a card at random")),
+        terminated(
+            nom_primitives::parse_number,
+            alt((tag(" card at random"), tag(" cards at random"))),
+        ),
+    ))
+    .parse(input)
 }
 
 /// CR 601.2f + CR 602.2b: Recognize the *head* of a self ACTIVATED-ability
@@ -3707,6 +3747,46 @@ mod tests {
                 self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             }
         );
+    }
+
+    #[test]
+    fn cost_discard_at_random_is_game_selected() {
+        for (text, expected) in [
+            ("Discard a card at random", 1),
+            ("Discard two cards at random", 2),
+        ] {
+            assert_eq!(
+                parse_oracle_cost(text),
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: expected },
+                    filter: None,
+                    selection: crate::types::ability::CardSelectionMode::Random,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn random_discard_cost_does_not_fall_back_to_chosen() {
+        for text in [
+            "Discard a creature card at random",
+            "Discard a card at random from your hand",
+            "Discard frobnitz at random",
+            "Discard X cards at random",
+        ] {
+            assert!(
+                matches!(parse_oracle_cost(text), AbilityCost::Unimplemented { .. }),
+                "{text} must fail closed"
+            );
+        }
+        assert!(matches!(
+            parse_oracle_cost("Discard a creature card"),
+            AbilityCost::Discard {
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                ..
+            }
+        ));
     }
 
     #[test]

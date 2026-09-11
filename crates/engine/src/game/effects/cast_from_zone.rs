@@ -1,8 +1,8 @@
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
-    AbilityCost, CastPermissionConstraint, CastingPermission, Duration, Effect, EffectError,
-    EffectKind, QuantityExpr, ResolvedAbility, SpellStackToGraveyardReplacement, TargetFilter,
-    TargetRef,
+    AbilityCondition, AbilityCost, CastPermissionConstraint, CastingPermission, Duration, Effect,
+    EffectError, EffectKind, QuantityExpr, ResolvedAbility, SpellStackToGraveyardReplacement,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, CastingVariant, GameState, WaitingFor};
@@ -1434,6 +1434,19 @@ pub(crate) fn graveyard_destination_rider(
             target: TargetFilter::ParentTarget,
             ..
         } => Some(SpellStackToGraveyardReplacement::Exile),
+        // ISSUE #8721, MEASURED AND REJECTED: this arm also swallows Invasion of
+        // Alara's printed "Put one of them into your hand." — an unconditional
+        // move of the OTHER exiled card, not a graveyard replacement. Gating the
+        // arm on the "if you don't cast it" condition (which the four genuine
+        // members carry and Invasion of Alara does not) does let that
+        // instruction run — and it then moves the WRONG object: with no chosen
+        // target on the head, `ParentTarget` binds to the source, and the Siege
+        // returns itself to its owner's hand. Measured end-to-end through
+        // `GameScenario`/`GameRunner`, both accept and decline.
+        //
+        // So the classification stays as it is and the swallowed instruction is
+        // carried as a named gap: repairing it needs the `ParentTarget` binding
+        // fixed first, which is a separate unit with its own gate run.
         Effect::ChangeZone {
             destination: Zone::Hand,
             target: TargetFilter::ParentTarget,
@@ -1460,6 +1473,70 @@ pub(crate) fn is_graveyard_exile_rider_subability(ability: &ResolvedAbility) -> 
         graveyard_destination_rider(ability),
         Some(SpellStackToGraveyardReplacement::Exile)
     )
+}
+
+/// CR 614.1a + CR 608.2c + CR 110.4b: does the counter's exile rider `sub`
+/// APPLY to the countered object `obj_id`? The rider's form alone
+/// (`is_graveyard_exile_rider_subability`) says the head CAN exile; its
+/// printed condition says WHICH countered spells it exiles — "If that spell is
+/// countered this way" (Spelljack, Force of Negation: `ZoneChangedThisWay {
+/// Typed[Card] }`) or "If a PERMANENT spell is countered this way"
+/// (Thranduil's Decree: `ZoneChangedThisWay { Typed[Permanent] }` — CR 110.4b,
+/// "a permanent spell" is an artifact, battle, creature, enchantment, or
+/// planeswalker spell). `counter::resolve` asks it ONCE, when it chooses the countered spell's
+/// destination, and records the answer in `state.exile_rider_countered_ids`
+/// for the `Exiled` provenance stamp — so a countered instant under
+/// Thranduil's Decree goes to its owner's graveyard (CR 701.6a) and is not
+/// published as "exiled this way". Asked once because the answer is not
+/// stable over the resolution: an Adventure or Omen spell has its creature
+/// face restored right after the destination is chosen (CR 715.4 / CR 720.4,
+/// via `restores_front_face_after_stack_exit`).
+///
+/// Asked of the concrete object rather than through `evaluate_condition`: that
+/// arm reads `last_zone_changed_ids`, the ledger of the move just made, and the
+/// destination is chosen BEFORE the move exists. The filter is the one the arm
+/// applies to each ledger member; it is asked with the rider's own ability
+/// context — same source and controller as the head
+/// (`build_resolved_from_def`), no targets (subs start without them), and no
+/// corpus rider's filter reads either. `TypeFilter::Permanent` reads the
+/// card's types, not its zone, so a spell on the stack matches by what it
+/// would be on the battlefield.
+///
+/// Asked and recorded per `counter::resolve` call: a `player_scope` or
+/// `repeat_for` counter would keep only its last iteration's answer — no
+/// corpus counter head is scoped or repeated (measured: all 20 are chain
+/// heads), so that shape must be decided with its evidence, not inherited.
+///
+/// Fail closed on every other shape: a rider with `destination: Some(_)` names
+/// an arrival this pre-move question cannot see, and a condition of another
+/// kind is one no corpus rider carries (measured over all 20 exile-rider heads:
+/// 18 `Typed[Card]`, 1 `Typed[Permanent]`, 1 whose condition the parser does
+/// not carry — Delay; its printed "if the spell is countered this way" is
+/// always true for the countered spell). A new kind must be decided here, not
+/// inherited from the form.
+pub(crate) fn graveyard_exile_rider_applies_to(
+    state: &GameState,
+    sub: &ResolvedAbility,
+    obj_id: ObjectId,
+) -> bool {
+    is_graveyard_exile_rider_subability(sub)
+        && match &sub.condition {
+            None => true,
+            Some(AbilityCondition::ZoneChangedThisWay {
+                filter,
+                destination: None,
+            }) => crate::game::filter::matches_target_filter(
+                state,
+                obj_id,
+                filter,
+                &crate::game::filter::FilterContext::from_ability(sub),
+            ),
+            Some(AbilityCondition::ZoneChangedThisWay {
+                destination: Some(_),
+                ..
+            })
+            | Some(_) => false,
+        }
 }
 
 fn cast_from_zone_graveyard_destination(
@@ -3294,6 +3371,135 @@ mod tests {
             "hand-origin in-place grant must default to UntilEndOfTurn so a \
              declined offer expires at cleanup; got {:?}",
             state.objects[&cheap].casting_permissions
+        );
+    }
+
+    /// CR 400.7: the in-place hand grant authorizes casting the card FROM THE
+    /// HAND. A card that leaves the hand without being cast "becomes a new object
+    /// with no memory of, or relation to, its previous existence", so the
+    /// permission must not travel with it.
+    ///
+    /// MEASURED, not hypothetical. `zones::apply_zone_exit_cleanup` dropped these
+    /// grants at the EXILE exit and at the STACK exit and nowhere else, so a
+    /// hand-origin grant rode a discard into the graveyard — where
+    /// `casting::has_graveyard_timed_alt_cost_permission` tests the CURRENT zone
+    /// and never the origin, and re-offered the card as a free GRAVEYARD cast on
+    /// every priority. That is the same re-offer the `from == Zone::Stack` block
+    /// exists to prevent, reached through the other door.
+    ///
+    /// Driven through the resolved zone-command core and then replayed, because
+    /// both live execution and journal replay must leave the same permission state.
+    ///
+    /// DISCRIMINATING: with `Zone::Hand` dropped from the exit condition, the
+    /// permission is still on the card in the graveyard.
+    #[test]
+    fn a_hand_grant_does_not_survive_the_card_leaving_the_hand() {
+        let mut state = make_test_state();
+        let card = add_card_to_hand(&mut state, PlayerId(0), CardId(517));
+        let ability = electrodominance_hand_ability(3);
+
+        let mut events = vec![];
+        grant_lingering_permissions(&mut state, &ability, &[card], &mut events).unwrap();
+        assert!(
+            !state.objects[&card].casting_permissions.is_empty(),
+            "reach guard: the in-place hand grant must have been recorded"
+        );
+
+        let mut replayed = state.clone();
+        let command = crate::game::zones::resolve_and_apply_zone_change(
+            &mut state,
+            card,
+            Zone::Hand,
+            Zone::Graveyard,
+            PlayerId(0),
+            crate::types::game_state::ZoneChangeRecord::test_minimal(
+                card,
+                Some(Zone::Hand),
+                Zone::Graveyard,
+            ),
+        )
+        .expect("live hand exit must resolve");
+
+        assert_eq!(
+            state.objects[&card].zone,
+            Zone::Graveyard,
+            "reach guard: the card must actually have left the hand"
+        );
+        assert!(
+            state.objects[&card].casting_permissions.is_empty(),
+            "CR 400.7: the hand grant must not ride the discard into the graveyard, \
+             where the graveyard cast path would re-offer it; got {:?}",
+            state.objects[&card].casting_permissions
+        );
+        crate::game::zones::apply_resolved_zone_change(&mut replayed, &command)
+            .expect("hand exit command must replay");
+        assert!(
+            replayed.objects[&card].casting_permissions.is_empty(),
+            "CR 400.7: replay must not retain a hand-origin cast permission"
+        );
+    }
+
+    /// CR 400.7: the GRAVEYARD half of the same rule.
+    ///
+    /// `grant_lingering_permissions` treats `Zone::Exile | Zone::Graveyard |
+    /// Zone::Hand` as "in place" and stamps the permission without moving the
+    /// card. Exile has had its own exit clear for a long time; the hand and the
+    /// graveyard had none, so a grant on a graveyard resident (Emry, Lurker of
+    /// the Loch's "you may cast that card this turn" is the named specimen)
+    /// travelled with the card when the graveyard was exiled — and
+    /// `casting::has_exile_cast_permission` reads the CURRENT zone, never the
+    /// origin, so it offered the cast again from exile. (Emry's own grant is not
+    /// free — "You may cast that card this turn. (You still pay its costs.
+    /// Timing rules still apply.)" —
+    /// which is why the clear matches on the permission variant and not on its
+    /// cost payload.)
+    ///
+    /// DISCRIMINATING: with `Zone::Graveyard` dropped from the condition, the
+    /// permission is still on the card in exile.
+    #[test]
+    fn a_graveyard_grant_does_not_survive_the_card_leaving_the_graveyard() {
+        let mut state = make_test_state();
+        let card = add_card_to_graveyard(&mut state, PlayerId(0), CardId(518));
+        let ability = electrodominance_hand_ability(3);
+
+        let mut events = vec![];
+        grant_lingering_permissions(&mut state, &ability, &[card], &mut events).unwrap();
+        assert!(
+            !state.objects[&card].casting_permissions.is_empty(),
+            "reach guard: the in-place graveyard grant must have been recorded"
+        );
+
+        let mut replayed = state.clone();
+        let command = crate::game::zones::resolve_and_apply_zone_change(
+            &mut state,
+            card,
+            Zone::Graveyard,
+            Zone::Exile,
+            PlayerId(0),
+            crate::types::game_state::ZoneChangeRecord::test_minimal(
+                card,
+                Some(Zone::Graveyard),
+                Zone::Exile,
+            ),
+        )
+        .expect("live graveyard exit must resolve");
+
+        assert_eq!(
+            state.objects[&card].zone,
+            Zone::Exile,
+            "reach guard: the card must actually have left the graveyard"
+        );
+        assert!(
+            state.objects[&card].casting_permissions.is_empty(),
+            "CR 400.7: the graveyard grant must not travel with the card into exile, \
+             where the exile cast path would re-offer it; got {:?}",
+            state.objects[&card].casting_permissions
+        );
+        crate::game::zones::apply_resolved_zone_change(&mut replayed, &command)
+            .expect("graveyard exit command must replay");
+        assert!(
+            replayed.objects[&card].casting_permissions.is_empty(),
+            "CR 400.7: replay must not retain a graveyard-origin cast permission"
         );
     }
 

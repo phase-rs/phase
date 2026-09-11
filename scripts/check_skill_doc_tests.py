@@ -38,6 +38,7 @@ SKILL = Path(".claude/skills/oracle-parser/SKILL.md")
 # honest: the table under test is the real one, not a hand-written stand-in.
 TREE = [Path("crates/engine/src/parser"), SKILL]
 
+
 def _shell() -> str:
     """The bash to run the gate under.
 
@@ -91,11 +92,21 @@ class Gate:
             else:
                 shutil.copy2(src, dst)
 
-    def run(self) -> subprocess.CompletedProcess:
+    def run(self, **kwargs) -> subprocess.CompletedProcess:
+        """Invoke the fixture's gate.
+
+        Recursion stops because the fixture has no `Cargo.toml` -- the gate runs
+        this suite, and this suite runs the gate, so something has to terminate
+        it. The manifest is the discriminator rather than the suite's own
+        absence, which used to conflate "am I a fixture?" with "does the suite
+        exist?", and rather than an environment marker, which would be a switch
+        for skipping the gate.
+        """
         return subprocess.run(
             [SHELL_BIN, str(self.root / "scripts" / SCRIPT.name)],
             capture_output=True,
             text=True,
+            **kwargs,
         )
 
     def read(self, rel: Path) -> str:
@@ -289,9 +300,20 @@ class SkillDocGate(unittest.TestCase):
         (g.root / "scripts" / "check_skill_doc_tests.py").write_text(
             "import sys\nsys.exit(1)\n", encoding="utf-8", newline="\n"
         )
+        subdir = g.root / "crates"
+        self.assertTrue(
+            subdir.is_dir(),
+            "fixture assumption broken: this test needs a subdirectory to "
+            "invoke the gate from by a relative path",
+        )
+        # A manifest, so the gate treats this as a real checkout and reaches
+        # the self-test hook -- the block under test.
+        (g.root / "Cargo.toml").write_text(
+            "[workspace]" + chr(10), encoding="utf-8"
+        )
         result = subprocess.run(
             [SHELL_BIN, "../scripts/" + SCRIPT.name],
-            cwd=g.root / "crates",
+            cwd=subdir,
             capture_output=True,
             text=True,
         )
@@ -302,6 +324,77 @@ class SkillDocGate(unittest.TestCase):
             + (result.stdout or "") + (result.stderr or ""),
         )
         self.assertIn("gate self-tests failed", result.stderr)
+
+    @gate
+    def test_missing_self_test_suite_is_an_error(self, g: Gate) -> None:
+        """A deleted suite must red, not read as "I am a fixture".
+
+        The recursion stop used to be the suite's own absence, so removing the
+        file made the gate green in ~5s having verified nothing -- the same
+        silent-skip class as the relative-path bypass, one door over. The stop
+        is now an environment marker, which leaves absence free to be an error.
+        """
+        self.assertFalse(
+            (g.root / "scripts" / "check_skill_doc_tests.py").exists(),
+            "fixture assumption broken: the fixture is expected to copy only "
+            "the gate, so the suite is already absent here",
+        )
+        # A manifest, so the gate treats this as a real checkout: the question
+        # is what an ordinary caller sees when the suite is gone.
+        (g.root / "Cargo.toml").write_text(
+            "[workspace]" + chr(10), encoding="utf-8"
+        )
+        result = subprocess.run(
+            [SHELL_BIN, str(g.root / "scripts" / SCRIPT.name)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            result.returncode,
+            1,
+            "a missing self-test suite must red: "
+            + (result.stdout or "") + (result.stderr or ""),
+        )
+        self.assertIn("gate self-tests missing", result.stderr)
+
+    @gate
+    def test_escaped_metacharacter_row_resolves_to_its_declaration(
+        self, g: Gate
+    ) -> None:
+        """The ERE-unescape in the discriminating loop is reachable and correct.
+
+        No row carries an escaped metacharacter today, so the unescape would
+        otherwise be untested code that a future edit could break silently.
+        `re.escape` on the raw form escapes the backslash itself, sending the
+        declaration regex after a literal one and failing the row with "names
+        no declaration" -- a wrong message in place of a right one.
+        """
+        script = g.root / "scripts" / SCRIPT.name
+        source = script.read_text(encoding="utf-8")
+        row = "fn peel_clause\\b\tcrates/engine/src/parser/clause_shell.rs"
+        escaped = "fn peel_clause\\(\tcrates/engine/src/parser/clause_shell.rs"
+        self.assertIn(row, source, "anchor row moved; update this fixture")
+        script.write_text(
+            source.replace(row, escaped), encoding="utf-8", newline="\n"
+        )
+        # The gate itself accepts the escaped form...
+        self.assertEqual(
+            g.run().returncode, 0, "the gate must accept an escaped metacharacter"
+        )
+        # ...and so must the suite's own row handling.
+        pat, rel = next(p for p in g.rows() if "peel_clause" in p[0])
+        self.assertEqual(pat, "fn peel_clause\\(")
+        self.assertFalse(
+            unescaped_metacharacters(pat),
+            "an escaped metacharacter is not an unescaped one",
+        )
+        symbol = re.sub(r"\\(.)", r"\1", ere_body(pat).rpartition(" ")[2])
+        self.assertEqual(symbol, "peel_clause(")
+        self.assertRegex(
+            g.read(Path(rel)),
+            re.escape("fn") + r"\s+" + re.escape(symbol),
+            "the unescaped symbol must match the real declaration",
+        )
 
     @gate
     def test_missing_documented_path_is_caught(self, g: Gate) -> None:

@@ -63,6 +63,16 @@ const namespaces = readdirSync(join(LOCALES_DIR, SOURCE)).filter((f) =>
 );
 const locales = readdirSync(LOCALES_DIR).filter((d) => d !== SOURCE);
 
+const GROUP_BY_LABELS: Record<string, string> = {
+  de: "Gruppieren nach",
+  en: "Group by",
+  es: "Agrupar por",
+  fr: "Grouper par",
+  it: "Raggruppa per",
+  pl: "Grupuj według",
+  pt: "Agrupar por",
+};
+
 const isKnownGap = (ns: string, key: string) =>
   KNOWN_PLACEHOLDER_GAPS.some((g) => g.ns === ns && g.key === key);
 
@@ -204,6 +214,19 @@ describe("locale parity", () => {
       const target = load(locale, "draft.json");
       for (const key of obsolete) expect(target[key], `${locale}:${key}`).toBeUndefined();
     }
+  });
+
+  it("keeps_grouping_and_deck_stats_wording_complete_in_every_locale", () => {
+    for (const locale of [SOURCE, ...locales]) {
+      const target = load(locale, "draft.json");
+      expect(target["workspace.sort.label"], locale).toBe(GROUP_BY_LABELS[locale]);
+      expect(target["limitedDeck.deckStats"], locale).toEqual(expect.any(String));
+      expect((target["limitedDeck.deckStats"] as string).trim(), locale).not.toBe("");
+      if (locale !== SOURCE) {
+        expect(target["limitedDeck.deckStats"], locale).not.toBe("Deck Stats");
+      }
+    }
+    expect(load(SOURCE, "draft.json")["limitedDeck.deckStats"]).toBe("Deck Stats");
   });
 
   it("keeps_all_plural_families_complete_in_every_locale", () => {

@@ -3,7 +3,13 @@
 //! Usage:
 //!     cargo run --bin tokens-gen -- \
 //!         --input data/mtgjson/sets \
+//!         --overlay crates/engine/data/known-tokens.overlay.toml \
 //!         --output crates/engine/data/known-tokens.toml
+//!
+//! `--overlay` names the hand-authored catalog rows this tool merges but never
+//! rewrites — MTGJSON has no source for them yet. A missing, malformed or
+//! row-invalid overlay is a hard failure: an overlay that silently reads as
+//! empty is the bug this input exists to fix.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -13,20 +19,14 @@ use std::str::FromStr;
 
 use engine::database::mtgjson::{SetFile, SetToken};
 use engine::game::token_presets::{
-    PredefinedTokenKind, PresetFidelity, TokenCategory, TokenPreset, TokenPtProvenance,
-    TokenSourceRef,
+    merge_overlay, parse_overlay, serialize_catalog, OverlayRowOutcome, PredefinedTokenKind,
+    PresetFidelity, TokenCategory, TokenPreset, TokenPtProvenance, TokenSourceRef,
 };
 use engine::types::card::TokenImageRef;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaColor;
 use engine::types::proposed_event::TokenCharacteristics;
-use serde::Serialize;
-
-#[derive(Serialize)]
-struct CatalogFile {
-    token: Vec<TokenPreset>,
-}
 
 #[derive(Default, Clone)]
 struct SourceCardIndex {
@@ -36,6 +36,7 @@ struct SourceCardIndex {
 
 fn main() -> ExitCode {
     let mut input = PathBuf::from("data/mtgjson/sets");
+    let mut overlay = PathBuf::from("crates/engine/data/known-tokens.overlay.toml");
     let mut output = PathBuf::from("crates/engine/data/known-tokens.toml");
 
     let mut args = std::env::args().skip(1);
@@ -47,6 +48,13 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 };
                 input = PathBuf::from(value);
+            }
+            "--overlay" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--overlay requires a path");
+                    return ExitCode::FAILURE;
+                };
+                overlay = PathBuf::from(value);
             }
             "--output" => {
                 let Some(value) = args.next() else {
@@ -62,7 +70,7 @@ fn main() -> ExitCode {
         }
     }
 
-    match generate(&input, &output) {
+    match generate(&input, &overlay, &output) {
         Ok(count) => {
             eprintln!("Generated {} token presets at {}", count, output.display());
             ExitCode::SUCCESS
@@ -74,7 +82,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn generate(input: &PathBuf, output: &PathBuf) -> Result<usize, String> {
+fn generate(input: &PathBuf, overlay: &PathBuf, output: &PathBuf) -> Result<usize, String> {
     let mut set_files = Vec::new();
     for entry in fs::read_dir(input).map_err(|e| format!("read {}: {e}", input.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -103,16 +111,56 @@ fn generate(input: &PathBuf, output: &PathBuf) -> Result<usize, String> {
         }
     }
 
-    presets.sort_by(|a, b| a.id.cmp(&b.id));
-    let toml = toml::to_string_pretty(&CatalogFile {
-        token: presets.clone(),
-    })
-    .map_err(|e| format!("serialize toml: {e}"))?;
+    let overlay_raw = fs::read_to_string(overlay)
+        .map_err(|e| format!("read overlay {}: {e}", overlay.display()))?;
+    let overlay_rows = parse_overlay(&overlay_raw)
+        .map_err(|e| format!("parse overlay {}: {e}", overlay.display()))?;
+    let generated_count = presets.len();
+    let (presets, reports) = merge_overlay(presets, overlay_rows)?;
+
+    let mut applied = 0usize;
+    let mut shadowed = 0usize;
+    let mut superseded = 0usize;
+    for report in &reports {
+        let row = format!(
+            "overlay row `{}` (`{}` / `{}`)",
+            report.overlay_id, report.set_code, report.display_name
+        );
+        match &report.outcome {
+            OverlayRowOutcome::Applied => applied += 1,
+            OverlayRowOutcome::AppliedShadowed { by_id } => {
+                applied += 1;
+                shadowed += 1;
+                eprintln!(
+                    "{row} kept, but catalog row `{by_id}` shares its token name and one half \
+                     of the key that would retire it — its set, or its source card, not both. \
+                     Either MTGJSON now ships this token, or {} names it twice; delete the \
+                     stale row",
+                    overlay.display()
+                );
+            }
+            OverlayRowOutcome::Superseded { by_id } => {
+                superseded += 1;
+                eprintln!(
+                    "{row} superseded by catalog row `{by_id}`; if that row is a generated \
+                     preset, MTGJSON now ships this token — delete the row from {}",
+                    overlay.display()
+                );
+            }
+        }
+    }
+    eprintln!(
+        "{generated_count} generated presets; {applied} overlay rows applied ({shadowed} \
+         shadowed), {superseded} superseded"
+    );
+
+    let count = presets.len();
+    let toml = serialize_catalog(presets).map_err(|e| format!("serialize toml: {e}"))?;
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
     fs::write(output, toml).map_err(|e| format!("write {}: {e}", output.display()))?;
-    Ok(presets.len())
+    Ok(count)
 }
 
 fn build_source_index(set_files: &[SetFile]) -> SourceCardIndex {

@@ -1333,6 +1333,37 @@ pub fn candidate_actions_broad_with_probe(
                 Vec::new()
             }
         }
+        WaitingFor::DieKeepChoice {
+            player,
+            ignorable_indices,
+            ignore_count,
+            ..
+        } => {
+            // CR 706.6: "if multiple results are tied for the lowest, the player
+            // chooses one of those rolls to be ignored." Only the engine-narrowed
+            // `ignorable_indices` are legal choices — the AI must not consider
+            // ignoring a roll that is not tied at the extreme.
+            //
+            // `ignore_count` is NOT always 1: CR 706.6 applies once per
+            // instructing effect, so two stacked replacements (Barbarian Class +
+            // Wyll — both legal in the same Commander dice deck) make it 2 and
+            // the roller owes two picks. Enumerating only the single-index shape
+            // would leave an AI seat with an EMPTY legal-action set, which
+            // `AiDecisionContract::contains_action` then uses to reject even
+            // `phase-ai`'s `fallback_action` rescue — the softlock class #6942
+            // fixed. Enumerate the real C(ignorable, ignore_count) domain
+            // instead, bounded like every other selection enumerator here.
+            bounded_ignore_combinations(ignorable_indices, *ignore_count)
+                .into_iter()
+                .map(|ignore_indices| {
+                    candidate(
+                        GameAction::SelectDieRolls { ignore_indices },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect()
+        }
         WaitingFor::DigChoice {
             player,
             keep_count,
@@ -5898,6 +5929,32 @@ fn push_object_combo(
     if seen.insert(key) {
         output.push(combo);
     }
+}
+
+/// CR 706.6: The die-roll ignore submissions to offer for a `DieKeepChoice`.
+///
+/// Enumerates `C(ignorable, ignore_count)` under the shared selection caps, so a
+/// pathological die count cannot make candidate generation blow up. The
+/// deterministic take-`ignore_count` prefix is emitted FIRST and is always
+/// present, which is the invariant that matters: an empty candidate list makes
+/// `AiDecisionContract::contains_action` reject every action — including
+/// `phase-ai`'s own fallback — and softlocks the AI seat (#6942).
+fn bounded_ignore_combinations(ignorable: &[usize], ignore_count: usize) -> Vec<Vec<usize>> {
+    if ignore_count == 0 || ignorable.len() < ignore_count {
+        return Vec::new();
+    }
+    // The forced pick: always legal, always offered, and the same submission
+    // `phase-ai`'s `fallback_action` produces — so the contract accepts it.
+    let forced: Vec<usize> = ignorable.iter().take(ignore_count).copied().collect();
+    if ignorable.len() > SELECTION_POOL_CAP {
+        return vec![forced];
+    }
+    let mut combos = combinations_usize(ignorable, ignore_count);
+    combos.truncate(SELECTION_CANDIDATE_CAP);
+    if !combos.contains(&forced) {
+        combos.insert(0, forced);
+    }
+    combos
 }
 
 fn combinations_usize(items: &[usize], k: usize) -> Vec<Vec<usize>> {

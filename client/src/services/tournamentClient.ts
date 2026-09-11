@@ -2,6 +2,7 @@ import type {
   BracketShape,
   GameFormat,
   MatchArity,
+  MatchType,
   PairingId,
   PodOutcome,
   ScoringPolicy,
@@ -13,7 +14,10 @@ import type {
   TournamentUpdateReply,
   TournamentView,
 } from "../adapter/types";
-import { MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK } from "../adapter/ws-adapter";
+import {
+  MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING,
+  MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK,
+} from "../adapter/ws-adapter";
 import type { PhaseSocket } from "./openPhaseSocket";
 
 /**
@@ -537,7 +541,14 @@ function gatedRequestOver(
 export interface CreateTournamentRequest {
   name: string;
   arity: MatchArity;
-  scoring: ScoringPolicy;
+  /**
+   * `null` means "Automatic" — let the broker apply its arity default
+   * (`ScoringPolicy::default_for_arity`) and report the resolved value back on
+   * `TournamentSummary.scoring`. An explicit policy overrides it. The send path
+   * substitutes {@link defaultScoringForArity} for a `null` here only against a
+   * pre-v6 broker that cannot accept an omitted `scoring`.
+   */
+  scoring: ScoringPolicy | null;
   bracket: BracketShape;
   totalRounds?: number | null;
   /**
@@ -553,14 +564,92 @@ export interface CreateTournamentRequest {
    * lobby protocol 7; ignored by a pre-v7 broker.
    */
   format?: GameFormat | null;
+  /**
+   * The match structure (Bo1 / Bo3). `null`/omitted resolves to the arity
+   * default (Bo3 head-to-head, Bo1 for pods). `Bo3` is head-to-head only — the
+   * broker rejects it at any other arity. Additive in lobby protocol 8; ignored
+   * by a pre-v8 broker.
+   */
+  matchType?: MatchType | null;
 }
 
-/** `CreateTournament` → `TournamentCreated` (point reply, carries the token). */
+/**
+ * Whether a `CreateTournament` request needs lobby protocol
+ * `MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE` to be honored — i.e. it selects a match
+ * structure a pre-v8 broker would silently apply DIFFERENTLY from a v8 broker.
+ *
+ * A pre-v8 broker discards `match_type` and applies the arity default: Bo3 for
+ * head-to-head, Bo1 for pods. So a request needs the capability exactly when its
+ * explicit `match_type` differs from that default:
+ * - **Bo1 head-to-head** — a pre-v8 broker runs it as Bo3.
+ * - **Bo3 pod** (any non-head-to-head arity) — a v8 broker *rejects* it (Bo3 is
+ *   head-to-head only), but a pre-v8 broker silently makes an arity-default Bo1
+ *   pod. Either way the organizer must not get a silent Bo1 pod.
+ *
+ * A selection that matches the pre-v8 default (Bo3 head-to-head, `Bo1`/`null`
+ * pods) is honored identically by both, so it is never gated. This encodes only
+ * the pre-v8 default boundary as a capability check; the broker stays the single
+ * authority for actually resolving and validating the structure.
+ */
+export function matchTypeNeedsCapability(
+  arity: MatchArity,
+  matchType: MatchType | null | undefined,
+): boolean {
+  if (matchType == null) return false;
+  const preV8Default: MatchType = arity === 2 ? "Bo3" : "Bo1";
+  return matchType !== preV8Default;
+}
+
+/**
+ * The BELOW-FLOOR COMPATIBILITY FALLBACK for {@link createTournamentOver}'s
+ * `scoring` gate, for a given arity. Mirrors `ScoringPolicy::default_for_arity`
+ * (`crates/lobby-broker/src/tournament.rs`).
+ *
+ * As of lobby protocol v6 the broker owns this default: `CreateTournament.scoring`
+ * is `Option<ScoringPolicy>` with `#[serde(default)]`, so a client omits it
+ * (`scoring: null`) and reads the resolved value back off
+ * `TournamentSummary.scoring`. The create form computes no default at all.
+ *
+ * This helper survives ONLY for the one direction that is not symmetric:
+ * omitting `scoring` against a pre-v6 broker is a hard `missing field \`scoring\``
+ * parse error, not a degrade, so below {@link MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING}
+ * the send path substitutes this explicit policy. It lives here, beside its sole
+ * consumer, rather than in `pages/tournamentPageState.ts`: a value import from
+ * that module would close the runtime cycle
+ * `tournamentClient → tournamentPageState → multiplayerStore → tournamentClient`.
+ *
+ * Arity-dependent by design: a fixed 3/1/0 would silently give every pod
+ * organizer MTR head-to-head scoring instead of MSTR pod scoring.
+ */
+export function defaultScoringForArity(arity: MatchArity): ScoringPolicy {
+  return { win_points: 2 * arity - 1, draw_points: 1, loss_points: 0 };
+}
+
+/**
+ * `CreateTournament` → `TournamentCreated` (point reply, carries the token).
+ *
+ * The `scoring` gate reads a **floor**, never the current version, exactly as
+ * `gatedRequestOver` reads {@link MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK}: a v6
+ * or v7 broker still applies its own default, so `req.scoring === null` is sent
+ * as an omitted `scoring: null` and the broker resolves it. Below
+ * {@link MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING} — including a peer that
+ * advertises no lobby version at all, which predates broker-owned scoring — an
+ * omitted policy is a hard parse error there, so the client substitutes the
+ * explicit {@link defaultScoringForArity}. An explicit `req.scoring` is always
+ * sent verbatim regardless of version.
+ */
 export function createTournamentOver(
   socket: PhaseSocket,
   req: CreateTournamentRequest,
   opts: TournamentRequestOptions = {},
 ): Promise<TournamentRpcResult<TournamentCreatedReply>> {
+  const lobbyProtocolVersion = socket.serverInfo.lobbyProtocolVersion;
+  const brokerOwnsDefault =
+    lobbyProtocolVersion !== undefined &&
+    lobbyProtocolVersion >= MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING;
+  const scoring =
+    req.scoring ?? (brokerOwnsDefault ? null : defaultScoringForArity(req.arity));
+
   return requestOver<TournamentCreatedReply>(
     socket,
     {
@@ -568,11 +657,12 @@ export function createTournamentOver(
       data: {
         name: req.name,
         arity: req.arity,
-        scoring: req.scoring,
+        scoring,
         bracket: req.bracket,
         total_rounds: req.totalRounds ?? null,
         plus_rounds: req.plusRounds ?? null,
         format: req.format ?? null,
+        match_type: req.matchType ?? null,
       },
     },
     matchReply<TournamentCreatedReply>("TournamentCreated", null),

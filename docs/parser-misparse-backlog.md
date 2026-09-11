@@ -18,8 +18,8 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
-| 1 | Relative-clause / filter restriction on target dropped | 745 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 584 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 1 | Relative-clause / filter restriction on target dropped | 744 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 583 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 404 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 387 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 329 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
@@ -28,7 +28,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 8 | Additional / alternative casting cost dropped | 210 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 167 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
-| 11 | Replacement / prevention / 'instead' effect mis-modeled | 157 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
+| 11 | Replacement / prevention / 'instead' effect mis-modeled | 153 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 138 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
 | 13 | State/game-state condition → StaticCondition::Unrecognized | 132 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
 | 14 | Granted/quoted ability or continuous modification dropped | 96 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
@@ -62,7 +62,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 > uncorrected here deliberately — that is a whole-file hygiene pass, not part of
 > the card fix that touched root cause 27.
 
-### 1. Relative-clause / filter restriction on target dropped  (745 cards)
+### 1. Relative-clause / filter restriction on target dropped  (744 cards)
 
 **Signature.** TargetFilter/affected emitted with empty or missing properties; a trailing restrictive clause (type, subtype, color, mana value, zone, combat/temporal/control predicate, exclusion) is silently dropped, over-broadening the filter.
 
@@ -195,7 +195,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Coralhelm Chronicler
 - Corpse Dance
 - Corrosive Ooze
-- Cover of Winter
 - Crimson Roc
 - Cromat
 - Crowd of True Believers
@@ -815,7 +814,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (584 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (583 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -824,7 +823,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 <details><summary>Cards</summary>
 
 - A-Paragon of Modernity
-- A-Sigil of Myrkul
 - Adaptive Training Post
 - Adrestia
 - Aether Revolt
@@ -1256,7 +1254,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Rowdy Crew
 - Rubblebelt Braggart
 - Runaway Steam-Kin
-- Runo Stromkirk
 - Rushing-Tide Zubera
 - Rushwood Legate
 - Saffi Eriksdotter
@@ -3618,7 +3615,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 11. Replacement / prevention / 'instead' effect mis-modeled  (157 cards)
+### 11. Replacement / prevention / 'instead' effect mis-modeled  (153 cards)
 
 **Signature.** A continuous replacement / damage-prevention / redirection clause (CR 614/615) is emitted as a one-shot Spell or unconditional sequential sibling, dropping the 'instead'/replacement semantics or the source/recipient filter.
 
@@ -3645,7 +3642,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Awe Strike
 - Azorius Ploy
 - Beamtown Beatstick
-- Benevolent Unicorn
 - Betrayal at the Vault
 - Bloatfly Swarm
 - Chains of Mephistopheles
@@ -3675,7 +3671,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Genesis Wave
 - Ghosts of the Innocent
 - Gift of Growth
-- Gisela, Blade of Goldnight
 - Gleemax
 - Glimpse the Cosmos
 - Gluttonous Hellkite
@@ -3734,7 +3729,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Phyrexian Vindicator
 - Pilgrim of Justice
 - Pilgrim of Virtue
-- Plated Pegasus
 - Power Leak
 - Power Level Analyzer
 - Prairie Dog
@@ -3759,7 +3753,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Sekki, Seasons' Guide
 - Shadow the Hedgehog
 - Shelter
-- Shield of the Avatar
 - Shield of the Realm
 - Shieldmage Advocate
 - Shimatsu the Bloodcloaked

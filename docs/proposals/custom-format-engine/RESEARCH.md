@@ -33,6 +33,25 @@ during the match.
   Jeweled Bird, Rebirth, Tempest Efreet.
 - **Reprint policy:** non-foil reprints with original frame + art, any language;
   no proxies.
+- **Named legal promos (ADDED 2026-09-09, Phase 2a implementation):** the
+  source also declares three promotional cards legal — **Arena**, **Sewers of
+  Estark**, and **Nalathni Dragon** (1994) — which the "Legal sets" line above
+  does not cover. This was missed in the original 2026-07-07 capture and is
+  recorded here because it is a real legality difference, not a detail.
+  - Their sets, verified against Scryfall 2026-09-09: Arena and Sewers of
+    Estark are in `PHPR` (HarperPrism Book Promos, **5 cards**); Nalathni
+    Dragon is in `PDRC` (Dragon Con, **1 card**).
+  - **Not expressible for 93-94 at set-code granularity.** The other three
+    PHPR cards — Giant Badger, Windseeker Centaur, Mana Crypt — are Old School
+    *95* promos, not 93-94 legal, and Mana Crypt is restricted even there. So
+    adding `PHPR` to 93-94's `legal_sets` would admit three cards the format
+    forbids, while omitting it rejects two the format allows. `PDRC` has no
+    such problem (one card).
+  - The implemented preset therefore omits both promo sets and is
+    **under-permissive by these three cards**, disclosed in its `description`
+    per the `SetCodeApproximation` pairing rule. Fixing it properly needs
+    card-level pool entries, which `LegalityRules` does not have — flagged, not
+    silently dropped.
 - **Legacy rules:** mana burn only. (Plus Chaos Orb / Falling Star flip Oracle,
   and a "no draws" 50-minute Chaos-Orb tiebreaker — tournament-ops, not engine.)
 
@@ -42,7 +61,16 @@ during the match.
 - **Legal sets:** all of 93-94 **plus** Fourth Edition, Ice Age, Chronicles,
   Renaissance, Homelands.
 - **Restricted:** 93-94's list **plus** Demonic Consultation, Mana Crypt.
-- **Banned:** 93-94's list **plus** Amulet of Quoz, Timmerian Fiends.
+- **Banned:** 93-94's list **plus** Amulet of Quoz, Timmerian Fiends. (Both
+  additions are CR 407.3 ante cards, which this era's pool newly contains —
+  `game::ante` bars them from every deck independently of this list.)
+- **Named legal promos (ADDED 2026-09-09, as above):** 93-94's three **plus**
+  Giant Badger, Windseeker Centaur and Mana Crypt. Unlike 93-94, this IS
+  expressible at set-code granularity — all five `PHPR` cards are 95-legal, so
+  `PHPR` + `PDRC` would be exactly correct here. The implemented preset still
+  omits them, because it inherits 93-94's `legal_sets` wholesale and diverging
+  only for 95 would make the two presets' pools disagree about a shared set for
+  no reason a reader could see. Revisit alongside 93-94's carve-out.
 - **Legacy rules:** mana burn only.
 
 ### Middle School
