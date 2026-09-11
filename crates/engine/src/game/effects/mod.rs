@@ -9105,6 +9105,23 @@ pub(crate) fn resolve_player_for_context_ref(
         return ability.scoped_player.unwrap_or(ability.controller);
     }
 
+    // CR 608.2c: a `ParentTargetSlot` anaphor names a specific DECLARED slot of
+    // the resolving chain. A player-valued slot must resolve from the chain root
+    // (not the node's locally-propagated targets), mirroring
+    // `collect_player_targets`' top-level slot arm; an object-valued slot yields
+    // nothing here and is handled by the caller's object path.
+    if let TargetFilter::ParentTargetSlot { index } = target_filter {
+        if let Some(player) = crate::game::targeting::resolve_parent_slot_from_root(
+            state, ability, *index,
+        )
+        .and_then(|target| match target {
+            TargetRef::Player(player) => Some(player),
+            TargetRef::Object(_) => None,
+        }) {
+            return player;
+        }
+    }
+
     // CR 608.2c + CR 109.4: A player-only reference to the Nth chosen player
     // ("choose a player to draw a card") resolves from the resolution-scoped
     // chosen-players list. Falls back to `ability.controller` when the index

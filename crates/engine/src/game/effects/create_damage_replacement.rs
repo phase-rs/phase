@@ -114,8 +114,7 @@ pub fn resolve(
                             filter: qualifier.clone(),
                         },
                         state,
-                        ability.source_id,
-                        &ability.targets,
+                        ability,
                     );
                     if matches!(resolved, TargetFilter::None) {
                         None
@@ -163,9 +162,9 @@ pub fn resolve(
         // while retaining the sibling live qualifier that damage-time matching
         // rechecks. The existing chosen-source continuation above remains the
         // authority for prompting and then reaches the same materialization.
-        other => other.as_ref().map(|filter| {
-            resolve_source_filter(filter, state, ability.source_id, &ability.targets)
-        }),
+        other => other
+            .as_ref()
+            .map(|filter| resolve_source_filter(filter, state, ability)),
     };
 
     // CR 614.5 vs CR 611.2a: label the shield by its actual lifetime.

@@ -3692,9 +3692,13 @@ fn filter_inner_for_object(
         TargetFilter::ParentTargetSlot { index } => ability.is_some_and(|ability| {
             !ability.target_incarnations.is_empty()
                 && matches!(
-                    ability.targets.get(*index),
+                    // CR 608.2c: the slot is resolved from the chain root, not the
+                    // current node's locally-propagated targets — the selected
+                    // object is then pin-checked (CR 400.7) so a departed-and-
+                    // returned referent no longer matches.
+                    crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index),
                     Some(TargetRef::Object(id))
-                        if *id == object_id && ability.target_pin_is_current(*id, state)
+                        if id == object_id && ability.target_pin_is_current(id, state)
                 )
         }),
         // ParentTargetController/ParentTargetOwner/PostReplacementSourceController
@@ -7982,8 +7986,10 @@ mod tests {
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{AttachmentSnapshot, ZoneChangeRecord};
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::game_state::{
+        AttachmentSnapshot, StackEntry, StackEntryKind, ZoneChangeRecord,
+    };
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
@@ -12447,6 +12453,87 @@ mod tests {
             TargetFilter::Not {
                 filter: Box::new(TargetFilter::SpecificObject { id: ObjectId(8) }),
             },
+        );
+    }
+
+    /// CR 608.2c + CR 400.7: `ParentTargetSlot` matching resolves the slot from
+    /// the chain ROOT and pin-checks the selected incarnation. A nested chain
+    /// whose root slot 0 names object A must match A — not the leaf's locally-
+    /// propagated target B — and only while A's recorded incarnation is current.
+    #[test]
+    fn matches_parent_target_slot_from_chain_root_with_pin_check() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Alpha".to_string(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Beta".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Root chain declares slot 0 = A, slot 1 = B.
+        let root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(a)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(b)],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+
+        // The leaf carries only the locally-propagated most-recent target (B).
+        let mut leaf = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(b)],
+            source,
+            PlayerId(0),
+        );
+        leaf.set_target_incarnations_recursive(vec![ObjectIncarnationRef::from_object(
+            &state.objects[&a],
+        )]);
+
+        let ctx = FilterContext::from_ability(&leaf);
+        let slot0 = TargetFilter::ParentTargetSlot { index: 0 };
+        assert!(
+            super::matches_target_filter(&state, a, &slot0, &ctx),
+            "root slot 0 names A, so A must match"
+        );
+        assert!(
+            !super::matches_target_filter(&state, b, &slot0, &ctx),
+            "root slot 0 is A, not the leaf's local target B"
         );
     }
 

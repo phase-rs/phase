@@ -32,14 +32,24 @@ enum DefenderReferent {
 ///
 /// Everything else is a player reference, which is the conservative default:
 /// every card using this effect before Gideon Jura named a player.
-fn defender_referent(ability: &ResolvedAbility, filter: &TargetFilter) -> DefenderReferent {
-    let inherited = match filter {
+fn defender_referent(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> DefenderReferent {
+    let inherited: Option<TargetRef> = match filter {
         TargetFilter::SelfRef | TargetFilter::SpecificObject { .. } => {
             return DefenderReferent::Object
         }
         // CR 608.2c: the parent's chosen target — first slot, or the named one.
-        TargetFilter::ParentTarget => ability.targets.first(),
-        TargetFilter::ParentTargetSlot { index } => ability.targets.get(*index),
+        TargetFilter::ParentTarget => ability.targets.first().cloned(),
+        // CR 608.2c: `ParentTargetSlot { index }` numbers the DECLARED target
+        // slots of the whole resolving chain, not the current node's local
+        // (propagated) targets — resolve it through the shared chain-root
+        // authority so a nested chain classifies the correct referent.
+        TargetFilter::ParentTargetSlot { index } => {
+            crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+        }
         _ => return DefenderReferent::Player,
     };
     match inherited {
@@ -68,7 +78,7 @@ fn snapshot_required_defender(
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> Option<RequiredDefender> {
-    match defender_referent(ability, filter) {
+    match defender_referent(state, ability, filter) {
         DefenderReferent::Player => Some(RequiredDefender::Fixed {
             player: resolve_player_for_context_ref(state, ability, filter),
         }),
@@ -355,9 +365,83 @@ mod tests {
         };
         assert_eq!(permanent.object_id, walker);
     }
+
+    /// CR 608.2c: `required_defender: ParentTargetSlot { index }` classifies the
+    /// DECLARED chain-root slot, not the leaf's locally-propagated target. A
+    /// nested chain whose root slot 0 is a PLAYER must lower to `Fixed` even when
+    /// the leaf's local (propagated) target is an object.
+    #[test]
+    fn parent_target_slot_defender_classifies_from_chain_root() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Coercer".to_string(),
+            Zone::Battlefield,
+        );
+        let walker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Some Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Root chain declares slot 0 = player, slot 1 = the planeswalker.
+        let root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(walker)],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+
+        // The leaf's local (propagated) target is the planeswalker, but its
+        // `ParentTargetSlot { index: 0 }` names root slot 0 = the player.
+        let leaf = ResolvedAbility::new(
+            Effect::ForceAttack {
+                target: TargetFilter::Any,
+                required_defender: TargetFilter::ParentTargetSlot { index: 0 },
+                duration: Duration::UntilEndOfCombat,
+                scope: EffectScope::Single,
+            },
+            vec![TargetRef::Object(walker)],
+            source,
+            PlayerId(0),
+        );
+
+        assert_eq!(
+            snapshot_required_defender(&state, &leaf, &TargetFilter::ParentTargetSlot { index: 0 }),
+            Some(RequiredDefender::Fixed {
+                player: PlayerId(1)
+            }),
+            "root slot 0 is a player, so the requirement must be Fixed, not Permanent"
+        );
+    }
+
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{ControllerRef, Duration, TargetRef, TypedFilter};
+    use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
