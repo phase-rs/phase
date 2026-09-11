@@ -861,6 +861,7 @@ mod issue_861_tree_of_perdition;
 mod issue_864_phyrexian_dreadnought;
 mod issue_868_szarekh_attack_trigger;
 mod issue_874_nadiers_nightblade_token_leaves;
+mod issue_8760_airbend_any_number;
 mod issue_8773_class_copy_enters_at_level_one;
 mod issue_879_obsessive_pursuit;
 mod issue_924_offspring;

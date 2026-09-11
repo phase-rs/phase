@@ -29001,6 +29001,46 @@ fn strip_optional_target_prefix_up_to_x_target() {
     );
 }
 
+/// CR 107.1c + CR 115.6: "any number of other target …" includes zero and is
+/// legal with no chosen targets. The combinator strips only the quantifier so
+/// `parse_target` still sees the article.
+#[test]
+fn strip_optional_target_prefix_any_number_of_other_target() {
+    let (rest, multi_target) =
+        strip_optional_target_prefix("any number of other target nonland permanents you control");
+    assert_eq!(rest, "other target nonland permanents you control");
+    assert_eq!(multi_target, Some(MultiTargetSpec::unlimited(0)));
+}
+
+#[test]
+fn strip_optional_target_prefix_any_number_of_target() {
+    let (rest, multi_target) = strip_optional_target_prefix("any number of target creatures");
+    assert_eq!(rest, "target creatures");
+    assert_eq!(multi_target, Some(MultiTargetSpec::unlimited(0)));
+}
+
+#[test]
+fn strip_optional_target_prefix_any_number_of_another_target() {
+    let (rest, multi_target) =
+        strip_optional_target_prefix("any number of another target creature");
+    assert_eq!(rest, "another target creature");
+    assert_eq!(multi_target, Some(MultiTargetSpec::unlimited(0)));
+}
+
+/// Negative + reach-guard: a resource-count "any number of" is not consumed,
+/// while the same prefix followed by a target article yields unlimited(0).
+#[test]
+fn strip_optional_target_prefix_any_number_of_non_target_is_not_consumed() {
+    let text = "any number of cards";
+    let (rest, multi_target) = strip_optional_target_prefix(text);
+    assert_eq!(rest, text);
+    assert_eq!(multi_target, None);
+
+    let (rest, multi_target) = strip_optional_target_prefix("any number of other target creatures");
+    assert_eq!(rest, "other target creatures");
+    assert_eq!(multi_target, Some(MultiTargetSpec::unlimited(0)));
+}
+
 #[test]
 fn detain_up_to_two_target_creatures_preserves_multi_target() {
     let def = parse_effect_chain(
@@ -35777,6 +35817,60 @@ fn parse_airbend_up_to_one_other_target_creature_or_spell() {
         }
         other => panic!("expected ChangeZone with creature-or-spell target, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_airbend_any_number_of_other_target_nonland_permanents_you_control() {
+    let clause = parse_effect_clause(
+        "airbend any number of other target nonland permanents you control",
+        &mut ParseContext::default(),
+    );
+    assert_eq!(clause.multi_target, Some(MultiTargetSpec::unlimited(0)));
+    match clause.effect {
+        Effect::ChangeZone {
+            origin,
+            target: TargetFilter::Typed(tf),
+            up_to,
+            ..
+        } => {
+            assert_eq!(
+                origin, None,
+                "single-target airbend must not pin origin to Battlefield"
+            );
+            assert!(
+                !up_to,
+                "optionality lives on MultiTargetSpec, not ChangeZone.up_to"
+            );
+            assert!(
+                has_type(&tf, TypeFilter::Permanent),
+                "expected Permanent type, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|ty| matches!(ty, TypeFilter::Non(inner) if **inner == TypeFilter::Land)),
+                "expected Non(Land), got {:?}",
+                tf.type_filters
+            );
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                has_prop(&tf, FilterProp::Another),
+                "expected Another, got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("expected ChangeZone with typed nonland permanent, got {other:?}"),
+    }
+    let grant = clause
+        .sub_ability
+        .as_ref()
+        .expect("airbend should chain a cast permission grant");
+    assert!(
+        matches!(&*grant.effect, Effect::GrantCastingPermission { .. }),
+        "airbend grant sub must be GrantCastingPermission, got {:?}",
+        grant.effect
+    );
 }
 
 #[test]
