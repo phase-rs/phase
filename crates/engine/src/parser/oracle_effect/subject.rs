@@ -2604,8 +2604,9 @@ pub(super) fn parse_subject_application(
         application.multi_target = Some(MultiTargetSpec::exact(count));
         return Some(application);
     }
-    // CR 107.1c + CR 115.1d: "any number of [other|another] target X" —
-    // variable-count targeting with a zero minimum and no upper bound.
+    // CR 107.1c + CR 115.1: "any number of [other|another] target X" —
+    // variable-count targeting with a zero minimum and no upper bound, for any
+    // spell or ability kind.
     // `strip_optional_target_prefix` is the single authority for the quantifier
     // and its target-article guard; it leaves `target_text` at "target …" /
     // "other target …" / "another target …" so `parse_target_with_ctx` adds
@@ -9713,7 +9714,7 @@ mod tests {
         assert!(app.multi_target.is_some(), "multi_target must be set");
     }
 
-    /// CR 107.1c + CR 115.1d: the subject "any number of" arm delegates to
+    /// CR 107.1c + CR 115.1: the subject "any number of" arm delegates to
     /// `strip_optional_target_prefix`, so it accepts every target article that
     /// helper does — including "another target".
     #[test]

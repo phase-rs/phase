@@ -36,7 +36,10 @@ pub fn resolve(
 /// sibling `{2}` cast permission is granted to (CR 701.65a) — so an airbend that
 /// chose zero targets, or whose targets all left before resolution, exiled
 /// nothing and is not a bend. Cause-bound, so an earlier producer merged into
-/// the same chain set (a discard, a draw) cannot stand in for an exile.
+/// the same chain set (a discard, a draw) cannot stand in for an exile. The set
+/// is scoped to the resolution chain, not to this one instruction, so an
+/// earlier exile in the same chain would also satisfy this check; no printed
+/// airbend card has one.
 ///
 /// CR 701.66b: an earthbend is registered after its delayed trigger is created,
 /// which is exactly the node that precedes this one, so it always counts.
