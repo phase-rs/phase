@@ -291,7 +291,12 @@ fn run_post_action_pipeline_from_with_policy(
             || deferred_trigger_batch_was_sba_choice_parked
         {
             triggers::collect_triggers_into_deferred(state, &filtered_events);
-        } else {
+        } else if state.game_end.is_none() {
+            // CR 104.1: only while the game is still going. Once this action
+            // has recorded a result on `GameState::game_end` (e.g. a CR 104.4b
+            // draw declared mid-resolution), the game has already ended, so
+            // abilities that triggered on the action's events never go on the
+            // stack.
             triggers::process_triggers(state, &filtered_events);
         }
     }

@@ -4263,10 +4263,11 @@ pub struct ExiledStopInput {
 /// TERMINATION CONTRACT: both stop predicates are pure functions of this
 /// witness. An iteration that leaves it unchanged changed nothing either
 /// predicate can observe, so no further iteration of the same body can reach a
-/// stop condition — the repeat is a loop of mandatory no-ops (CR 104.4b) and
-/// must end. Without this, an `UntilStopConditions` repeat whose producer is
-/// starved (empty library, a `Moved` redirect away from Exile) never
-/// terminates.
+/// stop condition. `effects::repeat_until_verdict` turns that into the CR 104.4b
+/// outcome: a draw when the stalled iteration contained only mandatory actions
+/// and moved no object, otherwise the end of the process. Without this, an
+/// `UntilStopConditions` repeat whose producer is starved (empty library, a
+/// `Moved` redirect away from Exile) never terminates.
 ///
 /// COUPLING, recorded: the `Some(RepeatContinuation::UntilStopConditions {
 /// stop_on_put_to_hand, stop_on_duplicate_exiled_names })` patterns in
@@ -4280,8 +4281,10 @@ pub struct ExiledStopInput {
 /// carries a linked-exile consumer. The grammar makes the same-name stop
 /// clause OPTIONAL, so a future body reading only "…repeat this process until
 /// you put a card into your hand" would track nothing, hold this witness
-/// byte-identical every iteration WHILE ACTUALLY EXILING CARDS, and be
-/// TRUNCATED after one iteration rather than hung. A `Moved` redirect that
+/// byte-identical every iteration WHILE ACTUALLY EXILING CARDS, and be judged
+/// stalled after one iteration rather than hung. That iteration moved a card,
+/// so `repeat_until_verdict` ends the process there (TRUNCATED) instead of
+/// declaring a draw. A `Moved` redirect that
 /// sends the card anywhere but Exile has the same shape. If such a card
 /// appears, the repair is to make the witness key on something that body
 /// actually mutates (the producer's own output — moved-card count, library
@@ -4302,8 +4305,8 @@ pub struct ExiledStopInput {
 /// `cards_exiled_with_source_this_turn`, `duplicate_name_among_exiled_by_source`
 /// reads `exile_links` — so a row added to one ledger for an object the OTHER
 /// ledger already holds genuinely moves a predicate's input. A union deduped by
-/// `ObjectId` would hold byte-identical across exactly that change and stop a
-/// repeat that had in fact advanced (a truncation — the unsafe direction), so
+/// `ObjectId` would hold byte-identical across exactly that change and stop (or
+/// draw) a repeat that had in fact advanced — the unsafe direction — so
 /// the rows are keyed by `(ledger, object_id)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepeatUntilStopWitness {
@@ -17498,6 +17501,13 @@ pub struct LoopDetectSample {
     pub live: GameState,
 }
 
+/// CR 104.1: the result of a game that has ended. `winner: None` is a draw (CR 104.4).
+/// Written only by `elimination::end_game`; see [`GameState::game_end`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GameEnd {
+    pub winner: Option<PlayerId>,
+}
+
 /// Declares the runtime state and its private serde-only raw mirror from one
 /// field list. Keeping the field declaration single-sourced makes persistence
 /// ingress exhaustive whenever `GameState` evolves.
@@ -17658,6 +17668,24 @@ declare_game_state! {
 
     // Game flow
     pub waiting_for: WaitingFor,
+    /// CR 104.1: the recorded result once the game has ended, written only by
+    /// `elimination::end_game`. `waiting_for` is not a durable home for it: a game can end
+    /// mid-resolution (the CR 104.4b mandatory-loop draw), and a later step of the SAME
+    /// action can still overwrite `waiting_for` before the action boundary. The CR 104.1
+    /// guard in `run_post_action_pipeline` stops triggers from reaching a finished game's
+    /// stack at the source. This record covers the writers that remain, such as a CR 616.1
+    /// replacement-order prompt raised in `resolve_top` on the resolving spell's own zone
+    /// move. `elimination::ensure_game_over_if_terminal`
+    /// re-establishes `WaitingFor::GameOver` from this record, without a second
+    /// `GameEvent::GameOver`.
+    ///
+    /// `#[serde(skip)]`: consumed within the apply that set it. Every action boundary runs
+    /// `reconcile_terminal_result`, after which `waiting_for` carries the result on the
+    /// wire, and nothing serializes a `GameState` between the write and that boundary (the
+    /// only runtime serializers are the persistence and client-wire boundaries). A clone
+    /// keeps it. A new game is a fresh `GameState::new`, so it cannot leak into game 2.
+    #[serde(skip)]
+    pub game_end: Option<GameEnd>,
     /// Persisted allocation source for Resolve All consent epochs. Starts at
     /// one for legacy saves and is minted only by `BeginResolveAll`.
     #[serde(default = "initial_resolve_all_consent_epoch")]
@@ -19342,9 +19370,10 @@ declare_game_state! {
     pub last_revealed_ids: Vec<ObjectId>,
 
     /// CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Set when the most
-    /// recently resolved `Dig`/`ChooseFromZone`/`RevealHand` reveal-choice
-    /// came up with nothing (empty library, no eligible card, or an empty
-    /// reveal-choice set respectively) — distinct from "none of those has run
+    /// recently resolved `Dig`/`ChooseFromZone`/`RevealHand` reveal-choice/
+    /// `ExileTop` came up with nothing (empty library, no eligible card, an
+    /// empty reveal-choice set, or no card exiled respectively; `ExileTop`
+    /// since issue #8798) — distinct from "none of those has run
     /// in this chain link," which is `None`. This is a brief, transient
     /// relay: `effects::apply_parent_chain_context` reads and immediately
     /// clears it at the very next parent->child hand-off (whatever that
@@ -24270,6 +24299,7 @@ impl GameState {
             waiting_for: WaitingFor::Priority {
                 player: starting_player,
             },
+            game_end: None,
             next_resolve_all_consent_epoch: initial_resolve_all_consent_epoch(),
             viewer_projection: None,
             resolve_all_consent_run: None,
@@ -26386,6 +26416,16 @@ fn _gamestate_partition_is_total(s: &GameState) {
         rng: _,
         combat: _,
         waiting_for: _,
+        // `game_end` (CR 104.1 terminal record): EXCLUDED from `impl PartialEq for
+        // GameState`, and that is the SAFE direction. It is written once, when the game
+        // ends, and never cleared or grown, so it cannot be a per-cycle accumulator; and the
+        // write is followed, at the same action boundary, by a `reconcile_terminal_result`
+        // that leaves the game on `GameOver` (or past it, in the match flow), so
+        // no CR 732 loop verdict is reached from a state that carries it. After the action
+        // boundary it is redundant with the COMPARED `waiting_for` (`GameOver { winner }`)
+        // and `match_phase`. Comparing it would make a finished game unequal to its own
+        // serde round trip, since it is `#[serde(skip)]`.
+        game_end: _,
         next_resolve_all_consent_epoch: _,
         // `viewer_projection`: COMPARED (fail-safe). It is `None` on every authoritative
         // state, so every loop-detection sample compares `None == None` and COMPARING it

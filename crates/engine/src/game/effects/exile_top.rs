@@ -1,6 +1,8 @@
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
-use crate::types::ability::{Effect, EffectError, EffectKind, LibraryPosition, ResolvedAbility};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason, ResolvedAbility,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::zones::Zone;
@@ -59,6 +61,14 @@ pub fn resolve(
             ))
         }
     };
+    // CR 609.3 + CR 608.2c (issue #8798): this ExileTop's own outcome — never
+    // a stale value from an earlier link — is what `apply_parent_chain_context`
+    // relays to the immediate sub_ability. With nothing exiled, a chained
+    // "that card" (`ParentTarget`) has no referent and must no-op rather than
+    // fall back to this ability's source.
+    state.last_parent_target_missing_reason = top_cards
+        .is_empty()
+        .then_some(ParentTargetMissingReason::ExileTop);
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
 
@@ -583,6 +593,50 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// CR 609.3 + CR 608.2c (issue #8798): an ExileTop that exiles nothing
+    /// hands its `ParentTarget` child no referent, so it must publish the
+    /// typed missing-referent reason for `apply_parent_chain_context` to relay.
+    #[test]
+    fn exile_top_with_empty_library_publishes_missing_parent_target_reason() {
+        let mut state = GameState::new_two_player(42);
+        let ability = make_exile_top_ability(1);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.last_parent_target_missing_reason,
+            Some(ParentTargetMissingReason::ExileTop)
+        );
+    }
+
+    /// CR 608.2c: the reason reflects THIS ExileTop's outcome. A card actually
+    /// exiled clears a stale reason left by an earlier link, so the chained
+    /// "that card" consumer acts on the exiled card.
+    #[test]
+    fn exile_top_that_exiles_a_card_clears_a_stale_missing_reason() {
+        let mut state = GameState::new_two_player(42);
+        let top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Top".to_string(),
+            Zone::Library,
+        );
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+        let ability = make_exile_top_ability(1);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&top).map(|obj| obj.zone),
+            Some(Zone::Exile),
+            "reach guard: the top card must actually be exiled"
+        );
+        assert_eq!(state.last_parent_target_missing_reason, None);
     }
 
     /// CR 603.7 + CR 406.1: `ExileTop` must publish a tracked set when a

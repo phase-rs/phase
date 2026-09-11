@@ -29880,13 +29880,13 @@ impl CopyCountStatus {
 }
 
 /// CR 608.2c: Distinguishes WHY an immediately-chained `ParentTarget` child
-/// ability was handed off with nothing to act on. The three sources are
-/// mutually exclusive per hand-off (only one effect can be the immediate
-/// parent of a given child). Downstream consumers inspect the typed reason only
-/// when their exact `ParentTarget` operation needs to distinguish a missing
-/// referent from an ordinary empty target list. These used to be three parallel
-/// boolean fields on `ResolvedAbility` / `GameState` before being consolidated
-/// here (see the PR #5834/#5836 review that requested this).
+/// ability was handed off with nothing to act on. The sources are mutually
+/// exclusive per hand-off (only one effect can be the immediate parent of a
+/// given child). Downstream consumers inspect the typed reason only when their
+/// exact `ParentTarget` operation needs to distinguish a missing referent from
+/// an ordinary empty target list. The first three used to be parallel boolean
+/// fields on `ResolvedAbility` / `GameState` before being consolidated here
+/// (see the PR #5834/#5836 review that requested this).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParentTargetMissingReason {
     /// CR 401.5 (issue #1365): A `Dig` looked at an empty library. Consulted
@@ -29915,6 +29915,15 @@ pub enum ParentTargetMissingReason {
     /// objects to a hard no-op (CR 608.2c: nothing to choose) instead of the
     /// whole-hand fallback.
     RevealHandChoice,
+    /// CR 609.3 + CR 608.2c (issue #8798, Tainted Pact): an `ExileTop` found
+    /// an empty library, so no card was exiled and nothing was bound as
+    /// "that card" for the chained `ParentTarget` child. Consulted by the
+    /// `ParentTarget` `ChangeZone` no-op guard (`change_zone.rs`) and by the
+    /// optional-effect feasibility probe (`optional_effect_is_infeasible`):
+    /// "you may put that card into your hand" with no exiled card is neither
+    /// an offerable option (CR 608.2d) nor a license for the generic
+    /// source fallback, which would move the resolving spell itself.
+    ExileTop,
 }
 
 /// CR 608.2c: what a chain split — a `player_scope` fan-out, or a multi-target

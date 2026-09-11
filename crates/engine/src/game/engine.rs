@@ -2336,8 +2336,7 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
                 && delta.is_net_progress()
                 && has_no_loss_axis(&delta)
             {
-                result.events.push(GameEvent::GameOver { winner: None });
-                state.waiting_for = WaitingFor::GameOver { winner: None };
+                super::elimination::end_game(state, None, &mut result.events);
                 result.waiting_for = state.waiting_for.clone();
                 match_flow::handle_game_over_transition(state);
                 return;
@@ -8611,6 +8610,13 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
     let mut iteration = 0usize;
     let mut advanced = false;
     loop {
+        // CR 104.1: a game ends immediately when a player wins or the game is a
+        // draw. Once this action has recorded a result (`GameState::game_end`),
+        // pass for no one, even if a later step left a Priority wait behind;
+        // the caller's `reconcile_terminal_result` restores `WaitingFor::GameOver`.
+        if state.game_end.is_some() {
+            break;
+        }
         // CR 732.2: the iteration cap was exhausted while a mandatory cascade is
         // still in flight (priority unsettled, non-empty stack, no meaningful
         // action) — halt gracefully, the same way the growth ceilings do, rather
@@ -8720,9 +8726,8 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                                 // repeated a prior state with no way to stop — a
                                 // draw. CR 801.16: limited-range partial draw N/A
                                 // while format_config.range_of_influence is None.
-                                result.events.push(GameEvent::GameOver { winner: None });
-                                result.waiting_for = WaitingFor::GameOver { winner: None };
-                                state.waiting_for = WaitingFor::GameOver { winner: None };
+                                super::elimination::end_game(state, None, &mut result.events);
+                                result.waiting_for = state.waiting_for.clone();
                                 match_flow::handle_game_over_transition(state);
                                 return advanced;
                             }

@@ -3,24 +3,30 @@
 //!
 //! https://github.com/phase-rs/phase/issues/2899
 //!
-//! # KNOWN REMAINING DEFECT — issue #8798
+//! Also covers the two outcomes of a Tainted Pact whose library runs out:
 //!
-//! The tests in this file prove TERMINATION only. Tainted Pact cast with an
-//! empty library is still wrong: `ChangeZone { target: ParentTarget }` re-binds
-//! to the source object when its producing `ExileTop` produced nothing
-//! (issue #8798), so the engine still offers one "you may put that card into
-//! your hand" prompt that CR 608.2d says cannot be offered, and accepting it
-//! still moves Tainted Pact itself from the graveyard to its controller's hand
-//! instead of leaving it there (CR 608.2n). Nothing here asserts the spell's
-//! final zone, and nothing here drives the accept path — a green file does NOT
-//! mean the card is correct.
+//! - Issue #8798: with no card exiled, "you may put that card into your hand"
+//!   has no referent. CR 608.2d forbids offering it, and CR 608.2c + CR 609.3
+//!   forbid its `ParentTarget` from falling back to Tainted Pact itself.
+//! - CR 104.4b + CR 732.4: once nothing is left to exile, every iteration is
+//!   a mandatory no-op that can never meet either stop condition, so the game
+//!   is a draw. A repeat whose stalled iteration offered an optional action is
+//!   not a draw (the CR 104.4b carve-out) and just ends, as does one whose
+//!   stalled iteration moved a card the progress witness does not count.
+//! - CR 104.1: that draw stands even when a later prompt in the same action (a
+//!   trigger-ordering or replacement-order choice) overwrites the wait.
+//!
+//! Fishing Gear (an `ExileTop` parent) and Jace, the Living Guildpact (a `Dig`
+//! parent) cover the #8798 class outside Tainted Pact.
 
 use std::sync::mpsc;
 use std::time::Duration;
 
 use engine::game::ability_utils::build_resolved_from_def;
+use engine::game::effects::attach::attach_to;
 use engine::game::effects::resolve_ability_chain;
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::layers::evaluate_layers;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::move_to_library_position;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
@@ -28,14 +34,23 @@ use engine::types::ability::{
     RepeatContinuation, ResolvedAbility, TargetFilter,
 };
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
-use engine::types::zones::Zone;
+use engine::types::zones::{EtbTapState, Zone};
+
+use super::rules::run_combat;
 
 const TAINTED_PACT_ORACLE: &str = "Exile the top card of your library. You may put that card into your hand unless it has the same name as another card exiled this way. Repeat this process until you put a card into your hand or you exile two cards with the same name, whichever comes first.";
+const HAUNT_OF_HIGHTOWER_ORACLE: &str = "Flying, lifelink\nWhenever The Haunt of Hightower attacks, defending player discards a card.\nWhenever a card is put into an opponent's graveyard from anywhere, put a +1/+1 counter on The Haunt of Hightower.";
+const BLOODCHIEF_ASCENSION_ORACLE: &str = "At the beginning of each end step, if an opponent lost 2 or more life this turn, you may put a quest counter on this enchantment. (Damage causes loss of life.)\nWhenever a card is put into an opponent's graveyard from anywhere, if this enchantment has three or more quest counters on it, you may have that player lose 2 life. If you do, you gain 2 life.";
+const LEYLINE_OF_THE_VOID_ORACLE: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.";
+const REST_IN_PEACE_ORACLE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
+const FISHING_GEAR_ORACLE: &str = "Whenever equipped creature deals combat damage to a player, exile the top card of that player's library. If it's a permanent card, you may put it onto the battlefield under your control. If you don't, create a 1/1 blue Fish creature token.\nEquip {2}";
+const JACE_THE_LIVING_GUILDPACT_ORACLE: &str = "[+1]: Look at the top two cards of your library. Put one of them into your graveyard.\n[−3]: Return another target nonland permanent to its owner's hand.\n[−8]: Each player shuffles their hand and graveyard into their library. You draw seven cards.";
 
 fn put_library_top(runner: &mut GameRunner, id: ObjectId) {
     let owner = runner.state().objects.get(&id).expect("object").owner;
@@ -219,18 +234,34 @@ fn assert_exile_top_resolved(events: &[GameEvent]) {
     );
 }
 
-/// CR 104.4b + CR 101.3 + CR 609.3: an `UntilStopConditions` repeat whose
-/// producer is starved from the very first iteration must terminate.
+/// Number of draw (`GameOver { winner: None }`) events in `events`.
+fn draw_event_count(events: &[GameEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::GameOver { winner: None }))
+        .count()
+}
+
+/// CR 104.4b + CR 732.4 + CR 608.2d (issue #8798): Tainted Pact cast with an
+/// empty library is a draw.
 ///
-/// With an empty library "exile the top card of your library" is impossible and
-/// is ignored, so neither printed stop predicate can ever become true and the
-/// repeat has no printed way to stop. The no-progress witness ends it.
+/// "Exile the top card of your library" exiles nothing (CR 609.3), so "that
+/// card" has no referent: the "you may put that card into your hand" option is
+/// impossible and never offered (CR 608.2d), and no printed stop condition can
+/// ever become true. Every iteration is the same mandatory no-op with no way to
+/// stop, so the game is a draw, and Tainted Pact is put into its owner's
+/// graveyard as it finishes resolving (CR 608.2n).
 ///
-/// Reverting the guard leaves the engine parked on the spurious
-/// `OptionalEffectChoice` with the repeat frame still live, so BOTH assertions
-/// below flip.
+/// The cast ACCEPTS every optional prompt, so it discriminates both halves:
+/// - revert the #8798 hunks (the `ExileTop` missing-referent stamp plus the
+///   `ChangeZone` feasibility arm / no-op guard) and the phantom prompt is
+///   offered and accepted, the `ParentTarget` falls back to the source, Tainted
+///   Pact goes to its owner's hand, and the paused iteration ends without a
+///   draw — the GameOver and graveyard assertions both flip;
+/// - revert the `MandatoryLoopDraw` verdict to a plain stop and the final
+///   state is `Priority`.
 #[test]
-fn tainted_pact_empty_library_terminates_the_repeat() {
+fn tainted_pact_empty_library_is_a_mandatory_loop_draw() {
     assert_tainted_pact_parses_to_until_stop_conditions();
 
     let mut scenario = GameScenario::new();
@@ -247,38 +278,46 @@ fn tainted_pact_empty_library_terminates_the_repeat() {
         "precondition: this regression is about a starved producer"
     );
 
-    let outcome = runner.cast(pact).resolve();
+    let outcome = runner.cast(pact).accept_optional().resolve();
 
     assert_exile_top_resolved(outcome.events());
     assert!(
-        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
-        "a repeat that cannot advance must end the resolution, got {:?}",
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::GameOver { winner: None }
+        ),
+        "a mandatory loop with no way to stop is a draw (CR 104.4b), got {:?}",
         outcome.final_waiting_for()
     );
+    assert_eq!(
+        draw_event_count(outcome.events()),
+        1,
+        "the draw must be announced exactly once"
+    );
+    outcome.assert_zone(&[pact], Zone::Graveyard);
     assert!(
         outcome.state().active_repeat_until().is_none(),
         "the repeat-until frame must retire, not stay parked"
     );
 }
 
-/// CR 104.4b: a repeat that makes progress and THEN stalls must still
-/// terminate.
+/// CR 104.4b + CR 732.4: a repeat that makes progress and THEN stalls is a
+/// draw once only mandatory actions remain.
 ///
-/// SCOPE OF THIS ROW, stated precisely because an earlier draft overclaimed it:
-/// this proves termination after real progress, and it is revert-failing for
-/// that. It does NOT discriminate a baseline hoisted above the `loop` in
-/// `resolve_ability_chain`. Tainted Pact's body pauses every iteration, so each
-/// iteration exits through the drain and RE-ENTERS `resolve_ability_chain`,
-/// which re-captures the baseline at function entry either way — the hoist is
-/// invisible from here. Observing it needs a non-pausing body whose witness
-/// genuinely grows, i.e. an `UntilStopConditions` ability carrying a
-/// linked-exile consumer, which no fixture in this file builds. The
-/// per-iteration capture is still the correct code, and it IS pinned against
-/// that specific mutation — by
-/// `until_stop_conditions_with_a_tracked_non_pausing_body_terminates_after_progress`
-/// at the bottom of this file, not by this row.
+/// Iteration 1 exiles the only card and offers the put (declined, the harness
+/// default), so it pauses and resumes through `drain_active_repeat_until`.
+/// That resumed iteration re-enters `resolve_ability_chain`, whose iteration 2
+/// finds the library empty, offers nothing, and draws. Its `GameOver` event is
+/// emitted inside the resumed iteration, so the event-count assertion also pins
+/// that the drain forwards resumed-iteration events to the action result.
+///
+/// It does NOT discriminate a baseline hoisted above the `loop` in
+/// `resolve_ability_chain`: the drain re-enters that function, which
+/// re-captures the baseline at entry either way. That mutation is pinned by
+/// `until_stop_conditions_with_a_tracked_non_pausing_body_draws_after_progress`
+/// at the bottom of this file.
 #[test]
-fn tainted_pact_terminates_when_the_library_empties_mid_repeat() {
+fn tainted_pact_draws_when_the_library_empties_mid_repeat() {
     assert_tainted_pact_parses_to_until_stop_conditions();
 
     let mut scenario = GameScenario::new();
@@ -300,16 +339,25 @@ fn tainted_pact_terminates_when_the_library_empties_mid_repeat() {
         "precondition: exactly one card, so iteration 2 is the stalled one"
     );
 
-    let outcome = runner.cast(pact).resolve();
+    let outcome = runner.cast(pact).decline_optional().resolve();
 
     assert_exile_top_resolved(outcome.events());
     // Positive reach-guard: iteration 1 really ran and really exiled, so the
-    // termination assertions below are not vacuous.
+    // draw assertions below are not vacuous.
     outcome.assert_zone(&[only_card], Zone::Exile);
     assert!(
-        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
-        "a repeat that stalls after making progress must still end, got {:?}",
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::GameOver { winner: None }
+        ),
+        "a repeat that stalls on mandatory actions after making progress is a \
+         draw (CR 104.4b), got {:?}",
         outcome.final_waiting_for()
+    );
+    assert_eq!(
+        draw_event_count(outcome.events()),
+        1,
+        "the resumed iteration's draw event must reach the action result"
     );
     assert!(
         outcome.state().active_repeat_until().is_none(),
@@ -317,17 +365,332 @@ fn tainted_pact_terminates_when_the_library_empties_mid_repeat() {
     );
 }
 
-/// CR 104.4b: the IN-LOOP guard arm, which the two cast-pipeline regressions
-/// above never reach.
+/// CR 104.1 + CR 104.4b + CR 603.3b: no trigger-ordering prompt opens after the
+/// draw.
 ///
-/// Tainted Pact's body raises a `WaitingFor` every iteration (the spurious
-/// prompt of issue #8798), so both of those tests exit through
-/// `drain_active_repeat_until`. This variant-level fixture gives the repeat a
-/// body that CANNOT pause — bare `ExileTop`, no optional sub-ability — against
-/// an empty library, which is exactly the shape #8798 creates for Tainted Pact
-/// itself once the spurious prompt is suppressed. Without the in-loop guard the
-/// `loop` in `resolve_ability_chain`'s `UntilStopConditions` arm never yields
-/// and never returns.
+/// Tainted Pact draws mid-resolution and is then put into P0's graveyard
+/// (CR 608.2n). P1 controls two different "whenever a card is put into an
+/// opponent's graveyard" triggers. The game ended with the draw (CR 104.1), so
+/// the post-action pipeline must not process them: `run_post_action_pipeline`
+/// skips `process_triggers` once `GameState::game_end` is recorded. Without that
+/// guard the pipeline opens P1's ordering prompt over the draw's wait. The
+/// recorded result is then still restored at `reconcile_terminal_result`, so
+/// the game still ends in a draw, but `pending_trigger_order` is left staged
+/// for a game that is over.
+#[test]
+fn tainted_pact_draw_opens_no_trigger_ordering_prompt() {
+    assert_tainted_pact_parses_to_until_stop_conditions();
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pact = scenario
+        .add_spell_to_hand_from_oracle(P0, "Tainted Pact", true, TAINTED_PACT_ORACLE)
+        .with_mana_cost(tainted_pact_cost())
+        .id();
+    scenario.with_mana_pool(P0, tainted_pact_mana());
+    scenario
+        .add_creature(P1, "The Haunt of Hightower", 3, 3)
+        .from_oracle_text_with_keywords(&["Flying", "Lifelink"], HAUNT_OF_HIGHTOWER_ORACLE);
+    let ascension = scenario
+        .add_enchantment_from_oracle(P1, "Bloodchief Ascension", BLOODCHIEF_ASCENSION_ORACLE)
+        .id();
+    // CR 603.4: the Ascension's graveyard trigger checks its quest counters as
+    // it triggers.
+    scenario.with_counter(ascension, CounterType::Generic("quest".to_string()), 3);
+
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().players[P0.0 as usize].library.is_empty(),
+        "precondition: this regression is about a starved producer"
+    );
+
+    let outcome = runner.cast(pact).resolve();
+
+    assert_exile_top_resolved(outcome.events());
+    // Reach-guard: the Pact really went to P0's graveyard after the draw, the
+    // event both of P1's triggers watch for.
+    outcome.assert_zone(&[pact], Zone::Graveyard);
+    assert!(
+        outcome.state().pending_trigger_order.is_none(),
+        "no CR 603.3b ordering prompt may open after the game ended (CR 104.1)"
+    );
+    assert!(
+        outcome.state().stack.is_empty(),
+        "no trigger may go on the stack after the game ended (CR 104.1)"
+    );
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::GameOver { winner: None }
+        ),
+        "the action must finish on the draw (CR 104.1), got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(draw_event_count(outcome.events()), 1);
+}
+
+/// CR 104.1 + CR 104.4b: no trigger goes on the stack after the draw.
+///
+/// The single-trigger sibling of the row above. P1's lone "whenever a card is
+/// put into an opponent's graveyard" trigger needs no ordering choice, so
+/// without the `game_end` guard in `run_post_action_pipeline` the pipeline puts
+/// it straight onto the stack of a game that is over. The wait stays on the
+/// draw, so the harness stops there, but the trigger is left on the stack.
+#[test]
+fn tainted_pact_draw_puts_no_trigger_on_the_stack() {
+    assert_tainted_pact_parses_to_until_stop_conditions();
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pact = scenario
+        .add_spell_to_hand_from_oracle(P0, "Tainted Pact", true, TAINTED_PACT_ORACLE)
+        .with_mana_cost(tainted_pact_cost())
+        .id();
+    scenario.with_mana_pool(P0, tainted_pact_mana());
+    let haunt = scenario
+        .add_creature(P1, "The Haunt of Hightower", 3, 3)
+        .from_oracle_text_with_keywords(&["Flying", "Lifelink"], HAUNT_OF_HIGHTOWER_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().players[P0.0 as usize].library.is_empty(),
+        "precondition: this regression is about a starved producer"
+    );
+
+    let outcome = runner.cast(pact).resolve();
+
+    assert_exile_top_resolved(outcome.events());
+    // Reach-guard: the Pact really went to P0's graveyard after the draw, the
+    // event the Haunt's trigger watches for.
+    outcome.assert_zone(&[pact], Zone::Graveyard);
+    assert!(
+        outcome.state().stack.is_empty(),
+        "the Haunt's trigger must not go on the stack after the game ended \
+         (CR 104.1), stack = {:?}",
+        outcome.state().stack
+    );
+    assert_eq!(
+        outcome.state().objects[&haunt]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied(),
+        None,
+        "nothing may happen in the game after it ended"
+    );
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::GameOver { winner: None }
+        ),
+        "the action must finish on the draw (CR 104.1), got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(draw_event_count(outcome.events()), 1);
+}
+
+/// CR 104.1 + CR 616.1: the draw also survives a replacement-order prompt on
+/// Tainted Pact's own move to the graveyard. Leyline of the Void and Rest in
+/// Peace, both controlled by P1, each want to exile it instead, so its owner
+/// chooses which applies first. That choice is raised inside the spell's
+/// resolution, after the draw, and parks `waiting_for` on the prompt.
+#[test]
+fn tainted_pact_draw_survives_a_replacement_order_prompt_on_its_graveyard_move() {
+    assert_tainted_pact_parses_to_until_stop_conditions();
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pact = scenario
+        .add_spell_to_hand_from_oracle(P0, "Tainted Pact", true, TAINTED_PACT_ORACLE)
+        .with_mana_cost(tainted_pact_cost())
+        .id();
+    scenario.with_mana_pool(P0, tainted_pact_mana());
+    scenario.add_enchantment_from_oracle(P1, "Leyline of the Void", LEYLINE_OF_THE_VOID_ORACLE);
+    scenario.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE_ORACLE);
+
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().players[P0.0 as usize].library.is_empty(),
+        "precondition: this regression is about a starved producer"
+    );
+
+    let outcome = runner.cast(pact).resolve();
+
+    assert_exile_top_resolved(outcome.events());
+    assert!(
+        outcome.state().pending_replacement.is_some(),
+        "reach guard: the two exile-instead redirects must have parked a CR 616.1 \
+         order choice on Tainted Pact's graveyard move"
+    );
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::GameOver { winner: None }
+        ),
+        "a replacement-order prompt after the draw must not undo it (CR 104.1), got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(
+        draw_event_count(outcome.events()),
+        1,
+        "restoring the draw must not announce it a second time"
+    );
+}
+
+/// Control for the draw rows above: a Tainted Pact whose repeat CAN stop
+/// resolves normally. The single card is exiled and the put is accepted, which
+/// meets the "until you put a card into your hand" condition (CR 608.2c).
+#[test]
+fn tainted_pact_that_puts_a_card_into_hand_resolves_without_a_draw() {
+    assert_tainted_pact_parses_to_until_stop_conditions();
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let only_card = scenario
+        .add_spell_to_library_top(P0, "Only Card", true)
+        .id();
+    let pact = scenario
+        .add_spell_to_hand_from_oracle(P0, "Tainted Pact", true, TAINTED_PACT_ORACLE)
+        .with_mana_cost(tainted_pact_cost())
+        .id();
+    scenario.with_mana_pool(P0, tainted_pact_mana());
+
+    let mut runner = scenario.build();
+    put_library_top(&mut runner, only_card);
+
+    let outcome = runner.cast(pact).accept_optional().resolve();
+
+    assert_exile_top_resolved(outcome.events());
+    outcome.assert_zone(&[only_card], Zone::Hand);
+    outcome.assert_zone(&[pact], Zone::Graveyard);
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "a repeat that met its stop condition ends normally, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(draw_event_count(outcome.events()), 0);
+    assert!(outcome.state().active_repeat_until().is_none());
+}
+
+/// Control for the draw rows above, through the cast pipeline: exiling two
+/// cards with the same name stops the repeat (CR 608.2c) and the game goes on.
+#[test]
+fn tainted_pact_that_exiles_a_duplicate_name_resolves_without_a_draw() {
+    assert_tainted_pact_parses_to_until_stop_conditions();
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bolt_a = scenario
+        .add_spell_to_library_top(P0, "Lightning Bolt", true)
+        .id();
+    let island = scenario.add_spell_to_library_top(P0, "Island", true).id();
+    let bolt_b = scenario
+        .add_spell_to_library_top(P0, "Lightning Bolt", true)
+        .id();
+    let pact = scenario
+        .add_spell_to_hand_from_oracle(P0, "Tainted Pact", true, TAINTED_PACT_ORACLE)
+        .with_mana_cost(tainted_pact_cost())
+        .id();
+    scenario.with_mana_pool(P0, tainted_pact_mana());
+
+    let mut runner = scenario.build();
+    // Exile order: bolt_b, island, bolt_a.
+    put_library_top(&mut runner, bolt_b);
+
+    let outcome = runner.cast(pact).decline_optional().resolve();
+
+    outcome.assert_zone(&[bolt_b, island, bolt_a], Zone::Exile);
+    outcome.assert_zone(&[pact], Zone::Graveyard);
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the duplicate-name stop ends the repeat normally, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(draw_event_count(outcome.events()), 0);
+    assert!(outcome.state().active_repeat_until().is_none());
+}
+
+/// CR 104.4b carve-out: "Loops that contain an optional action don't result in
+/// a draw." A stalled iteration that offered a real "you may" (here a feasible
+/// optional life gain after an `ExileTop` on an empty library) ends the
+/// repeat instead of drawing, even though nothing it did can meet a stop
+/// condition.
+///
+/// Revert-failing against a verdict that draws on any stalled iteration: the
+/// decline resumes through `drain_active_repeat_until`, which must classify the
+/// paused iteration as having offered an optional action.
+#[test]
+fn stalled_repeat_that_offered_an_optional_action_is_not_a_draw() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_spell_to_graveyard(P0, "Optional Repeat Source", true)
+        .id();
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().players[P0.0 as usize].library.is_empty(),
+        "precondition: the producer is starved, so the first iteration stalls"
+    );
+
+    let mut ability = ResolvedAbility::new(
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
+            face_down: false,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut gain = ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    gain.optional = true;
+    ability.sub_ability = Some(Box::new(gain));
+    ability.repeat_until = Some(RepeatContinuation::UntilStopConditions {
+        stop_on_put_to_hand: true,
+        stop_on_duplicate_exiled_names: false,
+    });
+
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0).unwrap();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "reach guard: the optional life gain must be offered, got {:?}",
+        runner.state().waiting_for
+    );
+
+    let result = runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("optional decision");
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "a loop containing an optional action is not a draw, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(draw_event_count(&result.events), 0);
+    assert!(runner.state().active_repeat_until().is_none());
+}
+
+/// CR 104.4b + CR 732.4: the IN-LOOP verdict arm, at the variant level.
+///
+/// This fixture gives the repeat a body that CANNOT pause — bare `ExileTop`,
+/// no optional sub-ability — against an empty library: the shape an
+/// empty-library Tainted Pact has once its impossible "you may" is no longer
+/// offered. Every iteration is the same mandatory no-op, so the in-loop arm
+/// must declare a draw. Without it the `loop` in `resolve_ability_chain`'s
+/// `UntilStopConditions` arm never yields and never returns.
 ///
 /// Deliberately NOT a `/card-test` cast-pipeline row: no card in the corpus
 /// prints this body, and `drive_resolution`'s 64-iteration bound only helps if
@@ -347,7 +710,7 @@ fn tainted_pact_terminates_when_the_library_empties_mid_repeat() {
 /// test's own process; under plain `cargo test`, which shares one process per
 /// test binary, it keeps spinning and allocating until the binary exits.
 #[test]
-fn until_stop_conditions_with_a_non_pausing_body_terminates_in_loop() {
+fn until_stop_conditions_with_a_non_pausing_body_draws_in_loop() {
     let (tx, rx) = mpsc::channel();
     let _fixture = std::thread::spawn(move || {
         let mut state = GameState::new_two_player(2899);
@@ -385,16 +748,19 @@ fn until_stop_conditions_with_a_non_pausing_body_terminates_in_loop() {
             ok,
             events.len(),
             exile_tops,
+            draw_event_count(&events),
+            matches!(state.waiting_for, WaitingFor::GameOver { winner: None }),
+            format!("{:?}", state.waiting_for),
             state.active_repeat_until().is_some(),
         ));
     });
 
-    let (ok, event_count, exile_tops, frame_still_parked) = rx
+    let (ok, event_count, exile_tops, draws, is_draw, waiting_for, frame_still_parked) = rx
         .recv_timeout(Duration::from_secs(10))
         .unwrap_or_else(|err| {
             panic!(
                 "the UntilStopConditions repeat never returned ({err:?}): the in-loop \
-                 `repeat_until_should_terminate` arm in `resolve_ability_chain`'s \
+                 `repeat_until_verdict` arm in `resolve_ability_chain`'s \
                  UntilStopConditions dispatch is missing or incorrect, so the loop \
                  spins without ever yielding a WaitingFor"
             )
@@ -411,13 +777,19 @@ fn until_stop_conditions_with_a_non_pausing_body_terminates_in_loop() {
         "a terminating repeat emits a bounded event list, got {event_count}"
     );
     assert!(
+        is_draw,
+        "a mandatory no-op loop is a draw (CR 104.4b), got {waiting_for}"
+    );
+    assert_eq!(draws, 1, "the draw must be announced exactly once");
+    assert!(
         !frame_still_parked,
         "a non-pausing body must never park a repeat-until frame"
     );
 }
 
-/// CR 104.4b: the in-loop guard's baseline is captured PER ITERATION, not once
-/// per repeat — the sibling of the test above, and the only row that pins that.
+/// CR 104.4b: the in-loop verdict's baseline is captured PER ITERATION, not
+/// once per repeat — the sibling of the test above, and the only row that pins
+/// that.
 ///
 /// WHICH MUTATION THIS TEST PINS, stated exactly: hoisting
 /// `resolve_ability_chain`'s `let progress_baseline = …repeat_until_stop_witness(…)`
@@ -426,11 +798,12 @@ fn until_stop_conditions_with_a_non_pausing_body_terminates_in_loop() {
 /// predicate, and this test then spins until its `recv_timeout` and FAILS.
 ///
 /// NOTHING ELSE IN THIS FILE PINS IT.
-/// `tainted_pact_terminates_when_the_library_empties_mid_repeat` has the same
-/// progress-then-stall SHAPE but exits through `drain_active_repeat_until`,
-/// which re-enters `resolve_ability_chain` and so re-captures the baseline at
-/// function entry either way — the hoist is invisible from there.
-/// `until_stop_conditions_with_a_non_pausing_body_terminates_in_loop` does reach
+/// `tainted_pact_draws_when_the_library_empties_mid_repeat` has the same
+/// progress-then-stall SHAPE but its first iteration pauses and resumes through
+/// `drain_active_repeat_until`, which re-enters `resolve_ability_chain` and so
+/// re-captures the baseline at function entry either way — the hoist is
+/// invisible from there.
+/// `until_stop_conditions_with_a_non_pausing_body_draws_in_loop` does reach
 /// the in-loop arm, but its ability carries NO linked-exile consumer, so
 /// `exile_links::should_track_exiled_by_source` is false, neither ledger is ever
 /// written, and its witness is empty on every iteration — a hoisted baseline is
@@ -442,16 +815,14 @@ fn until_stop_conditions_with_a_non_pausing_body_terminates_in_loop() {
 /// way"), which makes `should_track_exiled_by_source` true so the ledgers
 /// actually grow, and which neither pauses nor moves a card out of exile. Run
 /// against a ONE-CARD library: iteration 1 exiles the card and grows the
-/// witness; iteration 2 finds the library empty, changes nothing, and must end
-/// via the in-loop `repeat_until_should_terminate` arm. With the baseline
-/// hoisted, iteration 2's witness (one row) never equals the repeat's start
-/// (empty), `should_stop_repeat_until` stays false because the card is in exile
-/// and not in hand, and the loop never ends.
+/// witness; iteration 2 finds the library empty, changes nothing, and must draw
+/// via the in-loop `repeat_until_verdict` arm (no optional action anywhere in
+/// the body). With the baseline hoisted, iteration 2's witness (one row) never
+/// equals the repeat's start (empty), `should_stop_repeat_until` stays false
+/// because the card is in exile and not in hand, and the loop never ends.
 ///
-/// Why this shape matters rather than being a synthetic curiosity: it is the
-/// LIVE shape Tainted Pact acquires the moment issue #8798 suppresses the
-/// spurious prompt. That is precisely what the #8798 ordering constraint exists
-/// to prevent, so the guard that prevents it must be pinned before then.
+/// The draw also proves the in-loop arm ended the repeat: the drain can only
+/// run behind a player action, and this fixture takes none.
 ///
 /// Same bounded `std::thread` + `recv_timeout` harness as the test above, and
 /// the same residual: `recv_timeout` returning does not stop the spawned
@@ -459,7 +830,7 @@ fn until_stop_conditions_with_a_non_pausing_body_terminates_in_loop() {
 /// with this test's own process; under plain `cargo test` it keeps spinning and
 /// allocating until the binary exits.
 #[test]
-fn until_stop_conditions_with_a_tracked_non_pausing_body_terminates_after_progress() {
+fn until_stop_conditions_with_a_tracked_non_pausing_body_draws_after_progress() {
     let (tx, rx) = mpsc::channel();
     let _fixture = std::thread::spawn(move || {
         let mut scenario = GameScenario::new();
@@ -480,9 +851,6 @@ fn until_stop_conditions_with_a_tracked_non_pausing_body_terminates_after_progre
             vec![only_card],
             "precondition: exactly one card, so iteration 2 is the stalled one"
         );
-        // The same comparison the `UntilStopConditions` loop itself makes to
-        // decide whether an iteration paused.
-        let initial_waiting_for = runner.state().waiting_for.clone();
 
         let mut ability = ResolvedAbility::new(
             Effect::ExileTop {
@@ -534,22 +902,34 @@ fn until_stop_conditions_with_a_tracked_non_pausing_body_terminates_after_progre
             tracked_this_turn,
             linked,
             state.active_repeat_until().is_some(),
-            state.waiting_for == initial_waiting_for,
+            draw_event_count(&events),
+            matches!(state.waiting_for, WaitingFor::GameOver { winner: None }),
+            format!("{:?}", state.waiting_for),
         ));
     });
 
-    let (ok, event_count, card_zone, tracked_this_turn, linked, frame_still_parked, never_paused) =
-        rx.recv_timeout(Duration::from_secs(10))
-            .unwrap_or_else(|err| {
-                panic!(
-                    "the tracked UntilStopConditions repeat never returned ({err:?}): the \
+    let (
+        ok,
+        event_count,
+        card_zone,
+        tracked_this_turn,
+        linked,
+        frame_still_parked,
+        draws,
+        is_draw,
+        waiting_for,
+    ) = rx
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap_or_else(|err| {
+            panic!(
+                "the tracked UntilStopConditions repeat never returned ({err:?}): the \
                      `progress_baseline` capture in `resolve_ability_chain`'s \
                      UntilStopConditions arm must happen INSIDE the loop, once per \
                      iteration. Hoisted above the loop it measures against the repeat's \
                      start, so an iteration that stalls AFTER making progress never \
                      compares equal and the loop never ends"
-                )
-            });
+            )
+        });
 
     assert!(ok, "the repeat must resolve cleanly, not error out");
     // Positive reach-guards: iteration 1 really exiled, and really TRACKED what
@@ -575,8 +955,358 @@ fn until_stop_conditions_with_a_tracked_non_pausing_body_terminates_after_progre
         "a non-pausing body must never park a repeat-until frame"
     );
     assert!(
-        never_paused,
-        "precondition: `waiting_for` never changed, so no iteration parked and \
-         the in-loop arm — not the drain — is what ended the repeat"
+        is_draw,
+        "a repeat that stalls on mandatory actions after progress is a draw \
+         (CR 104.4b), got {waiting_for}"
+    );
+    assert_eq!(draws, 1, "the draw must be announced exactly once");
+}
+
+/// CR 104.4b + CR 608.2c: a stalled witness does not prove a mandatory loop
+/// when the iteration moved an object the witness does not count.
+///
+/// The body is `until_stop_conditions_with_a_non_pausing_body_draws_in_loop`'s
+/// bare `ExileTop` with no linked-exile consumer, run against a ONE-CARD
+/// library. `exile_links::should_track_exiled_by_source` is false, so iteration
+/// 1 exiles the card without writing either ledger and the witness is
+/// unchanged. That iteration made progress, so it is not a CR 104.4b loop. The
+/// in-loop verdict sees the `ZoneChanged` and ends the process (the deliberate
+/// `Stop` bound documented on `repeat_until_verdict`). Without the movement
+/// input the verdict reads the unchanged witness as a mandatory no-op and
+/// declares a draw on iteration 1, with a card just exiled.
+///
+/// Plain harness, no thread: every verdict this fixture can reach returns. A
+/// verdict that repeated after the move would find the library empty on
+/// iteration 2 and draw there.
+#[test]
+fn until_stop_conditions_that_moves_an_untracked_card_stops_without_a_draw() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let only_card = scenario
+        .add_spell_to_library_top(P0, "Only Card", true)
+        .id();
+    let source = scenario
+        .add_spell_to_graveyard(P0, "Untracked Repeat Source", true)
+        .id();
+    let mut runner = scenario.build();
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![only_card],
+        "precondition: exactly one card, so iteration 1 is the one that moves it"
+    );
+
+    let mut ability = ResolvedAbility::new(
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
+            face_down: false,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    ability.repeat_until = Some(RepeatContinuation::UntilStopConditions {
+        stop_on_put_to_hand: true,
+        stop_on_duplicate_exiled_names: false,
+    });
+
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0).unwrap();
+    let state = runner.state();
+
+    // Reach-guards: iteration 1 really moved the card, and the witness really
+    // did not see it. Without the second, the witness would grow and the
+    // verdict would repeat instead of reaching the stalled case under test.
+    assert_eq!(
+        state.objects.get(&only_card).map(|obj| obj.zone),
+        Some(Zone::Exile),
+        "reach-guard: iteration 1 must exile the only card"
+    );
+    assert_eq!(
+        (
+            state
+                .cards_exiled_with_source_this_turn
+                .get(&source)
+                .map_or(0, Vec::len),
+            state
+                .exile_links
+                .iter()
+                .filter(|link| link.source_id == source)
+                .count(),
+        ),
+        (0, 0),
+        "reach-guard: with no linked-exile consumer neither ledger records the \
+         card, so the witness stalls on an iteration that moved it"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "an iteration that moved a card is not a mandatory no-op loop, got {:?}",
+        state.waiting_for
+    );
+    assert_eq!(draw_event_count(&events), 0);
+    let exile_tops = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ExileTop,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        exile_tops, 1,
+        "the process ends after the iteration that moved the card"
+    );
+    assert!(state.active_repeat_until().is_none());
+}
+
+/// CR 608.2c + CR 609.3 (issue #8798): a MANDATORY "put that card into your
+/// hand" after an `ExileTop` that exiled nothing moves nothing. Without the
+/// `ChangeZone` missing-referent guard, the unresolved `ParentTarget` falls back
+/// to the ability's source and puts the source card into its owner's hand.
+///
+/// This is the guard's own row: the optional Tainted Pact rider never reaches
+/// `change_zone::resolve` with a missing referent, because the feasibility
+/// probe auto-declines it first.
+#[test]
+fn parent_target_move_after_an_empty_exile_top_moves_nothing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_spell_to_graveyard(P0, "Exile Top Source", true)
+        .id();
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().players[P0.0 as usize].library.is_empty(),
+        "precondition: the ExileTop has nothing to exile"
+    );
+
+    let mut ability = ResolvedAbility::new(
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
+            face_down: false,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Hand,
+            target: TargetFilter::ParentTarget,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+        vec![],
+        source,
+        P0,
+    )));
+
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0).unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::ChangeZone,
+                ..
+            }
+        )),
+        "reach guard: the chained move must have resolved"
+    );
+    assert_eq!(
+        runner.state().objects.get(&source).map(|obj| obj.zone),
+        Some(Zone::Graveyard),
+        "with no exiled card, \"that card\" must not re-bind to the source"
+    );
+}
+
+/// CR 608.2c + CR 609.3 (issue #8798's class, `Dig` parent): Jace, the Living
+/// Guildpact's +1 with an empty library. "Look at the top two cards of your
+/// library" looks at nothing, so the mandatory "Put one of them into your
+/// graveyard" has no "them" and moves nothing. The +1 cost is still paid
+/// (CR 606.4).
+///
+/// The +1 parses to `Dig { keep_count: Some(0) }` followed by a mandatory
+/// `ChangeZone { ParentTarget → Graveyard }`. An empty `Dig` stamps
+/// `ParentTargetMissingReason::Dig` onto that move, and `change_zone::resolve`
+/// turns it into a no-op. Without that guard the unresolved `ParentTarget`
+/// falls back to the ability's source, and Jace puts himself into his owner's
+/// graveyard.
+#[test]
+fn jace_plus_one_on_an_empty_library_moves_nothing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let jace = scenario
+        .add_planeswalker_from_oracle(
+            P0,
+            "Jace, the Living Guildpact",
+            "Jace",
+            5,
+            JACE_THE_LIVING_GUILDPACT_ORACLE,
+        )
+        .id();
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().players[P0.0 as usize].library.is_empty(),
+        "precondition: the +1 has nothing to look at"
+    );
+    // Reach-guard: the +1 is the `Dig` → `ParentTarget` move shape under test.
+    let plus_one = &runner.state().objects[&jace].abilities[0];
+    assert!(
+        matches!(
+            *plus_one.effect,
+            Effect::Dig {
+                keep_count: Some(0),
+                ..
+            }
+        ) && plus_one.sub_ability.as_ref().is_some_and(|sub| matches!(
+            *sub.effect,
+            Effect::ChangeZone {
+                destination: Zone::Graveyard,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ) && !sub.optional),
+        "reach-guard: the +1 must parse to Dig then a mandatory ParentTarget \
+         move to the graveyard, got {plus_one:?}"
+    );
+
+    let outcome = runner.activate(jace, 0).resolve();
+
+    assert!(
+        outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::ChangeZone,
+                ..
+            }
+        )),
+        "reach-guard: the chained move must have resolved"
+    );
+    assert_eq!(
+        outcome.zone_of(jace),
+        Zone::Battlefield,
+        "\"one of them\" must not re-bind to Jace"
+    );
+    let jace_obj = &outcome.state().objects[&jace];
+    assert_eq!(jace_obj.loyalty, Some(6), "the +1 cost is paid");
+    assert_eq!(
+        jace_obj.counters.get(&CounterType::Loyalty).copied(),
+        Some(6)
+    );
+    assert!(
+        !outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                to: Zone::Graveyard,
+                ..
+            }
+        )),
+        "nothing may be put into a graveyard"
+    );
+    assert!(outcome.state().players[P0.0 as usize].graveyard.is_empty());
+}
+
+/// CR 608.2c + CR 608.2d + CR 609.3 (issue #8798's class, outside Tainted
+/// Pact): Fishing Gear's trigger resolves against a player whose library is
+/// empty. "Exile the top card of that player's library" exiles nothing, so
+/// "you may put it onto the battlefield under your control" has no card to
+/// put. It is declined without being offered, and "If you don't, create a 1/1
+/// blue Fish creature token" creates the Fish.
+///
+/// The Fish alone does not pin the `ChangeZone` arm of
+/// `auto_decline_infeasible_optional`: without that arm the impossible put is
+/// still not offered, but it is executed, and the `ChangeZone`
+/// missing-referent guard turns it into a resolved no-op after which the
+/// "If you don't" branch also runs. What pins the arm is the absent
+/// `EffectResolved { kind: ChangeZone }`: a declined instruction is not
+/// performed at all (CR 608.2d).
+#[test]
+fn fishing_gear_on_an_empty_library_declines_the_put_and_makes_a_fish() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bearer = scenario.add_creature(P0, "Gear Bearer", 1, 1).id();
+    let gear = scenario
+        .add_creature(P0, "Fishing Gear", 0, 0)
+        .as_artifact()
+        .with_subtypes(vec!["Equipment"])
+        .from_oracle_text(FISHING_GEAR_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), gear, bearer);
+    evaluate_layers(runner.state_mut());
+    assert!(
+        runner.state().players[P1.0 as usize].library.is_empty(),
+        "precondition: the damaged player's library is empty"
+    );
+
+    run_combat(&mut runner, vec![bearer], vec![]);
+    assert!(
+        !runner.state().stack.is_empty(),
+        "reach guard: Fishing Gear's combat-damage trigger must be on the stack"
+    );
+
+    // Bounded: both players pass once per resolution (CR 117.4).
+    let mut events = Vec::new();
+    for _ in 0..8 {
+        if runner.state().stack.is_empty()
+            || !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority")
+                .events,
+        );
+    }
+
+    assert_exile_top_resolved(&events);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty(),
+        "the impossible put must not be offered, got {:?}",
+        runner.state().waiting_for
+    );
+    let fish = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter_map(|id| runner.state().objects.get(id))
+        .filter(|obj| obj.name == "Fish" && obj.controller == P0)
+        .count();
+    assert_eq!(fish, 1, "\"If you don't\" must create the Fish");
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::ChangeZone,
+                ..
+            }
+        )),
+        "the impossible put must be declined, not resolved as a no-op"
     );
 }

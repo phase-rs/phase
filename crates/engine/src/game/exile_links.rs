@@ -951,9 +951,13 @@ mod tests {
     }
 
     /// CR 607.2a + CR 104.4b: witness equality must not depend on either
-    /// ledger's insertion order, and an object recorded in BOTH ledgers must
-    /// contribute exactly one row. A witness built by concatenating
-    /// `cards_exiled_with_source_this_turn` and `exile_links` fails both halves.
+    /// ledger's insertion order, an object recorded in BOTH ledgers contributes
+    /// one row to EACH ledger's vec, and an object recorded twice within ONE
+    /// ledger still contributes a single row there. `push_tracked_by_source`
+    /// never writes such a duplicate, but a restored snapshot's ledgers are not
+    /// validated for it, so the fixture writes one directly. A witness built by
+    /// concatenating `cards_exiled_with_source_this_turn` and `exile_links`
+    /// fails every half.
     #[test]
     fn repeat_until_stop_witness_is_order_independent_and_deduped() {
         use crate::game::zones::create_object;
@@ -981,28 +985,44 @@ mod tests {
             (state, ids)
         };
 
-        let (forward, ids) = stage([0, 1, 2]);
+        let (mut forward, ids) = stage([0, 1, 2]);
         let (reverse, reverse_ids) = stage([2, 1, 0]);
         assert_eq!(
             ids, reverse_ids,
             "precondition: both stagings must allocate the same object ids"
         );
 
-        // Reach-guard: each card really is recorded in BOTH ledgers, so the
-        // dedup path below is genuinely exercised.
+        // Intra-ledger duplicates, written directly because
+        // `push_tracked_by_source` dedups each `(exiled_id, source_id)` pair.
+        let duplicate_link = forward
+            .exile_links
+            .iter()
+            .find(|link| link.source_id == source && link.exiled_id == ids[0])
+            .cloned()
+            .expect("precondition: the first card is linked to the source");
+        forward.exile_links.push(duplicate_link);
+        forward
+            .cards_exiled_with_source_this_turn
+            .get_mut(&source)
+            .expect("precondition: the source has a per-turn ledger")
+            .push(ids[0]);
+
+        // Reach-guard: each card really is recorded in BOTH ledgers, and the
+        // first one twice in each, so the dedup path below is genuinely
+        // exercised.
         assert_eq!(
             forward
                 .exile_links
                 .iter()
                 .filter(|link| link.source_id == source)
                 .count(),
-            3,
-            "precondition: all three cards are linked to the source"
+            4,
+            "precondition: three cards linked to the source, one of them twice"
         );
         assert_eq!(
             forward.cards_exiled_with_source_this_turn[&source].len(),
-            3,
-            "precondition: all three cards are in the per-turn ledger too"
+            4,
+            "precondition: the per-turn ledger holds the same duplicate"
         );
 
         let forward_witness = repeat_until_stop_witness(&forward, source);
