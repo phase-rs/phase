@@ -3,14 +3,15 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4660
-- **Total card appearances across root causes:** 4693 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4653
+- **Total card appearances across root causes:** 4686 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
-> three metadata bullets above are excluded. The ranked table's `# cards` column
-> currently sums to 4699 instead, because seven sections' declared counts disagree
-> with their own lists (see the note under the table); the bullet counts above are
-> the source of truth.
+> three metadata bullets above are excluded — and are the source of truth. The two
+> declared-count columns do not agree with them: measured 2026-09-11, the ranked
+> table's `# cards` column sums to 4693 and the section headings' `(N cards)` sum
+> to 4677, against 4686 listed bullets. The note under the table names the ten
+> sections responsible.
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -53,14 +54,22 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 ## Full card lists per root cause
 
-
-> **Known drift in the `# cards` column, measured 2026-09-07.** Seven sections'
-> declared counts disagree with the length of their own card lists: #1 (745 vs
-> 742), #2 (584 vs 589), #3 (404 vs 403), #4 (387 vs 386), #5 (329 vs 332),
-> #13 (132 vs 131), #22 (43 vs 51). The lists are authoritative; the declared
-> counts and this column have not been recomputed after past removals. Left
-> uncorrected here deliberately — that is a whole-file hygiene pass, not part of
-> the card fix that touched root cause 27.
+> **Known count drift, measured 2026-09-11.** Ten sections disagree, in two
+> different ways.
+>
+> - **Section heading vs. its own list** (the ranked-table row repeats the
+>   heading), seven sections, given as declared vs. listed: #1 (744 vs 741),
+>   #2 (583 vs 587), #3 (404 vs 403), #4 (387 vs 386), #5 (329 vs 332),
+>   #13 (132 vs 131), #22 (43 vs 51). These net +9 and reconcile the heading sum
+>   4677 to the list sum 4686.
+> - **Ranked-table row vs. its section heading** (the heading matches its list),
+>   three sections, given as table vs. heading: #19 (67 vs 55), #30 (10 vs 7),
+>   #31 (5 vs 4). These net +16 and reconcile the heading sum 4677 to the table
+>   sum 4693.
+>
+> The lists are authoritative; neither declared column has been recomputed after
+> past removals. Left uncorrected here deliberately — that is a whole-file hygiene
+> pass, not part of the card fix that touched root cause 27.
 
 ### 1. Relative-clause / filter restriction on target dropped  (744 cards)
 

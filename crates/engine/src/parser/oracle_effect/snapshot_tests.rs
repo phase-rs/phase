@@ -460,7 +460,10 @@ fn assembly_create_token_and_pump() {
 /// 110.5b sets the default entry state, and 110.5d is the rule that actually makes
 /// status battlefield-only ("cards not on the battlefield are neither tapped nor
 /// untapped"), so "tapped" is admitted only on the battlefield arm. The repo pairs
-/// these two for exactly this proposition at `game/filter.rs`.
+/// these two for exactly this proposition at
+/// `game/conditions.rs::eval_source_is_tapped_on_battlefield` (the zone-guarded tap
+/// predicate) and its scope-parameterized sibling `StaticCondition::IsTapped` in
+/// `types/ability.rs`.
 #[test]
 fn same_name_graveyard_return_follows_the_named_destination() {
     let to_hand = parse_effect_chain(
@@ -484,6 +487,7 @@ fn same_name_graveyard_return_follows_the_named_destination() {
         origin,
         destination,
         target,
+        enter_tapped,
         ..
     } = &*tail.effect
     else {
@@ -494,6 +498,12 @@ fn same_name_graveyard_return_follows_the_named_destination() {
         *destination,
         Zone::Hand,
         "the tail must land where the target does"
+    );
+    // CR 110.5d: a card in hand has no tapped status, so the hand arm must carry
+    // no entry state at all — neither Tapped nor an explicit Untapped.
+    assert!(
+        enter_tapped.is_unspecified(),
+        "a hand destination has no entry tap state, got {enter_tapped:?}"
     );
     let TargetFilter::Typed(tf) = target else {
         panic!("expected a typed tail filter, got {target:?}");
@@ -549,6 +559,17 @@ fn same_name_graveyard_return_follows_the_named_destination() {
     assert!(
         super::parse_same_name_return_destination("the battlefield tapped.").is_ok(),
         "reach-guard: the battlefield arm must still admit tapped"
+    );
+    // CR 110.5b: without "tapped" the battlefield arm sets no entry override.
+    assert_eq!(
+        super::parse_same_name_return_destination("the battlefield.")
+            .ok()
+            .map(|(_, parsed)| parsed),
+        Some((
+            Zone::Battlefield,
+            crate::types::zones::EtbTapState::Unspecified
+        )),
+        "an unqualified battlefield destination enters with no tap override"
     );
     // Bounded on purpose: zones this recognizer does not model must decline here
     // rather than receive a confidently wrong ChangeZoneAll.
