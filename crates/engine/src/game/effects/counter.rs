@@ -53,6 +53,10 @@ pub fn resolve(
         _ => None,
     };
 
+    // CR 614.1a: this resolution's own ledger of rider exiles (see the field
+    // doc); a counter that exiles nothing leaves it empty.
+    state.exile_rider_countered_ids.clear();
+
     let targets = match &ability.effect {
         Effect::Counter { target, .. } if matches!(target, TargetFilter::ParentTarget) => {
             let event_target = targeting::resolve_event_context_target(
@@ -163,14 +167,27 @@ pub fn resolve(
                     // exiles on leaving the stack (Flashback, Harmonize), or
                     // the counter ability carries a CR 614.1a "exile it instead
                     // of putting it into its owner's graveyard" rider (Force
-                    // of Negation, No More Lies, Defabricate).
+                    // of Negation, No More Lies, Defabricate) whose printed
+                    // condition applies to THIS spell — Thranduil's Decree
+                    // exiles "a permanent spell" (CR 110.4b) only, so a
+                    // countered instant keeps the graveyard rule. Asked of the concrete object
+                    // ONCE, here, before the move and before the face restore
+                    // below (an Adventure/Omen spell shows its creature face
+                    // after it); the answer is recorded in
+                    // `exile_rider_countered_ids` for the `Exiled` provenance
+                    // stamp of this resolution (issue #8762).
                     // CR 702.34a / CR 702.127a / CR 702.180a: the exile destination
                     // is a static destination rule (not a replacement), so it is
                     // selected here, before the pipeline consult.
-                    let exile_instead_of_graveyard_on_counter = ability
-                        .sub_ability
-                        .as_deref()
-                        .is_some_and(super::cast_from_zone::is_graveyard_exile_rider_subability);
+                    let exile_instead_of_graveyard_on_counter =
+                        ability.sub_ability.as_deref().is_some_and(|sub| {
+                            super::cast_from_zone::graveyard_exile_rider_applies_to(
+                                state, sub, obj_id,
+                            )
+                        });
+                    if exile_instead_of_graveyard_on_counter {
+                        state.exile_rider_countered_ids.push(obj_id);
+                    }
                     // CR 701.6a + CR 614.1a: choose the countered spell's
                     // destination. Exile precedence (alt-cost keyword exile-on-
                     // stack-exit, or the graveyard-exile sub-ability rider) wins
@@ -297,7 +314,7 @@ pub fn resolve(
 /// each one that matches the class filter. Mirrors `destroy::resolve_all` in
 /// shape: collect matching IDs, then run the same removal/zone-move logic the
 /// single-target `resolve` uses (re-using `CR 702.34a` Flashback exile-on-
-/// counter and `CR 608.2b` countered-spell-to-graveyard rules).
+/// counter and `CR 701.6a` countered-spell-to-graveyard rules).
 ///
 /// Stack entry matching is delegated to `targeting::stack_entry_matches_filter`
 /// so `CounterAll` shares the same `StackSpell`, `StackAbility`, typed,
@@ -1215,7 +1232,7 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &counter_ability, &mut events).unwrap();
 
-        // CR 608.2b: the spell was countered into its owner's graveyard.
+        // CR 701.6a: the spell was countered into its owner's graveyard.
         assert!(state.stack.is_empty(), "spell should be countered");
         assert!(state.players[1].graveyard.contains(&spell_id));
         // CR 701.8a / CR 110.1: a countered spell is not a permanent — the

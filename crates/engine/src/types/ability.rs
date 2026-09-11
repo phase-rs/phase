@@ -1809,6 +1809,13 @@ pub enum DamageRedirectTarget {
     /// "...to you instead" — the replacement source's controller (Jade Monolith,
     /// Goblin Psychopath).
     Controller,
+    /// "...to its/that source's/that spell's controller instead" — the
+    /// prospective damage source's controller, read when the damage event is
+    /// replaced (Mirror Strike, Reverberation, Reflect Damage). This is distinct
+    /// from [`Self::Controller`], which is the replacement host's controller.
+    ///
+    /// CR 614.9: a redirection effect may redirect damage to another player.
+    DamageSourceController,
     /// "...to ~ instead" / "...dealt to this creature instead" — the replacement
     /// source object itself (Beacon of Destiny).
     SourceObject,
@@ -37255,6 +37262,29 @@ mod ability_use_count_serde_tests {
         assert_eq!(
             serde_json::from_str::<AbilityCondition>(&json).unwrap(),
             condition
+        );
+    }
+}
+
+#[cfg(test)]
+mod damage_redirect_target_serde_tests {
+    use super::*;
+
+    #[test]
+    fn damage_source_controller_round_trips_without_changing_legacy_variants() {
+        let new_value = DamageRedirectTarget::DamageSourceController;
+        assert_eq!(
+            serde_json::from_str::<DamageRedirectTarget>(
+                &serde_json::to_string(&new_value).expect("new redirect target serializes"),
+            )
+            .expect("new redirect target deserializes"),
+            new_value
+        );
+        assert_eq!(
+            serde_json::to_string(&DamageRedirectTarget::Controller)
+                .expect("legacy controller serializes"),
+            r#"{"type":"Controller"}"#,
+            "adding the source-controller authority must preserve existing card data"
         );
     }
 }

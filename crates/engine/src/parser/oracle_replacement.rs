@@ -32,7 +32,9 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::parse_type_filter_word;
 use super::oracle_quantity::capitalize_first;
-use super::oracle_target::{parse_target, parse_type_phrase_folding};
+use super::oracle_target::{
+    parse_declared_damage_source_target, parse_target, parse_type_phrase_folding,
+};
 use super::oracle_util::{
     normalize_card_name_refs, parse_count_expr, parse_number, parse_ordinal, strip_after,
     strip_reminder_text, TextPair,
@@ -275,7 +277,7 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "If a card/token would be put into a graveyard, exile it instead" ---
-    if let Some(def) = parse_graveyard_exile_replacement(&norm_lower, &text) {
+    if let Some(def) = parse_graveyard_exile_replacement(&norm_lower, &normalized, &text) {
         return Some(def);
     }
 
@@ -6579,8 +6581,226 @@ fn graveyard_replacement_subject_is_self_referential(subject: &str) -> bool {
         || crate::parser::oracle_util::SELF_REF_TYPE_PHRASES.contains(&subject)
 }
 
+/// CR 400.1 + CR 614.1a: the optional stated ORIGIN of a graveyard-bound move —
+/// the `from <zone>` half of `"would be put into a graveyard from <zone>"`.
+///
+/// `None` is the UNCONSTRAINED reading: CR 400.1 enumerates every zone, so "from
+/// anywhere" adds no constraint (Rest in Peace, Leyline of the Void). `Some(zone)`
+/// is a real narrowing — "from the battlefield" is CR 700.4's dying test
+/// (Cosmic Intervention, Ugin's Nexus), and without it the redirect would also
+/// claim a milled, discarded, or countered card of the same description.
+///
+/// The named-zone half composes the shared `parse_zone_word` building block for
+/// every zone whose bare noun it already owns; only "the battlefield" is added
+/// here, because a bare "battlefield" is not a phrase that combinator accepts.
+fn parse_graveyard_move_origin(input: &str) -> OracleResult<'_, Option<Zone>> {
+    use crate::parser::oracle_nom::filter::parse_zone_word;
+    use nom::combinator::map;
+    use nom::sequence::preceded;
+
+    preceded(
+        tag(" from "),
+        alt((
+            value(None, tag("anywhere")),
+            map(
+                alt((
+                    value(Zone::Battlefield, tag("the battlefield")),
+                    parse_zone_word,
+                )),
+                Some,
+            ),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 400.1: narrow an affected-object filter to objects currently in `zone`.
+///
+/// `attach_zone_to_filter` folds `InZone` into a `Typed` filter in place; every
+/// other shape (`SelfRef`, `Or`, `And`) is CONJOINED instead, so the origin gate
+/// is never silently dropped on a self-referential or union subject.
+fn constrain_filter_to_origin_zone(filter: Option<TargetFilter>, zone: Zone) -> TargetFilter {
+    let in_zone =
+        TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::InZone { zone }]));
+    match filter {
+        None => in_zone,
+        Some(typed @ TargetFilter::Typed(_)) => attach_zone_to_filter(typed, zone),
+        Some(other) => TargetFilter::And {
+            filters: vec![other, in_zone],
+        },
+    }
+}
+
+/// CR 614.1 + CR 608.2c: read the antecedent's SUBJECT as a filter on the
+/// affected object.
+///
+/// CR 614.1 is the authority: a replacement effect "watch\[es\] for a particular
+/// event", and the antecedent is the description of that event. (NOT CR 614.1d,
+/// which classifies battlefield-ENTRY wordings and does not reach a
+/// graveyard-destination move.)
+///
+/// The subject is not decoration: "a permanent you control" (Cosmic
+/// Intervention), "an instant or sorcery card" (Dryad Militant) and "a
+/// permanent" (Samurai of the Pale Curtain) each say which objects the redirect
+/// may claim. Dropping the phrase turns every one of them into a board-wide Rest
+/// in Peace.
+///
+/// `parse_type_phrase_folding` is the single authority for a type phrase and is
+/// INFALLIBLE — an unrecognized subject comes back as an EMPTY filter plus the
+/// whole input — so acceptance requires BOTH a fully consumed phrase AND a
+/// filter that says something the caller's own axes do not.
+fn graveyard_replacement_subject_filter(subject: &str) -> Option<TargetFilter> {
+    let subject = nom_primitives::parse_article
+        .parse(subject)
+        .map_or(subject, |(rest, _)| rest)
+        .trim();
+    let (filter, rest) = parse_type_phrase_folding(subject);
+    if !rest.trim().is_empty() || !filter_constrains_beyond_token_axis(&filter) {
+        return None;
+    }
+    // CR 110.1: a permanent is a card or token ON THE BATTLEFIELD, so the noun
+    // itself carries the zone. The engine's `TypeFilter::Permanent` is a
+    // card-TYPE test (`game/filter.rs`), zone-blind by design, so the zone half
+    // has to be stated here — otherwise Samurai of the Pale Curtain ("If a
+    // permanent would be put into a graveyard, exile it instead") would also
+    // claim a milled or discarded creature CARD, which is not a permanent.
+    if filter_names_only_permanent_type(&filter) {
+        return Some(attach_zone_to_filter(filter, Zone::Battlefield));
+    }
+    Some(filter)
+}
+
+/// CR 108.2b + CR 111.1: does this folded subject filter say anything the
+/// caller's own token axis does not?
+///
+/// The bare card/token nouns ARE the token axis: "a card or token" is every
+/// object that can reach a graveyard (Rest in Peace) and "a card" is that minus
+/// tokens (Leyline of the Void), which `TokenScope` already encodes as a
+/// `NonToken` property. Re-expressing them as a type filter would narrow those
+/// two cards by whatever the `Card` type filter happens not to match, so this
+/// predicate declines them and leaves the axis to its owner.
+fn filter_constrains_beyond_token_axis(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            typed.controller.is_some()
+                || typed
+                    .type_filters
+                    .iter()
+                    .any(|t| !matches!(t, TypeFilter::Card | TypeFilter::Any))
+                || typed
+                    .properties
+                    .iter()
+                    .any(|p| !matches!(p, FilterProp::Token | FilterProp::NonToken))
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_constrains_beyond_token_axis)
+        }
+        _ => false,
+    }
+}
+
+/// Is this folded subject exactly the CR 110.1 "permanent" noun (with no
+/// competing card-noun reading), so that the battlefield zone is implied?
+fn filter_names_only_permanent_type(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(typed)
+            if typed.type_filters.as_slice() == [TypeFilter::Permanent]
+    )
+}
+
+/// CR 614.6: clear the tracked-set binding on every delayed trigger created in a
+/// replacement's consequent.
+///
+/// A replacement modifies ONE event, and a `Moved` event names exactly one
+/// object, so the consequent's "it" has no parent SET to bind. Left set, the
+/// flag makes `delayed_trigger::resolve` reach for whatever tracked set the game
+/// last published (`latest_tracked_set_id`) and re-target the trigger at
+/// unrelated objects. The parser emits the flag because the enclosing chain
+/// looks plural at parse time; the replacement seam is where that is known to be
+/// wrong.
+fn clear_consequent_tracked_set_binding(def: &mut AbilityDefinition) {
+    if let Effect::CreateDelayedTrigger {
+        uses_tracked_set,
+        effect,
+        ..
+    } = &mut *def.effect
+    {
+        *uses_tracked_set = false;
+        clear_consequent_tracked_set_binding(effect);
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        clear_consequent_tracked_set_binding(sub);
+    }
+}
+
+/// CR 604.2 + CR 611.2a: the PRINTED-STATIC front door for the graveyard
+/// redirect family.
+///
+/// A printed static ability's replacement effect states no window — it applies
+/// for as long as its source is in the appropriate zone. A definition whose
+/// antecedent DOES state one ("… from anywhere this turn, …") was created by the
+/// resolution of a spell or ability, so it belongs in the floating store under
+/// the resolving ability's controller, not on the card. Declining it here is
+/// what routes it to [`parse_windowed_graveyard_redirect_install`]; hosting it
+/// on the card would leave it inert, because `find_applicable_replacements`
+/// scans only the battlefield and command zone.
 fn parse_graveyard_exile_replacement(
     norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let def = parse_graveyard_redirect_replacement(norm_lower, normalized, original_text)?;
+    def.expiry.is_none().then_some(def)
+}
+
+/// CR 611.2a + CR 614.1a + CR 614.6: the RESOLUTION-INSTALL front door for the
+/// same family — the mirror image of [`parse_graveyard_exile_replacement`].
+///
+/// Accepts exactly the definitions that one declines (a stated window) and wraps
+/// them in `Effect::AddTargetReplacement { target: TargetFilter::None }`, the
+/// engine's existing "install this self-contained definition globally" slot
+/// (`game/effects/add_target_replacement.rs`). The resolver anchors
+/// `source_controller` to the resolving ability's controller, so a
+/// controller-relative `valid_card` ("a permanent you control") follows the
+/// caster rather than the card.
+///
+/// Takes the WHOLE printed line rather than a single clause: the consequent
+/// sentence ("Return it to the battlefield … at the beginning of the next end
+/// step.") belongs to the replacement and is carried on the redirect's
+/// `sub_ability`, where the mandatory post-replacement hook runs it once per
+/// redirected object. Clause-level dispatch would emit it as an immediate
+/// sibling that ran at resolution, with nothing exiled yet to return.
+pub(crate) fn parse_windowed_graveyard_redirect_install(text: &str) -> Option<Effect> {
+    // `parse_oracle_text` normalizes self-references before any line reaches an
+    // ability body, so the stripped text is already the normalized form and
+    // serves as both the offset source and the printed description.
+    let stripped = strip_reminder_text(text);
+    let lower = stripped.to_lowercase();
+    let def = parse_graveyard_redirect_replacement(&lower, &stripped, &stripped)?;
+    def.expiry.as_ref()?;
+    Some(Effect::AddTargetReplacement {
+        replacement: Box::new(def),
+        target: TargetFilter::None,
+    })
+}
+
+/// The shared grammar behind both front doors above. Never called directly by
+/// the dispatcher: the CR 611.2a static-versus-created discrimination is what
+/// decides which of the two a given definition belongs to.
+///
+/// Three text views, each load-bearing and none interchangeable:
+/// * `norm_lower` — what nom parses.
+/// * `normalized` — the SAME BYTE LENGTH as `norm_lower` (CR 608.2n self-refs
+///   already folded to `~`), so it is the only safe source for the remainder
+///   `nom_on_lower` maps back to original case. Slicing the printed text with
+///   these offsets lands mid-token on any card whose own name appears in the
+///   clause (Nexus of Fate, Blightsteel Colossus, Ugin's Nexus).
+/// * `original_text` — the printed line, used for the player-visible
+///   `description` only, where a normalized `~` would be wrong.
+fn parse_graveyard_redirect_replacement(
+    norm_lower: &str,
+    normalized: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     use crate::types::ability::RestrictionExpiry;
@@ -6616,29 +6836,43 @@ fn parse_graveyard_exile_replacement(
         },
     }
 
-    // CR 730.3e + CR 111.1: the subject's token axis. "a card or token" is
-    // token-INCLUSIVE (Rest in Peace) and adds no constraint; "a card" is
-    // token-EXCLUDING (Leyline of the Void) and adds a `NonToken` filter so
-    // a dying token reaches the graveyard (and dies-triggers fire) instead of
-    // being wrongly redirected. Any other subject (`~`, "that spell", "a
-    // permanent", a counter condition) leaves the axis `Unscoped` — the
-    // pre-existing token-inclusive behavior, preserved.
+    // CR 108.2b + CR 111.1: the subject's token axis. CR 108.2b ("tokens aren't
+    // considered cards") is what makes card-ness and token-ness a real partition
+    // of the objects that can reach a graveyard; CR 111.1 defines the token side.
+    //
+    // Three readings, and every one of them must be represented, because this
+    // axis is the SOLE owner of token-ness for the merged filter:
+    // * `Unscoped` — "a card or token" (Rest in Peace) names both sides, so it
+    //   constrains nothing, and any subject that says nothing about the axis
+    //   (`~`, "that spell", "a permanent") lands here too.
+    // * `NonToken` — "a card" without an "or token" rider (Leyline of the Void)
+    //   is token-EXCLUDING, so a dying token reaches the graveyard and its
+    //   dies-triggers fire instead of being wrongly redirected.
+    // * `TokenOnly` — "a token" is card-EXCLUDING. Without this reading the
+    //   subject was dropped on the floor: the bare token noun says nothing the
+    //   OTHER two readings encode, so `filter_constrains_beyond_token_axis`
+    //   declined it and the merge produced `valid_card: None` — an unfiltered
+    //   shield that redirected every card headed to any graveyard, including
+    //   the resolving spell itself (CR 608.2n).
     #[derive(Clone, Copy)]
     enum TokenScope {
         Unscoped,
         NonToken,
+        TokenOnly,
     }
 
-    let ((scope, token_scope, outcome, subject, window), _rest) =
-        nom_on_lower(original_text, norm_lower, |i| {
-            // Prefix: "if <subject> would be put into <scope> graveyard[ from anywhere], "
+    let ((scope, token_scope, outcome, subject, window, origin), consequent) =
+        nom_on_lower(normalized, norm_lower, |i| {
+            // Prefix: "if <subject> would be put into <scope> graveyard[ from <zone>][ <window>], "
+            // This mandatory tag is the SOLE recognition authority for the
+            // family; callers must not front it with a hand-rolled pre-check.
             let (i, _) = tag::<_, _, OracleError<'_>>("if ").parse(i)?;
             // Subject: accept any phrase up to " would be put into " — covers
             // "a card", "a nontoken creature", "~", "a creature an opponent controls", …
-            // — and classify its token axis (CR 730.3e) from the captured slice.
+            // — and classify its token axis (CR 108.2b + CR 111.1) from the captured slice.
             let (i, subject) =
                 take_until::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
-            // CR 730.3e + CR 111.1: a card-noun subject WITHOUT an "or token" rider
+            // CR 108.2b + CR 111.1: a card-noun subject WITHOUT an "or token" rider
             // is token-excluding (Leyline of the Void: "a card"). The inclusive RIP
             // phrasing ("a card or token") names tokens explicitly and stays
             // unscoped. The token-rider check wins over the bare-card check, so
@@ -6663,8 +6897,18 @@ fn parse_graveyard_exile_replacement(
                 subject_ends_with(subject, " or token") || subject_ends_with(subject, " or tokens");
             let names_card =
                 subject_ends_with(subject, " card") || subject_ends_with(subject, " cards");
+            // CR 111.1: a subject whose terminal noun IS "token" ("a token",
+            // "a creature token"). The leading space is the word boundary that
+            // keeps "a nontoken creature" out of this reading.
+            let names_token_terminal =
+                subject_ends_with(subject, " token") || subject_ends_with(subject, " tokens");
             let token_scope = if names_card && !names_token {
                 TokenScope::NonToken
+            } else if names_token_terminal && !names_token && !names_card {
+                // CR 108.2b: card-EXCLUDING. Guarded by `!names_token` so the
+                // inclusive "a card or token" rider — which also ends in
+                // "token" — keeps its Unscoped reading.
+                TokenScope::TokenOnly
             } else {
                 TokenScope::Unscoped
             };
@@ -6684,7 +6928,11 @@ fn parse_graveyard_exile_replacement(
                 ),
             ))
             .parse(i)?;
-            let (i, _) = opt(tag(" from anywhere")).parse(i)?;
+            // CR 400.1 + CR 700.4: the optional stated origin. `Some(None)` is
+            // "from anywhere" (no narrowing); `Some(Some(zone))` narrows the
+            // affected-object filter to that zone below.
+            let (i, origin) = opt(parse_graveyard_move_origin).parse(i)?;
+            let origin = origin.flatten();
             // CR 614.1a + CR 611.2a + CR 514.2: a stated window may sit INSIDE
             // the antecedent — "if a card would be put into your graveyard from
             // anywhere THIS TURN, exile that card instead" (Yawgmoth's Will /
@@ -6733,7 +6981,14 @@ fn parse_graveyard_exile_replacement(
 
             Ok((
                 i,
-                (scope, token_scope, outcome, subject.to_string(), window),
+                (
+                    scope,
+                    token_scope,
+                    outcome,
+                    subject.to_string(),
+                    window,
+                    origin,
+                ),
             ))
         })?;
 
@@ -6747,7 +7002,7 @@ fn parse_graveyard_exile_replacement(
 
     // CR 400.3 + CR 108.3: "opponent's graveyard" means cards owned by an opponent
     // (cards go to owner's graveyard, so ownership is the stable discriminant).
-    // CR 730.3e + CR 111.1: a token-excluding subject ("a card") adds `NonToken`
+    // CR 108.2b + CR 111.1: a token-excluding subject ("a card") adds `NonToken`
     // so a dying token is NOT redirected (Leyline of the Void must let an
     // opponent's token reach the graveyard so dies-triggers fire — Blood Artist
     // class). Both axes are leaf `FilterProp`s on one `TypedFilter`.
@@ -6762,17 +7017,41 @@ fn parse_graveyard_exile_replacement(
         }),
         Scope::Any => {}
     }
-    if let TokenScope::NonToken = token_scope {
-        props.push(FilterProp::NonToken);
+    // CR 108.2b + CR 111.1: this axis is the sole owner of token-ness on the
+    // merged filter, so every reading that constrains it must emit its property
+    // here. `Unscoped` names both sides and emits nothing.
+    match token_scope {
+        TokenScope::NonToken => props.push(FilterProp::NonToken),
+        TokenScope::TokenOnly => props.push(FilterProp::Token),
+        TokenScope::Unscoped => {}
     }
+    // CR 614.1: the antecedent's subject narrows the affected object on top of
+    // the ownership/token axes above. A self-referential subject binds to its own
+    // host and admits no type phrase; every other subject is read by
+    // `graveyard_replacement_subject_filter`, which declines the bare card/token
+    // nouns the token axis already owns.
+    let subject_filter = (!graveyard_replacement_subject_is_self_referential(subject))
+        .then(|| graveyard_replacement_subject_filter(subject))
+        .flatten();
+    let props_filter =
+        (!props.is_empty()).then(|| TargetFilter::Typed(TypedFilter::default().properties(props)));
     let valid_card = if graveyard_replacement_subject_is_self_referential(subject) {
         Some(TargetFilter::SelfRef)
-    } else if !props.is_empty() {
-        Some(TargetFilter::Typed(
-            TypedFilter::default().properties(props),
-        ))
     } else {
-        None
+        match (subject_filter, props_filter) {
+            // CR 614.1 + CR 400.3: both axes constrain, and both must hold.
+            (Some(subject), Some(props)) => Some(TargetFilter::And {
+                filters: vec![subject, props],
+            }),
+            (Some(only), None) | (None, Some(only)) => Some(only),
+            (None, None) => None,
+        }
+    };
+    // CR 400.1 + CR 700.4: fold the stated origin in last, so it applies to
+    // whichever shape the subject/ownership axes produced.
+    let valid_card = match origin {
+        Some(zone) => Some(constrain_filter_to_origin_zone(valid_card, zone)),
+        None => valid_card,
     };
 
     // CR 122.1: A `with N <type> counter(s) on it` rider on the exile outcome
@@ -6812,8 +7091,32 @@ fn parse_graveyard_exile_replacement(
     // For shuffle-back, attach the Reveal → Shuffle(Owner) chain as sub_ability.
     // The mandatory post-effect extractor at `replacement.rs` sees a top-level
     // ChangeZone and stashes `sub_ability` to run after the redirected move lands.
+    //
+    // CR 608.2c + CR 614.6: text after the redirect clause is the replacement's
+    // own CONSEQUENT, not a separate ability — "and take an extra turn after
+    // this one" (Ugin's Nexus), "Return it to the battlefield under its owner's
+    // control at the beginning of the next end step." (Cosmic Intervention). It
+    // rides on the redirect's `sub_ability` so the mandatory post-replacement
+    // hook runs it once per redirected object, with `source_id` bound to that
+    // object (`engine_replacement::apply_post_replacement_effect`). Dropping it
+    // — the prior behavior — silently swallowed the clause.
+    let consequent = consequent.trim_start_matches(['.', ' ']).trim();
+    let consequent = (!consequent.is_empty()).then(|| {
+        let mut chain = parse_effect_chain(consequent, AbilityKind::Spell);
+        clear_consequent_tracked_set_binding(&mut chain);
+        chain
+    });
+
     let execute = match outcome {
-        Outcome::Exile { .. } => redirect,
+        Outcome::Exile { .. } => match consequent {
+            Some(chain) => redirect.sub_ability(chain),
+            None => redirect,
+        },
+        // CR 608.2c: the shuffle-back outcome already owns `sub_ability` for its
+        // Reveal → Shuffle chain, so a consequent would have to be appended to
+        // that chain's tail. No card in the class carries one, and silently
+        // dropping it is what this change exists to stop — fail closed instead.
+        Outcome::ShuffleBack { .. } if consequent.is_some() => return None,
         Outcome::ShuffleBack { reveal } => {
             // CR 701.24: shuffle into owner's library. CR 400.3 is the owner-routing
             // authority — TargetFilter::Owner resolves to state.objects[source_id].owner,
@@ -7071,7 +7374,9 @@ pub(crate) fn parse_oneshot_damage_replacement(
     // leading "all " is disjoint from both "the next N damage" forms above and
     // from the "the next time" spine below, so ordering here is for readability,
     // not for disambiguation.
-    if let Some(effect) = parse_continuous_all_damage_redirect(norm_lower) {
+    if let Some(effect) = parse_continuous_source_damage_redirect(norm_lower)
+        .or_else(|| parse_continuous_all_damage_redirect(norm_lower))
+    {
         return Some(effect);
     }
 
@@ -7139,6 +7444,12 @@ pub(crate) fn parse_oneshot_damage_replacement(
 
     // CR 614.9: redirection one-shot.
     if let Some(redirect_to) = parse_redirect_recipient(result_clause) {
+        // "its controller" / "that source's controller" requires a source
+        // captured by the would-deal clause. Decline rather than inventing a
+        // recipient authority for a source-less redirection tail.
+        if redirect_to == DamageRedirectTarget::DamageSourceController && source_filter.is_none() {
+            return None;
+        }
         let redirect_object_filter = match redirect_to {
             DamageRedirectTarget::ChosenObjectTarget => {
                 parse_damage_to_target_filter(result_clause)
@@ -7153,6 +7464,7 @@ pub(crate) fn parse_oneshot_damage_replacement(
             // `parse_continuous_all_damage_redirect` is where that recipient
             // lives, and it likewise declares no slot.
             DamageRedirectTarget::Controller
+            | DamageRedirectTarget::DamageSourceController
             | DamageRedirectTarget::SourceObject
             | DamageRedirectTarget::AttachedToSource => None,
         };
@@ -7179,9 +7491,7 @@ pub(crate) fn parse_oneshot_damage_replacement(
         return Some(Effect::unimplemented("prevent", result_clause));
     }
 
-    if nom_primitives::scan_contains(result_clause, "prevent that damage")
-        || nom_primitives::scan_contains(result_clause, "prevent the damage")
-    {
+    if is_complete_oneshot_prevention_result(result_clause) {
         return Some(Effect::PreventDamage {
             amount: PreventionAmount::All,
             amount_dynamic: None,
@@ -7202,6 +7512,23 @@ pub(crate) fn parse_oneshot_damage_replacement(
     }
 
     None
+}
+
+/// CR 615.1a: The direct one-shot parser owns exactly one prevention
+/// instruction. A following sentence remains an ordinary effect-chain clause
+/// so its `damage prevented this way` relationship can be lowered as the
+/// prevention shield's continuation instead of being dropped by the direct
+/// spell route.
+fn is_complete_oneshot_prevention_result(input: &str) -> bool {
+    all_consuming(terminated(
+        alt((
+            tag::<_, _, OracleError<'_>>("prevent that damage"),
+            tag("prevent the damage"),
+        )),
+        opt(char('.')),
+    ))
+    .parse(input.trim())
+    .is_ok()
 }
 
 /// CR 615.1a + CR 614.1a + CR 115.1 + CR 609.7a + CR 609.7b: Parse the
@@ -7304,9 +7631,7 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
     // "prevent the damage" result clause (the whole one-shot sentence, from
     // "would deal" onward).
     let (would_clause, result_clause) = split_would_deal_clause(body);
-    if !nom_primitives::scan_contains(result_clause, "prevent that damage")
-        && !nom_primitives::scan_contains(result_clause, "prevent the damage")
-    {
+    if !is_complete_oneshot_prevention_result(result_clause) {
         return None;
     }
 
@@ -7911,13 +8236,20 @@ fn parse_continuous_all_damage_redirect(norm_lower: &str) -> Option<Effect> {
     })
 }
 
-/// Split the one-shot body at the "this turn[,]" boundary into the would-deal
+/// Split the one-shot body at its current-window boundary into the would-deal
 /// clause (source + original recipient) and the result clause (redirect /
-/// amount / prevention). The result clause is what follows "this turn".
+/// amount / prevention). The window is either "this turn" or "this combat";
+/// both delimit a complete one-shot prevention clause before its result.
 fn split_would_deal_clause(body: &str) -> (&str, &str) {
-    match nom_primitives::split_once_on(body, "this turn") {
+    match alt((
+        |input| nom_primitives::split_once_on(input, "this turn"),
+        |input| nom_primitives::split_once_on(input, "this combat"),
+    ))
+    .parse(body)
+    {
         Ok((_, (before, after))) => {
-            // `after` begins after "this turn"; trim a leading comma/space.
+            // `after` begins after the duration phrase; trim a leading
+            // comma/space before parsing the replacement result.
             let after = after.trim_start_matches([',', ' ']);
             (before, after)
         }
@@ -8047,6 +8379,7 @@ fn parse_redirect_recipient_phrase(
     .parse(input)?;
     alt((
         value(DamageRedirectTarget::Controller, tag("you")),
+        parse_damage_source_controller_tail,
         value(DamageRedirectTarget::SourceObject, tag("~")),
         value(
             DamageRedirectTarget::ChosenObjectTarget,
@@ -8054,6 +8387,83 @@ fn parse_redirect_recipient_phrase(
         ),
     ))
     .parse(input)
+}
+
+/// CR 614.9: The recipient authority in a source-bound redirection tail. This
+/// intentionally has no unbound caller: "its controller" is meaningful here
+/// only after the grammar has captured a prospective damage source.
+fn parse_damage_source_controller_tail(input: &str) -> OracleResult<'_, DamageRedirectTarget> {
+    value(
+        DamageRedirectTarget::DamageSourceController,
+        alt((
+            tag::<_, _, OracleError<'_>>("its controller"),
+            tag("that source's controller"),
+            tag("that spell's controller"),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 611.2a + CR 614.1a + CR 614.9 + CR 514.2: Effect-created,
+/// duration-bound source redirection: all damage that would be dealt this turn
+/// to a victim by a declared target source is dealt to that source's controller
+/// instead.
+///
+/// The grammar is fully anchored. Its two independent duration positions cover
+/// Mirror Strike's post-victim spelling and Reverberation's pre-victim spelling.
+fn parse_continuous_source_damage_redirect(norm_lower: &str) -> Option<Effect> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("all ")
+        .parse(norm_lower)
+        .ok()?;
+    let (rest, combat_scope) = parse_damage_noun_with_scope(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" that would be dealt ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("this turn "))
+        .parse(rest)
+        .ok()?;
+    // Reverberation has no original-recipient clause; Mirror Strike does. A
+    // missing clause is semantic data (`None` means every recipient), not an
+    // invitation to fabricate a "to you" filter.
+    let (rest, target_filter) = opt(parse_damage_target_phrase).parse(rest).ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(" this turn"))
+        .parse(rest)
+        .ok()?;
+    // A recipient clause leaves its separating leading space in place ("to you
+    // this turn by ..."), whereas Reverberation's omitted-recipient form has
+    // already consumed the space with "this turn " ("...dealt this turn by").
+    // These are one grammar axis, not two card-specific arms.
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>(" by "), tag("by ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, source_text) = terminated(
+        take_until::<_, _, OracleError<'_>>(" is dealt to "),
+        peek(tag(" is dealt to ")),
+    )
+    .parse(rest)
+    .ok()?;
+    let (_, source_filter) = all_consuming(parse_declared_damage_source_target)
+        .parse(source_text)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" is dealt to ")
+        .parse(rest)
+        .ok()?;
+    let (rest, redirect_to) = parse_damage_source_controller_tail(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" instead").parse(rest).ok()?;
+    let (rest, _) = opt(char::<_, OracleError<'_>>('.')).parse(rest).ok()?;
+    let (_, _) = eof::<_, OracleError<'_>>.parse(rest).ok()?;
+
+    Some(Effect::CreateDamageReplacement {
+        source_filter: Some(source_filter),
+        combat_scope,
+        target_filter,
+        modification: None,
+        redirect_to: Some(redirect_to),
+        redirect_amount: None,
+        redirect_object_filter: None,
+        recipient_object_filter: None,
+        redirect_lifetime: RedirectionLifetime::Continuous,
+    })
 }
 
 pub(crate) fn parse_choose_damage_source_candidate(input: &str) -> Option<TargetFilter> {
@@ -19257,7 +19667,7 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // CR 730.3e: "a card or token" names tokens explicitly — token-inclusive,
+        // CR 108.2b + CR 111.1: "a card or token" names tokens explicitly — token-inclusive,
         // so NO `NonToken` constraint and (with `Any` scope) no `valid_card` at all.
         assert!(def.valid_card.is_none()); // matches all objects, tokens included
         assert!(matches!(
@@ -19280,7 +19690,7 @@ mod tests {
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         // valid_card should scope to opponent-owned cards AND exclude tokens:
-        // CR 730.3e + CR 111.1 — "a card" (no "or token") is token-excluding, so a
+        // CR 108.2b + CR 111.1 — "a card" (no "or token") is token-excluding, so a
         // dying token reaches the graveyard (dies-triggers fire — Blood Artist
         // class) instead of being wrongly exiled.
         match &def.valid_card {
@@ -19290,7 +19700,7 @@ mod tests {
                 }));
                 assert!(
                     properties.contains(&FilterProp::NonToken),
-                    "'a card' subject must exclude tokens (CR 730.3e)"
+                    "'a card' subject must exclude tokens (CR 108.2b + CR 111.1)"
                 );
             }
             other => panic!("Expected Typed filter with Owned + NonToken, got {other:?}"),
@@ -19320,7 +19730,7 @@ mod tests {
         .expect("Dauthi's graveyard-exile-with-counter replacement must parse");
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // Opponent-owned, token-excluding (CR 730.3e) — same subject scope as Leyline.
+        // Opponent-owned, token-excluding (CR 108.2b + CR 111.1) — same subject scope as Leyline.
         match &def.valid_card {
             Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
                 assert!(properties.contains(&FilterProp::Owned {
@@ -19377,7 +19787,7 @@ mod tests {
                 assert!(!properties.contains(&FilterProp::Owned {
                     controller: ControllerRef::Opponent,
                 }));
-                // "a card" is still token-excluding (CR 730.3e).
+                // "a card" is still token-excluding (CR 108.2b + CR 111.1).
                 assert!(properties.contains(&FilterProp::NonToken));
             }
             other => panic!("Expected Typed(Owned You + NonToken), got {other:?}"),
@@ -19406,7 +19816,7 @@ mod tests {
         }
     }
 
-    /// CR 730.3e + CR 111.1: a card-only subject targeting ANY graveyard ("a
+    /// CR 108.2b + CR 111.1: a card-only subject targeting ANY graveyard ("a
     /// card would be put into a graveyard") is token-EXCLUDING with no
     /// controller scope — `valid_card` is `NonToken` alone. This is the live
     /// Leyline-class bug fix: without the `NonToken` axis a dying token was
@@ -19420,7 +19830,7 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // Exact equality: the "a card" subject must exclude tokens (CR 730.3e) and the
+        // Exact equality: the "a card" subject must exclude tokens (CR 108.2b + CR 111.1) and the
         // any-graveyard scope must add no owner constraint — so `NonToken` alone, with
         // no `Owned { Opponent }` and no other property.
         assert_eq!(
@@ -26745,6 +27155,79 @@ mod snapshot_tests {
             }
             other => panic!("expected PreventDamage, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn effect_created_source_controller_redirects_capture_declared_sources() {
+        assert!(all_consuming(parse_declared_damage_source_target)
+            .parse("target unblocked creature")
+            .is_ok());
+        assert!(all_consuming(parse_declared_damage_source_target)
+            .parse("target sorcery spell")
+            .is_ok());
+        let mirror = parse_oneshot_damage_replacement(
+            "all combat damage that would be dealt to you this turn by target unblocked creature is dealt to its controller instead.",
+            &ParseContext::default(),
+        )
+        .expect("Mirror Strike must parse");
+        let reverberation = parse_oneshot_damage_replacement(
+            "all damage that would be dealt this turn to you by target sorcery spell is dealt to that spell's controller instead.",
+            &ParseContext::default(),
+        )
+        .expect("Reverberation must parse");
+
+        for (effect, expected_scope) in [
+            (mirror, Some(CombatDamageScope::CombatOnly)),
+            (reverberation, None),
+        ] {
+            let Effect::CreateDamageReplacement {
+                source_filter,
+                combat_scope,
+                target_filter,
+                redirect_to,
+                redirect_lifetime,
+                ..
+            } = effect
+            else {
+                panic!("expected CreateDamageReplacement");
+            };
+            assert_eq!(combat_scope, expected_scope);
+            assert_eq!(target_filter, Some(damage_target_controller()));
+            assert_eq!(
+                redirect_to,
+                Some(DamageRedirectTarget::DamageSourceController)
+            );
+            assert_eq!(redirect_lifetime, RedirectionLifetime::Continuous);
+            assert!(matches!(
+                source_filter,
+                Some(TargetFilter::And { filters })
+                    if matches!(filters.first(), Some(TargetFilter::ParentTargetSlot { index: 0 }))
+            ));
+        }
+
+        let reflect = parse_oneshot_damage_replacement(
+            "the next time a source of your choice would deal damage this turn, that damage is dealt to that source's controller instead.",
+            &ParseContext::default(),
+        )
+        .expect("Reflect Damage must parse");
+        assert!(matches!(
+            reflect,
+            Effect::CreateDamageReplacement {
+                source_filter: Some(TargetFilter::ChosenDamageSource { .. }),
+                redirect_to: Some(DamageRedirectTarget::DamageSourceController),
+                redirect_lifetime: RedirectionLifetime::OneOpportunity,
+                ..
+            }
+        ));
+
+        assert!(
+            parse_oneshot_damage_replacement(
+                "the next time damage would be dealt to you this turn, that damage is dealt to its controller instead.",
+                &ParseContext::default(),
+            )
+            .is_none(),
+            "a source-controller tail without a captured source must decline"
+        );
     }
 
     /// Ria Ivor, Bane of Bladehold — the one-shot prevention lives in a

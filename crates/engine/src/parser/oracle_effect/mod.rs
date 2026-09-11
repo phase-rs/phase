@@ -15665,6 +15665,78 @@ fn parse_open_booster_pack_ir(
     })
 }
 
+/// CR 611.2a + CR 614.1a + CR 614.6: "If \<subject\> would be put into a graveyard
+/// \[from \<zone\>\] this turn, exile it instead\[. \<consequent\>\]" — a replacement
+/// effect CREATED by this spell or ability's resolution (Cosmic Intervention,
+/// Yawgmoth's Will, Gaea's Will).
+///
+/// A WHOLE-BODY recognizer, not a clause one. The consequent sentence is part of
+/// the replacement and must ride on its redirect; clause dispatch would emit it
+/// as an immediate sibling that ran at resolution, before anything was exiled.
+/// `parse_windowed_graveyard_redirect_install` is the single authority for the
+/// grammar and for the CR 611.2a static-versus-created discrimination — this
+/// wrapper only dresses its `Effect` as a one-clause chain.
+fn parse_windowed_graveyard_redirect_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
+    // No pre-check here: the nom grammar's own mandatory opening `tag("if ")` is
+    // the single recognition authority, and a second hand-rolled one — however
+    // it is spelled — is a parallel dispatch path the parser's combinator rule
+    // does not admit. The lowercase allocation it used to save is unmeasurable
+    // against a full card-data run and never happens during gameplay.
+    let effect = super::oracle_replacement::parse_windowed_graveyard_redirect_install(text)?;
+
+    let mut builder = ClauseIrBuilder::new(text);
+    builder
+        .clause(
+            text,
+            parsed_clause(effect),
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+
+    Some(EffectChainIr {
+        clauses: builder.finish(),
+        kind,
+        continuation_kind: Some(kind),
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+        injected_color_choice: InjectedColorChoice::Permitted,
+    })
+}
+
+/// CR 611.2a: the same recognizer, packaged as a whole ability for the two LINE
+/// dispatchers (`oracle::parse_normalized_oracle_ir`, `oracle_dispatch`) and for
+/// the spell-body join gate (`oracle::is_spell_resolution_instruction_line`).
+///
+/// They need their own entry point because they reach the effect-chain parser
+/// only through `is_effect_sentence_candidate`, which a bare "If … would … ,
+/// exile that card instead." line does not pass — it has no imperative lead.
+/// Without this the printed-static route's CR 604.2 decline would leave the line
+/// with no route at all, and the honest-failure residual would swallow a clause
+/// the parser can fully represent.
+pub(crate) fn parse_windowed_replacement_install_ir(text: &str) -> Option<AbilityIr> {
+    let body =
+        parse_windowed_graveyard_redirect_ir(text, AbilityKind::Spell, &ParseContext::default())?;
+    Some(AbilityIr {
+        source_text: text.to_string(),
+        body,
+        shell: AbilityShellIr::default(),
+        die_results: vec![],
+        root_transforms: vec![],
+        modal: None,
+    })
+}
+
 /// CR 400.11b: the zone a card taken out of an opened pack enters. Nested by
 /// preposition so each preposition names its zone family once.
 fn parse_booster_take_destination(input: &str) -> OracleResult<'_, Zone> {
@@ -33343,6 +33415,20 @@ pub(crate) fn parse_ability_ir(
     // two orphaned steps. Recognized in BOTH lowering modes: the sentence is a
     // whole printed spell ability, so it must win wherever a card body enters.
     if let Some(body) = parse_open_booster_pack_ir(text, kind, ctx) {
+        return AbilityIr {
+            source_text: text.to_string(),
+            body,
+            shell: AbilityShellIr::default(),
+            die_results: vec![],
+            root_transforms: vec![],
+            modal: None,
+        };
+    }
+    // CR 611.2a + CR 614.1a: a graveyard-redirect replacement clause that states
+    // its own window is created by THIS body's resolution, and its consequent
+    // sentence belongs to the replacement — both facts are only visible on the
+    // whole body, so the recognizer runs here rather than in clause dispatch.
+    if let Some(body) = parse_windowed_graveyard_redirect_ir(text, kind, ctx) {
         return AbilityIr {
             source_text: text.to_string(),
             body,

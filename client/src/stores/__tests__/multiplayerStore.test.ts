@@ -43,6 +43,8 @@ import {
   normalizeDisabledDirectorySources,
   normalizeRememberedHostConfig,
   normalizeUserLobbySources,
+  hydrateSessionTournamentCredentials,
+  rememberTournamentCredential,
   userLobbySource,
   type AmbientLobbyFrame,
   type HostingSettings,
@@ -671,6 +673,39 @@ describe("multiplayerStore", () => {
       ],
     };
     expect(migratePersistedMultiplayerState(blob, 6)).toEqual(blob);
+  });
+
+  // v6 -> v7: tournament bearer credentials leave localStorage. A pre-v7 blob
+  // that persisted them has them stripped; every other field is preserved.
+  it("strips tournament credentials from a pre-v7 store (v6 -> v7)", () => {
+    const migrated = migratePersistedMultiplayerState(
+      {
+        hostingServer: "wss://play.example.com/ws",
+        userLobbySources: [],
+        tournamentCredentials: {
+          TOUR01: { organizerToken: "secret", updatedAt: 1 },
+        },
+      },
+      6,
+    ) as Record<string, unknown>;
+
+    expect(migrated.tournamentCredentials).toBeUndefined();
+    expect(migrated.hostingServer).toBe("wss://play.example.com/ws");
+  });
+
+  // The strip must survive the early return the `version < 6` serverAddress arm
+  // takes — a pre-v6 blob carrying BOTH a legacy address and credentials.
+  it("strips credentials even when the legacy serverAddress arm runs (v5 -> v7)", () => {
+    const migrated = migratePersistedMultiplayerState(
+      {
+        serverAddress: "wss://play.example.com/ws",
+        tournamentCredentials: { TOUR01: { playerToken: "secret", updatedAt: 1 } },
+      },
+      5,
+    ) as Record<string, unknown>;
+
+    expect(migrated.tournamentCredentials).toBeUndefined();
+    expect(migrated.hostingServer).toBe("wss://play.example.com/ws");
   });
 
   it("drops malformed persisted user sources on hydration", () => {
@@ -2657,6 +2692,70 @@ describe("multiplayerStore", () => {
     detach = await dial({ directorySources: belowFloor(PRESET_URL) });
     expect(openPhaseSocket).toHaveBeenCalledWith(PRESET_URL, { surface: "lobby" });
     detach?.();
+  });
+});
+
+describe("tournament credential storage (sessionStorage, not localStorage)", () => {
+  const SESSION_KEY = "phase-tournament-credentials";
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    localStorageItems.clear();
+    useMultiplayerStore.setState({ tournamentCredentials: {} });
+  });
+
+  it("writes credentials to sessionStorage and NOT to the localStorage persist blob", () => {
+    act(() => {
+      useMultiplayerStore.setState((state) => ({
+        tournamentCredentials: rememberTournamentCredential(
+          state.tournamentCredentials,
+          "TOUR01",
+          { organizerToken: "secret" },
+        ),
+      }));
+    });
+
+    // Present in sessionStorage.
+    const session = JSON.parse(sessionStorage.getItem(SESSION_KEY) ?? "null");
+    expect(session?.TOUR01?.organizerToken).toBe("secret");
+
+    // Absent from the localStorage persist blob — the whole point of the move.
+    const persisted = JSON.parse(localStorageItems.get("phase-multiplayer") ?? "null");
+    expect(persisted?.state?.tournamentCredentials).toBeUndefined();
+  });
+
+  it("hydrates credentials from sessionStorage into the store", () => {
+    // The store is already empty from `beforeEach`; seed sessionStorage with no
+    // intervening `setState`, or the change subscription would wipe the seed
+    // (an emptied map removes the key).
+    sessionStorage.setItem(
+      SESSION_KEY,
+      JSON.stringify({ TOUR01: { playerToken: "secret", updatedAt: 5 } }),
+    );
+
+    hydrateSessionTournamentCredentials();
+
+    expect(
+      useMultiplayerStore.getState().tournamentCredentials.TOUR01?.playerToken,
+    ).toBe("secret");
+  });
+
+  it("removes the sessionStorage key when the credential map empties", () => {
+    act(() => {
+      useMultiplayerStore.setState((state) => ({
+        tournamentCredentials: rememberTournamentCredential(
+          state.tournamentCredentials,
+          "TOUR01",
+          { organizerToken: "secret" },
+        ),
+      }));
+    });
+    expect(sessionStorage.getItem(SESSION_KEY)).not.toBeNull();
+
+    act(() => {
+      useMultiplayerStore.setState({ tournamentCredentials: {} });
+    });
+    expect(sessionStorage.getItem(SESSION_KEY)).toBeNull();
   });
 });
 

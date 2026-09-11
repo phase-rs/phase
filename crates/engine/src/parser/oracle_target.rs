@@ -4526,11 +4526,67 @@ fn starts_with_article_core_type_segment(text: &str) -> bool {
 fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(tf) => !tf.type_filters.is_empty() || !tf.properties.is_empty(),
-        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => true,
+        TargetFilter::StackSpell
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. } => true,
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(target_filter_has_meaningful_content)
         }
         _ => false,
+    }
+}
+
+/// Parse a declared damage-source target and bind it to the first target slot.
+///
+/// This is deliberately the sole authority for the source-target grammar used
+/// by damage replacements.  It proves the `target` keyword with the shared nom
+/// target-prefix combinator, delegates the noun phrase to `parse_target`, and
+/// then scopes a consumed `spell` phrase to the stack.  The returned remainder
+/// is sliced from `text`, not its lowercase working copy, so callers that parse
+/// a mixed-case Oracle fragment retain the original spelling.
+pub(crate) fn parse_declared_damage_source_target<'a>(
+    text: &'a str,
+) -> OracleResult<'a, TargetFilter> {
+    let lower = text.to_ascii_lowercase();
+    if nom_on_lower(text, &lower, nom_target::parse_declared_target_prefix).is_none() {
+        return Err(super::oracle_nom::error::oracle_err(text));
+    }
+    let (filter, rest) = parse_target(text);
+    let consumed = text.len() - rest.len();
+    let filter = scope_target_spell_phrase(filter, &lower[..consumed]);
+    if !target_filter_has_meaningful_content(&filter) {
+        return Err(super::oracle_nom::error::oracle_err(rest));
+    }
+
+    Ok((
+        rest,
+        TargetFilter::And {
+            filters: vec![TargetFilter::ParentTargetSlot { index: 0 }, filter],
+        },
+    ))
+}
+
+#[cfg(test)]
+mod declared_damage_source_target_tests {
+    use super::*;
+
+    /// CR 109.2 + CR 601.2c + CR 609.7a: a bare declared "target spell" is
+    /// a meaningful source target, and its source binding must retain the
+    /// stack-zone scope rather than declining as an empty typed filter.
+    #[test]
+    fn bare_target_spell_is_a_stack_scoped_declared_damage_source() {
+        let (rest, filter) = parse_declared_damage_source_target("target spell")
+            .expect("a bare target spell must be accepted as a damage source");
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ParentTargetSlot { index: 0 },
+                    TargetFilter::StackSpell,
+                ],
+            }
+        );
     }
 }
 
