@@ -4295,11 +4295,33 @@ pub struct ExiledStopInput {
 /// stalled loop to look like it advanced. `zone`, `controller` and `name` earn
 /// their place because `should_stop_repeat_until` reads all three. Add a fourth
 /// only when a stop predicate reads it.
+///
+/// THE ONE EXCEPTION, which STRENGTHENS the guard: keeping the two ledgers in
+/// SEPARATE rows (below) rather than deduping their union. The two stop
+/// predicates read the ledgers separately — the put-to-hand half reads
+/// `cards_exiled_with_source_this_turn`, `duplicate_name_among_exiled_by_source`
+/// reads `exile_links` — so a row added to one ledger for an object the OTHER
+/// ledger already holds genuinely moves a predicate's input. A union deduped by
+/// `ObjectId` would hold byte-identical across exactly that change and stop a
+/// repeat that had in fact advanced (a truncation — the unsafe direction), so
+/// the rows are keyed by `(ledger, object_id)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepeatUntilStopWitness {
-    /// Sorted by `object_id` so equality is order-independent — the ledgers
-    /// this is built from are insertion-ordered, not stable.
-    pub exiled: Vec<ExiledStopInput>,
+    /// Rows drawn from `GameState::cards_exiled_with_source_this_turn`, the
+    /// ledger `should_stop_repeat_until`'s put-to-hand half reads.
+    ///
+    /// Sorted and deduped by `object_id` so equality is order-independent —
+    /// the ledger this is built from is insertion-ordered, not stable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exiled_this_turn: Vec<ExiledStopInput>,
+    /// Rows drawn from `GameState::exile_links` for this source, the ledger
+    /// `duplicate_name_among_exiled_by_source` reads. Kept separate from
+    /// `exiled_this_turn` rather than unioned with it, for the reason recorded
+    /// in this type's doc comment.
+    ///
+    /// Sorted and deduped by `object_id`, same as above.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked: Vec<ExiledStopInput>,
 }
 
 /// CR 608.2c + CR 107.1c: Resume state for a "repeat this process" loop

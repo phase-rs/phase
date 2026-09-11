@@ -7040,12 +7040,20 @@ mod tests {
             "the legacy fixture must deserialize its ability, proving it parsed at all"
         );
 
+        // Both ledger vecs carry a row, and DIFFERENT rows, so a round trip
+        // that dropped or conflated either one is visible.
         let witness = RepeatUntilStopWitness {
-            exiled: vec![ExiledStopInput {
+            exiled_this_turn: vec![ExiledStopInput {
                 object_id: ObjectId(212),
                 zone: Zone::Exile,
                 controller: PlayerId(0),
                 name: "Exiled This Way".to_string(),
+            }],
+            linked: vec![ExiledStopInput {
+                object_id: ObjectId(213),
+                zone: Zone::Hand,
+                controller: PlayerId(1),
+                name: "Linked This Way".to_string(),
             }],
         };
         let frame = PendingRepeatUntil {

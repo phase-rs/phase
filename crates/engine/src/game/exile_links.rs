@@ -211,39 +211,58 @@ pub(crate) fn duplicate_name_among_exiled_by_source(
 /// Objects absent from `state.objects` are skipped, mirroring the `filter_map`
 /// in `duplicate_name_among_exiled_by_source`; that is safe for the delta
 /// comparison because an id that disappears from `state.objects` changes the
-/// witness either way. The result is sorted and deduped by `ObjectId` so
-/// equality never depends on either ledger's insertion order and an object
-/// recorded in both ledgers contributes exactly one row.
+/// witness either way. Each ledger's rows are sorted and deduped by `ObjectId`
+/// so equality never depends on that ledger's insertion order.
+///
+/// ROWS ARE KEYED BY `(ledger, object_id)`, NOT BY `object_id` ALONE. The two
+/// stop predicates read the two ledgers SEPARATELY, so an object recorded in
+/// both contributes one row to EACH vec rather than one deduped row overall.
+/// Deduping the union would hold the witness byte-identical when a row is added
+/// to one ledger for an object the other ledger already holds — which really
+/// does move `duplicate_name_among_exiled_by_source`'s input — and would
+/// therefore stop a repeat that had advanced. That is a truncation, the unsafe
+/// direction to fail.
 pub(crate) fn repeat_until_stop_witness(
     state: &GameState,
     source_id: ObjectId,
 ) -> RepeatUntilStopWitness {
-    let tracked_this_turn = state
-        .cards_exiled_with_source_this_turn
-        .get(&source_id)
-        .into_iter()
-        .flatten()
-        .copied();
-    let linked = state
-        .exile_links
-        .iter()
-        .filter(|link| link.source_id == source_id)
-        .map(|link| link.exiled_id);
-
-    let mut exiled: Vec<ExiledStopInput> = tracked_this_turn
-        .chain(linked)
-        .filter_map(|exiled_id| {
-            state.objects.get(&exiled_id).map(|obj| ExiledStopInput {
-                object_id: exiled_id,
-                zone: obj.zone,
-                controller: obj.controller,
-                name: obj.name.clone(),
-            })
+    let row = |exiled_id: ObjectId| {
+        state.objects.get(&exiled_id).map(|obj| ExiledStopInput {
+            object_id: exiled_id,
+            zone: obj.zone,
+            controller: obj.controller,
+            name: obj.name.clone(),
         })
-        .collect();
-    exiled.sort_unstable_by_key(|entry| entry.object_id);
-    exiled.dedup_by_key(|entry| entry.object_id);
-    RepeatUntilStopWitness { exiled }
+    };
+    let sorted = |mut rows: Vec<ExiledStopInput>| {
+        rows.sort_unstable_by_key(|entry| entry.object_id);
+        rows.dedup_by_key(|entry| entry.object_id);
+        rows
+    };
+
+    let exiled_this_turn = sorted(
+        state
+            .cards_exiled_with_source_this_turn
+            .get(&source_id)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter_map(row)
+            .collect(),
+    );
+    let linked = sorted(
+        state
+            .exile_links
+            .iter()
+            .filter(|link| link.source_id == source_id)
+            .map(|link| link.exiled_id)
+            .filter_map(row)
+            .collect(),
+    );
+    RepeatUntilStopWitness {
+        exiled_this_turn,
+        linked,
+    }
 }
 
 /// CR 607.2a: True when `card_id` shares a name with another card linked to
@@ -891,17 +910,18 @@ mod tests {
         let witness_a = repeat_until_stop_witness(&state, source_a);
         let witness_b = repeat_until_stop_witness(&state, source_b);
 
-        // Positive reach-guard: both witnesses actually observed rows, so
-        // "they differ" is not two near-empty vectors compared vacuously.
+        // Positive reach-guard: both witnesses actually observed rows in both
+        // ledgers, so "they differ" is not two near-empty vectors compared
+        // vacuously.
         assert_eq!(
-            witness_a.exiled.len(),
-            2,
-            "source A witnesses exactly its own two cards, got {witness_a:?}"
+            (witness_a.exiled_this_turn.len(), witness_a.linked.len()),
+            (2, 2),
+            "source A witnesses exactly its own two cards in each ledger, got {witness_a:?}"
         );
         assert_eq!(
-            witness_b.exiled.len(),
-            2,
-            "source B witnesses exactly its own two cards, got {witness_b:?}"
+            (witness_b.exiled_this_turn.len(), witness_b.linked.len()),
+            (2, 2),
+            "source B witnesses exactly its own two cards in each ledger, got {witness_b:?}"
         );
         assert_ne!(
             witness_a, witness_b,
@@ -989,9 +1009,12 @@ mod tests {
         let reverse_witness = repeat_until_stop_witness(&reverse, source);
 
         assert_eq!(
-            forward_witness.exiled.len(),
-            3,
-            "one row per distinct object, not one per ledger entry, got {forward_witness:?}"
+            (
+                forward_witness.exiled_this_turn.len(),
+                forward_witness.linked.len()
+            ),
+            (3, 3),
+            "one row per distinct object PER LEDGER, not one per ledger entry, got {forward_witness:?}"
         );
         assert_eq!(
             forward_witness, reverse_witness,
@@ -1034,16 +1057,16 @@ mod tests {
 
         let before = repeat_until_stop_witness(&state, source);
         assert_eq!(
-            before.exiled.len(),
-            1,
+            (before.exiled_this_turn.len(), before.linked.len()),
+            (1, 1),
             "reach-guard: the pre-move witness must be non-empty"
         );
 
         state.objects.get_mut(&card).expect("card exists").zone = Zone::Hand;
         let after = repeat_until_stop_witness(&state, source);
         assert_eq!(
-            after.exiled.len(),
-            1,
+            (after.exiled_this_turn.len(), after.linked.len()),
+            (1, 1),
             "precondition: the move added no ledger row — only the zone changed"
         );
         assert_ne!(
@@ -1080,8 +1103,8 @@ mod tests {
 
         let before = repeat_until_stop_witness(&state, source);
         assert_eq!(
-            before.exiled.len(),
-            1,
+            (before.exiled_this_turn.len(), before.linked.len()),
+            (1, 1),
             "reach-guard: the pre-change witness must be non-empty"
         );
         assert!(
@@ -1102,16 +1125,86 @@ mod tests {
              the witness can observe it"
         );
         assert_eq!(
-            after.exiled[0].zone, before.exiled[0].zone,
+            after.exiled_this_turn[0].zone, before.exiled_this_turn[0].zone,
             "precondition: zone is held constant across the control change"
         );
         assert_eq!(
-            after.exiled[0].name, before.exiled[0].name,
+            after.exiled_this_turn[0].name, before.exiled_this_turn[0].name,
             "precondition: name is held constant across the control change"
         );
         assert_ne!(
             before, after,
             "a control change with the zone held constant must move the witness"
+        );
+    }
+
+    /// CR 607.2a + CR 104.4b: the witness keys its rows by `(ledger,
+    /// object_id)`, not by `object_id` alone.
+    ///
+    /// The two stop predicates read the two ledgers SEPARATELY:
+    /// `should_stop_repeat_until`'s put-to-hand half reads
+    /// `cards_exiled_with_source_this_turn`, while
+    /// `duplicate_name_among_exiled_by_source` builds its name list from
+    /// `exile_links`. So adding an `exile_links` row for an object the per-turn
+    /// ledger ALREADY holds really does move the duplicate-name predicate's
+    /// input — and a witness that deduped the UNION of the two ledgers by
+    /// `ObjectId` would be byte-identical across exactly that change, stopping a
+    /// repeat that had advanced. That is a truncation, the UNSAFE direction to
+    /// fail, which is why this row is pinned even though no body in today's pool
+    /// reaches it (Tainted Pact's `ExileTop` writes both ledgers together via
+    /// `push_with_kind`; the turn-ledger-only writers in `game/costs.rs` and
+    /// `game/engine_resolution_choices.rs` sit outside any
+    /// `UntilStopConditions` body).
+    #[test]
+    fn repeat_until_stop_witness_keys_rows_by_ledger_not_by_object_alone() {
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(7);
+        let source = ObjectId(900);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Twice Recorded".to_string(),
+            Zone::Exile,
+        );
+
+        // Turn ledger only — the shape `game/costs.rs` and
+        // `game/engine_resolution_choices.rs` write.
+        push_exiled_with_source_this_turn(&mut state, card, source);
+        let before = repeat_until_stop_witness(&state, source);
+        assert_eq!(
+            (before.exiled_this_turn.len(), before.linked.len()),
+            (1, 0),
+            "reach-guard: the baseline really is turn-ledger-only, got {before:?}"
+        );
+        assert!(
+            !duplicate_name_among_exiled_by_source(&state, source),
+            "precondition: the duplicate-name predicate reads `exile_links`, \
+             which is still empty"
+        );
+
+        // Now add the SAME object to the other ledger.
+        push_with_kind(&mut state, card, source, ExileLinkKind::TrackedBySource);
+        let after = repeat_until_stop_witness(&state, source);
+        assert_eq!(
+            (after.exiled_this_turn.len(), after.linked.len()),
+            (1, 1),
+            "the new row lands in the `exile_links` vec, got {after:?}"
+        );
+
+        // This is the assertion a union-deduped witness fails: the union is
+        // unchanged (same single object), so only per-ledger keying sees it.
+        assert_eq!(
+            before.exiled_this_turn, after.exiled_this_turn,
+            "precondition: the union of the two ledgers is the SAME one object \
+             before and after — a witness deduping that union stays byte-identical"
+        );
+        assert_ne!(
+            before, after,
+            "a row added to one ledger for an object the other ledger already \
+             holds must move the witness"
         );
     }
 

@@ -24,7 +24,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::zones::move_to_library_position;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, EffectKind, LibraryPosition, QuantityExpr,
+    AbilityDefinition, AbilityKind, Effect, EffectKind, LibraryPosition, QuantityExpr, QuantityRef,
     RepeatContinuation, ResolvedAbility, TargetFilter,
 };
 use engine::types::actions::GameAction;
@@ -273,8 +273,10 @@ fn tainted_pact_empty_library_terminates_the_repeat() {
 /// invisible from here. Observing it needs a non-pausing body whose witness
 /// genuinely grows, i.e. an `UntilStopConditions` ability carrying a
 /// linked-exile consumer, which no fixture in this file builds. The
-/// per-iteration capture is still the correct code; it is simply not pinned
-/// against that specific mutation by any test we have.
+/// per-iteration capture is still the correct code, and it IS pinned against
+/// that specific mutation — by
+/// `until_stop_conditions_with_a_tracked_non_pausing_body_terminates_after_progress`
+/// at the bottom of this file, not by this row.
 #[test]
 fn tainted_pact_terminates_when_the_library_empties_mid_repeat() {
     assert_tainted_pact_parses_to_until_stop_conditions();
@@ -391,7 +393,10 @@ fn until_stop_conditions_with_a_non_pausing_body_terminates_in_loop() {
         .recv_timeout(Duration::from_secs(10))
         .unwrap_or_else(|err| {
             panic!(
-                "the UntilStopConditions repeat never returned ({err:?}): the in-loop                  `repeat_until_should_terminate` arm in `resolve_ability_chain`'s                  UntilStopConditions dispatch is missing or incorrect, so the loop spins                  without ever yielding a WaitingFor"
+                "the UntilStopConditions repeat never returned ({err:?}): the in-loop \
+                 `repeat_until_should_terminate` arm in `resolve_ability_chain`'s \
+                 UntilStopConditions dispatch is missing or incorrect, so the loop \
+                 spins without ever yielding a WaitingFor"
             )
         });
 
@@ -408,5 +413,170 @@ fn until_stop_conditions_with_a_non_pausing_body_terminates_in_loop() {
     assert!(
         !frame_still_parked,
         "a non-pausing body must never park a repeat-until frame"
+    );
+}
+
+/// CR 104.4b: the in-loop guard's baseline is captured PER ITERATION, not once
+/// per repeat — the sibling of the test above, and the only row that pins that.
+///
+/// WHICH MUTATION THIS TEST PINS, stated exactly: hoisting
+/// `resolve_ability_chain`'s `let progress_baseline = …repeat_until_stop_witness(…)`
+/// out of the `UntilStopConditions` `loop` and above it. That turns the guard
+/// into "nothing has been exiled since the repeat BEGAN", a strictly weaker
+/// predicate, and this test then spins until its `recv_timeout` and FAILS.
+///
+/// NOTHING ELSE IN THIS FILE PINS IT.
+/// `tainted_pact_terminates_when_the_library_empties_mid_repeat` has the same
+/// progress-then-stall SHAPE but exits through `drain_active_repeat_until`,
+/// which re-enters `resolve_ability_chain` and so re-captures the baseline at
+/// function entry either way — the hoist is invisible from there.
+/// `until_stop_conditions_with_a_non_pausing_body_terminates_in_loop` does reach
+/// the in-loop arm, but its ability carries NO linked-exile consumer, so
+/// `exile_links::should_track_exiled_by_source` is false, neither ledger is ever
+/// written, and its witness is empty on every iteration — a hoisted baseline is
+/// also empty, so the comparison is unchanged and the hoist is invisible there
+/// too. Only a body that is BOTH non-pausing AND tracked discriminates.
+///
+/// The fixture: `ExileTop` chained to a genuine linked-exile consumer
+/// (`QuantityRef::CardsExiledBySource` — "gain 1 life for each card exiled this
+/// way"), which makes `should_track_exiled_by_source` true so the ledgers
+/// actually grow, and which neither pauses nor moves a card out of exile. Run
+/// against a ONE-CARD library: iteration 1 exiles the card and grows the
+/// witness; iteration 2 finds the library empty, changes nothing, and must end
+/// via the in-loop `repeat_until_should_terminate` arm. With the baseline
+/// hoisted, iteration 2's witness (one row) never equals the repeat's start
+/// (empty), `should_stop_repeat_until` stays false because the card is in exile
+/// and not in hand, and the loop never ends.
+///
+/// Why this shape matters rather than being a synthetic curiosity: it is the
+/// LIVE shape Tainted Pact acquires the moment issue #8798 suppresses the
+/// spurious prompt. That is precisely what the #8798 ordering constraint exists
+/// to prevent, so the guard that prevents it must be pinned before then.
+///
+/// Same bounded `std::thread` + `recv_timeout` harness as the test above, and
+/// the same residual: `recv_timeout` returning does not stop the spawned
+/// thread. Under nextest's process-per-test isolation the leaked thread dies
+/// with this test's own process; under plain `cargo test` it keeps spinning and
+/// allocating until the binary exits.
+#[test]
+fn until_stop_conditions_with_a_tracked_non_pausing_body_terminates_after_progress() {
+    let (tx, rx) = mpsc::channel();
+    let _fixture = std::thread::spawn(move || {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let only_card = scenario
+            .add_spell_to_library_top(P0, "Only Card", true)
+            .id();
+        let source = scenario
+            .add_spell_to_graveyard(P0, "Tracked Repeat Source", true)
+            .id();
+        let mut runner = scenario.build();
+        assert_eq!(
+            runner.state().players[P0.0 as usize]
+                .library
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![only_card],
+            "precondition: exactly one card, so iteration 2 is the stalled one"
+        );
+        // The same comparison the `UntilStopConditions` loop itself makes to
+        // decide whether an iteration paused.
+        let initial_waiting_for = runner.state().waiting_for.clone();
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+                face_down: false,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        // CR 607.1: the linked-exile consumer that makes
+        // `should_track_exiled_by_source` true, so the exile ledgers — and
+        // therefore the witness — actually grow on iteration 1. It reads the
+        // linked pool without pausing and without moving anything out of exile.
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::CardsExiledBySource,
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            P0,
+        )));
+        ability.repeat_until = Some(RepeatContinuation::UntilStopConditions {
+            stop_on_put_to_hand: true,
+            stop_on_duplicate_exiled_names: false,
+        });
+
+        let mut events = Vec::new();
+        let ok = resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0).is_ok();
+        let state = runner.state();
+        let tracked_this_turn = state
+            .cards_exiled_with_source_this_turn
+            .get(&source)
+            .map_or(0, Vec::len);
+        let linked = state
+            .exile_links
+            .iter()
+            .filter(|link| link.source_id == source)
+            .count();
+        let _ = tx.send((
+            ok,
+            events.len(),
+            state.objects.get(&only_card).map(|obj| obj.zone),
+            tracked_this_turn,
+            linked,
+            state.active_repeat_until().is_some(),
+            state.waiting_for == initial_waiting_for,
+        ));
+    });
+
+    let (ok, event_count, card_zone, tracked_this_turn, linked, frame_still_parked, never_paused) =
+        rx.recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|err| {
+                panic!(
+                    "the tracked UntilStopConditions repeat never returned ({err:?}): the \
+                     `progress_baseline` capture in `resolve_ability_chain`'s \
+                     UntilStopConditions arm must happen INSIDE the loop, once per \
+                     iteration. Hoisted above the loop it measures against the repeat's \
+                     start, so an iteration that stalls AFTER making progress never \
+                     compares equal and the loop never ends"
+                )
+            });
+
+    assert!(ok, "the repeat must resolve cleanly, not error out");
+    // Positive reach-guards: iteration 1 really exiled, and really TRACKED what
+    // it exiled — without both, the witness is empty every iteration and this
+    // test degenerates into the non-tracked sibling above.
+    assert_eq!(
+        card_zone,
+        Some(Zone::Exile),
+        "reach-guard: iteration 1 must actually exile the only card"
+    );
+    assert_eq!(
+        (tracked_this_turn, linked),
+        (1, 1),
+        "reach-guard: the linked-exile consumer must make both ledgers record \
+         the exiled card, so the witness genuinely GREW on iteration 1"
+    );
+    assert!(
+        event_count < 64,
+        "a terminating repeat emits a bounded event list, got {event_count}"
+    );
+    assert!(
+        !frame_still_parked,
+        "a non-pausing body must never park a repeat-until frame"
+    );
+    assert!(
+        never_paused,
+        "precondition: `waiting_for` never changed, so no iteration parked and \
+         the in-loop arm — not the drain — is what ended the repeat"
     );
 }
