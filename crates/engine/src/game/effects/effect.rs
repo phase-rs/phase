@@ -1312,6 +1312,7 @@ mod tests {
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
+    use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectIncarnationRef, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
@@ -1893,49 +1894,70 @@ mod tests {
     }
 
     /// CR 608.2c: a `ParentTargetSlot` naming a PLAYER slot resolves against the
-    /// chain root even when the ability declared no object target.
-    /// `inherited_object_target` is false for a player-only chain, so without the
-    /// independent slot arm the anaphor falls through to the positional live-target
-    /// fan-out and binds EVERY target instead of the one named slot.
+    /// chain-root declared slots even when the ability's local (propagated)
+    /// targets differ. `inherited_object_target` is false for a player-only
+    /// chain, so without the independent slot arm the anaphor falls through to
+    /// the positional fan-out and binds the leaf's local target instead of the
+    /// named root slot.
     #[test]
-    fn parent_target_slot_resolves_player_slot_without_object_target() {
+    fn parent_target_slot_resolves_root_player_slot_in_chain() {
         let mut state = GameState::new_two_player(42);
-        let source = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Continuous Source".to_string(),
-            Zone::Stack,
-        );
+        let source = ObjectId(500);
 
+        // Root chain declares two player targets: slot 0 = P0, slot 1 = P1.
+        let root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+
+        // The leaf carries only the locally-propagated most-recent target (P1),
+        // but `ParentTargetSlot { index: 0 }` must resolve to root slot 0 (P0).
         let static_def = StaticDefinition::continuous()
             .affected(TargetFilter::ParentTargetSlot { index: 0 })
             .modifications(vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Flying,
             }]);
-        let ability = ResolvedAbility::new(
+        let leaf = ResolvedAbility::new(
             Effect::GenericEffect {
                 static_abilities: vec![static_def],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
                 end_cost: None,
             },
-            vec![
-                TargetRef::Player(PlayerId(0)),
-                TargetRef::Player(PlayerId(1)),
-            ],
+            vec![TargetRef::Player(PlayerId(1))],
             source,
             PlayerId(0),
         )
         .duration(Duration::UntilEndOfTurn);
 
         let mut events = Vec::new();
-        resolve(&mut state, &ability, &mut events).unwrap();
+        resolve(&mut state, &leaf, &mut events).unwrap();
 
         assert_eq!(
             state.transient_continuous_effects.len(),
             1,
-            "only the slot-0 player should be bound, not both declared targets"
+            "only the chain-root slot 0 should be bound, not the leaf's local target"
         );
         assert_eq!(
             state.transient_continuous_effects[0].affected,
@@ -1943,12 +1965,10 @@ mod tests {
         );
     }
 
-    /// CR 400.7 + CR 603.7c: a `ParentTargetSlot` referent that became a new object
-    /// (departed and returned) must be dropped. The slot itself is never
-    /// pin-filtered (that would renumber later slots), but the SELECTED object is
-    /// pin-checked so a stale incarnation binds nothing.
+    /// CR 400.7 + CR 603.7c: the positive control for the departed-referent test —
+    /// a referent that STAYED keeps its captured pin and still receives the effect.
     #[test]
-    fn parent_target_slot_drops_stale_object_incarnation() {
+    fn parent_target_slot_binds_referent_that_stayed() {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
             &mut state,
@@ -1990,14 +2010,84 @@ mod tests {
         )
         .duration(Duration::UntilEndOfTurn);
 
-        // Pin the referent to a stale incarnation: the object "left and returned".
-        let stale_incarnation = state.objects[&target_creature].incarnation + 1;
-        ability.set_target_incarnations_recursive(vec![ObjectIncarnationRef::of(
-            target_creature,
-            stale_incarnation,
-        )]);
+        // Production pin capture: pin the referent to its current incarnation.
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&target_creature]);
+        ability.set_target_incarnations_recursive(vec![pin]);
 
         let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        assert_eq!(
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificObject {
+                id: target_creature
+            }
+        );
+    }
+
+    /// CR 400.7 + CR 603.7c: a `ParentTargetSlot` referent that left and returned
+    /// (a new incarnation) must be dropped. The pin is captured the production way
+    /// (`set_target_incarnations_recursive`) and the object actually moves zones —
+    /// battlefield → graveyard → battlefield — so the captured pin goes stale.
+    #[test]
+    fn parent_target_slot_drops_referent_that_left_and_returned() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Continuous Source".to_string(),
+            Zone::Stack,
+        );
+        let target_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTargetSlot { index: 0 })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        let mut ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![TargetRef::Object(target_creature)],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        // Production pin capture: pin the referent to its current incarnation.
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&target_creature]);
+        ability.set_target_incarnations_recursive(vec![pin]);
+
+        // Real zone transition: leave the battlefield and return. Each move bumps
+        // the incarnation (CR 400.7), so the captured pin is now stale.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, target_creature, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(
+            &mut state,
+            target_creature,
+            Zone::Battlefield,
+            &mut events,
+        );
+
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(
