@@ -1,8 +1,8 @@
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
-    AbilityCost, CastPermissionConstraint, CastingPermission, Duration, Effect, EffectError,
-    EffectKind, QuantityExpr, ResolvedAbility, SpellStackToGraveyardReplacement, TargetFilter,
-    TargetRef,
+    AbilityCondition, AbilityCost, CastPermissionConstraint, CastingPermission, Duration, Effect,
+    EffectError, EffectKind, QuantityExpr, ResolvedAbility, SpellStackToGraveyardReplacement,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, CastingVariant, GameState, WaitingFor};
@@ -1473,6 +1473,70 @@ pub(crate) fn is_graveyard_exile_rider_subability(ability: &ResolvedAbility) -> 
         graveyard_destination_rider(ability),
         Some(SpellStackToGraveyardReplacement::Exile)
     )
+}
+
+/// CR 614.1a + CR 608.2c + CR 110.4b: does the counter's exile rider `sub`
+/// APPLY to the countered object `obj_id`? The rider's form alone
+/// (`is_graveyard_exile_rider_subability`) says the head CAN exile; its
+/// printed condition says WHICH countered spells it exiles — "If that spell is
+/// countered this way" (Spelljack, Force of Negation: `ZoneChangedThisWay {
+/// Typed[Card] }`) or "If a PERMANENT spell is countered this way"
+/// (Thranduil's Decree: `ZoneChangedThisWay { Typed[Permanent] }` — CR 110.4b,
+/// "a permanent spell" is an artifact, battle, creature, enchantment, or
+/// planeswalker spell). `counter::resolve` asks it ONCE, when it chooses the countered spell's
+/// destination, and records the answer in `state.exile_rider_countered_ids`
+/// for the `Exiled` provenance stamp — so a countered instant under
+/// Thranduil's Decree goes to its owner's graveyard (CR 701.6a) and is not
+/// published as "exiled this way". Asked once because the answer is not
+/// stable over the resolution: an Adventure or Omen spell has its creature
+/// face restored right after the destination is chosen (CR 715.4 / CR 720.4,
+/// via `restores_front_face_after_stack_exit`).
+///
+/// Asked of the concrete object rather than through `evaluate_condition`: that
+/// arm reads `last_zone_changed_ids`, the ledger of the move just made, and the
+/// destination is chosen BEFORE the move exists. The filter is the one the arm
+/// applies to each ledger member; it is asked with the rider's own ability
+/// context — same source and controller as the head
+/// (`build_resolved_from_def`), no targets (subs start without them), and no
+/// corpus rider's filter reads either. `TypeFilter::Permanent` reads the
+/// card's types, not its zone, so a spell on the stack matches by what it
+/// would be on the battlefield.
+///
+/// Asked and recorded per `counter::resolve` call: a `player_scope` or
+/// `repeat_for` counter would keep only its last iteration's answer — no
+/// corpus counter head is scoped or repeated (measured: all 20 are chain
+/// heads), so that shape must be decided with its evidence, not inherited.
+///
+/// Fail closed on every other shape: a rider with `destination: Some(_)` names
+/// an arrival this pre-move question cannot see, and a condition of another
+/// kind is one no corpus rider carries (measured over all 20 exile-rider heads:
+/// 18 `Typed[Card]`, 1 `Typed[Permanent]`, 1 whose condition the parser does
+/// not carry — Delay; its printed "if the spell is countered this way" is
+/// always true for the countered spell). A new kind must be decided here, not
+/// inherited from the form.
+pub(crate) fn graveyard_exile_rider_applies_to(
+    state: &GameState,
+    sub: &ResolvedAbility,
+    obj_id: ObjectId,
+) -> bool {
+    is_graveyard_exile_rider_subability(sub)
+        && match &sub.condition {
+            None => true,
+            Some(AbilityCondition::ZoneChangedThisWay {
+                filter,
+                destination: None,
+            }) => crate::game::filter::matches_target_filter(
+                state,
+                obj_id,
+                filter,
+                &crate::game::filter::FilterContext::from_ability(sub),
+            ),
+            Some(AbilityCondition::ZoneChangedThisWay {
+                destination: Some(_),
+                ..
+            })
+            | Some(_) => false,
+        }
 }
 
 fn cast_from_zone_graveyard_destination(

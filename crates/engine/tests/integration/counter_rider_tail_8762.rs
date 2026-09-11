@@ -5,13 +5,22 @@
 //! may play it without paying its mana cost for as long as it remains exiled.")
 //! and No Escape's "Scry 1." therefore never ran.
 //!
-//! Two independent halves, both needed (each has its own counter-probe):
+//! Three parts, each with its own counter-probe:
 //! 1. the rider branch now runs the rider's direct sequential tail for the
 //!    families `counter_tail_family_has_runtime_evidence` admits;
 //! 2. `affected_objects_with_causes` stamps the countered card `Exiled` when the
-//!    counter carries the exile rider — without that stamp the tail's
+//!    counter's exile rider applied to it — without that stamp the tail's
 //!    `TrackedSetFiltered { caused_by: Exiled }` anaphor matched nothing, so the
-//!    permission grant resolved against an empty set even when it ran.
+//!    permission grant resolved against an empty set even when it ran;
+//! 3. the rider's printed condition decides WHETHER it applies to the concrete
+//!    countered spell — `counter::resolve` asks
+//!    `cast_from_zone::graveyard_exile_rider_applies_to` once, when it chooses
+//!    the destination, and records the answer in `exile_rider_countered_ids`;
+//!    the provenance stamp reads that record (an Adventure spell changes face
+//!    between the two, CR 715.4). Thranduil's Decree ("If a PERMANENT spell is
+//!    countered this way") exiled a countered instant on `main`; it now goes
+//!    to its owner's graveyard (CR 701.6a), unstamped and without the
+//!    permission.
 //!
 //! Corpus (`client/public/card-data.json`): 20 counter heads carry the exile
 //! rider, 6 of them a tail — Spelljack, Thranduil's Decree, Kheru Spellsnatcher
@@ -22,8 +31,11 @@
 use engine::ai_support::legal_actions;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{AbilityDefinition, CastingPermission, Effect, SubAbilityLink};
+use engine::types::ability::{
+    AbilityDefinition, CastingPermission, Effect, SubAbilityLink, ThisWayCause,
+};
 use engine::types::actions::GameAction;
+use engine::types::card::LayoutKind;
 use engine::types::card_type::CoreType;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
@@ -56,8 +68,17 @@ const DEVIOUS_COVER_UP: &str = "Counter target spell. If that spell is countered
                                 may shuffle up to four target cards from your graveyard into \
                                 your library.";
 
-/// An opponent spell on the stack, mirroring `counter_spell_zone_redirect.rs`.
-fn put_spell_on_stack(runner: &mut GameRunner, controller: PlayerId, core: CoreType) -> ObjectId {
+/// An opponent spell on the stack, mirroring `counter_spell_zone_redirect.rs`,
+/// cast as `variant`. For `CastingVariant::Adventure` the object is
+/// the Adventure half (type `core`) with the creature face stored as its back
+/// face — the shape `counter::resolve` restores when the spell leaves the
+/// stack (CR 715.4).
+fn put_spell_on_stack_as(
+    runner: &mut GameRunner,
+    controller: PlayerId,
+    core: CoreType,
+    variant: CastingVariant,
+) -> ObjectId {
     let spell = engine::game::zones::create_object(
         runner.state_mut(),
         CardId(701),
@@ -66,6 +87,14 @@ fn put_spell_on_stack(runner: &mut GameRunner, controller: PlayerId, core: CoreT
         Zone::Stack,
     );
     if let Some(obj) = runner.state_mut().objects.get_mut(&spell) {
+        if variant == CastingVariant::Adventure {
+            let mut creature_face = engine::game::printed_cards::snapshot_object_face(obj);
+            creature_face.name = "Bonecrusher Giant".to_string();
+            creature_face.card_types.core_types = vec![CoreType::Creature];
+            creature_face.layout_kind = Some(LayoutKind::Adventure);
+            obj.back_face = Some(creature_face);
+            obj.name = "Stomp".to_string();
+        }
         obj.card_types.core_types = vec![core];
     }
     runner.state_mut().stack.push_back(StackEntry {
@@ -75,7 +104,7 @@ fn put_spell_on_stack(runner: &mut GameRunner, controller: PlayerId, core: CoreT
         kind: StackEntryKind::Spell {
             card_id: CardId(701),
             ability: None,
-            casting_variant: CastingVariant::Normal,
+            casting_variant: variant,
             actual_mana_spent: 0,
         },
     });
@@ -90,6 +119,17 @@ fn counter_with(
     core: CoreType,
     setup: impl FnOnce(&mut GameScenario),
 ) -> (GameRunner, ObjectId, Vec<GameEvent>) {
+    counter_with_variant(name, oracle, core, CastingVariant::Normal, setup)
+}
+
+/// As `counter_with`, with the opponent spell cast as `variant`.
+fn counter_with_variant(
+    name: &str,
+    oracle: &str,
+    core: CoreType,
+    variant: CastingVariant,
+    setup: impl FnOnce(&mut GameScenario),
+) -> (GameRunner, ObjectId, Vec<GameEvent>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let mut cs = scenario.add_spell_to_hand_from_oracle(P0, name, true, oracle);
@@ -102,7 +142,7 @@ fn counter_with(
     scenario.add_basic_land(P0, ManaColor::Blue);
     setup(&mut scenario);
     let mut runner = scenario.build();
-    let opponent_spell = put_spell_on_stack(&mut runner, P1, core);
+    let opponent_spell = put_spell_on_stack_as(&mut runner, P1, core, variant);
 
     let outcome = runner
         .cast(counter)
@@ -133,6 +173,17 @@ fn can_cast(runner: &GameRunner, id: ObjectId) -> bool {
     legal_actions(runner.state())
         .iter()
         .any(|action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == id))
+}
+
+/// The provenance the counter published for `id`: the `ThisWayCause` stamped
+/// on it in any tracked set (`chain_tracked_set_id` is cleared once the chain
+/// ends, so every set is searched). `None` when the card was never stamped.
+fn published_cause(runner: &GameRunner, id: ObjectId) -> Option<ThisWayCause> {
+    runner
+        .state()
+        .tracked_set_member_causes
+        .values()
+        .find_map(|causes| causes.get(&id).copied())
 }
 
 /// CR 608.2c + CR 614.1a: Spelljack's third sentence is an instruction of the
@@ -186,6 +237,11 @@ fn thranduils_decree_grants_the_cast_permission_after_exiling_a_permanent_spell(
         |_| {},
     );
     assert_countered_into_exile(&runner, countered);
+    assert_eq!(
+        published_cause(&runner, countered),
+        Some(ThisWayCause::Exiled),
+        "a countered permanent spell is published as \"exiled this way\""
+    );
 
     assert!(
         can_cast(&runner, countered),
@@ -200,42 +256,44 @@ fn thranduils_decree_grants_the_cast_permission_after_exiling_a_permanent_spell(
     );
 }
 
-/// The rider's condition gates the tail. Thranduil's Decree names "a PERMANENT
-/// spell": countering an INSTANT must not grant the permission.
+/// The rider's printed condition decides whether it applies. Thranduil's Decree
+/// names "a PERMANENT spell": a countered INSTANT is not exiled — it goes to
+/// its owner's graveyard (CR 701.6a) — is not published as "exiled this way",
+/// and receives no permission. On `main` (and on this PR's first head) the
+/// instant was exiled and stamped `Exiled`, because `counter::resolve` and the
+/// stamp read the rider's presence alone; only the tail was withheld.
 ///
-/// NAMED, pre-existing, not repaired here (issue #8795): the instant is today
-/// still EXILED — `counter::resolve` decides the exile from the rider's
-/// presence alone, before the move, and ignores the rider's
-/// `ZoneChangedThisWay { Permanent }` condition. This test deliberately does
-/// NOT pin that zone: its reach guard is only that the counter resolved and the
-/// spell left the stack, so it survives the #8795 repair (graveyard) unchanged.
-/// The claim is the permission half: the tail follows the printed condition
-/// even where the exile does not. Without the gate this test is red on the
-/// permission — the wrongly exiled instant would become free to cast.
+/// Sibling of the creature test above, on the same setup: the two together are
+/// the ONLY difference the condition makes, so a destination gate that ignores
+/// the condition turns this test red on the zone and the provenance, and one
+/// that never exiles turns the sibling red.
 #[test]
-fn thranduils_decree_does_not_grant_when_the_countered_spell_is_not_a_permanent() {
+fn thranduils_decree_sends_a_countered_instant_to_the_graveyard_without_provenance_or_permission() {
     let (runner, countered, _) = counter_with(
         "Thranduil's Decree",
         THRANDUILS_DECREE,
         CoreType::Instant,
         |_| {},
     );
-    // Reach guard, zone-agnostic on purpose (see the doc comment): the counter
-    // resolved and the spell is no longer on the stack.
     assert!(
         runner.state().stack.is_empty(),
         "reach guard: the counter must resolve and take the spell off the stack"
     );
-    assert_ne!(
-        runner.state().objects[&countered].zone,
-        Zone::Stack,
-        "reach guard: the countered instant must have left the stack"
-    );
 
+    assert_eq!(
+        runner.state().objects[&countered].zone,
+        Zone::Graveyard,
+        "\"If a permanent spell is countered this way\" does not apply to an instant, so \
+         CR 701.6a puts it into its owner's graveyard (issue #8762)"
+    );
+    assert_eq!(
+        published_cause(&runner, countered),
+        None,
+        "a countered instant was not exiled and must not be published as \"exiled this way\""
+    );
     assert!(
         !can_cast(&runner, countered),
-        "\"If a permanent spell is countered this way\" did not apply to an instant, so \
-         \"you may cast that card\" must not follow (issue #8762)"
+        "\"you may cast that card\" must not follow for a card the rider did not exile"
     );
     assert!(
         runner.state().objects[&countered]
@@ -243,6 +301,85 @@ fn thranduils_decree_does_not_grant_when_the_countered_spell_is_not_a_permanent(
             .is_empty(),
         "no permission may be recorded on a card the rider's condition excluded, got {:?}",
         runner.state().objects[&countered].casting_permissions
+    );
+}
+
+/// The rider is applied to the spell AS CAST, and the answer is carried to the
+/// stamp rather than re-derived: an Adventure spell (Stomp, an instant) has its
+/// creature face (Bonecrusher Giant) restored by `counter::resolve` right after
+/// the destination is chosen (CR 715.4), so a stamp that re-asked "is it a
+/// permanent spell?" afterwards would say yes about a card in the graveyard —
+/// publishing it as "exiled this way" and handing the free cast to a graveyard
+/// card. Review-round finding on this PR; the ledger
+/// `exile_rider_countered_ids` exists for this case.
+#[test]
+fn thranduils_decree_on_an_adventure_instant_does_not_stamp_the_restored_creature_face() {
+    let (runner, countered, _) = counter_with_variant(
+        "Thranduil's Decree",
+        THRANDUILS_DECREE,
+        CoreType::Instant,
+        CastingVariant::Adventure,
+        |_| {},
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach guard: the counter must resolve and take the spell off the stack"
+    );
+    assert_eq!(
+        runner.state().objects[&countered].card_types.core_types,
+        vec![CoreType::Creature],
+        "reach guard: the creature face is restored once the Adventure spell left the stack"
+    );
+
+    assert_eq!(
+        runner.state().objects[&countered].zone,
+        Zone::Graveyard,
+        "the Adventure half is an instant when countered, so it goes to the graveyard"
+    );
+    assert_eq!(
+        published_cause(&runner, countered),
+        None,
+        "the restored creature face must not turn a graveyard card into \"exiled this way\""
+    );
+    assert!(
+        !can_cast(&runner, countered),
+        "no free cast for a card the rider did not exile"
+    );
+    assert!(
+        runner.state().objects[&countered]
+            .casting_permissions
+            .is_empty(),
+        "got {:?}",
+        runner.state().objects[&countered].casting_permissions
+    );
+}
+
+/// Positive partner on the same Adventure setup: Spelljack's rider names "that
+/// spell" (`Typed[Card]`), so the Adventure half IS exiled, stamped, and
+/// castable — the face restore does not lose a stamp that was earned.
+#[test]
+fn spelljack_on_an_adventure_instant_exiles_stamps_and_grants_the_play_permission() {
+    let (runner, countered, _) = counter_with_variant(
+        "Spelljack",
+        SPELLJACK,
+        CoreType::Instant,
+        CastingVariant::Adventure,
+        |_| {},
+    );
+    assert_countered_into_exile(&runner, countered);
+    assert_eq!(
+        runner.state().objects[&countered].card_types.core_types,
+        vec![CoreType::Creature],
+        "reach guard: the creature face is restored once the Adventure spell left the stack"
+    );
+    assert_eq!(
+        published_cause(&runner, countered),
+        Some(ThisWayCause::Exiled),
+        "the exiled Adventure card is published as \"exiled this way\""
+    );
+    assert!(
+        can_cast(&runner, countered),
+        "\"You may play it without paying its mana cost\" applies to the exiled card"
     );
 }
 
