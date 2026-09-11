@@ -862,16 +862,30 @@ fn transient_bound_filters(
                 .map(|id| TargetFilter::SpecificObject { id })
                 .collect();
         }
-        // Slot carve-out (§5.4b): this hands its list straight to
-        // `effect_object_targets`, which indexes `ParentTargetSlot`
-        // POSITIONALLY. A pin-filtered list would renumber the slots, so the
-        // raw list is passed for that shape only.
-        let pool: &[TargetRef] = if matches!(filter, TargetFilter::ParentTargetSlot { .. }) {
-            &ability.targets
-        } else {
-            &live_targets
-        };
-        return crate::game::effects::effect_object_targets(filter, pool)
+        // CR 608.2c: `ParentTargetSlot { index }` numbers the DECLARED target
+        // slots of the WHOLE resolving chain, not the current node's local
+        // targets. Chain propagation (`resolve_chain_body`) replaces a
+        // slot-less node's `targets` with the IMMEDIATELY PRECEDING parent's,
+        // so a node reached after a two-target declaration holds only the last
+        // target — indexing that local list would bind "the creature you
+        // control" (Blizzard Brawl's snow-conditional buff) to the opponent's
+        // creature. Resolve through the shared chain-root authority that
+        // `Pump` / `PutCounter` / `ChangeZone` already use. It is deliberately
+        // NOT pin-filtered: slot numbering is declared, so dropping a stale
+        // element would renumber every later slot.
+        if let TargetFilter::ParentTargetSlot { index } = filter {
+            return crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+                .into_iter()
+                .map(|target| match target {
+                    TargetRef::Object(id) => TargetFilter::SpecificObject { id },
+                    TargetRef::Player(id) => TargetFilter::SpecificPlayer { id },
+                })
+                .collect();
+        }
+        // Non-slot inherited references (`ParentTarget`, …) resolve against the
+        // pin-filtered live targets so a departed-and-returned referent is
+        // dropped (CR 400.7).
+        return crate::game::effects::effect_object_targets(filter, &live_targets)
             .into_iter()
             .map(|id| TargetFilter::SpecificObject { id })
             .collect();
