@@ -1837,9 +1837,10 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::ExtraTurn { target } => {
+        Effect::ExtraTurn { target, count } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
+            acc = acc.or(scan_quantity_expr(count, mode));
             acc
         }
         Effect::GrantExtraLoyaltyActivations { amount, target } => {
@@ -3106,7 +3107,16 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
         }
         AbilityCondition::DayNightIsNeither => Axes::NONE,
         AbilityCondition::DayNightIs { state: _ } => Axes::NONE,
-        AbilityCondition::NthResolutionThisTurn { n: _ } => Axes {
+        // Both tallies are per-turn counters projected from this ability's own
+        // `(source_id, ability_index)` ledger entry — neither reads the
+        // triggering event nor any sibling's output, so the axes are identical
+        // for `Resolved` and `Activated`. Destructured without `..` so a future
+        // field forces re-classification here.
+        AbilityCondition::AbilityUseCountThisTurn {
+            tally: _,
+            comparator: _,
+            n: _,
+        } => Axes {
             event: false,
             sibling: false,
             projected: true,
@@ -4447,6 +4457,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         }
         FilterProp::ProtectorMatches { controller } => scan_controller_ref(controller),
         FilterProp::Owned { controller } => scan_controller_ref(controller),
+        FilterProp::AttachedToPlayer { player } => scan_controller_ref(player),
         FilterProp::HasAttachment { controller, .. } => {
             controller.as_ref().map_or(Axes::NONE, scan_controller_ref)
         }
@@ -6980,6 +6991,20 @@ mod tests {
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
+    #[test]
+    fn extra_turn_scan_reaches_dynamic_count() {
+        let axes = scan_effect(
+            &Effect::ExtraTurn {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            },
+            ScanMode::LoopFirewall,
+        );
+        assert!(axes.event);
+    }
+
     fn zone_choice_for_scan(
         zone: Zone,
         candidate_source: ZoneChoiceCandidateSource,
@@ -7546,7 +7571,7 @@ mod tests {
         // from `typed_filter_axes`, so this IS that arm's verdict for this shape.
         let by_target = typed_filter_axes(&target, ScanMode::LoopFirewall);
         let by_condition = scan_ability_condition(
-            &AbilityCondition::NthResolutionThisTurn { n: 2 },
+            &AbilityCondition::nth_resolution_this_turn(2),
             ScanMode::LoopFirewall,
         );
         let refs = [
@@ -7580,7 +7605,7 @@ mod tests {
         ];
         for (label, axes) in [
             ("ControllerMatches{OpponentLostLife}", by_target),
-            ("NthResolutionThisTurn", by_condition),
+            ("AbilityUseCountThisTurn", by_condition),
         ]
         .into_iter()
         .chain(
@@ -9069,7 +9094,7 @@ mod tests {
         ));
         // Ability-condition branch selector reading the per-ability resolution count.
         assert!(ability_condition_reads_projected_resource(
-            &AbilityCondition::NthResolutionThisTurn { n: 10 }
+            &AbilityCondition::nth_resolution_this_turn(10)
         ));
         // Static-condition dormant reader (poison).
         assert!(static_condition_reads_projected_resource(

@@ -5,11 +5,18 @@
   },
   "tabs": {
     "gameplay": "Gameplay",
+    "experimental": "Experimental",
     "visual": "Visual",
     "combat": "Pacing",
     "audio": "Audio",
     "multiplayer": "Multiplayer",
     "data": "Data"
+  },
+  "experimental": {
+    "title": "Experimental",
+    "tournaments": "Tournaments",
+    "showTournaments": "Show Tournaments in navigation",
+    "showTournamentsDescription": "Tournaments are still in progress and may change without notice."
   },
   "gameplay": {
     "collapseLands": "Collapse Lands",

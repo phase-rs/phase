@@ -5,11 +5,12 @@
 //! to visit is a turn-based action at the beginning of the active player's precombat
 //! main phase when they control an Attraction.
 
-use crate::types::ability::{EffectKind, ResolvedAbility};
+use crate::types::ability::{DieRollIgnoreRule, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::resolution::{DieRollContinuation, PendingDieRollInstruction};
 use crate::types::zones::Zone;
 
 use super::effects::roll_die;
@@ -130,6 +131,51 @@ pub(crate) fn finish_attraction_open(
     }
 }
 
+/// CR 706.6 + CR 703.4g: Which roll (if any) the roll-to-visit turn-based action
+/// ignores, decided WITHOUT prompting the roller.
+///
+/// The roll-to-visit is a turn-based action (CR 703.4g) with no continuation
+/// frame to suspend into, so this path cannot open
+/// `WaitingFor::DieKeepChoice`. That makes a deterministic pick safe only for
+/// the tied-extreme rules, so the rule is matched rather than blindly taking the
+/// first candidate index:
+///
+/// - `Lowest` (and any future tied-extreme rule): `ignorable_indices` returns
+///   only indices tied at ONE extreme, so every candidate holds the SAME value.
+///   CR 706.6 removes the ROLL and CR 701.52a decides visits per RESULT, so
+///   dropping either of two equal rolls yields an identical set of visits — the
+///   auto-pick cannot change any observable outcome.
+///
+/// `DieRollIgnoreRule` has exactly one leaf today, and it is a tied-extreme
+/// rule, so the auto-pick above is always safe here. A future FREE-choice rule
+/// ("ignore one", where every remaining roll is a legal pick with a DIFFERENT
+/// value) would NOT be: any pick the engine made would silently take a decision
+/// away from the roller, and a different pick visits different Attractions
+/// (CR 701.52a). This path has no way to prompt, so such a rule needs a real
+/// continuation frame here rather than a silent pick — it must not be added to
+/// the enum without one.
+fn unprompted_ignored_indices(ignore_rules: &[DieRollIgnoreRule], naturals: &[u8]) -> Vec<usize> {
+    // CR 706.6 applies once per instructing effect, so each applied replacement
+    // removes one roll from the pool the earlier ones left behind. Every rule is
+    // a tied-extreme rule (`Lowest` is the only leaf), whose candidates are all
+    // tied at one extreme, so the deterministic pick cannot change any
+    // observable outcome (CR 701.52a decides visits per RESULT, and tied rolls
+    // hold equal results).
+    let mut remaining: Vec<usize> = (0..naturals.len()).collect();
+    let mut ignored = Vec::new();
+    for rule in ignore_rules {
+        if remaining.is_empty() {
+            break;
+        }
+        let pool: Vec<u8> = remaining.iter().map(|&index| naturals[index]).collect();
+        let Some(&local) = rule.ignorable_indices(&pool).first() else {
+            continue;
+        };
+        ignored.push(remaining.remove(local));
+    }
+    ignored
+}
+
 /// CR 701.52a: Roll a d6 and visit each controlled Attraction whose lights include the result.
 pub fn roll_to_visit_attractions(
     state: &mut GameState,
@@ -139,19 +185,131 @@ pub fn roll_to_visit_attractions(
     if !controls_attraction(state, player) {
         return;
     }
-    let roll = roll_die::roll_die(state, player, 6, events);
-    events.push(GameEvent::AttractionsRolledToVisit {
-        player_id: player,
-        roll,
-    });
-    let visited = visited_attraction_ids(state, player, roll);
-    for attraction_id in visited {
-        events.push(GameEvent::AttractionVisited {
+    // CR 701.52a + CR 614.1a: the roll-to-visit is a die roll like any other, so
+    // "if you would roll one or more dice, instead roll that many dice plus one
+    // and ignore the lowest roll" (Barbarian Class, Pixie Guide, Wyll) applies
+    // here too. CR 614.1a scopes a replacement by its own text, which does not
+    // restrict itself to spell- or ability-sourced rolls.
+    //
+    // CR 616.1: park the continuation frame BEFORE proposing. Two applicable
+    // die-roll replacements (Barbarian Class + Pixie Guide) suspend on a
+    // `ReplacementChoice`; the parked frame is what tells
+    // `roll_die::resume_roll_dice_after_replacement` that this roll belongs to
+    // the turn-based roll-to-visit and must be finished by
+    // `complete_roll_to_visit`, not by the resolution path.
+    state.pending_die_roll_instruction = Some(Box::new(PendingDieRollInstruction {
+        // CR 703.4g: the turn-based action has no source object and no
+        // resolution context — only the roller matters downstream.
+        source_id: ObjectId(0),
+        controller: player,
+        roller: player,
+        targets: Vec::new(),
+        results_table: Vec::new(),
+        modifier: None,
+        die_result: None,
+        continuation: DieRollContinuation::RollToVisitAttractions,
+    }));
+    let proposal = roll_die::propose_roll(state, player, 1, 6, events);
+    if !matches!(proposal, roll_die::RollProposal::Suspended) {
+        // Only a suspension needs the parked frame; every other outcome finishes
+        // inline and must not leave a stale instruction behind for an unrelated
+        // later roll to pick up.
+        state.pending_die_roll_instruction = None;
+    }
+    complete_roll_to_visit(state, player, proposal, events);
+}
+
+/// CR 701.52a + CR 706.6: Carry out the roll-to-visit once its replacement
+/// proposal is known.
+///
+/// The single authority shared by the inline path (`roll_to_visit_attractions`)
+/// and the CR 616.1 resume path
+/// (`roll_die::resume_roll_dice_after_replacement`), so an ordering choice
+/// cannot silently take a different route — or no route at all — than an
+/// unreplaced roll takes.
+pub(crate) fn complete_roll_to_visit(
+    state: &mut GameState,
+    player: PlayerId,
+    proposal: roll_die::RollProposal,
+    events: &mut Vec<GameEvent>,
+) {
+    let (count, ignore_rules) = match proposal {
+        roll_die::RollProposal::Execute {
+            count,
+            ignore_rules,
+        } => (count, ignore_rules),
+        // CR 614.6: the roll never happened — nothing is rolled and nothing is
+        // visited.
+        roll_die::RollProposal::Prevented => return,
+        // CR 616.1: the affected player is ordering the competing replacements.
+        // The parked frame routes the resume back into this function with the
+        // fully-applied proposal; nothing happens until then.
+        roll_die::RollProposal::Suspended => return,
+    };
+
+    // CR 706.2: roll every die first, collecting NATURAL results — nothing is
+    // emitted until the ignore set is known (CR 706.6).
+    let naturals: Vec<u8> = (0..count)
+        .map(|_| roll_die::roll_natural(state, 6))
+        .collect();
+    // CR 706.6: the ignore set is computed over the naturals. This path applies
+    // no die-roll modifier, so each surviving natural is also its actual result.
+    let ignored_indices = unprompted_ignored_indices(&ignore_rules, &naturals);
+
+    // CR 706.6: an ignored roll is considered never to have happened — it emits
+    // no `DieRolled`, appears in no event payload, and visits nothing.
+    let survivors: Vec<u8> = naturals
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !ignored_indices.contains(index))
+        .map(|(_, roll)| roll)
+        .collect();
+
+    // CR 706.2: this path does not go through `roll_die::resume_after_ignore`
+    // (it has no results table, no modifier, and no resolution context), so it
+    // emits the authoritative die-roll event itself, for survivors only.
+    for &roll in &survivors {
+        events.push(GameEvent::DieRolled {
             player_id: player,
-            roll,
-            attraction_id,
+            sides: 6,
+            result: Some(roll),
         });
     }
+
+    // CR 701.52a: the roll-to-visit is ONE turn-based action, so it is reported
+    // ONCE no matter how many dice a count-raising replacement (CR 706.6) left
+    // surviving. Emitting per surviving die would tell the log and every
+    // events-slice consumer that the action happened twice. The per-RESULT
+    // decision lives in the `AttractionVisited` loop below, which is where
+    // CR 701.52a actually distinguishes results.
+    if survivors.is_empty() {
+        // CR 614.6 / CR 706.6: every roll was ignored — the action produced no
+        // result to visit by, so nothing is reported and nothing is visited.
+        super::triggers::process_triggers(state, events);
+        return;
+    }
+    events.push(GameEvent::AttractionsRolledToVisit {
+        player_id: player,
+        rolls: survivors.clone(),
+    });
+
+    // CR 701.52a: visiting is decided PER RESULT — "if you control one or more
+    // Attractions with a number lit up that is equal to that result". Two
+    // surviving dice therefore make two independent visit checks.
+    for roll in survivors {
+        for attraction_id in visited_attraction_ids(state, player, roll) {
+            events.push(GameEvent::AttractionVisited {
+                player_id: player,
+                roll,
+                attraction_id,
+            });
+        }
+    }
+
+    // CR 706.4: this path deliberately does not stamp
+    // `die_result_this_resolution`. The turn-based roll-to-visit is not a
+    // spell/ability resolution, so no "equal to the result" effect can read it;
+    // stamping would leave stale resolution-scoped state behind.
     super::triggers::process_triggers(state, events);
 }
 
@@ -233,6 +391,76 @@ mod tests {
     use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::CardId;
     use crate::types::replacements::ReplacementEvent;
+
+    /// CR 706.6 + CR 701.52a: the unprompted roll-to-visit ignore decision is
+    /// safe ONLY for the tied-extreme rules. `Lowest` — the only rule today —
+    /// offers candidates that all hold the same value, so picking any of them is
+    /// observationally identical. A free-choice rule would offer candidates with
+    /// DIFFERENT values, so picking one would silently discard a roll the roller
+    /// was entitled to keep and (CR 701.52a decides visits per result) visit
+    /// different Attractions; the enum carries no such rule, and this test pins
+    /// the tied-extreme behavior the auto-pick depends on.
+    #[test]
+    fn unprompted_ignore_is_restricted_to_the_tied_extreme_rules() {
+        // A unique lowest is not a choice at all — drop it.
+        assert_eq!(
+            unprompted_ignored_indices(&[DieRollIgnoreRule::Lowest], &[2, 5]),
+            vec![0]
+        );
+        // The lowest is not always first.
+        assert_eq!(
+            unprompted_ignored_indices(&[DieRollIgnoreRule::Lowest], &[5, 2]),
+            vec![1]
+        );
+        // A tie among lowest rolls: every candidate holds the same value, so
+        // auto-picking the first is observationally identical to any other.
+        assert_eq!(
+            unprompted_ignored_indices(&[DieRollIgnoreRule::Lowest], &[3, 7, 3]),
+            vec![0]
+        );
+        // Two stacked `Lowest` rules take the lowest of what REMAINS each time,
+        // so the pair is {0, 2} — never index 0 twice.
+        assert_eq!(
+            unprompted_ignored_indices(
+                &[DieRollIgnoreRule::Lowest, DieRollIgnoreRule::Lowest],
+                &[3, 7, 3]
+            ),
+            vec![0, 2]
+        );
+
+        // No ignore replacement in play: CR 706.6 is inert.
+        assert_eq!(
+            unprompted_ignored_indices(&[], &[4, 5, 9]),
+            Vec::<usize>::new()
+        );
+        // CR 706.6 applies once per instructing effect: two stacked `Lowest`
+        // replacements (Barbarian Class + Pixie Guide) roll three dice and
+        // ignore TWO of them, each taking the lowest of what remains — never the
+        // same roll twice. Over `[1, 3, 6]` that is indices 0 then 1, leaving
+        // the single CR-correct survivor.
+        assert_eq!(
+            unprompted_ignored_indices(
+                &[DieRollIgnoreRule::Lowest, DieRollIgnoreRule::Lowest],
+                &[1, 3, 6]
+            ),
+            vec![0, 1],
+            "CR 706.6: N applied replacements must ignore N distinct rolls"
+        );
+        // More rules than dice: a rule that finds an empty pool ignores nothing
+        // rather than panicking or double-counting.
+        assert_eq!(
+            unprompted_ignored_indices(
+                &[DieRollIgnoreRule::Lowest, DieRollIgnoreRule::Lowest],
+                &[4]
+            ),
+            vec![0]
+        );
+        // No rolls at all: nothing to ignore.
+        assert_eq!(
+            unprompted_ignored_indices(&[DieRollIgnoreRule::Lowest], &[]),
+            Vec::<usize>::new()
+        );
+    }
 
     /// CR 701.51 + CR 616.1 discriminating test (fail-first): an Attraction
     /// whose battlefield entry parks on a replacement-ordering prompt (two

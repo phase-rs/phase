@@ -1,4 +1,22 @@
 {
+  "lan": {
+    "title": "Rete locale",
+    "guidance": "Inserisci un indirizzo server per unirti manualmente. Le pagine HTTPS richiedono un server wss:// sicuro; usa l’app desktop per gli indirizzi ws:// locali.",
+    "unavailable": "L’hosting e la ricerca LAN richiedono un’app desktop aggiornata.",
+    "checking": "Verifica del supporto LAN…",
+    "start": "Avvia hosting LAN",
+    "stop": "Interrompi hosting LAN",
+    "scan": "Cerca server LAN",
+    "pending": "Operazione in corso…",
+    "running": "L’hosting LAN è attivo. Condividi un indirizzo con i giocatori della tua rete.",
+    "empty": "Nessun server LAN trovato. Verifica che l’host sia attivo sulla stessa rete e riprova.",
+    "add": "Aggiungi server",
+    "copy": "Copia indirizzo",
+    "copied": "Indirizzo copiato",
+    "error": "Operazione LAN non riuscita. {{detail}}",
+    "added": "Server aggiunto. Usa un server dedicato quando la connessione è compatibile e pronta.",
+    "originUnavailable": "L’hosting LAN non è disponibile per questa versione o origine dell’app."
+  },
   "concedeDialog": {
     "title": "Concedere la partita?",
     "game": {
@@ -206,6 +224,7 @@
     "invalidJoinServer": "L'indirizzo del server in quel codice non è valido."
   },
   "hostSetup": {
+    "dedicatedUnavailable": "Al momento non è disponibile alcun server dedicato. Puoi ospitare una partita tramite P2P.",
     "hostDirectMatch": "Ospita partita diretta",
     "hostMatch": "Ospita partita",
     "p2pNotice": "Modalità peer-to-peer. Questa stanza collega i giocatori direttamente invece di girare su un server.",

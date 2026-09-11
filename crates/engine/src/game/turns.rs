@@ -932,10 +932,18 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
 
 /// CR 500.7: Enqueue an extra turn for `player` after the specified turn
 /// represented by `anchor`. Both ids are team-normalized (CR 805.8).
-pub(crate) fn enqueue_extra_turn(state: &mut GameState, player: PlayerId, anchor: PlayerId) {
-    state.extra_turns.push(ExtraTurn {
-        player: super::topology::normalize_shared_turn_recipient(state, player),
-        anchor: super::topology::normalize_shared_turn_recipient(state, anchor),
+pub(crate) fn enqueue_extra_turn(
+    state: &mut GameState,
+    player: PlayerId,
+    anchor: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    let player = super::topology::normalize_shared_turn_recipient(state, player);
+    let anchor = super::topology::normalize_shared_turn_recipient(state, anchor);
+    state.extra_turns.push(ExtraTurn { player, anchor });
+    events.push(GameEvent::ExtraTurnCreated {
+        player_id: player,
+        anchor,
     });
 }
 
@@ -1055,7 +1063,13 @@ pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId
             .map(|idx| turn_control::release_control_at(&mut scratch, idx).grant_extra_turn_after)
             .unwrap_or(false);
             if grant_extra_turn_after {
-                enqueue_extra_turn(&mut scratch, completed_player, completed_turn_key);
+                let mut preview_events = Vec::new();
+                enqueue_extra_turn(
+                    &mut scratch,
+                    completed_player,
+                    completed_turn_key,
+                    &mut preview_events,
+                );
             }
             scratch.active_full_turn_control = None;
             scratch.active_combat_phase_control = None;
@@ -1160,7 +1174,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .map(|idx| turn_control::release_control_at(state, idx).grant_extra_turn_after)
         .unwrap_or(false);
         if grant_extra_turn_after {
-            enqueue_extra_turn(state, completed_player, completed_turn_key);
+            enqueue_extra_turn(state, completed_player, completed_turn_key, events);
         }
         // CR 723.1 + CR 723.2: every active window on the completed turn is done.
         // This also covers an effect that ended the turn during combat; an
@@ -5225,7 +5239,7 @@ mod tests {
     fn extra_turns_field_is_independent_of_extra_phases() {
         let mut state = setup();
         state.active_player = PlayerId(0);
-        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0));
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0), &mut Vec::new());
         // No extra_phases pushed — make sure normal phase advance is unaffected.
         state.phase = Phase::Cleanup;
 
@@ -9010,12 +9024,60 @@ mod tests {
     }
 
     #[test]
+    fn enqueue_extra_turn_publishes_the_stored_standard_record() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let mut events = Vec::new();
+
+        enqueue_extra_turn(&mut state, PlayerId(1), PlayerId(0), &mut events);
+
+        assert_eq!(
+            state.extra_turns,
+            vec![ExtraTurn {
+                player: PlayerId(1),
+                anchor: PlayerId(0),
+            }]
+        );
+        assert_eq!(
+            events,
+            vec![GameEvent::ExtraTurnCreated {
+                player_id: PlayerId(1),
+                anchor: PlayerId(0),
+            }]
+        );
+    }
+
+    #[test]
+    fn enqueue_extra_turn_publishes_the_normalized_shared_turn_record() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        let mut events = Vec::new();
+
+        enqueue_extra_turn(&mut state, PlayerId(1), PlayerId(3), &mut events);
+
+        assert_eq!(state.extra_turns.len(), 1);
+        assert_eq!(events.len(), 1);
+        let ExtraTurn { player, anchor } = &state.extra_turns[0];
+        let GameEvent::ExtraTurnCreated {
+            player_id,
+            anchor: event_anchor,
+        } = &events[0]
+        else {
+            panic!("expected ExtraTurnCreated, got {:?}", events[0]);
+        };
+        assert_eq!((*player, *anchor), (PlayerId(0), PlayerId(2)));
+        assert_eq!((*player_id, *event_anchor), (*player, *anchor));
+    }
+
+    #[test]
     fn extra_turn_takes_precedence_over_seat_order() {
         let mut state = setup();
         state.active_player = PlayerId(0);
         state.turn_number = 1;
         // CR 500.7: Push extra turn for player 0 (in-sequence: anchor = player)
-        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0));
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0), &mut Vec::new());
 
         let mut events = Vec::new();
         start_next_turn(&mut state, &mut events);
@@ -9031,8 +9093,8 @@ mod tests {
         state.active_player = PlayerId(0);
         state.turn_number = 1;
         // CR 500.7: Push two extra turns — player 0 first, then player 1
-        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0));
-        enqueue_extra_turn(&mut state, PlayerId(1), PlayerId(0));
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0), &mut Vec::new());
+        enqueue_extra_turn(&mut state, PlayerId(1), PlayerId(0), &mut Vec::new());
 
         let mut events = Vec::new();
 
@@ -9053,8 +9115,8 @@ mod tests {
         let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
         state.active_player = PlayerId(2); // C
                                            // During C: grant A then B (LIFO → B first)
-        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(2));
-        enqueue_extra_turn(&mut state, PlayerId(1), PlayerId(2));
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(2), &mut Vec::new());
+        enqueue_extra_turn(&mut state, PlayerId(1), PlayerId(2), &mut Vec::new());
 
         let mut events = Vec::new();
         start_next_turn(&mut state, &mut events);
@@ -9076,7 +9138,7 @@ mod tests {
     fn extra_turn_nested_extra_preserves_outer_anchor() {
         let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
         state.active_player = PlayerId(2); // C
-        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(2));
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(2), &mut Vec::new());
 
         let mut events = Vec::new();
         start_next_turn(&mut state, &mut events);
@@ -9087,7 +9149,7 @@ mod tests {
             "first pop must latch specified turn C"
         );
 
-        enqueue_extra_turn(&mut state, PlayerId(1), PlayerId(0));
+        enqueue_extra_turn(&mut state, PlayerId(1), PlayerId(0), &mut Vec::new());
 
         start_next_turn(&mut state, &mut events);
         assert_eq!(
@@ -9199,6 +9261,7 @@ mod tests {
         assert_eq!(state.priority_player, PlayerId(0));
         assert_eq!(state.scheduled_turn_controls.len(), 1);
 
+        events.clear();
         start_next_turn(&mut state, &mut events);
 
         assert_eq!(state.active_player, PlayerId(1));
@@ -9206,6 +9269,56 @@ mod tests {
         assert_eq!(state.turn_decision_control_timestamp, None);
         assert_eq!(state.priority_player, PlayerId(1));
         assert!(state.scheduled_turn_controls.is_empty());
+        assert!(state.extra_turns.is_empty());
+        assert_eq!(state.extra_turn_sequence_anchor, Some(PlayerId(1)));
+
+        let creations = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ExtraTurnCreated { player_id, anchor } => Some((*player_id, *anchor)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(creations, vec![(PlayerId(1), PlayerId(1))]);
+        let creation_index = events
+            .iter()
+            .position(|event| matches!(event, GameEvent::ExtraTurnCreated { .. }))
+            .expect("controlled-turn release must publish its follow-up extra turn");
+        let turn_started_index = events
+            .iter()
+            .position(|event| matches!(event, GameEvent::TurnStarted { .. }))
+            .expect("the immediately selected extra turn must start");
+        assert!(creation_index < turn_started_index);
+    }
+
+    #[test]
+    fn controlled_turn_without_grant_publishes_no_extra_turn() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.turn_number = 1;
+        state
+            .scheduled_turn_controls
+            .push(crate::types::game_state::ScheduledTurnControl {
+                target_player: PlayerId(1),
+                controller: PlayerId(0),
+                timestamp: 0,
+                grant_extra_turn_after: false,
+                window: crate::types::ability::ControlWindow::NextTurn,
+            });
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+        assert_eq!(state.active_player, PlayerId(1));
+        assert_eq!(state.turn_decision_controller, Some(PlayerId(0)));
+
+        events.clear();
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(state.active_player, PlayerId(0));
+        assert!(state.scheduled_turn_controls.is_empty());
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ExtraTurnCreated { .. })));
     }
 
     #[test]
@@ -9253,7 +9366,7 @@ mod tests {
         let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
         state.active_player = PlayerId(0);
         // Extra for P2 granted during P0's turn — anchor is the specified turn.
-        enqueue_extra_turn(&mut state, PlayerId(2), PlayerId(0));
+        enqueue_extra_turn(&mut state, PlayerId(2), PlayerId(0), &mut Vec::new());
         install_begin_turn_skip_permanent(
             &mut state,
             ObjectId(100),
@@ -9297,7 +9410,9 @@ mod tests {
                 window: ControlWindow::NextTurn,
             });
 
+        let before = serde_json::to_value(&state).unwrap();
         let projected = projected_turn_order(&state, 2);
+        let after = serde_json::to_value(&state).unwrap();
 
         assert_eq!(
             projected,
@@ -9307,6 +9422,7 @@ mod tests {
         assert!(state.extra_turns.is_empty());
         assert_eq!(state.scheduled_turn_controls.len(), 1);
         assert_eq!(state.turn_decision_controller, Some(PlayerId(2)));
+        assert_eq!(after, before, "projection must not mutate its source state");
     }
 
     #[test]
@@ -9323,7 +9439,9 @@ mod tests {
                 window: ControlWindow::NextTurn,
             });
 
+        let before = serde_json::to_value(&state).unwrap();
         let projected = projected_turn_order(&state, 3);
+        let after = serde_json::to_value(&state).unwrap();
 
         assert_eq!(
             projected,
@@ -9333,6 +9451,7 @@ mod tests {
         assert!(state.extra_turns.is_empty());
         assert_eq!(state.scheduled_turn_controls.len(), 1);
         assert_eq!(state.turn_decision_controller, None);
+        assert_eq!(after, before, "projection must not mutate its source state");
     }
 
     #[test]
@@ -9766,7 +9885,7 @@ mod tests {
 
         // Push an extra turn for player 0 (in-sequence). With no further extras,
         // the next natural turn after the skip should go to player 1.
-        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0));
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0), &mut Vec::new());
 
         let mut events = Vec::new();
         start_next_turn(&mut state, &mut events);

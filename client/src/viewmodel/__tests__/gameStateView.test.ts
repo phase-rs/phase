@@ -1114,6 +1114,7 @@ const PARTITION_FIXTURES: Record<
   ArrangePlanarDeckTopChoice: NO_TARGET_REF_LEGAL_SET,
   RedistributeLifeTotals: NO_TARGET_REF_LEGAL_SET,
   CoinFlipKeepChoice: NO_TARGET_REF_LEGAL_SET,
+  DieKeepChoice: NO_TARGET_REF_LEGAL_SET,
   DigChoice: NO_TARGET_REF_LEGAL_SET,
   SurveilChoice: NO_TARGET_REF_LEGAL_SET,
   RevealChoice: NO_TARGET_REF_LEGAL_SET,

@@ -54,6 +54,9 @@
     "lossPointsLabel": "Loss",
     "formatLabel": "Format",
     "formatNone": "Unspecified",
+    "matchTypeLabel": "Match",
+    "matchTypeBo3": "Best of three",
+    "matchTypeBo1": "Best of one",
     "plusRoundsLabel": "Extra rounds",
     "plusRoundsHint": "Added on top of the automatic round count (Swiss plus N). Applies only when Rounds is left automatic.",
     "submit": "Create Tournament",
@@ -147,6 +150,7 @@
     "connectionLost": "Lost connection to the lobby. Check your server address.",
     "aborted": "That request was cancelled.",
     "unsupported": "That request was sent, but this server is too old to confirm it. Check the tournament before trying again.",
+    "incompatible": "This server is too old for that match structure (it needs lobby protocol {{needed}}). Nothing was sent.",
     "notFound": "No tournament with that code."
   }
 }

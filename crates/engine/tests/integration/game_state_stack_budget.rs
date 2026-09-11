@@ -127,20 +127,36 @@
 //! `BOUNDED_STACK_BYTES` from the *intersection* of all measured windows.
 //! Cross-compiling is not enough — the bisection has to execute.
 //!
-//! # A better instrument exists — this gate is not the only option
+//! # A better instrument exists, and now sits next to this one
 //!
-//! Recorded as a follow-up, deliberately not built here: **stack-painting
-//! high-water measurement**. Spawn a thread with a known large stack, fill it
-//! with a sentinel pattern, run the fixture, then scan for the deepest
-//! disturbed byte. That yields a *number* rather than the survive/abort bit
-//! this test produces, which means it (a) fails politely with "high-water
-//! 2,410 KiB exceeds budget 3,072 KiB" instead of a bare SIGABRT, (b) runs on
-//! every target, because the assertion is on the measured value rather than on
-//! a target-calibrated bound, and (c) makes the 1.36x-vs-2.42x ratio above
-//! *trackable over time* instead of something that has to be re-bisected by
-//! hand. It is materially more work and needs care around what the OS actually
-//! commits versus reserves. Do not read the `cfg` below as a claim that
-//! target-gating was the only available design.
+//! **Stack-painting high-water measurement**, recorded here as a follow-up and
+//! since built as `game_state_stack_high_water.rs`. Spawn a thread with a known
+//! large stack, fill it with a sentinel pattern, run the fixture, then scan for
+//! the deepest disturbed byte. That yields a *number* rather than the
+//! survive/abort bit this test produces, which means it (a) fails politely,
+//! naming the measured high-water against its 8 MiB portable ceiling, instead
+//! of a bare SIGABRT, (b) runs on 64-bit Linux — including CI's x86_64, which
+//! this file has never run on — because the assertion is on the measured value
+//! rather than on a target-calibrated bound,
+//! and (c) makes the 1.36x-vs-2.42x ratio above *trackable over time* instead
+//! of something that has to be re-bisected by hand. Do not read the `cfg` below
+//! as a claim that target-gating was the only available design.
+//!
+//! Its target gate is worth reading carefully, because it is **not** the same
+//! kind of gate as the one below. Nothing in that file is calibrated to a
+//! target: it is gated to where its stack-bounds query has actually been run,
+//! so widening it means adding a query and executing the test there, not
+//! re-running a bisection. CI's `ubuntu-latest` x86_64 is covered, which is the
+//! point — this file is not.
+//!
+//! **It does not replace this file, and the two are not redundant.** That one
+//! runs the same fixture on a 64 MiB stack and asserts a loose, portable
+//! ceiling, so it can run in CI on the targets it supports — which this file,
+//! gated to a target this repository has no runner for, has never done. What it gives up
+//! is exactly what the calibration above buys: the 3 MiB bound below is a
+//! *discrimination* dial, sharp enough that reverting the boxing flips it red,
+//! and no portable assertion can be that sharp. Keep both: this one for
+//! sensitivity where it is calibrated, that one for coverage everywhere else.
 #![cfg(all(target_arch = "aarch64", target_os = "macos"))]
 
 use engine::game::scenario::{GameScenario, P0, P1};

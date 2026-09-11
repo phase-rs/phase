@@ -52,11 +52,13 @@ use super::proposed_event::{
 use super::replacements::ReplacementEvent;
 #[cfg(debug_assertions)]
 use super::resolution::debug_assert_runtime_resolution_invariants;
+#[cfg(test)]
+use super::resolution::RESOLUTION_STATE_WIRE_VERSION;
 use super::resolution::{
     AbilityContinuationFrame, ChangeZoneFrame, ChildStackDepth, FrameGate, MultiDrawFrame,
-    OptionalEffectFrame, PendingCoinFlip, PendingMutateMerge, PendingProliferateActions,
-    RepeatedOptionalPaymentFrame, ResolutionFrame, ResolutionStack, ResolutionStackError,
-    ResolutionStateWire,
+    OptionalEffectFrame, PendingCoinFlip, PendingDieRoll, PendingDieRollInstruction,
+    PendingMutateMerge, PendingProliferateActions, RepeatedOptionalPaymentFrame, ResolutionFrame,
+    ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
 use super::resolved_commands::{
     ManaPaymentRecipient, ResolvedContinuousEffectCommand,
@@ -929,10 +931,13 @@ impl<'context, 'state> TriggerSourceRead<'context, 'state> {
         }
     }
 
-    pub fn class_level(self) -> Option<u8> {
+    /// CR 716.2d: the source's level, normalized through the shared
+    /// [`GameObject::level`] authority so a latched snapshot and a live object
+    /// answer identically, and so a source with no stored level reads as 1.
+    pub fn level(self) -> u8 {
         match self {
-            Self::ExactLive(object) => object.class_level,
-            Self::Latched(context) => context.class_level,
+            Self::ExactLive(object) => object.level(),
+            Self::Latched(context) => GameObject::level_from_stored(context.class_level),
         }
     }
 
@@ -1672,24 +1677,77 @@ pub(crate) fn battlefield_departure_trigger_source_context(
         return BattlefieldDepartureSourceContext::Malformed;
     };
 
-    if *object_id != record.object_id
-        || *from != record.from_zone
-        || *to != record.to_zone
-        || *from != Some(Zone::Battlefield)
-    {
+    if *object_id != record.object_id || *from != record.from_zone || *to != record.to_zone {
+        return BattlefieldDepartureSourceContext::Malformed;
+    }
+
+    battlefield_departure_source_context_from_record(record)
+}
+
+/// CR 400.7 + CR 603.10a + CR 608.2h: the authority state of a departure
+/// record's own source context, read from the record alone.
+///
+/// The record-only half of [`battlefield_departure_trigger_source_context`],
+/// which now delegates here after its event↔record cross-check. A caller that
+/// reads `state.zone_changes_this_turn` has a record but no event, so the
+/// cross-check is vacuous for it; every record-intrinsic rule — the departure
+/// must be battlefield-origin, and the context must name this record's own
+/// object observed in the battlefield zone — still applies, and lives here so
+/// the two entry points can never drift apart.
+///
+/// `Absent` (a legacy/deserialized record with no context) and `Malformed` (a
+/// context present but incoherent) are both fail-closed for every caller.
+pub(crate) fn battlefield_departure_source_context_from_record(
+    record: &ZoneChangeRecord,
+) -> BattlefieldDepartureSourceContext<'_> {
+    if record.from_zone != Some(Zone::Battlefield) {
         return BattlefieldDepartureSourceContext::Malformed;
     }
 
     match record.trigger_source_context() {
         None => BattlefieldDepartureSourceContext::Absent,
         Some(context)
-            if context.identity.reference.object_id == *object_id
+            if context.identity.reference.object_id == record.object_id
                 && context.identity.expected_zone == Zone::Battlefield =>
         {
             BattlefieldDepartureSourceContext::Present(context)
         }
         Some(_) => BattlefieldDepartureSourceContext::Malformed,
     }
+}
+
+/// CR 704.5d/e + CR 608.2i: the departure row that is the authority for an
+/// object which has CEASED to exist — the single authority for that selection.
+///
+/// The LAST battlefield-origin row for `object_id` this turn, and only if no
+/// later row of any kind names it. CR 704.5d/e: a ceased object cannot move
+/// again, so its terminal departure must be the last row naming it. A later row
+/// means the ledger disagrees with the caller's "this object has ceased"
+/// premise, and the answer is REFUSED rather than guessed.
+///
+/// That second guard is defence in depth — no producer can write such a row
+/// today, and `next_object_id` is monotonic so a retired id is never reissued —
+/// which is why it carries no test. It is stated once, here, rather than
+/// re-derived at each seam: the rule is rules-bearing, and two copies would have
+/// to change in lockstep with nothing linking them.
+///
+/// `None` for no row at all, which every caller must treat as fail-closed.
+/// `zone_changes_this_turn` is cleared at turn start, so a departure recorded on
+/// an earlier turn also yields `None` — the per-turn ceiling every ledger
+/// consumer shares.
+pub(crate) fn terminal_battlefield_departure_row(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<&ZoneChangeRecord> {
+    let index = state.zone_changes_this_turn.iter().rposition(|change| {
+        change.object_id == object_id && change.from_zone == Some(Zone::Battlefield)
+    })?;
+    state
+        .zone_changes_this_turn
+        .iter()
+        .skip(index + 1)
+        .all(|later| later.object_id != object_id)
+        .then(|| &state.zone_changes_this_turn[index])
 }
 
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
@@ -6511,13 +6569,13 @@ pub enum PendingCounterPostAction {
     ///
     /// Serialized surface: this enum reaches persisted state through
     /// `PendingEffectResolved::post_actions`, carried on the
-    /// `RESOLUTION_STATE_WIRE_VERSION` = 2 frame wire. A new externally-tagged
+    /// `RESOLUTION_STATE_WIRE_VERSION` = 3 frame wire. A new externally-tagged
     /// variant is backward compatible — no save written before it can contain
     /// one, so existing saves still decode — but NOT forward compatible: a build
     /// predating this variant cannot decode a save taken mid-paused-proliferate.
     /// That is the same one-way contract `MarkMonstrous`, `MarkRenowned` and
     /// `EmitCommittedCopyTokenEntry` shipped under, so the wire version is
-    /// deliberately not bumped.
+    /// did not itself require a bump.
     ContinueProliferateActions {
         pending: PendingProliferateActions,
     },
@@ -6783,6 +6841,10 @@ pub struct PendingCast {
     pub declared_mana_additions: Vec<ManaCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_cost: Option<AbilityCost>,
+    /// CR 601.2h: Random cost elements are paid after every nonrandom element.
+    /// Presence also reserves this many hand cards through the mana window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_random_discard_cost: Option<DeferredRandomDiscardCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_ability_index: Option<usize>,
     /// CR 606.3: Loyalty activation history is recorded only after the loyalty
@@ -7385,13 +7447,40 @@ pub struct RandomDiscardUnlessPaymentResume {
 /// choice. The object at `paused_at_index` completes during
 /// `handle_replacement_choice`; resumption starts with the following object.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingDiscardForCostResume {
-    pub player: PlayerId,
-    pub pending: PendingCast,
-    pub chosen: Vec<ObjectId>,
-    /// Index into `chosen` whose move was paused; that move completes during
-    /// `handle_replacement_choice` before this resume runs.
-    pub paused_at_index: usize,
+pub enum PendingDiscardForCostResume {
+    Chosen {
+        player: PlayerId,
+        pending: PendingCast,
+        chosen: Vec<ObjectId>,
+        /// Index into `chosen` whose move was paused; that move completes during
+        /// `handle_replacement_choice` before this resume runs.
+        paused_at_index: usize,
+    },
+    /// CR 601.2h + CR 701.9b + CR 616.1: A random cost discard paused after
+    /// its selected card entered the replacement pipeline. The narrowed cursor
+    /// prevents the settled pick from being selected or paid twice.
+    Random {
+        player: PlayerId,
+        pending: PendingCast,
+        remaining_eligible: Vec<ObjectId>,
+        remaining_count: usize,
+        paused_pick: Box<RandomDiscardCostPick>,
+    },
+}
+
+/// CR 400.7j + CR 608.2k: Identity and public characteristics captured before
+/// a randomly selected cost card leaves its owner's hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RandomDiscardCostPick {
+    pub occurrence: ObjectIncarnationRef,
+    pub snapshot: CostPaidObjectSnapshot,
+}
+
+/// The single supported random hand-discard leaf, reserved while every
+/// nonrandom component of the same cost is paid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredRandomDiscardCost {
+    pub count: usize,
 }
 
 impl PendingCast {
@@ -7410,6 +7499,7 @@ impl PendingCast {
             base_cost: None,
             declared_mana_additions: Vec::new(),
             activation_cost: None,
+            deferred_random_discard_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -7824,6 +7914,31 @@ pub enum ManaChoiceContext {
     ResolvingEffect(Box<ResolvedAbility>),
 }
 
+/// Deserializes [`PendingManaAbility::chosen_tappers`] as a REQUIRED
+/// `Option<Vec<ObjectId>>`: `null` is the legal *unanswered* state, an array is
+/// the answered one, and an ABSENT field is a hard error.
+///
+/// ⚠ MEASURED: this function is the mechanism, not decoration. Dropping
+/// `#[serde(default)]` does NOT make an `Option` field required —
+/// `serde_derive` routes a missing field through
+/// `serde::__private::de::missing_field`, whose deserializer answers
+/// `deserialize_option` with `visit_none`, so the field would still decode to
+/// `None` (the same measured fact recorded on
+/// `WaitingFor::LoopShortcut::declaration`). Once a field carries a
+/// `deserialize_with`, `serde_derive` emits a direct `Error::missing_field`
+/// instead, and THAT is what turns the pre-68 wire shape — `chosen_tappers`
+/// omitted, exactly as old code emitted an empty selection under
+/// `skip_serializing_if = "Vec::is_empty"` — into a loud decode failure rather
+/// than a silent read as *unanswered*.
+fn deserialize_required_chosen_tappers<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<ObjectId>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<Vec<ObjectId>>::deserialize(deserializer)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingManaAbility {
     pub player: PlayerId,
@@ -7853,8 +7968,51 @@ pub struct PendingManaAbility {
     /// already-live outer payment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_move_resume: Option<ManaAbilityResume>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub chosen_tappers: Vec<ObjectId>,
+    /// CR 107.3a + CR 601.2h: the tappers chosen for this activation's
+    /// `TapCreatures` cost. `None` means the selection stage has not been
+    /// answered yet; `Some(vec![])` is a legal, ANSWERED zero-tapper payment of
+    /// the CR 107.3a X-sentinel form (X=0, e.g. Hazel of the Rootbloom's
+    /// `Tap X untapped tokens you control` with no eligible token chosen).
+    /// A bare `Vec` conflates the two states, so `advance_mana_ability_activation`
+    /// re-surfaces the same `WaitingFor::PayCost` forever. Mirrors
+    /// [`Self::chosen_mana_payment`], two fields below, and the already-correct
+    /// `chosen_x.is_none()` presence gate.
+    ///
+    /// **WIRE BREAK — this retype is deliberately not wire-compatible.** A
+    /// pre-68 unanswered payload omits this field, and the custom deserializer
+    /// rejects that shape rather than silently decoding it as `None`; a
+    /// non-empty old array is the only old shape that decodes to `Some`. New→old
+    /// is SILENTLY INVERTED: `Some(vec![])` serializes as `chosen_tappers: []`,
+    /// which an old build decodes to `Vec::new()` and its `is_empty()` gate
+    /// reads as *unanswered* — re-prompting forever, the exact livelock this
+    /// field's `Option` fixes. The path is serialized, not theoretical:
+    /// `game::mana_abilities::handle_tap_creatures_for_mana_ability` writes this
+    /// field before the composite cost walk, and Hazel of the Rootbloom's cost
+    /// order `[Tap, PayLife(2), TapCreatures]` lets the later `PayLife` return
+    /// `PayLifeCostResult::DeferredReplacementChoice` → `pause_mana_ability_cost_payment`,
+    /// which stores into [`GameState::pending_cost_move_resume`] — documented as
+    /// serialized so a host checkpoint can resume the same cost-payment action.
+    /// A retype like this is normally version-backed rather than left silent:
+    /// see the `tap_creatures_pre_mode_wire_shape_is_rejected` doc block in this
+    /// file for the immediately preceding `PayCostKind::TapCreatures::mode`
+    /// retype, a deliberate break backed by `lobby_broker::PROTOCOL_VERSION` /
+    /// `WIRE_PROTOCOL_VERSION` under the convention entry 23
+    /// (`PayableResource::ManaGeneric`) established, whose test proves that break
+    /// is a clean, non-silent deserialize failure. That decision is now TAKEN,
+    /// the same way: `lobby_broker::PROTOCOL_VERSION` moved to 68 and
+    /// `WIRE_PROTOCOL_VERSION` to 51 (#8698), and this field intentionally
+    /// carries NO `#[serde(default)]` — so a payload that omits
+    /// `chosen_tappers`, which is exactly the pre-68 unanswered shape old code
+    /// emitted under `skip_serializing_if = "Vec::is_empty"`, fails
+    /// deserialization instead of inverting silently. `None` is therefore
+    /// always written on the wire (as `null`), never elided. The rejection is
+    /// pinned by `chosen_tappers_pre_option_wire_shape_is_rejected` in this
+    /// file's test module, alongside the `mode` precedent above. The
+    /// `deserialize_with` is what makes that rejection real — see
+    /// `deserialize_required_chosen_tappers` for why removing
+    /// `#[serde(default)]` from an `Option` field is not enough on its own.
+    #[serde(deserialize_with = "deserialize_required_chosen_tappers")]
+    pub chosen_tappers: Option<Vec<ObjectId>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_discards: Vec<ObjectId>,
     /// CR 107.4e + CR 605.3a: Pre-resolved hybrid-color choices for a `Mana` sub-cost
@@ -7868,11 +8026,24 @@ pub struct PendingManaAbility {
     /// in a mana-ability cost. The amount is chosen before mana production.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_counter_count: Option<u32>,
-    /// CR 107.3a + CR 601.2b + CR 702.179e/f: Announced value of X for a
-    /// `Pay X speed` mana-ability cost (Chicago Loop's `Pay X speed: Add X mana
-    /// in any combination of colors`). Chosen before cost payment and mana
-    /// production; bound to BOTH the speed cost and the produced-mana count via
-    /// `set_chosen_x_recursive`. `None` until the player announces X.
+    /// CR 107.3a + CR 601.2b: Announced value of X for this mana ability. Two
+    /// writers, both binding the same CR 107.3a announcement:
+    ///
+    /// * CR 702.179e/f: a `Pay X speed` cost (Chicago Loop's `Pay X speed: Add
+    ///   X mana in any combination of colors`), announced before cost payment
+    ///   and bound to BOTH the speed cost and the produced-mana count via
+    ///   `set_chosen_x_recursive`;
+    /// * the X-sentinel `TapCreatures` form (Hazel of the Rootbloom's
+    ///   `Tap X untapped tokens you control`), where
+    ///   `handle_tap_creatures_for_mana_ability` binds X to the size of the
+    ///   completed tapper selection. Both the cost-application loop in
+    ///   `pay_mana_ability_cost_with_choices` and the cursor advance in
+    ///   `advance_mana_ability_selection_cursor` read that single stored value
+    ///   rather than re-deriving it from `requirement.fixed_count()`.
+    ///
+    /// `None` until X is announced. Because this slot is shared by two costs, it
+    /// is NOT a stage-completion marker — each selection stage owns its own
+    /// typed presence field (see [`Self::chosen_tappers`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_x: Option<u32>,
     /// CR 605.2 + CR 701.59: Cards exiled to pay a `Collect evidence N`
@@ -9695,8 +9866,9 @@ fn visit_persisted_journal_zone_change_trigger_records(
 /// omit either field and deserialize them as zero.
 ///
 /// This runs against serialized `ResolutionStateWire` input before either v1
-/// legacy fields or v2 frames materialize into runtime state. The caller passes
-/// any v1-only live roots; v2 frames are part of the canonical root set below.
+/// legacy fields or v2/v3 typed frames materialize into runtime state. The
+/// caller passes any v1-only live roots; typed frames are part of the canonical
+/// root set below.
 /// Raw and Trusted persistence are both fallible at that boundary, and rebinding
 /// after deserialization would be too late: callers could already observe an
 /// ambiguous trigger event.
@@ -12623,6 +12795,33 @@ pub enum WaitingFor {
         results: Vec<bool>,
         keep_count: usize,
     },
+    /// CR 706.6 + CR 614.1a: A die-roll replacement ("instead roll that many dice
+    /// plus one and ignore the lowest roll" — Barbarian Class, Pixie Guide,
+    /// Wyll) rolled `results.len()` dice for one instruction, and the roller
+    /// must ignore `ignore_count` of them.
+    ///
+    /// `results` are the NATURAL results (CR 706.2 — before any modifier),
+    /// because CR 706.6 forbids any effect applying to an ignored roll.
+    /// `ignorable_indices` is engine-computed: for "ignore the lowest" it holds
+    /// exactly the indices tied for the lowest natural, which is CR 706.6's
+    /// second sentence ("if multiple results are tied for the lowest, the player
+    /// chooses one of those rolls to be ignored"). The frontend must NOT compute
+    /// which roll is lowest — it renders `results` and enables only
+    /// `ignorable_indices`.
+    ///
+    /// Engine convention, deliberately carrying no CR annotation: no
+    /// Comprehensive Rule states that die results are public information, so
+    /// there is no rule to cite here. This variant is absent from
+    /// `game/visibility.rs` — no per-player redaction, mirroring
+    /// `CoinFlipKeepChoice`.
+    DieKeepChoice {
+        /// CR 706.6: the player who rolled, who is the player instructed to
+        /// ignore and therefore the player who breaks a tie.
+        player: PlayerId,
+        results: Vec<u8>,
+        ignorable_indices: Vec<usize>,
+        ignore_count: usize,
+    },
     /// CR 701.20e: Waiting for the player to choose which looked-at cards to keep.
     DigChoice {
         /// Player who looks at the cards and makes any selection.
@@ -14808,6 +15007,7 @@ impl WaitingFor {
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
+            WaitingFor::DieKeepChoice { .. } => "DieKeepChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
             WaitingFor::RevealChoice { .. } => "RevealChoice",
@@ -14967,6 +15167,7 @@ impl WaitingFor {
             | WaitingFor::ArrangePlanarDeckTopChoice { player, .. }
             | WaitingFor::RedistributeLifeTotals { player, .. }
             | WaitingFor::CoinFlipKeepChoice { player, .. }
+            | WaitingFor::DieKeepChoice { player, .. }
             | WaitingFor::DigChoice { player, .. }
             | WaitingFor::SurveilChoice { player, .. }
             | WaitingFor::RevealChoice { player, .. }
@@ -17891,6 +18092,15 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_map")]
     pub tracked_set_member_causes: HashMap<TrackedSetId, HashMap<ObjectId, ThisWayCause>>,
 
+    /// CR 701.24c-e + CR 608.2c: players explicitly designated by a tracked-set
+    /// producer even when their subject population is empty. The object ledger
+    /// alone cannot represent "shuffle your empty graveyard into your library";
+    /// this sidecar preserves that participant so the cause-filtered owner
+    /// consumer still performs the shuffle.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
+    pub tracked_set_participants: HashMap<TrackedSetId, Vec<(PlayerId, ThisWayCause)>>,
+
     // Commander support
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
@@ -18432,7 +18642,7 @@ declare_game_state! {
     /// ability on a specific source object. Incremented at the top of
     /// `resolve_ability_chain` (depth 0) when the resolving ability has a
     /// `Some(ability_index)` stamp; read by
-    /// `AbilityCondition::NthResolutionThisTurn` to gate Omnath-style
+    /// `AbilityCondition::AbilityUseCountThisTurn` to gate Omnath-style
     /// "if this is the [Nth] time this ability has resolved this turn" patterns.
     /// Cleared in `start_next_turn` alongside other per-turn counters.
     #[serde(
@@ -18872,6 +19082,20 @@ declare_game_state! {
     /// CR 616.1: search-found replacement batch parked across a choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_search_found_batch: Option<PendingSearchFoundBatch>,
+    /// CR 616.1 + CR 706.1: die-roll INSTRUCTION context parked across a
+    /// replacement-ordering choice, before any die has been rolled.
+    ///
+    /// Two applicable die-roll replacements (Barbarian Class + Pixie Guide) make
+    /// the affected player order them, which suspends `roll_die::resolve` on a
+    /// `ReplacementChoice`. The resolving ability is gone by the time the choice
+    /// is submitted, so the results table, modifier, and targets are parked here
+    /// and consumed by `roll_die::resume_roll_dice_after_replacement`. This is
+    /// deliberately NOT a `ResolutionStack` frame: the stack top during the
+    /// ordering choice belongs to the ability continuation, and a `DieRoll`
+    /// frame pushed over it would break the top-of-stack ownership checks that
+    /// `take_active_die_roll_frame` relies on for the CR 706.6 ignore choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_die_roll_instruction: Option<Box<PendingDieRollInstruction>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub may_trigger_auto_choices: Vec<MayTriggerAutoChoiceRecord>,
 
@@ -19048,6 +19272,21 @@ declare_game_state! {
     /// Cleared at depth 0 in resolve_ability_chain.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_zone_changed_ids: Vec<ObjectId>,
+
+    /// CR 701.6a + CR 614.1a (issue #8762): the spells the most recent
+    /// `Effect::Counter` exiled through its "exile it instead of putting it
+    /// into its owner's graveyard" rider — recorded by `counter::resolve` at
+    /// the moment it chooses that destination, from the rider AS APPLIED to
+    /// the concrete countered spell (Thranduil's Decree names "a permanent
+    /// spell" only). Read by the `Exiled` provenance stamp of the same
+    /// resolution, which must not re-derive the answer: an Adventure or Omen
+    /// spell has its creature face restored between the destination choice
+    /// and the stamp (CR 715.4 / CR 720.4), so the same filter would answer
+    /// differently there.
+    /// Mirrors `last_zone_changed_ids` lifecycle: cleared at chain depth 0 in
+    /// `resolve_ability_chain`, and at the start of every `counter::resolve`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exile_rider_countered_ids: Vec<ObjectId>,
 
     /// CR 608.2c + CR 701.38: Per-vote ballots from the most recent
     /// `Effect::Vote` resolution within the current top-level ability
@@ -19612,6 +19851,7 @@ pub(crate) enum GameStateDecodeMode {
     TrustedEnvelope,
     ResolutionWireV1,
     ResolutionWireV2,
+    ResolutionWireV3,
     DirectCurrentRaw,
 }
 
@@ -19620,31 +19860,185 @@ pub(crate) enum GameStateDecodeMode {
 /// restore caller from silently becoming a second compatibility boundary.
 pub(crate) struct GameStateDecode;
 
+const LEGACY_EXPLOIT_EVENT_EVIDENCE_ERROR: &str =
+    "CreatureExploited snapshot lacks authoritative victim record; restore a save that contains the exploit departure record";
+
+const SERIALIZED_TRIGGER_DEFINITION_CORE_FIELDS: &[&str] = &[
+    "execute",
+    "valid_card",
+    "origin",
+    "destination",
+    "trigger_zones",
+    "phase",
+    "optional",
+    "damage_kind",
+    "secondary",
+    "valid_target",
+    "valid_source",
+    "description",
+    "constraint",
+    "condition",
+];
+
+fn is_serialized_exploited_trigger_definition(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    object.get("mode").and_then(serde_json::Value::as_str) == Some("Exploited")
+        && SERIALIZED_TRIGGER_DEFINITION_CORE_FIELDS
+            .iter()
+            .all(|field| object.contains_key(*field))
+}
+
+pub(crate) fn contains_ambiguous_serialized_exploited_trigger_definition(
+    value: &serde_json::Value,
+) -> bool {
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(contains_ambiguous_serialized_exploited_trigger_definition),
+        serde_json::Value::Object(object) => {
+            (is_serialized_exploited_trigger_definition(object)
+                && object
+                    .get("valid_card")
+                    .is_some_and(|valid_card| !valid_card.is_null()))
+                || object
+                    .values()
+                    .any(contains_ambiguous_serialized_exploited_trigger_definition)
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => false,
+    }
+}
+
+fn migrate_legacy_exploited_trigger_roles(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_exploited_trigger_roles(value);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if is_serialized_exploited_trigger_definition(object) {
+                if object
+                    .get("valid_source")
+                    .is_none_or(serde_json::Value::is_null)
+                {
+                    let legacy_actor = object
+                        .get("valid_card")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    object.insert("valid_source".to_string(), legacy_actor);
+                }
+                object.insert("valid_card".to_string(), serde_json::Value::Null);
+            }
+            for value in object.values_mut() {
+                migrate_legacy_exploited_trigger_roles(value);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
+fn reject_legacy_exploit_event_evidence(value: &serde_json::Value) -> Result<(), String> {
+    fn reject(path: &str, reason: &str) -> Result<(), String> {
+        Err(format!(
+            "{LEGACY_EXPLOIT_EVENT_EVIDENCE_ERROR} at {path}: {reason}"
+        ))
+    }
+
+    fn validate_event_data(data: &serde_json::Value, path: &str) -> Result<(), String> {
+        let Some(data) = data.as_object() else {
+            return reject(path, "event data is not an object");
+        };
+        let Some(record) = data.get("record") else {
+            return reject(path, "record is missing");
+        };
+        let Some(record) = record.as_object() else {
+            return reject(path, "record must be an object");
+        };
+        match record.get("is_token") {
+            None => return reject(path, "record.is_token is missing"),
+            Some(value) if !value.is_boolean() => {
+                return reject(path, "record.is_token must be a boolean");
+            }
+            Some(_) => {}
+        }
+        if let (Some(sacrificed), Some(object_id)) = (
+            data.get("sacrificed").and_then(serde_json::Value::as_u64),
+            record.get("object_id").and_then(serde_json::Value::as_u64),
+        ) {
+            if sacrificed != object_id {
+                return reject(path, "record.object_id disagrees with event.sacrificed");
+            }
+        }
+        Ok(())
+    }
+
+    fn visit(value: &serde_json::Value, path: &str) -> Result<(), String> {
+        match value {
+            serde_json::Value::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    visit(value, &format!("{path}[{index}]"))?;
+                }
+            }
+            serde_json::Value::Object(object) => {
+                if object.get("type").and_then(serde_json::Value::as_str)
+                    == Some("CreatureExploited")
+                {
+                    let Some(data) = object.get("data") else {
+                        return reject(path, "event data is missing");
+                    };
+                    validate_event_data(data, &format!("{path}.data"))?;
+                }
+                if let Some(data) = object.get("CreatureExploited") {
+                    validate_event_data(data, &format!("{path}.CreatureExploited"))?;
+                }
+                for (key, value) in object {
+                    visit(value, &format!("{path}.{key}"))?;
+                }
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+        Ok(())
+    }
+
+    visit(value, "$")
+}
+
 impl GameStateDecode {
     pub(crate) fn decode_persisted_resolution_state(
         mut value: serde_json::Value,
         mode: GameStateDecodeMode,
     ) -> Result<GameState, String> {
-        let object = value
-            .as_object_mut()
-            .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
+        if !value.is_object() {
+            return Err("persisted game state must be a JSON object".to_string());
+        }
         match mode {
             // An UNVERSIONED raw payload carries no resolution-wire
             // discriminator. Raw persistence in general does: the engine's own
             // raw writer, `PersistedGameState::Raw`'s `Serialize`, routes
             // through `ResolutionStateWire::to_value`, which always declares
-            // version 2. This is the only ingress allowed to infer a MISSING
+            // the current version. This is the only ingress allowed to infer a MISSING
             // discriminator, and `declare_raw_resolution_wire` is the single
             // authority that does. A payload that declares its own version
             // keeps it and is handled exactly as any declared payload is.
             GameStateDecodeMode::PersistedRaw => {
-                crate::types::resolution::declare_raw_resolution_wire(object)?;
+                crate::types::resolution::declare_raw_resolution_wire(&mut value)?;
             }
             // Trusted snapshots are written as versioned resolution-wire
             // envelopes and must retain their declared compatibility mode.
             GameStateDecodeMode::TrustedEnvelope => {}
             GameStateDecodeMode::ResolutionWireV1
             | GameStateDecodeMode::ResolutionWireV2
+            | GameStateDecodeMode::ResolutionWireV3
             | GameStateDecodeMode::DirectCurrentRaw => {
                 return Err("invalid persisted resolution-state decode mode".to_string());
             }
@@ -19669,6 +20063,7 @@ impl GameStateDecode {
         mut value: serde_json::Value,
         mode: GameStateDecodeMode,
     ) -> Result<GameState, String> {
+        reject_legacy_exploit_event_evidence(&value)?;
         reject_legacy_raw_prompt_authority(&value)?;
         if !matches!(mode, GameStateDecodeMode::DirectCurrentRaw) {
             migrate_legacy_delayed_trigger_provenance(&mut value)?;
@@ -19712,9 +20107,18 @@ impl GameStateDecode {
     ) -> Result<(), String> {
         debug_assert!(matches!(
             mode,
-            GameStateDecodeMode::ResolutionWireV1 | GameStateDecodeMode::ResolutionWireV2
+            GameStateDecodeMode::ResolutionWireV1
+                | GameStateDecodeMode::ResolutionWireV2
+                | GameStateDecodeMode::ResolutionWireV3
         ));
+        reject_legacy_exploit_event_evidence(value)?;
         reject_legacy_raw_prompt_authority(value)?;
+        if matches!(
+            mode,
+            GameStateDecodeMode::ResolutionWireV1 | GameStateDecodeMode::ResolutionWireV2
+        ) {
+            migrate_legacy_exploited_trigger_roles(value);
+        }
         migrate_legacy_delayed_trigger_provenance(value)?;
         migrate_legacy_trigger_firing_carriers(
             value,
@@ -20678,6 +21082,11 @@ pub struct PendingReplacement {
     /// `candidates` has exactly one entry (the real replacement); decline is synthetic.
     #[serde(default)]
     pub is_optional: bool,
+    /// Choice authority captured when an optional replacement is offered. This
+    /// is deliberately separate from CR 616 ordering, whose chooser remains
+    /// the affected player.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice_player: Option<PlayerId>,
     /// CR 701.24a: the library placement requested by the original `move_object`
     /// call whose replacement consult parked here (W3 library-placement arm only).
     /// `Some` solely for a parked Library-targeting `ZoneChange`; the resume path
@@ -20779,6 +21188,58 @@ pub struct PhaseTransitionProgress {
     pub entering_cleanup: bool,
     #[serde(default)]
     pub drain_state: PhaseTransitionDrainState,
+}
+
+#[cfg(test)]
+mod trigger_source_read_level_tests {
+    use super::*;
+    use crate::game::game_object::GameObject;
+
+    fn class_object(class_level: Option<u8>) -> GameObject {
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Stormchaser's Talent".to_string(),
+            Zone::Battlefield,
+        );
+        object.class_level = class_level;
+        object
+    }
+
+    fn latched(object: &GameObject) -> TriggerSourceContext {
+        object
+            .snapshot_for_zone_change(object.id, Some(Zone::Battlefield), object.zone)
+            .trigger_source_context
+            .expect("snapshot always carries trigger context")
+    }
+
+    /// CR 716.2d: a source with no stored level reads as level 1, on BOTH
+    /// `TriggerSourceRead` arms. No printed card reaches this through a trigger —
+    /// zero cards say "becomes level 1", and `oracle_class.rs` only wraps a
+    /// trigger in `ClassLevelGE` when `section.level > 1` — so the guarantee is
+    /// asserted directly here rather than through a card scenario the parser
+    /// cannot emit. Without it, a `None` level fails every `== N` / `>= N` gate,
+    /// which is the shape of issue #8773.
+    #[test]
+    fn absent_stored_level_reads_as_one_on_both_arms() {
+        let object = class_object(None);
+        let context = latched(&object);
+
+        assert_eq!(TriggerSourceRead::ExactLive(&object).level(), 1);
+        assert_eq!(TriggerSourceRead::Latched(&context).level(), 1);
+    }
+
+    /// A stored level is reported verbatim, so normalization cannot mask a real
+    /// level, and the two arms agree.
+    #[test]
+    fn stored_level_is_reported_verbatim_on_both_arms() {
+        let object = class_object(Some(3));
+        let context = latched(&object);
+
+        assert_eq!(TriggerSourceRead::ExactLive(&object).level(), 3);
+        assert_eq!(TriggerSourceRead::Latched(&context).level(), 3);
+    }
 }
 
 #[cfg(test)]
@@ -21793,6 +22254,75 @@ impl GameState {
     /// Parks one Krark's Thumb keep-choice resolution.
     pub fn push_coin_flip_frame(&mut self, pending: PendingCoinFlip) {
         self.resolution_stack.push_coin_flip(pending);
+    }
+
+    /// CR 706.6: Parks one "ignore the lowest roll" resolution.
+    ///
+    /// The CR 706.6 ignore choice itself is raised ONCE per instruction — every
+    /// applied replacement's rule is folded into a single
+    /// `WaitingFor::DieKeepChoice` with an `ignore_count` — so this frame is
+    /// pushed once for that choice and consumed by
+    /// `take_active_die_roll_frame`.
+    ///
+    /// It is NOT the frame's whole lifecycle: past the ignore choice, a
+    /// results-table branch can suspend mid-loop on its own prompt
+    /// (CR 706.3a + CR 608.2c), and the owner is then re-parked by
+    /// `park_die_roll_frame_for_resume` to carry the remaining dice. See that
+    /// method for which stack slot each case parks into.
+    pub fn push_die_roll_frame(&mut self, pending: PendingDieRoll) {
+        self.resolution_stack.push_die_roll(pending);
+    }
+
+    /// CR 706.6: Consumes exactly the active die-roll frame when the roller
+    /// submits which roll(s) to ignore.
+    pub fn take_active_die_roll_frame(
+        &mut self,
+    ) -> Result<Option<PendingDieRoll>, ResolutionStackError> {
+        self.resolution_stack.take_active_die_roll()
+    }
+
+    /// CR 706.3a: Re-parks the active die-roll owner after a results branch
+    /// suspended mid-loop, so the remaining dice resume from the frame's cursor.
+    pub fn replace_active_die_roll_frame(
+        &mut self,
+        pending: PendingDieRoll,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack.replace_active_die_roll(pending)
+    }
+
+    /// CR 706.3a + CR 608.2c: Parks the die-roll owner for a mid-loop resume,
+    /// choosing the structurally valid slot instead of assuming one.
+    ///
+    /// Three cases, and collapsing them is a stack-invariant bug:
+    ///
+    /// * the owner is already on top (this pass came from a keep choice) — swap
+    ///   it in place, keeping the stack top stable;
+    /// * the stack is empty (a first pass that never parked one) — push;
+    /// * something else owns the top. Past cursor 0 this frame is an
+    ///   `AfterChild` owner (see `ResolutionFrame::gate`), so a results-table
+    ///   branch that suspended on its OWN prompt is above us. Pushing there
+    ///   would bury that child's `DirectChoice`, which `validate` rejects
+    ///   (`buried_direct_choice`) because a direct-choice owner must be the top
+    ///   frame. Insert BELOW the active child instead — the frame waits on it,
+    ///   exactly like every other `AfterChild` owner.
+    pub fn park_die_roll_frame_for_resume(
+        &mut self,
+        pending: PendingDieRoll,
+    ) -> Result<(), ResolutionStackError> {
+        match self
+            .resolution_stack
+            .replace_active_die_roll(pending.clone())
+        {
+            Ok(()) => Ok(()),
+            Err(ResolutionStackError::Empty) => {
+                self.resolution_stack.push_die_roll(pending);
+                Ok(())
+            }
+            Err(ResolutionStackError::UnexpectedTop { .. }) => self
+                .resolution_stack
+                .insert_parent_of_active(ResolutionFrame::DieRoll(Box::new(pending))),
+            Err(error) => Err(error),
+        }
     }
 
     /// Re-parks the active coin-flip owner after it suspends for another keep
@@ -23688,6 +24218,7 @@ impl GameState {
             chain_tracked_set_id: None,
             resolving_modal_instruction: None,
             tracked_set_member_causes: HashMap::new(),
+            tracked_set_participants: HashMap::new(),
             commander_cast_count: HashMap::new(),
             commander_cast_owners: HashMap::new(),
             extra_turns: Vec::new(),
@@ -23805,6 +24336,7 @@ impl GameState {
             pending_scoped_library_search: None,
             pending_library_search_delivery: None,
             pending_search_found_batch: None,
+            pending_die_roll_instruction: None,
             may_trigger_auto_choices: Vec::new(),
             decision_templates: Vec::new(),
             priority_yields: Vec::new(),
@@ -23827,6 +24359,7 @@ impl GameState {
             private_look_ids: Vec::new(),
             private_look_player: None,
             last_zone_changed_ids: Vec::new(),
+            exile_rider_countered_ids: Vec::new(),
             last_vote_ballots: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
             last_effect_amount: None,
@@ -25816,6 +26349,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         // resolution — the same reason that field is projected out here.
         resolving_modal_instruction: _,
         tracked_set_member_causes: _,
+        tracked_set_participants: _,
         commander_cast_count: _,
         commander_cast_owners: _,
         commander_declined_zone_return: _,
@@ -25958,6 +26492,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         private_look_ids: _,
         private_look_player: _,
         last_zone_changed_ids: _,
+        exile_rider_countered_ids: _,
         last_vote_ballots: _,
         player_actions_this_way: _,
         last_effect_amount: _,
@@ -26061,6 +26596,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_scoped_library_search: _,
         pending_library_search_delivery: _,
         pending_search_found_batch: _,
+        pending_die_roll_instruction: _,
         post_replacement_token_substitution_count: _,
         //   - `last_loop_action_sequence` (PR-7 Phase 4d-ii / P7 v3 object-growth loop-action
         //     sequence): EXCLUDED from `impl PartialEq for GameState` (a transient decision
@@ -26159,6 +26695,7 @@ impl PartialEq for GameState {
             && self.chain_tracked_set_id == other.chain_tracked_set_id
             && self.resolving_modal_instruction == other.resolving_modal_instruction
             && self.tracked_set_member_causes == other.tracked_set_member_causes
+            && self.tracked_set_participants == other.tracked_set_participants
             && self.commander_cast_count == other.commander_cast_count
             && self.commander_cast_owners == other.commander_cast_owners
             && self.commander_declined_zone_return == other.commander_declined_zone_return
@@ -26283,6 +26820,7 @@ impl PartialEq for GameState {
             && self.pending_scoped_library_search == other.pending_scoped_library_search
             && self.pending_library_search_delivery == other.pending_library_search_delivery
             && self.pending_search_found_batch == other.pending_search_found_batch
+            && self.pending_die_roll_instruction == other.pending_die_roll_instruction
             && self.pending_cost_move_resume == other.pending_cost_move_resume
             && self.pending_triggered_mana_resume == other.pending_triggered_mana_resume
             && self.pending_trigger_construction_priority_recipient
@@ -26301,6 +26839,7 @@ impl PartialEq for GameState {
             && self.private_look_ids == other.private_look_ids
             && self.private_look_player == other.private_look_player
             && self.last_zone_changed_ids == other.last_zone_changed_ids
+            && self.exile_rider_countered_ids == other.exile_rider_countered_ids
             && self.last_vote_ballots == other.last_vote_ballots
             && self.player_actions_this_way == other.player_actions_this_way
             && self.last_effect_count == other.last_effect_count
@@ -27481,6 +28020,486 @@ mod tests {
     };
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
     use crate::types::triggers::TriggerMode;
+
+    fn state_with_recorded_exploit() -> (GameState, GameEvent) {
+        let mut state = GameState::new_two_player(42);
+        let exploiter = create_object(
+            &mut state,
+            CardId(70),
+            PlayerId(0),
+            "Exploit source".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = create_object(
+            &mut state,
+            CardId(71),
+            PlayerId(1),
+            "Exploit victim".to_string(),
+            Zone::Battlefield,
+        );
+        let victim_object = state.objects.get_mut(&victim).expect("victim exists");
+        victim_object.controller = PlayerId(0);
+        victim_object.card_types.core_types.push(CoreType::Creature);
+        victim_object.base_card_types = victim_object.card_types.clone();
+        victim_object.is_token = true;
+
+        let mut departure_events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            victim,
+            Zone::Graveyard,
+            &mut departure_events,
+        );
+        let record = departure_events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id, record, ..
+                } if *object_id == victim => Some(record.clone()),
+                _ => None,
+            })
+            .expect("the fixture emits an authoritative departure record");
+        let exploit = GameEvent::CreatureExploited {
+            exploiter,
+            sacrificed: victim,
+            record,
+        };
+        state.deferred_entry_events = vec![exploit.clone()];
+        (state, exploit)
+    }
+
+    #[test]
+    fn recorded_exploit_round_trips_through_current_and_persisted_ingresses() {
+        let (state, expected) = state_with_recorded_exploit();
+
+        let direct: GameState =
+            serde_json::from_value(serde_json::to_value(&state).expect("current state serializes"))
+                .expect("current state with complete exploit evidence decodes");
+        assert_eq!(direct.deferred_entry_events, vec![expected.clone()]);
+
+        for persisted in [
+            PersistedGameState::Raw(Box::new(state.clone())),
+            PersistedGameState::capture(state),
+        ] {
+            let restored = serde_json::from_value::<PersistedGameState>(
+                serde_json::to_value(persisted).expect("persisted state serializes"),
+            )
+            .expect("persisted state with complete exploit evidence decodes")
+            .into_game_state_unchecked();
+            assert_eq!(restored.deferred_entry_events, vec![expected.clone()]);
+        }
+    }
+
+    #[test]
+    fn exploit_evidence_guard_rejects_obsolete_and_untrustworthy_snapshots() {
+        let (state, _) = state_with_recorded_exploit();
+        let current_wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+                .expect("versioned fixture serializes");
+        let base = serde_json::to_value(state).expect("fixture serializes");
+        let event_path = "$.deferred_entry_events[0].data";
+
+        let mut cases = Vec::new();
+        let mut missing_record = base.clone();
+        missing_record["deferred_entry_events"][0]["data"]
+            .as_object_mut()
+            .expect("event data is an object")
+            .remove("record");
+        cases.push((missing_record, "record is missing"));
+
+        let mut null_record = base.clone();
+        null_record["deferred_entry_events"][0]["data"]["record"] = serde_json::Value::Null;
+        cases.push((null_record, "record must be an object"));
+
+        let mut scalar_record = base.clone();
+        scalar_record["deferred_entry_events"][0]["data"]["record"] =
+            serde_json::Value::from("not a record");
+        cases.push((scalar_record, "record must be an object"));
+
+        let mut missing_token = base.clone();
+        missing_token["deferred_entry_events"][0]["data"]["record"]
+            .as_object_mut()
+            .expect("record is an object")
+            .remove("is_token");
+        cases.push((missing_token, "record.is_token is missing"));
+
+        let mut invalid_token = base.clone();
+        invalid_token["deferred_entry_events"][0]["data"]["record"]["is_token"] =
+            serde_json::Value::from("true");
+        cases.push((invalid_token, "record.is_token must be a boolean"));
+
+        let mut mismatched_id = base.clone();
+        mismatched_id["deferred_entry_events"][0]["data"]["record"]["object_id"] =
+            serde_json::Value::from(99_999_u64);
+        cases.push((
+            mismatched_id,
+            "record.object_id disagrees with event.sacrificed",
+        ));
+
+        for (value, reason) in cases {
+            let error = serde_json::from_value::<GameState>(value)
+                .expect_err("invalid exploit evidence must refuse the containing state")
+                .to_string();
+            assert!(
+                error.contains(LEGACY_EXPLOIT_EVENT_EVIDENCE_ERROR),
+                "{error}"
+            );
+            assert!(error.contains(event_path), "{error}");
+            assert!(error.contains(reason), "{error}");
+        }
+
+        let mut partial_record = base.clone();
+        partial_record["deferred_entry_events"][0]["data"]["record"]
+            .as_object_mut()
+            .expect("record is an object")
+            .remove("name");
+        let error = serde_json::from_value::<GameState>(partial_record)
+            .expect_err("ordinary incomplete record shape remains a serde schema error")
+            .to_string();
+        assert!(error.contains("missing field `name`"), "{error}");
+        assert!(
+            !error.contains(LEGACY_EXPLOIT_EVENT_EVIDENCE_ERROR),
+            "ordinary record schema errors must not be mislabeled as legacy exploit evidence: {error}"
+        );
+
+        let historical = serde_json::json!({
+            "journal": [{
+                "CreatureExploited": {
+                    "exploiter": 1,
+                    "sacrificed": 2
+                }
+            }]
+        });
+        let error = reject_legacy_exploit_event_evidence(&historical)
+            .expect_err("historical externally tagged evidence is diagnostic-only");
+        assert!(error.contains(LEGACY_EXPLOIT_EVENT_EVIDENCE_ERROR));
+        assert!(error.contains("$.journal[0].CreatureExploited"));
+
+        let benign = serde_json::json!({ "description": "CreatureExploited" });
+        reject_legacy_exploit_event_evidence(&benign)
+            .expect("a string mentioning the event is not an event envelope");
+
+        for version in [1_u64, 2_u64] {
+            let mut historical_wire = current_wire.clone();
+            historical_wire["resolution_state_version"] = serde_json::Value::from(version);
+            if version == 1 {
+                historical_wire
+                    .as_object_mut()
+                    .expect("wire is an object")
+                    .remove("resolution_frames");
+            }
+            historical_wire["deferred_entry_events"][0]["data"]
+                .as_object_mut()
+                .expect("event data is an object")
+                .remove("record");
+            let error = serde_json::from_value::<ResolutionStateWire>(historical_wire)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(LEGACY_EXPLOIT_EVENT_EVIDENCE_ERROR),
+                "declared v{version}: {error}"
+            );
+        }
+    }
+
+    fn legacy_exploited_definition(marker: &str, actor_id: u64) -> serde_json::Value {
+        let mut definition = TriggerDefinition::new(TriggerMode::Exploited);
+        definition.description = Some(marker.to_string());
+        let mut value = serde_json::to_value(definition)
+            .expect("typed exploited trigger definition serializes");
+        value["valid_card"] = serde_json::to_value(TargetFilter::SpecificObject {
+            id: ObjectId(actor_id),
+        })
+        .expect("actor filter serializes");
+        value["valid_source"] = serde_json::Value::Null;
+        value
+    }
+
+    fn assert_migrated_exploited_definition(
+        tree: &serde_json::Value,
+        pointer: &str,
+        marker: &str,
+        actor_id: u64,
+    ) {
+        let definition = tree
+            .pointer(pointer)
+            .unwrap_or_else(|| panic!("fixture contains {pointer}"));
+        assert_eq!(definition["description"], marker);
+        assert_eq!(definition["valid_source"]["type"], "SpecificObject");
+        assert_eq!(definition["valid_source"]["id"], actor_id);
+        assert!(definition["valid_card"].is_null());
+    }
+
+    #[test]
+    fn legacy_exploited_role_migration_visits_every_persisted_definition_carrier() {
+        let mut decoy = legacy_exploited_definition("decoy", 99);
+        decoy
+            .as_object_mut()
+            .expect("definition is an object")
+            .remove("execute");
+        let expected_decoy = decoy.clone();
+
+        let mut tree = serde_json::json!({
+            "objects": {
+                "1": {
+                    "trigger_definitions": [{ "definition": legacy_exploited_definition("live", 1) }],
+                    "base_trigger_definitions": [legacy_exploited_definition("base", 2)]
+                }
+            },
+            "zone_change_record": {
+                "trigger_definitions": [{ "definition": legacy_exploited_definition("record", 3) }],
+                "trigger_source_context": {
+                    "trigger_entries": [{ "definition": legacy_exploited_definition("context", 4) }]
+                }
+            },
+            "logical_zone_change_group": {
+                "immediately_before_batched_triggers": [{ "definition": legacy_exploited_definition("latch-before", 5) }],
+                "immediately_after_batched_triggers": [{ "definition": legacy_exploited_definition("latch-after", 6) }]
+            },
+            "delayed_triggers": [
+                {
+                    "condition": {
+                        "type": "WheneverEvent",
+                        "trigger": legacy_exploited_definition("whenever", 7)
+                    }
+                },
+                {
+                    "condition": {
+                        "type": "WhenNextEvent",
+                        "trigger": legacy_exploited_definition("when-next", 8),
+                        "or_trigger": legacy_exploited_definition("when-next-or", 9)
+                    }
+                }
+            ],
+            "nested_effects": [
+                {
+                    "type": "CreateDelayedTrigger",
+                    "condition": {
+                        "type": "WheneverEvent",
+                        "trigger": legacy_exploited_definition("created-delayed", 10)
+                    }
+                },
+                {
+                    "type": "CreateEmblem",
+                    "triggers": [legacy_exploited_definition("emblem", 11)]
+                }
+            ],
+            "preexisting_source": {
+                "definition": legacy_exploited_definition("preexisting-source", 13)
+            },
+            "decoy": decoy
+        });
+        tree["preexisting_source"]["definition"]["valid_source"] =
+            serde_json::to_value(TargetFilter::SpecificObject { id: ObjectId(12) })
+                .expect("preexisting actor filter serializes");
+
+        migrate_legacy_exploited_trigger_roles(&mut tree);
+
+        for (pointer, marker, actor_id) in [
+            ("/objects/1/trigger_definitions/0/definition", "live", 1),
+            ("/objects/1/base_trigger_definitions/0", "base", 2),
+            (
+                "/zone_change_record/trigger_definitions/0/definition",
+                "record",
+                3,
+            ),
+            (
+                "/zone_change_record/trigger_source_context/trigger_entries/0/definition",
+                "context",
+                4,
+            ),
+            (
+                "/logical_zone_change_group/immediately_before_batched_triggers/0/definition",
+                "latch-before",
+                5,
+            ),
+            (
+                "/logical_zone_change_group/immediately_after_batched_triggers/0/definition",
+                "latch-after",
+                6,
+            ),
+            ("/delayed_triggers/0/condition/trigger", "whenever", 7),
+            ("/delayed_triggers/1/condition/trigger", "when-next", 8),
+            (
+                "/delayed_triggers/1/condition/or_trigger",
+                "when-next-or",
+                9,
+            ),
+            ("/nested_effects/0/condition/trigger", "created-delayed", 10),
+            ("/nested_effects/1/triggers/0", "emblem", 11),
+        ] {
+            assert_migrated_exploited_definition(&tree, pointer, marker, actor_id);
+        }
+        assert_migrated_exploited_definition(
+            &tree,
+            "/preexisting_source/definition",
+            "preexisting-source",
+            12,
+        );
+        assert_eq!(tree["decoy"], expected_decoy);
+    }
+
+    fn state_with_exploited_trigger_roles(
+        mut state: GameState,
+        actor: TargetFilter,
+        victim: Option<TargetFilter>,
+    ) -> (GameState, ObjectId) {
+        let object_id = ObjectId(9_170);
+        let mut definition = TriggerDefinition::new(TriggerMode::Exploited);
+        definition.valid_source = Some(actor);
+        definition.valid_card = victim;
+        let mut object = GameObject::new(
+            object_id,
+            CardId(9_170),
+            PlayerId(0),
+            "Exploit observer".to_string(),
+            Zone::Battlefield,
+        );
+        object.push_printed_trigger(definition);
+        state.objects.insert(object_id, object);
+        (state, object_id)
+    }
+
+    fn downgrade_exploited_roles(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    downgrade_exploited_roles(value);
+                }
+            }
+            serde_json::Value::Object(object) => {
+                if is_serialized_exploited_trigger_definition(object) {
+                    let actor = object
+                        .get("valid_source")
+                        .cloned()
+                        .expect("complete trigger definition has valid_source");
+                    object.insert("valid_card".to_string(), actor);
+                    object.insert("valid_source".to_string(), serde_json::Value::Null);
+                }
+                for value in object.values_mut() {
+                    downgrade_exploited_roles(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn assert_restored_exploit_roles(
+        restored: &GameState,
+        object_id: ObjectId,
+        actor: &TargetFilter,
+        victim: Option<&TargetFilter>,
+    ) {
+        let definition = &restored.objects[&object_id].trigger_definitions[0].definition;
+        assert_eq!(definition.valid_source.as_ref(), Some(actor));
+        assert_eq!(definition.valid_card.as_ref(), victim);
+    }
+
+    #[test]
+    fn declared_resolution_wires_migrate_only_legacy_exploited_roles() {
+        let actor = TargetFilter::SpecificObject {
+            id: ObjectId(9_171),
+        };
+        let victim = TargetFilter::SpecificObject {
+            id: ObjectId(9_172),
+        };
+        let (state, object_id) = state_with_exploited_trigger_roles(
+            GameState::new_two_player(42),
+            actor.clone(),
+            Some(victim.clone()),
+        );
+        let current = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("current resolution wire serializes");
+
+        assert_eq!(
+            current["resolution_state_version"],
+            serde_json::Value::from(RESOLUTION_STATE_WIRE_VERSION)
+        );
+        let restored_current = serde_json::from_value::<ResolutionStateWire>(current.clone())
+            .expect("declared v3 payload restores")
+            .into_game_state();
+        assert_restored_exploit_roles(&restored_current, object_id, &actor, Some(&victim));
+
+        for version in [1_u64, 2_u64] {
+            let mut legacy = current.clone();
+            legacy["resolution_state_version"] = serde_json::Value::from(version);
+            if version == 1 {
+                legacy
+                    .as_object_mut()
+                    .expect("wire is an object")
+                    .remove("resolution_frames");
+            }
+            downgrade_exploited_roles(&mut legacy);
+            let restored = serde_json::from_value::<ResolutionStateWire>(legacy)
+                .unwrap_or_else(|error| panic!("declared v{version} payload restores: {error}"))
+                .into_game_state();
+            assert_restored_exploit_roles(&restored, object_id, &actor, None);
+        }
+    }
+
+    #[test]
+    fn unversioned_ambiguous_exploited_roles_fail_closed_before_carrier_inference() {
+        let actor = TargetFilter::SpecificObject {
+            id: ObjectId(9_173),
+        };
+        let victim = TargetFilter::SpecificObject {
+            id: ObjectId(9_174),
+        };
+        let (state, _) =
+            state_with_exploited_trigger_roles(GameState::new_two_player(42), actor, Some(victim));
+        let bare_current = serde_json::to_value(state).expect("bare state serializes");
+        assert!(bare_current.get("resolution_state_version").is_none());
+        assert!(bare_current.get("resolution_stack").is_none());
+        assert!(contains_ambiguous_serialized_exploited_trigger_definition(
+            &bare_current
+        ));
+
+        let error = serde_json::from_value::<PersistedGameState>(bare_current.clone())
+            .expect_err("unversioned v3 role layout is ambiguous")
+            .to_string();
+        assert!(error.contains(
+            "unversioned raw resolution state contains an Exploited trigger with ambiguous role layout"
+        ));
+
+        let mut old_layout = bare_current;
+        downgrade_exploited_roles(&mut old_layout);
+        assert!(contains_ambiguous_serialized_exploited_trigger_definition(
+            &old_layout
+        ));
+        let error = serde_json::from_value::<PersistedGameState>(old_layout)
+            .expect_err("unversioned legacy role layout is equally ambiguous")
+            .to_string();
+        assert!(error.contains(
+            "unversioned raw resolution state contains an Exploited trigger with ambiguous role layout"
+        ));
+    }
+
+    #[test]
+    fn unversioned_safe_exploited_roles_restore_with_or_without_a_live_stack() {
+        let actor = TargetFilter::SpecificObject {
+            id: ObjectId(9_175),
+        };
+        for (label, state) in [
+            ("empty stack", GameState::new_two_player(42)),
+            ("live stack", parked_spell_resolution_fixture()),
+        ] {
+            let (state, object_id) = state_with_exploited_trigger_roles(state, actor.clone(), None);
+            let bare = serde_json::to_value(state).expect("bare state serializes");
+            assert!(bare.get("resolution_state_version").is_none(), "{label}");
+            assert_eq!(
+                bare.get("resolution_stack").is_some(),
+                label == "live stack"
+            );
+            assert!(
+                !contains_ambiguous_serialized_exploited_trigger_definition(&bare),
+                "{label}"
+            );
+            let restored = serde_json::from_value::<PersistedGameState>(bare)
+                .unwrap_or_else(|error| panic!("{label} safe role layout restores: {error}"))
+                .into_game_state_unchecked();
+            assert_restored_exploit_roles(&restored, object_id, &actor, None);
+        }
+    }
 
     #[test]
     fn persisted_legacy_tap_effects_migrate_only_effect_payloads() {
@@ -29640,7 +30659,7 @@ mod tests {
         // `GameState`'s derived `Serialize` — the unversioned raw writer whose
         // shape `declare_raw_resolution_wire` infers from. NOT
         // `to_value(PersistedGameState::Raw(..))`, which routes through
-        // `ResolutionStateWire::to_value` and emits a DECLARED v2 wire that would
+        // `ResolutionStateWire::to_value` and emits a DECLARED current wire that would
         // take the inference's early return and make this test vacuous.
         let wire = serde_json::to_value(&state).expect("the bare GameState serializes");
         assert!(
@@ -29654,7 +30673,7 @@ mod tests {
         );
         assert!(
             wire.get("resolution_frames").is_none(),
-            "the raw writer must not emit the v2 frame carrier"
+            "the raw writer must not emit the typed-frame carrier"
         );
 
         let restored = serde_json::from_value::<PersistedGameState>(wire)
@@ -29701,9 +30720,10 @@ mod tests {
     }
 
     /// V6 + V7. The unlabeled-carrier allowance is **not** widened to the raw
-    /// ingress by the inference. A raw payload that now classifies as v2 and
-    /// carries a triggered `resolving_stack_entry` with no firing carrier is
-    /// refused, at BOTH a Priority rest and a non-Priority prompt rest.
+    /// ingress by the inference. A raw payload that now classifies as the
+    /// current wire and carries a triggered `resolving_stack_entry` with no
+    /// firing carrier is refused, at BOTH a Priority rest and a non-Priority
+    /// prompt rest.
     ///
     /// What this prevents: `migrate_legacy_trigger_firing_carriers` fabricates
     /// `TriggerFiring::LegacyDelayed` for an unlabeled triggered carrier when
@@ -29715,7 +30735,7 @@ mod tests {
     /// for an ordinary trigger is a rules error, so the inference must leave the
     /// allowance exactly where it was.
     #[test]
-    fn raw_inferred_v2_refuses_an_unlabeled_triggered_carrier() {
+    fn raw_inferred_current_wire_refuses_an_unlabeled_triggered_carrier() {
         let priority_rest = parked_frame_on_triggered_carrier_fixture();
 
         // The non-Priority sibling. `SpellResolution` is an `AfterChild` frame,
@@ -29737,7 +30757,7 @@ mod tests {
             let labeled = serde_json::to_value(&state).expect("the bare GameState serializes");
             assert!(
                 labeled.get("resolution_stack").is_some(),
-                "{label}: the fixture must reach the inferred-v2 classification"
+                "{label}: the fixture must reach the inferred-current-wire classification"
             );
 
             // Paired positive reach-guard, asserted FIRST: the identical payload
@@ -29796,7 +30816,14 @@ mod tests {
                 1_u64,
                 "v1 resolution state must not contain resolution_stack",
             ),
-            (2_u64, "v2 resolution state is missing resolution_frames"),
+            (
+                2_u64,
+                "typed-frame resolution state is missing resolution_frames",
+            ),
+            (
+                RESOLUTION_STATE_WIRE_VERSION,
+                "typed-frame resolution state is missing resolution_frames",
+            ),
         ] {
             let declared = declare(version);
             let raw_error = serde_json::from_value::<PersistedGameState>(declared.clone())
@@ -29991,7 +31018,7 @@ mod tests {
     /// that fixture sets a triggered `resolving_stack_entry` AND a live firing,
     /// so extending it yields the coherent shape, which the client wire already
     /// refuses without any of this — see
-    /// `raw_inferred_v2_refuses_an_unlabeled_triggered_carrier`.
+    /// `raw_inferred_current_wire_refuses_an_unlabeled_triggered_carrier`.
     fn parked_continuation_fixture(stashed: Option<TriggerFiring>) -> GameState {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
@@ -30612,7 +31639,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_continuation_zone_change_event_reconciles_in_serialized_frame() {
+    fn current_continuation_zone_change_event_reconciles_in_serialized_frame() {
         let mut state = trigger_continuation_fixture();
         state.turn_number = 19;
         let record = persisted_zone_change_record(ObjectId(9_172), state.turn_number, 0);
@@ -30633,14 +31660,14 @@ mod tests {
         state.park_ability_continuation(continuation);
 
         let mut persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
-            .expect("v2 frame fixture serializes");
+            .expect("current frame fixture serializes");
         erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
-            .expect("v2 frame event reconciles before materialization")
+            .expect("current frame event reconciles before materialization")
             .into_game_state_unchecked();
         let GameEvent::ZoneChanged { record, .. } = &restored
             .active_ability_continuation()
-            .expect("v2 frame restores as an active continuation")
+            .expect("current frame restores as an active continuation")
             .trigger_context
             .as_ref()
             .expect("continuation retains its trigger context")
@@ -30653,7 +31680,7 @@ mod tests {
         assert_eq!(
             (record.recorded_turn_number, record.turn_zone_change_index),
             (19, 0),
-            "serialized v2 frame event is reconciled to its current ledger occurrence"
+            "serialized current frame event is reconciled to its ledger occurrence"
         );
     }
 
@@ -30661,7 +31688,7 @@ mod tests {
     fn direct_resolution_wire_rejects_unlabeled_active_trigger_carriers() {
         let state = normal_trigger_firing_fixture();
         let wire = serde_json::to_value(ResolutionStateWire::from_game_state(state))
-            .expect("coherent trigger fixture serializes as v2 wire");
+            .expect("coherent trigger fixture serializes through the current wire");
 
         let mut missing_pending = wire.clone();
         missing_pending
@@ -30707,7 +31734,7 @@ mod tests {
         continuation_state.park_ability_continuation(continuation);
         let continuation_wire =
             serde_json::to_value(ResolutionStateWire::from_game_state(continuation_state))
-                .expect("continuation fixture serializes as v2 wire");
+                .expect("continuation fixture serializes through the current wire");
         let continuation_error = serde_json::from_value::<ResolutionStateWire>(continuation_wire)
             .expect_err("direct wire must reject an unlabeled active continuation");
         assert!(
@@ -30783,6 +31810,124 @@ mod tests {
         assert!(
             aggregate_error.to_string().contains("mode"),
             "expected a missing-`mode` deserialize error, got: {aggregate_error}"
+        );
+    }
+
+    /// #8698 review follow-up (matthewevans): `PendingManaAbility::chosen_tappers`
+    /// changed from `Vec<ObjectId>` to `Option<Vec<ObjectId>>` so an ANSWERED
+    /// zero-tapper selection of the CR 107.3a X-sentinel form (Hazel of the
+    /// Rootbloom's `Tap X untapped tokens you control` with X=0) is
+    /// distinguishable from a selection stage nobody has answered yet. The
+    /// field intentionally carries NO `#[serde(default)]` and no
+    /// `skip_serializing_if`, and its `deserialize_with` is what makes the
+    /// absent field an error at all (see
+    /// `deserialize_required_chosen_tappers`), so this is a deliberate
+    /// wire-compatibility break,
+    /// backed by `lobby_broker::PROTOCOL_VERSION` 68 / `WIRE_PROTOCOL_VERSION`
+    /// 51 (not a backward-compatible decode shim) — the same convention entry
+    /// 23 (`PayableResource::ManaGeneric`) established and
+    /// `tap_creatures_pre_mode_wire_shape_is_rejected` above pins for the
+    /// sibling `PayCostKind::TapCreatures::mode` retype.
+    ///
+    /// This test proves the break is a clean, non-silent deserialize failure
+    /// through the actual production restore path (`PersistedGameState`, the
+    /// same type `server-core::session::PersistedSession.state` uses) rather
+    /// than an inversion: without it, a pre-68 payload that OMITS the field —
+    /// exactly what the old `Vec<ObjectId>` emitted for an empty selection
+    /// under `skip_serializing_if = "Vec::is_empty"` — would decode to `None`
+    /// and re-surface the same `WaitingFor::PayCost` forever, the livelock this
+    /// PR fixes. The answered-zero round-trip asserted first is the reach-guard:
+    /// without it, "rejects the old shape" would also be satisfied by a fixture
+    /// that fails to deserialize for some unrelated reason.
+    #[test]
+    fn chosen_tappers_pre_option_wire_shape_is_rejected() {
+        let state_with = |chosen_tappers: Option<Vec<ObjectId>>| {
+            let mut state = GameState::new_two_player(42);
+            state.waiting_for = WaitingFor::PayCost {
+                player: PlayerId(0),
+                kind: PayCostKind::TapCreatures {
+                    mode: TapCreaturesSelectionMode::Fixed,
+                },
+                choices: vec![ObjectId(1)],
+                count: 1,
+                min_count: 0,
+                resume: CostResume::ManaAbility {
+                    mana_ability: Box::new(PendingManaAbility {
+                        player: PlayerId(0),
+                        source_id: ObjectId(1),
+                        ability_index: None,
+                        rules_execution_node: None,
+                        ability_snapshot: None,
+                        color_override: None,
+                        resume: ManaAbilityResume::Priority,
+                        cost_move_resume: None,
+                        chosen_tappers,
+                        chosen_discards: Vec::new(),
+                        chosen_mana_payment: None,
+                        chosen_counter_count: None,
+                        chosen_x: None,
+                        collected_evidence: Vec::new(),
+                        chosen_exiled: Vec::new(),
+                        chosen_sacrificed_battlefield: Vec::new(),
+                        cost_paid_object: None,
+                        batch_siblings: Vec::new(),
+                    }),
+                },
+            };
+            state
+        };
+
+        // The value the pre-68 wire silently inverted: an ANSWERED zero-tapper
+        // payment. New->new must round-trip it as `Some(vec![])`, not `None`.
+        let answered_zero = serde_json::to_value(state_with(Some(Vec::new())))
+            .expect("answered zero-tapper fixture state serializes");
+        let restored = match serde_json::from_value::<PersistedGameState>(answered_zero.clone())
+            .expect("a payload that carries `chosen_tappers` restores")
+        {
+            PersistedGameState::Raw(state) => state,
+            PersistedGameState::Trusted(_) => panic!("raw fixture decoded as a trusted envelope"),
+        };
+        match &restored.waiting_for {
+            WaitingFor::PayCost {
+                resume: CostResume::ManaAbility { mana_ability },
+                ..
+            } => assert_eq!(
+                mana_ability.chosen_tappers,
+                Some(Vec::new()),
+                "an answered zero-tapper selection must not restore as unanswered"
+            ),
+            other => panic!("expected a mana-ability PayCost wait, got {other:?}"),
+        }
+
+        // No `skip_serializing_if`, so the unanswered state is now STATED on
+        // the wire rather than inferred from an absent field.
+        let unanswered =
+            serde_json::to_value(state_with(None)).expect("unanswered fixture state serializes");
+        // `.get()`, not `Value` indexing: indexing a MISSING key also yields
+        // `Value::Null`, which would make this probe vacuous against exactly
+        // the `skip_serializing_if = "Option::is_none"` it exists to refuse.
+        assert_eq!(
+            unanswered["waiting_for"]["data"]["resume"]["ManaAbility"]
+                .as_object()
+                .expect("the ManaAbility resume payload is a JSON object")
+                .get("chosen_tappers"),
+            Some(&serde_json::Value::Null),
+            "`chosen_tappers` must be serialized unconditionally, `None` included: \
+             a `skip_serializing_if` here would re-emit the pre-68 omitted shape \
+             this break exists to reject"
+        );
+
+        // The pre-68 unanswered wire shape: the field omitted entirely.
+        let mut legacy_omitted = answered_zero;
+        legacy_omitted["waiting_for"]["data"]["resume"]["ManaAbility"]
+            .as_object_mut()
+            .expect("the ManaAbility resume payload is a JSON object")
+            .remove("chosen_tappers");
+        let omitted_error = serde_json::from_value::<PersistedGameState>(legacy_omitted)
+            .expect_err("pre-68 omitted-`chosen_tappers` payload must fail to deserialize");
+        assert!(
+            omitted_error.to_string().contains("chosen_tappers"),
+            "expected a missing-`chosen_tappers` deserialize error, got: {omitted_error}"
         );
     }
 
@@ -30876,7 +32021,8 @@ mod tests {
     fn direct_v2_resolution_wire_rejects_orphaned_trigger_continuation() {
         let state = trigger_continuation_fixture();
         let mut wire = serde_json::to_value(ResolutionStateWire::from_game_state(state))
-            .expect("v2 fixture serializes");
+            .expect("current fixture serializes before v2 downgrade");
+        wire["resolution_state_version"] = serde_json::Value::from(2_u64);
         remove_resolving_trigger_carrier(&mut wire);
 
         let error = serde_json::from_value::<ResolutionStateWire>(wire)
@@ -30911,7 +32057,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_v2_resolution_wire_preserves_normal_continuations() {
+    fn direct_current_resolution_wire_preserves_normal_continuations() {
         let mut state = normal_trigger_firing_fixture();
         let continuation = PendingContinuation::new(
             state
@@ -33946,6 +35092,7 @@ mod tests {
                 base_cost: None,
                 declared_mana_additions: Vec::new(),
                 activation_cost: None,
+                deferred_random_discard_cost: None,
                 activation_ability_index: None,
                 pending_loyalty_activation_player: None,
                 target_constraints: vec![],
@@ -34376,6 +35523,7 @@ mod tests {
             base_cost: None,
             declared_mana_additions: Vec::new(),
             activation_cost: None,
+            deferred_random_discard_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
@@ -34483,7 +35631,7 @@ mod tests {
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
-                    chosen_tappers: Vec::new(),
+                    chosen_tappers: None,
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
                     chosen_counter_count: None,
@@ -35733,7 +36881,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_state_decodes_v1_at_the_boundary_and_rewrites_v2_only() {
+    fn persisted_state_decodes_v1_at_the_boundary_and_rewrites_current_only() {
         let mut v1 =
             serde_json::to_value(GameState::new_two_player(43)).expect("serialize v1 baseline");
         v1["pending_multi_draw"] = serde_json::to_value(PendingMultiDraw {
@@ -35756,20 +36904,20 @@ mod tests {
             Some(2)
         );
 
-        let raw_v2 = serde_json::to_value(restored).expect("restored raw state serializes");
+        let raw_current = serde_json::to_value(restored).expect("restored raw state serializes");
         assert_eq!(
-            raw_v2["resolution_state_version"],
-            serde_json::Value::from(2)
+            raw_current["resolution_state_version"],
+            serde_json::Value::from(RESOLUTION_STATE_WIRE_VERSION)
         );
-        assert!(raw_v2.get("resolution_frames").is_some());
-        assert!(raw_v2.get("pending_multi_draw").is_none());
+        assert!(raw_current.get("resolution_frames").is_some());
+        assert!(raw_current.get("pending_multi_draw").is_none());
 
-        let trusted_v2 = serde_json::to_value(PersistedGameState::capture(resumed))
+        let trusted_current = serde_json::to_value(PersistedGameState::capture(resumed))
             .expect("trusted state serializes");
-        let trusted_state = &trusted_v2["state"];
+        let trusted_state = &trusted_current["state"];
         assert_eq!(
             trusted_state["resolution_state_version"],
-            serde_json::Value::from(2)
+            serde_json::Value::from(RESOLUTION_STATE_WIRE_VERSION)
         );
         assert!(trusted_state.get("resolution_frames").is_some());
         assert!(trusted_state.get("pending_multi_draw").is_none());

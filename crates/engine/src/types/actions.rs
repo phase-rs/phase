@@ -313,6 +313,15 @@ pub enum GameAction {
     SelectCoinFlips {
         keep_indices: Vec<usize>,
     },
+    /// CR 706.6: Die-roll ignore choice — indices into `results` the roller
+    /// IGNORES (the rest survive). Note the inversion from
+    /// [`GameAction::SelectCoinFlips`], which names the flips KEPT: CR 705.1
+    /// instructs the player to keep one, while CR 706.6 instructs them to ignore
+    /// the lowest. Length must equal `ignore_count`, and every index must be one
+    /// the engine offered in `ignorable_indices`.
+    SelectDieRolls {
+        ignore_indices: Vec<usize>,
+    },
     /// CR 400.11 + CR 406.3: Player commits one or more selections from the
     /// offered outside-game pool. Each selection is a discriminated source —
     /// a sideboard slot (wishboard) or a face-up exile object (Karn / Coax).
@@ -1899,6 +1908,7 @@ impl GameAction {
             | Self::SpendPoolMana { .. }
             | Self::UnspendPoolMana { .. }
             | Self::SelectCoinFlips { .. }
+            | Self::SelectDieRolls { .. }
             | Self::ChooseReplacement { .. }
             | Self::ChooseEntryController { .. }
             | Self::OrderTriggers { .. }
@@ -2234,6 +2244,7 @@ impl GameAction {
             | GameAction::SelectCards { .. }
             | GameAction::ChooseRemoveCounterCostDistribution { .. }
             | GameAction::SelectCoinFlips { .. }
+            | GameAction::SelectDieRolls { .. }
             | GameAction::ChooseOutsideGameCards { .. }
             | GameAction::SelectTargets { .. }
             | GameAction::ChooseTarget { .. }

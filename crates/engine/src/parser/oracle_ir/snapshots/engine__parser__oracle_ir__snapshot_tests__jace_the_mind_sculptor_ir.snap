@@ -573,6 +573,9 @@ expression: "&ir"
                     "destination": "Library",
                     "target": {
                       "type": "ParentTargetController"
+                    },
+                    "library_shuffle": {
+                      "type": "TerminalShuffle"
                     }
                   },
                   "duration": null,

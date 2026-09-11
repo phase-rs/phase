@@ -241,6 +241,32 @@ pub(crate) fn subtype_matches_core_types(
     })
 }
 
+/// CR 205.3: Remove every subtype belonging to `set`. Creature-type membership
+/// comes from the game's runtime registry; the other subtype sets have fixed
+/// CR-defined membership. Shared by layered and copy-value applications so a
+/// copy exception removes the same subtype set it would remove in layer 4.
+pub(crate) fn remove_subtype_set(
+    subtypes: &mut Vec<String>,
+    set: SubtypeSet,
+    all_creature_types: &[String],
+) {
+    match set {
+        SubtypeSet::Creature => subtypes.retain(|subtype| {
+            !all_creature_types
+                .iter()
+                .any(|creature_type| creature_type == subtype)
+        }),
+        SubtypeSet::Land => subtypes.retain(|subtype| !is_land_subtype(subtype)),
+        SubtypeSet::Artifact
+        | SubtypeSet::Enchantment
+        | SubtypeSet::Planeswalker
+        | SubtypeSet::Spell
+        | SubtypeSet::Battle => {
+            subtypes.retain(|subtype| noncreature_subtype_set(subtype) != Some(set));
+        }
+    }
+}
+
 /// Remove transient effects that have expired based on their duration.
 /// Called during cleanup (end of turn) to prune `UntilEndOfTurn` effects.
 /// CR 514.2: End-of-turn continuous effects expire at cleanup.
@@ -4016,6 +4042,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another
@@ -7019,10 +7046,20 @@ pub(crate) fn gather_transient_continuous_effects(
             // characteristic. Grafting it onto each affected object would let
             // `battlefield_active_statics` see it too and double-apply the
             // discount, so skip it here for the same reason.
+            // CR 601.2b + CR 118.9: `CastFromHandFree` joins them for the same
+            // reason. It is read directly off the TCE by
+            // `casting::transient_cast_free_permission` — the transient arm of
+            // the single free-cast authority
+            // `casting::unlimited_hand_cast_free_source` — and grafting it onto
+            // every affected object would additionally expose it to
+            // `iter_cast_free_permission_source_ids`, giving one grant two
+            // sources.
             if matches!(
                 modification,
                 ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MayLookAtFaceDown | StaticMode::ReduceAbilityCost { .. },
+                    mode: StaticMode::MayLookAtFaceDown
+                        | StaticMode::ReduceAbilityCost { .. }
+                        | StaticMode::CastFromHandFree { .. },
                 }
             ) {
                 continue;
@@ -7116,6 +7153,7 @@ fn transient_duration_condition(tce: &TransientContinuousEffect) -> Option<&Stat
 /// [`any_active_static_condition_perturbed_by_entry`] in this module, six
 /// static-mode/protection queries in `static_abilities`, plus
 /// `casting::transient_granted_spell_keywords_for`,
+/// `casting::transient_cast_free_permission`,
 /// `turns::scan_step_end_mana_handlers` and
 /// `visibility::viewer_may_look_at_face_down`. All but the first evaluate with
 /// `evaluate_condition` rather than `source_condition_gate_passes` — the
@@ -8980,27 +9018,7 @@ fn apply_continuous_effect_filtered(
             // against the runtime-populated `state.all_creature_types` — the
             // same source `AddAllCreatureTypes` uses below.
             ContinuousModification::RemoveAllSubtypes { set } => {
-                match set {
-                    SubtypeSet::Creature => {
-                        obj.card_types
-                            .subtypes
-                            .retain(|s| !all_creature_types.iter().any(|c| c == s));
-                    }
-                    SubtypeSet::Land => {
-                        // CR 205.3i: land-type membership via the basic/non-basic
-                        // land-subtype classification.
-                        obj.card_types.subtypes.retain(|s| !is_land_subtype(s));
-                    }
-                    SubtypeSet::Artifact
-                    | SubtypeSet::Enchantment
-                    | SubtypeSet::Planeswalker
-                    | SubtypeSet::Spell
-                    | SubtypeSet::Battle => {
-                        obj.card_types
-                            .subtypes
-                            .retain(|s| noncreature_subtype_set(s) != Some(*set));
-                    }
-                }
+                remove_subtype_set(&mut obj.card_types.subtypes, *set, &all_creature_types);
             }
             // CR 205.4 + CR 707.9d: "in addition to its other types" — append
             // the supertype if absent. Idempotent.

@@ -471,6 +471,12 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::SelectCoinFlips { keep_indices } => {
             bound_list("SelectCoinFlips.keep_indices", keep_indices.len())?;
         }
+        // CR 706.6: a client-supplied set of die-roll indices to ignore. The
+        // engine re-validates every index against `ignorable_indices`; this is
+        // the coarse WS-level length bound, mirroring the coin-flip sibling.
+        GameAction::SelectDieRolls { ignore_indices } => {
+            bound_list("SelectDieRolls.ignore_indices", ignore_indices.len())?;
+        }
         GameAction::SelectModes { indices } => {
             bound_list("SelectModes.indices", indices.len())?;
         }

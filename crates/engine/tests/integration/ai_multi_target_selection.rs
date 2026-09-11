@@ -57,7 +57,7 @@ fn mana_ability_resume() -> CostResume {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,

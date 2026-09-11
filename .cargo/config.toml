@@ -5,6 +5,7 @@ wasm-release = "build --package engine-wasm --target wasm32-unknown-unknown --re
 test-all = "nextest run --workspace --features engine/proptest"
 clippy-strict = "clippy --all-targets -- -D warnings"
 export-cards = "run --profile tool --features cli --bin oracle-gen --"
+deck-check = "run --profile tool -p phase-engine --features cli --bin deck-check --"
 serve = "run --release --bin phase-server"
 coverage = "run --profile tool --bin coverage-report -- data/"
 parser-gaps = "run --profile tool --bin parser-gap-analyzer -- data/"

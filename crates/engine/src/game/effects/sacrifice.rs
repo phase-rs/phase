@@ -636,6 +636,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::ability_utils::build_target_slots;
     use crate::game::effects::resolve_ability_chain;
     use crate::game::zones::create_object;
     use crate::types::ability::{
@@ -1063,7 +1064,8 @@ mod tests {
     }
 
     // CR 701.21a: When the target filter scopes sacrifice to opponents
-    // (ControllerRef::Opponent) or a target player (ControllerRef::TargetPlayer),
+    // (ControllerRef::Opponent) or a target player/opponent
+    // (ControllerRef::TargetPlayer/TargetOpponent),
     // the affected player — not the ability controller — both provides the
     // eligible permanent pool and makes the choice.
     fn make_scoped_sacrifice_ability(
@@ -1163,6 +1165,58 @@ mod tests {
             WaitingFor::EffectZoneChoice { player, cards, .. } => {
                 assert_eq!(*player, PlayerId(1));
                 assert!(cards.contains(&tp_a) && cards.contains(&tp_b));
+                assert_eq!(cards.len(), 2);
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+    }
+
+    /// CR 115.1a/c/d + CR 701.21a: A targeted-opponent edict exposes only the
+    /// opponent as its player target, then routes the sacrifice choice to that
+    /// selected opponent.
+    #[test]
+    fn target_opponent_scope_excludes_self_and_routes_choice_to_target() {
+        let mut state = GameState::new_two_player(42);
+        let own = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mine".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "OppA".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "OppB".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = make_scoped_sacrifice_ability(ControllerRef::TargetOpponent, vec![]);
+
+        let slots = build_target_slots(&state, &ability).expect("target slots build");
+        assert_eq!(slots.len(), 1, "the edict has one player target slot");
+        assert_eq!(
+            slots[0].legal_targets,
+            vec![TargetRef::Player(PlayerId(1))],
+            "the ability controller must not be a legal target opponent"
+        );
+
+        ability.targets = vec![TargetRef::Player(PlayerId(1))];
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(1), "the targeted opponent chooses");
+                assert!(cards.contains(&opp_a) && cards.contains(&opp_b));
+                assert!(!cards.contains(&own));
                 assert_eq!(cards.len(), 2);
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),

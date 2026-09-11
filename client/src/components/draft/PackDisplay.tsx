@@ -35,6 +35,11 @@ export interface PackDropAdmission {
   readonly interactionGeneration: number;
 }
 
+export interface PackDragPreviewImage {
+  readonly src: string | null;
+  readonly alt: string;
+}
+
 interface PackDropSourceCommon {
   readonly authorityId: string;
   /** The rendered pack card which originated this drag, distinct from effect authority. */
@@ -44,6 +49,7 @@ interface PackDropSourceCommon {
   readonly interactionGeneration: number;
   readonly previewWidth: number;
   readonly previewHeight: number;
+  readonly previewImages: readonly PackDragPreviewImage[];
   readonly onAdmission: (admission: PackDropAdmission) => void;
   readonly onSettled: (result: PackDropSettlement) => void;
 }
@@ -169,7 +175,22 @@ interface ScheduledVisual {
 }
 
 const DOUBLE_TAP_DELAY_MS = 350;
+const TOUCH_PICK_COMPATIBILITY_WINDOW_MS = 500;
 const TOUCH_TAP_MOVE_THRESHOLD_PX = 10;
+const POINTER_SELECTION_CLICK_TIMEOUT_MS = 500;
+
+interface PendingPointerSelection {
+  readonly pointerId: number;
+  readonly pointerType: string;
+  readonly expiresAt: number;
+}
+
+interface TouchPickSuppression {
+  readonly sourceInstanceId: string;
+  readonly step: DraftStep;
+  readonly interactionGeneration: number;
+  readonly expiresAt: number;
+}
 
 const draftStep = (view: DraftPlayerView): DraftStep => ({
   packNumber: view.current_pack_number,
@@ -196,7 +217,7 @@ function RetainedPackCard({ entry, fallbackWidth }: { entry: RetainedCard; fallb
       className="shrink-0 overflow-hidden rounded-md ring-1 ring-amber-300/50"
     >
       {entry.imageSrc === null ? (
-        <span className="flex h-full items-center justify-center text-xs text-white/60">{entry.card.name}</span>
+        <span aria-hidden="true" className="block h-full w-full bg-neutral-900" />
       ) : (
         <img src={entry.imageSrc} alt={entry.card.name} draggable={false} className="h-full w-full object-contain" />
       )}
@@ -205,7 +226,7 @@ function RetainedPackCard({ entry, fallbackWidth }: { entry: RetainedCard; fallb
 }
 
 function PackCard({
-  card, state, width, locked, local, doubleTapPickEnabled, doubleClickPickEnabled, allowTouchPackDrag, desktopLayout, onSelect, onDestination, onDoubleClickPick, onHover, onImageSource, makeDropSource,
+  card, state, width, locked, local, doubleTapPickEnabled, doubleClickPickEnabled, allowTouchPackDrag, desktopLayout, onSelect, onDestination, onDoubleClickPick, onConsumeTouchPickCompatibility, onHover, onImageSource, makeDropSource,
 }: {
   card: DraftCardInstance;
   state: CardVisualState;
@@ -218,9 +239,10 @@ function PackCard({
   desktopLayout: boolean;
   onSelect(): void;
   onDestination(destination: DraftPickDestination): void;
-  onDoubleClickPick(): void;
+  onDoubleClickPick(inputKind: "touch" | "mouse"): void;
+  onConsumeTouchPickCompatibility(kind: "touch-pointer" | "click" | "double-click", detail?: number): boolean;
   onHover(info: CardHoverInfo | null): void;
-  onImageSource(instanceId: string, src: string): void;
+  onImageSource(instanceId: string, image: PackDragPreviewImage): void;
   makeDropSource(): PackDropSource | null;
 }) {
   const { t } = useTranslation("draft");
@@ -232,11 +254,32 @@ function PackCard({
   const touchMoved = useRef(false);
   const lastTouchTapAt = useRef<number | null>(null);
   const ignoreCompatibilityClickUntil = useRef(0);
+  const pendingPointerSelection = useRef<PendingPointerSelection | null>(null);
+  const releasedPointerId = useRef<number | null>(null);
   const longPress = useLongPress(() => onHover(cardInfo(card)), { delay: 500 });
 
   useEffect(() => {
-    if (src !== null) onImageSource(card.instance_id, src);
-  }, [card.instance_id, onImageSource, src]);
+    onImageSource(card.instance_id, { src, alt: displayName });
+  }, [card.instance_id, displayName, onImageSource, src]);
+
+  useEffect(() => {
+    if (locked) pendingPointerSelection.current = null;
+  }, [locked]);
+
+  const consumePointerSelectionClick = (event: ReactMouseEvent<HTMLElement>) => {
+    const pending = pendingPointerSelection.current;
+    if (pending === null || event.detail === 0) return false;
+    if (Date.now() > pending.expiresAt) {
+      pendingPointerSelection.current = null;
+      return false;
+    }
+    const pointerEvent = event.nativeEvent as MouseEvent & { pointerId?: number; pointerType?: string };
+    if (
+      (pointerEvent.pointerId !== undefined && pointerEvent.pointerId !== pending.pointerId)
+      || (pointerEvent.pointerType !== undefined && pointerEvent.pointerType !== pending.pointerType)
+    ) return false;
+    return true;
+  };
 
   return (
     <motion.div
@@ -248,6 +291,7 @@ function PackCard({
       onMouseLeave={() => onHover(null)}
       onPointerDown={(event) => {
         if (event.pointerType === "touch") {
+          if (onConsumeTouchPickCompatibility("touch-pointer")) return;
           if (!locked) {
             touchStart.current = { x: event.clientX, y: event.clientY };
             touchMoved.current = false;
@@ -256,6 +300,23 @@ function PackCard({
             if (source !== null) local?.dragController.handlePointerDown(event, source, true);
           }
         } else {
+          const existingPendingSelection = pendingPointerSelection.current;
+          const samePendingPointer = existingPendingSelection !== null
+            && Date.now() <= existingPendingSelection.expiresAt
+            && existingPendingSelection.pointerId === event.pointerId
+            && existingPendingSelection.pointerType === event.pointerType;
+          if (!samePendingPointer) pendingPointerSelection.current = null;
+          releasedPointerId.current = null;
+          if (desktopLayout && !locked && state !== "selected" && event.isPrimary && event.button === 0) {
+            onSelect();
+            pendingPointerSelection.current = {
+              pointerId: event.pointerId,
+              pointerType: event.pointerType,
+              expiresAt: Date.now() + POINTER_SELECTION_CLICK_TIMEOUT_MS,
+            };
+          } else {
+            pendingPointerSelection.current = null;
+          }
           const source = makeDropSource();
           if (source !== null) local?.dragController.handlePointerDown(event, source);
         }
@@ -265,6 +326,7 @@ function PackCard({
           local?.dragController.handlePointerMove(event);
           return;
         }
+        if (onConsumeTouchPickCompatibility("touch-pointer")) return;
         const start = touchStart.current;
         if (start !== null) {
           const deltaX = event.clientX - start.x;
@@ -279,6 +341,12 @@ function PackCard({
       onPointerUp={(event) => {
         if (event.pointerType !== "touch") {
           local?.dragController.handlePointerUp(event);
+          releasedPointerId.current = event.pointerId;
+          return;
+        }
+        if (onConsumeTouchPickCompatibility("touch-pointer")) {
+          touchStart.current = null;
+          touchMoved.current = false;
           return;
         }
         const longPressFired = longPress.firedRef.current;
@@ -295,7 +363,7 @@ function PackCard({
           && now - lastTouchTapAt.current <= DOUBLE_TAP_DELAY_MS
         ) {
           lastTouchTapAt.current = null;
-          onDoubleClickPick();
+          onDoubleClickPick("touch");
           return;
         }
         lastTouchTapAt.current = now;
@@ -303,27 +371,43 @@ function PackCard({
       }}
       onPointerCancel={(event) => {
         if (event.pointerType === "touch") {
+          if (onConsumeTouchPickCompatibility("touch-pointer")) {
+            touchStart.current = null;
+            touchMoved.current = false;
+            return;
+          }
           touchStart.current = null;
           touchMoved.current = false;
           if (allowTouchPackDrag) local?.dragController.handlePointerCancel(event);
           longPress.handlers.onPointerCancel(event);
         } else {
+          if (pendingPointerSelection.current?.pointerId === event.pointerId) pendingPointerSelection.current = null;
           local?.dragController.handlePointerCancel(event);
         }
       }}
-      onLostPointerCapture={(event) => local?.dragController.handleLostPointerCapture(event)}
+      onLostPointerCapture={(event) => {
+        if (event.pointerType === "touch" && onConsumeTouchPickCompatibility("touch-pointer")) return;
+        if (
+          pendingPointerSelection.current?.pointerId === event.pointerId
+          && releasedPointerId.current !== event.pointerId
+        ) pendingPointerSelection.current = null;
+        local?.dragController.handleLostPointerCapture(event);
+      }}
       onContextMenu={longPress.handlers.onContextMenu}
       onClick={(event) => {
         // The desktop drag controller captures the pointer on this shell. A
         // browser may consequently target its trailing click here instead of
         // the nested activation button; accept only that retargeted case.
         if (locked || !desktopLayout || event.target !== event.currentTarget) return;
+        if (onConsumeTouchPickCompatibility("click", event.detail)) return;
+        if (consumePointerSelectionClick(event)) return;
         if (!longPress.firedRef.current && !local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "click", card.instance_id))) onSelect();
       }}
       onDoubleClick={(event) => {
         const target = event.target as HTMLElement;
         if (target !== event.currentTarget && target.closest("[data-pack-card-activation]") === null) return;
-        if (!local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "double-click", card.instance_id)) && doubleClickPickEnabled) onDoubleClickPick();
+        if (onConsumeTouchPickCompatibility("double-click", event.detail)) return;
+        if (!local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "double-click", card.instance_id)) && doubleClickPickEnabled) onDoubleClickPick("mouse");
       }}
     >
       <button
@@ -332,7 +416,9 @@ function PackCard({
         aria-pressed={state === "selected"}
         disabled={locked}
         onClick={(event) => {
-          if (Date.now() < ignoreCompatibilityClickUntil.current) return;
+          if (onConsumeTouchPickCompatibility("click", event.detail)) return;
+          if (consumePointerSelectionClick(event)) return;
+          if (event.detail !== 0 && Date.now() < ignoreCompatibilityClickUntil.current) return;
           if (!longPress.firedRef.current && !local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "click", card.instance_id))) onSelect();
         }}
         className="block h-full w-full overflow-hidden rounded-md disabled:cursor-not-allowed"
@@ -345,7 +431,10 @@ function PackCard({
             alt={displayName}
             draggable={false}
             className="h-full w-full object-contain"
-            onError={() => advanceFailedSource?.(src)}
+            onError={() => {
+              onImageSource(card.instance_id, { src: null, alt: displayName });
+              advanceFailedSource?.(src);
+            }}
           />
         )}
       </button>
@@ -389,13 +478,15 @@ export function PackDisplay({
   const [states, setStates] = useState<Readonly<Record<string, CardVisualRecord>>>({});
   const [retained, setRetained] = useState<readonly RetainedCard[]>([]);
   const statesRef = useRef<Readonly<Record<string, CardVisualRecord>>>({});
-  const imageSourcesRef = useRef(new Map<string, string>());
+  const imageSourcesRef = useRef(new Map<string, PackDragPreviewImage>());
   const viewRef = useRef(controller.view);
   const previousStepRef = useRef<DraftStep | null>(null);
   const requestOrder = useRef(0);
   const timers = useRef(new Map<string, ScheduledVisual>());
   const packSequenceRef = useRef<HTMLDivElement>(null);
   const responsiveScaleInitialized = useRef(false);
+  const touchPickSuppressionRef = useRef<TouchPickSuppression | null>(null);
+  const touchPickSuppressionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const setPackScaleRef = useRef(presentation.setPackScale);
   const localGeneration = controller.kind === "local-workspace" ? controller.interactionGeneration : 0;
   const generationRef = useRef(localGeneration);
@@ -422,9 +513,19 @@ export function PackDisplay({
       timers.current.set(key, { handle, instanceId });
     }
   };
+  const clearTouchPickSuppression = (record?: TouchPickSuppression) => {
+    if (record !== undefined && touchPickSuppressionRef.current !== record) return;
+    touchPickSuppressionRef.current = null;
+    if (touchPickSuppressionTimerRef.current !== null) {
+      clearTimeout(touchPickSuppressionTimerRef.current);
+      touchPickSuppressionTimerRef.current = null;
+    }
+  };
   useEffect(() => () => {
     for (const entry of timers.current.values()) clearTimeout(entry.handle);
     timers.current.clear();
+    touchPickSuppressionRef.current = null;
+    if (touchPickSuppressionTimerRef.current !== null) clearTimeout(touchPickSuppressionTimerRef.current);
   }, []);
 
   const view = controller.view;
@@ -436,7 +537,7 @@ export function PackDisplay({
   const isOrderedSelection = view?.pick_selection_mode === "Ordered";
   const currentStep = view === null ? null : draftStep(view);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const live = new Set(controller.view?.current_pack?.map((card) => card.instance_id) ?? []);
     setRetained((current) => {
       const reappeared = current.filter((entry) => live.has(entry.card.instance_id));
@@ -447,6 +548,7 @@ export function PackDisplay({
   useEffect(() => {
     if (generationRef.current === localGeneration) return;
     generationRef.current = localGeneration;
+    clearTouchPickSuppression();
     for (const entry of timers.current.values()) clearTimeout(entry.handle);
     timers.current.clear();
     statesRef.current = {};
@@ -508,8 +610,11 @@ export function PackDisplay({
   }, [view?.current_pack_number, view?.pick_number]);
 
   if (!view) return null;
+  const currentPackIds = new Set(pack.map((card) => card.instance_id));
   const visibleRetained = retained.filter((entry) => (
-    entry.generation === localGeneration && sameDraftStep(entry.step, currentStep!)
+    entry.generation === localGeneration
+    && sameDraftStep(entry.step, currentStep!)
+    && !currentPackIds.has(entry.card.instance_id)
   ));
   if (pack.length === 0 && visibleRetained.length === 0) return <div className="flex justify-center py-12 text-white/40">{t("pack.waitingNext")}</div>;
 
@@ -557,7 +662,7 @@ export function PackDisplay({
         }
         const live = new Set(viewRef.current?.current_pack?.map((card) => card.instance_id) ?? []);
         const departed = cards.flatMap((card, index): RetainedCard[] => live.has(card.instance_id) ? [] : [{
-          card, imageSrc: imageSourcesRef.current.get(card.instance_id) ?? null,
+          card, imageSrc: imageSourcesRef.current.get(card.instance_id)?.src ?? null,
           sourceIndex: indices[index], requestOrder: requestOrder.current,
           width: sizes[index]?.width ?? 0, height: sizes[index]?.height ?? 0, token, generation, step,
         }]);
@@ -583,6 +688,37 @@ export function PackDisplay({
     return card === undefined ? [] : [card];
   });
   const requiredCount = activeEffect === null ? Math.max(1, view.required_pick_count) : 2;
+  const armTouchPickSuppression = (
+    sourceInstanceId: string,
+    step: DraftStep,
+    interactionGeneration: number,
+  ) => {
+    clearTouchPickSuppression();
+    const record: TouchPickSuppression = {
+      sourceInstanceId,
+      step,
+      interactionGeneration,
+      expiresAt: Date.now() + TOUCH_PICK_COMPATIBILITY_WINDOW_MS,
+    };
+    touchPickSuppressionRef.current = record;
+    touchPickSuppressionTimerRef.current = setTimeout(
+      () => clearTouchPickSuppression(record),
+      TOUCH_PICK_COMPATIBILITY_WINDOW_MS,
+    );
+    return record;
+  };
+  const consumeTouchPickCompatibilityActivation = (
+    kind: "touch-pointer" | "click" | "double-click",
+    detail = 1,
+  ) => {
+    const record = touchPickSuppressionRef.current;
+    if (record === null || (kind !== "touch-pointer" && detail === 0)) return false;
+    if (record.interactionGeneration !== localGeneration || Date.now() >= record.expiresAt) {
+      clearTouchPickSuppression(record);
+      return false;
+    }
+    return true;
+  };
   const chosenCards = (fallback: DraftCardInstance): readonly DraftCardInstance[] => {
     if (activeEffect === null && requiredCount === 1) return [fallback];
     return selectedCards.length === requiredCount && selectedCards.some((card) => card.instance_id === fallback.instance_id)
@@ -604,6 +740,22 @@ export function PackDisplay({
         ? await local.pickCard(ids[0], destination)
         : await local.pickCardStep(ids, destination);
     settle(token, generation, step, cards, indices, cards.map(() => ({ width: 0, height: 0 })), { kind: "outcome", outcome });
+  };
+  const submitDoublePick = async (card: DraftCardInstance, inputKind: "touch" | "mouse") => {
+    if (activeEffect !== null || requiredCount !== 1) {
+      await request(chosenCards(card), "deck");
+      return;
+    }
+    if (local === null) return;
+    const suppression = inputKind === "touch"
+      ? armTouchPickSuppression(card.instance_id, draftStep(view), local.interactionGeneration)
+      : null;
+    try {
+      const outcome = await local.confirmPick("deck");
+      if (outcome.status === "rejected" && suppression !== null) clearTouchPickSuppression(suppression);
+    } catch {
+      if (suppression !== null) clearTouchPickSuppression(suppression);
+    }
   };
   const select = (id: string) => {
     if (locked) return;
@@ -720,17 +872,17 @@ export function PackDisplay({
         {mobileLayout || responsiveLayout === "tablet-landscape" ? (
           <div data-pack-scale-controls className="ml-auto flex shrink-0 items-center gap-1.5">
             <button type="button" disabled={locked} aria-label={t("pack.scaleDecrease")} onClick={() => presentation.setPackScale(repairDraftWorkspacePackScale(presentation.packScale - 0.1))} className={menuButtonClass({ tone: "neutral", size: "icon", disabled: locked })}>−</button>
-            <label className="flex items-center">
+            <label className="flex min-w-0 items-center">
               <span className="sr-only">{t("pack.scale")}</span>
-              <input type="range" min={DRAFT_WORKSPACE_PACK_SCALE_MIN} max={DRAFT_WORKSPACE_PACK_SCALE_MAX} step={DRAFT_WORKSPACE_PACK_SCALE_STEP} value={presentation.packScale} disabled={locked} onChange={(event) => presentation.setPackScale(Number(event.target.value))} aria-label={t("pack.scale")} />
+              <input type="range" min={DRAFT_WORKSPACE_PACK_SCALE_MIN} max={DRAFT_WORKSPACE_PACK_SCALE_MAX} step={DRAFT_WORKSPACE_PACK_SCALE_STEP} value={presentation.packScale} disabled={locked} onChange={(event) => presentation.setPackScale(Number(event.target.value))} aria-label={t("pack.scale")} className="min-w-0 w-[6.5rem] max-w-full" />
             </label>
             <button type="button" disabled={locked} aria-label={t("pack.scaleIncrease")} onClick={() => presentation.setPackScale(repairDraftWorkspacePackScale(presentation.packScale + 0.1))} className={menuButtonClass({ tone: "neutral", size: "icon", disabled: locked })}>+</button>
           </div>
         ) : (
           <div data-pack-scale-controls className="ml-auto flex shrink-0 items-center gap-2">
-            <label className="flex items-center gap-2 text-xs text-white/70">
+            <label className={`flex items-center gap-2 text-xs text-white/70 ${responsiveLayout === "desktop" ? "" : "min-w-0"}`}>
               {t("pack.scale")}
-              <input type="range" min={DRAFT_WORKSPACE_PACK_SCALE_MIN} max={DRAFT_WORKSPACE_PACK_SCALE_MAX} step={DRAFT_WORKSPACE_PACK_SCALE_STEP} value={presentation.packScale} disabled={locked} onChange={(event) => presentation.setPackScale(Number(event.target.value))} aria-label={t("pack.scale")} />
+              <input type="range" min={DRAFT_WORKSPACE_PACK_SCALE_MIN} max={DRAFT_WORKSPACE_PACK_SCALE_MAX} step={DRAFT_WORKSPACE_PACK_SCALE_STEP} value={presentation.packScale} disabled={locked} onChange={(event) => presentation.setPackScale(Number(event.target.value))} aria-label={t("pack.scale")} className={responsiveLayout === "desktop" ? undefined : "min-w-0 w-[6.5rem] max-w-full"} />
             </label>
             <button type="button" disabled={locked} aria-label={t("pack.scaleDecrease")} onClick={() => presentation.setPackScale(repairDraftWorkspacePackScale(presentation.packScale - 0.1))} className={menuButtonClass({ tone: "neutral", size: "icon", disabled: locked })}>−</button>
             <button type="button" disabled={locked} aria-label={t("pack.scaleReset")} onClick={() => presentation.setPackScale(DRAFT_WORKSPACE_PACK_SCALE_DEFAULT)} className={menuButtonClass({ tone: "neutral", size: "icon", disabled: locked })}>
@@ -786,12 +938,10 @@ export function PackDisplay({
               desktopLayout={responsiveLayout === "desktop"}
               onSelect={() => select(card.instance_id)}
               onDestination={(destination) => void request(chosenCards(card), destination)}
-              onDoubleClickPick={() => {
-                if (activeEffect === null && requiredCount === 1) void local?.confirmPick("deck");
-                else void request(chosenCards(card), "deck");
-              }}
+              onDoubleClickPick={(inputKind) => void submitDoublePick(card, inputKind)}
+              onConsumeTouchPickCompatibility={consumeTouchPickCompatibilityActivation}
               onHover={onCardHover}
-              onImageSource={(instanceId, imageSrc) => imageSourcesRef.current.set(instanceId, imageSrc)}
+              onImageSource={(instanceId, image) => imageSourcesRef.current.set(instanceId, image)}
               makeDropSource={() => {
                 if (local === null || locked) return null;
                 const cards = chosenCards(card);
@@ -812,6 +962,10 @@ export function PackDisplay({
                   interactionGeneration: generation,
                   previewWidth: width,
                   previewHeight: width * 680 / 488,
+                  previewImages: cards.map((candidate) => imageSourcesRef.current.get(candidate.instance_id) ?? {
+                    src: null,
+                    alt: candidate.name,
+                  }),
                   onAdmission: (nextAdmission) => {
                     admission = nextAdmission;
                     requestOrder.current += 1;

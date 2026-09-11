@@ -637,6 +637,7 @@ pub fn resolve(
             // CR 608.2c: drop the consumed set's member-cause provenance too so
             // the side map never outlives its `tracked_object_sets` entry.
             state.tracked_set_member_causes.remove(&id);
+            state.tracked_set_participants.remove(&id);
         }
     }
 
@@ -1371,9 +1372,15 @@ pub(crate) fn materialize_token_copy_body(
     // itself copiable. `install_copiable_values_as_base` already installs
     // `loyalty`/`base_loyalty` from `values.loyalty` (CR 306.5b), so no separate
     // loyalty seed is needed here.
+    let mut values = copy.values.clone();
+    let cda_pruning = super::copy_exception::prune_copy_exception_overridden_cdas(
+        &values.static_definitions,
+        &copy.additional_modifications,
+    );
+    values.static_definitions = Arc::new(cda_pruning.definitions);
     apply_copiable_values_to_liminal_object(
         object,
-        &copy.values,
+        &values,
         copy.display_source,
         copy.printed_ref.clone(),
         copy.token_image_ref.clone(),

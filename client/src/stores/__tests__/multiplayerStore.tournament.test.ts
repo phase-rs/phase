@@ -27,6 +27,7 @@ const localStorageMock = vi.hoisted(() => {
 
 import {
   MAX_TOURNAMENT_CREDENTIALS,
+  hydrateSessionTournamentCredentials,
   rememberTournamentCredential,
   useMultiplayerStore,
   findLobbyGameByCode,
@@ -34,7 +35,10 @@ import {
 } from "../multiplayerStore";
 import { openPhaseSocket, withReconnect } from "../../services/openPhaseSocket";
 import { SERVER_PRESETS } from "../../services/serverDetection";
-import { LOBBY_PROTOCOL_VERSION } from "../../adapter/ws-adapter";
+import {
+  LOBBY_PROTOCOL_VERSION,
+  MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE,
+} from "../../adapter/ws-adapter";
 import type {
   TournamentSummary,
   TournamentView,
@@ -274,35 +278,38 @@ afterEach(() => {
 // ── A. tournament credentials (R1, R2, R6, R10, R11, R11b) ───────────────
 
 describe("tournament credentials", () => {
-  it("persists tournament credentials across a rehydrate", async () => {
-    useMultiplayerStore.setState({
-      tournamentCredentials: {
-        AAA: { organizerToken: "org-a", updatedAt: 10 },
-        BBB: { playerToken: "ply-b", playerKey: "key-b", updatedAt: 20 },
-      },
-    });
+  it("persists tournament credentials to sessionStorage, not the localStorage blob", () => {
+    const CREDS = {
+      AAA: { organizerToken: "org-a", updatedAt: 10 },
+      BBB: { playerToken: "ply-b", playerKey: "key-b", updatedAt: 20 },
+    };
+    useMultiplayerStore.setState({ tournamentCredentials: CREDS });
 
+    // The bearer secrets must NOT ride the localStorage persist blob.
     const raw = localStorage.getItem("phase-multiplayer");
     expect(raw).not.toBeNull();
     const blob = JSON.parse(raw as string) as { state: Record<string, unknown> };
-    expect(blob.state.tournamentCredentials).toEqual({
-      AAA: { organizerToken: "org-a", updatedAt: 10 },
-      BBB: { playerToken: "ply-b", playerKey: "key-b", updatedAt: 20 },
-    });
-    // Positive reach-guard: the credentials rode the SAME partition as the
-    // other persisted keys, so this is not a coincidentally-present blob.
+    expect(blob.state.tournamentCredentials).toBeUndefined();
+    // Positive reach-guard: the blob IS being written (other keys ride it), so
+    // the absence above is a real exclusion, not a coincidentally-absent blob.
     expect(blob.state.playerId).toBe(store().playerId);
 
-    // Wipe in memory, restore the blob (the wipe re-persisted an empty map),
-    // and hydrate through `merge` + the normalizer.
-    useMultiplayerStore.setState({ tournamentCredentials: {} });
-    localStorage.setItem("phase-multiplayer", raw as string);
-    await useMultiplayerStore.persist.rehydrate();
+    // They live in sessionStorage instead.
+    const session = JSON.parse(
+      sessionStorage.getItem("phase-tournament-credentials") ?? "null",
+    );
+    expect(session).toEqual(CREDS);
 
-    expect(store().tournamentCredentials).toEqual({
-      AAA: { organizerToken: "org-a", updatedAt: 10 },
-      BBB: { playerToken: "ply-b", playerKey: "key-b", updatedAt: 20 },
-    });
+    // Hydrate them back. Reseed sessionStorage right before hydrating: a
+    // `setState` wipe would fire the change subscription and clear the key.
+    useMultiplayerStore.setState({ tournamentCredentials: {} });
+    sessionStorage.setItem(
+      "phase-tournament-credentials",
+      JSON.stringify(CREDS),
+    );
+    hydrateSessionTournamentCredentials();
+
+    expect(store().tournamentCredentials).toEqual(CREDS);
   });
 
   it("hydrates a pre-phase-2 blob with an empty credential map", async () => {
@@ -327,26 +334,22 @@ describe("tournament credentials", () => {
     expect(store().displayName).toBe("Legacy");
   });
 
-  it("drops malformed persisted credentials and enforces the cap on hydrate", async () => {
-    const hydrateWith = async (credentials: unknown) => {
-      localStorage.setItem(
-        "phase-multiplayer",
-        JSON.stringify({
-          state: {
-            playerId: "p",
-            serverAddress: "ws://localhost:8787",
-            tournamentCredentials: credentials,
-          },
-          version: 5,
-        }),
+  it("drops malformed persisted credentials and enforces the cap on hydrate", () => {
+    const hydrateWith = (credentials: unknown) => {
+      // Credentials hydrate from sessionStorage now; seed it directly (a
+      // `setState` wipe would fire the change subscription and clear the key)
+      // and hydrate through the same normalizer + cap.
+      sessionStorage.setItem(
+        "phase-tournament-credentials",
+        JSON.stringify(credentials),
       );
-      await useMultiplayerStore.persist.rehydrate();
+      hydrateSessionTournamentCredentials();
       return store().tournamentCredentials;
     };
 
     // Part 1 — malformed entries, well under the cap so eviction cannot be
     // confused with rejection.
-    const cleaned = await hydrateWith({
+    const cleaned = hydrateWith({
       AAA: { organizerToken: "t", updatedAt: 5 },
       BBB: { playerToken: 42 }, // non-string token, no other authority
       CCC: "not-an-object",
@@ -370,7 +373,7 @@ describe("tournament credentials", () => {
     paddedCodes(1, 40).forEach((code, index) => {
       overflowing[code] = { organizerToken: `org-${code}`, updatedAt: 1000 + index };
     });
-    const capped = await hydrateWith(overflowing);
+    const capped = hydrateWith(overflowing);
 
     expect(Object.keys(capped)).toHaveLength(MAX_TOURNAMENT_CREDENTIALS);
     expect("T40" in capped).toBe(true); // newest survives
@@ -607,6 +610,93 @@ describe("tournament credentials", () => {
     expect(result.ok).toBe(true);
     expect(store().tournamentCredentials.ZZZ?.organizerToken).toBe("org-zzz");
     expect(Object.keys(store().tournamentCredentials)).toEqual(["ZZZ"]);
+  });
+
+  it("refuses a Bo1 head-to-head create on a pre-v8 broker, sending nothing", async () => {
+    const fake = makeFakeSocket();
+    // A broker one version below the one that introduced `match_type`: it would
+    // discard the field and silently run the event as Bo3.
+    fake.socket.serverInfo.lobbyProtocolVersion =
+      MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE - 1;
+    primeSocket(fake);
+
+    const pending = store().createTournament({
+      name: "Single-Game Bracket",
+      arity: 2,
+      scoring: { win_points: 3, draw_points: 1, loss_points: 0 },
+      bracket: "SingleElimination",
+      matchType: "Bo1",
+    });
+    await flush();
+    // The whole point of the gate: no frame goes out, so no surprise Bo3 event
+    // is created on the broker.
+    expect(fake.tally("CreateTournament")).toBe(0);
+
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("incompatible");
+      // A typed field the UI reads instead of parsing the English message.
+      expect(
+        (result as { neededLobbyVersion?: number }).neededLobbyVersion,
+      ).toBe(MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE);
+    }
+    // A refusal never mints a credential.
+    expect(Object.keys(store().tournamentCredentials)).toEqual([]);
+  });
+
+  it("still sends a create whose structure matches the pre-v8 default", async () => {
+    const fake = makeFakeSocket();
+    fake.socket.serverInfo.lobbyProtocolVersion =
+      MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE - 1;
+    primeSocket(fake);
+
+    // An explicit Bo3 head-to-head matches what a pre-v8 broker would default
+    // to, so it is NOT gated — the frame goes out.
+    const pending = store().createTournament({
+      name: "Bo3 Night",
+      arity: 2,
+      scoring: { win_points: 3, draw_points: 1, loss_points: 0 },
+      bracket: "Swiss",
+      matchType: "Bo3",
+    });
+    await flush();
+    expect(fake.tally("CreateTournament")).toBe(1);
+    fake.deliver("TournamentCreated", {
+      code: "BBB",
+      organizer_token: "org-bbb",
+      view: viewFor("BBB"),
+    });
+    expect((await pending).ok).toBe(true);
+  });
+
+  it("refuses a pod Bo3 create on a pre-v8 broker, sending nothing", async () => {
+    const fake = makeFakeSocket();
+    fake.socket.serverInfo.lobbyProtocolVersion =
+      MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE - 1;
+    primeSocket(fake);
+
+    // Bo3 at a pod arity differs from the pre-v8 default (Bo1 pods). A v8 broker
+    // rejects it; a pre-v8 broker would silently make a Bo1 pod. Either way the
+    // organizer must not get a silent structure — refuse before sending.
+    const pending = store().createTournament({
+      name: "Pod Bo3",
+      arity: 4,
+      scoring: { win_points: 3, draw_points: 1, loss_points: 0 },
+      bracket: "Swiss",
+      matchType: "Bo3",
+    });
+    await flush();
+    expect(fake.tally("CreateTournament")).toBe(0);
+
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("incompatible");
+      expect(
+        (result as { neededLobbyVersion?: number }).neededLobbyVersion,
+      ).toBe(MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE);
+    }
   });
 
   it("files a join's player token and the player key it actually sent", async () => {

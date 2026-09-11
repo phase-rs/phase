@@ -392,6 +392,7 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
         search_found_candidates: vec![candidate],
         depth: 0,
         is_optional: false,
+        choice_player: None,
         library_placement: None,
         exile_controller: None,
         exile_duration: None,

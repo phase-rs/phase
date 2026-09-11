@@ -107,6 +107,86 @@ interface RemoteContinuation {
   start: (() => Promise<void>) | null;
 }
 
+interface ResolvedPresentationCacheEntry {
+  readonly invalidationScope: string;
+  readonly src: string | null;
+  readonly sources: CardImageSource[];
+  readonly sourceIndex: number;
+  readonly failedSourceValues: readonly string[];
+  readonly isRotated: boolean;
+  readonly isFlip: boolean;
+  readonly isLoading: boolean;
+  readonly settled: boolean;
+}
+
+export class BoundedCache<K, V> {
+  private readonly values = new Map<K, V>();
+
+  constructor(private readonly limit: number) {}
+
+  get(key: K): V | undefined {
+    const value = this.values.get(key);
+    if (value === undefined) return undefined;
+    this.values.delete(key);
+    this.values.set(key, value);
+    return value;
+  }
+
+  set(key: K, value: V): void {
+    this.values.delete(key);
+    this.values.set(key, value);
+    while (this.values.size > this.limit) {
+      const oldest = this.values.keys().next();
+      if (oldest.done) return;
+      this.values.delete(oldest.value);
+    }
+  }
+
+  delete(key: K): boolean {
+    return this.values.delete(key);
+  }
+
+  clear(): void {
+    this.values.clear();
+  }
+
+  entries(): IterableIterator<[K, V]> {
+    return this.values.entries();
+  }
+}
+
+const PRESENTATION_CACHE_LIMIT = 256;
+const resolvedPresentationCache = new BoundedCache<string, ResolvedPresentationCacheEntry>(PRESENTATION_CACHE_LIMIT);
+const stablePresentationCache = new BoundedCache<string, string>(PRESENTATION_CACHE_LIMIT);
+let globalArtInvalidationGeneration = 0;
+const cardArtInvalidationGenerations = new BoundedCache<string, number>(PRESENTATION_CACHE_LIMIT);
+
+function dispatchArtCacheEvent(detail?: string): void {
+  if (detail === undefined) {
+    globalArtInvalidationGeneration += 1;
+    resolvedPresentationCache.clear();
+  } else {
+    cardArtInvalidationGenerations.set(detail, (cardArtInvalidationGenerations.get(detail) ?? 0) + 1);
+    for (const [key, presentation] of resolvedPresentationCache.entries()) {
+      if (presentation.invalidationScope === detail) resolvedPresentationCache.delete(key);
+    }
+  }
+  artCacheEvents.dispatchEvent(detail === undefined
+    ? new Event("update")
+    : new CustomEvent("update", { detail }));
+}
+
+function cacheResolvedPresentation(
+  requestKey: string,
+  presentation: ResolvedPresentationCacheEntry,
+): void {
+  resolvedPresentationCache.set(requestKey, presentation);
+}
+
+function cacheStablePresentation(presentationKey: string, src: string | null): void {
+  if (src !== null) stablePresentationCache.set(presentationKey, src);
+}
+
 function remoteRungs(src: string, size: ImageSize): ImageRungs | undefined {
   return size === "art_crop" || imageUrlSize(src) === null
     ? undefined
@@ -341,7 +421,7 @@ function loadLocaleArtInBackground(lang: string): void {
   loadLocaleArt(lang)
     .then(() => {
       localeArtInflight.delete(lang);
-      artCacheEvents.dispatchEvent(new Event("update"));
+      dispatchArtCacheEvent();
     })
     .catch(() => {
       localeArtInflight.delete(lang);
@@ -415,7 +495,7 @@ function resolveStrategyInBackground(oracleId: string, chain: ArtChainEntry[]): 
       printingsNegativeCache.add(oracleId);
     }
     strategyInflight.delete(oracleId);
-    artCacheEvents.dispatchEvent(new CustomEvent("update", { detail: oracleId }));
+    dispatchArtCacheEvent(oracleId);
   }).catch(() => {
     strategyInflight.delete(oracleId);
   });
@@ -433,7 +513,7 @@ function loadPrintingsInBackground(oracleId: string): void {
       printingsNegativeCache.add(oracleId);
     }
     strategyInflight.delete(oracleId);
-    artCacheEvents.dispatchEvent(new CustomEvent("update", { detail: oracleId }));
+    dispatchArtCacheEvent(oracleId);
   }).catch(() => {
     strategyInflight.delete(oracleId);
   });
@@ -455,7 +535,7 @@ function resolveOverrideUrl(
   getCardPrintings(oracleId).then((printings) => {
     if (printings.length > 0) {
       printingsCacheMap.set(oracleId, printings);
-      artCacheEvents.dispatchEvent(new CustomEvent("update", { detail: oracleId }));
+      dispatchArtCacheEvent(oracleId);
     } else {
       printingsNegativeCache.add(oracleId);
     }
@@ -481,7 +561,7 @@ function resolveSourcePrintingUrl(
   return null;
 }
 
-function imageRequestKey(
+function imagePresentationKey(
   cardName: string,
   size: string,
   faceIndex: number,
@@ -507,7 +587,6 @@ function imageRequestKey(
   explicitPrintingId: string,
   artChainKey: string,
   effectiveOffline: boolean,
-  artCacheTick: number,
 ): string {
   return [
     oracleId || cardName,
@@ -529,8 +608,54 @@ function imageRequestKey(
     explicitPrintingId,
     artChainKey,
     String(effectiveOffline),
-    String(artCacheTick),
   ].join("|");
+}
+
+function imageRequestKey(
+  cardName: string,
+  size: string,
+  faceIndex: number,
+  isToken: boolean,
+  filterPower: number | null,
+  filterToughness: number | null,
+  filterColors: string,
+  filterSubtypes: string,
+  filterHasAbilities: boolean | null,
+  tokenImageRefKey: string,
+  oracleId: string,
+  faceName: string,
+  resolvedOracleId: string,
+  resolvedFaceIndex: number,
+  artLocaleKey: string,
+  repositoryRevision: string,
+  sourcePrinting: SourcePrinting | undefined,
+  explicitPrintingId: string,
+  artChainKey: string,
+  effectiveOffline: boolean,
+  invalidationGeneration: string,
+): string {
+  return `${imagePresentationKey(
+    cardName,
+    size,
+    faceIndex,
+    isToken,
+    filterPower,
+    filterToughness,
+    filterColors,
+    filterSubtypes,
+    filterHasAbilities,
+    tokenImageRefKey,
+    oracleId,
+    faceName,
+    resolvedOracleId,
+    resolvedFaceIndex,
+    artLocaleKey,
+    repositoryRevision,
+    sourcePrinting,
+    explicitPrintingId,
+    artChainKey,
+    effectiveOffline,
+  )}|${invalidationGeneration}`;
 }
 
 function releaseCachedImageSrc(key: string): void {
@@ -711,7 +836,7 @@ export function useCardImage(
     generation: "",
     values: new Set(),
   });
-  const [artCacheTick, setArtCacheTick] = useState(0);
+  const [, rerenderForArtCacheEvent] = useState(0);
   const remoteContinuation = useRef<RemoteContinuation>({
     generation: "",
     promise: null,
@@ -740,7 +865,7 @@ export function useCardImage(
       // global invalidation match. All in-tree dispatchers send a CustomEvent
       // with detail; this is defensive against future callers.
       if (detail && detail !== target) return;
-      setArtCacheTick((t) => t + 1);
+      rerenderForArtCacheEvent((generation) => generation + 1);
     };
     artCacheEvents.addEventListener("update", handler);
     return () => artCacheEvents.removeEventListener("update", handler);
@@ -762,6 +887,30 @@ export function useCardImage(
     ? scryfallId || (resolvedOracleId ? artOverrides[resolvedOracleId]?.scryfallId ?? "" : "")
     : "";
   const artChainKey = JSON.stringify(artChain);
+  const currentArtInvalidationGeneration = `${globalArtInvalidationGeneration}:${resolvedOracleId ? cardArtInvalidationGenerations.get(resolvedOracleId) ?? 0 : 0}`;
+
+  const presentationKey = imagePresentationKey(
+    cardName,
+    size,
+    faceIndex,
+    isToken,
+    filterPower,
+    filterToughness,
+    filterColors,
+    filterSubtypes,
+    filterHasAbilities,
+    tokenImageRefKey,
+    oracleId,
+    faceName,
+    resolvedOracleId,
+    resolvedFaceIndex,
+    artLocaleKey,
+    repositoryRevision,
+    stableSourcePrinting,
+    explicitPrintingId,
+    artChainKey,
+    effectiveOffline,
+  );
 
   const requestKey = imageRequestKey(
     cardName,
@@ -784,18 +933,42 @@ export function useCardImage(
     explicitPrintingId,
     artChainKey,
     effectiveOffline,
-    artCacheTick,
+    currentArtInvalidationGeneration,
   );
+  const previousRequestKeyRef = useRef(requestKey);
+  const requestChanged = previousRequestKeyRef.current !== requestKey;
+  previousRequestKeyRef.current = requestKey;
+  const effectRequestKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     let acquiredRemoteCache = false;
-    failedSources.current = { generation: requestKey, values: new Set() };
+    const effectRequestChanged = effectRequestKeyRef.current !== null
+      && effectRequestKeyRef.current !== requestKey;
+    effectRequestKeyRef.current = requestKey;
+    const cachedPresentation = effectRequestChanged
+      ? undefined
+      : resolvedPresentationCache.get(requestKey);
+    failedSources.current = {
+      generation: requestKey,
+      values: new Set(cachedPresentation?.failedSourceValues ?? []),
+    };
     setStateRequestKey(requestKey);
-    setSrc(null);
-    setSources([]);
-    setSourceIndex(0);
-    setIsLoading(true);
+    if (cachedPresentation) {
+      setSrc(cachedPresentation.src);
+      setSources(cachedPresentation.sources);
+      setSourceIndex(cachedPresentation.sourceIndex);
+      setIsRotated(cachedPresentation.isRotated);
+      setIsFlip(cachedPresentation.isFlip);
+      setIsLoading(cachedPresentation.isLoading);
+    } else {
+      setSrc(stablePresentationCache.get(presentationKey) ?? null);
+      setSources([]);
+      setSourceIndex(0);
+      setIsRotated(false);
+      setIsFlip(false);
+      setIsLoading(true);
+    }
 
     const fallback: CardImageSource[] = [{ kind: "fallback", src: null }];
     const canResolveRemotely = Boolean(cardName || oracleId || resolvableTokenImageRef);
@@ -805,12 +978,30 @@ export function useCardImage(
       settled = true,
     ) => {
       if (cancelled) return;
+      const nextSrc = nextSources[0]?.src ?? null;
+      const displayedSrc = nextSrc ?? (
+        !settled ? stablePresentationCache.get(presentationKey) ?? null : null
+      );
       setSources(nextSources);
       setSourceIndex(0);
-      setSrc(nextSources[0]?.src ?? null);
-      setIsRotated(imageAsset?.isRotated ?? isCardImageRotatedSync(resolvedOracleId, cardName));
-      setIsFlip(isCardImageFlipLayoutSync(resolvedOracleId, cardName));
+      setSrc(displayedSrc);
+      const nextIsRotated = imageAsset?.isRotated ?? isCardImageRotatedSync(resolvedOracleId, cardName);
+      const nextIsFlip = isCardImageFlipLayoutSync(resolvedOracleId, cardName);
+      setIsRotated(nextIsRotated);
+      setIsFlip(nextIsFlip);
       setIsLoading(!settled);
+      cacheStablePresentation(presentationKey, nextSrc);
+      cacheResolvedPresentation(requestKey, {
+        invalidationScope: resolvedOracleId,
+        src: displayedSrc,
+        sources: nextSources,
+        sourceIndex: 0,
+        failedSourceValues: [...failedSources.current.values],
+        isRotated: nextIsRotated,
+        isFlip: nextIsFlip,
+        isLoading: !settled,
+        settled,
+      });
     };
 
     const continuation: RemoteContinuation = {
@@ -958,9 +1149,13 @@ export function useCardImage(
         allowRemote: false,
       }).catch(() => ({ sources: fallback }));
       if (cancelled) return;
-      const installed = result.sources.some((source) => source.kind === "installed");
+      const viable = result.sources.filter((source) => (
+        source.src === null || !failedSources.current.values.has(source.src)
+      ));
+      const nextSources = viable.length > 0 ? viable : fallback;
+      const installed = nextSources.some((source) => source.kind === "installed");
       const settled = installed || effectiveOffline || !canResolveRemotely;
-      publish(result.sources, undefined, settled);
+      publish(nextSources, undefined, settled);
       if (settled) return;
       void continuation.start?.();
     }
@@ -999,6 +1194,32 @@ export function useCardImage(
 
   const activeSource = sources[sourceIndex] ?? null;
   const advanceFailedSource = useCallback((failedSrc: string) => {
+    const presentationSeed = stablePresentationCache.get(presentationKey);
+    const freshSourcesIncludeSeed = stateRequestKey === requestKey
+      && sources.some((source) => source.src === failedSrc);
+    if (presentationSeed === failedSrc && !freshSourcesIncludeSeed) {
+      stablePresentationCache.delete(presentationKey);
+      if (failedSources.current.generation !== requestKey) {
+        failedSources.current = { generation: requestKey, values: new Set([failedSrc]) };
+      } else {
+        failedSources.current.values.add(failedSrc);
+      }
+      setSrc(null);
+      setSourceIndex(0);
+      setIsLoading(true);
+      cacheResolvedPresentation(requestKey, {
+        invalidationScope: resolvedOracleId,
+        src: null,
+        sources,
+        sourceIndex: 0,
+        failedSourceValues: [...failedSources.current.values],
+        isRotated,
+        isFlip,
+        isLoading: true,
+        settled: false,
+      });
+      return;
+    }
     if (failedSources.current.generation !== requestKey) return;
     const nextIndex = nextImageSourceIndex(
       sources,
@@ -1007,6 +1228,9 @@ export function useCardImage(
       failedSrc,
     );
     if (nextIndex === null) return;
+    if (stablePresentationCache.get(presentationKey) === failedSrc) {
+      stablePresentationCache.delete(presentationKey);
+    }
     const next = sources[nextIndex];
     const continuation = remoteContinuation.current;
     if (
@@ -1016,12 +1240,45 @@ export function useCardImage(
     ) {
       setSourceIndex(nextIndex);
       setSrc(null);
+      cacheResolvedPresentation(requestKey, {
+        invalidationScope: resolvedOracleId,
+        src: null,
+        sources,
+        sourceIndex: nextIndex,
+        failedSourceValues: [...failedSources.current.values],
+        isRotated,
+        isFlip,
+        isLoading: true,
+        settled: false,
+      });
       void continuation.start?.();
       return;
     }
     setSourceIndex(nextIndex);
     setSrc(next?.src ?? null);
-  }, [requestKey, sourceIndex, sources]);
+    cacheStablePresentation(presentationKey, next?.src ?? null);
+    cacheResolvedPresentation(requestKey, {
+      invalidationScope: resolvedOracleId,
+      src: next?.src ?? null,
+      sources,
+      sourceIndex: nextIndex,
+      failedSourceValues: [...failedSources.current.values],
+      isRotated,
+      isFlip,
+      isLoading,
+      settled: continuation.settled,
+    });
+  }, [
+    isFlip,
+    isLoading,
+    isRotated,
+    presentationKey,
+    requestKey,
+    resolvedOracleId,
+    sourceIndex,
+    sources,
+    stateRequestKey,
+  ]);
 
   // Effects reset the state after render, so a component reused for a new card
   // would otherwise expose the previous card's src for one frame. Hand previews
@@ -1029,8 +1286,28 @@ export function useCardImage(
   // by request identity until the new generation's local or remote stage
   // publishes its own source.
   if (stateRequestKey !== requestKey) {
+    if (requestChanged) {
+      return {
+        src: null, isLoading: true, isRotated: false, isFlip: false,
+        source: null, advanceFailedSource,
+      };
+    }
+    const cachedPresentation = resolvedPresentationCache.get(requestKey);
+    if (cachedPresentation) {
+      const cachedSource = cachedPresentation.sources[cachedPresentation.sourceIndex] ?? null;
+      return {
+        src: cachedPresentation.src,
+        isLoading: cachedPresentation.isLoading,
+        isRotated: cachedPresentation.isRotated,
+        isFlip: cachedPresentation.isFlip,
+        source: cachedSource,
+        rungs: cachedSource?.kind === "fallback" ? undefined : cachedSource?.rungs,
+        advanceFailedSource,
+      };
+    }
+    const presentationSeed = stablePresentationCache.get(presentationKey) ?? null;
     return {
-      src: null, isLoading: true, isRotated: false, isFlip: false,
+      src: presentationSeed, isLoading: true, isRotated: false, isFlip: false,
       source: null, advanceFailedSource,
     };
   }

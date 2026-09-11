@@ -488,6 +488,7 @@ fn return_target_and_same_name_from_your_graveyard_carries_zone_and_mass_tail() 
         enter_with_counters: _,
         face_down_profile: None,
         library_position: None,
+        library_shuffle: _,
         random_order: false,
     } = &*same_name.effect
     else {

@@ -24,7 +24,11 @@ import { isFormatConfigShape } from "../adapter/format-config-shape";
 import { findSavedCustomFormat } from "../services/customFormats";
 import { AI_DIFFICULTIES } from "../constants/ai";
 import { FORMAT_REGISTRY } from "../data/formatRegistry";
-import { serverProtocolRejection, type ServerInfo } from "../adapter/ws-adapter";
+import {
+  MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE,
+  serverProtocolRejection,
+  type ServerInfo,
+} from "../adapter/ws-adapter";
 import {
   clearWsSession,
   loadWsSession,
@@ -47,6 +51,7 @@ import {
   endTournamentOver,
   getTournamentOver,
   joinTournamentOver,
+  matchTypeNeedsCapability,
   reportMatchResultOver,
   startTournamentRoundOver,
   subscribeTournamentsOver,
@@ -934,6 +939,28 @@ export interface TournamentNotAuthorized {
 }
 
 /**
+ * A `CreateTournament` request refused **locally, before any frame is sent**,
+ * because the tournament broker's advertised lobby protocol cannot honor a
+ * capability the request needs — today, an explicit Bo1 head-to-head structure
+ * against a broker below {@link MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE}, which would
+ * otherwise silently run as Bo3.
+ *
+ * Modelled on {@link TournamentNotAuthorized}: same `{ ok: false; reason;
+ * message }` skeleton so `if (!r.ok)` narrows uniformly, plus a **typed**
+ * `neededLobbyVersion` the UI can read instead of parsing the English message.
+ * Like `not_authorized`, it is decided from a broker-advertised fact and puts
+ * nothing on the wire — never read it as "the tournament was created".
+ */
+export interface TournamentIncompatible {
+  ok: false;
+  reason: "incompatible";
+  /** The lobby protocol version the requested capability requires. */
+  neededLobbyVersion: number;
+  /** Human-readable fallback; the UI wraps it via an i18n key. */
+  message: string;
+}
+
+/**
  * What a token-gated tournament action resolves to: the wire result, widened
  * by exactly one locally-produced failure member. Every failure member keeps
  * the same `{ ok: false; reason; message }` skeleton, so `if (!r.ok)`
@@ -1386,7 +1413,9 @@ interface MultiplayerActions {
   /** Create a tournament and remember its organizer token. */
   createTournament: (
     req: CreateTournamentRequest,
-  ) => Promise<TournamentRpcResult<TournamentCreatedReply>>;
+  ) => Promise<
+    TournamentRpcResult<TournamentCreatedReply> | TournamentIncompatible
+  >;
   /** Join a tournament and remember its player token and player key. */
   joinTournament: (
     code: string,
@@ -2032,6 +2061,17 @@ export function migratePersistedMultiplayerState(
 ): unknown {
   if (!persisted || typeof persisted !== "object") return persisted;
   const migrated = persisted as Record<string, unknown>;
+  // v6 → v7: tournament bearer credentials moved OFF localStorage. They are
+  // secrets that must not sit at rest in localStorage (readable by any
+  // same-origin script for the life of the profile); a dedicated sessionStorage
+  // sync owns them going forward and `partialize` no longer writes them here.
+  // Strip any a pre-v7 build persisted.
+  //
+  // Placed BEFORE the `version < 6` arm below, which returns early when a legacy
+  // `serverAddress` is present — a strip that ran after it could be skipped.
+  if (version < 7 && "tournamentCredentials" in migrated) {
+    delete migrated.tournamentCredentials;
+  }
   if (version < 3) {
     migrated.serverAddress = migrateOfficialServerAddress(
       migrated.serverAddress,
@@ -3324,8 +3364,42 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         };
       },
 
-      createTournament: async (req) =>
-        runTournamentRpc(set, get, async (socket, signal) => {
+      createTournament: async (req) => {
+        // `runTournamentRpc` is inlined here (its whole body is this url check
+        // plus `withOriginSocket`) so the pre-send capability gate below can read
+        // the SOCKET's negotiated `lobbyProtocolVersion` — the same authority the
+        // gated RPCs read — and return the locally-produced `TournamentIncompatible`
+        // that the generic `runTournamentRpc<T>` return shape cannot carry.
+        const url = tournamentBroadcastUrl(get);
+        if (url === null) {
+          return {
+            ok: false,
+            reason: "connection_lost",
+            message: "Lobby connection unavailable. Check your server address.",
+          };
+        }
+        return withOriginSocket(set, get, url, async (socket, signal) => {
+          // Refuse a match structure this broker cannot honor BEFORE any frame
+          // is sent, so an explicit Bo1 head-to-head choice is never silently
+          // run as Bo3 by a pre-v8 broker (which discards `match_type`). Reads
+          // the exact socket's advertised version; an absent one predates v8, so
+          // it fails closed. Mirrors the local `not_authorized` refusal — a
+          // broker-advertised fact, nothing on the wire.
+          const version = socket.serverInfo.lobbyProtocolVersion;
+          if (
+            matchTypeNeedsCapability(req.arity, req.matchType) &&
+            (version === undefined || version < MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE)
+          ) {
+            return {
+              ok: false,
+              reason: "incompatible",
+              neededLobbyVersion: MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE,
+              // Non-localized fallback for logs/non-UI consumers. The user-facing
+              // copy is rendered from the typed `neededLobbyVersion` via the
+              // `errors.incompatible` catalog entry, not from this string.
+              message: `The selected match structure needs a server speaking lobby protocol ${MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE}; this one speaks ${version ?? "an older version"} and would apply its default structure instead. Nothing was sent.`,
+            };
+          }
           const result = await createTournamentOver(socket, req, { signal });
           if (result.ok) {
             // Keyed by the code in the REPLY: `CreateTournament` carries no
@@ -3340,7 +3414,8 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             }));
           }
           return result;
-        }),
+        });
+      },
 
       joinTournament: async (code, displayName) =>
         runTournamentRpc(set, get, async (socket, signal) => {
@@ -3395,7 +3470,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
     }),
     {
       name: "phase-multiplayer",
-      version: 6,
+      version: 7,
       // v0/v1 → v2: official hosted lobby addresses are deployment defaults,
       // not user intent. A self-hosted build must move returning browsers from
       // the official lobby to its configured default while preserving explicit
@@ -3426,6 +3501,12 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       // authorities it browses). A hand-typed address becomes both; an
       // official or build-default address is already derived as a preset, so
       // it becomes the hosting server only.
+      //
+      // v6 → v7: tournament bearer credentials leave this localStorage-backed
+      // persist for sessionStorage (secrets must not sit at rest in
+      // localStorage). The migration strips any a pre-v7 build wrote here;
+      // `partialize` no longer emits them and a dedicated sessionStorage sync
+      // (below the store) owns them.
       migrate: migratePersistedMultiplayerState,
       // Persisted state is external input. Migration only runs when the schema
       // version changes, so hydrate current-version blobs through the same
@@ -3438,9 +3519,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           ...current,
           ...saved,
           lastHostConfig: normalizeRememberedHostConfig(saved.lastHostConfig),
-          tournamentCredentials: normalizeTournamentCredentials(
-            saved.tournamentCredentials,
-          ),
+          // Tournament credentials are NEVER hydrated from this localStorage
+          // blob (v7): they live in sessionStorage now. Forcing the in-memory
+          // initial here — after `...saved` — guarantees a stray or
+          // pre-migration localStorage copy cannot win;
+          // `hydrateSessionTournamentCredentials` (below the store) fills the
+          // real value right after creation.
+          tournamentCredentials: current.tournamentCredentials,
           userLobbySources: normalizeUserLobbySources(saved.userLobbySources),
           disabledDirectorySources: normalizeDisabledDirectorySources(
             saved.disabledDirectorySources,
@@ -3477,11 +3562,84 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         // projection is rebuilt each session, never persisted.
         disabledDirectorySources: state.disabledDirectorySources,
         lastHostConfig: state.lastHostConfig,
-        tournamentCredentials: state.tournamentCredentials,
+        // `tournamentCredentials` is deliberately ABSENT: these are bearer
+        // secrets and must not be written to localStorage. They persist to
+        // sessionStorage instead — see `hydrateSessionTournamentCredentials`
+        // and the subscription just below the store.
       }),
     },
   ),
 );
+
+// ── Tournament credentials: sessionStorage, not localStorage ───────────────
+//
+// Bearer secrets (`organizer_token` / `player_token`) must not sit at rest in
+// localStorage, where any same-origin script can read them for the life of the
+// browser profile. They live in sessionStorage instead: preserved across a
+// refresh (an organizer keeps authority), cleared when the tab closes. This is
+// a separate persistence from the localStorage-backed `persist` above — the
+// store's `partialize` omits the credentials and its `merge` never hydrates
+// them from localStorage.
+
+const TOURNAMENT_CREDENTIALS_SESSION_KEY = "phase-tournament-credentials";
+
+/** Reads and validates the credential map from sessionStorage. Any failure
+ *  (absent, quota, disabled, malformed) yields an empty map — credentials then
+ *  simply do not survive, exactly as a fresh tab. */
+function readSessionTournamentCredentials(): Record<string, TournamentCredential> {
+  try {
+    const raw = sessionStorage.getItem(TOURNAMENT_CREDENTIALS_SESSION_KEY);
+    if (raw === null) return {};
+    return normalizeTournamentCredentials(JSON.parse(raw));
+  } catch {
+    return {};
+  }
+}
+
+/** Writes the credential map to sessionStorage, removing the key entirely when
+ *  the map is empty so a cleared session leaves nothing behind. */
+function writeSessionTournamentCredentials(
+  credentials: Record<string, TournamentCredential>,
+): void {
+  try {
+    if (Object.keys(credentials).length === 0) {
+      sessionStorage.removeItem(TOURNAMENT_CREDENTIALS_SESSION_KEY);
+      return;
+    }
+    sessionStorage.setItem(
+      TOURNAMENT_CREDENTIALS_SESSION_KEY,
+      JSON.stringify(credentials),
+    );
+  } catch {
+    // Non-fatal: with no sessionStorage the credentials just do not survive a
+    // refresh, which is a strictly safer failure than persisting them anyway.
+  }
+}
+
+/**
+ * Loads sessionStorage-persisted credentials into the store. Runs once at
+ * module load, after `create` has finished localStorage hydration, so it is the
+ * final word on the initial `tournamentCredentials` value. Idempotent and
+ * exported so a test can drive it against a seeded sessionStorage.
+ */
+export function hydrateSessionTournamentCredentials(): void {
+  const hydrated = readSessionTournamentCredentials();
+  if (Object.keys(hydrated).length > 0) {
+    useMultiplayerStore.setState({ tournamentCredentials: hydrated });
+  }
+}
+
+hydrateSessionTournamentCredentials();
+
+// Mirror every later change to the credential map back to sessionStorage. Keyed
+// on identity: `rememberTournamentCredential` and the fan-out both return a new
+// object only when the map actually changed, so unrelated store updates do not
+// touch storage.
+useMultiplayerStore.subscribe((state, prev) => {
+  if (state.tournamentCredentials !== prev.tournamentCredentials) {
+    writeSessionTournamentCredentials(state.tournamentCredentials);
+  }
+});
 
 export function getPlayerDisplayName(playerId: number, myId?: number): string {
   if (playerId === myId) return "You";

@@ -286,6 +286,7 @@ function buildDefaultPreferences(): PreferencesState {
     pacingMultipliers: defaultPacingMultipliers(),
     phaseStops: [],
     priorityPassingMode: "Standard",
+    experimentalTournamentsEnabled: false,
     masterVolume: 100,
     sfxVolume: 70,
     musicVolume: 40,
@@ -357,6 +358,8 @@ interface PreferencesState {
   pacingMultipliers: Record<PacingCategory, number>;
   phaseStops: PhaseStop[];
   priorityPassingMode: PriorityPassingMode;
+  /** Whether the in-progress tournament UI appears in app navigation. */
+  experimentalTournamentsEnabled: boolean;
   masterVolume: number;
   sfxVolume: number;
   musicVolume: number;
@@ -472,6 +475,7 @@ interface PreferencesActions {
   resetAllPreferences: () => void;
   setPhaseStops: (stops: PhaseStop[]) => void;
   setPriorityPassingMode: (mode: PriorityPassingMode) => void;
+  setExperimentalTournamentsEnabled: (enabled: boolean) => void;
   setMasterVolume: (vol: number) => void;
   setSfxVolume: (vol: number) => void;
   setMusicVolume: (vol: number) => void;
@@ -625,6 +629,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       resetAllPreferences: () => set(buildDefaultPreferences()),
       setPhaseStops: (stops) => set({ phaseStops: stops }),
       setPriorityPassingMode: (mode) => set({ priorityPassingMode: mode }),
+      setExperimentalTournamentsEnabled: (enabled) => set({ experimentalTournamentsEnabled: enabled }),
       setMasterVolume: (vol) => set({ masterVolume: vol }),
       setSfxVolume: (vol) => set({ sfxVolume: vol }),
       setMusicVolume: (vol) => set({ musicVolume: vol }),
@@ -820,7 +825,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 34,
+      version: 35,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -903,6 +908,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          once is now remembered. The legacy key is dropped so it cannot
       //          linger in the persisted blob. Mobile never auto-opens regardless,
       //          so this is a desktop-only behavior change.
+      // v34 → v35: Add experimentalTournamentsEnabled. Existing users retain
+      //          the hidden-by-default navigation because the shallow merge
+      //          supplies false.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;

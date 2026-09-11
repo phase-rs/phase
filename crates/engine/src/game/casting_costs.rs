@@ -402,6 +402,14 @@ fn continue_after_declared_mana_split(
         state.pending_cast = Some(Box::new(pending));
         return enter_payment_step(state, player, Some(payment_mode), events);
     }
+
+    if pending.activation_ability_index.is_some()
+        && pending.deferred_random_discard_cost.is_some()
+        && matches!(pending.cost, ManaCost::NoCost)
+    {
+        state.pending_cast = Some(Box::new(pending));
+        return enter_payment_step(state, player, None, events);
+    }
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
@@ -1500,6 +1508,10 @@ pub(crate) fn finish_pending_cost_or_cast(
         state.pending_cast = Some(Box::new(pending));
         return enter_payment_step(state, player, None, events);
     }
+    if pending.deferred_random_discard_cost.is_some() {
+        state.pending_cast = Some(Box::new(pending));
+        return enter_payment_step(state, player, None, events);
+    }
     let waiting_for = pay_and_push(
         state,
         player,
@@ -1899,12 +1911,13 @@ pub(crate) fn handle_discard_for_cost(
         match super::effects::discard::discard_as_cost(state, card_id, player, events) {
             super::effects::discard::DiscardOutcome::Complete => {}
             super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
-                state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume {
-                    player,
-                    pending: pending.clone(),
-                    chosen: chosen.to_vec(),
-                    paused_at_index: index,
-                }));
+                state.pending_discard_for_cost =
+                    Some(Box::new(PendingDiscardForCostResume::Chosen {
+                        player,
+                        pending: pending.clone(),
+                        chosen: chosen.to_vec(),
+                        paused_at_index: index,
+                    }));
                 super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
                 // CR 603.2 + CR 603.3b: Earlier cards in a count>1 discard cost may
                 // already have emitted graveyard `ZoneChanged` events before this
@@ -1957,6 +1970,175 @@ pub(crate) fn handle_discard_for_cost(
     );
 
     Ok(waiting_for)
+}
+
+fn commit_random_discard_cost_picks(
+    state: &GameState,
+    pending: &mut PendingCast,
+    picks: &[crate::types::game_state::RandomDiscardCostPick],
+) {
+    let ids = picks
+        .iter()
+        .map(|pick| pick.occurrence.object_id)
+        .collect::<Vec<_>>();
+    pending.ability.add_cost_paid_object_ids_recursive(&ids);
+
+    // CR 400.7j + CR 608.2k + CR 701.9c: A cost-paid card remains a usable
+    // referent only when its move delivered it to a public zone. If a future
+    // replacement puts an unfiltered random payment into an unrevealed hidden
+    // zone, the payment remains legal but its characteristics are undefined.
+    if pending.ability.cost_paid_object.is_none() {
+        if let Some(pick) = picks.iter().find(|pick| {
+            state
+                .objects
+                .get(&pick.occurrence.object_id)
+                .is_some_and(|obj| obj.zone.is_public())
+        }) {
+            pending
+                .ability
+                .set_cost_paid_object_recursive(pick.snapshot.clone());
+        }
+    }
+}
+
+fn pay_deferred_random_discard_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let Some(deferred) = pending.deferred_random_discard_cost.take() else {
+        return Ok(None);
+    };
+    if deferred.count == 0 {
+        return Ok(None);
+    }
+    let eligible =
+        super::casting::find_eligible_discard_targets(state, player, pending.object_id, None);
+    if eligible.len() < deferred.count {
+        return Err(EngineError::ActionNotAllowed(
+            "Reserved random discard cost is no longer payable".to_string(),
+        ));
+    }
+    if pending.activation_ability_index.is_some() {
+        pending.mark_activation_cost_committed();
+    }
+    let cost_event_start = events.len();
+    match super::effects::discard::discard_at_random(
+        state,
+        super::effects::discard::RandomDiscardRequest {
+            player,
+            source_id: pending.object_id,
+            count: deferred.count,
+            eligible,
+            cause: super::effects::discard::DiscardCause::Cost,
+            discard_frame: None,
+        },
+        events,
+    ) {
+        super::effects::discard::RandomDiscardOutcome::Completed { picks } => {
+            commit_random_discard_cost_picks(state, pending, &picks);
+            Ok(None)
+        }
+        super::effects::discard::RandomDiscardOutcome::NeedsReplacementChoice {
+            completed_picks,
+            remaining_eligible,
+            remaining_count,
+            paused_pick,
+            chooser,
+            ..
+        } => {
+            commit_random_discard_cost_picks(state, pending, &completed_picks);
+            state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume::Random {
+                player,
+                pending: pending.clone(),
+                remaining_eligible,
+                remaining_count,
+                paused_pick,
+            }));
+            super::casting::pause_cost_payment_for_replacement_choice(state, chooser);
+            let waiting_for = state.waiting_for.clone();
+            park_cost_payment_triggers_if_paused(
+                state,
+                events,
+                cost_event_start,
+                events.len(),
+                &waiting_for,
+            );
+            Ok(Some(waiting_for))
+        }
+    }
+}
+
+fn resume_random_discard_cost_payment(
+    state: &mut GameState,
+    resume: PendingDiscardForCostResume,
+    cost_event_start: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let PendingDiscardForCostResume::Random {
+        player,
+        mut pending,
+        remaining_eligible,
+        remaining_count,
+        paused_pick,
+    } = resume
+    else {
+        unreachable!("random discard resume requires the random carrier")
+    };
+    commit_random_discard_cost_picks(
+        state,
+        &mut pending,
+        std::slice::from_ref(paused_pick.as_ref()),
+    );
+    if remaining_count > 0 {
+        match super::effects::discard::discard_at_random(
+            state,
+            super::effects::discard::RandomDiscardRequest {
+                player,
+                source_id: pending.object_id,
+                count: remaining_count,
+                eligible: remaining_eligible,
+                cause: super::effects::discard::DiscardCause::Cost,
+                discard_frame: None,
+            },
+            events,
+        ) {
+            super::effects::discard::RandomDiscardOutcome::Completed { picks } => {
+                commit_random_discard_cost_picks(state, &mut pending, &picks);
+            }
+            super::effects::discard::RandomDiscardOutcome::NeedsReplacementChoice {
+                completed_picks,
+                remaining_eligible,
+                remaining_count,
+                paused_pick,
+                chooser,
+                ..
+            } => {
+                commit_random_discard_cost_picks(state, &mut pending, &completed_picks);
+                state.pending_discard_for_cost =
+                    Some(Box::new(PendingDiscardForCostResume::Random {
+                        player,
+                        pending,
+                        remaining_eligible,
+                        remaining_count,
+                        paused_pick,
+                    }));
+                super::casting::pause_cost_payment_for_replacement_choice(state, chooser);
+                let waiting_for = state.waiting_for.clone();
+                park_cost_payment_triggers_if_paused(
+                    state,
+                    events,
+                    cost_event_start,
+                    events.len(),
+                    &waiting_for,
+                );
+                return Ok(waiting_for);
+            }
+        }
+    }
+    state.pending_cast = Some(Box::new(pending));
+    finalize_automatic_mana_payment(state, player, events)
 }
 
 /// CR 603.2 + CR 603.3b: When discard-for-cost emits graveyard `ZoneChanged`
@@ -2310,24 +2492,34 @@ pub(crate) fn resume_interrupted_cost_payment(
     }
 
     if let Some(resume) = state.pending_discard_for_cost.take() {
-        let player = resume.player;
-        let mut pending = resume.pending;
+        let (player, mut pending, chosen, paused_at_index) = match *resume {
+            PendingDiscardForCostResume::Chosen {
+                player,
+                pending,
+                chosen,
+                paused_at_index,
+            } => (player, pending, chosen, paused_at_index),
+            random @ PendingDiscardForCostResume::Random { .. } => {
+                return resume_random_discard_cost_payment(
+                    state,
+                    random,
+                    replacement_action_cost_event_start.unwrap_or(events.len()),
+                    events,
+                );
+            }
+        };
         let cost_event_start = replacement_action_cost_event_start.unwrap_or(events.len());
-        for &card_id in resume.chosen.iter().skip(resume.paused_at_index + 1) {
+        for (index, &card_id) in chosen.iter().enumerate().skip(paused_at_index + 1) {
             match super::effects::discard::discard_as_cost(state, card_id, player, events) {
                 super::effects::discard::DiscardOutcome::Complete => {}
                 super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
-                    let paused_at_index = resume
-                        .chosen
-                        .iter()
-                        .position(|&id| id == card_id)
-                        .unwrap_or(resume.paused_at_index + 1);
-                    state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume {
-                        player,
-                        pending: pending.clone(),
-                        chosen: resume.chosen.clone(),
-                        paused_at_index,
-                    }));
+                    state.pending_discard_for_cost =
+                        Some(Box::new(PendingDiscardForCostResume::Chosen {
+                            player,
+                            pending: pending.clone(),
+                            chosen: chosen.clone(),
+                            paused_at_index: index,
+                        }));
                     super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
                     // CR 603.2 + CR 603.3b: Same mid-loop replacement pause as
                     // `handle_discard_for_cost` — park already-emitted discard
@@ -2612,7 +2804,9 @@ fn pay_spell_mana_before_deferred_sacrifice(
     resume: Option<&ManaAbilityResume>,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<u32>, EngineError> {
-    if pending.deferred_sacrificed_permanents.is_empty() {
+    if pending.deferred_sacrificed_permanents.is_empty()
+        && pending.deferred_random_discard_cost.is_none()
+    {
         return Ok(None);
     }
 
@@ -4879,6 +5073,11 @@ pub(crate) fn finish_activated_ability_at_payment_boundary(
         .expect("payable activation mana leg enters its finalization flow"));
     }
 
+    if pending.deferred_random_discard_cost.is_some() {
+        state.pending_cast = Some(Box::new(pending));
+        return enter_payment_step(state, player, None, events);
+    }
+
     push_activated_ability_to_stack(
         state,
         player,
@@ -4954,10 +5153,46 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
     pending: &mut PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
-    let Some(cost) = pending.activation_cost.as_ref() else {
+    let Some(initial_cost) = pending.activation_cost.clone() else {
         return Ok(None);
     };
     let source_id = pending.object_id;
+
+    match super::casting::single_random_hand_discard_cost(&initial_cost) {
+        Err(message) => return Err(EngineError::ActionNotAllowed(message.to_string())),
+        Ok(Some(count)) => {
+            if pending.deferred_random_discard_cost.is_some() {
+                return Err(EngineError::ActionNotAllowed(
+                    "Multiple random discard costs are unsupported".to_string(),
+                ));
+            }
+            let count =
+                super::quantity::resolve_quantity_with_targets(state, count, &pending.ability)
+                    .max(0) as usize;
+            let eligible =
+                super::casting::find_eligible_discard_targets(state, player, source_id, None);
+            if eligible.len() < count {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough cards in hand to discard at random".to_string(),
+                ));
+            }
+            pending.deferred_random_discard_cost =
+                Some(crate::types::game_state::DeferredRandomDiscardCost { count });
+            pending.activation_cost = super::casting::remove_random_hand_discard_cost(
+                pending
+                    .activation_cost
+                    .take()
+                    .expect("classified activation cost is present"),
+            );
+            if pending.activation_cost.is_none() {
+                return Ok(None);
+            }
+        }
+        Ok(None) => {}
+    }
+    let Some(cost) = pending.activation_cost.as_ref() else {
+        return Ok(None);
+    };
 
     // CR 601.2h + CR 701.9a: A resolved zero-card FromHand discard leg (Lion's Eye Diamond /
     // Bomat Courier's "Discard your hand" on an empty hand) is paid by doing nothing — the
@@ -5793,6 +6028,9 @@ pub(super) fn push_activated_ability_to_stack(
             events,
         )? {
             return Ok(waiting_for);
+        }
+        if pending_interactive.deferred_random_discard_cost.is_some() {
+            return finish_pending_cost_or_cast(state, player, pending_interactive, events);
         }
 
         // CR 606.3 + CR 606.5: Capture the symbolic `[−X]` loyalty shape before
@@ -7559,6 +7797,46 @@ fn pay_additional_cost_with_source(
     } else {
         cost
     };
+
+    match super::casting::single_random_hand_discard_cost(&cost) {
+        Err(message) => return Err(EngineError::ActionNotAllowed(message.to_string())),
+        Ok(Some(count)) => {
+            if pending.deferred_random_discard_cost.is_some() {
+                return Err(EngineError::ActionNotAllowed(
+                    "Multiple random discard costs are unsupported".to_string(),
+                ));
+            }
+            let count =
+                super::quantity::resolve_quantity_with_targets(state, count, &pending.ability)
+                    .max(0) as usize;
+            let eligible = super::casting::find_eligible_discard_targets(
+                state,
+                player,
+                pending.object_id,
+                None,
+            );
+            if eligible.len() < count {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough cards in hand to discard at random".to_string(),
+                ));
+            }
+            let mut pending = pending;
+            pending.deferred_random_discard_cost =
+                Some(crate::types::game_state::DeferredRandomDiscardCost { count });
+            return match super::casting::remove_random_hand_discard_cost(cost) {
+                Some(residual) => pay_additional_cost_with_source(
+                    state,
+                    player,
+                    residual,
+                    cost_source,
+                    pending,
+                    events,
+                ),
+                None => finish_pending_cost_or_cast(state, player, pending, events),
+            };
+        }
+        Ok(None) => {}
+    }
 
     // CR 601.2b + CR 601.2h: Legacy card data represents an optional
     // "exile any number of [quality] cards" cost as ChangeZone. Surface every
@@ -13226,6 +13504,12 @@ fn finalize_mana_payment_with_resume(
                 }
             }
             pending.cost = ManaCost::NoCost;
+            pending.prepaid_actual_mana_spent = Some(0);
+            if let Some(waiting_for) =
+                pay_deferred_random_discard_cost(state, player, &mut pending, events)?
+            {
+                return Ok(waiting_for);
+            }
             return super::casting_targets::finish_activation_after_automatic_mana_payment(
                 state, player, *pending, events,
             );
@@ -13313,6 +13597,21 @@ fn finalize_mana_payment_with_resume(
         // deferred path — would cover both.
         if !pending.deferred_sacrificed_permanents.is_empty() {
             pending.ability.repin_cost_paid_object_recursive(state);
+        }
+        if pending.deferred_random_discard_cost.is_some() {
+            pending.cost = ManaCost::NoCost;
+            pending.prepaid_actual_mana_spent = prepaid_actual_mana_spent;
+            if let Some(waiting_for) =
+                pay_deferred_random_discard_cost(state, player, &mut pending, events)?
+            {
+                park_deferred_cost_triggers_if_paused(
+                    state,
+                    events,
+                    deferred_sacrifice_events,
+                    &waiting_for,
+                );
+                return Ok(waiting_for);
+            }
         }
         let final_cast_cost = if prepaid_actual_mana_spent.is_some() {
             crate::types::mana::ManaCost::NoCost
@@ -13628,6 +13927,13 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                     }
                 }
             }
+            pending.cost = ManaCost::NoCost;
+            pending.prepaid_actual_mana_spent = Some(0);
+            if let Some(waiting_for) =
+                pay_deferred_random_discard_cost(state, player, &mut pending, events)?
+            {
+                return Ok(waiting_for);
+            }
             return push_activated_ability_to_stack(
                 state,
                 player,
@@ -13726,6 +14032,21 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         // deferred path — would cover both.
         if !pending.deferred_sacrificed_permanents.is_empty() {
             pending.ability.repin_cost_paid_object_recursive(state);
+        }
+        if pending.deferred_random_discard_cost.is_some() {
+            pending.cost = ManaCost::NoCost;
+            pending.prepaid_actual_mana_spent = prepaid_actual_mana_spent;
+            if let Some(waiting_for) =
+                pay_deferred_random_discard_cost(state, player, &mut pending, events)?
+            {
+                park_deferred_cost_triggers_if_paused(
+                    state,
+                    events,
+                    deferred_sacrifice_events,
+                    &waiting_for,
+                );
+                return Ok(waiting_for);
+            }
         }
         let final_cast_cost = if prepaid_actual_mana_spent.is_some() {
             crate::types::mana::ManaCost::NoCost
@@ -14227,6 +14548,8 @@ pub fn extract_mana_leg(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    use rand::RngCore;
 
     use super::*;
     use crate::game::engine::apply_as_current;
@@ -14974,6 +15297,7 @@ mod tests {
             base_cost: None,
             declared_mana_additions: Vec::new(),
             activation_cost: None,
+            deferred_random_discard_cost: None,
             activation_ability_index: Some(0),
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -15716,6 +16040,74 @@ mod tests {
         assert!(
             state.stack.iter().any(|entry| entry.source_id == source),
             "activation should be pushed after the nested OneOf is replaced and paid"
+        );
+    }
+
+    #[test]
+    fn random_discard_sibling_of_unresolved_discard_one_of_fails_before_mutation() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(101),
+            player,
+            "Random Choice Relic".to_string(),
+            Zone::Battlefield,
+        );
+        create_object(
+            &mut state,
+            CardId(102),
+            player,
+            "Hand Fodder".to_string(),
+            Zone::Hand,
+        );
+        let random_discard = AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Random,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        };
+        let chosen_discard = AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        };
+        let mut pending = make_pending(source);
+        pending.activation_cost = Some(AbilityCost::Composite {
+            costs: vec![
+                random_discard,
+                AbilityCost::OneOf {
+                    costs: vec![
+                        chosen_discard,
+                        AbilityCost::Mana {
+                            cost: ManaCost::NoCost,
+                        },
+                    ],
+                },
+            ],
+        });
+        let pending_before = pending.clone();
+        let mut expected_rng = state.rng.clone();
+        let mut events = Vec::new();
+
+        let error = surface_next_unpaid_interactive_activation_cost(
+            &mut state,
+            player,
+            &mut pending,
+            &mut events,
+        )
+        .expect_err("an unresolved discard OneOf beside random discard must fail closed");
+
+        assert!(matches!(error, EngineError::ActionNotAllowed(_)));
+        assert_eq!(pending, pending_before, "the cost carrier must not mutate");
+        assert!(events.is_empty(), "no cost event may be emitted");
+        assert_eq!(state.players[0].hand.len(), 1, "no hand card may be paid");
+        let mut actual_rng = state.rng.clone();
+        assert_eq!(
+            actual_rng.next_u64(),
+            expected_rng.next_u64(),
+            "strict rejection must not advance seeded randomness"
         );
     }
 
@@ -18081,7 +18473,10 @@ mod tests {
                 .state()
                 .pending_discard_for_cost
                 .as_deref()
-                .map(|resume| resume.pending.object_id),
+                .map(|resume| match resume {
+                    PendingDiscardForCostResume::Chosen { pending, .. }
+                    | PendingDiscardForCostResume::Random { pending, .. } => pending.object_id,
+                }),
             Some(spell),
             "the replacement pause must serialize the exact pending spell",
         );
@@ -20613,6 +21008,7 @@ mod tests {
             base_cost: None,
             declared_mana_additions: Vec::new(),
             activation_cost: None,
+            deferred_random_discard_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -20751,6 +21147,7 @@ mod tests {
             base_cost: None,
             declared_mana_additions: Vec::new(),
             activation_cost: None,
+            deferred_random_discard_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -20858,6 +21255,7 @@ mod tests {
             base_cost: None,
             declared_mana_additions: Vec::new(),
             activation_cost: None,
+            deferred_random_discard_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -20954,6 +21352,7 @@ mod tests {
             base_cost: None,
             declared_mana_additions: Vec::new(),
             activation_cost: None,
+            deferred_random_discard_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -21083,6 +21482,7 @@ mod tests {
             base_cost: None,
             declared_mana_additions: Vec::new(),
             activation_cost: None,
+            deferred_random_discard_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),

@@ -1108,6 +1108,7 @@ impl AssemblyEnv {
                 Effect::ChangeZoneAll {
                     face_down_profile: Some(_),
                     library_position: None,
+                    library_shuffle: _,
                     random_order: false,
                     ..
                 } | Effect::ChangeZone {
@@ -2015,7 +2016,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                 instead.else_ability = continuation.sub_ability.take();
                                 continuation.sub_ability = Some(Box::new(instead));
                             } else {
-                                // CR 702.33d + CR 707.10: Resolve "create N of those
+                                // CR 111.1 + CR 707.10: Resolve "create N of those
                                 // tokens" anaphor against the root (the antecedent
                                 // for a multi-clause base is the first printed clause).
                                 rewrite_those_tokens_from_antecedent(
@@ -3195,7 +3196,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         }
     }
 
-    // CR 702.33d + CR 608.2c: Resolve "create [N] of those tokens [instead]"
+    // CR 111.1 + CR 608.2c: Resolve "create [N] of those tokens [instead]"
     // anaphoric subs — the sub-ability parses as `Unimplemented` because the
     // noun "those tokens" refers back to the previous clause's token-creation
     // effect. Rewrite those subs by cloning the previous effect with an

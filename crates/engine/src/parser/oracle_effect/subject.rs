@@ -2624,7 +2624,36 @@ pub(super) fn parse_subject_application(
         .parse(after_prefix)
         .is_ok()
         {
-            let (filter, _) = parse_target_with_ctx(target_text, ctx);
+            let (filter, rest) = parse_target_with_ctx(target_text, ctx);
+            // CR 115.1d (issue #8581): "any number of target players other
+            // than that player" (Curse of Surveillance) is not silently
+            // dropped here. The plural-noun coordinated-player arm inside
+            // `parse_target_with_ctx` matches the singular "player" tag
+            // against "players", so `rest` routinely carries a benign
+            // leftover "s" even on the fully-supported "any number of target
+            // players"/"target creatures" shapes (see
+            // `parse_subject_any_number_of_target_players`) -- a bare
+            // non-empty-rest guard would fail those too. The actual signal
+            // for an unexpressed exclusion is that leftover, once the "s"
+            // pluralization artifact is stripped, starting with "other than
+            // " -- the one shape this arm cannot express (no player-scoped
+            // counterpart to `FilterProp::Another` exists yet). Failing
+            // closed here (returning None) sends the caller back to
+            // Effect::unimplemented instead of reporting a bare
+            // target=player as fully supported. The general "exclude the
+            // enchanted/reference player from a player-targeted count" shape
+            // is tracked separately (issue #8581); this guard only refuses to
+            // fabricate a wrong AST for it.
+            if (
+                opt(nom::character::complete::char::<_, OracleError<'_>>('s')),
+                multispace0,
+                tag("other than "),
+            )
+                .parse(rest)
+                .is_ok()
+            {
+                return None;
+            }
             let mut application = subject_filter_application(filter, true)?;
             application.multi_target = Some(MultiTargetSpec::unlimited(0));
             return Some(application);
@@ -7104,6 +7133,10 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "look",
     "lose",
     "investigate",
+    // CR 701.53a: "if they do, you incubate N" (Assimilate Essence). The
+    // subject prefix is stripped so the existing imperative lowerer owns the
+    // keyword action and retains the resolving ability's controller.
+    "incubate",
     "learn",
     // CR 701.40a: Manifest — "its controller manifests the top card of their
     // library" (Reality Shift). Subject-shifted manifest clauses route through
@@ -7116,6 +7149,9 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "put",
     "proliferate",
     "regenerate",
+    // CR 701.70a: "you recruit" (Queen of Dale) re-dispatches to the
+    // existing Recruit lowering after the controller subject is stripped.
+    "recruit",
     "reveal",
     "return",
     "sacrifice",
@@ -8484,6 +8520,64 @@ mod tests {
             "expected TakeTheInitiative, got {:?}",
             ability.effect
         );
+    }
+
+    #[test]
+    fn subject_prefixed_recruit_and_incubate_reach_existing_imperatives() {
+        for (text, predicate) in [("you recruit", "recruit"), ("you incubate 2", "incubate 2")] {
+            let stripped = strip_subject_clause(text)
+                .unwrap_or_else(|| panic!("{text:?} must reach subject stripping"));
+            assert_eq!(stripped, predicate, "wrong predicate for {text:?}");
+            let ability =
+                crate::parser::oracle_effect::parse_effect_chain(text, AbilityKind::Spell);
+            if predicate == "incubate 2" {
+                assert!(matches!(
+                    ability.effect.as_ref(),
+                    Effect::Incubate {
+                        count: QuantityExpr::Fixed { value: 2 }
+                    }
+                ));
+            } else {
+                assert!(matches!(
+                    ability.effect.as_ref(),
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        ..
+                    }
+                ));
+                let discard = ability
+                    .sub_ability
+                    .as_deref()
+                    .expect("Recruit must discard");
+                assert!(matches!(
+                    discard.effect.as_ref(),
+                    Effect::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        ..
+                    }
+                ));
+                let token = discard
+                    .sub_ability
+                    .as_deref()
+                    .expect("Recruit must create a token");
+                assert!(matches!(
+                    token.effect.as_ref(),
+                    Effect::Token {
+                        power: PtValue::Fixed(1),
+                        toughness: PtValue::Fixed(1),
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    token.condition.as_ref(),
+                    Some(
+                        crate::types::ability::AbilityCondition::DiscardedCardMatchesFilter {
+                            filter: TargetFilter::Not { .. }
+                        }
+                    )
+                ));
+            }
+        }
     }
 
     #[test]

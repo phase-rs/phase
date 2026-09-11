@@ -1,4 +1,5 @@
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { LanServers } from "./LanServers";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type {
@@ -15,6 +16,7 @@ import {
   directoryLobbySources,
   FORMAT_DEFAULTS,
   isKnownFormat,
+  isServerCompatible,
   lobbySources,
   useMultiplayerStore,
 } from "../../stores/multiplayerStore";
@@ -24,7 +26,7 @@ import type {
   HostingSettings,
   LobbySource,
 } from "../../stores/multiplayerStore";
-import type { DirectorySource } from "../../services/serverDirectory";
+import { refreshServerDirectory, type DirectorySource } from "../../services/serverDirectory";
 import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
@@ -319,7 +321,50 @@ export function HostSetup({
   const rememberHostConfig = useMultiplayerStore((s) => s.rememberHostConfig);
   const clearRememberedHostConfig = useMultiplayerStore((s) => s.clearRememberedHostConfig);
 
-  const isP2P = connectionMode === "p2p";
+  const hostCandidates = useMemo(
+    () => fullHostCandidates({
+      userLobbySources, sourceStatus, directorySources, disabledDirectorySources,
+    }),
+    [userLobbySources, sourceStatus, directorySources, disabledDirectorySources],
+  );
+  const selectableCandidates = hostCandidates.filter((candidate) => {
+    const status = sourceStatus.get(candidate.source.url);
+    return hostRejection(candidate.listing) === null
+      && status?.state === "open"
+      && status.serverInfo?.mode === "Full"
+      && isServerCompatible(status.serverInfo);
+  });
+  const dedicatedAvailable = selectableCandidates.length > 0;
+  const isP2P = connectionMode === "p2p" || !dedicatedAvailable;
+
+  // Host setup is also a direct entry point. Discover and connect here as
+  // well as in LobbyView, using the store's shared sockets and directory TTL.
+  const sourceUrls = JSON.stringify(lobbySources({
+    userLobbySources, sourceStatus, directorySources, disabledDirectorySources,
+  }).map((source) => source.url).sort());
+  const checkConnections = useCallback(() => {
+    void refreshServerDirectory();
+    const urls: string[] = JSON.parse(sourceUrls);
+    for (const url of urls) {
+      void useMultiplayerStore.getState().ensureSubscriptionSocket(url);
+    }
+  }, [sourceUrls]);
+  useEffect(() => {
+    checkConnections();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") checkConnections();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [checkConnections]);
+
+  // Persist the fallback so recovery never switches the form back underneath
+  // the player. A submitted action separately retains its chosen transport.
+  useEffect(() => {
+    if (connectionMode === "server" && !dedicatedAvailable) {
+      onConnectionModeChange("p2p");
+    }
+  }, [connectionMode, dedicatedAvailable, onConnectionModeChange]);
 
   // Restore the player's last host-setup choices across sessions — but only
   // when they're still hostable in this connection mode. A remembered format
@@ -700,24 +745,6 @@ export function HostSetup({
     [isP2P],
   );
 
-  const hostCandidates = useMemo(
-    () =>
-      fullHostCandidates({
-        userLobbySources,
-        sourceStatus,
-        directorySources,
-        disabledDirectorySources,
-      }),
-    [userLobbySources, sourceStatus, directorySources, disabledDirectorySources],
-  );
-
-  /** The candidates this submit may actually use. A rejected row stays in
-   *  `hostCandidates` — it is still rendered, with its reason — but it is never
-   *  seeded, never selectable and never submitted. */
-  const selectableCandidates = hostCandidates.filter(
-    (candidate) => hostRejection(candidate.listing) === null,
-  );
-
   /**
    * The user's explicit pick, when they have made one. Session-local: choosing
    * a game server for one match must not repoint `hostingServer`, which is the
@@ -732,9 +759,8 @@ export function HostSetup({
       ?? DEFAULT_MULTIPLAYER_SERVER_URL,
   );
 
-  /** Re-resolve as the directory arrives, retaining an explicit pick only
-   * while it remains eligible. The default URL is only a placeholder while
-   * candidates are absent: dedicated submission is disabled in that state. */
+  /** Retain an explicit pick while connected, otherwise use the best available
+   * server. With no candidates, the form uses P2P and submits a null URL. */
   const selected =
     selectableCandidates.some((candidate) => candidate.source.url === hostServerUrl)
       ? hostServerUrl
@@ -798,10 +824,8 @@ export function HostSetup({
   // submission locally instead of letting the user walk the full
   // save/select/deck-pick flow into a guaranteed dead end.
   const customFormatHostUnavailable = activeSavedFormat !== null;
-  const dedicatedHostUnavailable = !isP2P && selectableCandidates.length === 0;
   const submitDisabled =
-    dedicatedHostUnavailable
-    || hostDisabled
+    hostDisabled
     || customFormatHostUnavailable
     || isSubmitting
     || isResolvingFormat
@@ -818,11 +842,22 @@ export function HostSetup({
       <Field label={t("connectionMode.label")}>
         <div className="max-w-sm">
           <ConnectionModeSwitch
-            value={connectionMode}
+            value={isP2P ? "p2p" : "server"}
             onChange={onConnectionModeChange}
+            dedicatedAvailable={dedicatedAvailable}
           />
         </div>
+        {!dedicatedAvailable && (
+          <div className="flex flex-wrap items-center gap-x-3 text-sm text-slate-400">
+            <p role="status">{t("hostSetup.dedicatedUnavailable")}</p>
+            <button type="button" onClick={checkConnections} className="min-h-11 px-2 text-slate-200 underline underline-offset-4 hover:text-white">
+              {t("connectionToast.retry")}
+            </button>
+          </div>
+        )}
       </Field>
+
+      <LanServers />
 
       <p className="max-w-2xl text-sm leading-6 text-slate-400">
         {t(isP2P ? "hostSetup.p2pNotice" : "hostSetup.hostServerHelp")}
@@ -1084,7 +1119,6 @@ export function HostSetup({
           {!isP2P && (
             <Field
               label={t("hostSetup.hostServer")}
-              hint={dedicatedHostUnavailable ? t("serverOfflineDialog.couldNotConnect") : undefined}
             >
               <MenuSelect
                 ariaLabel={t("hostSetup.hostServer")}
@@ -1096,6 +1130,7 @@ export function HostSetup({
                 selectedValue={selected}
                 items={hostCandidates.map((candidate) => ({
                   value: candidate.source.url,
+                  disabled: !selectableCandidates.includes(candidate),
                   // A rejected candidate reads as `ServerPicker` renders one —
                   // the same `serverPicker.incompatibleVersion` line, off the
                   // same announced version — in place of a rank it cannot be
@@ -1106,6 +1141,8 @@ export function HostSetup({
                     ? `${candidate.source.name} — ${t("serverPicker.incompatibleVersion", {
                         version: candidate.listing?.row.server_version,
                       })}`
+                    : !selectableCandidates.includes(candidate)
+                      ? `${candidate.source.name} — ${t("connectionDot.disconnected")}`
                     : candidate.source.score === undefined
                       ? t("hostSetup.hostServerUnscored", { name: candidate.source.name })
                       : t("hostSetup.hostServerScore", {
@@ -1113,17 +1150,7 @@ export function HostSetup({
                           score: candidate.source.score,
                         }),
                 }))}
-                // A rejected row is inert rather than absent: it is listed so
-                // the user can see why, and selecting it does nothing, which is
-                // the same affordance `ServerPicker` gives by withholding the
-                // toggle.
-                onSelect={(url) => {
-                  const picked = hostCandidates.find(
-                    (candidate) => candidate.source.url === url,
-                  );
-                  if (picked && hostRejection(picked.listing) !== null) return;
-                  setHostServerUrl(url);
-                }}
+                onSelect={setHostServerUrl}
                 menuLayout="dropdown"
                 fitContainer
                 wrapperClassName="w-full min-w-0"

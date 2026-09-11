@@ -562,6 +562,23 @@ fn issue_8485_maze_prevents_both_double_strike_steps() {
         b.double_strike();
         b.id()
     };
+    // POSITIVE CONTROL for the second damage step. The Maze assertion below is an
+    // ABSENCE, and the driver's `saw_damage_step` latch is satisfied by a SINGLE
+    // `Phase::CombatDamage` observation — the engine runs both CR 510.4 steps inside
+    // one `Phase::CombatDamage` arm, so no phase-transition count can distinguish
+    // them either. Without this control the test would stay green while proving only
+    // the first-strike step: if the engine ever stopped raising the regular step for
+    // a double striker, the Mazed creature's damage would still be zero.
+    //
+    // An UN-MAZED double striker makes the second step observable. CR 702.4b: a
+    // creature with double strike deals combat damage in the first-strike step AND
+    // again in the regular step, so this 2/2 must take exactly 2 + 2 = 4 life off P0.
+    // A single step would take 2 and fail the assertion.
+    let control = {
+        let mut b = scenario.add_creature(P1, "Free Double Striker", 2, 2);
+        b.double_strike();
+        b.id()
+    };
 
     let mut runner = scenario.build();
     runner.state_mut().active_player = P1;
@@ -572,16 +589,33 @@ fn issue_8485_maze_prevents_both_double_strike_steps() {
         &mut runner,
         maze,
         mazed,
-        &[(mazed, AttackTarget::Player(P0))],
+        &[
+            (mazed, AttackTarget::Player(P0)),
+            (control, AttackTarget::Player(P0)),
+        ],
         &[],
         MazeTiming::BeforeBlockers,
     );
 
+    // CR 702.4b + CR 510.4: the control proves BOTH damage steps actually ran. This
+    // must be asserted before the prevention claim, because it is what stops that
+    // claim from being vacuous.
     assert_eq!(
         runner.life(P0),
-        p0_life_before,
-        "BOTH the first-strike and regular combat damage steps must be prevented"
+        p0_life_before - 4,
+        "CR 702.4b: the un-Mazed 2/2 double striker must connect in BOTH the \
+         first-strike and the regular combat damage step (2 + 2). Exactly 2 here \
+         means only ONE step ran, and the Mazed creature's prevention below would \
+         prove nothing about the second."
     );
+    // NOTE: no `damage_marked(mazed)` assertion here on purpose. The Mazed double
+    // striker is UNBLOCKED, so nothing deals damage to it in either step and such an
+    // assertion would be vacuously true — the exact defect this control exists to
+    // remove. The "dealt BY that creature" claim is already carried by the life
+    // assertion above: had the Maze failed, P0 would be down 4 (control) + 6 (the
+    // Mazed 3/3 striking twice) = 10, not 4. The blocked "dealt TO" direction is
+    // covered by `issue_8485_maze_prevents_both_directions_against_opposing_attacker`
+    // and `issue_8485_maze_to_shield_survives_layer_reevaluation_when_blocked`.
 }
 
 /// CR 615 + CR 806: the same defender-side orientation in a MULTIPLAYER game —

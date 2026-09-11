@@ -201,6 +201,9 @@ expression: result
           "destination": "Library",
           "target": {
             "type": "ParentTargetController"
+          },
+          "library_shuffle": {
+            "type": "TerminalShuffle"
           }
         },
         "cost": null,

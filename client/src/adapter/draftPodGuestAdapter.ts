@@ -455,6 +455,11 @@ export class DraftPodGuestAdapter {
     await this.guest.updateWorkspace(state);
   }
 
+  async suggestLands(): Promise<Record<string, number>> {
+    if (!this.guest) throw new Error("Guest not initialized");
+    return this.guest.suggestLands();
+  }
+
   sendMatchSettlement(settlement: DraftMatchSettlement): void {
     this.guest?.sendMatchSettlement(settlement);
   }

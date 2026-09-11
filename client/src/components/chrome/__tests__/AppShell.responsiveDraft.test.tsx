@@ -155,13 +155,13 @@ describe("AppShell responsive draft chrome", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Tablet mode" }));
-    await waitFor(() => expect(screen.getByRole("link", { name: "Home" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Home" })).not.toBeInTheDocument());
     expect(screen.getByRole("button", { name: "Pod Draft in Progress" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Pod Draft in Progress" }));
     expect(phoneActionClick).toHaveBeenCalledOnce();
-    const tabletChromeRow = screen.getByRole("link", { name: "Home" }).parentElement!;
+    const tabletChromeRow = screen.getByRole("button", { name: "Pod Draft in Progress" }).parentElement!;
     expect([...tabletChromeRow.children].flatMap((element) => element.getAttribute("aria-label") ?? []))
-      .toEqual(["Home", "Pod Draft in Progress", "Pause Draft", "End Draft"]);
+      .toEqual(["Pod Draft in Progress", "Pause Draft", "End Draft"]);
     expect(screen.getByRole("button", { name: "Pause Draft" })).toHaveTextContent("Pause Draft");
     expect(screen.getByRole("button", { name: "End Draft" })).toHaveTextContent("End Draft");
     expect(document.querySelector(".menu-scene")).toHaveClass("h-dvh", "min-h-0", "overflow-y-hidden");
@@ -177,6 +177,7 @@ describe("AppShell responsive draft chrome", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Tablet builder mode" }));
     await waitFor(() => expect(screen.getByText("Build Deck")).toHaveAttribute("aria-current", "step"));
+    expect(screen.getByRole("link", { name: "Home" })).toBeInTheDocument();
     const tabletBuilderChromeRow = screen.getByRole("link", { name: "Home" }).parentElement!;
     expect([...tabletBuilderChromeRow.children].flatMap((element) => element.getAttribute("aria-label") ?? []))
       .toEqual(["Home", "End Draft"]);

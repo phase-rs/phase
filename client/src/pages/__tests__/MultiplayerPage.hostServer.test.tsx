@@ -193,6 +193,17 @@ describe("MultiplayerPage host server", () => {
   });
 
   // V-U15g, leg (i)
+  it("honors the form's P2P fallback even before the saved dedicated preference updates", async () => {
+    useMultiplayerStore.setState({ connectionMode: "server" });
+    renderPage("/multiplayer?view=host-setup");
+    await submitHostSetup(null);
+    expect(startP2PHostingSession).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(),
+      { brokerUrl: OFFICIAL_MULTIPLAYER_SERVER_URL, roomName: "Test room" },
+    );
+    expect(startHosting).not.toHaveBeenCalled();
+  });
+
   it("probes and hosts on the chosen server, never on the anchor", async () => {
     renderPage("/multiplayer?view=host-setup");
     await screen.findByTestId("host-setup");

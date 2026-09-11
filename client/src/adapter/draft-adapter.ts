@@ -659,6 +659,13 @@ export class DraftEngineOperationLease {
     return this.wasm.suggest_lands(JSON.stringify(spells)) as Record<string, number>;
   }
 
+  suggestLandsForSeat(seat: number, spells: string[]): Record<string, number> {
+    return this.wasm.suggest_lands_for_seat(
+      seat,
+      JSON.stringify(spells),
+    ) as Record<string, number>;
+  }
+
   getBotDeck(botSeat: number): SuggestedDeck {
     return this.wasm.get_bot_deck(botSeat) as SuggestedDeck;
   }
@@ -871,6 +878,10 @@ export class DraftAdapter {
 
   async suggestLands(spells: string[]): Promise<Record<string, number>> {
     return withDraftEngineOperation((lease) => lease.suggestLands(spells));
+  }
+
+  async suggestLandsForSeat(seat: number, spells: string[]): Promise<Record<string, number>> {
+    return withDraftEngineOperation((lease) => lease.suggestLandsForSeat(seat, spells));
   }
 
   async getBotDeck(botSeat: number): Promise<SuggestedDeck> {

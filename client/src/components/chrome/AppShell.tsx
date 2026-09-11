@@ -105,15 +105,17 @@ export function AppShell() {
             >
               {draftTopRowChrome && (
                 <>
-                  <Link
-                    to="/"
-                    aria-label={t("nav.home")}
-                    title={t("nav.home")}
-                    className="relative z-10 flex w-11 shrink-0 flex-col items-center justify-center gap-0.5 rounded-[8px] border border-hairline bg-black/45 px-1 py-1 transition-colors hover:border-white/15 hover:bg-slate-950"
-                  >
-                    <HomeIcon className="h-6 w-6 opacity-70" />
-                    <span className="text-[9px] font-semibold leading-none text-fg-meta">{t("nav.home")}</span>
-                  </Link>
+                  {draftChromeMode !== "tablet-drafting" && (
+                    <Link
+                      to="/"
+                      aria-label={t("nav.home")}
+                      title={t("nav.home")}
+                      className="relative z-10 flex w-11 shrink-0 flex-col items-center justify-center gap-0.5 rounded-[8px] border border-hairline bg-black/45 px-1 py-1 transition-colors hover:border-white/15 hover:bg-slate-950"
+                    >
+                      <HomeIcon className="h-6 w-6 opacity-70" />
+                      <span className="text-[9px] font-semibold leading-none text-fg-meta">{t("nav.home")}</span>
+                    </Link>
+                  )}
                   {phoneAction && (
                     <button
                       type="button"

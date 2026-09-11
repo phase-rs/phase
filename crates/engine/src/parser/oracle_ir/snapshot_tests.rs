@@ -7,10 +7,13 @@
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::{OracleDocIr, OracleNodeIr};
+use crate::parser::oracle_ir::trace::OuterRoute;
 use crate::parser::oracle_ir::trigger::TriggerNodeIr;
+use crate::parser::{parse_oracle_text, parse_oracle_text_traced};
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCost, ActivationRestriction, Effect, TargetChoiceTiming, TriggerCondition,
+    AbilityCost, ActivationRestriction, ControllerRef, Effect, FilterProp, TargetChoiceTiming,
+    TargetFilter, TriggerCondition, TypedFilter,
 };
 use crate::types::game_state::DistributionUnit;
 
@@ -49,6 +52,171 @@ fn parse_two_layer_with_keywords(
     let mut ir = parse_oracle_ir(oracle_text, card_name, &keywords, &types, &subtypes);
     let lowered = lower_oracle_ir(&mut ir);
     (ir, lowered)
+}
+
+#[test]
+fn parser_trace_uses_production_output_and_records_real_item_routes() {
+    let text = "Exploit (When this creature enters, you may sacrifice a creature.)\nWhenever a creature you control exploits a nontoken creature, create a 2/2 black Zombie creature token.";
+    let keywords = vec!["Exploit".to_string()];
+    let types = vec!["Creature".to_string()];
+    let subtypes = vec!["Zombie".to_string()];
+    let traced = parse_oracle_text_traced(text, "Skull Skaab", &keywords, &types, &subtypes);
+    let ordinary = parse_oracle_text(text, "Skull Skaab", &keywords, &types, &subtypes);
+
+    assert_eq!(
+        serde_json::to_value(&traced.production_output).expect("serialize traced output"),
+        serde_json::to_value(&ordinary).expect("serialize ordinary output")
+    );
+    assert!(traced
+        .events
+        .iter()
+        .any(|event| event.route == OuterRoute::Trigger));
+    assert!(traced
+        .events
+        .iter()
+        .all(|event| event.span.first_line <= event.span.last_line));
+    let unique_items = traced
+        .events
+        .iter()
+        .map(|event| event.item_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        unique_items.len(),
+        traced.events.len(),
+        "one outer event per emitted item"
+    );
+    let exploit = ordinary
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == crate::types::triggers::TriggerMode::Exploited)
+        .expect("Skull Skaab exploit payoff trigger");
+    assert_eq!(
+        exploit.valid_source,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+    );
+    assert!(matches!(
+        exploit.valid_card.as_ref(),
+        Some(TargetFilter::Typed(filter)) if filter.properties.contains(&FilterProp::NonToken)
+    ));
+    assert!(!ability_has_unimplemented(
+        exploit.execute.as_deref().expect("Skull Skaab payoff")
+    ));
+}
+
+#[test]
+fn parser_trace_skull_skaab_pair_preserves_input_difference_and_omits_trigger_carrier() {
+    let left_text = "Exploit (When this creature enters, you may sacrifice a creature.)\nWhenever a creature you control exploits a nontoken creature, create a 2/2 black Zombie creature token.";
+    let right_text = "Exploit (When this creature enters, you may sacrifice a creature.)\nWhenever a creature you control exploits a creature, create a 2/2 black Zombie creature token.";
+    let keywords = vec!["Exploit".to_string()];
+    let types = vec!["Creature".to_string()];
+    let subtypes = vec!["Zombie".to_string()];
+    let left = parse_oracle_text_traced(left_text, "Skull Skaab", &keywords, &types, &subtypes);
+    let right = parse_oracle_text_traced(right_text, "A-Skull Skaab", &keywords, &types, &subtypes);
+    let (left_ir, left_lowered) = parse_two_layer_with_keywords(
+        left_text,
+        "Skull Skaab",
+        &["Exploit"],
+        &["Creature"],
+        &["Zombie"],
+    );
+    let (right_ir, right_lowered) = parse_two_layer_with_keywords(
+        right_text,
+        "A-Skull Skaab",
+        &["Exploit"],
+        &["Creature"],
+        &["Zombie"],
+    );
+
+    for (ir, expects_nontoken) in [(&left_ir, true), (&right_ir, false)] {
+        let parsed = ir
+            .items
+            .iter()
+            .find_map(|item| match &item.node {
+                OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger))
+                    if trigger.partial_def.mode
+                        == crate::types::triggers::TriggerMode::Exploited =>
+                {
+                    Some(trigger)
+                }
+                _ => None,
+            })
+            .expect("typed Exploited TriggerIr");
+        assert_eq!(
+            parsed.partial_def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
+        assert_eq!(
+            matches!(
+                parsed.partial_def.valid_card.as_ref(),
+                Some(TargetFilter::Typed(filter))
+                    if filter.properties.contains(&FilterProp::NonToken)
+            ),
+            expects_nontoken
+        );
+    }
+
+    assert_eq!(
+        serde_json::to_value(&left.production_output).unwrap(),
+        serde_json::to_value(&left_lowered).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&right.production_output).unwrap(),
+        serde_json::to_value(&right_lowered).unwrap()
+    );
+    let mut left_projection = serde_json::to_value(&left_lowered).unwrap();
+    let mut right_projection = serde_json::to_value(&right_lowered).unwrap();
+    crate::parser::audit_projection::omit_definition_descriptions(&mut left_projection);
+    crate::parser::audit_projection::omit_definition_descriptions(&mut right_projection);
+    assert_ne!(left_projection, right_projection);
+
+    assert_ne!(left.normalized_source, right.normalized_source);
+    assert!(left
+        .events
+        .iter()
+        .any(|event| event.route == OuterRoute::Trigger));
+    assert!(right
+        .events
+        .iter()
+        .any(|event| event.route == OuterRoute::Trigger));
+    assert!(left
+        .omitted_evidence
+        .iter()
+        .any(|evidence| evidence.identity_sensitive_omission));
+    assert!(right
+        .omitted_evidence
+        .iter()
+        .any(|evidence| evidence.identity_sensitive_omission));
+}
+
+#[test]
+fn parser_trace_distinguishes_routes_that_emit_spell_ir() {
+    let activated = parse_oracle_text_traced(
+        "{T}: Add {G}.",
+        "Test Druid",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let imperative = parse_oracle_text_traced(
+        "Draw a card.",
+        "Test Spell",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+
+    assert!(activated
+        .events
+        .iter()
+        .any(|event| event.route == OuterRoute::Activated));
+    assert!(imperative
+        .events
+        .iter()
+        .any(|event| event.route == OuterRoute::ImperativeEffect));
 }
 
 /// CR 707.9a + CR 602.1a: generic activated abilities are emitted as native
@@ -2668,12 +2836,18 @@ fn aerial_formation() {
 //     `static_def` *before* the push in both branches, so the conversion site is
 //     identical either way; the unwrapped half is covered by row 204's Wizard L1.
 //
-// Non-witness worth knowing about: Barbarian Class L1 ("If you would roll one or
-// more dice, instead roll that many dice plus one and ignore the lowest roll")
-// does NOT reach the replacement arm — it falls through to the generic path and
-// lands as `PreLoweredSpell` with an `Unimplemented` effect. That is a pre-existing
-// parser gap, not something T1 introduces; it is baselined here so that if T1
-// changes it, the churn is visible and must be explained.
+// Formerly-baselined gap, now CLOSED: Barbarian Class L1 ("If you would roll one
+// or more dice, instead roll that many dice plus one and ignore the lowest roll")
+// used to fall through the replacement arm to the generic path, landing as
+// `PreLoweredSpell` with an `Unimplemented` effect. It now reaches the
+// replacement arm and lowers to a real `ReplacementEvent::RollDice` definition
+// (CR 706.1 + CR 706.6 + CR 614.1a): the `execute` raises the instruction's die
+// count by one (`Offset { EventContextAmount, +1 }`) and `die_ignore_rule`
+// carries `Lowest`, with `valid_player: You` for the "if YOU would roll" scope.
+// Both `barbarian_class_ir` and `barbarian_class_lowered` were regenerated
+// together for that change — the IR node moved from `Unsupported`/`Unknown` to
+// `Replacement`, and the lowered ability moved out of `abilities` into
+// `replacements`.
 // ---------------------------------------------------------------------------
 
 #[test]

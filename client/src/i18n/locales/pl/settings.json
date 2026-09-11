@@ -5,11 +5,18 @@
   },
   "tabs": {
     "gameplay": "Rozgrywka",
+    "experimental": "Eksperymentalne",
     "visual": "Grafika",
     "combat": "Tempo",
     "audio": "Dźwięk",
     "multiplayer": "Tryb wieloosobowy",
     "data": "Dane"
+  },
+  "experimental": {
+    "title": "Eksperymentalne",
+    "tournaments": "Turnieje",
+    "showTournaments": "Pokazuj turnieje w nawigacji",
+    "showTournamentsDescription": "Turnieje są nadal w fazie rozwoju i mogą ulec zmianie bez uprzedzenia."
   },
   "gameplay": {
     "collapseLands": "Zwiń Lands",

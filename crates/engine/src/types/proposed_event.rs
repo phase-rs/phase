@@ -7,7 +7,8 @@ use crate::game::game_object::{AttachTarget, DisplaySource};
 use super::counter::CounterType;
 
 use super::ability::{
-    ContinuousModification, CopiableValues, Duration, FaceDownProfile, StaticDefinition, TargetRef,
+    ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile,
+    StaticDefinition, TargetRef,
 };
 use super::card::{PrintedCardRef, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
@@ -592,6 +593,38 @@ pub enum ProposedEvent {
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
+    /// CR 706.1 + CR 614.1a: A player is about to roll one or more dice as a
+    /// single instruction. Carried through the replacement pipeline so
+    /// count-modifying "instead roll that many dice plus one" effects
+    /// (Barbarian Class, Pixie Guide, Wyll) raise the count before the RNG runs.
+    ///
+    /// CR 706.1: The event is per-INSTRUCTION, not per-die — one "roll two
+    /// six-sided dice" instruction proposes ONE `RollDice { count: 2 }`. This
+    /// matches the once-per-batch firing of die-roll triggers. Contrast
+    /// `CoinFlip`, which is per-flip per Krark's Thumb's own ruling.
+    RollDice {
+        player_id: PlayerId,
+        count: u32,
+        sides: u8,
+        /// CR 706.6: What the die-roll resolver must do with the extra dice the
+        /// applied replacements caused to be rolled — ONE entry per applied
+        /// replacement, in application order. Appended by `roll_dice_applier`
+        /// from each matched `ReplacementDefinition.die_ignore_rule`; empty when
+        /// no applied replacement carried an ignore instruction. This field is
+        /// the ONLY channel by which the rules reach `roll_die.rs` —
+        /// `ApplyResult` carries nothing but the modified event.
+        ///
+        /// A `Vec` rather than an `Option` because CR 706.6 applies once per
+        /// INSTRUCTING effect: two stacked die-roll replacements (Barbarian
+        /// Class + Pixie Guide) each raise the count by one AND each instruct
+        /// the roller to ignore a roll, so three dice are rolled and TWO are
+        /// ignored. Collapsing to a single rule would leave the extra die
+        /// surviving and inflate every aggregate.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ignore_rules: Vec<DieRollIgnoreRule>,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+        applied: HashSet<AppliedReplacementKey>,
+    },
     /// CR 701.37a + CR 614.1a: A creature is about to explore. Replacement
     /// effects can modify the explore action (e.g., add a scry prelude).
     Explore {
@@ -981,6 +1014,7 @@ impl ProposedEvent {
             | ProposedEvent::Scry { applied, .. }
             | ProposedEvent::Mill { applied, .. }
             | ProposedEvent::CoinFlip { applied, .. }
+            | ProposedEvent::RollDice { applied, .. }
             | ProposedEvent::Explore { applied, .. }
             | ProposedEvent::Connive { applied, .. }
             | ProposedEvent::Proliferate { applied, .. }
@@ -1015,6 +1049,7 @@ impl ProposedEvent {
             | ProposedEvent::Scry { applied, .. }
             | ProposedEvent::Mill { applied, .. }
             | ProposedEvent::CoinFlip { applied, .. }
+            | ProposedEvent::RollDice { applied, .. }
             | ProposedEvent::Explore { applied, .. }
             | ProposedEvent::Connive { applied, .. }
             | ProposedEvent::Proliferate { applied, .. }
@@ -1119,6 +1154,7 @@ impl ProposedEvent {
             | ProposedEvent::Mill { player_id, .. }
             | ProposedEvent::Proliferate { player_id, .. }
             | ProposedEvent::CoinFlip { player_id, .. }
+            | ProposedEvent::RollDice { player_id, .. }
             | ProposedEvent::LifeGain { player_id, .. }
             | ProposedEvent::LifeLoss { player_id, .. }
             | ProposedEvent::Discard { player_id, .. }
@@ -1193,6 +1229,7 @@ impl ProposedEvent {
             | ProposedEvent::Mill { .. }
             | ProposedEvent::Proliferate { .. }
             | ProposedEvent::CoinFlip { .. }
+            | ProposedEvent::RollDice { .. }
             | ProposedEvent::LifeGain { .. }
             | ProposedEvent::LifeLoss { .. }
             | ProposedEvent::CreateToken { .. }

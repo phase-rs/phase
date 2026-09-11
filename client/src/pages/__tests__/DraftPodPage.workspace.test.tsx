@@ -5,9 +5,13 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { WorkspaceDeckBuilderController } from "../../components/draft/LimitedDeckBuilder";
+import type {
+  LocalDeckBuilderController,
+  WorkspaceDeckBuilderController,
+} from "../../components/draft/LimitedDeckBuilder";
 import type { PackDisplayController, PackDisplayPresentation } from "../../components/draft/PackDisplay";
 import type { DraftShellPhoneAction, DraftShellTopAction } from "../../components/chrome/ShellContext";
+import { ShellProvider } from "../../components/chrome/ShellContext";
 import { DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../constants/storage";
 import type { DraftWorkspaceProps } from "../../components/draft/workspace/DraftWorkspace";
 import type { ResponsiveDraftLayout } from "../../components/draft/workspace/workspacePreferences";
@@ -19,8 +23,9 @@ const captured = vi.hoisted(() => ({
   workspace: null as DraftWorkspaceProps | null,
   deckbuilder: null as WorkspaceDeckBuilderController | null,
   builderLayout: null as ResponsiveDraftLayout | null,
+  builderShowSuggestions: null as boolean | null,
   previews: [] as Array<{ mode?: string; hoverDelayMs?: number }>,
-  menuShell: null as { layout?: string; contentWidthClass?: string; compactTopPadding?: boolean } | null,
+  menuShell: null as { layout?: string; contentWidthClass?: string; compactTopPadding?: boolean; fillEmbeddedHeight?: boolean } | null,
   presentation: null as PackDisplayPresentation | null,
   packLayout: null as ResponsiveDraftLayout | null,
   phoneToolbarPinned: null as boolean | null,
@@ -36,6 +41,12 @@ const captured = vi.hoisted(() => ({
   showProgress: null as boolean | null,
   hostPresentations: [] as string[],
 }));
+
+function isEditableDeckBuilderController(
+  controller: WorkspaceDeckBuilderController | null,
+): controller is LocalDeckBuilderController {
+  return controller !== null && controller.capabilities?.kind !== "fixed-pool";
+}
 
 const store = vi.hoisted(() => {
   const cards = [
@@ -90,6 +101,7 @@ const store = vi.hoisted(() => {
     setWorkspaceState: vi.fn(),
     addBasicLand: vi.fn(),
     removeBasicLand: vi.fn(),
+    autoSuggestLands: vi.fn(),
     submitDeck: vi.fn(),
     leave: vi.fn(),
     resumeDraft: vi.fn(async () => "absent" as const),
@@ -142,7 +154,7 @@ vi.mock("../../components/chrome/ShellContext", async (importOriginal) => ({
     captured.topActions = topActions ?? [];
   },
 }));
-vi.mock("../../components/menu/MenuShell", () => ({ MenuShell: (props: { children: ReactNode; layout?: string; contentWidthClass?: string; compactTopPadding?: boolean }) => {
+vi.mock("../../components/menu/MenuShell", () => ({ MenuShell: (props: { children: ReactNode; layout?: string; contentWidthClass?: string; compactTopPadding?: boolean; fillEmbeddedHeight?: boolean }) => {
   captured.menuShell = props;
   return <>{props.children}</>;
 } }));
@@ -226,9 +238,10 @@ vi.mock("../../components/draft/workspace/DraftWorkspace", () => ({
   },
 }));
 vi.mock("../../components/draft/LimitedDeckBuilder", () => ({
-  LimitedDeckBuilder: ({ local, responsiveLayout }: { local?: WorkspaceDeckBuilderController; responsiveLayout?: ResponsiveDraftLayout }) => {
+  LimitedDeckBuilder: ({ local, responsiveLayout, showSuggestions }: { local?: WorkspaceDeckBuilderController; responsiveLayout?: ResponsiveDraftLayout; showSuggestions?: boolean }) => {
     captured.deckbuilder = local ?? null;
     captured.builderLayout = responsiveLayout ?? null;
+    captured.builderShowSuggestions = showSuggestions ?? false;
     return <div data-testid="deckbuilder" />;
   },
 }));
@@ -239,6 +252,7 @@ describe("DraftPodPage workspace", () => {
     captured.workspace = null;
     captured.deckbuilder = null;
     captured.builderLayout = null;
+    captured.builderShowSuggestions = null;
     captured.previews = [];
     captured.menuShell = null;
     captured.presentation = null;
@@ -299,8 +313,17 @@ describe("DraftPodPage workspace", () => {
     act(() => { store.state.phase = "deckbuilding"; });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
     expect(screen.getByTestId("deckbuilder")).toBeInTheDocument();
-    expect(captured.deckbuilder?.workspace).toBe(store.state.workspaceState);
-    expect(captured.deckbuilder?.capabilities).toEqual({ kind: "editable-pool", suggestions: false });
+    const deckbuilder = captured.deckbuilder;
+    if (!isEditableDeckBuilderController(deckbuilder)) {
+      throw new Error("editable deck builder controller not installed");
+    }
+    expect(deckbuilder.workspace).toBe(store.state.workspaceState);
+    expect(deckbuilder.capabilities).toEqual({ kind: "editable-pool", suggestions: true });
+    expect(captured.builderShowSuggestions).toBe(true);
+    expect(deckbuilder.onAutoSuggestDeck).toBeUndefined();
+    expect(deckbuilder.onAutoSuggestLands).toBe(store.state.autoSuggestLands);
+    await deckbuilder.onAutoSuggestLands?.();
+    expect(store.state.autoSuggestLands).toHaveBeenCalledOnce();
   });
 
   it("forwards the engine commander requirement independently of draft kind", () => {
@@ -357,6 +380,19 @@ describe("DraftPodPage workspace", () => {
     }
   });
 
+  it("forwards embedded fill for responsive pod workspace phases", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 768 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 1024 });
+
+    render(
+      <ShellProvider value>
+        <MemoryRouter><DraftPodPage /></MemoryRouter>
+      </ShellProvider>,
+    );
+
+    expect(captured.menuShell).toMatchObject({ fillEmbeddedHeight: true });
+  });
+
   it.each([
     ["phone-portrait", 430, 932, "h-[calc(100dvh_-_11rem)]"],
     ["phone-landscape", 924, 412, "h-[calc(100dvh_-_4rem)]"],
@@ -369,7 +405,7 @@ describe("DraftPodPage workspace", () => {
 
     expect(captured.shellMode).toBe("phone-drafting");
     expect(captured.progressVariant).toBe("pod");
-    expect(captured.showProgress).toBe(responsiveLayout === "phone-landscape");
+    expect(captured.showProgress).toBe(false);
     expect(captured.menuShell).toMatchObject({ compactTopPadding: true });
     expect(captured.packLayout).toBe(responsiveLayout);
     expect(captured.phoneToolbarPinned).toBe(true);
@@ -401,6 +437,7 @@ describe("DraftPodPage workspace", () => {
     act(() => { store.state.phase = "deckbuilding"; });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
     expect(captured.shellMode).toBe("phone-deckbuilding");
+    expect(captured.showProgress).toBe(false);
     expect(captured.phoneAction).toBeUndefined();
     expect(captured.builderLayout).toBe(responsiveLayout);
     expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(true);

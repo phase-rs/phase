@@ -598,11 +598,7 @@ pub fn resolve(
                 remaining_eligible,
                 remaining_count,
                 paused_card,
-                // `discard_at_random` already set `waiting_for` from this value
-                // and this path parks without re-setting it, so there is
-                // nothing here to keep in step. The drain that RE-parks does
-                // consume it.
-                chooser: _,
+                ..
             } = discard_at_random(
                 state,
                 RandomDiscardRequest {
@@ -783,7 +779,9 @@ pub(crate) struct RandomDiscardRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RandomDiscardOutcome {
     /// Every requested card was discarded (or replacement-redirected).
-    Completed,
+    Completed {
+        picks: Vec<crate::types::game_state::RandomDiscardCostPick>,
+    },
     /// A replacement effect needs a player choice before the batch can finish.
     /// `state.waiting_for` has been set; callers MUST return without treating
     /// the batch as complete.
@@ -794,6 +792,8 @@ pub(crate) enum RandomDiscardOutcome {
     /// caller owns an unless-payment that must still be settled, which is not
     /// the effect caller's problem.
     NeedsReplacementChoice {
+        /// Picks fully delivered before the paused one.
+        completed_picks: Vec<crate::types::game_state::RandomDiscardCostPick>,
         /// Cards still un-picked. Excludes the card whose replacement paused.
         remaining_eligible: Vec<ObjectId>,
         /// Picks still owed AFTER the paused one resolves.
@@ -808,6 +808,9 @@ pub(crate) enum RandomDiscardOutcome {
         /// in hand. The drain settles the pause against this exact occurrence
         /// leaving the hand, so a later same-id occurrence cannot claim it.
         paused_card: ObjectIncarnationRef,
+        /// Pre-move cost referent data for the paused pick. Effect callers
+        /// ignore it; cost callers preserve it until delivery completes.
+        paused_pick: Box<crate::types::game_state::RandomDiscardCostPick>,
         /// The replacement pipeline's selected chooser. Published by this
         /// authority rather than re-derived at the call site, because it is NOT
         /// always the discarding player — see the commander carve-out in
@@ -866,12 +869,24 @@ pub(crate) fn discard_at_random(
         discard_frame,
     } = request;
     let mut remaining = eligible;
+    let mut picks = Vec::new();
     for pick in 0..count {
         if remaining.is_empty() {
             break;
         }
         let index = state.rng.random_range(0..remaining.len());
         let obj_id = remaining.swap_remove(index);
+        let object = state
+            .objects
+            .get(&obj_id)
+            .expect("random discard selected a live hand object");
+        let selected = crate::types::game_state::RandomDiscardCostPick {
+            occurrence: ObjectIncarnationRef::from_object(object),
+            snapshot: crate::types::ability::CostPaidObjectSnapshot::capture(
+                object,
+                object.snapshot_for_mana_spent(),
+            ),
+        };
         // CR 701.9a + CR 614.1a: route with this call site's OWN provenance.
         // `route_discard` is the shared tail; only the `caused_by_effect` flag
         // differs, and it is exactly what Library-of-Leng-class replacements
@@ -899,20 +914,23 @@ pub(crate) fn discard_at_random(
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(chooser, state);
             return RandomDiscardOutcome::NeedsReplacementChoice {
+                completed_picks: picks,
                 remaining_eligible: remaining,
                 // The paused pick is settled by the replacement itself, so the
                 // resumed batch owes only the picks after it.
                 remaining_count: count - pick - 1,
                 // CR 400.7: pinned before the redirect moves it, so the resume
                 // settles against this occurrence and not a later same-id one.
-                paused_card: pin_paused_occurrence(state, obj_id),
+                paused_card: selected.occurrence,
+                paused_pick: Box::new(selected),
                 // Same value this function just set `waiting_for` from, so a
                 // re-parking caller cannot drift from the prompt actually shown.
                 chooser,
             };
         }
+        picks.push(selected);
     }
-    RandomDiscardOutcome::Completed
+    RandomDiscardOutcome::Completed { picks }
 }
 
 pub(crate) fn discard_caused_by_effect_with_source_and_frame(
@@ -1116,7 +1134,7 @@ mod random_discard_authority_tests {
         let (mut state, hand) = hand_of(42, 5);
         let mut events = Vec::new();
         let outcome = discard_at_random(&mut state, request(2, hand.clone()), &mut events);
-        assert_eq!(outcome, RandomDiscardOutcome::Completed);
+        assert!(matches!(outcome, RandomDiscardOutcome::Completed { .. }));
         assert_eq!(discarded(&state, &hand).len(), 2);
         assert_eq!(state.players[0].hand.len(), 3, "the rest stay in hand");
     }
@@ -1220,9 +1238,8 @@ mod random_discard_authority_tests {
             },
             &mut events,
         );
-        assert_eq!(
-            outcome,
-            RandomDiscardOutcome::Completed,
+        assert!(
+            matches!(outcome, RandomDiscardOutcome::Completed { .. }),
             "a cost payment must not stop for an effect-caused replacement"
         );
         assert!(
@@ -1301,6 +1318,7 @@ mod random_discard_authority_tests {
             remaining_count,
             paused_card,
             chooser,
+            ..
         } = outcome
         else {
             panic!("expected a replacement pause, got {outcome:?}");
@@ -1357,7 +1375,7 @@ mod random_discard_authority_tests {
         let (mut state, hand) = hand_of(42, 2);
         let mut events = Vec::new();
         let outcome = discard_at_random(&mut state, request(5, hand.clone()), &mut events);
-        assert_eq!(outcome, RandomDiscardOutcome::Completed);
+        assert!(matches!(outcome, RandomDiscardOutcome::Completed { .. }));
         assert_eq!(discarded(&state, &hand).len(), 2);
     }
 

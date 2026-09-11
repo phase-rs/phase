@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActiveSearchDecisionAuthority, CollectEvidenceResume, CostResume, DeferredLifeCostResume,
-    GameState, PayCostKind, PendingCast, PendingCostMoveResume, PendingSacrificeCostCompletion,
-    WaitingFor,
+    GameState, PayCostKind, PendingCast, PendingCostMoveResume, PendingDiscardForCostResume,
+    PendingSacrificeCostCompletion, WaitingFor,
 };
 use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::match_config::MatchPhase;
@@ -107,7 +107,11 @@ fn abandon_pending_spell_casts(
         .pending_discard_for_cost
         .as_ref()
         .is_some_and(|resume| {
-            is_abandoned_spell(state, departing_player, spell_ids, &resume.pending)
+            let pending = match resume.as_ref() {
+                PendingDiscardForCostResume::Chosen { pending, .. }
+                | PendingDiscardForCostResume::Random { pending, .. } => pending,
+            };
+            is_abandoned_spell(state, departing_player, spell_ids, pending)
         })
     {
         state.pending_discard_for_cost = None;
@@ -1906,6 +1910,7 @@ mod tests {
             search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
+            choice_player: None,
             library_placement: None,
             exile_controller: None,
             exile_duration: None,
@@ -3099,6 +3104,7 @@ mod tests {
             search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
+            choice_player: None,
             library_placement: None,
             exile_controller: None,
             exile_duration: None,
@@ -3239,6 +3245,7 @@ mod tests {
             search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
+            choice_player: None,
             library_placement: None,
             exile_controller: None,
             exile_duration: None,
@@ -3292,6 +3299,7 @@ mod tests {
             search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
+            choice_player: None,
             library_placement: None,
             exile_controller: None,
             exile_duration: None,
@@ -3336,6 +3344,7 @@ mod tests {
             search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
+            choice_player: None,
             library_placement: None,
             exile_controller: None,
             exile_duration: None,
@@ -3410,6 +3419,7 @@ mod tests {
             search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
+            choice_player: None,
             library_placement: None,
             exile_controller: None,
             exile_duration: None,

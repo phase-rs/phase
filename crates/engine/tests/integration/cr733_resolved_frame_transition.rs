@@ -13,7 +13,7 @@ use engine::types::player::PlayerId;
 use engine::types::resolution::{
     CipherEncodeStage, FrameKind, MultiDrawFrame, OptionalEffectFrame, PendingCipherEncode,
     PendingCoinFlip, PendingCoinFlipKind, ResolutionFrame, ResolutionStackError,
-    ResolutionStateWire,
+    ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION,
 };
 use engine::types::resolved_commands::{
     ResolvedCommandOrdinal, ResolvedFrameTransition, ResolvedFrameTransitionCommand,
@@ -414,10 +414,10 @@ fn production_parent_insertions_preserve_adjacency_and_journal_the_transition() 
         )));
 }
 
-/// Frame-transition commands use the existing v2 resolution-state wire and
+/// Frame-transition commands use the current resolution-state wire and
 /// preserve both their journal evidence and their structural stack exactly.
 #[test]
-fn resolution_state_wire_v2_round_trip_preserves_frame_transition_journal_and_stack() {
+fn current_resolution_wire_round_trip_preserves_frame_transition_journal_and_stack() {
     let mut state = GameState::new_two_player(102);
     state
         .resolve_and_apply_frame_transition(ResolvedFrameTransition::Push {
@@ -428,10 +428,13 @@ fn resolution_state_wire_v2_round_trip_preserves_frame_transition_journal_and_st
     let expected_stack = frames(&state);
 
     let wire = serde_json::to_value(ResolutionStateWire::from_game_state(state))
-        .expect("v2 resolution state serializes");
-    assert_eq!(wire["resolution_state_version"], 2);
+        .expect("current resolution state serializes");
+    assert_eq!(
+        wire["resolution_state_version"],
+        RESOLUTION_STATE_WIRE_VERSION
+    );
     let restored = serde_json::from_value::<ResolutionStateWire>(wire)
-        .expect("v2 resolution state restores")
+        .expect("current resolution state restores")
         .into_game_state();
 
     assert_eq!(restored.resolved_rules_journal, expected_journal);

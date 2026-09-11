@@ -4605,6 +4605,11 @@ fn execute_zone_move_with_applied_terminal(
             // wait state is already set by the counter-pause / devour machinery
             // (`replacement_pause_delivery_result` reads it).
             if let Some(pending) = state.pending_replacement.as_mut() {
+                // CR 701.24a: this generic effect-driven entry also accepts an
+                // explicit library placement. Preserve it across the replacement
+                // pause so its resumed delivery does not fall back to the tail's
+                // placement-less auto-shuffle behavior.
+                pending.library_placement = library_placement;
                 pending.exile_controller = exile_controller;
                 pending.exile_duration = duration.cloned();
                 pending.exile_tracking = if track_exiled_by_source {

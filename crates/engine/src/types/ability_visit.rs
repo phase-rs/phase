@@ -113,14 +113,19 @@ pub enum ResolutionScope {
 /// ([`visit_nested_ability_def_scoped`]) and the cost walk
 /// ([`visit_ability_def_costs_scoped`]) consult this and nothing else.
 ///
-/// Deliberately keys on `WhenYouDo` ALONE. `AbilityCondition::EffectOutcome`
-/// ("if you do, ...") is CR 608.2c — one instruction conditional on another
-/// within the SAME resolution — and must keep being descended. Do not reach for
-/// `effects::sub_ability_is_reflexive`, which unions the two because it answers a
-/// different question (skip-on-decline), not this one.
+/// Deliberately keys on the root `WhenYouDo` marker alone. Its optional flat
+/// `And` guard is still part of the separately-created reflexive ability.
+/// `AbilityCondition::EffectOutcome` ("if you do, ...") is CR 608.2c — one
+/// instruction conditional on another within the SAME resolution — and must
+/// keep being descended. Do not reach for `effects::sub_ability_is_reflexive`,
+/// which unions the two because it answers a different question
+/// (skip-on-decline), not this one.
 fn scope_prunes_nested_ability(def: &AbilityDefinition, scope: ResolutionScope) -> bool {
     scope == ResolutionScope::OwnResolutionOnly
-        && matches!(def.condition, Some(AbilityCondition::WhenYouDo))
+        && def
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::has_when_you_do_marker)
 }
 
 /// Scope-reset trapdoor tripwire, shared by the five traversal functions that

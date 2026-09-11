@@ -35,6 +35,8 @@
 //!   for non-leading bodies in a comma-anded list)
 //!   → [`ContinuousModification::AddType`] (when the type word is a core type)
 //!   or [`ContinuousModification::AddSubtype`] (otherwise).
+//! - `it's a(n) {core_type}`
+//!   → [`ContinuousModification::SetCardTypes`] with that single core type.
 //! - `it has {keyword[, keyword, ...]}`
 //!   → [`ContinuousModification::AddKeyword`] per recognised keyword.
 //! - `<subject pronoun> has this ability`
@@ -269,6 +271,9 @@ pub(crate) fn parse_except_body<'a>(
     // must be tried before the additive form, which would otherwise leave the
     // "and loses all other card types" tail unconsumed.
     if let Some((rest, modifications)) = parse_its_a_type_loses_others(input) {
+        return Some((rest, modifications));
+    }
+    if let Some((rest, modifications)) = parse_its_a_single_core_type(input, card_name, ctx) {
         return Some((rest, modifications));
     }
     if let Some((rest, subtype)) = parse_its_a_type_in_addition(input) {
@@ -1026,6 +1031,85 @@ pub(super) fn parse_its_a_type_loses_others(
     Some((rest, result))
 }
 
+/// CR 205.1a + CR 613.1d + CR 707.9b: an `except it's a(n) <card type>`
+/// copy exception sets the copied object's card types to the named type. The
+/// boundary is deliberately structural: it permits a complete body or the
+/// start of a subsequent exception body, but not a second type word. Thus
+/// `it's an artifact creature` and `it's an artifact and creature` decline
+/// rather than silently treating their first word as a complete exception.
+fn parse_its_a_single_core_type<'a>(
+    input: &'a str,
+    card_name: &str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, Vec<ContinuousModification>)> {
+    let (rest, ()) = parse_copy_subject_and_copula(input).ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, core_type) = nom_primitives::parse_core_type(rest).ok()?;
+    let (_, ()) = peek(|remainder| parse_single_core_type_boundary(remainder, card_name, ctx))
+        .parse(rest)
+        .ok()?;
+    Some((
+        rest,
+        vec![ContinuousModification::SetCardTypes {
+            core_types: vec![core_type],
+        }],
+    ))
+}
+
+/// Boundary after a standalone core card type in a copy exception. Keeping
+/// this as an `OracleResult` gives the constituent nom combinators the shared
+/// parser error type while ensuring callers do not consume the next body.
+fn parse_single_core_type_boundary<'a>(
+    input: &'a str,
+    card_name: &str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, ()> {
+    value(
+        (),
+        alt((
+            value((), eof),
+            value((), char('.')),
+            value(
+                (),
+                preceded(tag(", and "), |remainder| {
+                    parse_independent_except_body_start(remainder, card_name, ctx)
+                }),
+            ),
+            value(
+                (),
+                preceded(tag(", "), |remainder| {
+                    parse_independent_except_body_start(remainder, card_name, ctx)
+                }),
+            ),
+            value(
+                (),
+                preceded(tag(" and "), |remainder| {
+                    parse_independent_except_body_start(remainder, card_name, ctx)
+                }),
+            ),
+        )),
+    )
+    .parse(input)
+}
+
+/// Recognize the start of an independently parseable copy-exception body
+/// after the comma in an `X, Y, and Z` list. This is deliberately narrower
+/// than the outer clause loop's generic comma separator: a bare `, creature`
+/// is a second type word, not another body, and must not let the singleton
+/// card-type arm silently emit only `Artifact`.
+fn parse_independent_except_body_start<'a>(
+    input: &'a str,
+    card_name: &str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, ()> {
+    parse_except_body(input, card_name, ctx)
+        .filter(|(_, modifications)| !modifications.is_empty())
+        .map(|_| (input, ()))
+        .ok_or_else(|| nom::Err::Error(OracleError::new(input, nom::error::ErrorKind::Tag)))
+}
+
 /// CR 205.1a + CR 613.1d + CR 613.1f + CR 613.8a: "<article> <type words> [with
 /// \"<ability>\"] and loses all other card types and abilities" — the
 /// full-replacement animation used by "<subject> becomes …" effects that both
@@ -1733,7 +1817,7 @@ pub(crate) fn parse_casualty_copy_riders_from_oracle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ObjectScope, QuantityRef, RoundingMode};
+    use crate::types::ability::{Effect, ObjectScope, QuantityRef, RoundingMode};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
 
@@ -2321,6 +2405,53 @@ mod tests {
             )),
             "must not emit bogus subtypes from the 'with crew 3' clause: {mods:?}"
         );
+    }
+
+    /// CR 205.1a + CR 613.1d + CR 707.9b: Machine God's Effigy keeps only
+    /// Artifact after copying a creature, while its separate quoted mana
+    /// ability remains a copiable exception.
+    #[test]
+    fn its_an_artifact_sets_types_and_keeps_quoted_mana_ability() {
+        let (_, mods) = parse_except_clause(
+            ", except it's an artifact and it has \"{T}: Add {U}.\"",
+            "Machine God's Effigy",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Artifact],
+        }));
+        let granted = mods
+            .iter()
+            .find_map(|modification| match modification {
+                ContinuousModification::GrantAbility { definition } => Some(definition),
+                _ => None,
+            })
+            .expect("the quoted blue mana ability must be granted");
+        assert!(matches!(granted.effect.as_ref(), Effect::Mana { .. }));
+        assert!(
+            !matches!(granted.effect.as_ref(), Effect::Unimplemented { .. }),
+            "the quoted mana ability must not become an unsupported residual: {mods:?}"
+        );
+    }
+
+    #[test]
+    fn multiple_core_types_do_not_emit_a_partial_set_card_types() {
+        for body in [
+            ", except it's an artifact creature",
+            ", except it's an artifact and creature",
+            ", except it's an artifact, creature",
+        ] {
+            let (_, mods) = parse_except_clause(body, "Card", &ParseContext::default()).unwrap();
+            assert!(
+                !mods.iter().any(|modification| matches!(
+                    modification,
+                    ContinuousModification::SetCardTypes { core_types }
+                        if core_types == &vec![CoreType::Artifact]
+                )),
+                "{body:?} must not silently emit a partial Artifact replacement: {mods:?}"
+            );
+        }
     }
 
     /// The additive "in addition to its other types" form must still emit

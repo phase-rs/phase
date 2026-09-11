@@ -1929,6 +1929,19 @@ enum BlockDeclarationRequirement {
     },
 }
 
+/// Bounded answer for an AI-only existential block-declaration query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaximumBlockDeclarationBlockability {
+    Blockable,
+    NotBlockable,
+    Unknown,
+}
+
+// The advisory query must avoid constructing a broad pair map or declaration
+// product while the exact declaration solver remains unrestricted.
+const MAX_ADVISORY_BLOCK_PAIR_DOMAIN: usize = 64;
+const MAX_ADVISORY_BLOCK_DECLARATION_PRODUCT: usize = 64;
+
 /// The single live model for CR 509.1 blocker declarations.  This mirrors
 /// AttackDeclarationConstraints: hard legality is owned by
 /// validate_blockers_core, and this model owns only the requirement multiset and
@@ -2207,6 +2220,73 @@ impl BlockDeclarationConstraints {
             chosen.truncate(start);
         }
     }
+}
+
+/// CR 509.1b-c: conservatively determines whether a defender can make a small,
+/// tax-free declaration that blocks `attacker`. Requirements or restriction
+/// interactions outside that bounded witness return Unknown.
+pub fn attacker_blockability_in_maximum_free_declaration(
+    state: &GameState,
+    player: PlayerId,
+    attacker: ObjectId,
+) -> MaximumBlockDeclarationBlockability {
+    if defending_player_for_attacker(state, attacker) != Some(player) {
+        return MaximumBlockDeclarationBlockability::NotBlockable;
+    }
+    let attacker_count = state.combat.as_ref().map_or(0, |combat| {
+        combat
+            .attackers
+            .iter()
+            .filter(|info| is_attacker_in_play(state, info.object_id))
+            .count()
+    });
+    let blocker_count = get_valid_blocker_ids(state).len();
+    if attacker_count
+        .checked_mul(blocker_count)
+        .is_none_or(|pairs| pairs > MAX_ADVISORY_BLOCK_PAIR_DOMAIN)
+    {
+        return MaximumBlockDeclarationBlockability::Unknown;
+    }
+
+    let valid = get_valid_block_targets_for_player(state, player);
+    let minimum = min_blockers_required(state, attacker) as usize;
+    let mut capable: Vec<_> = valid
+        .iter()
+        .filter_map(|(&blocker, attackers)| attackers.contains(&attacker).then_some(blocker))
+        .collect();
+    if capable.len() < minimum {
+        return MaximumBlockDeclarationBlockability::NotBlockable;
+    }
+    capable.sort_unstable();
+
+    let mut declaration_product = 1usize;
+    for (&blocker, attackers) in &valid {
+        let Some(object) = state.objects.get(&blocker) else {
+            return MaximumBlockDeclarationBlockability::Unknown;
+        };
+        if extra_block_limit(state, object) > 1 {
+            return MaximumBlockDeclarationBlockability::Unknown;
+        }
+        let Some(product) = declaration_product
+            .checked_mul(attackers.len() + 1)
+            .filter(|product| *product <= MAX_ADVISORY_BLOCK_DECLARATION_PRODUCT)
+        else {
+            return MaximumBlockDeclarationBlockability::Unknown;
+        };
+        declaration_product = product;
+    }
+
+    let candidate: Vec<_> = capable
+        .into_iter()
+        .take(minimum)
+        .map(|blocker| (blocker, attacker))
+        .collect();
+    if validate_blockers_for_player(state, player, &candidate).is_err()
+        || compute_block_tax(state, &candidate).is_some()
+    {
+        return MaximumBlockDeclarationBlockability::Unknown;
+    }
+    MaximumBlockDeclarationBlockability::Blockable
 }
 
 /// Evaluates one CR 509.1c requirement against a complete or partial
@@ -2903,8 +2983,14 @@ fn combat_tax_relevant_modes(
 pub(crate) fn combat_tax_relevant_kinds(
     context: &crate::types::game_state::CombatTaxContext,
 ) -> [StaticModeKind; 2] {
-    let modes = combat_tax_relevant_modes(context);
-    [modes[0].kind(), modes[1].kind()]
+    // `each_ref` keeps the arity DERIVED rather than restated. Writing
+    // `[modes[0].kind(), modes[1].kind()]` would let a future third mode compile
+    // and be SILENTLY DROPPED from the gate — narrowing it, which is the unsound
+    // direction. Mapping the whole array makes that a compile error at this
+    // function's return type instead of a red test after the fact.
+    combat_tax_relevant_modes(context)
+        .each_ref()
+        .map(|mode| mode.kind())
 }
 
 /// CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d: Walk every battlefield / command-zone
@@ -4663,15 +4749,41 @@ impl AttackDeclarationConstraints {
     /// out from the closed form itself so a test can run the closed form on a
     /// board that FAILS the precondition and show the two answers genuinely
     /// diverge there — i.e. that declining is load-bearing, not decorative.
-    fn separable_precondition(&self, state: &GameState) -> bool {
-        // Precondition 1: uncoupled. The SAME predicate `max_no_payment` tests
-        // before taking its own separable fast path.
-        let coupled = self.global_cap.is_some()
+    /// CR 508.1c + CR 506.5: whether one candidate's legality or score can depend
+    /// on ANOTHER candidate's declaration. This is the single authority both
+    /// separable fast paths gate on.
+    ///
+    /// It is a method rather than two matching expressions because the
+    /// correspondence IS the correctness premise: the precondition
+    /// [`Self::separable_precondition`] checks has to be the same predicate
+    /// `max_no_payment` gates on, and two blocks that merely happen to read alike
+    /// are free to drift on a future edit.
+    ///
+    /// Each disjunct names a genuinely set-coupled rule:
+    /// * `global_cap` / `per_defender_caps` — a shared budget across attackers.
+    /// * `per_permanent_defender_caps` (`MaxAttackersEachCombat { defender:
+    ///   Some(ThisPermanent) }`, The Eternal Wanderer) — two creatures whose only
+    ///   legal target is a capped permanent are not independently maximizable,
+    ///   since attacking it with both would exceed the cap.
+    /// * `needs_companion` / `must_be_sole` — CR 506.5 "can't attack alone" and
+    ///   "attacks alone", which read the rest of the declared set by definition.
+    ///
+    /// The three fields deliberately absent (`candidates`, `legal_targets`,
+    /// `requirements`) are the inputs to the per-pair legality loop and the score
+    /// bar, both of which are per-candidate by signature.
+    fn is_coupled(&self) -> bool {
+        self.global_cap.is_some()
             || !self.per_defender_caps.is_empty()
             || !self.per_permanent_defender_caps.is_empty()
             || !self.needs_companion.is_empty()
-            || !self.must_be_sole.is_empty();
-        if coupled {
+            || !self.must_be_sole.is_empty()
+    }
+
+    fn separable_precondition(&self, state: &GameState) -> bool {
+        // Precondition 1: uncoupled. The SAME predicate `max_no_payment` tests
+        // before taking its own separable fast path — literally the same method,
+        // so the two cannot drift apart.
+        if self.is_coupled() {
             return false;
         }
         // Precondition 2: CR 508.1a + CR 702.26b + CR 701.35a — every candidate
@@ -4873,18 +4985,10 @@ fn max_no_payment(constraints: &AttackDeclarationConstraints, state: &GameState)
     // requirements depend only on its own chosen (free) target, so the optimum is
     // the per-creature sum of best single-target scores.
     //
-    // `per_permanent_defender_caps` (`MaxAttackersEachCombat { defender:
-    // Some(ThisPermanent) }`, The Eternal Wanderer) IS a coupling input here,
-    // same as `per_defender_caps`: two creatures whose only legal target is a
-    // capped permanent are not independently maximizable (attacking it with
-    // both would exceed the cap), so the fast path must be skipped whenever
-    // any such cap is active.
-    let coupled = constraints.global_cap.is_some()
-        || !constraints.per_defender_caps.is_empty()
-        || !constraints.per_permanent_defender_caps.is_empty()
-        || !constraints.needs_companion.is_empty()
-        || !constraints.must_be_sole.is_empty();
-    if !coupled {
+    // Coupling is decided by the single authority on the constraints model; see
+    // `AttackDeclarationConstraints::is_coupled` for why each disjunct is one,
+    // including why `per_permanent_defender_caps` (The Eternal Wanderer) counts.
+    if !constraints.is_coupled() {
         return constraints
             .candidates
             .iter()
@@ -7926,11 +8030,21 @@ mod tests {
         );
     }
 
-    /// CR 508.1d + CR 118.12a: positive control for the gate above. With a real
-    /// Ghostly Prison on the flushed board, `static_mode_presence` reports
-    /// `CantAttack` present, the gate falls through to the exact walk (the
-    /// counter fires), and the tax is still computed — proving the O(1) gate
-    /// suppresses only boards where no tax could apply.
+    /// CR 508.1c + CR 508.1h + CR 118.12a: positive control for the gate above.
+    /// With a real Ghostly Prison on the flushed board, `static_mode_presence`
+    /// reports `CantAttack` present, the gate falls through to the exact walk
+    /// (the counter fires), and the tax is still computed — proving the O(1)
+    /// gate suppresses only boards where no tax could apply.
+    ///
+    /// A Ghostly Prison tax is a RESTRICTION (CR 508.1c — "effects that say a
+    /// creature can't attack, or that it can't attack unless some condition is
+    /// met") whose cost is aggregated at CR 508.1h. CR 508.1d still applies: its
+    /// requirement count passes over a restriction, while its third sentence
+    /// covers this case directly — "If a creature can't attack unless a player
+    /// pays a cost, that player is not required to pay that cost." CR 118.12a is
+    /// the general rule behind that optional payment ("unless [a player] pays"
+    /// means "[a player] MAY pay"), and is what this test's `{2}` assertion
+    /// exercises; see the authority comment on `combat_tax_relevant_modes`.
     #[test]
     fn combat_tax_presence_gate_does_not_suppress_a_real_tax() {
         let mut state = setup();
@@ -14020,6 +14134,160 @@ mod tests {
         assert!(validate_blockers(&state, &[]).is_err());
         // Assigning the blocker: legal
         assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    #[test]
+    fn blockability_query_bounds_unrelated_free_for_all_pair_domain() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let target = create_creature(&mut state, PlayerId(0), "Target", 3, 3);
+        let unrelated_attackers: Vec<_> = (0..8)
+            .map(|index| {
+                create_creature(
+                    &mut state,
+                    PlayerId(0),
+                    &format!("Unrelated Attacker {index}"),
+                    2,
+                    2,
+                )
+            })
+            .collect();
+        create_creature(&mut state, PlayerId(1), "Target Blocker", 2, 2);
+        for index in 0..8 {
+            create_creature(
+                &mut state,
+                PlayerId(2),
+                &format!("Unrelated Blocker {index}"),
+                2,
+                2,
+            );
+        }
+        state.combat = Some(CombatState {
+            attackers: std::iter::once(AttackerInfo::attacking_player(target, PlayerId(1)))
+                .chain(
+                    unrelated_attackers
+                        .iter()
+                        .copied()
+                        .map(|attacker| AttackerInfo::attacking_player(attacker, PlayerId(2))),
+                )
+                .collect(),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            attacker_blockability_in_maximum_free_declaration(&state, PlayerId(1), target),
+            MaximumBlockDeclarationBlockability::Unknown
+        );
+    }
+
+    #[test]
+    fn blockability_query_bounds_defender_scoped_declaration_product() {
+        let mut state = setup();
+        let attackers: Vec<_> = (0..8)
+            .map(|index| {
+                create_creature(&mut state, PlayerId(0), &format!("Attacker {index}"), 2, 2)
+            })
+            .collect();
+        let target = attackers[0];
+        let blockers: Vec<_> = (0..8)
+            .map(|index| {
+                create_creature(&mut state, PlayerId(1), &format!("Blocker {index}"), 2, 2)
+            })
+            .collect();
+        state.combat = Some(CombatState {
+            attackers: attackers
+                .iter()
+                .copied()
+                .map(|attacker| AttackerInfo::attacking_player(attacker, PlayerId(1)))
+                .collect(),
+            ..Default::default()
+        });
+
+        let live_attacker_count = state
+            .combat
+            .as_ref()
+            .unwrap()
+            .attackers
+            .iter()
+            .filter(|info| is_attacker_in_play(&state, info.object_id))
+            .count();
+        let globally_valid_blocker_count = get_valid_blocker_ids(&state).len();
+        assert_eq!(
+            live_attacker_count * globally_valid_blocker_count,
+            MAX_ADVISORY_BLOCK_PAIR_DOMAIN,
+            "the global pair-domain bailout must not fire"
+        );
+
+        let valid = get_valid_block_targets_for_player(&state, PlayerId(1));
+        assert_eq!(valid.len(), blockers.len());
+        assert!(valid
+            .values()
+            .all(|blockable_attackers| blockable_attackers.len() == attackers.len()));
+        assert!(valid
+            .values()
+            .all(|blockable_attackers| blockable_attackers.contains(&target)));
+        assert!(valid.keys().all(|blocker| {
+            extra_block_limit(&state, state.objects.get(blocker).unwrap()) == 1
+        }));
+        assert_eq!(min_blockers_required(&state, target), 1);
+        let declaration_product = valid
+            .values()
+            .fold(1usize, |product, attackers| product * (attackers.len() + 1));
+        assert!(
+            declaration_product > MAX_ADVISORY_BLOCK_DECLARATION_PRODUCT,
+            "the defender-scoped declaration product must exceed the advisory cap"
+        );
+
+        assert_eq!(
+            attacker_blockability_in_maximum_free_declaration(&state, PlayerId(1), target),
+            MaximumBlockDeclarationBlockability::Unknown
+        );
+    }
+
+    #[test]
+    fn blockability_query_returns_unknown_for_extra_blocker_before_exact_validation() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Palace Guard", 2, 2);
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::ExtraBlockers {
+                count: Some(1),
+            }));
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        assert_eq!(get_valid_blocker_ids(&state).len(), 1);
+        assert_eq!(
+            state.combat.as_ref().unwrap().attackers.len() * get_valid_blocker_ids(&state).len(),
+            1,
+            "the global pair-domain bailout must not fire"
+        );
+        let valid = get_valid_block_targets_for_player(&state, PlayerId(1));
+        assert_eq!(valid.get(&blocker), Some(&vec![attacker]));
+        assert!(
+            valid
+                .values()
+                .fold(1usize, |product, attackers| product * (attackers.len() + 1))
+                <= MAX_ADVISORY_BLOCK_DECLARATION_PRODUCT,
+            "the defender-scoped declaration-product bailout must not fire"
+        );
+        assert_eq!(min_blockers_required(&state, attacker), 1);
+        assert_eq!(
+            extra_block_limit(&state, state.objects.get(&blocker).unwrap()),
+            2
+        );
+        assert!(validate_blockers_for_player(&state, PlayerId(1), &[(blocker, attacker)]).is_ok());
+        assert!(compute_block_tax(&state, &[(blocker, attacker)]).is_none());
+
+        assert_eq!(
+            attacker_blockability_in_maximum_free_declaration(&state, PlayerId(1), attacker),
+            MaximumBlockDeclarationBlockability::Unknown
+        );
     }
 
     /// CR 509.1c: a wide defender board still chooses the deterministic

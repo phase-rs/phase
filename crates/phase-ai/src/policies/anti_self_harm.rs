@@ -4,6 +4,7 @@ use engine::ai_support::{
     certify_pact_plan, current_target_selection_targets, find_copy_targets, is_pact_payment_cast,
 };
 use engine::game::combat;
+use engine::game::effects::draw::can_draw_at_least_one;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords;
 use engine::game::life_safety::{preview_candidate_life_safety, CandidateLifeSafety};
@@ -16,8 +17,9 @@ use engine::types::ability::AbilityCondition;
 #[cfg(test)]
 use engine::types::ability::DelayedTriggerPlayerBinding;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, EffectScope,
-    QuantityExpr, ReplacementMode, TapStateChange, TargetFilter, TargetRef,
+    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, DelayedTriggerCondition,
+    Effect, EffectScope, QuantityExpr, ReplacementMode, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
@@ -28,13 +30,12 @@ use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, WardCost};
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
+use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 use crate::card_value::intrinsic_value;
 use crate::cast_facts::collect_definition_effects;
-use crate::damage_reflection::{
-    is_event_context_damage_to_player, opponent_creature_reflection_penalty,
-};
+use crate::damage_reflection::opponent_creature_reflection_penalty;
 use crate::eval::{evaluate_creature, threat_level};
 use engine::game::players;
 
@@ -45,14 +46,15 @@ use super::copy_value::{
 };
 use super::effect_classify::{
     aggregate_player_impact, aura_polarity, effect_polarity, effect_targets_object,
-    extract_target_filter, is_spell_beneficial, lethal_to_creature, targeted_object_impact,
-    targeted_player_impact, targets_creatures, targets_creatures_only, EffectPolarity,
-    PLAYER_IMPACT_PREFERENCE_BAND,
+    exact_pending_player_impact, extract_target_filter, is_spell_beneficial, lethal_to_creature,
+    targeted_object_impact, targeted_player_impact, targets_creatures, targets_creatures_only,
+    EffectPolarity, PLAYER_IMPACT_PREFERENCE_BAND,
 };
 use super::registry::{
     DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy, CRITICAL_MAX,
 };
 use super::removal_lethality;
+use super::self_cost::count_death_triggers_on_board;
 use super::strategy_helpers::can_pay_ward_cost;
 use crate::features::DeckFeatures;
 #[cfg(test)]
@@ -155,6 +157,7 @@ fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
         {
             Some(PolicyReason::new("anti_self_harm_extra_turn_self_loss"))
         }
+        GameAction::ActivateAbility { .. } => harmful_activation_reaches_only_own_board(ctx),
         GameAction::DecideOptionalEffect { accept: true }
             if optional_effect_life_cost_is_lethal(ctx) =>
         {
@@ -267,7 +270,8 @@ fn effect_grants_ai_extra_turn(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::ExtraTurn {
-            target: TargetFilter::Controller
+            target: TargetFilter::Controller,
+            count: _,
         }
     )
 }
@@ -811,6 +815,226 @@ fn own_permanent_with_opponent_alternative(
         .then(|| PolicyReason::new("anti_self_harm_own_permanent_with_opponent_target"))
 }
 
+/// Refuse an ACTIVATION whose every legal target is a permanent the AI itself
+/// controls, and whose effect on that permanent is harmful.
+///
+/// # Activation only, deliberately
+///
+/// There is no `CastSpell` arm, and adding one is a mistake this function
+/// already made once. [`PolicyContext::effects`]'s `CastSpell` arm walks every
+/// printed `AbilityDefinition` on the source with no `kind` filter — activated
+/// abilities included — unlike [`action_ability_definitions`], whose own
+/// `CastSpell` arm carries `.filter(|ability| ability.kind == AbilityKind::Spell)`.
+/// So a cast read its source's ACTIVATED abilities: casting Royal Assassin
+/// ("{T}: Destroy target tapped creature") while the AI controlled a tapped
+/// creature and the opponent controlled none produced an own-board-only pool
+/// from an ability that was not even activatable yet, and hard-rejected the
+/// spell — deleting the candidate, since a `Reject` is `-inf`. The AI refused
+/// to deploy Royal Assassin exactly when it was ahead on board.
+///
+/// The CR argument below reaches only the activation case, and the cast case is
+/// already priced: `score_pre_cast` charges `wasted_cast_penalty` for a harmful
+/// creature-only spell with no reachable opponent target, softly and by
+/// deliberate design. See `cast_arm` in
+/// `policies/tests/own_board_only_activation_repro.rs`.
+///
+/// CR 601.2c + CR 601.2h + CR 602.2b: targets are announced at 601.2c and costs
+/// are paid at 601.2h, and CR 602.2b applies that whole 601.2b–i sequence to
+/// activating an ability. Both steps therefore happen inside ONE atomic
+/// process. By the time any target-step policy is consulted the activation cost
+/// is already spent and the ability is on the stack, so a veto there cannot give
+/// back a sacrificed creature. **The activation decision is the last window in
+/// which the AI can decline**, which is why this lives on the pre-cast arm
+/// rather than beside its target-step sibling.
+///
+/// [`own_permanent_with_opponent_alternative`] is that sibling, and it cannot
+/// cover this case by construction: it fires only while the SAME slot still
+/// offers an opponent-controlled object to prefer instead. When the AI's own
+/// board is the ENTIRE legal target pool there is no alternative, so it stands
+/// down — which is how a "{T}, Sacrifice this creature: it deals 2 damage to
+/// target attacking or blocking creature" outlet came to be spent shooting the
+/// AI's own lone attacker.
+///
+/// Board-wide by design, unlike that slot-local sibling: the question here is
+/// "does this action have anywhere worth going at all", and CR 115.2 makes
+/// target legality the engine's to answer — so it asks `find_legal_targets`,
+/// which already honours hexproof, shroud, protection and ward.
+fn harmful_activation_reaches_only_own_board(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
+    let source = ctx.source_object()?;
+    let effects = ctx.effects();
+
+    // Own bounce / flicker: aiming these at one's own permanent IS the play.
+    if effects.iter().any(is_deliberate_self_target_rider) {
+        return None;
+    }
+
+    // CR 115.10a: a MASS leg (`DestroyAll`, `DamageAll`) is NON-targeted, so it
+    // clears an opposing population that targeting cannot reach at all —
+    // hexproof (CR 702.11b gates targeting only), shroud, protection. A chain
+    // carrying one is a real removal line no matter what its targeted leg can
+    // see, so consult the same resolver-mirroring mass seam `score_pre_cast`
+    // uses for its own no-target branch rather than re-deriving it.
+    if ctx.has_opposing_mass_population() {
+        return None;
+    }
+
+    // A chained leg like `Effect::Draw` carries NO target slot
+    // (`extract_target_filter` returns `None` for it — the field exists on
+    // the type, defaulting to `Controller`, but the variant is simply absent
+    // from that function's match arms), so it is invisible to the per-effect
+    // loop below by construction. "Destroy target creature. Draw a card."
+    // (Garruk, Cursed Huntsman's [-3], and the same shape on Vraska, Relic
+    // Seeker and Teferi, Time Raveler) is a real, engine-guaranteed payoff
+    // this veto must not blind itself to just because the Destroy leg's only
+    // legal target is the AI's own creature — the same reasoning
+    // `score_selected_modes` already uses one level up: "the engine has
+    // already removed modes with no legal target at all ... so this mode IS
+    // playable."
+    //
+    // Global `effect_polarity` alone is NOT sufficient evidence, though:
+    // `effect_polarity(Effect::Draw)` is unconditionally `Beneficial`
+    // regardless of WHO draws, and `extract_target_filter` never surfaces
+    // that recipient for the loop to check either — so a blanket
+    // "no target filter + Beneficial" reading would ALSO stand down for
+    // "Destroy target creature. Target opponent draws a card" (a pure gift,
+    // not a payoff) and for an AI-directed draw off an empty library (no
+    // payoff, and CR 121.3's own SBA loss risk). `untargeted_effect_confirms_ai_payoff`
+    // resolves the actual recipient for each such shape and, for Draw
+    // specifically, also requires the engine's own delivery authority.
+    if effects
+        .iter()
+        .any(|effect| untargeted_effect_confirms_ai_payoff(ctx, effect))
+    {
+        return None;
+    }
+
+    let mut harmful_own_board_effects = 0i64;
+    for effect in &effects {
+        let Some(filter) = extract_target_filter(effect) else {
+            continue;
+        };
+        let targets = find_legal_targets(ctx.state, filter, ctx.ai_player, source.id);
+        // An EMPTY pool is the WHIFF case, already priced by `score_pre_cast`'s
+        // `wasted_cast_penalty` branches. Charging it again here would
+        // double-book one mistake as two.
+        if targets.is_empty() {
+            continue;
+        }
+
+        let reaches_beyond_own_board = targets.iter().any(|target| match target {
+            TargetRef::Object(id) => ctx
+                .state
+                .objects
+                .get(id)
+                .is_none_or(|object| object.controller != ctx.ai_player),
+            // CR 115.4: a player slot the AI can point somewhere other than
+            // itself is a real alternative, so the pool is not own-board-only.
+            TargetRef::Player(player) => *player != ctx.ai_player,
+        });
+        if reaches_beyond_own_board {
+            return None;
+        }
+
+        match effect_polarity(effect) {
+            EffectPolarity::Harmful => harmful_own_board_effects += 1,
+            // A beneficial or contextual leg confined to the AI's own board is
+            // the ability working exactly as printed — a self-pump, a regrowth,
+            // a counter placed on its own source. Never veto those.
+            EffectPolarity::Beneficial | EffectPolarity::Contextual => return None,
+        }
+    }
+
+    if harmful_own_board_effects == 0 {
+        return None;
+    }
+
+    // An aristocrats board turns the AI's own creature dying into a PAYOFF
+    // (CR 603.2 death triggers), so pointing a harmful effect at its own
+    // creature can be the correct line there. Reuses the same death-trigger
+    // census `FreeOutletActivationPolicy` gates on rather than re-deriving it.
+    let features = ctx
+        .context
+        .session
+        .features
+        .get(&ctx.ai_player)
+        .cloned()
+        .unwrap_or_default();
+    if count_death_triggers_on_board(
+        ctx.state,
+        ctx.ai_player,
+        &features.aristocrats.death_trigger_names,
+    ) > 0
+    {
+        return None;
+    }
+
+    Some(
+        PolicyReason::new("anti_self_harm_harmful_activation_own_board_only")
+            .with_fact("harmful_own_board_effects", harmful_own_board_effects),
+    )
+}
+
+/// Does `effect` deliver a real, AI-received payoff, for the untargeted
+/// resource shapes `extract_target_filter` never exposes a slot for
+/// (`Draw`, `GainLife`, `Token`, `Mana`, `SearchLibrary`)?
+///
+/// `effect_polarity` alone answers a DIFFERENT, WEAKER question — "is this
+/// kind of effect beneficial in the abstract" — true for `Effect::Draw`
+/// regardless of who draws. This function answers the one
+/// [`harmful_activation_reaches_only_own_board`] actually needs: does the
+/// AI, specifically, receive it, and — where the engine exposes a delivery
+/// authority — can it actually be delivered rather than fizzle as a no-op.
+///
+/// Every field checked here (`target`/`player`/`owner`/`target_player`) is a
+/// PLAYER-SCOPE role, never a CR 115 target: none of these effects announce a
+/// target, so there is nothing wrong with `extract_target_filter` omitting
+/// them — the bug this closes is upstream of that, in treating "beneficial in
+/// the abstract" as "beneficial to the AI".
+fn untargeted_effect_confirms_ai_payoff(ctx: &PolicyContext<'_>, effect: &Effect) -> bool {
+    // CR 601.2c + CR 115: none of these five roles are ever announced as a
+    // target, so resolving "is it the AI" is exactly `TargetFilter::Controller`
+    // — the activating player — with everything else read conservatively as
+    // NOT provably the AI, matching this function's fail-closed contract.
+    let resolves_to_ai = |role: &TargetFilter| matches!(role, TargetFilter::Controller);
+
+    match effect {
+        // CR 121.1 + CR 121.3: a draw is a payoff only if the AI is the one
+        // drawing AND the draw can actually be delivered — an empty library,
+        // an exhausted per-turn limit, a `CantDraw` static, or a replacement
+        // that removes the draw all make it a no-op (and an empty-library draw
+        // is a state-based LOSS, the opposite of a payoff). `resolves_to_ai`
+        // mirrors `draw_payoff::draws_controller`'s exact check; `can_draw_at_least_one`
+        // is the same delivery authority that policy pays for its bonus with.
+        Effect::Draw { target, .. } => {
+            resolves_to_ai(target) && can_draw_at_least_one(ctx.state, ctx.ai_player)
+        }
+        // CR 119.3: same recipient shape as Draw. No engine delivery authority
+        // exists for lifegain (unlike drawing from an empty library, CR 119
+        // has no analogous SBA risk from gaining zero life), so ownership is
+        // the whole question here.
+        Effect::GainLife { player, .. } => resolves_to_ai(player),
+        // CR 111.7: the player who creates/owns the token(s).
+        Effect::Token { owner, .. } => resolves_to_ai(owner),
+        // CR 605: the common, unmarked shape adds to the ACTIVATING player's
+        // own pool (no explicit role at all). An explicit `ManaTargetRole`
+        // (Jetfire-class "target player adds...") names some OTHER player's
+        // pool or count source and is not provably AI-directed, so it fails
+        // closed rather than assume the common case.
+        Effect::Mana { target, .. } => target.is_none(),
+        // CR 701.23a: whose library is searched (defaults to the controller's
+        // — the AI's, for an ability the AI is activating). Says nothing about
+        // the DESTINATION of what's found; that is a separate, chained
+        // `ChangeZone` effect this same effect list carries as its own entry,
+        // which `extract_target_filter` already covers and this loop already
+        // visits on its own iteration — so this arm answers only the
+        // ownership half, by design, not the whole tutor.
+        Effect::SearchLibrary { target_player, .. } => {
+            target_player.as_ref().is_none_or(resolves_to_ai)
+        }
+        _ => false,
+    }
+}
+
 /// CR 601.2b + CR 700.2a: a mode is chosen while the spell is being cast (or
 /// the ability put on the stack), one step BEFORE targets. Since
 /// [`PolicyContext::effects`] now reports exactly the modes a `SelectModes`
@@ -928,6 +1152,12 @@ fn filter_reaches_only_own_permanents(
 fn target_reject_reason(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<PolicyReason> {
     match target {
         TargetRef::Player(player_id) => {
+            if let Some(impact) = exact_pending_player_impact(ctx, target) {
+                let prefers_self = impact > 0.0;
+                return (impact != 0.0 && prefers_self != (*player_id == ctx.ai_player))
+                    .then(|| PolicyReason::new("anti_self_harm_wrong_player_target"));
+            }
+
             let beneficial = is_spell_beneficial(ctx);
             let is_self = *player_id == ctx.ai_player;
 
@@ -970,6 +1200,11 @@ fn target_reject_reason(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<P
 }
 
 fn score_target_ref(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
+    if matches!(target, TargetRef::Player(_))
+        && exact_pending_player_impact(ctx, target) == Some(0.0)
+    {
+        return 0.0;
+    }
     if target_reject_reason(ctx, target).is_some() {
         return 0.0;
     }
@@ -985,29 +1220,6 @@ fn score_target_ref(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
                     let opponent_life = ctx.state.players[player_id.0 as usize].life;
                     if damage >= opponent_life {
                         return ctx.penalties().lethal_burn_bonus;
-                    }
-                }
-            }
-
-            // Spiteful Sliver / Boros Reckoner-style reflection: in multiplayer,
-            // concentrate damage on the lowest-life opponent instead of rotating
-            // targets each trigger (issue #1364).
-            if !is_self
-                && !beneficial
-                && ctx
-                    .effects()
-                    .iter()
-                    .any(|e| is_event_context_damage_to_player(e))
-            {
-                let opponents = players::opponents(ctx.state, ctx.ai_player);
-                if opponents.len() > 1 {
-                    if let Some(weakest) = opponents
-                        .iter()
-                        .min_by_key(|&&p| ctx.state.players[p.0 as usize].life)
-                    {
-                        if *player_id == *weakest {
-                            return 12.0 + threat_level(ctx.state, ctx.ai_player, *player_id) * 4.0;
-                        }
                     }
                 }
             }
@@ -1037,7 +1249,15 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
 
     let effects = ctx.effects();
 
-    let controller_delta = if object.controller == ctx.ai_player {
+    let effective_controller = if beneficial
+        && gain_control_target_has_ai_beneficiary(ctx)
+        && players::is_opponent(ctx.state, ctx.ai_player, object.controller)
+    {
+        ctx.ai_player
+    } else {
+        object.controller
+    };
+    let controller_delta = if effective_controller == ctx.ai_player {
         if beneficial {
             1.0
         } else {
@@ -1065,7 +1285,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
         })
     {
         if object.tapped {
-            score += if object.controller == ctx.ai_player {
+            score += if effective_controller == ctx.ai_player {
                 ctx.penalties().untap_own_tapped_bonus
             } else {
                 ctx.penalties().untap_opponent_tapped_penalty
@@ -1419,8 +1639,108 @@ fn pump_taps_blocker_penalty(ctx: &PolicyContext<'_>) -> f64 {
     -(5.0 * creatures_tapped as f64)
 }
 
-/// Extract the fixed damage amount from the pending spell's DealDamage effect.
-/// Returns None for variable damage or non-damage spells.
+fn gain_control_target_has_ai_beneficiary(ctx: &PolicyContext<'_>) -> bool {
+    let WaitingFor::TriggerTargetSelection {
+        target_slots,
+        selection,
+        ..
+    } = &ctx.decision.waiting_for
+    else {
+        return false;
+    };
+    if selection.current_slot != 0
+        || !selection.selected_slots.is_empty()
+        || target_slots.len() != 1
+        || target_slots
+            .get(selection.current_slot)
+            .is_none_or(|slot| slot.effect_kind != engine::types::ability::EffectKind::GainControl)
+    {
+        return false;
+    }
+
+    let Some(trigger) = ctx.state.pending_trigger.as_deref() else {
+        return false;
+    };
+    let root = &trigger.ability;
+    let Effect::GainControl { target } = &root.effect else {
+        return false;
+    };
+    if matches!(target, TargetFilter::SelfRef)
+        || root.original_controller.unwrap_or(root.controller) != ctx.ai_player
+        || !is_unbranched_resolved_ability(root)
+    {
+        return false;
+    }
+
+    let mut saw_supported_rider = false;
+    let mut next = root.sub_ability.as_deref();
+    while let Some(ability) = next {
+        if ability.sub_link != SubAbilityLink::SequentialSibling
+            || !is_unbranched_resolved_ability(ability)
+        {
+            return false;
+        }
+        match &ability.effect {
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            } => saw_supported_rider = true,
+            Effect::GenericEffect {
+                static_abilities,
+                target: None,
+                end_cost: None,
+                ..
+            } if has_supported_post_control_static_riders(static_abilities) => {
+                saw_supported_rider = true;
+            }
+            _ => return false,
+        }
+        next = ability.sub_ability.as_deref();
+    }
+
+    saw_supported_rider
+}
+
+fn is_unbranched_resolved_ability(ability: &engine::types::ability::ResolvedAbility) -> bool {
+    ability.else_ability.is_none()
+        && ability.condition.is_none()
+        && !ability.optional
+        && ability.optional_player.is_none()
+        && ability.optional_for.is_none()
+        && !ability.optional_targeting
+        && ability.modal.is_none()
+        && ability.mode_abilities.is_empty()
+        && ability.repeat_for.is_none()
+}
+
+fn has_supported_post_control_static_riders(
+    static_abilities: &[engine::types::ability::StaticDefinition],
+) -> bool {
+    !static_abilities.is_empty()
+        && static_abilities.iter().all(|static_ability| {
+            static_ability.mode == StaticMode::Continuous
+                && static_ability.affected == Some(TargetFilter::ParentTarget)
+                && static_ability.condition.is_none()
+                && static_ability.per_player_condition.is_none()
+                && static_ability.affected_zone.is_none()
+                && static_ability.effect_zone.is_none()
+                && static_ability.active_zones.is_empty()
+                && !static_ability.characteristic_defining
+                && static_ability.source_controller.is_none()
+                && static_ability.source_object.is_none()
+                && !static_ability.modifications.is_empty()
+                && static_ability.modifications.iter().all(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste
+                        } | ContinuousModification::AddSubtype { .. }
+                    )
+                })
+        })
+}
+
 /// Returns true if `object_id` is the source of an activated ability whose cost
 /// includes sacrificing itself. Targeting such an object is wasteful because the
 /// source will be gone before the ability resolves.
@@ -1454,7 +1774,9 @@ fn cost_includes_sacrifice_self(cost: &AbilityCost) -> bool {
     }
 }
 
-fn extract_damage_amount(effects: &[&Effect]) -> Option<i32> {
+/// Extract the fixed damage amount from the pending spell's DealDamage effect.
+/// Returns None for variable damage or non-damage spells.
+pub(crate) fn extract_damage_amount(effects: &[&Effect]) -> Option<i32> {
     effects.iter().find_map(|effect| match effect {
         Effect::DealDamage {
             amount: QuantityExpr::Fixed { value },
@@ -1469,8 +1791,14 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::config::AiConfig;
-    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use crate::choose_action_with_session_diagnostic;
+    use crate::config::{create_config, AiConfig, AiDifficulty, Platform};
+    use crate::policies::effect_classify::targeted_player_impact_in_with_bound_parent_target;
+    use crate::policies::registry::PolicyRegistry;
+    use crate::session::AiSession;
+    use engine::ai_support::{
+        ActionMetadata, AiDecisionContext, AiDecisionContract, CandidateAction, TacticalClass,
+    };
     use engine::game::ability_utils::build_resolved_from_def;
     use engine::game::combat::AttackTarget;
     use engine::game::zones::create_object;
@@ -1478,11 +1806,12 @@ mod tests {
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, AdditionalCostRepeatability,
         BounceSelection, CardSelectionMode, ContinuousModification, ControllerRef,
-        DiscardSelfScope, EffectKind, FilterProp, ModalChoice, PtValue, QuantityModification,
-        QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost, StaticCondition,
-        StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
-        UnlessPayScaling,
+        DiscardSelfScope, Duration, EffectKind, FilterProp, ModalChoice, OpponentMayScope, PtValue,
+        QuantityModification, QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost,
+        StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter, TriggerConstraint,
+        TriggerDefinition, TypeFilter, TypedFilter, UnlessPayScaling,
     };
+    use engine::types::format::FormatConfig;
     use engine::types::game_state::{
         CastingVariant, GameState, PendingCast, TargetEffectDetail, TargetSelectionProgress,
         TargetSelectionSlot, WaitingFor,
@@ -1495,12 +1824,18 @@ mod tests {
     use engine::types::statics::StaticMode;
     use engine::types::triggers::{AttackTargetFilter, TriggerMode};
     use engine::types::zones::Zone;
+    use rand::rngs::SmallRng;
+    use rand::SeedableRng;
 
     fn make_state() -> GameState {
         let mut state = GameState::new_two_player(42);
         state.turn_number = 2;
         state
     }
+
+    // These live-cast baselines include the source card in the caster's hand.
+    const LIVE_CAST_SELF_TARGET_BAND: f64 = 4.971_428_571_428_571_5;
+    const LIVE_CAST_SELF_TARGET_WITH_ONE_CREATURE_BAND: f64 = 5.291_428_571_428_572;
 
     fn live_additional_cost_candidate(
         additional_cost: AdditionalCost,
@@ -1864,6 +2199,162 @@ mod tests {
             metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         (decision, candidate)
+    }
+
+    fn cast_live_targeting_definition(
+        state: &mut GameState,
+        card_id: CardId,
+        name: &str,
+        definition: AbilityDefinition,
+    ) -> ObjectId {
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let source = create_object(state, card_id, PlayerId(0), name.to_string(), Zone::Hand);
+        state.objects.get_mut(&source).unwrap().abilities = Arc::new(vec![definition]);
+        engine::game::apply_as_current(
+            state,
+            GameAction::CastSpell {
+                object_id: source,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+        )
+        .expect("the full definition's real zero-cost cast reaches target selection");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        source
+    }
+
+    fn live_target_verdict(state: &GameState, action: GameAction) -> PolicyVerdict {
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action,
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        AntiSelfHarmPolicy.verdict(&ctx)
+    }
+
+    fn live_exact_target_impact(state: &GameState, target: TargetRef) -> Option<f64> {
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(target.clone()),
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        exact_pending_player_impact(&ctx, &target)
+    }
+
+    fn live_targeted_impacts(state: &GameState, player: PlayerId) -> (Option<f64>, Option<f64>) {
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(player)),
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let source = ctx.source_object();
+        let effects = ctx.effects();
+        (
+            targeted_player_impact(&ctx, player),
+            targeted_player_impact_in_with_bound_parent_target(
+                state,
+                source.map(|object| object.controller),
+                source.map(|object| object.id),
+                &effects,
+                player,
+                player,
+            ),
+        )
+    }
+
+    fn assert_live_target_action_advances(state: &GameState, action: GameAction) {
+        let mut state = state.clone();
+        let WaitingFor::TargetSelection {
+            selection,
+            target_slots,
+            ..
+        } = &state.waiting_for
+        else {
+            unreachable!("the fixture starts at a live target selection");
+        };
+        let prior_slot = selection.current_slot;
+        let prior_selected_count = selection.selected_slots.len();
+        let prior_slot_count = target_slots.len();
+        if matches!(action, GameAction::ChooseTarget { .. }) {
+            assert!(
+                engine::ai_support::candidate_actions(&state)
+                    .iter()
+                    .any(|issued| issued.action == action),
+                "candidate generation issues ChooseTarget, never a bulk target action"
+            );
+        }
+        engine::game::apply_as_current(&mut state, action)
+            .expect("the real reducer accepts the one-element target action");
+        if prior_slot_count == 1 {
+            assert!(
+                !matches!(&state.waiting_for, WaitingFor::TargetSelection { .. }),
+                "the real reducer must complete a single-slot target selection"
+            );
+        } else if let WaitingFor::TargetSelection { selection, .. } = &state.waiting_for {
+            assert!(
+                selection.current_slot > prior_slot
+                    || selection.selected_slots.len() > prior_selected_count,
+                "the real reducer must advance the current target selection"
+            );
+        }
     }
 
     fn make_target_selection_ctx(
@@ -2488,9 +2979,10 @@ mod tests {
         parse_oracle_text(oracle_text, card_name, &keywords, &types, &[]).abilities
     }
 
-    /// Put `definition` on the stack as an AI-controlled spell, offer
-    /// `legal_targets` at the current slot and return the policy verdict for
-    /// `candidate_target`.
+    /// Stage `definition` at a target-selection prompt as an AI-controlled
+    /// spell, keeping its object in Hand as the production cast pipeline does
+    /// until `finalize_cast` moves it to Stack. Offer `legal_targets` at the
+    /// current slot and return the policy verdict for `candidate_target`.
     fn target_verdict_for_definition(
         state: &mut GameState,
         card_name: &str,
@@ -2503,7 +2995,7 @@ mod tests {
             CardId(state.next_object_id),
             PlayerId(0),
             card_name.to_string(),
-            Zone::Stack,
+            Zone::Hand,
         );
         let card_id = state.objects[&source_id].card_id;
         let ability = build_resolved_from_def(definition, source_id, PlayerId(0));
@@ -3190,9 +3682,9 @@ mod tests {
 
     #[test]
     fn draw_then_parent_target_discard_prefers_opponent() {
-        let state = make_state();
-        let config = AiConfig::default();
-        let discard = ResolvedAbility::new(
+        let mut state = make_state();
+        let discard = AbilityDefinition::new(
+            AbilityKind::Spell,
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::ParentTarget,
@@ -3200,86 +3692,523 @@ mod tests {
                 unless_filter: None,
                 filter: None,
             },
-            Vec::new(),
-            ObjectId(100),
-            PlayerId(0),
         );
-        let ability = ResolvedAbility::new(
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Player,
             },
-            Vec::new(),
-            ObjectId(100),
-            PlayerId(0),
         )
         .sub_ability(discard);
-        let decision = AiDecisionContext {
-            waiting_for: WaitingFor::TargetSelection {
-                player: PlayerId(0),
-                pending_cast: Box::new(PendingCast::new(
-                    ObjectId(100),
-                    CardId(100),
-                    ability,
-                    ManaCost::zero(),
-                )),
-                target_slots: vec![TargetSelectionSlot {
-                    legal_targets: vec![
-                        TargetRef::Player(PlayerId(0)),
-                        TargetRef::Player(PlayerId(1)),
-                    ],
-                    optional: false,
-                    chooser: None,
-                    effect_kind: EffectKind::NoOp,
-                    effect_detail: TargetEffectDetail::None,
-                }],
-                mode_labels: Vec::new(),
-                selection: Default::default(),
+        cast_live_targeting_definition(&mut state, CardId(100), "Draw then discard", definition);
+        for (player, is_self) in [(PlayerId(0), true), (PlayerId(1), false)] {
+            for bulk in [false, true] {
+                let action = if bulk {
+                    GameAction::SelectTargets {
+                        targets: vec![TargetRef::Player(player)],
+                    }
+                } else {
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(player)),
+                    }
+                };
+                let verdict = live_target_verdict(&state, action.clone());
+                if is_self {
+                    assert_eq!(
+                        reject_kind(&verdict),
+                        Some("anti_self_harm_wrong_player_target"),
+                        "the real cast's Draw/ParentTarget Discard chain rejects self for {action:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        score_delta(&verdict),
+                        4.8,
+                        "the real cast's Draw/ParentTarget Discard chain keeps its exact opponent score for {action:?}"
+                    );
+                }
+                assert_live_target_action_advances(&state, action);
+            }
+        }
+    }
+
+    #[test]
+    fn exact_zero_player_targets_score_zero_for_choose_and_bulk() {
+        let mut state = make_state();
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Player,
             },
-            candidates: Vec::new(),
-        };
-        let self_candidate = CandidateAction {
-            action: GameAction::ChooseTarget {
+        );
+        cast_live_targeting_definition(&mut state, CardId(101), "Zero draw", definition);
+
+        for action in [
+            GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(0))),
             },
-            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
-        };
-        let self_ctx = PolicyContext {
-            state: &state,
-            decision: &decision,
-            candidate: &self_candidate,
-            ai_player: PlayerId(0),
-            config: &config,
-            context: &crate::context::AiContext::empty(&config.weights),
-            cast_facts: None,
-            search_depth: crate::policies::context::SearchDepth::Root,
-        };
-        let opponent_candidate = CandidateAction {
-            action: GameAction::ChooseTarget {
+            GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(1))),
             },
-            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
-        };
-        let opponent_ctx = PolicyContext {
-            state: &state,
-            decision: &decision,
-            candidate: &opponent_candidate,
-            ai_player: PlayerId(0),
-            config: &config,
-            context: &crate::context::AiContext::empty(&config.weights),
-            cast_facts: None,
-            search_depth: crate::policies::context::SearchDepth::Root,
-        };
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(PlayerId(0))],
+            },
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(PlayerId(1))],
+            },
+        ] {
+            let verdict = live_target_verdict(&state, action.clone());
+            assert!(matches!(
+                verdict,
+                PolicyVerdict::Score { delta, ref reason }
+                    if delta == 0.0 && reason.kind == "anti_self_harm_score"
+            ));
+            assert_live_target_action_advances(&state, action);
+        }
+    }
 
-        assert!(matches!(
-            AntiSelfHarmPolicy.verdict(&self_ctx),
-            PolicyVerdict::Reject { ref reason }
-                if reason.kind == "anti_self_harm_wrong_player_target"
-        ));
-        assert!(matches!(
-            AntiSelfHarmPolicy.verdict(&opponent_ctx),
-            PolicyVerdict::Score { .. }
-        ));
+    #[test]
+    fn exact_dynamic_draw_and_chosen_discard_cover_actions_and_reducer() {
+        for (name, effect, expect_self_reject) in [
+            (
+                "draw",
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter::creature()),
+                        },
+                    },
+                    target: TargetFilter::Player,
+                },
+                false,
+            ),
+            (
+                "discard",
+                Effect::Discard {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter::creature()),
+                        },
+                    },
+                    target: TargetFilter::Player,
+                    filter: None,
+                    selection: CardSelectionMode::Chosen,
+                    unless_filter: None,
+                },
+                true,
+            ),
+        ] {
+            for creature_count in [0, 1] {
+                let mut state = make_state();
+                if creature_count == 1 {
+                    let creature =
+                        add_creature(&mut state, PlayerId(0), "counted reach guard", 1, 1);
+                    assert!(state.battlefield.contains(&creature));
+                }
+                let definition = AbilityDefinition::new(AbilityKind::Spell, effect.clone());
+                cast_live_targeting_definition(
+                    &mut state,
+                    CardId(10_100 + creature_count),
+                    &format!("dynamic {name}"),
+                    definition,
+                );
+                for (target, is_self) in [(PlayerId(0), true), (PlayerId(1), false)] {
+                    for bulk in [false, true] {
+                        let action = if bulk {
+                            GameAction::SelectTargets {
+                                targets: vec![TargetRef::Player(target)],
+                            }
+                        } else {
+                            GameAction::ChooseTarget {
+                                target: Some(TargetRef::Player(target)),
+                            }
+                        };
+                        let verdict = live_target_verdict(&state, action.clone());
+                        if creature_count == 0 {
+                            assert!(
+                                matches!(
+                                    verdict,
+                                    PolicyVerdict::Score { delta, ref reason }
+                                        if delta == 0.0 && reason.kind == "anti_self_harm_score"
+                                ),
+                                "{name} zero {action:?} must take the exact neutral path"
+                            );
+                        } else if is_self == expect_self_reject {
+                            assert!(
+                                matches!(
+                                    verdict,
+                                    PolicyVerdict::Reject { ref reason }
+                                        if reason.kind == "anti_self_harm_wrong_player_target"
+                                ),
+                                "{name} positive {action:?} must reject its harmful recipient"
+                            );
+                        } else {
+                            let expected = if name == "draw" {
+                                LIVE_CAST_SELF_TARGET_WITH_ONE_CREATURE_BAND
+                            } else {
+                                4.8
+                            };
+                            assert_eq!(
+                                score_delta(&verdict),
+                                expected,
+                                "{name} positive {action:?} must retain the exact directional score"
+                            );
+                            assert!(matches!(
+                                verdict,
+                                PolicyVerdict::Score { ref reason, .. }
+                                    if reason.kind == "anti_self_harm_score"
+                            ));
+                        }
+                        assert_live_target_action_advances(&state, action);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_small_signed_impact_ignores_controller_rider_in_both_action_forms() {
+        let mut state = make_state();
+        let rider = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: Some(TargetFilter::Player),
+            },
+        )
+        .sub_ability(rider);
+        cast_live_targeting_definition(
+            &mut state,
+            CardId(10_200),
+            "controller rider source",
+            definition,
+        );
+        for (target, is_self) in [(PlayerId(0), true), (PlayerId(1), false)] {
+            for bulk in [false, true] {
+                let action = if bulk {
+                    GameAction::SelectTargets {
+                        targets: vec![TargetRef::Player(target)],
+                    }
+                } else {
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(target)),
+                    }
+                };
+                let verdict = live_target_verdict(&state, action.clone());
+                if is_self {
+                    assert_eq!(
+                        reject_kind(&verdict),
+                        Some("anti_self_harm_wrong_player_target")
+                    );
+                } else {
+                    assert_eq!(score_delta(&verdict), 4.8);
+                    assert!(matches!(
+                        verdict,
+                        PolicyVerdict::Score { ref reason, .. }
+                            if reason.kind == "anti_self_harm_score"
+                    ));
+                }
+                assert_live_target_action_advances(&state, action);
+            }
+        }
+    }
+
+    #[test]
+    fn exact_unavailable_cases_keep_legacy_player_verdicts_for_both_action_forms() {
+        let assert_fallback = |name: &str, definition: AbilityDefinition, harmful: bool| {
+            for (player, is_self) in [(PlayerId(0), true), (PlayerId(1), false)] {
+                for bulk in [false, true] {
+                    let mut state = make_state();
+                    cast_live_targeting_definition(
+                        &mut state,
+                        CardId(10_300),
+                        &format!("legacy fallback {name}"),
+                        definition.clone(),
+                    );
+                    let action = if bulk {
+                        GameAction::SelectTargets {
+                            targets: vec![TargetRef::Player(player)],
+                        }
+                    } else {
+                        GameAction::ChooseTarget {
+                            target: Some(TargetRef::Player(player)),
+                        }
+                    };
+                    assert_eq!(
+                        live_exact_target_impact(&state, TargetRef::Player(player)),
+                        None,
+                        "{name} must be unavailable to the exact-impact classifier"
+                    );
+                    let verdict = live_target_verdict(&state, action.clone());
+                    let should_reject = is_self == harmful;
+                    assert!(
+                        matches!(verdict, PolicyVerdict::Reject { ref reason }
+                            if reason.kind == "anti_self_harm_wrong_player_target")
+                            == should_reject,
+                        "{name} {action:?} must retain the legacy recipient direction"
+                    );
+                    if !should_reject {
+                        let expected = if is_self {
+                            LIVE_CAST_SELF_TARGET_BAND
+                        } else {
+                            4.8
+                        };
+                        assert_eq!(
+                            score_delta(&verdict),
+                            expected,
+                            "{name} retains the probed fallback band"
+                        );
+                    }
+                    assert_live_target_action_advances(&state, action);
+                }
+            }
+        };
+        let unknown_draw = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Player,
+            },
+        );
+        let unknown_discard = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Player,
+                filter: None,
+                selection: CardSelectionMode::Chosen,
+                unless_filter: None,
+            },
+        );
+        assert_fallback("unknown Draw", unknown_draw.clone(), false);
+        assert_fallback("unknown Discard", unknown_discard.clone(), true);
+        for (name, filter, unless_filter, selection) in [
+            (
+                "filtered Discard",
+                Some(TargetFilter::Any),
+                None,
+                CardSelectionMode::Chosen,
+            ),
+            (
+                "unless-filtered Discard",
+                None,
+                Some(TargetFilter::Any),
+                CardSelectionMode::Chosen,
+            ),
+            ("non-Chosen Discard", None, None, CardSelectionMode::Random),
+        ] {
+            assert_fallback(
+                name,
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Player,
+                        filter,
+                        selection,
+                        unless_filter,
+                    },
+                ),
+                true,
+            );
+        }
+        let controller_rider = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        );
+        assert_fallback(
+            "unknown Draw plus Controller",
+            unknown_draw.clone().sub_ability(controller_rider),
+            false,
+        );
+        let mut otherwise = unknown_draw.clone();
+        otherwise.else_ability = Some(Box::new(unknown_draw.clone()));
+        assert_fallback("otherwise branch", otherwise, false);
+
+        let mut state = make_state();
+        cast_live_targeting_definition(
+            &mut state,
+            CardId(10_300),
+            "legacy fallback multiple slots",
+            unknown_draw,
+        );
+        let WaitingFor::TargetSelection { target_slots, .. } = &mut state.waiting_for else {
+            unreachable!("the real cast installs target selection");
+        };
+        target_slots.push(target_slots[0].clone());
+        for (player, is_self) in [(PlayerId(0), true), (PlayerId(1), false)] {
+            let choose = GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(player)),
+            };
+            assert_eq!(
+                live_exact_target_impact(&state, TargetRef::Player(player)),
+                None,
+                "multiple slots must be unavailable to the exact-impact classifier"
+            );
+            let verdict = live_target_verdict(&state, choose.clone());
+            if is_self {
+                assert_eq!(
+                    score_delta(&verdict),
+                    LIVE_CAST_SELF_TARGET_BAND,
+                    "multiple slots retain the beneficial self fallback"
+                );
+            } else {
+                assert_eq!(
+                    reject_kind(&verdict),
+                    Some("anti_self_harm_wrong_player_target"),
+                    "multiple slots retain the beneficial opponent rejection"
+                );
+            }
+            assert_live_target_action_advances(&state, choose);
+
+            let bulk = GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(player)],
+            };
+            let bulk_verdict = live_target_verdict(&state, bulk.clone());
+            if is_self {
+                assert_eq!(score_delta(&bulk_verdict), LIVE_CAST_SELF_TARGET_BAND);
+            } else {
+                assert_eq!(
+                    reject_kind(&bulk_verdict),
+                    Some("anti_self_harm_wrong_player_target")
+                );
+            }
+            let error = engine::game::apply_as_current(&mut state.clone(), bulk)
+                .expect_err("one bulk target cannot satisfy two required target slots");
+            assert!(
+                matches!(error, engine::game::EngineError::InvalidAction(ref message)
+                    if message == "Expected between 2 and 2 targets, got 1"),
+                "the real reducer must reject an incomplete bulk declaration: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unbound_parent_target_does_not_rebind_an_already_selected_root_for_later_slot() {
+        let mut state = make_state();
+        let later = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Player,
+            },
+        );
+        let discard = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::ParentTarget,
+                filter: None,
+                selection: CardSelectionMode::Chosen,
+                unless_filter: None,
+            },
+        );
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Player,
+            },
+        )
+        .sub_ability(discard);
+        cast_live_targeting_definition(
+            &mut state,
+            CardId(10_301),
+            "later independent target source",
+            definition,
+        );
+        let WaitingFor::TargetSelection {
+            pending_cast,
+            target_slots,
+            selection,
+            ..
+        } = &mut state.waiting_for
+        else {
+            unreachable!("the real cast installs target selection");
+        };
+        let mut sibling = build_resolved_from_def(&later, pending_cast.object_id, PlayerId(0));
+        sibling.sub_link = engine::types::ability::SubAbilityLink::SequentialSibling;
+        pending_cast
+            .ability
+            .sub_ability
+            .as_mut()
+            .expect("the full definition carries the ParentTarget child")
+            .sub_ability = Some(Box::new(sibling));
+        target_slots.push(target_slots[0].clone());
+        selection.current_slot = 1;
+        selection
+            .selected_slots
+            .push(Some(TargetRef::Player(PlayerId(1))));
+        let (unbound, incorrectly_bound) = live_targeted_impacts(&state, PlayerId(0));
+        assert_eq!(
+            unbound,
+            Some(1.4),
+            "the later slot remains unbound: Draw(1) plus independent GainLife(1)"
+        );
+        assert_eq!(
+            incorrectly_bound,
+            Some(-1.6),
+            "temporarily binding ParentTarget would reverse the later-slot direction"
+        );
+        for (player, is_self) in [(PlayerId(0), true), (PlayerId(1), false)] {
+            let choose = GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(player)),
+            };
+            assert_eq!(
+                live_exact_target_impact(&state, TargetRef::Player(player)),
+                None,
+                "the selected root and later independent slot must be unavailable to exact impact"
+            );
+            let verdict = live_target_verdict(&state, choose.clone());
+            if is_self {
+                assert_eq!(score_delta(&verdict), LIVE_CAST_SELF_TARGET_BAND);
+            } else {
+                assert_eq!(
+                    reject_kind(&verdict),
+                    Some("anti_self_harm_wrong_player_target")
+                );
+            }
+            assert_live_target_action_advances(&state, choose);
+
+            let bulk = GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(player)],
+            };
+            let bulk_verdict = live_target_verdict(&state, bulk.clone());
+            if is_self {
+                assert_eq!(score_delta(&bulk_verdict), LIVE_CAST_SELF_TARGET_BAND);
+            } else {
+                assert_eq!(
+                    reject_kind(&bulk_verdict),
+                    Some("anti_self_harm_wrong_player_target")
+                );
+            }
+            let error = engine::game::apply_as_current(&mut state.clone(), bulk)
+                .expect_err("one bulk target cannot satisfy two required target slots");
+            assert!(
+                matches!(error, engine::game::EngineError::InvalidAction(ref message)
+                    if message == "Expected between 2 and 2 targets, got 1"),
+                "the real reducer must reject an incomplete bulk declaration: {error:?}"
+            );
+        }
     }
 
     #[test]
@@ -5028,6 +5957,523 @@ mod tests {
         );
     }
 
+    fn recruiter_target_selection_state(
+        mut state: GameState,
+        primary_target_controller: PlayerId,
+        extra_target_controller: Option<PlayerId>,
+        include_untap: bool,
+        rider: Option<AbilityDefinition>,
+        expected_target_slots: usize,
+        configure_root: impl FnOnce(&mut AbilityDefinition),
+    ) -> (GameState, ObjectId, ObjectId, Option<ObjectId>) {
+        state.phase = Phase::Untap;
+        let source = add_creature(&mut state, PlayerId(0), "Coercive Recruiter", 4, 4);
+        let opponent = add_creature(&mut state, primary_target_controller, "Opponent Bear", 5, 5);
+        let extra_target = extra_target_controller
+            .map(|controller| add_creature(&mut state, controller, "Additional target", 3, 3));
+        state.objects.get_mut(&source).unwrap().tapped = true;
+        state.objects.get_mut(&opponent).unwrap().tapped = true;
+        if let Some(extra_target) = extra_target {
+            state.objects.get_mut(&extra_target).unwrap().tapped = true;
+        }
+
+        let creature = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        let mut recruiter = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GainControl { target: creature },
+        );
+        recruiter.duration = Some(Duration::UntilEndOfTurn);
+
+        if include_untap {
+            let mut untap = AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::SetTapState {
+                    target: TargetFilter::ParentTarget,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                },
+            );
+            untap.sub_link = SubAbilityLink::SequentialSibling;
+
+            if let Some(mut rider) = rider {
+                rider.sub_link = SubAbilityLink::SequentialSibling;
+                untap.sub_ability = Some(Box::new(rider));
+            }
+            recruiter.sub_ability = Some(Box::new(untap));
+        } else {
+            assert!(rider.is_none(), "a root-only fixture has no rider");
+        }
+        configure_root(&mut recruiter);
+
+        let trigger = TriggerDefinition::new(TriggerMode::Phase)
+            .execute(recruiter)
+            .phase(Phase::Upkeep)
+            .constraint(TriggerConstraint::OnlyDuringYourTurn)
+            .trigger_zones(vec![Zone::Battlefield]);
+        let source_object = state.objects.get_mut(&source).unwrap();
+        source_object.trigger_definitions.push(trigger.clone());
+        Arc::make_mut(&mut source_object.base_trigger_definitions).push(trigger);
+        source_object.materialize_base_trigger_definitions();
+        let mut events = Vec::new();
+        engine::game::turns::auto_advance(&mut state, &mut events);
+        engine::game::apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        let WaitingFor::TriggerTargetSelection {
+            target_slots,
+            selection,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "the engine must surface the Recruiter target prompt, got {:?}; phase={:?}; stack={}; trigger_defs={}; events={events:?}",
+                state.waiting_for,
+                state.phase,
+                state.stack.len(),
+                state.objects[&source].trigger_definitions.len(),
+            );
+        };
+        assert_eq!(target_slots.len(), expected_target_slots);
+        assert_eq!(selection.current_slot, 0);
+        assert_eq!(target_slots[0].effect_kind, EffectKind::GainControl);
+
+        let contract = AiDecisionContract::issue(&state, PlayerId(0));
+        let friendly_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(source)),
+        };
+        let opponent_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(opponent)),
+        };
+        assert!(contract.contains_action(&state, &friendly_action));
+        assert!(contract.contains_action(&state, &opponent_action));
+        if let Some(extra_target) = extra_target {
+            assert!(contract.contains_action(
+                &state,
+                &GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(extra_target)),
+                },
+            ));
+        }
+
+        (state, source, opponent, extra_target)
+    }
+
+    fn anti_self_harm_registry_verdict_for_target(
+        state: &GameState,
+        target: ObjectId,
+    ) -> (bool, PolicyVerdict) {
+        let config = AiConfig::default();
+        let target_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        };
+        let decision =
+            engine::ai_support::build_decision_context_for_semantic_owner(state, PlayerId(0));
+        let candidate = decision
+            .candidates
+            .iter()
+            .find(|candidate| candidate.action == target_action)
+            .expect("the engine decision context carries the target action");
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let beneficial = is_spell_beneficial(&ctx);
+        let verdict = PolicyRegistry::default()
+            .verdicts(&ctx)
+            .into_iter()
+            .find_map(|(id, verdict)| (id == PolicyId::AntiSelfHarm).then_some(verdict))
+            .expect("the registry reaches AntiSelfHarm for the target decision");
+        (beneficial, verdict)
+    }
+
+    fn recruiter_haste_subtype_rider() -> AbilityDefinition {
+        let mut rider = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste,
+                        },
+                        ContinuousModification::AddSubtype {
+                            subtype: "Pirate".to_string(),
+                        },
+                    ])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+        );
+        rider.duration = Some(Duration::UntilEndOfTurn);
+        rider
+    }
+
+    #[test]
+    fn coercive_recruiter_public_chooser_exposes_pre_control_beneficiary_scoring() {
+        let (state, source, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(recruiter_haste_subtype_rider()),
+            1,
+            |_| {},
+        );
+        let friendly_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(source)),
+        };
+        let opponent_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(opponent)),
+        };
+
+        // The phase wrapper is only the engine-authoritative way to build the
+        // trigger's push-first target prompt. It is a normalized scoring witness,
+        // not a replay of the report's PreCombatMain board.
+        let mut config = create_config(AiDifficulty::VeryEasy, Platform::Native);
+        config.temperature = 0.01;
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(beneficial);
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta > 0.0
+        ));
+        let session = AiSession::arc_from_game(&state);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let selection =
+            choose_action_with_session_diagnostic(&state, PlayerId(0), &config, &mut rng, &session);
+        let receipt = selection
+            .receipt
+            .expect("the public chooser must retain its ranked target receipt");
+        let friendly_candidate = receipt
+            .candidates
+            .iter()
+            .find(|candidate| candidate.action == friendly_action)
+            .expect("the engine issued the friendly Recruiter target");
+        let opponent_candidate = receipt
+            .candidates
+            .iter()
+            .find(|candidate| candidate.action == opponent_action)
+            .expect("the engine issued the opponent Recruiter target");
+
+        assert!(
+            opponent_candidate.is_top_ranked,
+            "the Recruiter chain must value its opponent target for the AI after control changes: friendly={friendly_candidate:?}, opponent={opponent_candidate:?}"
+        );
+        assert_eq!(selection.action, Some(opponent_action));
+    }
+
+    #[test]
+    fn gain_control_empty_static_rider_keeps_existing_opponent_score() {
+        let empty_rider = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GenericEffect {
+                static_abilities: Vec::new(),
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+        );
+        let (state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(empty_rider),
+            1,
+            |_| {},
+        );
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(
+            beneficial,
+            "the supported Untap prefix establishes polarity"
+        );
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_empty_static_modifications_keep_existing_opponent_score() {
+        let empty_modifications = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GenericEffect {
+                static_abilities: vec![
+                    StaticDefinition::continuous().affected(TargetFilter::ParentTarget)
+                ],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+        );
+        let (state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(empty_modifications),
+            1,
+            |_| {},
+        );
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(
+            beneficial,
+            "the supported Untap prefix establishes polarity"
+        );
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_chooser_without_recipient_keeps_existing_opponent_score() {
+        let (mut state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(recruiter_haste_subtype_rider()),
+            1,
+            |_| {},
+        );
+        state
+            .pending_trigger
+            .as_mut()
+            .expect("the engine target prompt retains its pending trigger")
+            .ability
+            .original_controller = Some(PlayerId(1));
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(
+            beneficial,
+            "the slot polarity is independent of the recipient"
+        );
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_second_target_slot_keeps_existing_opponent_score() {
+        let mut rider = recruiter_haste_subtype_rider();
+        let mut second_target = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GainControl {
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            },
+        );
+        second_target.sub_link = SubAbilityLink::SequentialSibling;
+        rider.sub_ability = Some(Box::new(second_target));
+        let (state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(rider),
+            2,
+            |_| {},
+        );
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(beneficial);
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_alternate_branch_keeps_existing_opponent_score() {
+        let (state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(recruiter_haste_subtype_rider()),
+            1,
+            |root| {
+                root.else_ability = Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::NoOp,
+                )));
+            },
+        );
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(beneficial);
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
+    #[test]
+    fn unbranched_resolved_ability_rejects_optional_player_and_opponent_scopes() {
+        let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(1), PlayerId(0));
+        assert!(is_unbranched_resolved_ability(&ability));
+
+        ability.optional_player = Some(TargetFilter::Any);
+        assert!(!is_unbranched_resolved_ability(&ability));
+
+        ability.optional_player = None;
+        ability.optional_for = Some(OpponentMayScope::AnyOpponent);
+        assert!(!is_unbranched_resolved_ability(&ability));
+    }
+
+    #[test]
+    fn root_only_gain_control_keeps_existing_opponent_score() {
+        let (state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            false,
+            None,
+            1,
+            |_| {},
+        );
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(
+            !beneficial,
+            "bare GainControl must retain its existing non-beneficial polarity"
+        );
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta > 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_team_target_only_corrects_actual_opponent() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        let (state, _, opponent, teammate) = recruiter_target_selection_state(
+            state,
+            PlayerId(2),
+            Some(PlayerId(1)),
+            true,
+            Some(recruiter_haste_subtype_rider()),
+            1,
+            |_| {},
+        );
+        let teammate = teammate.expect("the engine issued the teammate target");
+        assert!(engine::game::players::is_opponent(
+            &state,
+            PlayerId(0),
+            PlayerId(2)
+        ));
+        assert!(!engine::game::players::is_opponent(
+            &state,
+            PlayerId(0),
+            PlayerId(1)
+        ));
+
+        let (opponent_beneficial, opponent_verdict) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        let (teammate_beneficial, teammate_verdict) =
+            anti_self_harm_registry_verdict_for_target(&state, teammate);
+        assert!(opponent_beneficial && teammate_beneficial);
+        assert!(matches!(
+            opponent_verdict,
+            PolicyVerdict::Score { delta, .. } if delta > 0.0
+        ));
+        assert!(matches!(
+            teammate_verdict,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_currently_ai_controlled_stolen_target_keeps_existing_score() {
+        let (mut state, _, stolen, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(recruiter_haste_subtype_rider()),
+            1,
+            |_| {},
+        );
+        let stolen_object = state.objects.get_mut(&stolen).unwrap();
+        stolen_object.base_controller = Some(PlayerId(1));
+        stolen_object.controller = PlayerId(0);
+        assert_eq!(stolen_object.owner, PlayerId(1));
+        assert_eq!(stolen_object.base_controller, Some(PlayerId(1)));
+        assert_eq!(stolen_object.controller, PlayerId(0));
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, stolen);
+        assert!(beneficial);
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta > 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_nonsequential_parent_target_rider_keeps_existing_opponent_score() {
+        let (state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(recruiter_haste_subtype_rider()),
+            1,
+            |root| {
+                root.sub_ability
+                    .as_mut()
+                    .expect("fixture has the ParentTarget rider")
+                    .sub_link = SubAbilityLink::ContinuationStep;
+            },
+        );
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(beneficial, "the ParentTarget Untap establishes polarity");
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
+    #[test]
+    fn gain_control_conditional_root_keeps_existing_opponent_score() {
+        let (state, _, opponent, _) = recruiter_target_selection_state(
+            make_state(),
+            PlayerId(1),
+            None,
+            true,
+            Some(recruiter_haste_subtype_rider()),
+            1,
+            |root| root.condition = Some(AbilityCondition::IsYourTurn),
+        );
+
+        let (beneficial, anti_self_harm) =
+            anti_self_harm_registry_verdict_for_target(&state, opponent);
+        assert!(beneficial);
+        assert!(matches!(
+            anti_self_harm,
+            PolicyVerdict::Score { delta, .. } if delta < 0.0
+        ));
+    }
+
     #[test]
     fn noncreature_ward_target_scores_lower_than_unwarded_equivalent() {
         let mut state = make_state();
@@ -5631,14 +7077,28 @@ mod tests {
         );
     }
 
-    /// Issue #1364: reflected damage in multiplayer should concentrate on the
-    /// lowest-life opponent instead of cycling evenly between opponents.
+    /// Reflected damage with an unknown dynamic amount follows the shared threat
+    /// signal; only a known fixed lethal amount receives the lethal preference.
     #[test]
-    fn event_context_damage_prefers_lowest_life_opponent_in_multiplayer() {
+    fn event_context_damage_prefers_threatening_opponent_in_multiplayer() {
         let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
         state.players[0].life = 20;
         state.players[1].life = 5;
         state.players[2].life = 14;
+        for _ in 0..8 {
+            let card_id = CardId(state.next_object_id);
+            let creature = create_object(
+                &mut state,
+                card_id,
+                PlayerId(2),
+                "Threat".to_string(),
+                Zone::Battlefield,
+            );
+            let object = state.objects.get_mut(&creature).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.power = Some(3);
+            object.toughness = Some(3);
+        }
 
         let effect = Effect::DealDamage {
             amount: QuantityExpr::Ref {
@@ -5693,8 +7153,40 @@ mod tests {
         let other_score = AntiSelfHarmPolicy.score(&ctx_other);
 
         assert!(
-            lowest_score > other_score,
-            "Reflected damage should prefer the lowest-life opponent: lowest={lowest_score}, other={other_score}"
+            other_score > lowest_score,
+            "Dynamic reflected damage must prefer the stronger opponent: low-life={lowest_score}, threat={other_score}"
+        );
+
+        state.players[1].life = 3;
+        let fixed = Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Player,
+            damage_source: None,
+            excess: None,
+        };
+        let (decision, candidate) = make_target_selection_ctx(
+            &mut state,
+            fixed,
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            Some(TargetRef::Player(PlayerId(1))),
+        );
+        let fixed_ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(
+            AntiSelfHarmPolicy.score(&fixed_ctx),
+            config.policy_penalties.lethal_burn_bonus,
+            "known fixed lethal still overrides ordinary threat ranking"
         );
     }
 
@@ -5786,6 +7278,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::ExtraTurn {
                 target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
             },
         );
         if let Some(condition) = self_loss_condition {

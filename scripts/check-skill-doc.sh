@@ -276,19 +276,27 @@ EOF
 # and neither was visible from this script's own output. The suite pins those as
 # properties, so it runs where the gate runs.
 #
-# The guard is also the recursion stop: the throwaway repos the suite builds
-# copy only this script, so the file is absent there and the fixture's own
-# invocation skips this block.
+# Recursion stops on `Cargo.toml`: the throwaway repos the suite builds copy the
+# parser tree and this script, never the manifest, while every real checkout has
+# one. That is deliberately NOT the file-presence check it replaces, which
+# answered "am I a fixture?" and "does the suite exist?" with a single test --
+# so DELETING the suite read as "I am a fixture" and the gate went green in 5s
+# having verified nothing. Separating the two lets a missing suite be the error
+# it is. Deriving the answer from the tree, rather than from an environment
+# variable, also leaves no switch a caller could set to skip its own gate.
 #
 # Skipped when the tree is already failing. The fixtures copy the LIVE tree, so
 # genuine drift breaks them too, and reporting it a second time as "self-tests
 # failed" points at the suite rather than at the drift that actually caused it.
 # ---------------------------------------------------------------------------
-if [ "$fail" -eq 0 ] && [ -f "$SELF_DIR/check_skill_doc_tests.py" ]; then
+if [ "$fail" -eq 0 ] && [ -f "Cargo.toml" ]; then
   # Invoked through the repo-relative path (we are at the repo root by now), so
   # the interpreter never sees $SELF_DIR's shell-native spelling -- which is not
-  # the same string as a native path on every host.
-  if ! self_test_output="$(python3 scripts/check_skill_doc_tests.py 2>&1)"; then
+  # the same string as a native path on every host. The guard below uses the
+  # same base, so the two cannot disagree about which file they mean.
+  if [ ! -f "scripts/check_skill_doc_tests.py" ]; then
+    err "gate self-tests missing: scripts/check_skill_doc_tests.py"
+  elif ! self_test_output="$(python3 scripts/check_skill_doc_tests.py 2>&1)"; then
     printf '%s\n' "$self_test_output" >&2
     err "gate self-tests failed — rerun: python3 scripts/check_skill_doc_tests.py"
   fi

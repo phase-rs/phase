@@ -521,6 +521,7 @@ pub enum InteractionActionCode {
     SelectCards,
     ChooseRemoveCounterCostDistribution,
     SelectCoinFlips,
+    SelectDieRolls,
     ChooseOutsideGameCards,
     SelectTargets,
     ChooseTarget,
