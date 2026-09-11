@@ -186,6 +186,15 @@ pub(in crate::game) fn advance_phase_once(
         complete_end_combat_teardown(state);
     }
 
+    // CR 500.5 + CR 101.4: the empty-pool events this transition raises belong
+    // to the ENDING phase of the outgoing turn, and replacement-choice ordering
+    // is APNAP — so their order must start at the outgoing active player.
+    // `start_next_turn` below rotates `active_player`, and phase entry builds
+    // its queue afterwards, so the anchor has to be captured here or the
+    // incoming turn's player would be asked first.
+    let apnap_anchor =
+        (state.phase == Phase::Cleanup && next == Phase::Untap).then_some(state.active_player);
+
     // If wrapping from Cleanup to Untap, start next turn. Turn-level skip
     // replacements (CR 614.10) are handled inside `start_next_turn` — the
     // per-phase pipeline below runs only for within-turn phase advances.
@@ -229,7 +238,7 @@ pub(in crate::game) fn advance_phase_once(
             .and_then(|ep| ep.attacker_restriction_source);
     }
 
-    AdvancePhaseOnce::Entry(Box::new(enter_phase(state, next, events)))
+    AdvancePhaseOnce::Entry(Box::new(enter_phase(state, next, events, apnap_anchor)))
 }
 
 /// CR 724.1d: End the current turn by skipping straight to the cleanup step.
@@ -251,7 +260,7 @@ pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // is skipped, so we must expire the restriction here.
     state.current_combat_attacker_restriction = None;
     state.current_combat_attacker_restriction_source = None;
-    enter_phase(state, Phase::Cleanup, events);
+    enter_phase(state, Phase::Cleanup, events, None);
 }
 
 /// CR 511.2 + CR 511.3: End Combat effects expire and combat objects leave
@@ -291,7 +300,7 @@ pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<Ga
     // CR 500.8 + CR 724.2d: extra phases scheduled for this turn are skipped, so
     // drop any inserted-beginning-phase resume anchors along with them.
     state.extra_phase_resume.clear();
-    enter_phase(state, Phase::PostCombatMain, events);
+    enter_phase(state, Phase::PostCombatMain, events, None);
 }
 
 /// CR 508.8: Mark the end-of-combat step after no attackers remain, so the
@@ -330,10 +339,15 @@ pub(super) fn advance_after_empty_attackers(
 /// drain stores progress in `state.pending_phase_transition_progress` and
 /// sets `state.waiting_for`; resume happens via the `EmptyManaPool` arm of
 /// `handle_replacement_choice`, which re-calls `drain_pending_phase_transition_progress`.
+/// `apnap_anchor` overrides whom CR 101.4's APNAP order starts from. `None`
+/// means the current active player, which is right for every within-turn
+/// advance. It is `Some` only for Cleanup -> Untap, where the turn has already
+/// rotated but the empty-pool events still belong to the outgoing turn.
 fn enter_phase(
     state: &mut GameState,
     next: Phase,
     events: &mut Vec<GameEvent>,
+    apnap_anchor: Option<PlayerId>,
 ) -> PhaseEntryOutcome {
     use std::collections::VecDeque;
 
@@ -402,10 +416,24 @@ fn enter_phase(
 
     state.pending_phase_transition_progress =
         Some(crate::types::game_state::PhaseTransitionProgress {
-            remaining_players: VecDeque::from(super::players::apnap_order(state)),
+            remaining_players: VecDeque::from(match apnap_anchor {
+                // `SpecificPlayer` and NOT `None`: with `None` the anchor
+                // argument is ignored and the order falls back to the ACTIVE
+                // player — which by this point is the incoming turn's, the
+                // exact bug this override exists to prevent. That variant's own
+                // doc names this case: a snapshotted anchor that is not the
+                // active player.
+                Some(anchor) => super::players::apnap_order_from(
+                    state,
+                    Some(crate::types::ability::ControllerRef::SpecificPlayer { id: anchor }),
+                    anchor,
+                ),
+                None => super::players::apnap_order(state),
+            }),
             next_phase: next,
             previous_phase: Some(previous),
             owed_life_loss: VecDeque::new(),
+            in_flight_life_loss: None,
             entering_cleanup,
             drain_state: crate::types::game_state::PhaseTransitionDrainState::Ready,
         });
@@ -530,7 +558,10 @@ pub(super) fn discharge_owed_life_losses(
             Err(deferred) => {
                 // This loss is mid-flight and will complete through the
                 // replacement pipeline; only what has NOT been attempted is
-                // parked. Re-queuing `next` would apply it twice.
+                // parked. Re-queuing `next` would apply it twice — but its
+                // CAUSE still has to survive, or the event that explains it is
+                // lost when it lands. See `note_empty_pool_life_loss_resolved`.
+                park_in_flight_life_loss(state, next);
                 park_owed_life_losses(state, owed);
                 if matches!(
                     deferred,
@@ -561,6 +592,41 @@ fn emit_life_loss_cause(loss: PendingEmptyPoolLifeLoss, actual: u32, events: &mu
         }),
         EmptyPoolLifeLossCause::UnspentManaStatic => {}
     }
+}
+
+fn park_in_flight_life_loss(state: &mut GameState, loss: PendingEmptyPoolLifeLoss) {
+    if let Some(progress) = state.pending_phase_transition_progress.as_mut() {
+        progress.in_flight_life_loss = Some(loss);
+    }
+}
+
+/// Emit the event explaining an empty-pool life loss that completed through the
+/// CR 616.1 replacement pipeline rather than returning to
+/// `discharge_owed_life_losses`.
+///
+/// Called from the replacement resume path, which handles EVERY life loss — so
+/// this fires only when a parked record names this same player, and consumes it
+/// either way so a later unrelated loss cannot inherit the provenance.
+///
+/// `actual` is what the pipeline really took, which is the point: a replacement
+/// effect may have reduced it, and CR 119.8 can make it zero.
+pub(super) fn note_empty_pool_life_loss_resolved(
+    state: &mut GameState,
+    player_id: PlayerId,
+    actual: u32,
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(progress) = state.pending_phase_transition_progress.as_mut() else {
+        return;
+    };
+    let Some(parked) = progress.in_flight_life_loss else {
+        return;
+    };
+    if parked.player_id != player_id {
+        return;
+    }
+    progress.in_flight_life_loss = None;
+    emit_life_loss_cause(parked, actual, events);
 }
 
 fn park_owed_life_losses(state: &mut GameState, owed: VecDeque<PendingEmptyPoolLifeLoss>) {
@@ -9670,6 +9736,112 @@ mod tests {
             });
     }
 
+    /// CR 500.5 + CR 101.4: the ending phase's empty-pool events belong to the
+    /// OUTGOING turn, so their APNAP order starts at the outgoing active
+    /// player — even though `start_next_turn` has already rotated the turn by
+    /// the time phase entry builds the queue.
+    ///
+    /// Three players, so "starts at the outgoing active player" and "starts at
+    /// the incoming one" are distinguishable orders rather than a 2-seat swap.
+    /// Mana burn makes the order observable: each player's emptied pool emits
+    /// its own `ManaBurn`, in the order the drain processed them.
+    #[test]
+    fn cleanup_to_untap_empties_pools_in_the_outgoing_turn_apnap_order() {
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.turn_number = 1;
+        // Mana burn is a custom-format axis; `for_custom_rules` applies no gate
+        // of its own, which is what lets a test reach it.
+        let mut rules = crate::types::custom_format::old_school_93_94().rules;
+        rules.legality.legal_sets = None;
+        state.format_config = crate::types::format::FormatConfig::for_custom_rules(&rules);
+
+        // Every player holds unspent mana, so every player burns and each one
+        // contributes an event whose position reveals the order.
+        for player in &mut state.players {
+            player
+                .mana_pool
+                .add(ManaUnit::new(ManaType::Red, ObjectId(9_100), false, vec![]));
+        }
+
+        // The outgoing turn belongs to seat 1, so APNAP is 1, 2, 0. If the
+        // anchor were taken after `start_next_turn`, it would be 2, 0, 1.
+        state.active_player = PlayerId(1);
+        state.phase = Phase::Cleanup;
+
+        let mut events = Vec::new();
+        advance_phase_once(&mut state, &mut events);
+
+        let burn_order: Vec<PlayerId> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::ManaBurn { player_id, .. } => Some(*player_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            burn_order,
+            vec![PlayerId(1), PlayerId(2), PlayerId(0)],
+            "CR 101.4: the ending phase's APNAP order starts at the OUTGOING \
+             active player, not the incoming one"
+        );
+        // Paired control: the turn really did roll over, so this is the
+        // Cleanup -> Untap boundary and not an intra-turn step that never
+        // exercised the anchor.
+        assert_eq!(state.active_player, PlayerId(2));
+    }
+
+    /// A mana burn that defers through the CR 616.1 replacement pipeline still
+    /// reports WHY life was lost.
+    ///
+    /// The deferred loss completes in `apply_life_loss_after_replacement` and
+    /// never returns to `discharge_owed_life_losses`, so without the parked
+    /// provenance the `ManaBurn` event is simply never emitted and the player
+    /// sees life vanish with no stated cause.
+    #[test]
+    fn a_deferred_empty_pool_loss_still_names_its_cause_on_resume() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_phase_transition_progress =
+            Some(crate::types::game_state::PhaseTransitionProgress {
+                remaining_players: VecDeque::new(),
+                next_phase: Phase::Untap,
+                previous_phase: Some(Phase::Cleanup),
+                owed_life_loss: VecDeque::new(),
+                in_flight_life_loss: Some(PendingEmptyPoolLifeLoss {
+                    player_id: PlayerId(0),
+                    amount: 2,
+                    cause: EmptyPoolLifeLossCause::ManaBurn,
+                }),
+                entering_cleanup: false,
+                drain_state: crate::types::game_state::PhaseTransitionDrainState::Ready,
+            });
+
+        // A replacement effect may have changed what was actually lost, so the
+        // event must carry the pipeline's number (1), not the parked one (2).
+        let mut events = Vec::new();
+        note_empty_pool_life_loss_resolved(&mut state, PlayerId(0), 1, &mut events);
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    GameEvent::ManaBurn { player_id, amount } => Some((*player_id, *amount)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![(PlayerId(0), 1)],
+            "the resumed loss must emit ManaBurn with the ACTUAL amount"
+        );
+
+        // Consumed: a later unrelated life loss must not inherit the cause.
+        let mut again = Vec::new();
+        note_empty_pool_life_loss_resolved(&mut state, PlayerId(0), 1, &mut again);
+        assert!(
+            again.is_empty(),
+            "the parked provenance is consumed once, not reusable"
+        );
+    }
+
     // CR 723.2 + CR 506.1 + CR 511.3 (test 7.1 — the discriminating core): control
     // under a NextCombatPhase entry is active EXACTLY within the target's combat
     // phase. Owner decides upkeep/draw/precombat-main and postcombat-main/end;
@@ -9687,7 +9859,7 @@ mod tests {
         let mut events = Vec::new();
 
         for phase in [Phase::Upkeep, Phase::Draw, Phase::PreCombatMain] {
-            enter_phase(&mut state, phase, &mut events);
+            enter_phase(&mut state, phase, &mut events, None);
             assert_eq!(
                 turn_control::turn_decision_maker(&state),
                 owner,
@@ -9701,7 +9873,7 @@ mod tests {
             Phase::CombatDamage,
             Phase::EndCombat,
         ] {
-            enter_phase(&mut state, phase, &mut events);
+            enter_phase(&mut state, phase, &mut events, None);
             assert_eq!(
                 turn_control::turn_decision_maker(&state),
                 controller,
@@ -9709,7 +9881,7 @@ mod tests {
             );
         }
         for phase in [Phase::PostCombatMain, Phase::End] {
-            enter_phase(&mut state, phase, &mut events);
+            enter_phase(&mut state, phase, &mut events, None);
             assert_eq!(
                 turn_control::turn_decision_maker(&state),
                 owner,
@@ -9762,14 +9934,14 @@ mod tests {
             "the full-turn control applies before combat"
         );
 
-        enter_phase(&mut state, Phase::BeginCombat, &mut events);
+        enter_phase(&mut state, Phase::BeginCombat, &mut events, None);
         assert_eq!(
             turn_control::turn_decision_maker(&state),
             expected_combat_controller,
             "the newest currently applicable effect controls combat"
         );
 
-        enter_phase(&mut state, Phase::PostCombatMain, &mut events);
+        enter_phase(&mut state, Phase::PostCombatMain, &mut events, None);
         assert_eq!(
             turn_control::turn_decision_maker(&state),
             full_turn_controller,
@@ -9817,11 +9989,11 @@ mod tests {
         }
         let mut events = Vec::new();
 
-        enter_phase(&mut state, Phase::BeginCombat, &mut events);
+        enter_phase(&mut state, Phase::BeginCombat, &mut events, None);
         assert_eq!(turn_control::turn_decision_maker(&state), PlayerId(2));
         assert_eq!(state.scheduled_turn_controls.len(), 1);
 
-        enter_phase(&mut state, Phase::PostCombatMain, &mut events);
+        enter_phase(&mut state, Phase::PostCombatMain, &mut events, None);
         assert!(state.scheduled_turn_controls.is_empty());
         assert_eq!(turn_control::turn_decision_maker(&state), PlayerId(1));
     }
@@ -9840,17 +10012,17 @@ mod tests {
         schedule_combat_phase_control(&mut state, owner, controller);
         let mut events = Vec::new();
 
-        enter_phase(&mut state, Phase::BeginCombat, &mut events);
+        enter_phase(&mut state, Phase::BeginCombat, &mut events, None);
         assert_eq!(
             turn_control::turn_decision_maker(&state),
             controller,
             "combat phase 1: controller pilots"
         );
-        enter_phase(&mut state, Phase::EndCombat, &mut events);
+        enter_phase(&mut state, Phase::EndCombat, &mut events, None);
         assert_eq!(turn_control::turn_decision_maker(&state), controller);
 
         // CR 500.8: a second (extra) combat phase begins.
-        enter_phase(&mut state, Phase::BeginCombat, &mut events);
+        enter_phase(&mut state, Phase::BeginCombat, &mut events, None);
         assert_eq!(
             turn_control::turn_decision_maker(&state),
             owner,
@@ -9888,7 +10060,7 @@ mod tests {
             Phase::End,
             Phase::Cleanup,
         ] {
-            enter_phase(&mut state, phase, &mut events);
+            enter_phase(&mut state, phase, &mut events, None);
         }
         assert_eq!(
             state.turn_decision_controller, None,
@@ -9907,7 +10079,7 @@ mod tests {
         assert_eq!(state.active_player, owner);
 
         // Owner now actually takes a combat phase → control activates.
-        enter_phase(&mut state, Phase::BeginCombat, &mut events);
+        enter_phase(&mut state, Phase::BeginCombat, &mut events, None);
         assert_eq!(
             turn_control::turn_decision_maker(&state),
             controller,
@@ -9930,7 +10102,7 @@ mod tests {
         schedule_combat_phase_control(&mut state, owner, controller);
         let mut events = Vec::new();
 
-        enter_phase(&mut state, Phase::BeginCombat, &mut events);
+        enter_phase(&mut state, Phase::BeginCombat, &mut events, None);
         assert_eq!(turn_control::turn_decision_maker(&state), controller);
         assert_eq!(
             state.priority_player, controller,

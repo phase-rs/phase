@@ -21192,6 +21192,17 @@ pub struct PhaseTransitionProgress {
     /// it before advancing to the next player.
     #[serde(default)]
     pub owed_life_loss: VecDeque<PendingEmptyPoolLifeLoss>,
+    /// The empty-pool life loss currently IN FLIGHT through the CR 616.1
+    /// replacement pipeline, kept only to name its cause when it lands.
+    ///
+    /// Distinct from `owed_life_loss`, which holds losses not yet attempted:
+    /// this one has been applied and will complete elsewhere
+    /// (`apply_life_loss_after_replacement`), so re-applying it would double
+    /// it. Without this the loss still resolves correctly, but nothing records
+    /// WHY — a deferred mana burn would silently lose its `ManaBurn` event and
+    /// the player would see life vanish with no stated reason.
+    #[serde(default)]
+    pub in_flight_life_loss: Option<PendingEmptyPoolLifeLoss>,
     /// The phase the turn is leaving, paired with `next_phase` to identify the
     /// boundary being crossed. Replaces a derived `in_combat: bool`, which
     /// carried strictly less information than the phase it was computed from
@@ -21220,6 +21231,7 @@ mod phase_transition_progress_serde_tests {
             next_phase: Phase::Upkeep,
             previous_phase: Some(Phase::Untap),
             owed_life_loss: VecDeque::new(),
+            in_flight_life_loss: None,
             entering_cleanup: false,
             drain_state: PhaseTransitionDrainState::AwaitingPostReplacementContinuation,
         };

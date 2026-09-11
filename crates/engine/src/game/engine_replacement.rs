@@ -716,7 +716,21 @@ fn handle_replacement_choice_inner(
                 }
                 // CR 120.3: Life loss accepted after replacement choice.
                 loss @ ProposedEvent::LifeLoss { .. } => {
-                    apply_life_loss_after_replacement(state, loss, events);
+                    // Captured before the move: an empty-pool loss that
+                    // deferred here never returns to the phase-transition
+                    // drain, so this is the only place its cause can still be
+                    // named (a mana burn would otherwise land as an unexplained
+                    // life change).
+                    let loser = match &loss {
+                        ProposedEvent::LifeLoss { player_id, .. } => Some(*player_id),
+                        _ => None,
+                    };
+                    let actual = apply_life_loss_after_replacement(state, loss, events);
+                    if let Some(player_id) = loser {
+                        crate::game::turns::note_empty_pool_life_loss_resolved(
+                            state, player_id, actual, events,
+                        );
+                    }
                 }
                 // CR 701.9a: Discard accepted after replacement choice — move the
                 // object hand → graveyard and record/emit the discard event. The
