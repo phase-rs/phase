@@ -2524,7 +2524,7 @@ mod tests {
     use crate::tournament::{
         BracketShape, MatchArity, PairingOutcome, PodOutcome, ScoringPolicy, TournamentAction,
         TournamentStatus, IN_PROGRESS_ABANDON_SECS, REGISTRATION_TIMEOUT_SECS,
-        TOURNAMENT_CREDENTIAL_TTL_MS,
+        TOURNAMENT_CREDENTIAL_OVERLAP_MS, TOURNAMENT_CREDENTIAL_TTL_MS,
     };
 
     /// Creates a tournament through the real dispatch path and returns
@@ -4655,20 +4655,41 @@ mod tests {
             "a rotated secret must never be broadcast: {out:?}"
         );
 
-        // The old secret is dead at the broker's own authority boundary, not
-        // only inside the manager.
-        let refused = broker.handle(
+        // The broker's own authority boundary honors the credential's bounded
+        // overlap, not only the manager. Right after rotation the just-presented
+        // secret still authorizes — the lost-reply recovery path, end-to-end
+        // through the broker's gate — so it is NOT refused as an invalid token.
+        let within_overlap = broker.handle(
             &mut conn,
             LobbyClientMessage::StartTournamentRound {
                 code: code.clone(),
+                organizer_token: organizer_token.clone(),
+                request_id: None,
+            },
+            &env,
+        );
+        assert!(
+            !error_reason_contains(&within_overlap, "Invalid organizer token"),
+            "the just-superseded secret must still authorize during overlap: {within_overlap:?}"
+        );
+
+        // Once the overlap window closes it stops authorizing. A byte match past
+        // its window is `Expired`, so the broker reports the expiry — the
+        // recoverable arm — rather than a bare mismatch, at its own boundary as
+        // inside the manager.
+        env.advance_secs(TOURNAMENT_CREDENTIAL_OVERLAP_MS / 1_000 + 1);
+        let after_overlap = broker.handle(
+            &mut conn,
+            LobbyClientMessage::StartTournamentRound {
+                code,
                 organizer_token,
                 request_id: None,
             },
             &env,
         );
         assert!(
-            is_error(&refused) && error_reason(&refused).contains("Invalid organizer token"),
-            "the rotated-away organizer secret must stop authorizing: {refused:?}"
+            gated_rejection_reason(&after_overlap).contains("expired"),
+            "the superseded secret must stop authorizing once its overlap lapses: {after_overlap:?}"
         );
     }
 
