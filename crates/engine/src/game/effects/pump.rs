@@ -36,10 +36,11 @@ pub fn resolve(
     // routes `SelfRef` through the post-#323 short-circuit so chained
     // `Pump { target: SelfRef }` sub-abilities resolve to the source object
     // rather than inheriting the parent's targets via chain propagation in
-    // `effects::mod.rs::resolve_ability_chain`.
-    let effective_targets =
-        crate::game::targeting::resolved_targets(ability, &target_filter, state);
-    let ids = crate::game::effects::effect_object_targets(&target_filter, &effective_targets);
+    // `effects::mod.rs::resolve_ability_chain`. CR 608.2b: a `ParentTargetSlot`
+    // subject whose target was illegal as the spell resolved gets no bonus
+    // ("the creature you control gets +1/+1" when that creature was stolen in
+    // response).
+    let ids = crate::game::effects::resolved_effect_object_ids(state, ability, &target_filter);
 
     // CR 608.2h + CR 613.4c: the pump amount is determined once, as the effect
     // resolves. When the P/T references the pumped object itself ("+X for each
@@ -231,8 +232,7 @@ pub fn resolve_double_pt(
     // CR 608.2c + 603.10a: Same 3-tier dispatch as `pump.resolve` — `SelfRef`
     // short-circuits to `ability.source_id` so chained
     // `DoublePT { target: SelfRef }` sub-abilities don't inherit parent targets.
-    let effective_targets = crate::game::targeting::resolved_targets(ability, target_filter, state);
-    let ids = crate::game::effects::effect_object_targets(target_filter, &effective_targets);
+    let ids = crate::game::effects::resolved_effect_object_ids(state, ability, target_filter);
 
     for obj_id in ids {
         let modifications = double_modifications(state, obj_id, mode, factor)?;

@@ -10528,7 +10528,7 @@ mod tests {
     /// object target (`game::effects::evaluate_condition`'s
     /// `TargetMatchesFilter` arm), and the fail-closed walk guarantees the
     /// antecedent IS that most-recent declarer. `Some(1)` would instead index
-    /// the FLATTENED root chain via `resolve_parent_slot_from_root`, drop the
+    /// the FLATTENED root chain via `resolve_live_parent_slot_from_root`, drop the
     /// `TriggeringSource` fallback that `None` carries, and set
     /// `reads_member_bound` in `game::ability_rw`, refusing batch-T1.
     ///

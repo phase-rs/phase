@@ -195,14 +195,19 @@ fn gain_control_object_targets(
     // CR 608.2c: a precise slot anaphor ("gain control of that Equipment" →
     // slot 1) indexes the whole resolving chain's declared targets. The
     // per-clause `ability.targets` may carry only the nearest propagated target,
-    // so route through the root-chain authority; `effect_object_targets` would
-    // fall through to "all inherited targets" when the index is out of range.
+    // so route through the root-chain slot authority. The slot answer is final:
+    // falling through would index the local targets and then `resolved_targets`'
+    // whole root chain, taking control of every declared object. CR 608.2b: a
+    // slot whose target was illegal at resolution (or whose pinned referent
+    // departed, CR 400.7) gains control of nothing.
     if let TargetFilter::ParentTargetSlot { index } = filter {
-        if let Some(TargetRef::Object(id)) =
-            crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
-        {
-            return vec![id];
-        }
+        return crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
+            .and_then(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .into_iter()
+            .collect();
     }
 
     // CR 400.7 + CR 603.7c: a delayed gain-control whose pinned referent became
@@ -218,9 +223,9 @@ fn gain_control_object_targets(
     // and falls to its UNCONDITIONAL `EffectResolved` push. An emptied list is
     // already a clean no-op with the event.
     //
-    // Slot carve-out does NOT apply here: `ParentTargetSlot` is handled above by
-    // `resolve_parent_slot_from_root` and never reaches this read. Adding a
-    // `matches!` guard would be dead code.
+    // Slot carve-out does NOT apply here: `ParentTargetSlot` returns above
+    // through `resolve_live_parent_slot_from_root` and never reaches this read.
+    // Adding a `matches!` guard would be dead code.
     let live_targets = ability.live_object_targets(state);
     let chosen_objects = super::effect_object_targets(filter, &live_targets);
 

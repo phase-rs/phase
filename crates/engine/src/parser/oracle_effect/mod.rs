@@ -22733,7 +22733,7 @@ fn chain_prior_chosen_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
 ///
 /// Emitting `Some(index)` instead would be a regression, not a tightening: it
 /// indexes the FLATTENED root chain through
-/// `targeting::resolve_parent_slot_from_root` (a runtime concatenation of every
+/// `targeting::resolve_live_parent_slot_from_root` (a runtime concatenation of every
 /// node's own targets, player refs included) which no parse-time clause count
 /// reproduces; it drops the `TriggeringSource` fallback `None` carries, which is
 /// what makes the Phase/End-step trigger route work; and it sets

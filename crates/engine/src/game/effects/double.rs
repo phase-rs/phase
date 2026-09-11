@@ -5,7 +5,6 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
-use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaType, ManaUnit};
 use crate::types::player::PlayerId;
 
@@ -44,9 +43,11 @@ fn resolve_double_counters(
     counter_type: Option<&CounterType>,
 ) -> Result<(), EffectError> {
     // CR 608.2c + CR 603.7c: the ordinary dispatch first — SelfRef,
-    // context anaphors and chosen targets all bind here. `resolve_object_targets`
-    // delegates to `targeting::resolved_targets`' unified 3-tier dispatch.
-    let mut obj_ids = resolve_object_targets(ability, target, state);
+    // context anaphors and chosen targets all bind here, through
+    // `targeting::resolved_targets`' unified 3-tier dispatch, so a chained
+    // `Double { target: SelfRef }` resolves to the source rather than the
+    // parent's propagated targets (issue #323 class).
+    let mut obj_ids = super::resolved_effect_object_ids(state, ability, target);
     // CR 701.10e + CR 608.2d: only when nothing was chosen or bound is this a
     // DESCRIBED population ("each Spider and legendary creature you control").
     // The shared helper's gate refuses every targeted shape (CR 601.2c +
@@ -279,24 +280,6 @@ fn resolve_double_mana(
     Ok(())
 }
 
-/// Resolve object targets from ability targets or self-ref.
-///
-/// CR 608.2c + 603.10a: Delegates to the unified 3-tier dispatch
-/// (`targeting::resolved_targets`) so `SelfRef` always resolves to the source
-/// object regardless of `ability.targets` (issue #323 class — chained
-/// `Double { target: SelfRef }` sub-abilities would otherwise inherit the
-/// parent's targets via chain propagation in
-/// `effects::mod.rs::resolve_ability_chain`). `None` falls back to the
-/// source only when `ability.targets` is empty.
-fn resolve_object_targets(
-    ability: &ResolvedAbility,
-    target: &TargetFilter,
-    state: &GameState,
-) -> Vec<ObjectId> {
-    let effective_targets = crate::game::targeting::resolved_targets(ability, target, state);
-    super::effect_object_targets(target, &effective_targets)
-}
-
 /// Resolve a player target from the ability.
 fn resolve_player_target(ability: &ResolvedAbility, target: &TargetFilter) -> PlayerId {
     match target {
@@ -372,6 +355,7 @@ mod tests {
             force_block_attacker: None,
             target_incarnations: Vec::new(),
             selected_target_incarnations: Vec::new(),
+            illegal_target_slots: Vec::new(),
             targets,
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -702,8 +686,9 @@ mod tests {
     ///
     /// Two hostile classes, each with its own mechanism:
     ///  * a CONTEXT REF (`SelfRef`) never reaches the helper at all:
-    ///    `resolve_object_targets` binds it in the ordinary dispatch above, so
-    ///    `obj_ids` is non-empty and the mass fall-through is skipped. It doubles
+    ///    `effects::resolved_effect_object_ids` binds it in the ordinary
+    ///    dispatch above, so `obj_ids` is non-empty and the mass fall-through is
+    ///    skipped. It doubles
     ///    exactly the source and nothing else, even when the source is outside the
     ///    population the surrounding board would offer. (The helper's own
     ///    `is_context_ref()` conjunct is a second, unreachable guard on this path —

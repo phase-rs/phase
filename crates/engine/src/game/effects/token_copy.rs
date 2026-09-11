@@ -188,9 +188,7 @@ pub fn resolve(
         } else {
             ability
         };
-        let effective_targets =
-            crate::game::targeting::resolved_targets(resolution_ability, target_filter, state);
-        crate::game::effects::effect_object_targets(target_filter, &effective_targets)
+        crate::game::effects::resolved_effect_object_ids(state, resolution_ability, target_filter)
     };
 
     // CR 609.3 + CR 101.3: "Do as much as possible" — when the copy source

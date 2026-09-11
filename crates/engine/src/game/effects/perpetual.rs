@@ -89,8 +89,7 @@ fn perpetual_target_object_ids(
         return Vec::new();
     }
 
-    let effective_targets = crate::game::targeting::resolved_targets(ability, target, state);
-    let mut ids = super::effect_object_targets(target, &effective_targets);
+    let mut ids = super::resolved_effect_object_ids(state, ability, target);
 
     if matches!(target, TargetFilter::ParentTarget) && ids == [ability.source_id] {
         if let Some(id) = parent_object_from_resolution_trigger_context(state) {

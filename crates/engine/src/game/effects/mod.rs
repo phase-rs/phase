@@ -272,6 +272,30 @@ pub(crate) fn effect_object_targets(
     }
 }
 
+/// CR 608.2c + CR 608.2b: The objects an effect handler's `target` designates:
+/// `targeting::resolved_targets` indexed by [`effect_object_targets`], except a
+/// bare `ParentTargetSlot`, which binds through the live slot authority
+/// (`targeting::resolve_live_parent_slot_from_root`) so a slot whose target was
+/// illegal as the chain began to resolve, or whose pinned referent went stale,
+/// affects nothing. `resolved_targets` itself keeps returning the whole
+/// declared chain for that filter: the callers that index it need declared
+/// numbering, which dropping an illegal target would shift.
+pub(crate) fn resolved_effect_object_ids(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    match target_filter {
+        TargetFilter::ParentTargetSlot { .. } => {
+            crate::game::targeting::resolved_object_ids_for_filter(state, ability, target_filter)
+        }
+        _ => effect_object_targets(
+            target_filter,
+            &crate::game::targeting::resolved_targets(ability, target_filter, state),
+        ),
+    }
+}
+
 /// Resolve the battlefield object(s) an effect's `target` slot designates,
 /// falling back to a zone scan when the ability declared no explicit object
 /// target (mass / population forms). Shared by the `turn_face_up` and
@@ -283,8 +307,7 @@ pub(crate) fn resolved_battlefield_object_ids(
     ability: &ResolvedAbility,
     target: &TargetFilter,
 ) -> Vec<ObjectId> {
-    let resolved = crate::game::targeting::resolved_targets(ability, target, state);
-    let explicit = effect_object_targets(target, &resolved);
+    let explicit = resolved_effect_object_ids(state, ability, target);
     if !explicit.is_empty() {
         return explicit;
     }
@@ -9109,15 +9132,19 @@ pub(crate) fn resolve_player_for_context_ref(
     // the resolving chain. A player-valued slot must resolve from the chain root
     // (not the node's locally-propagated targets), mirroring
     // `collect_player_targets`' top-level slot arm; an object-valued slot yields
-    // nothing here and is handled by the caller's object path.
+    // nothing here and is handled by the caller's object path. CR 608.2b: a
+    // player slot that was an illegal target at resolution names no player
+    // either, and falls through to the fallbacks below because this resolver
+    // must return some player; a caller that must affect no one for an illegal
+    // slot resolves the slot itself (`force_attack::defender_referent`).
     if let TargetFilter::ParentTargetSlot { index } = target_filter {
-        if let Some(player) = crate::game::targeting::resolve_parent_slot_from_root(
-            state, ability, *index,
-        )
-        .and_then(|target| match target {
-            TargetRef::Player(player) => Some(player),
-            TargetRef::Object(_) => None,
-        }) {
+        if let Some(player) =
+            crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
+                .and_then(|target| match target {
+                    TargetRef::Player(player) => Some(player),
+                    TargetRef::Object(_) => None,
+                })
+        {
             return player;
         }
     }
@@ -16490,7 +16517,10 @@ pub(crate) fn evaluate_condition(
             // chain slot (Malamet's condition reads slot 0, the you-control
             // fighter) — the current node's local `targets` were overwritten by
             // most-recent-only chain propagation, so resolve against the
-            // flattened root chain instead of `targets.first()`.
+            // flattened root chain instead of `targets.first()`. CR 608.2b: "If
+            // part of the effect requires information about an illegal target,
+            // it fails to determine any such information", so a slot that was
+            // an illegal target at resolution tests as unmatched.
             // CR 109.4 + CR 603.2: without a slot, "that creature" / "it" is the
             // ability's first object target, OR — for subject-based triggers that
             // carry no chosen target — the triggering event's subject object.
@@ -16498,8 +16528,9 @@ pub(crate) fn evaluate_condition(
             // `targets` has no object, resolve the anaphor against
             // `TriggeringSource` from the current trigger event.
             let target_id = if let Some(index) = subject_slot {
-                match crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
-                {
+                match crate::game::targeting::resolve_live_parent_slot_from_root(
+                    state, ability, *index,
+                ) {
                     Some(TargetRef::Object(id)) => Some(id),
                     _ => None,
                 }

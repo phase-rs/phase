@@ -1943,12 +1943,18 @@ fn stamp_other_batch_source_targets(ability: &mut ResolvedAbility) {
     visit(ability, &mut Vec::new());
 }
 
-pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
-    let mut targets = if is_per_opponent_target_fanout(ability) {
+/// The targets one chain node contributes to [`flatten_targets_in_chain`]'s
+/// numbering: a per-opponent fanout contributes only its object targets.
+fn chain_node_targets(ability: &ResolvedAbility) -> Vec<TargetRef> {
+    if is_per_opponent_target_fanout(ability) {
         object_targets_only(&ability.targets)
     } else {
         ability.targets.clone()
-    };
+    }
+}
+
+pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
+    let mut targets = chain_node_targets(ability);
     if let Some(sub_ability) = ability.sub_ability.as_deref() {
         targets.extend(flatten_targets_in_chain(sub_ability));
     }
@@ -1957,6 +1963,58 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
     }
     targets
 }
+
+/// CR 608.2b: The slots of `declared` — numbered exactly as
+/// [`flatten_targets_in_chain`] numbers them — whose target the resolution-time
+/// re-validation `validated` (the [`validate_targets_in_chain`] result for the
+/// same chain) no longer holds on the corresponding node. Those targets are
+/// illegal, and "illegal targets, if any, won't be affected by parts of a
+/// resolving spell's effect for which they're illegal."
+///
+/// Membership is tested per node, not by position: validation compacts a
+/// node's pruned targets, so positions shift while the survivors keep their
+/// identity. It counts multiplicity, because CR 115.3 lets one object fill
+/// several target slots of a node: each surviving copy vouches for one declared
+/// copy, so a pruned copy is marked. Compaction does not record WHICH copy was
+/// pruned, so the later declared copy is the one marked. A validation arm that
+/// deliberately keeps an illegal target in place (the multi-role mana and
+/// damage-replacement role arms, which re-validate each role where it is
+/// consumed) leaves that slot unmarked.
+pub(crate) fn illegal_declared_target_slots(
+    declared: &ResolvedAbility,
+    validated: &ResolvedAbility,
+) -> Vec<usize> {
+    fn visit(
+        declared: &ResolvedAbility,
+        validated: Option<&ResolvedAbility>,
+        next_slot: &mut usize,
+        illegal: &mut Vec<usize>,
+    ) {
+        let mut survivors = validated.map_or_else(Vec::new, |node| node.targets.clone());
+        for target in chain_node_targets(declared) {
+            match survivors.iter().position(|survivor| *survivor == target) {
+                Some(found) => {
+                    survivors.swap_remove(found);
+                }
+                None => illegal.push(*next_slot),
+            }
+            *next_slot += 1;
+        }
+        if let Some(sub_ability) = declared.sub_ability.as_deref() {
+            let validated_sub = validated.and_then(|node| node.sub_ability.as_deref());
+            visit(sub_ability, validated_sub, next_slot, illegal);
+        }
+        if let Some(else_ability) = declared.else_ability.as_deref() {
+            let validated_else = validated.and_then(|node| node.else_ability.as_deref());
+            visit(else_ability, validated_else, next_slot, illegal);
+        }
+    }
+
+    let mut illegal = Vec::new();
+    visit(declared, Some(validated), &mut 0, &mut illegal);
+    illegal
+}
+
 /// CR 608.2b + CR 115.10a: the targets this chain SPECIFIED — one entry per
 /// instance of the word "target" — as opposed to every `TargetRef` the chain
 /// happens to hold.
@@ -5036,9 +5094,10 @@ pub(crate) fn collect_player_targets(
     // CR 608.2c: a definite player anaphor may name one exact slot in the
     // flattened resolving chain after an intervening object target. Resolve
     // that slot before inspecting this node's propagated local targets, which
-    // may contain only the most-recent object slot.
+    // may contain only the most-recent object slot. CR 608.2b: a player slot
+    // that was an illegal target at resolution affects no player.
     if let TargetFilter::ParentTargetSlot { index } = target {
-        return crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+        return crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
             .and_then(|target| match target {
                 TargetRef::Player(player) => Some(player),
                 TargetRef::Object(_) => None,
@@ -11974,6 +12033,65 @@ mod tests {
             ),
             "a delayed-return ParentTarget ability must not fizzle when its \
              snapshotted object is off the battlefield"
+        );
+    }
+
+    /// CR 608.2b: validation compacts each node's pruned targets, so the
+    /// illegal declared slots are found by per-node membership and reported in
+    /// `flatten_targets_in_chain`'s numbering — a pruned first target does not
+    /// shift the verdict onto its surviving neighbour, and a later node's slots
+    /// continue the count.
+    #[test]
+    fn illegal_declared_target_slots_numbers_pruned_targets_across_the_chain() {
+        let [a, b, c, d] = [1, 2, 3, 4].map(|id| TargetRef::Object(ObjectId(id)));
+        let node = |targets: Vec<TargetRef>| {
+            ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                targets,
+                ObjectId(99),
+                PlayerId(0),
+            )
+        };
+        let declared = node(vec![a, b.clone()]).sub_ability(node(vec![c.clone(), d]));
+        let validated = node(vec![b]).sub_ability(node(vec![c]));
+
+        assert_eq!(flatten_targets_in_chain(&declared).len(), 4);
+        assert_eq!(
+            illegal_declared_target_slots(&declared, &validated),
+            vec![0, 3],
+            "slot 0 (pruned, compacted away) and slot 3 (pruned in the sub) are illegal"
+        );
+        assert!(
+            illegal_declared_target_slots(&declared, &declared).is_empty(),
+            "an unpruned chain has no illegal slots"
+        );
+    }
+
+    /// CR 115.3 + CR 608.2b: one object may fill two target slots of a node.
+    /// When validation prunes one copy, the surviving copy vouches for only one
+    /// declared slot, so exactly one of the two is reported illegal.
+    #[test]
+    fn illegal_declared_target_slots_counts_a_duplicated_target_per_slot() {
+        let [x, y] = [1, 2].map(|id| TargetRef::Object(ObjectId(id)));
+        let node = |targets: Vec<TargetRef>| {
+            ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                targets,
+                ObjectId(99),
+                PlayerId(0),
+            )
+        };
+        let declared = node(vec![x.clone(), x.clone(), y.clone()]);
+        let validated = node(vec![x, y]);
+
+        assert_eq!(
+            illegal_declared_target_slots(&declared, &validated),
+            vec![1],
+            "one pruned copy of a duplicated target marks one slot"
         );
     }
 

@@ -554,6 +554,19 @@ fn register_transient_effect(
     let direct_binding_uses_targets = target_filter.is_some()
         || application_filter.is_some_and(generic_effect_affected_uses_inherited_targets)
         || inherited_object_target;
+    // CR 608.2b + CR 608.2c: a `ParentTargetSlot` anaphor names a DECLARED slot
+    // of the resolving chain root, so it binds through the carrier rather than
+    // through this node's local list. Chain propagation copies the immediately
+    // preceding parent's targets, and resolution-time re-validation compacts an
+    // illegal one away — so a chain whose LAST declared slot was illegal reaches
+    // its slot-bound grant with an EMPTY local list (Blizzard Brawl when the
+    // opponent's fighter gains hexproof in response). Gating the targeted branch
+    // on that list alone would send the still-legal slot referent down the
+    // broadcast path and drop its grant, but CR 608.2b's Plague Spores example
+    // keeps it: "other parts of the effect for which those targets are not
+    // illegal may still affect them."
+    let slot_anaphor_binding = application_filter
+        .is_some_and(|filter| matches!(filter, TargetFilter::ParentTargetSlot { .. }));
 
     // CR 611.1 + CR 611.2c + CR 115.1: Targeted effects — register one transient
     // continuous effect per target. `TargetRef::Object` binds to
@@ -567,7 +580,7 @@ fn register_transient_effect(
     // that scan `state.transient_continuous_effects` directly.
     // A `ControllerRef::TargetPlayer` affected filter is different: its player
     // target parameterizes a broadcast object filter and is resolved below.
-    if (!ability.targets.is_empty() || forwarded_parent_target)
+    if (!ability.targets.is_empty() || forwarded_parent_target || slot_anaphor_binding)
         && direct_binding_uses_targets
         && !static_affected_references_target_player
     {
@@ -869,11 +882,11 @@ fn transient_bound_filters(
         // so a node reached after a two-target declaration holds only the last
         // target — indexing that local list would bind "the creature you
         // control" (Blizzard Brawl's snow-conditional buff) to the opponent's
-        // creature. Resolve through the shared chain-root authority that
-        // `Pump` / `PutCounter` / `ChangeZone` already use. The slot is never
-        // pin-filtered (slot numbering is declared, so dropping a stale element
-        // would renumber every later slot), but the SELECTED object is
-        // pin-checked so a departed-and-returned referent is dropped (CR 400.7).
+        // creature. Resolve through the shared chain-root slot authority. The
+        // slot list is never filtered (slot numbering is declared, so dropping
+        // an element would renumber every later slot); the SELECTED referent is
+        // dropped when it was an illegal target at resolution (CR 608.2b) or
+        // departed and returned (CR 400.7).
         if let TargetFilter::ParentTargetSlot { index } = filter {
             return parent_target_slot_filters(state, ability, *index);
         }
@@ -912,25 +925,19 @@ fn transient_bound_filters(
         .collect()
 }
 
-/// CR 608.2c + CR 400.7: Resolve a `ParentTargetSlot { index }` anaphor to its
-/// bound `TargetFilter`s from the resolving chain root. The slot is indexed by
-/// its declared position — never pin-filtered, since dropping a stale element
-/// would renumber every later slot — but the SELECTED object is pin-checked so a
-/// departed-and-returned referent yields nothing (CR 400.7, mirroring
-/// `deal_damage::resolve_effect_recipients` and
-/// `targeting::resolved_object_ids_for_filter_with_context`). Player slots pass
-/// through unchanged; an out-of-range index yields an empty list.
+/// CR 608.2c + CR 400.7: Bind a `ParentTargetSlot { index }` anaphor to the
+/// transient-effect filter for its referent, resolved through the shared
+/// chain-root slot authority
+/// (`targeting::resolve_live_parent_slot_from_root`). A referent that was an
+/// illegal target at resolution (CR 608.2b), a stale object referent, or an
+/// out-of-range index yields an empty list.
 fn parent_target_slot_filters(
     state: &GameState,
     ability: &ResolvedAbility,
     index: usize,
 ) -> Vec<TargetFilter> {
-    crate::game::targeting::resolve_parent_slot_from_root(state, ability, index)
+    crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, index)
         .into_iter()
-        .filter(|target| match target {
-            TargetRef::Object(id) => ability.target_pin_is_current(*id, state),
-            TargetRef::Player(_) => true,
-        })
         .map(|target| match target {
             TargetRef::Object(id) => TargetFilter::SpecificObject { id },
             TargetRef::Player(id) => TargetFilter::SpecificPlayer { id },

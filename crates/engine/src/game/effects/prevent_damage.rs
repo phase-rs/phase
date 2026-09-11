@@ -46,8 +46,10 @@ pub(crate) fn resolve_source_filter(
         // sorcery spell") is captured into a SpecificObject shield so it
         // persists after the spell leaves the stack. The slot is resolved from
         // the chain root (CR 608.2c), not the node's locally-propagated targets.
+        // CR 608.2b + CR 400.7: a slot whose target was illegal as the ability
+        // resolved, or whose object left and returned, captures no source.
         TargetFilter::ParentTargetSlot { index } => {
-            crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+            crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
                 .and_then(|t| match t {
                     TargetRef::Object(id) => Some(id),
                     _ => None,
@@ -750,7 +752,7 @@ mod tests {
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{ChosenDamageSource, StackEntry, StackEntryKind};
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
@@ -2903,6 +2905,89 @@ mod tests {
             "damage from a non-chosen source must NOT be prevented"
         );
         assert_eq!(state.players[0].life, 17);
+    }
+
+    /// CR 608.2b + CR 400.7 + CR 609.7a: a source slot captures no source when
+    /// its declared target was illegal as the ability resolved (the resolution
+    /// carrier's `illegal_target_slots` stamp) or when its pinned object left
+    /// and returned as a new object under the same id. Either way the shield
+    /// must not bind that object.
+    #[test]
+    fn parent_target_slot_source_is_not_captured_once_illegal_or_departed() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Prevention Source".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let mut root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(creature)],
+            source,
+            PlayerId(0),
+        );
+        root.set_target_incarnations_recursive(vec![ObjectIncarnationRef::from_object(
+            &state.objects[&creature],
+        )]);
+        let install = |state: &mut GameState, root: &ResolvedAbility| {
+            state.resolving_stack_entry = Some(StackEntry {
+                id: source,
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: source,
+                    ability: Box::new(root.clone()),
+                },
+            });
+        };
+        let slot_zero = TargetFilter::ParentTargetSlot { index: 0 };
+
+        install(&mut state, &root);
+        assert_eq!(
+            resolve_source_filter(&slot_zero, &state, &root),
+            TargetFilter::SpecificObject { id: creature },
+            "reach guard: a legal, current slot captures its object"
+        );
+
+        let mut stamped = root.clone();
+        stamped.illegal_target_slots = vec![0];
+        install(&mut state, &stamped);
+        assert_eq!(
+            resolve_source_filter(&slot_zero, &state, &stamped),
+            TargetFilter::None,
+            "an illegal declared source must not be captured"
+        );
+
+        install(&mut state, &root);
+        let mut events = Vec::new();
+        for zone in [Zone::Graveyard, Zone::Battlefield] {
+            let _ = crate::game::zone_pipeline::move_object(
+                &mut state,
+                crate::game::zone_pipeline::ZoneMoveRequest::effect(creature, zone, source),
+                &mut events,
+            );
+        }
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Battlefield,
+            "reach guard: the object is back under the same id"
+        );
+        assert_eq!(
+            resolve_source_filter(&slot_zero, &state, &root),
+            TargetFilter::None,
+            "a departed-and-returned source is a new object and must not be captured"
+        );
     }
 
     /// CR 615.5 + CR 700.2d: A `ContinuationStep` rider (Gatta and Luzzu) is

@@ -295,9 +295,9 @@ fn resolve_duplicate_reference(
     ability: &ResolvedAbility,
     reference: &TargetFilter,
 ) -> Option<ObjectId> {
-    let resolved = crate::game::targeting::resolved_targets(ability, reference, state);
-    let object_ids = crate::game::effects::effect_object_targets(reference, &resolved);
-    object_ids.into_iter().next()
+    crate::game::effects::resolved_effect_object_ids(state, ability, reference)
+        .into_iter()
+        .next()
 }
 
 /// Place every just-conjured copy for one recipient into `owner`'s library at the

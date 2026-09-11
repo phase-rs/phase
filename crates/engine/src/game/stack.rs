@@ -27,7 +27,7 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::{
     build_target_slots, flatten_specified_targets_in_chain, flatten_targets_in_chain,
-    validate_targets_in_chain,
+    illegal_declared_target_slots, validate_targets_in_chain,
 };
 use super::effects;
 use super::targeting;
@@ -63,6 +63,31 @@ pub(super) fn finish_resolving_stack_entry(
     );
     if let Some(firing) = firing {
         super::lifecycle::record_delayed_terminal(firing, disposition);
+    }
+}
+
+/// CR 608.2b: Record on the resolution carrier's declared chain which declared
+/// target slots failed the legality check this resolution made (`validated` is
+/// `None` when no check was made), so the live `ParentTargetSlot` authority
+/// drops those targets. Always overwrites: a spell that copies itself during
+/// its own resolution (CR 707.10) clones this carrier, stamp included.
+///
+/// The carrier holds the chain as it was put on the stack, not the local copy
+/// `resolve_top` validates. Resolution-time re-seeding of a triggered
+/// ability's `ParentTarget` referent (`seed_event_context_parent_targets`)
+/// changes only that local copy, so a lone source-object fallback it replaces
+/// reads here as a pruned slot. No printed card combines that re-seeding with
+/// a `ParentTargetSlot` consumer; writing the seeded copy back into the carrier
+/// would make the two agree.
+fn record_illegal_target_slots(state: &mut GameState, validated: Option<&ResolvedAbility>) {
+    if let Some(root) = state
+        .resolving_stack_entry
+        .as_mut()
+        .and_then(StackEntry::ability_mut)
+    {
+        root.illegal_target_slots = validated.map_or_else(Vec::new, |validated| {
+            illegal_declared_target_slots(root, validated)
+        });
     }
 }
 
@@ -1790,8 +1815,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 state.resolution_source_relatch = None;
                 return;
             }
+            record_illegal_target_slots(state, Some(&validated));
             execute_effect(state, &validated, events);
         } else {
+            record_illegal_target_slots(state, None);
             execute_effect(state, ability, events);
         }
     }
@@ -3679,6 +3706,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller,
         scoped_player,
@@ -3909,6 +3937,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -4119,6 +4148,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -4651,6 +4681,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         mode_abilities: a_mode_abilities,
         parent_target_missing_reason: a_parent_target_missing_reason,
         selected_target_incarnations: a_selected_target_incarnations,
+        illegal_target_slots: a_illegal_target_slots,
     } = a;
     let ResolvedAbility {
         effect: b_effect,
@@ -4724,6 +4755,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         mode_abilities: b_mode_abilities,
         parent_target_missing_reason: b_parent_target_missing_reason,
         selected_target_incarnations: b_selected_target_incarnations,
+        illegal_target_slots: b_illegal_target_slots,
     } = b;
 
     a_effect == b_effect
@@ -4735,6 +4767,9 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         // `PartialEq`; disagreeing with the derive would be the actual defect.
         && a_target_incarnations == b_target_incarnations
         && a_selected_target_incarnations == b_selected_target_incarnations
+        // CR 608.2b: the resolution legality stamp participates for the same
+        // reason — agreement with the derived `PartialEq`.
+        && a_illegal_target_slots == b_illegal_target_slots
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player
         && a_kind == b_kind
