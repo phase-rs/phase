@@ -47,11 +47,14 @@ during the match.
     adding `PHPR` to 93-94's `legal_sets` would admit three cards the format
     forbids, while omitting it rejects two the format allows. `PDRC` has no
     such problem (one card).
-  - The implemented preset therefore omits both promo sets and is
-    **under-permissive by these three cards**, disclosed in its `description`
-    per the `SetCodeApproximation` pairing rule. Fixing it properly needs
-    card-level pool entries, which `LegalityRules` does not have — flagged, not
-    silently dropped.
+  - **RESOLVED (2026-09-11).** The preset originally omitted both promo sets
+    and was **under-permissive by these three cards**, because fixing it
+    properly needed card-level pool entries that `LegalityRules` did not have.
+    It has them now: `LegalityRules.legal_cards` names cards legal
+    individually, unioned with the set check, and both Old School presets list
+    their promos there. Set codes remain an approximation for the *reprint*
+    axis, so the `SetCodeApproximation` disclosure stays — but it no longer
+    covers the promo gap, which is closed.
 - **Legacy rules:** mana burn only. (Plus Chaos Orb / Falling Star flip Oracle,
   and a "no draws" 50-minute Chaos-Orb tiebreaker — tournament-ops, not engine.)
 
@@ -67,10 +70,11 @@ during the match.
 - **Named legal promos (ADDED 2026-09-09, as above):** 93-94's three **plus**
   Giant Badger, Windseeker Centaur and Mana Crypt. Unlike 93-94, this IS
   expressible at set-code granularity — all five `PHPR` cards are 95-legal, so
-  `PHPR` + `PDRC` would be exactly correct here. The implemented preset still
-  omits them, because it inherits 93-94's `legal_sets` wholesale and diverging
-  only for 95 would make the two presets' pools disagree about a shared set for
-  no reason a reader could see. Revisit alongside 93-94's carve-out.
+  `PHPR` + `PDRC` would be exactly correct here. **RESOLVED (2026-09-11)
+  alongside 93-94's carve-out**, and by naming the six cards rather than adding
+  the two sets: the same mechanism serves both presets, so their pools stay
+  legible side by side, and neither depends on a set's membership happening to
+  match a format's promo list.
 - **Legacy rules:** mana burn only.
 
 ### Middle School

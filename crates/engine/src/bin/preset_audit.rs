@@ -45,6 +45,75 @@ const USER_AGENT: &str = "phase-rs-preset-audit/1.0";
 
 const SEARCH_URL: &str = "https://api.scryfall.com/cards/search";
 
+/// What one page of a Scryfall search says.
+///
+/// Typed rather than `(Vec<String>, bool)` so "is this the last page?" cannot be
+/// confused with "did this match anything?" — two different answers that a bare
+/// boolean pair would let a caller mix up.
+#[derive(Debug, PartialEq, Eq)]
+enum Page {
+    /// Names on this page, with at least one page after it.
+    More(Vec<String>),
+    /// Names on this page, which is the last one.
+    Last(Vec<String>),
+    /// Scryfall's documented answer to a search that matched nothing.
+    NoMatch,
+}
+
+/// Interpret one Scryfall search response body.
+///
+/// Split from the transport so the awkward cases are testable without a
+/// network: this is a pure function of the bytes curl wrote.
+///
+/// **A matchless search is HTTP 404 with a JSON error object, not an empty
+/// list** — which is why the body must be read even when curl reports failure,
+/// and why `--fail` cannot be used here. An empty authority list is a real,
+/// expected answer for a preset whose carve-out is empty; turning it into a
+/// transport error would make that preset unauditable.
+fn read_page(body: &[u8], query: &str, page: u32) -> Result<Page, String> {
+    let json: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| format!("Scryfall returned non-JSON for {query:?} (page {page}): {e}"))?;
+
+    if json.get("object").and_then(|o| o.as_str()) == Some("error") {
+        if json.get("code").and_then(|c| c.as_str()) == Some("not_found") {
+            return Ok(Page::NoMatch);
+        }
+        return Err(format!(
+            "Scryfall error for {query:?}: {}",
+            json.get("details").and_then(|d| d.as_str()).unwrap_or("?")
+        ));
+    }
+
+    // FAIL CLOSED on a shape we do not recognise. Silently skipping a
+    // malformed `data`, a card with no `name`, or an absent `has_more`
+    // would report DRIFT — a wrong, actionable-looking verdict about the
+    // preset — when the truth is that the audit could not read the answer.
+    let Some(data) = json.get("data").and_then(|d| d.as_array()) else {
+        return Err(format!(
+            "Scryfall response for {query:?} has no `data` array (page {page})"
+        ));
+    };
+    let mut names = Vec::with_capacity(data.len());
+    for card in data {
+        let Some(name) = card.get("name").and_then(|n| n.as_str()) else {
+            return Err(format!(
+                "Scryfall returned a card with no `name` for {query:?} (page {page})"
+            ));
+        };
+        names.push(name.to_string());
+    }
+
+    match json.get("has_more").and_then(|m| m.as_bool()) {
+        Some(true) => Ok(Page::More(names)),
+        Some(false) => Ok(Page::Last(names)),
+        // Absent/non-bool: the page may or may not be the last, and
+        // guessing "last" would silently truncate the authority's list.
+        None => Err(format!(
+            "Scryfall response for {query:?} has no boolean `has_more` (page {page})"
+        )),
+    }
+}
+
 /// Card names returned by one Scryfall query, following pagination.
 ///
 /// Shells out to `curl` rather than taking an HTTP dependency: this is a
@@ -57,15 +126,20 @@ fn scryfall_names(query: &str) -> Result<BTreeSet<String>, String> {
     loop {
         let output = Command::new("curl")
             .args([
-                "--fail",
+                // NO `--fail`. It exits before the body can be read, and the
+                // body is where Scryfall says whether a non-200 is "nothing
+                // matched" (fine) or a real error (not). `read_page` decides.
                 "--silent",
                 "--show-error",
                 // Same retry posture as scripts/lib/scryfall-fetch.sh: Scryfall
                 // fronts Cloudflare, which answers throttling with a non-JSON
-                // body that a bare `curl -s` would report as success.
+                // body that a bare `curl -s` would report as success. Bare
+                // `--retry` already covers 408/429/5xx and connection failures;
+                // `--retry-all-errors` is deliberately absent, since without
+                // `--fail` its only remaining effect would be to retry the 404
+                // that means "nothing matched" five times over.
                 "--retry",
                 "5",
-                "--retry-all-errors",
                 "--retry-delay",
                 "2",
                 // BOUNDED. An audit that hangs is worse than one that fails:
@@ -90,56 +164,30 @@ fn scryfall_names(query: &str) -> Result<BTreeSet<String>, String> {
             .output()
             .map_err(|e| format!("could not run curl: {e}"))?;
 
-        if !output.status.success() {
-            return Err(format!(
-                "curl failed for {query:?}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
+        // curl's own exit status is reported only when the body turns out to be
+        // unreadable — a failed transfer explains a non-JSON body far better
+        // than a serde error does. When the body IS valid Scryfall JSON, it is
+        // the authority regardless of the HTTP status behind it.
+        let page_result = read_page(&output.stdout, query, page).map_err(|e| {
+            if output.status.success() {
+                e
+            } else {
+                format!(
+                    "curl failed for {query:?} (page {page}): {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )
+            }
+        })?;
 
-        let body: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .map_err(|e| format!("Scryfall returned non-JSON for {query:?}: {e}"))?;
-
-        // A query matching nothing is a 404 with object=error, not an empty
-        // list. That is a legitimate answer for a list we expect to be empty,
-        // so it is not an error here.
-        if body.get("object").and_then(|o| o.as_str()) == Some("error") {
-            if body.get("code").and_then(|c| c.as_str()) == Some("not_found") {
+        match page_result {
+            Page::NoMatch => return Ok(names),
+            Page::Last(found) => {
+                names.extend(found);
                 return Ok(names);
             }
-            return Err(format!(
-                "Scryfall error for {query:?}: {}",
-                body.get("details").and_then(|d| d.as_str()).unwrap_or("?")
-            ));
-        }
-
-        // FAIL CLOSED on a shape we do not recognise. Silently skipping a
-        // malformed `data`, a card with no `name`, or an absent `has_more`
-        // would report DRIFT — a wrong, actionable-looking verdict about the
-        // preset — when the truth is that the audit could not read the answer.
-        let Some(data) = body.get("data").and_then(|d| d.as_array()) else {
-            return Err(format!(
-                "Scryfall response for {query:?} has no `data` array (page {page})"
-            ));
-        };
-        for card in data {
-            let Some(name) = card.get("name").and_then(|n| n.as_str()) else {
-                return Err(format!(
-                    "Scryfall returned a card with no `name` for {query:?} (page {page})"
-                ));
-            };
-            names.insert(name.to_string());
-        }
-
-        match body.get("has_more").and_then(|m| m.as_bool()) {
-            Some(true) => page += 1,
-            Some(false) => return Ok(names),
-            // Absent/non-bool: the page may or may not be the last, and
-            // guessing "last" would silently truncate the authority's list.
-            None => {
-                return Err(format!(
-                    "Scryfall response for {query:?} has no boolean `has_more` (page {page})"
-                ))
+            Page::More(found) => {
+                names.extend(found);
+                page += 1;
             }
         }
     }
@@ -251,6 +299,82 @@ fn main() {
                 drift.len()
             );
             std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Scryfall's real 404 body for a search that matched nothing, verbatim.
+    /// This is the case `--fail` used to swallow: curl exits nonzero, and
+    /// without reading the body the audit reported a transport failure for what
+    /// is actually a well-formed "the answer is the empty set".
+    const NO_MATCH_404: &[u8] = br#"{
+      "object": "error",
+      "code": "not_found",
+      "status": 404,
+      "details": "Your query didn't match any cards. Adjust your search terms or refer to the syntax guide at https://scryfall.com/docs/reference"
+    }"#;
+
+    #[test]
+    fn a_matchless_search_reads_as_the_empty_set_not_a_failure() {
+        assert_eq!(
+            read_page(NO_MATCH_404, "banned:oldschool", 1),
+            Ok(Page::NoMatch)
+        );
+    }
+
+    /// The paired control: a DIFFERENT Scryfall error is still an error. Were
+    /// the fix "treat any error object as empty", a malformed query would report
+    /// the preset's whole list as drift instead of saying the audit broke.
+    #[test]
+    fn any_other_scryfall_error_is_still_an_error() {
+        let bad_syntax = br#"{"object":"error","code":"bad_request","status":400,
+          "details":"Expected a value after ':'"}"#;
+        let err =
+            read_page(bad_syntax, "legal:", 1).expect_err("a bad query must not read as empty");
+        assert!(err.contains("Expected a value"), "{err}");
+    }
+
+    #[test]
+    fn pagination_is_driven_by_has_more() {
+        let page_one = br#"{"object":"list","has_more":true,
+          "data":[{"name":"Black Lotus"},{"name":"Ancestral Recall"}]}"#;
+        assert_eq!(
+            read_page(page_one, "restricted:oldschool", 1),
+            Ok(Page::More(vec![
+                "Black Lotus".to_string(),
+                "Ancestral Recall".to_string()
+            ]))
+        );
+        let page_two = br#"{"object":"list","has_more":false,"data":[{"name":"Timetwister"}]}"#;
+        assert_eq!(
+            read_page(page_two, "restricted:oldschool", 2),
+            Ok(Page::Last(vec!["Timetwister".to_string()]))
+        );
+    }
+
+    /// Fail closed: each unreadable shape must produce a verdict about the
+    /// AUDIT, never a silently short list that would read as preset drift.
+    #[test]
+    fn unreadable_shapes_fail_closed() {
+        for (body, expected) in [
+            (&br#"<html>Just a moment...</html>"#[..], "non-JSON"),
+            (&br#"{"object":"list","has_more":false}"#[..], "`data`"),
+            (
+                &br#"{"object":"list","has_more":false,"data":[{"id":"x"}]}"#[..],
+                "no `name`",
+            ),
+            (
+                &br#"{"object":"list","data":[{"name":"Shivan Dragon"}]}"#[..],
+                "`has_more`",
+            ),
+        ] {
+            let err = read_page(body, "legal:oldschool", 1)
+                .expect_err("an unreadable page must not report names");
+            assert!(err.contains(expected), "expected {expected:?} in: {err}");
         }
     }
 }
