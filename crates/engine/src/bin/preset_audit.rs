@@ -37,8 +37,9 @@
 
 use std::collections::BTreeSet;
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use engine::types::custom_format::{old_school_93_94, CustomFormatDef};
 
@@ -125,8 +126,24 @@ fn read_page(body: &[u8], query: &str, page: u32) -> Result<Page, String> {
 fn scryfall_names(query: &str) -> Result<BTreeSet<String>, String> {
     let mut names = BTreeSet::new();
     let mut page = 1;
-    let body_path = env::temp_dir().join(format!("phase-preset-audit-{}.json", std::process::id()));
+    // Unique per run (pid + clock), and created fresh with `create_new`
+    // (O_CREAT|O_EXCL) before each request: an existing path, a planted symlink
+    // included, is refused rather than followed, so curl only ever writes a
+    // file this process just created.
+    let run_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let body_path = env::temp_dir().join(format!(
+        "phase-preset-audit-{}-{run_nanos}.json",
+        std::process::id()
+    ));
     loop {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&body_path)
+            .map_err(|e| format!("could not create {}: {e}", body_path.display()))?;
         let output = Command::new("curl")
             .args([
                 // NO `--fail`. It exits before the body can be read, and the
@@ -172,20 +189,19 @@ fn scryfall_names(query: &str) -> Result<BTreeSet<String>, String> {
                 "--output",
             ])
             .arg(&body_path)
-            .output()
-            .map_err(|e| format!("could not run curl: {e}"))?;
-        // Read and removed before the exit check so the file never outlives
-        // this request. It may be absent only when curl failed, and then it is
-        // discarded below; curl creates it for every complete response, even
-        // an empty one.
+            .output();
+        // Read and removed before any check, so the file never outlives this
+        // request — even when curl could not be run — and the next page's
+        // `create_new` succeeds.
         let body = fs::read(&body_path).unwrap_or_default();
         let _ = fs::remove_file(&body_path);
+        let output = output.map_err(|e| format!("could not run curl: {e}"))?;
 
         // curl's exit status FIRST. Without `--fail`, curl exits 0 for every
         // complete HTTP response, a 404 included, so a nonzero exit means the
-        // transfer did not complete — and whatever the file holds (a stale
-        // file from an interrupted run, or one curl could not overwrite) is
-        // not this request's answer, however well-formed it looks.
+        // transfer did not complete — and the file holds at most an earlier
+        // attempt's or a partial response, not this request's answer, however
+        // well-formed it looks.
         if !output.status.success() {
             return Err(format!(
                 "curl failed for {query:?} (page {page}): {}",
