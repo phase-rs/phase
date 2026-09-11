@@ -1218,6 +1218,7 @@ mod tinybones_joins_up_multi_target;
 mod tinybones_pocket_nuisance;
 mod tobita_master_of_winds_flying_grant;
 mod tom_bombadil_lore_counter_gate;
+mod tomb_tyrant_graveyard_count_activation;
 mod tombstone_stairwell_per_player_tokens;
 mod top_manifold_key_incarnation;
 mod top_of_library_mixed_permission;

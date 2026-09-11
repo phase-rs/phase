@@ -10573,6 +10573,121 @@ fn parses_activate_only_timing_and_only_if_condition() {
     ));
 }
 
+/// CR 602.1b + CR 602.5: Tomb Tyrant's Activate-only sentence peels into
+/// `DuringYourTurn` + `RequiresCondition` (GE 3 Zombie creature cards in your
+/// graveyard), not a SequentialSibling `Effect::Unimplemented`.
+#[test]
+fn parses_tomb_tyrant_activate_only_if_graveyard_count() {
+    const TOMB_TYRANT_ORACLE: &str = "\
+Other Zombies you control get +1/+1.\n\
+{2}{B}, {T}, Sacrifice a creature: Return a Zombie creature card at random from your graveyard to the battlefield. Activate only during your turn and only if there are at least three Zombie creature cards in your graveyard.";
+
+    let r = parse(
+        TOMB_TYRANT_ORACLE,
+        "Tomb Tyrant",
+        &[],
+        &["Creature"],
+        &["Zombie"],
+    );
+    let ability = r
+        .abilities
+        .iter()
+        .find(|ability| {
+            matches!(
+                ability.effect.as_ref(),
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            )
+        })
+        .expect("Tomb Tyrant GY→battlefield activate");
+
+    fn has_unimplemented(definition: &AbilityDefinition) -> bool {
+        matches!(definition.effect.as_ref(), Effect::Unimplemented { .. })
+            || definition
+                .sub_ability
+                .as_deref()
+                .is_some_and(has_unimplemented)
+    }
+    assert!(
+        !has_unimplemented(ability),
+        "Activate sentence must peel into restrictions, not SequentialSibling Unimplemented: {ability:#?}"
+    );
+    // CR 602.1b: text after the colon restricting when the ability can be
+    // activated is not part of the effect.
+    assert!(
+        ability.condition.is_none(),
+        "activation gate must live on restrictions, not resolution condition"
+    );
+
+    let restrictions = &ability.activation_restrictions;
+    assert!(
+        restrictions.contains(&ActivationRestriction::DuringYourTurn),
+        "must peel DuringYourTurn: {restrictions:?}"
+    );
+    let requires = restrictions
+        .iter()
+        .find_map(|restriction| match restriction {
+            ActivationRestriction::RequiresCondition {
+                condition:
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty:
+                                    QuantityRef::ZoneCardCount {
+                                        zone: crate::types::ability::ZoneRef::Graveyard,
+                                        card_types,
+                                        filter:
+                                            Some(TargetFilter::Typed(TypedFilter {
+                                                type_filters,
+                                                controller: None,
+                                                properties,
+                                            })),
+                                        scope: CountScope::Controller,
+                                    },
+                            },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 3 },
+                    }),
+            } => Some((card_types, type_filters, properties)),
+            _ => None,
+        });
+    let Some((card_types, type_filters, properties)) = requires else {
+        panic!(
+            "CR 205.1 + CR 205.3m + CR 107.1 + CR 404.1: expected GE 3 Zombie creature ZoneCardCount: {restrictions:?}"
+        );
+    };
+    assert!(
+        card_types.is_empty(),
+        "AND encoding is filter, not OR card_types: {card_types:?}"
+    );
+    assert!(
+        properties.is_empty(),
+        "juxtaposed noun has empty properties"
+    );
+    assert_eq!(
+        type_filters,
+        &vec![
+            TypeFilter::Creature,
+            TypeFilter::Subtype("Zombie".to_string()),
+        ]
+    );
+    assert!(
+        restrictions.len() >= 2,
+        "reach-guard: restrictions populated: {restrictions:?}"
+    );
+    assert!(
+        r.parse_warnings.iter().all(|warning| {
+            let text = warning.to_string();
+            !text.contains("ActivateOnly") && !text.contains("Condition_If")
+        }),
+        "Activate sentence must not be reported as swallowed: {:?}",
+        r.parse_warnings
+    );
+}
+
 #[test]
 fn parses_activate_only_filtered_spell_count_condition() {
     use crate::types::ability::{
