@@ -7612,10 +7612,27 @@ fn parse_no_spent_mana_metric(i: &str) -> OracleResult<'_, CastManaSpentMetric> 
     .parse(i)
 }
 
-/// CR 400.7d + CR 601.2h: which object's payment record the anaphor names.
-/// "it"/"that spell"/"this spell"/"them" is the object carried by the trigger
-/// event (the spell just cast, or the permanent that just entered); "~" is the
-/// ability's own source.
+/// CR 400.7d + CR 601.2h + CR 603.4: which object's payment record the anaphor
+/// names, IN A TRIGGER'S INTERVENING-IF. "it"/"that spell"/"this spell"/"them"
+/// is the object carried by the trigger event (the spell just cast, or the
+/// permanent that just entered); "~" is the ability's own source.
+///
+/// Deliberately NOT `oracle_nom::quantity::parse_mana_spent_self_subject`,
+/// which maps the same words the other way ("it"/"this spell"/"them" →
+/// `SelfObject`). That combinator is the authority for a RESOLVING spell
+/// referring to its own payment ("where X is the amount of mana spent to cast
+/// it" — Toph, Greatest Earthbender); there "it" IS the source. Here the clause
+/// sits on a trigger whose event carries a different object, so the same words
+/// resolve to the event's subject: Void Mirror's "if no colored mana was spent
+/// to cast it" asks about the spell a player just cast, never about Void Mirror.
+/// Reading `SelfObject` here would answer with the mirror's own {2} payment —
+/// always zero colored — and counter every spell, which is issue #8807 itself.
+///
+/// This matches the mapping the sibling intervening-if extractor in this file
+/// already uses (`try_extract_mana_spent_comparison_condition`: "in a
+/// spell-cast trigger's intervening-if clause, 'it'/'that spell'/'this spell'
+/// all refer to the spell object carried by the trigger event"). The two
+/// contracts are context-scoped, not contradictory.
 fn parse_cast_payment_subject_scope(i: &str) -> OracleResult<'_, CastManaObjectScope> {
     alt((
         value(CastManaObjectScope::TriggeringSpell, tag("it")),
