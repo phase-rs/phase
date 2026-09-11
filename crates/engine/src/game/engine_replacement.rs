@@ -236,16 +236,26 @@ fn handle_replacement_choice_inner(
     // ownership before `continue_replacement` consumes the pending record.
     // The LifeLoss event is the sole resume authority; the already-applied
     // EmptyManaPool event must never be replayed.
-    let pending_was_phase_drain_life_loss = state
+    //
+    // Carries the LOSER rather than a bare bool: the `Prevented` arm has to
+    // consume that player's parked empty-pool provenance, and reading it back
+    // after `continue_replacement` is impossible — the record is gone.
+    let pending_phase_drain_life_loser = state
         .pending_phase_transition_progress
         .as_ref()
         .is_some_and(|progress| {
             progress.drain_state == crate::types::game_state::PhaseTransitionDrainState::Ready
         })
-        && state
-            .pending_replacement
-            .as_ref()
-            .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::LifeLoss { .. }));
+        .then(|| {
+            state
+                .pending_replacement
+                .as_ref()
+                .and_then(|pending| match pending.proposed {
+                    ProposedEvent::LifeLoss { player_id, .. } => Some(player_id),
+                    _ => None,
+                })
+        })
+        .flatten();
     // CR 701.24a: capture the parked library placement (W3) BEFORE
     // `continue_replacement` consumes (`.take()`s) the pending record, so the
     // ZoneChange resume arm below can thread it into the delivery `DeliveryCtx`
@@ -1435,7 +1445,14 @@ fn handle_replacement_choice_inner(
             {
                 return Ok(state.waiting_for.clone());
             }
-            if pending_was_phase_drain_life_loss {
+            if let Some(loser) = pending_phase_drain_life_loser {
+                // CR 614.1a: the chosen replacement prevented the loss outright,
+                // so no life left this player and nothing may narrate one.
+                // Consume the parked provenance anyway — left behind, it is a
+                // record with no event, and the next same-player loss to resume
+                // through this pipeline would claim it and be logged as mana
+                // burn. `actual: 0` consumes without emitting.
+                super::turns::note_empty_pool_life_loss_resolved(state, loser, 0, events);
                 state.waiting_for = WaitingFor::Priority {
                     player: state.active_player,
                 };

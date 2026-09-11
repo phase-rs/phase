@@ -21,8 +21,20 @@ use crate::types::resolved_commands::ResolvedPlayerEdit;
 /// paused on its own interactive continuation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplacementDeferred {
+    /// CR 616.1: paused on the ordering choice BEFORE anything was applied.
+    /// The pipeline reports the real amount when the choice resumes.
     ReplacementChoice,
-    SubstitutionContinuation,
+    /// CR 614.6: the root event already finished for `applied`; what paused is
+    /// the substitute effect that must resolve before the original resolution
+    /// may continue.
+    ///
+    /// Carrying the amount is load-bearing, not decorative: a caller that needs
+    /// to narrate WHY the life changed (the empty-pool drain's mana burn) learns
+    /// the true figure here and nowhere else. Dropping it forced that caller to
+    /// park provenance and hope a later resume would hand the number back — and
+    /// the resume that completes a substitute is not the one that applied the
+    /// root, so the number never came.
+    SubstitutionContinuation { applied: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,7 +165,7 @@ pub fn apply_life_gain(
             match drain_substitution_continuation(state, events) {
                 SubstitutionDrainOutcome::Completed => Ok(gained),
                 SubstitutionDrainOutcome::Deferred => {
-                    Err(ReplacementDeferred::SubstitutionContinuation)
+                    Err(ReplacementDeferred::SubstitutionContinuation { applied: gained })
                 }
             }
         }
@@ -163,7 +175,9 @@ pub fn apply_life_gain(
             match drain_substitution_continuation(state, events) {
                 SubstitutionDrainOutcome::Completed => Ok(0),
                 SubstitutionDrainOutcome::Deferred => {
-                    Err(ReplacementDeferred::SubstitutionContinuation)
+                    // Fully prevented: the root gained nothing, whatever the
+                    // substitute goes on to do.
+                    Err(ReplacementDeferred::SubstitutionContinuation { applied: 0 })
                 }
             }
         }
@@ -293,7 +307,9 @@ pub fn apply_life_loss(
             match drain_substitution_continuation(state, events) {
                 SubstitutionDrainOutcome::Completed => Ok(lost),
                 SubstitutionDrainOutcome::Deferred => {
-                    Err(ReplacementDeferred::SubstitutionContinuation)
+                    // The root loss is FINAL at this point — `lost` is what the
+                    // player actually paid. Only the substitute is unfinished.
+                    Err(ReplacementDeferred::SubstitutionContinuation { applied: lost })
                 }
             }
         }
@@ -303,7 +319,9 @@ pub fn apply_life_loss(
             match drain_substitution_continuation(state, events) {
                 SubstitutionDrainOutcome::Completed => Ok(0),
                 SubstitutionDrainOutcome::Deferred => {
-                    Err(ReplacementDeferred::SubstitutionContinuation)
+                    // Fully prevented: no life left the player, so nothing
+                    // downstream may narrate a loss.
+                    Err(ReplacementDeferred::SubstitutionContinuation { applied: 0 })
                 }
             }
         }
@@ -1736,7 +1754,14 @@ mod tests {
 
         let outcome = apply_life_gain(&mut state, PlayerId(0), 4, &mut Vec::new());
 
-        assert_eq!(outcome, Err(ReplacementDeferred::SubstitutionContinuation));
+        // The branch prompt fully REPLACES the gain, so the root added nothing
+        // before pausing. The deferral says so, which is the point of carrying
+        // the figure: a caller narrating this event must report what actually
+        // happened (0), not the 4 that was proposed.
+        assert_eq!(
+            outcome,
+            Err(ReplacementDeferred::SubstitutionContinuation { applied: 0 })
+        );
         assert!(matches!(
             state.waiting_for,
             WaitingFor::ChooseOneOfBranch { .. }

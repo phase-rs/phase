@@ -556,19 +556,35 @@ pub(super) fn discharge_owed_life_losses(
             // count instead would tell a player they lost life they still have.
             Ok(actual) => emit_life_loss_cause(next, actual, events),
             Err(deferred) => {
-                // This loss is mid-flight and will complete through the
-                // replacement pipeline; only what has NOT been attempted is
-                // parked. Re-queuing `next` would apply it twice — but its
-                // CAUSE still has to survive, or the event that explains it is
-                // lost when it lands. See `note_empty_pool_life_loss_resolved`.
-                park_in_flight_life_loss(state, next);
-                park_owed_life_losses(state, owed);
-                if matches!(
-                    deferred,
-                    crate::game::effects::life::ReplacementDeferred::SubstitutionContinuation
-                ) {
-                    mark_phase_transition_awaiting_post_replacement(state);
+                // Either way this loss is mid-flight and must NOT be re-queued
+                // — re-applying it would take the life a second time. Only what
+                // has not been attempted yet is parked. The two deferral kinds
+                // differ in whether the ROOT loss has already happened, and so
+                // in where its cause can still be named.
+                match deferred {
+                    // CR 616.1: nothing applied yet. How much is lost is
+                    // unknowable until the ordering choice resumes, so park the
+                    // cause and let the resume path name it. See
+                    // `note_empty_pool_life_loss_resolved`.
+                    crate::game::effects::life::ReplacementDeferred::ReplacementChoice => {
+                        park_in_flight_life_loss(state, next);
+                    }
+                    // CR 614.6: the root loss is DONE, for exactly `applied`;
+                    // only the substitute effect is still running. Narrate it
+                    // HERE, where the true figure is in hand. Parking it instead
+                    // would strand the provenance, because the resume that
+                    // finishes a substitute is not the one that applied the root
+                    // and never hands that number back. This also matches the
+                    // `Ok` arm's event ordering: there too the cause follows the
+                    // substitute's own events, because the drain already ran.
+                    crate::game::effects::life::ReplacementDeferred::SubstitutionContinuation {
+                        applied,
+                    } => {
+                        emit_life_loss_cause(next, applied, events);
+                        mark_phase_transition_awaiting_post_replacement(state);
+                    }
                 }
+                park_owed_life_losses(state, owed);
                 return EmptyManaPoolApplyOutcome::Deferred;
             }
         }
@@ -601,12 +617,18 @@ fn park_in_flight_life_loss(state: &mut GameState, loss: PendingEmptyPoolLifeLos
 }
 
 /// Emit the event explaining an empty-pool life loss that completed through the
-/// CR 616.1 replacement pipeline rather than returning to
+/// CR 616.1 ordering choice rather than returning to
 /// `discharge_owed_life_losses`.
 ///
 /// Called from the replacement resume path, which handles EVERY life loss — so
 /// this fires only when a parked record names this same player, and consumes it
 /// either way so a later unrelated loss cannot inherit the provenance.
+///
+/// It must be called on EVERY terminal outcome of the choice, including
+/// `Prevented`: a record left parked outlives its own event and is then claimed
+/// by the next same-player loss to resume, which would log an unrelated loss as
+/// mana burn. Passing `actual: 0` consumes it and emits nothing, which is the
+/// correct narration for a prevented loss.
 ///
 /// `actual` is what the pipeline really took, which is the point: a replacement
 /// effect may have reduced it, and CR 119.8 can make it zero.

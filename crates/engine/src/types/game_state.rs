@@ -21192,15 +21192,25 @@ pub struct PhaseTransitionProgress {
     /// it before advancing to the next player.
     #[serde(default)]
     pub owed_life_loss: VecDeque<PendingEmptyPoolLifeLoss>,
-    /// The empty-pool life loss currently IN FLIGHT through the CR 616.1
-    /// replacement pipeline, kept only to name its cause when it lands.
+    /// The empty-pool life loss currently IN FLIGHT through a CR 616.1 ordering
+    /// choice, kept only to name its cause when it lands.
     ///
-    /// Distinct from `owed_life_loss`, which holds losses not yet attempted:
-    /// this one has been applied and will complete elsewhere
-    /// (`apply_life_loss_after_replacement`), so re-applying it would double
-    /// it. Without this the loss still resolves correctly, but nothing records
-    /// WHY — a deferred mana burn would silently lose its `ManaBurn` event and
-    /// the player would see life vanish with no stated reason.
+    /// Distinct from `owed_life_loss`, which holds losses not yet ATTEMPTED:
+    /// this one has entered the pipeline and will complete elsewhere
+    /// (`apply_life_loss_after_replacement`), so re-queuing it would double it.
+    /// Without this the loss still resolves correctly, but nothing records WHY
+    /// — a deferred mana burn would silently lose its `ManaBurn` event and the
+    /// player would see life vanish with no stated reason.
+    ///
+    /// Set ONLY for `ReplacementDeferred::ReplacementChoice`, where the amount
+    /// is still unknown. A `SubstitutionContinuation` deferral has already
+    /// applied the root loss and carries the figure back to the drain, which
+    /// narrates it on the spot — parking that case would strand the record,
+    /// since the resume that finishes a substitute is not the one that applied
+    /// the root.
+    ///
+    /// Every terminal outcome of that choice must consume this, `Prevented`
+    /// included; see `turns::note_empty_pool_life_loss_resolved`.
     #[serde(default)]
     pub in_flight_life_loss: Option<PendingEmptyPoolLifeLoss>,
     /// The phase the turn is leaving, paired with `next_phase` to identify the

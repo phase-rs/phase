@@ -13,12 +13,21 @@
 //! so a failure to burn and a failure to set the scenario up are
 //! distinguishable.
 
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, PlayerFilter, QuantityExpr, QuantityModification,
+    ReplacementDefinition, ReplacementPlayerScope, TargetFilter,
+};
+use engine::types::actions::GameAction;
 use engine::types::custom_format::{old_school_93_94, swedish_old_school};
+use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 
 const POOL: usize = 2;
 
@@ -220,4 +229,181 @@ fn mana_held_through_the_ending_phase_burns_before_the_next_turn() {
         life_before - POOL as i32,
         "the ending phase's boundary charges the burn like any other"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Provenance through the CR 616.1 replacement pipeline.
+//
+// A mana burn is a life loss like any other, so it can be doubled, prevented
+// or substituted. Whatever survives that pipeline, the log still has to say
+// mana burn is WHY — and it must never say so about a loss that is not one.
+// These two are the paired halves of that: the burn that happens must be
+// narrated, and the burn that does not happen must not leave its name behind.
+// ---------------------------------------------------------------------------
+
+/// Every `ManaBurn` event in `events`, as `(player, amount)`.
+fn burns(events: &[GameEvent]) -> Vec<(PlayerId, u32)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ManaBurn { player_id, amount } => Some((*player_id, *amount)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A branch prompt, used as the substitute effect so the CR 614.6 continuation
+/// pauses on real player input instead of completing synchronously.
+fn gain_branches() -> Effect {
+    let gain = |amount| {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: amount },
+                player: TargetFilter::Controller,
+            },
+        )
+    };
+    Effect::ChooseOneOf {
+        chooser: PlayerFilter::Controller,
+        branches: vec![gain(1), gain(2)],
+    }
+}
+
+/// A two-player game in the precombat main phase under Old School 93/94, with
+/// `P1` holding `POOL` unspent mana. `P0` hosts the replacement effects, so
+/// `ReplacementPlayerScope::Opponent` names `P1` and nothing else.
+fn burner_facing_replacements(defs: Vec<ReplacementDefinition>) -> GameRunner {
+    let mut scenario = GameScenario::new_n_player(2, 51);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P1, pool(POOL));
+    let mut creature = scenario.add_creature(P0, "Burn Replacements", 1, 1);
+    for def in defs {
+        creature.with_replacement_definition(def);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().format_config = FormatConfig::for_custom_rules(&old_school_93_94().rules);
+    runner
+}
+
+/// CR 614.6: the burn RESOLVED and then its substitute paused, so the loss is
+/// already final — the log must name its cause even though the transition has
+/// not finished.
+///
+/// Reverts to red by dropping the amount from
+/// `ReplacementDeferred::SubstitutionContinuation`: the drain then has no
+/// figure to narrate at the point the pause happens, the root's provenance is
+/// parked instead, and no later resume ever claims it — `LifeChanged` lands
+/// with no `ManaBurn` beside it.
+#[test]
+fn a_burn_whose_substitute_pauses_still_names_itself() {
+    let mut doubled_with_substitute = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+        .quantity_modification(QuantityModification::DOUBLE)
+        .execute(AbilityDefinition::new(AbilityKind::Spell, gain_branches()))
+        .description("Double, then choose a gain".to_string());
+    doubled_with_substitute.valid_player = Some(ReplacementPlayerScope::Opponent);
+    let mut runner = burner_facing_replacements(vec![doubled_with_substitute]);
+    let life_before = runner.state().players[1].life;
+
+    let mut events = Vec::new();
+    engine::game::turns::advance_phase(runner.state_mut(), &mut events);
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseOneOfBranch { .. }
+        ),
+        "the substitute must pause, or this exercises the synchronous path; \
+         got {:?}",
+        runner.state().waiting_for
+    );
+    // The REAL figure, not the pool count: the replacement doubled it.
+    let burned = POOL as i32 * 2;
+    assert_eq!(runner.state().players[1].life, life_before - burned);
+    assert_eq!(
+        burns(&events),
+        vec![(P1, burned as u32)],
+        "the resolved burn is narrated once, with what was actually lost"
+    );
+
+    // Answering the prompt finishes the transition and adds no second burn.
+    let resumed = runner
+        .act(GameAction::ChooseBranch { index: 1 })
+        .expect("answering the substitute resumes the drain");
+    assert!(
+        burns(&resumed.events).is_empty(),
+        "the burn is emitted once"
+    );
+    assert_eq!(runner.state().phase, Phase::BeginCombat);
+    assert!(runner.state().pending_phase_transition_progress.is_none());
+}
+
+/// CR 614.1a: a PREVENTED burn is not a burn. Its parked provenance has to be
+/// consumed at that terminal outcome, or it outlives its own event and the next
+/// same-player life loss to resume through the pipeline inherits it.
+///
+/// The interactive substitute is what makes the leak observable: it holds the
+/// phase transition open past the prevented choice, so the record can be read
+/// at the one moment it would still be there.
+#[test]
+fn a_prevented_burn_leaves_no_provenance_behind() {
+    let mut double = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+        .quantity_modification(QuantityModification::DOUBLE)
+        .description("Double".to_string());
+    double.valid_player = Some(ReplacementPlayerScope::Opponent);
+    let mut substitute = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+        .execute(AbilityDefinition::new(AbilityKind::Spell, gain_branches()))
+        .description("Choose gain instead".to_string());
+    substitute.valid_player = Some(ReplacementPlayerScope::Opponent);
+    let mut runner = burner_facing_replacements(vec![double, substitute]);
+    let life_before = runner.state().players[1].life;
+
+    let mut events = Vec::new();
+    engine::game::turns::advance_phase(runner.state_mut(), &mut events);
+
+    let substitute_index = match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { candidates, .. } => candidates
+            .iter()
+            .position(|candidate| candidate.description == "Choose gain instead")
+            .expect("the substituting candidate is offered"),
+        waiting => panic!("expected a life-loss replacement choice, got {waiting:?}"),
+    };
+    let chosen = runner
+        .act(GameAction::ChooseReplacement {
+            index: substitute_index,
+        })
+        .expect("the prevented choice surfaces the substitute's own prompt");
+    events.extend(chosen.events);
+
+    // The transition is still open, which is the whole point — the parked
+    // record would still be readable here if it were not consumed.
+    let progress = runner
+        .state()
+        .pending_phase_transition_progress
+        .as_ref()
+        .expect("the phase cursor stays owned while the substitute waits");
+    assert!(
+        progress.in_flight_life_loss.is_none(),
+        "a prevented burn must not leave provenance parked, or the next \
+         same-player loss to resume is logged as mana burn: {:?}",
+        progress.in_flight_life_loss
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseBranch { index: 1 })
+        .expect("answering the substitute resumes the drain");
+    events.extend(resumed.events);
+
+    assert_eq!(
+        runner.state().players[1].life,
+        life_before,
+        "CR 614.1a: the prevented burn took no life"
+    );
+    assert!(
+        burns(&events).is_empty(),
+        "nothing may be narrated as mana burn when no burn resolved: {:?}",
+        burns(&events)
+    );
+    assert!(runner.state().players[1].mana_pool.mana.is_empty());
+    assert_eq!(runner.state().phase, Phase::BeginCombat);
 }
