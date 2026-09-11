@@ -1,3 +1,7 @@
+use crate::game::ability_utils::{
+    damage_replacement_target_role_legality, damage_replacement_target_roles,
+    DamageReplacementTargetRole,
+};
 use crate::game::effects::choose_damage_source;
 use crate::game::effects::prevent_damage::resolve_source_filter;
 use crate::game::game_object::AttachTarget;
@@ -74,6 +78,22 @@ pub fn resolve(
         }
     };
 
+    // CR 608.2b + CR 614.9: a spell with some remaining legal targets resolves
+    // normally, but a damage replacement needs every one of its declared roles
+    // to define a single replacement event. Do not install a partial shield or
+    // reinterpret a later role at an earlier slot; other chained instructions
+    // still resolve through the ordinary effect pipeline.
+    if damage_replacement_target_role_legality(state, ability)
+        .is_some_and(|legality| !legality.all_required_roles_are_legal())
+    {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::CreateDamageReplacement,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
     // CR 609.7a + CR 614.9: "a source of your choice" / "that source" — the
     // damage source is a player choice. Resolve it to a concrete object NOW so
     // the shield can match damage later this turn via a durable `SpecificObject`
@@ -138,7 +158,14 @@ pub fn resolve(
                 }
             }
         }
-        other => other.clone(),
+        // CR 609.7a/b: capture every declared source target before the shield
+        // is installed. This turns `ParentTargetSlot` into `SpecificObject`
+        // while retaining the sibling live qualifier that damage-time matching
+        // rechecks. The existing chosen-source continuation above remains the
+        // authority for prompting and then reaches the same materialization.
+        other => other.as_ref().map(|filter| {
+            resolve_source_filter(filter, state, ability.source_id, &ability.targets)
+        }),
     };
 
     // CR 614.5 vs CR 611.2a: label the shield by its actual lifetime.
@@ -206,8 +233,18 @@ pub fn resolve(
     let recipient_context_ref = recipient_object_filter
         .as_ref()
         .filter(|f| f.is_context_ref());
-    let recipient_consumes_slot =
-        recipient_object_filter.is_some() && recipient_context_ref.is_none();
+    // One shared declaration-order authority serves targeting and resolution.
+    // The source's slot is distinct from the replacement host, so a stack spell
+    // can leave the stack after resolution while its `SpecificObject` damage
+    // filter remains installed in the shield.
+    let roles = damage_replacement_target_roles(&ability.effect).unwrap_or_default();
+    let source_slot_count = usize::from(matches!(
+        roles.first(),
+        Some(DamageReplacementTargetRole::DeclaredSource(_))
+    ));
+    let redirect_slot = roles
+        .iter()
+        .position(|role| matches!(role, DamageReplacementTargetRole::RedirectRecipient(_)));
     let recipient_host = match (recipient_context_ref, recipient_object_filter.is_some()) {
         (Some(filter), _) => targeting::resolved_targets(ability, filter, state)
             .into_iter()
@@ -215,7 +252,7 @@ pub fn resolve(
                 TargetRef::Object(id) => Some(id),
                 TargetRef::Player(_) => None,
             }),
-        (None, true) => chosen_target_object(ability, /*skip*/ 0),
+        (None, true) => chosen_target_object(ability, source_slot_count),
         (None, false) => None,
     };
 
@@ -282,7 +319,16 @@ pub fn resolve(
                 // the target its parent instruction already chose ("Choose target
                 // creature you control. …to the chosen creature instead"), which
                 // reaches this resolver through the propagated parent targets.
-                if let Some(id) = chosen_redirect_object(ability, recipient_consumes_slot) {
+                // A declared redirect recipient has its own role slot. The
+                // continuous "the chosen creature" grammar instead reuses an
+                // already propagated parent target and deliberately declares no
+                // new role; retain that target as the redirect recipient. The
+                // source-role offset keeps a future source-targeted version of
+                // that grammar from borrowing the source as its destination.
+                let chosen_redirect = redirect_slot
+                    .or(Some(source_slot_count))
+                    .and_then(|slot| chosen_redirect_object(ability, slot));
+                if let Some(id) = chosen_redirect {
                     shield = shield.redirect_target(TargetFilter::SpecificObject { id });
                 }
             }
@@ -396,16 +442,10 @@ fn chosen_target_object(ability: &ResolvedAbility, skip: usize) -> Option<Object
 }
 
 /// Return the object target slot for a `ChosenObjectTarget` redirect recipient.
-/// When the original recipient is itself a chosen target object (Jade Monolith —
-/// `recipient_consumed_slot` is `true`), the redirect slot is the *second*
-/// object target; otherwise (no recipient slot, or a self recipient like the
-/// en-Kor cycle) it is the first.
-fn chosen_redirect_object(
-    ability: &ResolvedAbility,
-    recipient_consumed_slot: bool,
-) -> Option<ObjectId> {
-    let skip = if recipient_consumed_slot { 1 } else { 0 };
-    chosen_target_object(ability, skip)
+/// Its index is derived from the shared CDR role order: source, original
+/// recipient, redirect destination.
+fn chosen_redirect_object(ability: &ResolvedAbility, redirect_slot: usize) -> Option<ObjectId> {
+    chosen_target_object(ability, redirect_slot)
 }
 
 /// CR 614.9: Resolve a redirection recipient to a concrete `TargetRef` against
@@ -421,15 +461,23 @@ fn chosen_redirect_object(
 pub(crate) fn resolve_redirect_recipient(
     state: &GameState,
     recipient: DamageRedirectTarget,
-    source_id: ObjectId,
+    replacement_host_id: ObjectId,
+    prospective_damage_source_id: ObjectId,
     chosen_object: Option<ObjectId>,
 ) -> Option<TargetRef> {
     match recipient {
         DamageRedirectTarget::Controller => state
             .objects
-            .get(&source_id)
+            .get(&replacement_host_id)
             .map(|obj| TargetRef::Player(obj.controller)),
-        DamageRedirectTarget::SourceObject => Some(TargetRef::Object(source_id)),
+        // CR 614.9: this authority follows the source of the prospective damage,
+        // not the object carrying the replacement effect. CR 609.7a/b retain
+        // the selected source identity and recheck its live properties.
+        DamageRedirectTarget::DamageSourceController => state
+            .objects
+            .get(&prospective_damage_source_id)
+            .map(|obj| TargetRef::Player(obj.controller)),
+        DamageRedirectTarget::SourceObject => Some(TargetRef::Object(replacement_host_id)),
         DamageRedirectTarget::ChosenObjectTarget => chosen_object.map(TargetRef::Object),
         // CR 303.4b + CR 301.5a: the Aura's/Equipment's own host, read LIVE from
         // `attached_to` on every damage event rather than latched at install, so
@@ -451,7 +499,7 @@ pub(crate) fn resolve_redirect_recipient(
         // the CR 614.9 "left the game" clause is checked there.)
         DamageRedirectTarget::AttachedToSource => state
             .objects
-            .get(&source_id)
+            .get(&replacement_host_id)
             .and_then(|obj| obj.attached_to.as_ref())
             .and_then(AttachTarget::as_object)
             .map(TargetRef::Object),
@@ -493,6 +541,36 @@ mod tests {
         let id = create_object(state, CardId(1), owner, name.to_string(), Zone::Battlefield);
         state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
         id
+    }
+
+    #[test]
+    fn damage_source_controller_uses_prospective_source_not_replacement_host() {
+        let mut state = GameState::new_two_player(42);
+        let replacement_host = create_creature(&mut state, PlayerId(0), "Replacement Host");
+        let damage_source = create_creature(&mut state, PlayerId(1), "Damage Source");
+
+        assert_eq!(
+            resolve_redirect_recipient(
+                &state,
+                DamageRedirectTarget::DamageSourceController,
+                replacement_host,
+                damage_source,
+                None,
+            ),
+            Some(TargetRef::Player(PlayerId(1))),
+            "CR 614.9: redirect to the live controller of the prospective damage source"
+        );
+        assert_eq!(
+            resolve_redirect_recipient(
+                &state,
+                DamageRedirectTarget::Controller,
+                replacement_host,
+                damage_source,
+                None,
+            ),
+            Some(TargetRef::Player(PlayerId(0))),
+            "legacy Controller remains the replacement host's controller"
+        );
     }
 
     fn amount_oneshot_ability(source: ObjectId, controller: PlayerId) -> ResolvedAbility {

@@ -19273,6 +19273,21 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_zone_changed_ids: Vec<ObjectId>,
 
+    /// CR 701.6a + CR 614.1a (issue #8762): the spells the most recent
+    /// `Effect::Counter` exiled through its "exile it instead of putting it
+    /// into its owner's graveyard" rider — recorded by `counter::resolve` at
+    /// the moment it chooses that destination, from the rider AS APPLIED to
+    /// the concrete countered spell (Thranduil's Decree names "a permanent
+    /// spell" only). Read by the `Exiled` provenance stamp of the same
+    /// resolution, which must not re-derive the answer: an Adventure or Omen
+    /// spell has its creature face restored between the destination choice
+    /// and the stamp (CR 715.4 / CR 720.4), so the same filter would answer
+    /// differently there.
+    /// Mirrors `last_zone_changed_ids` lifecycle: cleared at chain depth 0 in
+    /// `resolve_ability_chain`, and at the start of every `counter::resolve`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exile_rider_countered_ids: Vec<ObjectId>,
+
     /// CR 608.2c + CR 701.38: Per-vote ballots from the most recent
     /// `Effect::Vote` resolution within the current top-level ability
     /// resolution. Each entry is `(voter, choice_index)`; populated by
@@ -24344,6 +24359,7 @@ impl GameState {
             private_look_ids: Vec::new(),
             private_look_player: None,
             last_zone_changed_ids: Vec::new(),
+            exile_rider_countered_ids: Vec::new(),
             last_vote_ballots: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
             last_effect_amount: None,
@@ -26476,6 +26492,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         private_look_ids: _,
         private_look_player: _,
         last_zone_changed_ids: _,
+        exile_rider_countered_ids: _,
         last_vote_ballots: _,
         player_actions_this_way: _,
         last_effect_amount: _,
@@ -26822,6 +26839,7 @@ impl PartialEq for GameState {
             && self.private_look_ids == other.private_look_ids
             && self.private_look_player == other.private_look_player
             && self.last_zone_changed_ids == other.last_zone_changed_ids
+            && self.exile_rider_countered_ids == other.exile_rider_countered_ids
             && self.last_vote_ballots == other.last_vote_ballots
             && self.player_actions_this_way == other.player_actions_this_way
             && self.last_effect_count == other.last_effect_count

@@ -25,7 +25,9 @@ import {
 import {
   arityLabel,
   failureLabel,
+  isActionOpen,
   isActiveEntrant,
+  isPairingReportable,
   myPairing,
   viewerRelation,
   viewerRoles,
@@ -348,10 +350,23 @@ export function TournamentPage() {
   // while the dialog is open cannot carry a stale seat list into the payload.
   // No `key={pairing.id}` is passed: the dialog's entry-state reset is
   // structural, and its own prop doc says a caller need not pass one.
-  const freshPairing =
+  //
+  // Gated on `isPairingReportable`, the same broker `report_gate` the Report
+  // button consumes: a broadcast can close the gate while the dialog is open
+  // (the tournament ends → `TournamentNotRunning`, or a drop auto-settles the
+  // pairing → `Forfeit`), and an open dialog would then offer a submit the
+  // broker refuses every time. Closing it keeps the dialog consistent with the
+  // button that opened it. An already-`Reported` pairing on a running event
+  // stays `Open`, so a correction-in-progress is not yanked away.
+  const freshPairingCandidate =
     reporting === null
       ? null
       : (view?.pairings.find((p) => p.id === reporting.id) ?? reporting);
+  const freshPairing =
+    freshPairingCandidate !== null &&
+    isPairingReportable(freshPairingCandidate)
+      ? freshPairingCandidate
+      : null;
 
   const arity = view === null ? null : arityLabel(view.summary.arity);
 
@@ -442,6 +457,25 @@ export function TournamentPage() {
                     })}
                   </span>
                 )}
+                {/* The RESOLVED scoring policy, read straight off the summary and
+                    never recomputed — the readout that makes an organizer's
+                    "Automatic" choice legible after the broker applies its
+                    arity default (lobby protocol v6). Absent from a pre-v6
+                    broker's summary, in which case nothing is shown. Reuses the
+                    create-form point labels rather than minting new catalog
+                    keys. */}
+                {view.summary.scoring !== undefined && (
+                  <span
+                    className="text-slate-400"
+                    title={t("create.scoringLabel")}
+                  >
+                    {t("create.winPointsLabel")} {view.summary.scoring.win_points}{" "}
+                    · {t("create.drawPointsLabel")}{" "}
+                    {view.summary.scoring.draw_points} ·{" "}
+                    {t("create.lossPointsLabel")}{" "}
+                    {view.summary.scoring.loss_points}
+                  </span>
+                )}
                 {/* Rendered for every relation, "Spectating" included: on a
                     single-tournament page the viewer's relation to THIS event
                     is exactly the thing worth stating. */}
@@ -450,56 +484,74 @@ export function TournamentPage() {
                 </span>
               </div>
 
-              {roles.has("organizer") && (
-                <MenuPanel>
-                  <div className="flex flex-col gap-3">
-                    <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
-                      {t("detail.organizerControls")}
-                    </h2>
-                    {/* `busy !== null` on both controls, `busy === "<kind>"`
-                        on both labels — see `BusyKind`. The two tests are
-                        deliberately different: one action in flight holds
-                        EVERY control, while only the control whose action is
-                        actually running changes what it says. */}
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        onClick={handleStart}
-                        disabled={busy !== null}
-                        className={menuButtonClass({
-                          tone: "emerald",
-                          size: "sm",
-                          disabled: busy !== null,
-                        })}
-                      >
-                        {busy === "start"
-                          ? t("detail.startRoundBusy")
-                          : t("detail.startRound")}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleEnd}
-                        disabled={busy !== null}
-                        className={menuButtonClass({
-                          tone: "red",
-                          size: "sm",
-                          disabled: busy !== null,
-                        })}
-                      >
-                        {busy === "end"
-                          ? t("detail.endTournamentBusy")
-                          : t("detail.endTournament")}
-                      </button>
+              {/* Each control is gated on the broker's own `open_actions`
+                  (lobby protocol v6) via `isActionOpen`, composed with the
+                  organizer credential — the two together are the whole gate.
+                  This withdraws `End Tournament` during `Registration` (which
+                  the broker refuses) and hides the panel entirely on a terminal
+                  event (its `open_actions` is empty), the organizer-side
+                  counterpart to the `report_gate` fix. Against a pre-v6 broker
+                  that emits no `open_actions`, `isActionOpen` answers `true` and
+                  the prior credential-only behaviour is preserved. */}
+              {roles.has("organizer") &&
+                (isActionOpen(view.summary, "StartRound") ||
+                  isActionOpen(view.summary, "EndTournament")) && (
+                  <MenuPanel>
+                    <div className="flex flex-col gap-3">
+                      <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
+                        {t("detail.organizerControls")}
+                      </h2>
+                      {/* `busy !== null` on both controls, `busy === "<kind>"`
+                          on both labels — see `BusyKind`. The two tests are
+                          deliberately different: one action in flight holds
+                          EVERY control, while only the control whose action is
+                          actually running changes what it says. */}
+                      <div className="flex flex-wrap gap-2">
+                        {isActionOpen(view.summary, "StartRound") && (
+                          <button
+                            type="button"
+                            onClick={handleStart}
+                            disabled={busy !== null}
+                            className={menuButtonClass({
+                              tone: "emerald",
+                              size: "sm",
+                              disabled: busy !== null,
+                            })}
+                          >
+                            {busy === "start"
+                              ? t("detail.startRoundBusy")
+                              : t("detail.startRound")}
+                          </button>
+                        )}
+                        {isActionOpen(view.summary, "EndTournament") && (
+                          <button
+                            type="button"
+                            onClick={handleEnd}
+                            disabled={busy !== null}
+                            className={menuButtonClass({
+                              tone: "red",
+                              size: "sm",
+                              disabled: busy !== null,
+                            })}
+                          >
+                            {busy === "end"
+                              ? t("detail.endTournamentBusy")
+                              : t("detail.endTournament")}
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                </MenuPanel>
-              )}
+                  </MenuPanel>
+                )}
 
               {/* `canPlayerAct`, not `roles.has("player")`. The broker
                   permanently refuses a second drop by design, and no
                   credential is cleared by a successful one — so a button
-                  gated on possession alone can only ever produce an alert. */}
-              {canPlayerAct && (
+                  gated on possession alone can only ever produce an alert.
+                  `isActionOpen(..., "Drop")` adds the broker's own v6 gate on
+                  top: Drop closes once the event is terminal, and degrades to
+                  open against a pre-v6 broker. */}
+              {canPlayerAct && isActionOpen(view.summary, "Drop") && (
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
@@ -526,7 +578,7 @@ export function TournamentPage() {
                   // The ONLY place `onReport` is ever supplied. `canPlayerAct`
                   // carries C2 (a dropped entrant keeps a live pairing in a pod
                   // with >=2 active seats, so neither `myPairing` nor
-                  // `isReportable` refuses there) and `[mine]` carries C3.
+                  // `isPairingReportable` refuses there) and `[mine]` carries C3.
                   <PairingsList
                     pairings={[mine]}
                     onReport={canPlayerAct ? setReporting : undefined}

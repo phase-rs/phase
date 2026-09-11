@@ -8,11 +8,13 @@ import type { TournamentSummary, TournamentView } from "../../adapter/types";
 import type { PhaseSocket } from "../openPhaseSocket";
 import {
   LOBBY_PROTOCOL_VERSION,
+  MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING,
   MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK,
   type ServerInfo,
 } from "../../adapter/ws-adapter";
 import {
   createTournamentOver,
+  defaultScoringForArity,
   dropFromTournamentOver,
   endTournamentOver,
   getTournamentOver,
@@ -472,6 +474,75 @@ describe("tournament request frames", () => {
 
     controller.abort();
     await expect(promise).resolves.toMatchObject({ ok: false, reason: "aborted" });
+  });
+
+  // The `scoring` version gate: `null` (Automatic) is sent as `scoring: null`
+  // at or above `MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING` (the broker resolves
+  // its own default), and substituted with the explicit `defaultScoringForArity`
+  // below it — where an omitted `scoring` is a hard `missing field` parse error,
+  // not a degrade. An explicit override is sent verbatim regardless.
+  describe("createTournamentOver scoring gate", () => {
+    // V12 (moved here from tournamentPageState): mirrors `default_for_arity`'s
+    // `2n-1 / 1 / 0`. The below-floor send path is this helper's only consumer.
+    it.each([
+      [2, 3],
+      [4, 7],
+      [128, 255],
+    ])("defaultScoringForArity: arity %i -> %i win points", (arity, winPoints) => {
+      expect(defaultScoringForArity(arity)).toEqual({
+        win_points: winPoints,
+        draw_points: 1,
+        loss_points: 0,
+      });
+    });
+
+    async function createWithScoring(
+      ws: MockWebSocket,
+      lobbyProtocolVersion: number | undefined,
+      scoring: { win_points: number; draw_points: number; loss_points: number } | null,
+    ): Promise<void> {
+      const controller = new AbortController();
+      const promise = createTournamentOver(
+        makePhaseSocket(ws, { lobbyProtocolVersion }),
+        { name: "Friday Night", arity: 2, scoring, bracket: "Swiss", totalRounds: 3 },
+        { signal: controller.signal },
+      );
+      controller.abort();
+      await expect(promise).resolves.toMatchObject({ ok: false, reason: "aborted" });
+    }
+
+    it("sends scoring: null at or above the default-scoring floor", async () => {
+      const ws = new MockWebSocket();
+      await createWithScoring(ws, MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING, null);
+      expect(ws.send).toHaveBeenCalledWith(
+        '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":null,"bracket":"Swiss","total_rounds":3,"plus_rounds":null,"format":null,"match_type":null}}',
+      );
+    });
+
+    it.each([
+      ["a pre-floor broker", 4 as number | undefined],
+      ["a broker advertising no lobby version", undefined],
+    ])("substitutes the explicit default against %s", async (_label, lobbyProtocolVersion) => {
+      const ws = new MockWebSocket();
+      await createWithScoring(ws, lobbyProtocolVersion, null);
+      expect(ws.send).toHaveBeenCalledWith(
+        '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":3,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":3,"plus_rounds":null,"format":null,"match_type":null}}',
+      );
+    });
+
+    it("sends an explicit override verbatim below the floor", async () => {
+      const ws = new MockWebSocket();
+      // draw_points 0 — the broker accepts any non-`win_points==0` policy, so an
+      // explicit choice must never be rewritten to the default.
+      await createWithScoring(ws, 4, {
+        win_points: 5,
+        draw_points: 0,
+        loss_points: 0,
+      });
+      expect(ws.send).toHaveBeenCalledWith(
+        '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":5,"draw_points":0,"loss_points":0},"bracket":"Swiss","total_rounds":3,"plus_rounds":null,"format":null,"match_type":null}}',
+      );
+    });
   });
 
   it("serializes a pod draw outcome as the bare Draw unit variant", async () => {

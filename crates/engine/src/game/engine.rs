@@ -5948,6 +5948,7 @@ fn normalize_recast_frame(
     s.last_created_token_ids.clear();
     s.last_revealed_ids.clear();
     s.last_zone_changed_ids.clear();
+    s.exile_rider_countered_ids.clear();
     s
 }
 

@@ -12,10 +12,41 @@
 //!   unstamped window is not "missing", it is PERMANENT, because CR 611.2a
 //!   makes an unstated duration last until the end of the game.
 //!
+//! **Where the stamped definition lives (issue #8781).** CR 604.2: a printed
+//! static ability's replacement effect states no window, so a stated one proves
+//! the definition was CREATED by a resolving spell or ability (CR 611.2a). U2
+//! originally left such a definition hosted on the card, which this file's own
+//! V5 comment already recorded as inert — `find_applicable_replacements` scans
+//! the battlefield and command zone only. It now routes to
+//! `Effect::AddTargetReplacement { target: None }` instead, which installs it
+//! into the floating store at resolution under the resolving controller. Every
+//! row below therefore reads `expiry` off [`windowed_installs`] rather than off
+//! `parsed.replacements`; the invariant is unchanged and is still "nothing
+//! permanent escapes".
+//!
 //! **Honesty statement.** B1 makes ZERO cards supported. Yawgmoth's Will,
 //! Gaea's Will and Magus of the Will still parse to `Effect::Unimplemented`;
 //! `v5_will_cycle_cards_remain_honestly_unsupported` pins that as a REGRESSION
 //! GUARD, not as a discriminating test.
+//!
+//! **One precision on that statement.** "These cards parse to
+//! `Effect::Unimplemented`" is only half true, and the nuance matters for
+//! anyone who later closes this gap. The CAST half of "you may play lands and
+//! cast spells from your graveyard" ALREADY lowers to `Effect::CastFromZone`,
+//! in `sub_ability` — a position the instrument originally used to write this
+//! file never read. Only the LAND half is refused, as the bare fragment
+//! `"play lands"`, which `try_parse_cast_effect`'s guard declines because a
+//! zone-less "play lands" genuinely is not a grant. So these cards are HALF
+//! parsed, and `v5` below asserts only that a refusal is still present.
+//!
+//! **Parsing the land half is NOT sufficient to support these cards.**
+//! MEASURED: `graveyard_lands_playable_by_permission` returns `[]` after
+//! resolving the real Yawgmoth's Will even when both halves parse, because
+//! `Effect::CastFromZone` is not a channel any land-permission consumer reads.
+//! The consumers (`casting::graveyard_permission_sources`) read
+//! `StaticMode::GraveyardCastPermission` instead. Closing this gap therefore
+//! needs a DELIVERY seam, not another parser arm — see the U1 note below, which
+//! is that seam's prerequisite.
 //!
 //! **Stack size.** `parse_oracle_text` overflows the default 8 MB test stack
 //! and prints a convincing PARTIAL negative on the way down. Every body that
@@ -26,8 +57,8 @@ use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use engine::parser::oracle_static::parse_static_line;
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    CardPlayMode, ControllerRef, Effect, FilterProp, RestrictionExpiry, StaticDefinition,
-    TargetFilter,
+    AbilityDefinition, CardPlayMode, ControllerRef, Effect, FilterProp, ReplacementDefinition,
+    RestrictionExpiry, StaticDefinition, TargetFilter,
 };
 use engine::types::replacements::ReplacementEvent;
 use engine::types::statics::{CastFrequency, StaticMode};
@@ -80,6 +111,55 @@ fn duration_this_turn_warnings(parsed: &ParsedAbilities) -> usize {
         .count()
 }
 
+/// CR 611.2a: every windowed clause's home — the resolution-install effects.
+///
+/// Returns ALL of them, never just the first. This file's load-bearing invariant
+/// is that NOTHING PERMANENT escapes, so an accessor that stopped at the first
+/// match would let a second install carrying `expiry: None` ride along unseen,
+/// passing the very assertion written to catch it. Callers pin the expected
+/// cardinality and then check every element.
+///
+/// Walks the whole chain (`sub_ability` included) because a card whose earlier
+/// line failed to parse can absorb the clause into that line's chain.
+fn windowed_installs(parsed: &ParsedAbilities) -> Vec<&ReplacementDefinition> {
+    fn walk<'a>(def: &'a AbilityDefinition, found: &mut Vec<&'a ReplacementDefinition>) {
+        if let Effect::AddTargetReplacement {
+            replacement,
+            target: TargetFilter::None,
+        } = &*def.effect
+        {
+            found.push(replacement);
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            walk(sub, found);
+        }
+    }
+
+    let mut found = Vec::new();
+    for def in &parsed.abilities {
+        walk(def, &mut found);
+    }
+    found
+}
+
+/// The one install this card must produce, with its cardinality pinned.
+///
+/// # Panics
+/// If the card produced anything other than exactly one install.
+fn sole_windowed_install<'a>(
+    parsed: &'a ParsedAbilities,
+    context: &str,
+) -> &'a ReplacementDefinition {
+    let installs = windowed_installs(parsed);
+    assert_eq!(
+        installs.len(),
+        1,
+        "{context}: expected exactly one resolution install, found {}",
+        installs.len()
+    );
+    installs[0]
+}
+
 fn permission_mode(def: &StaticDefinition) -> (&CastFrequency, &CardPlayMode) {
     match &def.mode {
         StaticMode::GraveyardCastPermission {
@@ -118,6 +198,31 @@ fn v1_leading_until_end_of_turn_head_no_longer_blocks_the_permission() {
     let (g_freq, g_mode) = permission_mode(&headless);
     assert_eq!(*g_freq, CastFrequency::Unlimited);
     assert_eq!(*g_mode, CardPlayMode::Play);
+
+    // THE WINDOW MUST NOT NARROW THE PERMISSION.
+    //
+    // This row was the gap that let a real bug through. The two assertions above
+    // compare `frequency` and `play_mode` between the windowed and headless
+    // forms, and both matched — while `affected`, the field that decides WHICH
+    // graveyard cards the permission actually offers, silently differed:
+    //
+    //     headless  -> Or[ Typed[Land], Typed[Card] ]   (play lands AND cast spells)
+    //     windowed  -> Typed[Land]                      (the cast half, gone)
+    //
+    // Cause: `try_parse_unlimited_combined_graveyard_permission` — the only
+    // branch that builds the two-part filter — requires a leading
+    // `"you may play "`, and the duration-head strip ran AFTER it. A windowed
+    // sentence fell through to the single-verb dispatch instead.
+    //
+    // Invisible to every parse-shape assertion in this suite, and only
+    // observable at runtime through `graveyard_permission_sources`, which reads
+    // `affected` to decide what a player may cast. Comparing the two forms'
+    // FULL definitions is what closes that class.
+    assert_eq!(
+        def.affected, headless.affected,
+        "CR 611.2a: a stated window scopes the permission, it must not narrow which \
+         cards the permission covers — windowed and headless must agree"
+    );
 }
 
 #[test]
@@ -213,14 +318,15 @@ const CASE_B_WINDOWLESS: &str =
 fn v3_antecedent_window_is_captured_and_stamped_onto_expiry() {
     let parsed = parse_sorcery(CASE_B, "Window Probe");
 
-    // THE discriminating assertions. Pre-change all three fail: 0 replacements,
-    // no expiry to read, and warns == 1.
+    // THE discriminating assertions. Pre-change all three fail: the clause is
+    // dropped entirely, there is no expiry to read, and warns == 1.
     assert_eq!(
         parsed.replacements.len(),
-        1,
-        "U2: the antecedent window must not block the replacement"
+        0,
+        "CR 604.2: a windowed definition is not a printed static and must not be \
+         hosted on the card, where it could never apply"
     );
-    let def = &parsed.replacements[0];
+    let def = sole_windowed_install(&parsed, "U2: the antecedent window must not block it");
     assert_eq!(def.event, ReplacementEvent::Moved);
     assert_eq!(def.destination_zone, Some(Zone::Graveyard));
     assert_eq!(
@@ -235,10 +341,11 @@ fn v3_antecedent_window_is_captured_and_stamped_onto_expiry() {
         "the window is now represented, so the swallow warning must be gone"
     );
 
-    // PAIRED POSITIVE REACH-GUARD. The window-FREE sibling yields a
-    // replacement with `expiry: None`. Without this row, `Some(EndOfTurn)`
+    // PAIRED POSITIVE REACH-GUARD. The window-FREE sibling stays a card-hosted
+    // printed static with `expiry: None`. Without this row, `Some(EndOfTurn)`
     // above could be satisfied by an instrument that reports one value only —
-    // this proves `None` is a distinguishable reading of the same field.
+    // this proves `None` is a distinguishable reading of the same field, and it
+    // pins the CR 604.2 fork: window ⇒ install, no window ⇒ printed static.
     let guard = parse_sorcery(CASE_B_WINDOWLESS, "Windowless Probe");
     assert_eq!(
         guard.replacements.len(),
@@ -248,6 +355,10 @@ fn v3_antecedent_window_is_captured_and_stamped_onto_expiry() {
     assert_eq!(
         guard.replacements[0].expiry, None,
         "CR 604.2: a clause stating no window must keep expiry: None"
+    );
+    assert!(
+        windowed_installs(&guard).is_empty(),
+        "CR 604.2: a windowless clause must NOT be lifted to a resolution install"
     );
 }
 
@@ -339,13 +450,12 @@ fn v4_unbindable_window_is_declined_not_silently_shortened() {
     // 0 / no expiry; post-change it is 1 / Some(EndOfTurn). It proves the
     // window at this position is genuinely parsed.
     let reachable = parse_sorcery(CASE_B, "Window Probe");
-    assert_eq!(
-        reachable.replacements.len(),
-        1,
-        "reach-guard: a BINDABLE window at this position is accepted"
+    let reachable = sole_windowed_install(
+        &reachable,
+        "reach-guard: a BINDABLE window at this position is accepted",
     );
     assert_eq!(
-        reachable.replacements[0].expiry,
+        reachable.expiry,
         Some(RestrictionExpiry::EndOfTurn),
         "reach-guard: and it is stamped"
     );
@@ -362,6 +472,10 @@ fn v4_unbindable_window_is_declined_not_silently_shortened() {
         0,
         "an unbindable window must decline the whole definition, not shorten it"
     );
+    assert!(
+        windowed_installs(&declined).is_empty(),
+        "and it must not reappear through the resolution-install route either"
+    );
 }
 
 #[test]
@@ -373,9 +487,9 @@ fn v4a_this_combat_window_stamps_end_of_combat() {
         "If a card would be put into your graveyard from anywhere this combat, exile that card instead.",
         "Combat Window Probe",
     );
-    assert_eq!(parsed.replacements.len(), 1);
+    let def = sole_windowed_install(&parsed, "a 'this combat' window is bindable");
     assert_eq!(
-        parsed.replacements[0].expiry,
+        def.expiry,
         Some(RestrictionExpiry::EndOfCombat),
         "CR 511.2: 'this combat' expires at the end of the combat phase"
     );
@@ -398,9 +512,12 @@ fn v5_will_cycle_cards_remain_honestly_unsupported() {
     // sorcery, a sorcery preceded by a Suspend line, and a creature's activated
     // ability. All three must yield the SAME verdict, proving the outcome keys
     // on the body rather than on AbilityKind, cost presence, or line index.
-    for (text, name, types, expected_replacements) in [
-        // The two Sorceries expose their line-2 replacement to the card-level
-        // scan; Magus does not, because its line 2 is inside an activated
+    // The install count is EXACT, not a presence flag: each card's line 2 is one
+    // clause and must install exactly one definition, so a duplicate install is
+    // as much a failure as a missing one.
+    for (text, name, types, expected_installs) in [
+        // The two Sorceries expose their line-2 clause to the card-level line
+        // dispatch; Magus does not, because its line 2 is inside an activated
         // ability's effect text.
         (YAWGMOTHS_WILL, "Yawgmoth's Will", &["Sorcery"][..], 1usize),
         (GAEAS_WILL, "Gaea's Will", &["Sorcery"][..], 1usize),
@@ -429,37 +546,38 @@ fn v5_will_cycle_cards_remain_honestly_unsupported() {
                 .any(|a| matches!(&*a.effect, Effect::CreateEmblem { .. })),
             "{name}: B1 must not manufacture an emblem"
         );
-        // (iii) MEASURED, not assumed. The plan's pre-change baseline was
-        // `replacements == 0` for all three cards; U2 CHANGES that for the two
-        // Sorceries, and the honest assertion records the change rather than
-        // the stale baseline.
+        // (iii) MEASURED, not assumed. Yawgmoth's Will and Gaea's Will emit
+        // their real line-2 replacement, correctly windowed
+        // (`expiry: Some(EndOfTurn)`, CR 514.2) — pre-U2 the clause was DROPPED
+        // entirely. Issue #8781 then moved it off the card: a Sorcery never
+        // reaches the `[Battlefield, Command]` zone gate in
+        // `game::replacement::object_replacement_candidate_applies`, so a
+        // card-hosted definition was never consulted; the resolution install
+        // (CR 611.2a) is where it can actually apply.
         //
-        // Yawgmoth's Will and Gaea's Will now emit their real line-2
-        // replacement, correctly windowed: `expiry: Some(EndOfTurn)`. That is
-        // CR 514.2-correct and is precisely U2's purpose — pre-change the
-        // clause was DROPPED entirely (0 replacements + a `Duration_ThisTurn`
-        // swallow warning). It is additionally inert at runtime: a Sorcery
-        // never reaches the `[Battlefield, Command]` zone gate in
-        // `game::replacement::object_replacement_candidate_applies`, so no
-        // definition is ever consulted.
+        // Magus of the Will produces neither, because its line 2 sits INSIDE an
+        // activated ability's effect text, which the card-level line dispatch
+        // does not reach.
         //
-        // Magus of the Will stays at 0 because its line 2 sits INSIDE an
-        // activated ability's effect text, which the card-level replacement
-        // scan does not reach.
-        //
-        // The load-bearing invariant is not "zero replacements" — it is that
-        // NOTHING PERMANENT escapes. Every replacement these cards produce
-        // must carry a window.
+        // The load-bearing invariant is that NOTHING PERMANENT escapes. Every
+        // replacement these cards produce, by EITHER route and however many
+        // there turn out to be, must carry a window.
         assert_eq!(
             parsed.replacements.len(),
-            expected_replacements,
-            "{name}: card-level replacement count"
+            0,
+            "{name}: CR 604.2 — a windowed clause is never a printed static"
         );
-        for r in &parsed.replacements {
+        let installs = windowed_installs(&parsed);
+        assert_eq!(
+            installs.len(),
+            expected_installs,
+            "{name}: resolution-install count"
+        );
+        for r in parsed.replacements.iter().chain(installs) {
             assert_eq!(
                 r.expiry,
                 Some(RestrictionExpiry::EndOfTurn),
-                "{name}: CR 611.2a - this class must NEVER produce a permanent card-level replacement; the stated one-turn window must be stamped"
+                "{name}: CR 611.2a - this class must NEVER produce a permanent replacement; the stated one-turn window must be stamped"
             );
         }
         // (iv) no duration-less permission static escapes U1's head.
@@ -484,33 +602,39 @@ fn v5_will_cycle_cards_remain_honestly_unsupported() {
         "reach-guard: the emblem instrument must be able to see an emblem"
     );
 
-    // REACH-GUARD (beta) for assertion (iii): the replacement path IS live for
-    // this exact sentence in isolation, so the cards' 0 is a real absence
-    // rather than a dead instrument.
+    // REACH-GUARD (beta) for assertion (iii): the install path IS live for this
+    // exact sentence in isolation, so Magus's absence is a real absence rather
+    // than a dead instrument.
     let live = parse_sorcery(CASE_B, "Window Probe");
     assert_eq!(
-        live.replacements.len(),
+        windowed_installs(&live).len(),
         1,
-        "reach-guard: the replacement path is live for this clause standalone"
+        "reach-guard: the install path is live for this clause standalone"
     );
 }
 
 #[test]
 fn v5b_the_same_grammar_on_a_permanent_host_is_stamped_not_permanent() {
     // HOST-TYPE hostile fixture, and the row that proves U2 earns its keep
-    // BEYOND the three printed cards. The card-level replacement scan is
-    // host-type-agnostic, so this shape on a Creature or an Enchantment host
-    // yields a LIVE replacement. Pre-change it is live and PERMANENT
-    // (`expiry: None`); post-change it self-expires at cleanup.
+    // BEYOND the three printed cards. Both the line dispatch and the CR 611.2a
+    // static-versus-created fork are host-type-agnostic, so this shape on a
+    // Creature or an Enchantment host reaches the same resolution install.
+    // Pre-U2 it was live and PERMANENT (`expiry: None`); it now carries the
+    // stated window wherever it lands.
     for host in [&["Creature"][..], &["Enchantment"][..]] {
         let parsed = parse_with_types(CASE_B, "Permanent Host Probe", host);
         assert_eq!(
             parsed.replacements.len(),
-            1,
-            "{host:?}: replacement is live"
+            0,
+            "{host:?}: CR 604.2 — a windowed clause is not a printed static on \
+             any host type"
+        );
+        let def = sole_windowed_install(
+            &parsed,
+            &format!("{host:?}: the windowed clause must still be represented"),
         );
         assert_eq!(
-            parsed.replacements[0].expiry,
+            def.expiry,
             Some(RestrictionExpiry::EndOfTurn),
             "{host:?}: CR 514.2 — a stated one-turn window must not install a \
              PERMANENT replacement on a permanent host"

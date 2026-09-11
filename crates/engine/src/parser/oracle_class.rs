@@ -284,6 +284,13 @@ pub(crate) fn parse_class_oracle_text(
                     ));
                     continue;
                 }
+                // NOTE: the CR 611.2a resolution-install lift the two general
+                // line dispatchers apply here (`oracle.rs`, `oracle_dispatch.rs`)
+                // is deliberately absent. A Class section's replacement is
+                // level-gated by `wrap_replacement_with_class_level` (CR 716.2a),
+                // and an install `Effect` has nowhere to carry that gate — a lift
+                // here would silently drop it. No Class card prints a windowed
+                // replacement clause, so the gap costs no coverage.
             }
 
             // Ability word prefixed lines

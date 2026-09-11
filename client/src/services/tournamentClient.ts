@@ -14,7 +14,10 @@ import type {
   TournamentUpdateReply,
   TournamentView,
 } from "../adapter/types";
-import { MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK } from "../adapter/ws-adapter";
+import {
+  MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING,
+  MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK,
+} from "../adapter/ws-adapter";
 import type { PhaseSocket } from "./openPhaseSocket";
 
 /**
@@ -538,7 +541,14 @@ function gatedRequestOver(
 export interface CreateTournamentRequest {
   name: string;
   arity: MatchArity;
-  scoring: ScoringPolicy;
+  /**
+   * `null` means "Automatic" — let the broker apply its arity default
+   * (`ScoringPolicy::default_for_arity`) and report the resolved value back on
+   * `TournamentSummary.scoring`. An explicit policy overrides it. The send path
+   * substitutes {@link defaultScoringForArity} for a `null` here only against a
+   * pre-v6 broker that cannot accept an omitted `scoring`.
+   */
+  scoring: ScoringPolicy | null;
   bracket: BracketShape;
   totalRounds?: number | null;
   /**
@@ -590,12 +600,56 @@ export function matchTypeNeedsCapability(
   return matchType !== preV8Default;
 }
 
-/** `CreateTournament` → `TournamentCreated` (point reply, carries the token). */
+/**
+ * The BELOW-FLOOR COMPATIBILITY FALLBACK for {@link createTournamentOver}'s
+ * `scoring` gate, for a given arity. Mirrors `ScoringPolicy::default_for_arity`
+ * (`crates/lobby-broker/src/tournament.rs`).
+ *
+ * As of lobby protocol v6 the broker owns this default: `CreateTournament.scoring`
+ * is `Option<ScoringPolicy>` with `#[serde(default)]`, so a client omits it
+ * (`scoring: null`) and reads the resolved value back off
+ * `TournamentSummary.scoring`. The create form computes no default at all.
+ *
+ * This helper survives ONLY for the one direction that is not symmetric:
+ * omitting `scoring` against a pre-v6 broker is a hard `missing field \`scoring\``
+ * parse error, not a degrade, so below {@link MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING}
+ * the send path substitutes this explicit policy. It lives here, beside its sole
+ * consumer, rather than in `pages/tournamentPageState.ts`: a value import from
+ * that module would close the runtime cycle
+ * `tournamentClient → tournamentPageState → multiplayerStore → tournamentClient`.
+ *
+ * Arity-dependent by design: a fixed 3/1/0 would silently give every pod
+ * organizer MTR head-to-head scoring instead of MSTR pod scoring.
+ */
+export function defaultScoringForArity(arity: MatchArity): ScoringPolicy {
+  return { win_points: 2 * arity - 1, draw_points: 1, loss_points: 0 };
+}
+
+/**
+ * `CreateTournament` → `TournamentCreated` (point reply, carries the token).
+ *
+ * The `scoring` gate reads a **floor**, never the current version, exactly as
+ * `gatedRequestOver` reads {@link MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK}: a v6
+ * or v7 broker still applies its own default, so `req.scoring === null` is sent
+ * as an omitted `scoring: null` and the broker resolves it. Below
+ * {@link MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING} — including a peer that
+ * advertises no lobby version at all, which predates broker-owned scoring — an
+ * omitted policy is a hard parse error there, so the client substitutes the
+ * explicit {@link defaultScoringForArity}. An explicit `req.scoring` is always
+ * sent verbatim regardless of version.
+ */
 export function createTournamentOver(
   socket: PhaseSocket,
   req: CreateTournamentRequest,
   opts: TournamentRequestOptions = {},
 ): Promise<TournamentRpcResult<TournamentCreatedReply>> {
+  const lobbyProtocolVersion = socket.serverInfo.lobbyProtocolVersion;
+  const brokerOwnsDefault =
+    lobbyProtocolVersion !== undefined &&
+    lobbyProtocolVersion >= MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING;
+  const scoring =
+    req.scoring ?? (brokerOwnsDefault ? null : defaultScoringForArity(req.arity));
+
   return requestOver<TournamentCreatedReply>(
     socket,
     {
@@ -603,7 +657,7 @@ export function createTournamentOver(
       data: {
         name: req.name,
         arity: req.arity,
-        scoring: req.scoring,
+        scoring,
         bracket: req.bracket,
         total_rounds: req.totalRounds ?? null,
         plus_rounds: req.plusRounds ?? null,

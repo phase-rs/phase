@@ -1976,6 +1976,55 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         );
     }
 
+    // CR 611.2a + CR 514.2: strip an optional LEADING duration head HERE, before
+    // the combined-permission branch below, so a sentence that states its window
+    // up front reaches the same body as its headless twin.
+    //
+    // This used to sit further down, AFTER
+    // `try_parse_unlimited_combined_graveyard_permission`. That branch requires
+    // a leading `"you may play "` and splits on `" and cast "` — it is the only
+    // one that builds the two-part `Or[Land, Card]` filter — so the Will cycle's
+    // windowed form never reached it and fell through to the single-verb
+    // dispatch, which yields a LAND-ONLY `affected`.
+    //
+    // MEASURED, the same sentence in both forms:
+    //   "You may play lands and cast spells from your graveyard."
+    //       -> affected = Or[ Typed[Land], Typed[Card] ]   (both halves)
+    //   "Until end of turn, you may play lands and cast spells from your graveyard."
+    //       -> affected = Typed[Land]                      (cast half LOST)
+    //
+    // `graveyard_permission_sources` consults `affected` to decide which
+    // graveyard cards a permission offers, so dropping the `Card` branch removed
+    // the spell half of every windowed permission in this class — silently, and
+    // only at runtime, which is why parse-shape tests never saw it.
+    //
+    // The phrase -> `Duration` mapping stays owned by the single duration grammar
+    // (`oracle_nom::duration::parse_duration`); this site owns only the leading
+    // position and the ", " split. `opt`-shaped, so text with no leading duration
+    // reaches every branch below byte-identically.
+    //
+    // CR 611.2a's second sentence ("If no duration is stated, it lasts until the
+    // end of the game") makes the captured window load-bearing, but
+    // `StaticDefinition` has no duration/expiry field, so there is no storage
+    // site at this layer. The value is consumed and EXPLICITLY DISCARDED to make
+    // the body reachable.
+    //
+    // DISCARDING IT IS SAFE ONLY BECAUSE NO CARD ROUTES HERE YET. Measured: the
+    // corpus contains zero `GraveyardCastPermission` statics, because the Will
+    // cycle's sentence reaches the EFFECT path, not this static path. Any future
+    // change that routes a windowed permission through here must thread the
+    // window to a real expiry first — otherwise CR 611.2a makes the grant last
+    // until end of GAME, which is strictly worse than not parsing it.
+    let lower = {
+        use crate::parser::oracle_nom::duration::parse_duration;
+        match nom_on_lower(lower, lower, |i| {
+            terminated(parse_duration, tag::<_, _, OracleError<'_>>(", ")).parse(i)
+        }) {
+            Some((_duration, rest)) => rest,
+            None => lower,
+        }
+    };
+
     // CR 305.1 + CR 601.2a + CR 114.4: Unlimited combined permission —
     // "You may play lands and cast permanent spells from your graveyard."
     // (Wrenn and Realmbreaker emblem). Composed through the shared branch
@@ -2004,42 +2053,12 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         return Some(def);
     }
 
-    // CR 611.2a + CR 514.2: Optional LEADING duration head — "Until end of
-    // turn, you may play lands and cast spells from your graveyard."
-    // (Yawgmoth's Will / Gaea's Will / Magus of the Will class). Without this
-    // head the whole permission body below is unreachable for any sentence
-    // that states its window up front; with it, the body is reachable under
-    // the ENTIRE duration grammar, not one hard-coded phrase.
-    //
-    // The phrase -> `Duration` mapping is owned by the single duration grammar
-    // (`oracle_nom::duration::parse_duration`); this site owns only the leading
-    // position and the ", " split. It is the general-duration sibling of the
-    // fixed "during your turn, " head immediately below.
-    //
-    // CR 611.2a's second sentence ("If no duration is stated, it lasts until
-    // the end of the game") is what makes the captured window load-bearing —
-    // but `StaticDefinition` has NO duration/expiry field, so there is no
-    // storage site at this layer. The value is therefore consumed and
-    // EXPLICITLY DISCARDED so the body below is reachable; its host is
-    // `Effect::GenericEffect { static_abilities, duration }`, and threading it
-    // there is deferred to a later phase. Measured safe: the cards carrying
-    // this shape reach the effect path rather than the static-line path, so
-    // this head produces no duration-less permission static today.
-    //
-    // CR 305.1 + CR 601.2a: the body below grants both the land play and the
-    // spell cast, so a single stated window scopes both halves.
-    //
-    // `opt`-shaped: text with no leading duration reaches the body
-    // byte-identically.
-    let lower = {
-        use crate::parser::oracle_nom::duration::parse_duration;
-        match nom_on_lower(lower, lower, |i| {
-            terminated(parse_duration, tag::<_, _, OracleError<'_>>(", ")).parse(i)
-        }) {
-            Some((_duration, rest)) => rest,
-            None => lower,
-        }
-    };
+    // NOTE: the leading-duration head (B1's U1) is stripped ABOVE, before the
+    // combined-permission branch, rather than here. It used to sit at this
+    // position, which put it AFTER
+    // `try_parse_unlimited_combined_graveyard_permission` and so hid the Will
+    // cycle's windowed form from the only branch that builds the two-part
+    // `Or[Land, Card]` filter. See the hoisted site for the measurement.
 
     // CR 117.1c: Optional "during your turn, " timing qualifier (Festival of
     // Embers). When present, the permission is gated to the source controller's

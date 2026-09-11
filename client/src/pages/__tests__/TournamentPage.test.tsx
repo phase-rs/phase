@@ -261,8 +261,9 @@ function h2hView(code = "TOUR01", overrides: Partial<TournamentView> = {}): Tour
  * outcome, in which Alice has dropped while three active seats remain.
  *
  * Every clause is load-bearing. `round === current_round` keeps `myPairing`
- * matching (C3 passes), `outcome: null` keeps `isReportable` true (the arm
- * gate passes), and `>= 2` remaining active seats is exactly the shape
+ * matching (C3 passes), `outcome: null` with no `report_gate` keeps
+ * `isPairingReportable` true (via its outcome-only fallback, so the arm gate
+ * passes), and `>= 2` remaining active seats is exactly the shape
  * `drop_player` leaves behind when its one-survivor forfeit guard does not
  * fire — so C2 is the ONLY conjunct that can refuse Alice.
  *
@@ -558,6 +559,47 @@ describe("TournamentPage Bo1 result entry", () => {
   });
 });
 
+// An open report dialog consumes the same broker `report_gate` the Report
+// button does: a broadcast that closes the gate (the tournament ends) must
+// close the dialog, not leave it offering a submit the broker will refuse.
+describe("TournamentPage report dialog gate", () => {
+  it("closes an open report dialog when a broadcast closes the pairing's gate", async () => {
+    const user = userEvent.setup();
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    useMultiplayerStore.setState({
+      tournamentCredentials: { TOUR01: playerCredential("alice") },
+    });
+    await mountWith(fake, h2hView());
+
+    await user.click(screen.getByRole("button", { name: "Report Result" }));
+    await settle();
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    // The tournament ends: the pairing's report_gate closes to
+    // `TournamentNotRunning`.
+    const closed: TournamentView = {
+      ...h2hView(),
+      summary: { ...summaryFor("TOUR01"), status: "Completed" },
+      pairings: [
+        {
+          id: 1,
+          round: 1,
+          players: [ALICE, BOB],
+          outcome: { Reported: "Draw" },
+          report_gate: "TournamentNotRunning",
+        },
+      ],
+    };
+    await act(async () => {
+      fake.deliver("TournamentUpdate", { code: "TOUR01", view: closed });
+    });
+    await settle();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
 // ── V11 — no page ever writes a view from an RPC result ──────────────────
 
 describe("TournamentPage RPC-result provenance", () => {
@@ -771,6 +813,97 @@ describe("TournamentPage organizer gating", () => {
 
     expect(screen.queryByText("Start Round")).toBeNull();
     expect(screen.getAllByText("Report Result")).toHaveLength(1);
+  });
+});
+
+// ── Protocol v6 — broker-owned action legality and resolved scoring ──────
+
+describe("TournamentPage v6 affordances", () => {
+  // `open_actions` withholds End Tournament in a state the broker refuses it
+  // (Registration): the organizer-side counterpart to the report_gate fix.
+  it("withholds End Tournament when open_actions omits it", async () => {
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    useMultiplayerStore.setState({ tournamentCredentials: { TOUR01: ORGANIZER } });
+    const view = h2hView("TOUR01", {
+      summary: { ...summaryFor("TOUR01"), open_actions: ["StartRound", "Drop"] },
+    });
+    await mountWith(fake, view);
+
+    expect(screen.getByText("Start Round")).toBeTruthy();
+    expect(screen.queryByText("End Tournament")).toBeNull();
+  });
+
+  // A terminal event's `open_actions` is empty, so the whole organizer panel
+  // disappears rather than rendering a heading over no controls.
+  it("hides the organizer panel entirely when open_actions is empty", async () => {
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    useMultiplayerStore.setState({ tournamentCredentials: { TOUR01: ORGANIZER } });
+    const view = h2hView("TOUR01", {
+      summary: { ...summaryFor("TOUR01"), status: "Completed", open_actions: [] },
+    });
+    await mountWith(fake, view);
+
+    expect(screen.queryByText("Start Round")).toBeNull();
+    expect(screen.queryByText("End Tournament")).toBeNull();
+    expect(screen.queryByText("Organizer controls")).toBeNull();
+    // Reach-guard: the page really rendered this tournament.
+    expect(screen.getByText("Event TOUR01")).toBeTruthy();
+  });
+
+  // `open_actions` gates Drop too, on top of the C1/C2 player conjuncts.
+  it("withholds Drop when open_actions omits it, even for an active entrant", async () => {
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    useMultiplayerStore.setState({
+      tournamentCredentials: { TOUR01: playerCredential("alice") },
+    });
+    const view = h2hView("TOUR01", {
+      summary: { ...summaryFor("TOUR01"), open_actions: ["StartRound"] },
+    });
+    await mountWith(fake, view);
+
+    expect(screen.queryByText("Drop")).toBeNull();
+    // Reach-guard: the player affordance that does NOT read open_actions("Drop")
+    // still renders, so this is not a page that withheld everything.
+    expect(screen.getAllByText("Report Result")).toHaveLength(1);
+  });
+
+  // The resolved scoring policy is read straight off the summary and rendered.
+  it("renders the resolved scoring policy from the summary", async () => {
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    // A policy no arity default (`{2n-1, 1, 0}`) and not the former client-side
+    // h2h default (`{3, 1, 0}`) could produce: `win_points` is even (defaults
+    // are always odd), `draw_points` is 2 (defaults are 1), `loss_points` is 1
+    // (defaults are 0). Asserting all three label/value pairs is what proves the
+    // page renders the broker's wire data verbatim — the test would otherwise
+    // pass if the page reintroduced a local default or dropped draw/loss.
+    const view = h2hView("TOUR01", {
+      summary: {
+        ...summaryFor("TOUR01"),
+        scoring: { win_points: 4, draw_points: 2, loss_points: 1 },
+      },
+    });
+    const { container } = await mountWith(fake, view);
+
+    // A `span` title, distinct from the standings table's `th` of the same
+    // title (`standings.matchPointsTitle`).
+    const readout = container.querySelector('span[title="Match points"]');
+    expect(readout).not.toBeNull();
+    expect(readout?.textContent).toContain("Win 4");
+    expect(readout?.textContent).toContain("Draw 2");
+    expect(readout?.textContent).toContain("Loss 1");
+  });
+
+  // Absent from a pre-v6 broker's summary → nothing rendered, never recomputed.
+  it("renders no scoring readout when the summary omits it", async () => {
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    const { container } = await mountWith(fake, h2hView());
+
+    expect(container.querySelector('span[title="Match points"]')).toBeNull();
   });
 });
 

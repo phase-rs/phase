@@ -7422,6 +7422,120 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
     }
 }
 
+/// CR 109.2: does this `TypedFilter` name a zone of its own? A bare descriptive
+/// reference ("a creature you control") names none; one that says "in your
+/// graveyard" / "on the battlefield" carries an `InZone`/`InAnyZone` prop that
+/// `filter_inner` already enforces.
+///
+/// Nearest neighbor: `layers.rs::target_filter_reads_zone` runs the identical
+/// `InZone`/`InAnyZone` prop scan and recurses `Or`/`And`/`Not`. A separate
+/// helper is correct here because it answers a DIFFERENT question — "does the
+/// filter name ANY zone at all?" (a boolean gate on emptiness of the zone
+/// axis) versus that function's "does the filter constrain to this SPECIFIC
+/// `zone`?" — and because `target_filter_reads_zone` is module-private to
+/// `layers.rs` (game must not reach across modules for a private predicate,
+/// and `layers.rs` is out of bounds for this change).
+fn typed_reference_names_zone(tf: &TypedFilter) -> bool {
+    tf.properties
+        .iter()
+        .any(|p| matches!(p, FilterProp::InZone { .. } | FilterProp::InAnyZone { .. }))
+}
+
+/// CR 109.2 + CR 109.2a/b: decide whether `reference_obj` is admitted as the
+/// referent of `reference_filter`, applying the zone default per leg.
+///
+/// * A bare descriptive `Typed` reference that names no zone means a permanent
+///   ON THE BATTLEFIELD (CR 109.2) — the half of the contract this scan
+///   previously left unimplemented (it only excluded the stack, CR 109.2b).
+/// * A `Typed` reference that names a zone keeps it; `filter_inner`'s
+///   `InZone`/`InAnyZone` props are the single authority for that zone (CR 109.2a).
+/// * `Or` recurses so a disjunctive reference ("a creature you control OR a
+///   creature card in your graveyard", Volo) binds the battlefield default to
+///   the zone-less leg only.
+/// * Any other (identity/anaphoric) reference — `SelfRef`, etc. — keeps the
+///   prior "anything but the stack" rule; CR 109.2 scopes only to descriptions
+///   that include a card type or subtype, which "it"/"~" do not.
+///
+/// CR 109.2 PRECONDITION: CR 109.2 applies only to descriptions that include a
+/// card type/subtype, and EXCLUDES descriptions containing the word
+/// "card"/"spell"/"source"/"scheme" (CR 109.2a/b/c). The `Typed` arm below
+/// honors the first half literally — an empty `type_filters` list carries no
+/// type word, so it is NOT given the battlefield default. A corpus census of
+/// `client/public/card-data.json` (measured: 112 `SharesQuality` nodes across 96
+/// cards) shows exactly one such reference: Tiamat's "Dragon cards not named
+/// Tiamat" → `Typed { type_filters: [], properties: [Named "tiamat"] }`, which
+/// therefore keeps the prior "anything but the stack" rule.
+///
+/// The second half — the "card"/"spell"/"source" word exclusion — cannot be
+/// honored literally, because the engine's `TargetFilter` has no representation
+/// for a zone-less "card" word. The census bounds that gap instead: every
+/// `Typed` reference that includes the word "card" (core type `Card`) already
+/// carries an explicit `InZone`, and the only such references (Frostpyre
+/// Arcanist, Pyromancer Ascension) all resolve `InZone Graveyard`, so
+/// `typed_reference_names_zone` keeps their zone rather than defaulting to the
+/// battlefield. Every remaining zone-less, type-bearing `Typed` reference is a
+/// bare permanent description ("a creature/land you control"), for which the
+/// battlefield default is exactly what CR 109.2 prescribes. Re-measure this
+/// census before widening the arm; a new printing is what would invalidate it.
+///
+/// COMPOUND SHAPES (`And` / `Not`) are deliberately left on the `_` arm's prior
+/// "anything but the stack" rule rather than given speculative recursion, and
+/// the bound on that is EMPIRICAL, not structural. `parse_shared_quality_reference`
+/// (`parser/oracle_target.rs`) is the sole producer of this `reference`; its own
+/// arms emit `Typed`, `Or { Typed, Typed }`, and the identity/anaphoric filters
+/// (`CostPaidObject`, `TriggeringSource`, `ParentTarget`, `TrackedSet`), but its
+/// final leg delegates to the general `parse_target`, which CAN build `And`/`Not`
+/// for other noun phrases — so reachability is bounded by which reference
+/// phrasings printed cards actually use, not by construction. The corpus census
+/// above measures that bound: across all 112 `SharesQuality` nodes the only
+/// reference shapes present are `Typed`, a single `Or` (Volo), and anaphors —
+/// zero `And`, zero `Not`. `Not` in particular has no grounded zone semantics
+/// here ("an object that is NOT a creature you control" does not inherit a
+/// battlefield default from the negated description), so inventing one against
+/// no card would be untested rule-making. If a printing ever makes an `And`/`Not`
+/// reference reachable, extend this match with that shape's real zone rule (for
+/// `And`, the natural reading is "apply the battlefield default unless SOME leg
+/// names a zone"; `layers.rs::target_filter_reads_zone` is the syntactic analog)
+/// and add a card-backed test — do not take this comment's parenthetical as the
+/// answer.
+fn reference_leg_admits(
+    state: &GameState,
+    reference_id: ObjectId,
+    reference_obj: &GameObject,
+    reference_filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    match reference_filter {
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|leg| reference_leg_admits(state, reference_id, reference_obj, leg, ctx)),
+        TargetFilter::Typed(tf) => {
+            // CR 109.2's precondition is a description that INCLUDES A CARD TYPE
+            // OR SUBTYPE. An empty `type_filters` list carries no such type word
+            // — the reference is characteristic-only ("not named Tiamat" →
+            // `Typed { type_filters: [], properties: [Named] }`, the corpus's one
+            // instance) — so CR 109.2 does not reach it and it must NOT inherit
+            // the battlefield default. Those keep the prior "anything but the
+            // stack" rule, which is what sources Tiamat's own name for its
+            // "Dragon cards not named Tiamat" search in the CR 113.7a window
+            // where the triggered ability outlives its source — Tiamat having
+            // left the battlefield before its enters trigger resolves.
+            let zone_ok = if tf.type_filters.is_empty() {
+                reference_obj.zone != Zone::Stack
+            } else if typed_reference_names_zone(tf) {
+                true
+            } else {
+                reference_obj.zone == Zone::Battlefield
+            };
+            zone_ok && filter_inner(state, reference_id, reference_filter, ctx)
+        }
+        _ => {
+            reference_obj.zone != Zone::Stack
+                && filter_inner(state, reference_id, reference_filter, ctx)
+        }
+    }
+}
+
 fn object_shares_quality_with_reference_filter(
     state: &GameState,
     obj: &GameObject,
@@ -7473,26 +7587,32 @@ fn object_shares_quality_with_reference_filter(
         recipient_id: source.recipient_id,
         scoped_iteration_player: None,
     };
-    // CR 109.2 + CR 205.3m: a bare type reference such as "a creature you
-    // control" or "a creature card in your graveyard" denotes an object in the
-    // zone that reference implies — a permanent on the battlefield or a card in
-    // the named zone — never a spell on the stack. A creature spell being cast
-    // (Volo, Guide to Monsters; Menagerie Curator) is itself on the stack, and
-    // any sibling creature spell on the stack is likewise not a "creature you
-    // control" permanent. Excluding stack objects from the reference scan keeps
-    // any same-type spell (the one under test AND its siblings) from
-    // self-satisfying the "shares a creature type" test; stack-scoped references
-    // (TriggeringSource / ParentTarget) are resolved by the branches above, so
-    // this scan only ever backs bare permanent/card references. Battlefield- and
+    // CR 109.2 + CR 205.3m: resolve a bare descriptive reference such as "a
+    // creature you control" or "a creature card in your graveyard" to the zone
+    // that description implies, per leg. CR 109.2: a zone-less description that
+    // includes a card type/subtype means a permanent of that type ON THE
+    // BATTLEFIELD — the half of the contract this scan previously left
+    // unimplemented (it only excluded the stack). CR 109.2a: a description that
+    // names a zone keeps it, enforced by `filter_inner`'s `InZone`/`InAnyZone`
+    // props (the single authority for that zone). CR 109.2b: a spell being cast
+    // (Volo, Guide to Monsters; Menagerie Curator) is on the stack and is never
+    // a "creature you control" permanent, and any sibling creature spell on the
+    // stack is likewise excluded — so a same-type spell cannot self-satisfy the
+    // "shares a creature type" test. Stack-scoped references (TriggeringSource /
+    // ParentTarget) are resolved by the branches above, so this scan only ever
+    // backs bare permanent/card references. `Or` is evaluated per leg so a
+    // disjunctive reference (Volo's battlefield-or-graveyard) binds the
+    // battlefield default to the zone-less leg only. Battlefield- and
     // graveyard-to-object comparisons keep their existing self-inclusive
-    // semantics.
+    // semantics; only the previously-unguarded library/hand self-match (the
+    // Descendants' Path defect, where the revealed library card satisfied its
+    // own "a creature you control" reference) is closed.
     state.objects.keys().copied().any(|reference_id| {
         state
             .objects
             .get(&reference_id)
             .is_some_and(|reference_obj| {
-                reference_obj.zone != Zone::Stack
-                    && filter_inner(state, reference_id, reference_filter, &ctx)
+                reference_leg_admits(state, reference_id, reference_obj, reference_filter, &ctx)
                     && {
                         let values = object_shared_quality_values(
                             reference_obj,
