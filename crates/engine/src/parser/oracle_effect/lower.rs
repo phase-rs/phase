@@ -6095,35 +6095,45 @@ fn strip_performed_action_this_way_clause(
     ))
 }
 
+/// CR 607.2a + CR 108.3: The linked-exile owner subject — "the exiled card's
+/// owner", "the exiled cards' owners", "the owner of each card exiled with
+/// <source>" — naming the owner of each card the source's linked exile ability
+/// exiled. Consumes the trailing space, leaving the verb (or modal `may `).
+///
+/// Single authority for the subject grammar: the mandatory route
+/// (`strip_linked_exile_owner_subject`, Skyclave Apparition) and the optional
+/// route (`clause_shell::try_peel_opponent_may_prefix`, Spell Queller) both
+/// compose it, so the two cannot drift apart.
+pub(crate) fn parse_linked_exile_owner_subject(i: &str) -> OracleResult<'_, PlayerFilter> {
+    alt((
+        value(
+            PlayerFilter::OwnersOfCardsExiledBySource,
+            tag("the exiled card's owner "),
+        ),
+        value(
+            PlayerFilter::OwnersOfCardsExiledBySource,
+            tag("the exiled cards' owners "),
+        ),
+        // CR 406.2 + CR 610.3: "the owner of each card exiled with <source> "
+        // — the source-linked exile cleanup subject (Trial of a Time Lord IV:
+        // "the owner of each card exiled with ~ puts that card on the bottom
+        // of their library"). The self-ref token is `~` after normalization,
+        // or the literal "this saga" pre-normalization; compose the prefix
+        // with the source token rather than verbatim-matching the card name.
+        value(
+            PlayerFilter::OwnersOfCardsExiledBySource,
+            preceded(
+                tag("the owner of each card exiled with "),
+                (alt((tag("~"), tag("this saga"))), tag(" ")),
+            ),
+        ),
+    ))
+    .parse(i)
+}
+
 fn strip_linked_exile_owner_subject(text: &str) -> (Option<PlayerFilter>, String) {
     let lower = text.to_lowercase();
-    let scope_rest = nom_on_lower(text, &lower, |i| {
-        alt((
-            value(
-                PlayerFilter::OwnersOfCardsExiledBySource,
-                tag::<_, _, OracleError<'_>>("the exiled card's owner "),
-            ),
-            value(
-                PlayerFilter::OwnersOfCardsExiledBySource,
-                tag("the exiled cards' owners "),
-            ),
-            // CR 406.2 + CR 610.3: "the owner of each card exiled with <source> "
-            // — the source-linked exile cleanup subject (Trial of a Time Lord IV:
-            // "the owner of each card exiled with ~ puts that card on the bottom
-            // of their library"). The self-ref token is `~` after normalization,
-            // or the literal "this saga" pre-normalization; compose the prefix
-            // with the source token rather than verbatim-matching the card name.
-            value(
-                PlayerFilter::OwnersOfCardsExiledBySource,
-                preceded(
-                    tag("the owner of each card exiled with "),
-                    (alt((tag("~"), tag("this saga"))), tag(" ")),
-                ),
-            ),
-        ))
-        .parse(i)
-    });
-    let Some((scope, rest)) = scope_rest else {
+    let Some((scope, rest)) = nom_on_lower(text, &lower, parse_linked_exile_owner_subject) else {
         return (None, text.to_string());
     };
 

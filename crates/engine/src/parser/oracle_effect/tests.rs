@@ -25185,25 +25185,65 @@ fn parse_emry_cast_that_card_this_turn_is_cast_from_zone() {
     }
 }
 
+/// CR 607.2a + CR 108.3 + CR 608.2g + CR 118.9: "the exiled card's owner may
+/// cast that card without paying its mana cost" (Spell Queller) is two
+/// existing building blocks composed: the optional linked-exile-owner subject
+/// peel and the ordinary free-cast body. On every subject spelling:
+/// - the choice is optional and fans out per owner (`player_scope`);
+/// - the cast happens while the ability resolves, so declining leaves no
+///   standing permission (the card's ruling: the owner can't wait to cast it
+///   later);
+/// - each owner's cast is limited to the linked card that owner owns.
 #[test]
-fn parse_linked_exile_owner_free_cast_permission() {
-    let def = parse_effect_chain(
-        "The exiled card's owner may cast that card without paying its mana cost.",
-        AbilityKind::Triggered,
-    );
-
-    assert!(matches!(
-        &*def.effect,
-        Effect::GrantCastingPermission {
-            permission: CastingPermission::ExileWithAltCost {
-                cost,
-                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
-                ..
-            },
-            target: TargetFilter::ExiledBySource,
-            grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
-        } if *cost == ManaCost::zero()
-    ));
+fn parse_linked_exile_owner_may_cast_that_card_is_owner_scoped_resolution_cast() {
+    let owned_linked_card = TargetFilter::And {
+        filters: vec![
+            TargetFilter::ExiledBySource,
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::You,
+            }])),
+        ],
+    };
+    for subject in [
+        "The exiled card's owner",
+        "The owner of each card exiled with ~",
+    ] {
+        let def = parse_effect_chain(
+            &format!("{subject} may cast that card without paying its mana cost."),
+            AbilityKind::Spell,
+        );
+        let Effect::CastFromZone {
+            target,
+            without_paying_mana_cost,
+            mode,
+            cast_transformed,
+            alt_ability_cost,
+            constraint,
+            duration,
+            driver,
+            mana_spend_permission,
+        } = &*def.effect
+        else {
+            panic!("{subject}: expected CastFromZone, got {:?}", def.effect);
+        };
+        assert_eq!(target, &owned_linked_card, "{subject}");
+        assert!(*without_paying_mana_cost, "{subject}");
+        assert_eq!(mode, &Cast, "{subject}");
+        assert!(!*cast_transformed, "{subject}");
+        assert_eq!(alt_ability_cost, &None, "{subject}");
+        assert_eq!(constraint, &None, "{subject}");
+        assert_eq!(duration, &None, "{subject}");
+        assert_eq!(driver, &DuringResolution, "{subject}");
+        assert_eq!(mana_spend_permission, &None, "{subject}");
+        assert!(def.optional, "{subject}");
+        assert_eq!(def.optional_for, None, "{subject}");
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::OwnersOfCardsExiledBySource),
+            "{subject}"
+        );
+        assert!(def.sub_ability.is_none(), "{subject}");
+    }
 }
 
 /// Regression for PR #2185: an impulse-draw chain ("Exile the top card... you
