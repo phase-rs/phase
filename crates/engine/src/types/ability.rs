@@ -23517,8 +23517,11 @@ pub struct AbilityDefinition {
     /// any-opponent permission. Requires `optional: true`; prompts use APNAP order.
     pub optional_for: Option<OpponentMayScope>,
     /// Variable-count targeting: min/max targets the player can choose.
-    /// When present, resolution enters MultiTargetSelection instead of immediate resolve.
-    /// CR 601.2c + CR 115.1d.
+    /// CR 601.2c + CR 115.1d: when present, target choice on the stack emits one
+    /// `TargetSelectionSlot` per allowed target (up to the resolved max), with
+    /// slots at or above the resolved min marked optional, and surfaces them via
+    /// `WaitingFor::TargetSelection` (spells and activated abilities) or
+    /// `WaitingFor::TriggerTargetSelection` (triggered abilities).
     pub multi_target: Option<MultiTargetSpec>,
     /// CR 115.1 + CR 601.2c: Additional legality constraints across selected targets.
     pub target_constraints: Vec<TargetSelectionConstraint>,

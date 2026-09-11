@@ -5,7 +5,7 @@
 
 use engine::game::effects::register_bending::resolve as resolve_register_bending;
 use engine::game::game_object::BackFaceData;
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::triggers::process_triggers;
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{AbilityKind, Effect, ResolvedAbility};
@@ -20,6 +20,9 @@ use engine::types::triggers::TriggerMode;
 const AVATAR_AANG_ORACLE: &str = "Flying, firebending 2\nWhenever you waterbend, earthbend, \
      firebend, or airbend, draw a card. Then if you've done all four this turn, transform \
      Avatar Aang.";
+
+const AIRBENDING_LESSON_ORACLE: &str = "Airbend target nonland permanent. (Exile it. While \
+     it's exiled, its owner may cast it for {2} rather than its mana cost.)\nDraw a card.";
 
 fn drain_to_priority(runner: &mut engine::game::scenario::GameRunner) {
     let mut guard = 0;
@@ -128,22 +131,29 @@ fn avatar_aang_transforms_after_fourth_bend_in_same_turn() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
     let aang = seed_aang(&mut scenario);
-    // One library card per bend trigger draw.
-    for i in 0..4 {
+    let lesson = scenario
+        .add_spell_to_hand_from_oracle(P0, "Airbending Lesson", true, AIRBENDING_LESSON_ORACLE)
+        .id();
+    let victim = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
+    // One library card per bend trigger draw, plus Airbending Lesson's own draw.
+    for i in 0..5 {
         scenario.add_card_to_library_top(P0, &format!("Lib {i}"));
     }
     let mut runner = scenario.build();
     attach_aang_back_face(&mut runner, aang);
     assert!(!runner.state().objects[&aang].transformed);
 
-    for kind in [
-        BendingType::Water,
-        BendingType::Earth,
-        BendingType::Fire,
-        BendingType::Air,
-    ] {
+    for kind in [BendingType::Water, BendingType::Earth, BendingType::Fire] {
         register_bend(&mut runner, kind, aang);
     }
+    // CR 701.65b: an airbend counts only when it exiles something, so the fourth
+    // bend is a real airbend through the cast pipeline.
+    runner.cast(lesson).target_object(victim).resolve();
+    assert_eq!(
+        runner.state().objects[&victim].zone,
+        engine::types::zones::Zone::Exile,
+        "the airbend must exile its target"
+    );
 
     assert!(
         runner.state().objects[&aang].transformed,
