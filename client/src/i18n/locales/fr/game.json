@@ -2376,10 +2376,12 @@
   "outsideGame": {
     "fromExile": "Depuis l'exil",
     "fromSideboard": "Depuis la réserve",
-    "fromBoosterPack": "D'un booster {{setCode}}"
+    "fromBoosterPack": "D'un booster {{setCode}}",
+    "fromCubeBoosterPack": "D'un booster du cube"
   },
   "boosterPack": {
     "title": "Booster {{setCode}}",
+    "cubeTitle": "Booster du cube",
     "subtitleExact_one": "Choisissez {{count}} carte à garder ; le reste est retiré de la partie",
     "subtitleExact_other": "Choisissez {{count}} cartes à garder ; le reste est retiré de la partie",
     "subtitleUpTo_one": "Choisissez jusqu'à {{count}} carte à garder ; le reste est retiré de la partie",

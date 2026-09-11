@@ -1219,7 +1219,13 @@ describe("draftProtocol", () => {
       }
     });
 
-    it.each([{ pool: ["Cube A", "Cube A", "Undealt sentinel"] }, { pool: [] }, { pool: undefined }])(
+    it.each([
+      { pool: ["Cube A", "Cube A", "Undealt sentinel"] },
+      { pool: [] },
+      // A guest-authority launch names no source: the host sends an explicit null.
+      { pool: null },
+      { pool: undefined },
+    ])(
       "round-trips a deck-carrying draft match start message: $pool", async ({ pool }) => {
       const deck = {
         main_deck: ["Island"],

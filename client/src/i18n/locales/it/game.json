@@ -2376,10 +2376,12 @@
   "outsideGame": {
     "fromExile": "Dall'esilio",
     "fromSideboard": "Dalla sideboard",
-    "fromBoosterPack": "Da una busta {{setCode}}"
+    "fromBoosterPack": "Da una busta {{setCode}}",
+    "fromCubeBoosterPack": "Da una busta del cube"
   },
   "boosterPack": {
     "title": "Busta {{setCode}}",
+    "cubeTitle": "Busta del cube",
     "subtitleExact_one": "Scegli {{count}} carta da tenere; il resto è rimosso dalla partita",
     "subtitleExact_other": "Scegli {{count}} carte da tenere; il resto è rimosso dalla partita",
     "subtitleUpTo_one": "Scegli fino a {{count}} carta da tenere; il resto è rimosso dalla partita",

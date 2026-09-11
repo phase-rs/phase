@@ -866,9 +866,11 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
             entry.source.type === "FaceUpExile"
               ? t("outsideGame.fromExile")
               : entry.source.type === "BoosterPack"
-                ? t("outsideGame.fromBoosterPack", {
-                    setCode: entry.source.data.set_code,
-                  })
+                ? entry.source.data.origin.type === "Set"
+                  ? t("outsideGame.fromBoosterPack", {
+                      setCode: entry.source.data.origin.data,
+                    })
+                  : t("outsideGame.fromCubeBoosterPack")
                 : t("outsideGame.fromSideboard");
           return (
             <button

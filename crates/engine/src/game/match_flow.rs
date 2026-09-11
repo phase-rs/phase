@@ -517,9 +517,19 @@ fn restart_between_games_with_starting_player(
     let interaction_session = state.interaction_session_id.clone();
 
     load_deck_into_state(&mut next_state, &payload);
-    if state.booster_pack_pool.is_some() {
-        next_state.booster_shelf = state.booster_shelf.clone();
-    }
+    // The booster shelf is stocked only at rehydrate, which this rebuild never
+    // reaches: it holds no card database, and `load_deck_into_state` resets the
+    // shelf. Carry it for every source, set products and Cube alike. Whether a
+    // game stocks one depends only on the registered deck pools, sideboards
+    // included, which sideboarding cannot extend; what it holds comes from the
+    // card database and `booster_pack_pool`, neither of which changes within a
+    // match. Game one's shelf (for set products, game one's seeded sample of
+    // sets) therefore still serves every later game, and without it a pack
+    // opener in game two opens nothing. A restore of a later game re-stocks
+    // set products from that game's own seed, so its sample of sets can differ
+    // from the carried one. The shelf is `#[serde(skip)]` and outside state
+    // identity, and either sample is an equally random draw of sets.
+    next_state.booster_shelf = state.booster_shelf.clone();
     let start = super::engine::start_game_with_starting_player(&mut next_state, starting_player);
     events.extend(start.events);
 

@@ -58,7 +58,7 @@ pub fn resolve(
         };
         pack
     };
-    let (set_code, cards) = pack;
+    let (origin, cards) = pack;
 
     // CR 701.20: "reveal the cards" — the WHOLE pack becomes public, not only
     // the card that is taken. The pack's cards are outside the game and have no
@@ -96,7 +96,7 @@ pub fn resolve(
             name: card.name.clone(),
             source: OutsideGameChoiceSource::BoosterPack {
                 pack_slot,
-                set_code: set_code.clone(),
+                origin: origin.clone(),
                 card: Box::new(card),
             },
             // Each card in a pack is one physical card.

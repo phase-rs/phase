@@ -2414,10 +2414,12 @@
   "outsideGame": {
     "fromExile": "From exile",
     "fromSideboard": "From sideboard",
-    "fromBoosterPack": "From {{setCode}} booster pack"
+    "fromBoosterPack": "From {{setCode}} booster pack",
+    "fromCubeBoosterPack": "From a Cube booster pack"
   },
   "boosterPack": {
     "title": "{{setCode}} Booster Pack",
+    "cubeTitle": "Cube Booster Pack",
     "subtitleExact_one": "Choose {{count}} card to keep — the rest are removed from the game",
     "subtitleExact_other": "Choose {{count}} cards to keep — the rest are removed from the game",
     "subtitleUpTo_one": "Choose up to {{count}} card to keep — the rest are removed from the game",

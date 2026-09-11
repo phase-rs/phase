@@ -8557,20 +8557,31 @@ pub enum OutsideGameChoiceSource {
     /// CR 400.11 + CR 400.11b: A card in a booster pack `Effect::OpenBoosterPack`
     /// just opened. The pack's cards are outside the game and in no zone, so —
     /// like `Sideboard` — the entry carries the full `CardFace` the taken card
-    /// is built from, plus the set the pack came from for display. `pack_slot`
+    /// is built from, plus where the pack came from for display. `pack_slot`
     /// is the card's position in the opened pack and its only stable identity.
     BoosterPack {
         pack_slot: usize,
-        set_code: String,
+        origin: PackOrigin,
         /// Boxed, unlike `Sideboard`'s inline face: `WaitingFor` is stored
         /// inline in `GameState`, which `phase-server` moves BY VALUE through
         /// the action + AI path, so this enum's largest variant is multiplied by
         /// every live `GameState` on a frame chain (see `types/game_state_size.rs`
         /// and the `game_state_stack_budget` regression). `Sideboard` already
-        /// sets that ceiling; adding a set code beside a second inline face
+        /// sets that ceiling; adding a pack origin beside a second inline face
         /// would raise it.
         card: Box<crate::types::card::CardFace>,
     },
+}
+
+/// Where an opened booster pack came from, for display. Every card in one pack
+/// shares its origin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum PackOrigin {
+    /// A sealed product of one set, named by its MTGJSON set code.
+    Set(String),
+    /// The game's original Cube source (`GameState::booster_pack_pool`).
+    Cube,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8595,21 +8606,34 @@ fn default_one_u32() -> u32 {
 /// and each `Effect::OpenBoosterPack` resolution opens a freshly collated pack
 /// from one of them — so the number of packs a game can open is unbounded while
 /// the resident cost stays proportional to the shelf, not to the corpus.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct BoosterShelf {
-    /// Bounded source takes precedence over products, including when empty.
-    pub card_pool: Option<Vec<CardFace>>,
-    /// Products in deterministic order. Empty when no card in the game opens
-    /// booster packs, or when the loaded card database carries no set that can
-    /// fill a pack.
-    pub products: Vec<BoosterProduct>,
+///
+/// A game opens packs from exactly one kind of source, so the shelf is one or
+/// the other and never both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoosterShelf {
+    /// Sealed products in deterministic order. Empty when no card in the game
+    /// opens booster packs, or when the loaded card database carries no set
+    /// that can fill a pack.
+    Products(Vec<BoosterProduct>),
+    /// The hydrated original Cube source (`GameState::booster_pack_pool`),
+    /// copies included. Empty when that source is unavailable: a legacy
+    /// snapshot that lost it, or an entry the card database cannot resolve.
+    Cube(Vec<CardFace>),
+}
+
+impl Default for BoosterShelf {
+    /// An unstocked shelf: no products until rehydrate stocks it.
+    fn default() -> Self {
+        Self::Products(Vec::new())
+    }
 }
 
 impl BoosterShelf {
     pub fn is_empty(&self) -> bool {
-        self.card_pool
-            .as_ref()
-            .map_or_else(|| self.products.is_empty(), Vec::is_empty)
+        match self {
+            Self::Products(products) => products.is_empty(),
+            Self::Cube(cards) => cards.is_empty(),
+        }
     }
 }
 

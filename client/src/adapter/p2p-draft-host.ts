@@ -2337,6 +2337,20 @@ export class P2PDraftHost {
     return this.adapter.boosterPackPoolForGame();
   }
 
+  /**
+   * The booster source for a pairwise launch whose engine runs on
+   * `authoritySeat`. The original Cube multiset is private to this device: the
+   * host is always pod seat 0, and only its own draft session holds the source.
+   * Any other authority is a guest's device, which must never learn the undealt
+   * entries or their duplicate counts, so its launch names no source at all.
+   * That engine then opens ordinary set boosters, exactly as every draft game
+   * did before Cube sources existed; opening from the Cube there would need a
+   * host-side pack request the match authority can call without holding the pool.
+   */
+  private async boosterPackPoolForMatchAuthority(authoritySeat: number): Promise<string[] | null> {
+    return authoritySeat === 0 ? this.adapter.boosterPackPoolForGame() : null;
+  }
+
   private async dispatchMatchLaunch(pairing: PairingView, view: DraftPlayerView): Promise<void> {
     const seatA = pairing.seat_a;
     const seatB = pairing.seat_b;
@@ -2360,7 +2374,7 @@ export class P2PDraftHost {
         player: humanDeck,
         opponent: botDeck,
         ai_decks: [],
-        booster_pack_pool: await this.adapter.boosterPackPoolForGame(),
+        booster_pack_pool: await this.boosterPackPoolForMatchAuthority(humanSeat),
       };
 
       await this.sendMatchLaunch(humanSeat, {
@@ -2389,7 +2403,7 @@ export class P2PDraftHost {
       player: hostDeck,
       opponent: guestDeck,
       ai_decks: [],
-      booster_pack_pool: await this.adapter.boosterPackPoolForGame(),
+      booster_pack_pool: await this.boosterPackPoolForMatchAuthority(matchHostSeat),
     };
 
     await this.sendMatchLaunch(matchHostSeat, {

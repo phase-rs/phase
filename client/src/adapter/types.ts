@@ -561,8 +561,14 @@ export type OutsideGameChoiceSource =
   | { type: "FaceUpExile"; data: { object_id: ObjectId } }
   | {
       type: "BoosterPack";
-      data: { pack_slot: number; set_code: string; card: CardFacePartial };
+      data: { pack_slot: number; origin: PackOrigin; card: CardFacePartial };
     };
+
+/**
+ * Where an opened booster pack came from, for display. Mirrors Rust
+ * `PackOrigin` (engine `types/game_state.rs`).
+ */
+export type PackOrigin = { type: "Set"; data: string } | { type: "Cube" };
 
 export interface OutsideGameChoiceEntry {
   source: OutsideGameChoiceSource;

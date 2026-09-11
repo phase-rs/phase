@@ -2376,10 +2376,12 @@
   "outsideGame": {
     "fromExile": "Desde el exilio",
     "fromSideboard": "Desde el banquillo",
-    "fromBoosterPack": "De un sobre de {{setCode}}"
+    "fromBoosterPack": "De un sobre de {{setCode}}",
+    "fromCubeBoosterPack": "De un sobre del cube"
   },
   "boosterPack": {
     "title": "Sobre de {{setCode}}",
+    "cubeTitle": "Sobre del cube",
     "subtitleExact_one": "Elige {{count}} carta para quedártela; el resto se retira de la partida",
     "subtitleExact_other": "Elige {{count}} cartas para quedártelas; el resto se retira de la partida",
     "subtitleUpTo_one": "Elige hasta {{count}} carta para quedártela; el resto se retira de la partida",

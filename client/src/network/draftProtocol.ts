@@ -159,8 +159,9 @@ import type {
  *  28 — authoritative per-seat Auto Lands requests and correlated results,
  *       including explicit rejection so an older peer cannot leave a waiter
  *       pending after an otherwise exact handshake.
- *  29 — original Cube entries reach the selected match authority, while they
- *       remain absent from public draft views.
+ *  29 — a Cube match launch run on the host's own seat names the original
+ *       entries as its in-game booster source; a guest authority and public
+ *       draft views never receive them.
  *       Older hosts would silently discard the in-game booster source.
  */
 export const DRAFT_PROTOCOL_VERSION = 29 as const;
@@ -210,7 +211,12 @@ export interface DraftMatchDeckPayload {
   player: DraftDeckPayload;
   opponent: DraftDeckPayload;
   ai_decks: DraftDeckPayload[];
-  /** Original Cube entries, including duplicates, for in-game pack generation. */
+  /**
+   * In-game booster source. Original Cube entries, including duplicates, only
+   * when the launch's engine runs on the host's own seat; null for a guest
+   * authority, which must never learn the private multiset and so opens
+   * ordinary set boosters.
+   */
   booster_pack_pool?: string[] | null;
   /**
    * Every set whose draft boosters these decks' draft CONTAINED, supplied

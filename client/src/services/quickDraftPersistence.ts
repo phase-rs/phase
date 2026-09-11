@@ -38,7 +38,10 @@ export interface DraftRunActiveMatch {
 }
 
 export interface DraftRunState {
-  /** Original cube authority, retained after the one-shot game handoff. Empty is bounded. */
+  /**
+   * Original cube authority, retained after the one-shot game handoff. Empty
+   * marks a legacy Cube snapshot that lost its source; it stays bounded.
+   */
   booster_pack_pool?: string[] | null;
   format: DraftRunFormat;
   results: Array<{ gameId: string; result: DraftMatchResult }>;
@@ -77,7 +80,11 @@ export interface QuickDraftSnapshotInput {
 }
 
 export interface DraftMatchPayload {
-  /** Opaque original cube entries; empty must not fall back to ordinary products. */
+  /**
+   * Opaque original cube entries. Empty marks a legacy Cube snapshot that lost
+   * its source and must not fall back to ordinary products; absent means no
+   * Cube source applies.
+   */
   booster_pack_pool?: string[] | null;
   player: { main_deck: string[]; sideboard: string[]; commander: string[] };
   opponent: { main_deck: string[]; sideboard: string[]; commander: string[] };

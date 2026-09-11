@@ -1065,6 +1065,9 @@ fn client_state_wire_value(
     // Both are trusted persistence authorities, never client schema.
     root.remove("pending_triggered_mana_resume");
     root.remove("pending_trigger_construction_priority_recipient");
+    // Same defense in depth for the original Cube multiset: undealt entries and
+    // their copy counts are pack-generation input the viewer filter also drops.
+    root.remove("booster_pack_pool");
 
     redact_private_trigger_firing(&mut value);
 
@@ -7797,6 +7800,49 @@ mod tests {
             state.pending_triggered_mana_resume.is_some()
                 && state.pending_trigger_construction_priority_recipient == Some(PlayerId(1)),
             "projection must not alter the authoritative carriers"
+        );
+    }
+
+    /// `ClientGameStateRef::wrap` serializes the state it is handed, filtered
+    /// or not, so a direct caller that never ran `filter_state_for_viewer` must
+    /// still not ship the original Cube multiset to a client.
+    ///
+    /// REVERT-PROBE: drop `root.remove("booster_pack_pool")` from
+    /// `client_state_wire_value` and both envelopes carry the key and sentinel.
+    #[test]
+    fn client_wire_omits_the_original_cube_booster_pool() {
+        const SENTINEL: &str = "Undealt cube wire sentinel";
+        let mut state = GameState::new_two_player(42);
+        state.booster_pack_pool = Some(std::sync::Arc::new(vec![
+            "Dealt cube card".to_string(),
+            SENTINEL.to_string(),
+            SENTINEL.to_string(),
+        ]));
+        let trusted = serde_json::to_value(&state).expect("serialize trusted state");
+        assert!(
+            trusted.get("booster_pack_pool").is_some(),
+            "test precondition: trusted persistence keeps the source under its snake-case key"
+        );
+
+        // Both iterations guard `root.remove`: `wrap` serializes the state it
+        // was handed and uses its `filter_state_for_viewer` copy only for
+        // display ids. Server frames (`filter_state_for_player`) and
+        // `wrap_filtered` callers are redacted independently by visibility.rs.
+        for viewer in [None, Some(PlayerId(1))] {
+            let projection = serde_json::to_value(ClientGameStateRef::wrap(&state, viewer))
+                .expect("client envelope serializes");
+            assert!(
+                projection["state"].get("booster_pack_pool").is_none(),
+                "viewer {viewer:?} envelope leaked the booster source key"
+            );
+            assert!(
+                !projection.to_string().contains(SENTINEL),
+                "viewer {viewer:?} envelope leaked an undealt source entry"
+            );
+        }
+        assert!(
+            state.booster_pack_pool.is_some(),
+            "projection must not alter the authoritative source"
         );
     }
 
