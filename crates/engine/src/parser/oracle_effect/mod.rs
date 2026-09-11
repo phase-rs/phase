@@ -34019,7 +34019,14 @@ fn parse_same_name_return_destination(
                 Zone::Hand,
                 crate::types::zones::EtbTapState::from_legacy_bool(false),
             )),
-            _ => None,
+            // A supported zone under the wrong qualifier, or a tapped hand.
+            (true, Zone::Battlefield, _) | (false, Zone::Hand, _) | (true, Zone::Hand, true) => {
+                None
+            }
+            // Unmodelled destinations decline; a new `Zone` needs a decision here.
+            (_, Zone::Library | Zone::Graveyard | Zone::Stack | Zone::Exile | Zone::Command, _) => {
+                None
+            }
         },
     )
     .parse(input)

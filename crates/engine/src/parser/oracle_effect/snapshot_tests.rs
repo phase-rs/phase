@@ -573,7 +573,12 @@ fn same_name_graveyard_return_follows_the_named_destination() {
     );
     // Bounded on purpose: zones this recognizer does not model must decline here
     // rather than receive a confidently wrong ChangeZoneAll.
-    for unmodelled in ["your library.", "exile.", "your graveyard."] {
+    for unmodelled in [
+        "your library.",
+        "exile.",
+        "your graveyard.",
+        "the command zone.",
+    ] {
         assert!(
             super::parse_same_name_return_destination(unmodelled).is_err(),
             "{unmodelled:?} is outside the modelled destinations and must decline"
