@@ -5904,8 +5904,12 @@ mod tests {
         );
         repeat_ability.kind = AbilityKind::Spell;
         repeat_ability.repeat_until = Some(RepeatContinuation::ControllerChoice);
+        // `ControllerChoice` carries no progress witness — the mode
+        // re-prompts the controller every iteration, so `None` is semantically
+        // right here, not compiler appeasement.
         state.push_repeat_until(PendingRepeatUntil {
             ability: Box::new(repeat_ability),
+            stop_progress: None,
         });
         // Simulate the moment the review describes: a paused repeat-until
         // frame re-entering from priority.

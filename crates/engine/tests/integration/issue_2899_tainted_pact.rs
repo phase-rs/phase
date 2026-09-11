@@ -2,16 +2,36 @@
 //! unless gate on the optional put-to-hand rider.
 //!
 //! https://github.com/phase-rs/phase/issues/2899
+//!
+//! # KNOWN REMAINING DEFECT — issue #8798
+//!
+//! The tests in this file prove TERMINATION only. Tainted Pact cast with an
+//! empty library is still wrong: `ChangeZone { target: ParentTarget }` re-binds
+//! to the source object when its producing `ExileTop` produced nothing
+//! (issue #8798), so the engine still offers one "you may put that card into
+//! your hand" prompt that CR 608.2d says cannot be offered, and accepting it
+//! still moves Tainted Pact itself from the graveyard to its controller's hand
+//! instead of leaving it there (CR 608.2n). Nothing here asserts the spell's
+//! final zone, and nothing here drives the accept path — a green file does NOT
+//! mean the card is correct.
+
+use std::sync::mpsc;
+use std::time::Duration;
 
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::zones::move_to_library_position;
 use engine::parser::oracle_effect::parse_effect_chain;
-use engine::types::ability::AbilityKind;
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, EffectKind, LibraryPosition, QuantityExpr,
+    RepeatContinuation, ResolvedAbility, TargetFilter,
+};
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::events::GameEvent;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -134,5 +154,259 @@ fn tainted_pact_stops_when_two_exiled_cards_share_a_name() {
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "duplicate-name stop must end the loop, got {:?}",
         runner.state().waiting_for
+    );
+}
+
+/// `{1}{B}` worth of floating mana, so the cast is pool-funded and never
+/// surfaces a `ManaPayment` window (CR 601.2g).
+fn tainted_pact_mana() -> Vec<ManaUnit> {
+    vec![
+        ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+        ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+    ]
+}
+
+fn tainted_pact_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::Black],
+        generic: 1,
+    }
+}
+
+fn chain_contains_unimplemented(def: &AbilityDefinition) -> bool {
+    if matches!(*def.effect, Effect::Unimplemented { .. }) {
+        return true;
+    }
+    [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(chain_contains_unimplemented)
+}
+
+/// Positive reach-guard shared by the termination regressions: the card really
+/// parses to the loop variant whose missing termination guarantee is under
+/// test, with no `Effect::Unimplemented` anywhere in the chain. Without this a
+/// "the loop ended" assertion would pass vacuously on a card that never parsed
+/// into a loop at all.
+fn assert_tainted_pact_parses_to_until_stop_conditions() {
+    let def = parse_effect_chain(TAINTED_PACT_ORACLE, AbilityKind::Spell);
+    assert!(
+        !chain_contains_unimplemented(&def),
+        "reach-guard: Tainted Pact must parse with no Effect::Unimplemented"
+    );
+    assert!(
+        matches!(
+            def.repeat_until,
+            Some(RepeatContinuation::UntilStopConditions { .. })
+        ),
+        "reach-guard: Tainted Pact must parse to the UntilStopConditions repeat, got {:?}",
+        def.repeat_until
+    );
+}
+
+/// Positive reach-guard: the repeat's producer actually ran, so "the loop
+/// ended" is not the trivially-true statement that it never started.
+fn assert_exile_top_resolved(events: &[GameEvent]) {
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::ExileTop,
+                ..
+            }
+        )),
+        "reach-guard: the repeat body must have resolved at least one ExileTop"
+    );
+}
+
+/// CR 104.4b + CR 101.3 + CR 609.3: an `UntilStopConditions` repeat whose
+/// producer is starved from the very first iteration must terminate.
+///
+/// With an empty library "exile the top card of your library" is impossible and
+/// is ignored, so neither printed stop predicate can ever become true and the
+/// repeat has no printed way to stop. The no-progress witness ends it.
+///
+/// Reverting the guard leaves the engine parked on the spurious
+/// `OptionalEffectChoice` with the repeat frame still live, so BOTH assertions
+/// below flip.
+#[test]
+fn tainted_pact_empty_library_terminates_the_repeat() {
+    assert_tainted_pact_parses_to_until_stop_conditions();
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pact = scenario
+        .add_spell_to_hand_from_oracle(P0, "Tainted Pact", true, TAINTED_PACT_ORACLE)
+        .with_mana_cost(tainted_pact_cost())
+        .id();
+    scenario.with_mana_pool(P0, tainted_pact_mana());
+
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().players[P0.0 as usize].library.is_empty(),
+        "precondition: this regression is about a starved producer"
+    );
+
+    let outcome = runner.cast(pact).resolve();
+
+    assert_exile_top_resolved(outcome.events());
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "a repeat that cannot advance must end the resolution, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(
+        outcome.state().active_repeat_until().is_none(),
+        "the repeat-until frame must retire, not stay parked"
+    );
+}
+
+/// CR 104.4b: a repeat that makes progress and THEN stalls must still
+/// terminate.
+///
+/// SCOPE OF THIS ROW, stated precisely because an earlier draft overclaimed it:
+/// this proves termination after real progress, and it is revert-failing for
+/// that. It does NOT discriminate a baseline hoisted above the `loop` in
+/// `resolve_ability_chain`. Tainted Pact's body pauses every iteration, so each
+/// iteration exits through the drain and RE-ENTERS `resolve_ability_chain`,
+/// which re-captures the baseline at function entry either way — the hoist is
+/// invisible from here. Observing it needs a non-pausing body whose witness
+/// genuinely grows, i.e. an `UntilStopConditions` ability carrying a
+/// linked-exile consumer, which no fixture in this file builds. The
+/// per-iteration capture is still the correct code; it is simply not pinned
+/// against that specific mutation by any test we have.
+#[test]
+fn tainted_pact_terminates_when_the_library_empties_mid_repeat() {
+    assert_tainted_pact_parses_to_until_stop_conditions();
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let only_card = scenario
+        .add_spell_to_library_top(P0, "Only Card", true)
+        .id();
+    let pact = scenario
+        .add_spell_to_hand_from_oracle(P0, "Tainted Pact", true, TAINTED_PACT_ORACLE)
+        .with_mana_cost(tainted_pact_cost())
+        .id();
+    scenario.with_mana_pool(P0, tainted_pact_mana());
+
+    let mut runner = scenario.build();
+    put_library_top(&mut runner, only_card);
+    assert_eq!(
+        runner.state().players[P0.0 as usize].library.len(),
+        1,
+        "precondition: exactly one card, so iteration 2 is the stalled one"
+    );
+
+    let outcome = runner.cast(pact).resolve();
+
+    assert_exile_top_resolved(outcome.events());
+    // Positive reach-guard: iteration 1 really ran and really exiled, so the
+    // termination assertions below are not vacuous.
+    outcome.assert_zone(&[only_card], Zone::Exile);
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "a repeat that stalls after making progress must still end, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(
+        outcome.state().active_repeat_until().is_none(),
+        "the repeat-until frame must retire, not stay parked"
+    );
+}
+
+/// CR 104.4b: the IN-LOOP guard arm, which the two cast-pipeline regressions
+/// above never reach.
+///
+/// Tainted Pact's body raises a `WaitingFor` every iteration (the spurious
+/// prompt of issue #8798), so both of those tests exit through
+/// `drain_active_repeat_until`. This variant-level fixture gives the repeat a
+/// body that CANNOT pause — bare `ExileTop`, no optional sub-ability — against
+/// an empty library, which is exactly the shape #8798 creates for Tainted Pact
+/// itself once the spurious prompt is suppressed. Without the in-loop guard the
+/// `loop` in `resolve_ability_chain`'s `UntilStopConditions` arm never yields
+/// and never returns.
+///
+/// Deliberately NOT a `/card-test` cast-pipeline row: no card in the corpus
+/// prints this body, and `drive_resolution`'s 64-iteration bound only helps if
+/// the engine yields between iterations — here it never does, so the spin would
+/// happen inside a single `resolve()` call with the bound never consulted. The
+/// skill's "never call the raw `resolve()` stack function directly" rule names
+/// `stack::resolve_top` / `effect::resolve` and exists to preserve the
+/// intervening-if recheck and the `cast_from_zone` carry-through; this fixture
+/// never puts anything on the stack and never casts, so that rule has no
+/// subject here.
+///
+/// BOUNDED HARNESS: the work runs on a spawned thread and the assertion waits
+/// on `recv_timeout`, so a missing or incorrect guard FAILS instead of hanging
+/// the suite. Residual, stated honestly: `recv_timeout` returning does not stop
+/// the spawned thread. Under nextest's process-per-test isolation
+/// (`.config/nextest.toml`, profile `ci`) the leaked thread dies with this
+/// test's own process; under plain `cargo test`, which shares one process per
+/// test binary, it keeps spinning and allocating until the binary exits.
+#[test]
+fn until_stop_conditions_with_a_non_pausing_body_terminates_in_loop() {
+    let (tx, rx) = mpsc::channel();
+    let _fixture = std::thread::spawn(move || {
+        let mut state = GameState::new_two_player(2899);
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+                face_down: false,
+            },
+            vec![],
+            ObjectId(900),
+            P0,
+        );
+        ability.repeat_until = Some(RepeatContinuation::UntilStopConditions {
+            stop_on_put_to_hand: true,
+            stop_on_duplicate_exiled_names: false,
+        });
+
+        let mut events = Vec::new();
+        let ok = resolve_ability_chain(&mut state, &ability, &mut events, 0).is_ok();
+        let exile_tops = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::ExileTop,
+                        ..
+                    }
+                )
+            })
+            .count();
+        let _ = tx.send((
+            ok,
+            events.len(),
+            exile_tops,
+            state.active_repeat_until().is_some(),
+        ));
+    });
+
+    let (ok, event_count, exile_tops, frame_still_parked) = rx
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap_or_else(|err| {
+            panic!(
+                "the UntilStopConditions repeat never returned ({err:?}): the in-loop                  `repeat_until_should_terminate` arm in `resolve_ability_chain`'s                  UntilStopConditions dispatch is missing or incorrect, so the loop spins                  without ever yielding a WaitingFor"
+            )
+        });
+
+    assert!(ok, "the repeat must resolve cleanly, not error out");
+    // Positive reach-guard: a body that failed to build would also "return".
+    assert!(
+        exile_tops >= 1,
+        "reach-guard: the repeat body must have resolved at least one ExileTop"
+    );
+    assert!(
+        event_count < 64,
+        "a terminating repeat emits a bounded event list, got {event_count}"
+    );
+    assert!(
+        !frame_still_parked,
+        "a non-pausing body must never park a repeat-until frame"
     );
 }

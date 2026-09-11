@@ -31,7 +31,8 @@ use crate::types::game_state::{
     PendingContinuation, PendingCostMoveResume, PendingDiscardBatchCompletion,
     PendingPlayerScopeLinkedExile, PendingPlayerScopeSacrificeChoice,
     PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
-    ResolutionOptionalPaymentOption, WaitingFor, ZoneChangeRecord, ZoneOpponentChooserPurpose,
+    RepeatUntilStopWitness, ResolutionOptionalPaymentOption, WaitingFor, ZoneChangeRecord,
+    ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -1197,7 +1198,10 @@ fn drain_active_repeat_until(state: &mut GameState) {
     else {
         return;
     };
-    let crate::types::game_state::PendingRepeatUntil { ability } = pending;
+    let crate::types::game_state::PendingRepeatUntil {
+        ability,
+        stop_progress,
+    } = pending;
     match &ability.repeat_until {
         // CR 107.1c: the iteration's choice has resolved — prompt the
         // controller whether to repeat the process.
@@ -1211,11 +1215,16 @@ fn drain_active_repeat_until(state: &mut GameState) {
             stop_on_put_to_hand,
             stop_on_duplicate_exiled_names,
         }) => {
-            if should_stop_repeat_until(
+            // CR 104.4b: `stop_progress` is the pre-iteration baseline stashed
+            // at the pause. Comparing it HERE — after the iteration's player
+            // choice and any chained continuation have fully drained — measures
+            // the whole iteration, interactive tail included.
+            if repeat_until_should_terminate(
                 state,
                 &ability,
                 *stop_on_put_to_hand,
                 *stop_on_duplicate_exiled_names,
+                stop_progress.as_ref(),
             ) {
                 return;
             }
@@ -1253,11 +1262,21 @@ fn drain_active_repeat_until(state: &mut GameState) {
 /// complete child stack its iteration raised. The frame count captured before
 /// the body runs is the exact child-stack boundary, so consumers remain
 /// strictly top-only without searching for a buried parent.
+///
+/// CR 104.4b: the pre-iteration `stop_progress` witness rides this same funnel
+/// and the frame is built HERE, in exactly one production place, so a pause can
+/// never lose the baseline the drain needs to tell a stalled repeat from a
+/// progressing one.
 fn park_repeat_until_after_inner_pause(
     state: &mut GameState,
-    pending: crate::types::game_state::PendingRepeatUntil,
+    ability: Box<ResolvedAbility>,
+    stop_progress: Option<RepeatUntilStopWitness>,
     stack_depth_before_iteration: ChildStackDepth,
 ) {
+    let pending = crate::types::game_state::PendingRepeatUntil {
+        ability,
+        stop_progress,
+    };
     match state
         .resolution_stack
         .capture_child_boundary()
@@ -1274,7 +1293,13 @@ fn park_repeat_until_after_inner_pause(
 }
 
 /// CR 608.2c + CR 107.1c: Stop predicates for `RepeatContinuation::UntilStopConditions`.
-fn should_stop_repeat_until(
+///
+/// `pub(crate)` so `exile_links`'s witness tests can pin the standing argument
+/// for `ExiledStopInput::controller`: a control change with the zone held
+/// constant leaves this predicate false while moving the witness. The witness
+/// builder and this predicate must read the same rows, so the test that proves
+/// they diverge nowhere lives beside the builder.
+pub(crate) fn should_stop_repeat_until(
     state: &GameState,
     ability: &ResolvedAbility,
     stop_on_put_to_hand: bool,
@@ -1299,6 +1324,50 @@ fn should_stop_repeat_until(
     }
     stop_on_duplicate_exiled_names
         && crate::game::exile_links::duplicate_name_among_exiled_by_source(state, ability.source_id)
+}
+
+/// CR 608.2c + CR 104.4b: the SINGLE authority deciding whether an
+/// `UntilStopConditions` repeat ends. Both decision sites — the loop in
+/// `resolve_ability_chain` and the resume in `drain_active_repeat_until` — call
+/// THIS, never the two halves separately, so they cannot diverge.
+///
+/// Two independent reasons to stop:
+///  1. A printed stop condition is met (`should_stop_repeat_until`, CR 608.2c).
+///  2. The iteration made no stop-relevant progress (`baseline` equals the
+///     current witness). CR 101.3 / CR 609.3: the iteration's instructions were
+///     impossible and did nothing, so repeating them cannot do anything either.
+///
+/// DELIBERATE UNDER-IMPLEMENTATION, recorded: CR 104.4b makes a loop of
+/// mandatory actions with no way to stop a DRAW, and once the producer is
+/// starved the "you may" clause has no referent (CR 608.2d: a player can't
+/// choose an impossible option), so the carve-out for loops containing an
+/// optional action does not rescue it. This function ENDS the repeat instead of
+/// drawing the game (the draw site is tracked separately as issue #8799).
+/// Rationale: a draw is terminal and table-wide, this predicate proves "the
+/// repeat cannot advance" but not "no optional action was available", and the
+/// engine's only live CR 104.4b draw site (`game/engine.rs`, the auto-pass
+/// mandatory-loop block, gated on `loop_detection.samples()` and on
+/// `WaitingFor::Priority`) structurally cannot observe an intra-resolution
+/// loop. A second draw site here would be a divergent detector. This witness is
+/// exactly the certificate such a site would consume if one is ever added.
+fn repeat_until_should_terminate(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    stop_on_put_to_hand: bool,
+    stop_on_duplicate_exiled_names: bool,
+    baseline: Option<&RepeatUntilStopWitness>,
+) -> bool {
+    if should_stop_repeat_until(
+        state,
+        ability,
+        stop_on_put_to_hand,
+        stop_on_duplicate_exiled_names,
+    ) {
+        return true;
+    }
+    baseline.is_some_and(|baseline| {
+        *baseline == crate::game::exile_links::repeat_until_stop_witness(state, ability.source_id)
+    })
 }
 
 /// CR 303.4f + CR 614.12b + CR 614.1c + CR 614.13: Resume a multi-target
@@ -11694,11 +11763,13 @@ pub fn resolve_ability_chain(
             if state.waiting_for != initial_waiting_for {
                 // Inner pause: stash so the drain re-sets the repeat prompt
                 // after the iteration's player choice resolves.
+                //
+                // No progress witness: this mode re-prompts the controller
+                // every iteration, so it cannot loop unattended.
                 park_repeat_until_after_inner_pause(
                     state,
-                    crate::types::game_state::PendingRepeatUntil {
-                        ability: Box::new(ability.clone()),
-                    },
+                    Box::new(ability.clone()),
+                    None,
                     stack_depth_before_iteration,
                 );
             } else {
@@ -11715,24 +11786,30 @@ pub fn resolve_ability_chain(
             stop_on_put_to_hand,
             stop_on_duplicate_exiled_names,
         }) => loop {
+            // CR 104.4b: pre-iteration baseline. Captured INSIDE the loop so
+            // each iteration is measured against its own start, not the
+            // repeat's start — a repeat that makes progress and THEN stalls
+            // must still terminate.
+            let progress_baseline =
+                crate::game::exile_links::repeat_until_stop_witness(state, ability.source_id);
             let initial_waiting_for = state.waiting_for.clone();
             let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
             resolve_chain_body(state, ability, events, depth)?;
             if state.waiting_for != initial_waiting_for {
                 park_repeat_until_after_inner_pause(
                     state,
-                    crate::types::game_state::PendingRepeatUntil {
-                        ability: Box::new(ability.clone()),
-                    },
+                    Box::new(ability.clone()),
+                    Some(progress_baseline),
                     stack_depth_before_iteration,
                 );
                 return Ok(());
             }
-            if should_stop_repeat_until(
+            if repeat_until_should_terminate(
                 state,
                 ability,
                 stop_on_put_to_hand,
                 stop_on_duplicate_exiled_names,
+                Some(&progress_baseline),
             ) {
                 return Ok(());
             }
@@ -11776,11 +11853,13 @@ pub fn resolve_ability_chain(
                         condition: condition.clone(),
                         max_iterations: remaining,
                     });
+                    // No progress witness: this mode is bounded by its own
+                    // `max_iterations`, threaded above via
+                    // `should_repeat_while_condition`.
                     park_repeat_until_after_inner_pause(
                         state,
-                        crate::types::game_state::PendingRepeatUntil {
-                            ability: Box::new(paused),
-                        },
+                        Box::new(paused),
+                        None,
                         stack_depth_before_iteration,
                     );
                     return Ok(());
@@ -26227,6 +26306,7 @@ mod tests {
         };
         state.push_repeat_until(crate::types::game_state::PendingRepeatUntil {
             ability: Box::new(ability),
+            stop_progress: None,
         });
 
         let mut events = Vec::new();
