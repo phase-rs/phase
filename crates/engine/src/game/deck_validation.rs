@@ -604,9 +604,10 @@ impl CardPoolAuthority<'_> {
 }
 
 /// A custom format's resolved card pool: which cards are IN the pool (by
-/// printing — `legal_sets: None` means unrestricted), overlaid with its
-/// banned/restricted lists. Built once per evaluation by [`Self::resolve`]
-/// from a [`LegalityRules`] value, never assembled piecemeal.
+/// printing — `legal_sets: None` means unrestricted — or by name, via
+/// `legal_cards`), overlaid with its banned/restricted lists. Built once per
+/// evaluation by [`Self::resolve`] from a [`LegalityRules`] value, never
+/// assembled piecemeal.
 ///
 /// `Debug` is required because [`CardPoolAuthority`] borrows this type and
 /// derives `Debug` itself.
@@ -656,6 +657,7 @@ impl DeclaredPool {
     /// {format_label})" message in the shared evaluator, so the two card-pool
     /// authorities must report absence identically.
     fn status(&self, db: &CardDatabase, name: &str) -> Option<LegalityStatus> {
+        let canonical = canonical_deck_count_key(db, name);
         if let Some(sets) = &self.legal_sets {
             // A named card is in the pool whether or not any legal set contains
             // it — the two membership tests are a union, because a ruleset that
@@ -663,10 +665,7 @@ impl DeclaredPool {
             //
             // Checked only inside the `Some` arm: `legal_sets: None` already
             // admits everything, so widening an unrestricted pool is a no-op.
-            let named = self
-                .legal_cards
-                .contains(&canonical_deck_count_key(db, name));
-            if !named && !printed_in_any_set(db, name, sets) {
+            if !self.legal_cards.contains(&canonical) && !printed_in_any_set(db, name, sets) {
                 return None;
             }
         }
@@ -676,7 +675,6 @@ impl DeclaredPool {
         // only constructed-shaped formats, leaving the commander validator and
         // the FreeForAll / TwoHeadedGiant / Limited routes to disagree with it.
         // `ante_deck_violations` applies it once, for all of them.
-        let canonical = canonical_deck_count_key(db, name);
         if self.banned.contains(&canonical) {
             return Some(LegalityStatus::Banned);
         }

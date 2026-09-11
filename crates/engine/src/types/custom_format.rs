@@ -513,7 +513,7 @@ impl CustomFormatDef {
     /// method would silently save something the host never configured.
     ///
     /// `legality` is left at defaults (`legal_sets: None`, empty
-    /// banned/restricted, default `LegacyRuleSet`): a lobby save models no
+    /// legal_cards/banned/restricted, default `LegacyRuleSet`): a lobby save models no
     /// published paper ruleset, so it has no card-pool or era intent to
     /// declare. `reprint_policy: None` / `printing_fidelity: NotApplicable`
     /// for the same reason.
@@ -533,7 +533,7 @@ impl CustomFormatDef {
         config: &FormatConfig,
     ) -> Result<Self, FormatConfigError> {
         // Re-saving an already-custom format is out of scope for Axis A: the
-        // source's `legality` (legal_sets/banned/restricted/legacy) has no
+        // source's `legality` (legal_sets/legal_cards/banned/restricted/legacy) has no
         // home in this conversion, which always writes defaults, so the save
         // would silently drop it. `from_source_format` below would reject
         // `Custom` too, but only when the command-zone branch is reached —
@@ -542,8 +542,8 @@ impl CustomFormatDef {
         if let GameFormat::Custom(id) = config.format {
             return Err(FormatConfigError(format!(
                 "from_lobby_config cannot save Custom({}) as a new custom format — the source's \
-                 own legality rules (legal_sets/banned/restricted/legacy) have no representation \
-                 in a lobby save and would be silently dropped",
+                 own legality rules (legal_sets/legal_cards/banned/restricted/legacy) have no \
+                 representation in a lobby save and would be silently dropped",
                 id.0
             )));
         }
@@ -713,8 +713,8 @@ fn declared_legacy_axes(rules: &LegacyRuleSet) -> Vec<LegacyAxis> {
 /// deserialized custom format that declares an unimplemented axis would
 /// otherwise get behavior the engine silently does not enforce.
 ///
-/// Deliberately asymmetric with `legal_sets`/`banned`/`restricted`, which are
-/// NOT gated: those are declarative card-pool data the evaluator either
+/// Deliberately asymmetric with `legal_sets`/`legal_cards`/`banned`/`restricted`,
+/// which are NOT gated: those are declarative card-pool data the evaluator either
 /// applies in full or not at all, so there is no partial-implementation risk.
 /// A `LegacyRuleSet` axis instead promises runtime behavior (mana burn, the
 /// legend rule's scope, Wish reach, an ante zone) that may not be built yet,
@@ -890,21 +890,13 @@ pub const OLD_SCHOOL_95_ID: CustomFormatId = CustomFormatId(3);
 /// Both Eternal Central Old School rulesets define legality partly by
 /// PRINTING — "all non-foil cards from the sets above, that were reprinted in
 /// any language with the original frame and original art" — while this engine
-/// knows only set-code membership (`printed_in_any_set`). Two concrete
-/// divergences, both verified against Scryfall at implementation time rather
-/// than asserted:
+/// knows only set-code membership (`printed_in_any_set`). So frame/foil is not
+/// enforced: a foil or modern-frame copy of a legal card passes here and would
+/// not pass in paper. Over-permissive.
 ///
-/// - **Frame/foil is not enforced.** A foil or modern-frame copy of a legal
-///   card passes here and would not pass in paper. Over-permissive.
-/// - **The promo carve-outs are not included.** Both rulesets name specific
-///   legal promos — Arena, Sewers of Estark and Nalathni Dragon for 93/94,
-///   plus Giant Badger, Windseeker Centaur and Mana Crypt for 95 — and their
-///   sets are NOT in `legal_sets`, so those cards are rejected. Under-
-///   permissive, and not fixable at set-code granularity for 93/94: four of
-///   those six live in `PHPR` (HarperPrism Book Promos, 5 cards), of which
-///   only Arena and Sewers of Estark are 93/94-legal, so admitting the set
-///   would admit three cards the format does not allow — one of them Mana
-///   Crypt. See this phase's PR discussion.
+/// The rulesets' named promo carve-outs are not a divergence: both presets name
+/// them in [`LegalityRules::legal_cards`], whose doc records why set-code
+/// granularity could not express them.
 const SET_CODE_APPROXIMATION_DISCLOSURE: &str =
     "Legality is approximated at the set-code level; original-printing frame/foil is not \
      enforced.";

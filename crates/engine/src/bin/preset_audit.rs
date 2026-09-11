@@ -36,6 +36,8 @@
 //! Requires network access and `curl`.
 
 use std::collections::BTreeSet;
+use std::env;
+use std::fs;
 use std::process::Command;
 
 use engine::types::custom_format::{old_school_93_94, CustomFormatDef};
@@ -66,8 +68,8 @@ enum Page {
 /// network: this is a pure function of the bytes curl wrote.
 ///
 /// **A matchless search is HTTP 404 with a JSON error object, not an empty
-/// list** — which is why the body must be read even when curl reports failure,
-/// and why `--fail` cannot be used here. An empty authority list is a real,
+/// list** — which is why the body of a non-200 response must be read, and why
+/// `--fail`, which discards it, cannot be used here. An empty authority list is a real,
 /// expected answer for a preset whose carve-out is empty; turning it into a
 /// transport error would make that preset unauditable.
 fn read_page(body: &[u8], query: &str, page: u32) -> Result<Page, String> {
@@ -123,6 +125,7 @@ fn read_page(body: &[u8], query: &str, page: u32) -> Result<Page, String> {
 fn scryfall_names(query: &str) -> Result<BTreeSet<String>, String> {
     let mut names = BTreeSet::new();
     let mut page = 1;
+    let body_path = env::temp_dir().join(format!("phase-preset-audit-{}.json", std::process::id()));
     loop {
         let output = Command::new("curl")
             .args([
@@ -131,15 +134,16 @@ fn scryfall_names(query: &str) -> Result<BTreeSet<String>, String> {
                 // matched" (fine) or a real error (not). `read_page` decides.
                 "--silent",
                 "--show-error",
-                // Same retry posture as scripts/lib/scryfall-fetch.sh: Scryfall
-                // fronts Cloudflare, which answers throttling with a non-JSON
-                // body that a bare `curl -s` would report as success. Bare
-                // `--retry` already covers 408/429/5xx and connection failures;
-                // `--retry-all-errors` is deliberately absent, since without
-                // `--fail` its only remaining effect would be to retry the 404
-                // that means "nothing matched" five times over.
+                // Retry posture of scripts/lib/scryfall-fetch.sh, minus its
+                // `--fail`. `--retry` retries timeouts and the transient
+                // statuses (408, 429, 5xx); `--retry-all-errors` adds transport
+                // failures such as a refused or reset connection, which bare
+                // `--retry` does not. Without `--fail` an HTTP 404 is not an
+                // error to curl, so neither flag retries the 404 that means
+                // "nothing matched" — measured: one request.
                 "--retry",
                 "5",
+                "--retry-all-errors",
                 "--retry-delay",
                 "2",
                 // BOUNDED. An audit that hangs is worse than one that fails:
@@ -160,27 +164,46 @@ fn scryfall_names(query: &str) -> Result<BTreeSet<String>, String> {
                 &format!("q={query}"),
                 "--data-urlencode",
                 &format!("page={page}"),
+                // The body goes to a file, not stdout: curl truncates an output
+                // file before each retry, whereas stdout keeps every attempt's
+                // body. A retried 503 followed by a 200 would read as two
+                // concatenated documents, which no JSON parser accepts, so no
+                // retry could ever recover.
+                "--output",
             ])
+            .arg(&body_path)
             .output()
             .map_err(|e| format!("could not run curl: {e}"))?;
+        // Read and removed before the exit check so the file never outlives
+        // this request. It may be absent only when curl failed, and then it is
+        // discarded below; curl creates it for every complete response, even
+        // an empty one.
+        let body = fs::read(&body_path).unwrap_or_default();
+        let _ = fs::remove_file(&body_path);
 
-        // curl's own exit status is reported only when the body turns out to be
-        // unreadable — a failed transfer explains a non-JSON body far better
-        // than a serde error does. When the body IS valid Scryfall JSON, it is
-        // the authority regardless of the HTTP status behind it.
-        let page_result = read_page(&output.stdout, query, page).map_err(|e| {
-            if output.status.success() {
-                e
-            } else {
-                format!(
-                    "curl failed for {query:?} (page {page}): {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )
+        // curl's exit status FIRST. Without `--fail`, curl exits 0 for every
+        // complete HTTP response, a 404 included, so a nonzero exit means the
+        // transfer did not complete — and whatever the file holds (a stale
+        // file from an interrupted run, or one curl could not overwrite) is
+        // not this request's answer, however well-formed it looks.
+        if !output.status.success() {
+            return Err(format!(
+                "curl failed for {query:?} (page {page}): {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        match read_page(&body, query, page)? {
+            Page::NoMatch if page == 1 => return Ok(names),
+            // After a page that reported `has_more`, "nothing matched"
+            // contradicts it, and stopping here would silently truncate the
+            // authority's list.
+            Page::NoMatch => {
+                return Err(format!(
+                    "Scryfall said {query:?} matched nothing on page {page}, after a page \
+                     reporting `has_more`"
+                ))
             }
-        })?;
-
-        match page_result {
-            Page::NoMatch => return Ok(names),
             Page::Last(found) => {
                 names.extend(found);
                 return Ok(names);
@@ -307,7 +330,7 @@ fn main() {
 mod tests {
     use super::*;
 
-    /// Scryfall's real 404 body for a search that matched nothing, verbatim.
+    /// Scryfall's real 404 body for a search that matched nothing.
     /// This is the case `--fail` used to swallow: curl exits nonzero, and
     /// without reading the body the audit reported a transport failure for what
     /// is actually a well-formed "the answer is the empty set".

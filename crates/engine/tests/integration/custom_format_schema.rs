@@ -325,10 +325,6 @@ fn old_school_93_94_declares_its_sourced_card_pool() {
     );
 }
 
-/// PLAN.md §2's preset-inheritance requirement: 95 must carry every 93/94
-/// entry PLUS exactly its own declared additions. Asserting only that the
-/// additions are present would let a future edit silently drop or duplicate
-/// the inherited base.
 /// The promo carve-out, asserted as DATA on the shipped preset: both EC
 /// rulesets name specific cards legal, and `legal_sets` cannot express it.
 #[test]
@@ -345,6 +341,10 @@ fn the_eternal_central_presets_name_their_legal_promos() {
     assert!(swedish_old_school().rules.legality.legal_cards.is_empty());
 }
 
+/// PLAN.md §2's preset-inheritance requirement: 95 must carry every 93/94
+/// entry PLUS exactly its own declared additions. Asserting only that the
+/// additions are present would let a future edit silently drop or duplicate
+/// the inherited base.
 #[test]
 fn old_school_95_extends_93_94_by_exactly_its_declared_deltas() {
     let base = old_school_93_94();
@@ -963,16 +963,8 @@ fn plains_only_db_json() -> String {
     .to_string()
 }
 
-/// Phase 1d: `validate_name_deck_for_format_full` now runs a `Resolved`
-/// Custom format through the REAL evaluator (`evaluate_custom_format`) rather
-/// than an honest "not yet supported" rejection. `custom_config` is built via
-/// `FormatConfig::for_custom_rules` — the same resolver a real caller uses —
-/// so every runtime field (`deck_size`, `sideboard_policy`,
-/// `default_deck_copy_limit`, ...) is self-consistent with `sample_rules`'
-/// declared structural rules, exactly as `validate_custom_rules_consistency`
-/// demands of a trusted, non-deserialized config.
-/// `legal_cards` through the AUTHORITATIVE deck-admission entry point, not the
-/// private pool.
+/// Drives `legal_cards` through the AUTHORITATIVE deck-admission entry point,
+/// not the private pool.
 ///
 /// A field can serialize, validate and pass a unit test on `DeclaredPool` while
 /// being dropped or bypassed where decks are actually admitted — so this drives
@@ -1059,6 +1051,14 @@ fn validate_name_deck_for_format_full_admits_a_card_only_named_in_legal_cards() 
     );
 }
 
+/// Phase 1d: `validate_name_deck_for_format_full` now runs a `Resolved`
+/// Custom format through the REAL evaluator (`evaluate_custom_format`) rather
+/// than an honest "not yet supported" rejection. `custom_config` is built via
+/// `FormatConfig::for_custom_rules` — the same resolver a real caller uses —
+/// so every runtime field (`deck_size`, `sideboard_policy`,
+/// `default_deck_copy_limit`, ...) is self-consistent with `sample_rules`'
+/// declared structural rules, exactly as `validate_custom_rules_consistency`
+/// demands of a trusted, non-deserialized config.
 #[test]
 fn validate_name_deck_for_format_full_evaluates_a_resolved_custom_format() {
     use engine::database::CardDatabase;
@@ -2348,7 +2348,7 @@ fn from_lobby_config_rejects_an_empty_or_whitespace_only_name() {
 #[test]
 fn from_lobby_config_rejects_a_custom_source_whatever_its_command_zone_flag() {
     // Re-saving a save is out of scope: the source's own legality rules
-    // (legal_sets/banned/restricted/legacy) have no home in this conversion
+    // (legal_sets/legal_cards/banned/restricted/legacy) have no home in this conversion
     // and would be silently dropped. Both flag values are exercised because
     // the Custom check must not depend on reaching the command-zone branch.
     let mut with_zone = sample_custom_config(5);
