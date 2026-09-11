@@ -2253,7 +2253,7 @@ fn redirect_damage_event(
 
     let chosen = redirect_chosen_object_for_rid(state, rid);
     let new_recipient = super::effects::create_damage_replacement::resolve_redirect_recipient(
-        state, recipient, rid.source, chosen,
+        state, recipient, rid.source, source_id, chosen,
     )
     .filter(|new_target| {
         super::effects::create_damage_replacement::redirect_recipient_is_legal(state, new_target)

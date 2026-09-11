@@ -62,6 +62,13 @@ pub(super) fn dispatch_line_nom(
     }
 
     if is_replacement_pattern(&lower) {
+        // CR 604.2 + CR 611.2a: a replacement definition that states its own
+        // window is created by a resolving spell or ability rather than printed
+        // as a static, so the printed-static route declines it. Install it at
+        // resolution instead of recording a gap the parser can represent.
+        if let Some(ir) = super::oracle_effect::parse_windowed_replacement_install_ir(line) {
+            return NomDispatchIr::Spell(ir);
+        }
         return NomDispatchIr::Unsupported(UnsupportedAbilityIr::new(
             UnsupportedAbilityCategory::ReplacementStructure,
             format!("Replacement pattern matched but line failed replacement parser: {line}"),
