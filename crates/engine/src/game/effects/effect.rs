@@ -2078,13 +2078,27 @@ mod tests {
         ability.set_target_incarnations_recursive(vec![pin]);
 
         // Real zone transition: leave the battlefield and return. Each move bumps
-        // the incarnation (CR 400.7), so the captured pin is now stale.
+        // the incarnation (CR 400.7), so the captured pin is now stale. Route both
+        // moves through the replacement-aware pipeline (`move_object`) rather than
+        // the raw `zones::move_to_zone` primitive, so a replacement effect could
+        // still modify or prevent either transition.
         let mut events = Vec::new();
-        crate::game::zones::move_to_zone(&mut state, target_creature, Zone::Graveyard, &mut events);
-        crate::game::zones::move_to_zone(
+        let _ = crate::game::zone_pipeline::move_object(
             &mut state,
-            target_creature,
-            Zone::Battlefield,
+            crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                target_creature,
+                Zone::Graveyard,
+                source,
+            ),
+            &mut events,
+        );
+        let _ = crate::game::zone_pipeline::move_object(
+            &mut state,
+            crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                target_creature,
+                Zone::Battlefield,
+                source,
+            ),
             &mut events,
         );
 
