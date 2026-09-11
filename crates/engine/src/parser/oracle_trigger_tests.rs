@@ -24126,6 +24126,55 @@ fn extract_no_colored_mana_spent_condition() {
     );
 }
 
+/// CR 400.7d: the anaphor names whose payment record answers the clause —
+/// "it"/"that spell"/"this spell"/"them" is the object carried by the trigger
+/// event, "~" is the ability's own source. Every arm must both be accepted and
+/// map to its own scope; an arm that failed to parse would drop the
+/// intervening-if entirely rather than fail loudly.
+#[test]
+fn colored_mana_clause_maps_each_anaphor_to_its_payment_subject() {
+    use crate::types::ability::CastManaObjectScope;
+
+    for (anaphor, expected_scope) in [
+        ("it", CastManaObjectScope::TriggeringSpell),
+        ("that spell", CastManaObjectScope::TriggeringSpell),
+        ("this spell", CastManaObjectScope::TriggeringSpell),
+        ("them", CastManaObjectScope::TriggeringSpell),
+        ("~", CastManaObjectScope::SelfObject),
+    ] {
+        let text = format!("if no colored mana was spent to cast {anaphor}, counter that spell");
+        let (cleaned, cond) = extract_if_condition(&text);
+        assert_eq!(
+            cleaned, "counter that spell",
+            "the clause must be stripped from the effect text for {anaphor:?}"
+        );
+        let scope = match &cond {
+            Some(TriggerCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ManaSpentToCast { scope, metric },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }) => {
+                assert_eq!(
+                    *metric,
+                    crate::types::ability::CastManaSpentMetric::DistinctColors,
+                    "the colored qualifier must select the distinct-colors metric for {anaphor:?}"
+                );
+                *scope
+            }
+            other => {
+                panic!("expected a DistinctColors == 0 comparison for {anaphor:?}, got {other:?}")
+            }
+        };
+        assert_eq!(
+            scope, expected_scope,
+            "wrong payment subject for {anaphor:?}"
+        );
+    }
+}
+
 /// The bare "no mana" reading must NOT be shadowed by the qualified one: the
 /// amount axis keeps its own condition shape (Vexing Bauble, Lavinia).
 #[test]
