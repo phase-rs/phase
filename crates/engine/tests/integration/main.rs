@@ -863,6 +863,7 @@ mod issue_868_szarekh_attack_trigger;
 mod issue_874_nadiers_nightblade_token_leaves;
 mod issue_8773_class_copy_enters_at_level_one;
 mod issue_879_obsessive_pursuit;
+mod issue_8807_void_mirror_colored_mana;
 mod issue_924_offspring;
 mod issue_927_tireless_provisioner;
 mod issue_934_ring_goes_south;

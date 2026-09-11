@@ -24102,6 +24102,46 @@ fn extract_no_mana_spent_condition() {
     );
 }
 
+/// CR 603.4 + CR 106.1a + CR 601.2h, issue #8807: Void Mirror's intervening-if
+/// gates on the COLOR axis of the payment record, not the amount. Before this
+/// was parsed the clause was dropped entirely and the trigger degraded to an
+/// unconditional "whenever a player casts a spell, counter that spell".
+#[test]
+fn extract_no_colored_mana_spent_condition() {
+    let (cleaned, cond) =
+        extract_if_condition("if no colored mana was spent to cast it, counter that spell");
+    assert_eq!(cleaned, "counter that spell");
+    assert_eq!(
+        cond,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                    metric: crate::types::ability::CastManaSpentMetric::DistinctColors,
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        })
+    );
+}
+
+/// The bare "no mana" reading must NOT be shadowed by the qualified one: the
+/// amount axis keeps its own condition shape (Vexing Bauble, Lavinia).
+#[test]
+fn no_colored_mana_qualifier_does_not_capture_the_bare_amount_clause() {
+    for clause in [
+        "if no mana was spent to cast that spell, counter that spell",
+        "if no mana was spent to cast them, draw a card",
+    ] {
+        let (_, cond) = extract_if_condition(clause);
+        assert!(
+            matches!(cond, Some(TriggerCondition::ManaSpentCondition { .. })),
+            "bare no-mana clause must stay on the amount axis, got {cond:?} for {clause:?}"
+        );
+    }
+}
+
 #[test]
 fn extract_mana_spent_comparison_condition_less_than() {
     let (cleaned, cond) = extract_if_condition(
