@@ -1013,6 +1013,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::TappedForMana { .. }
         | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
+        | GameEvent::ManaBurn { .. }
         | GameEvent::ManaRecolored { .. }
         | GameEvent::PlayerLost { .. }
         | GameEvent::MulliganStarted

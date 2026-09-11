@@ -737,6 +737,14 @@ export class DraftEngineOperationLease {
     return this.wasm.export_draft_session();
   }
 
+  /**
+   * Host-only original cube multiset for the next game launch. This is never
+   * projected onto a participant or spectator draft view.
+   */
+  boosterPackPoolForGame(): string[] | null {
+    return this.wasm.booster_pack_pool_for_game() as string[] | null;
+  }
+
   importSession(json: string, difficulty: number): DraftPlayerView {
     return this.wasm.import_draft_session(json, difficulty) as DraftPlayerView;
   }
@@ -886,6 +894,10 @@ export class DraftAdapter {
 
   async getBotDeck(botSeat: number): Promise<SuggestedDeck> {
     return withDraftEngineOperation((lease) => lease.getBotDeck(botSeat));
+  }
+
+  async boosterPackPoolForGame(): Promise<string[] | null> {
+    return withDraftEngineOperation((lease) => lease.boosterPackPoolForGame());
   }
 
   async loadCardDatabase(json: string): Promise<number> {

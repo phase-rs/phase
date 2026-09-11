@@ -1286,6 +1286,9 @@ impl DraftPairing {
 /// The full state of a draft session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DraftSession {
+    /// Original source name multiset, including copies and entries never dealt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booster_pack_pool: Option<Vec<String>>,
     pub draft_code: String,
     pub set_code: String,
     pub kind: DraftKind,

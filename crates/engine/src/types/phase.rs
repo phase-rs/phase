@@ -62,18 +62,61 @@ pub enum TurnDirection {
     Reversed,
 }
 
+/// CR 500.1: "A turn consists of five phases, in this order: beginning,
+/// precombat main, combat, postcombat main, and ending."
+///
+/// [`Phase`] flattens MTG's phases AND steps into one list — `DeclareAttackers`
+/// and `CombatDamage` are separate `Phase` variants inside the single real
+/// combat phase — because almost everything the engine does happens per step.
+/// This type recovers the distinction CR 500.1 draws, for the rules that are
+/// about the PHASE rather than the step within it.
+///
+/// Deliberately not parameterized by anything: it is a total, closed
+/// classification of `Phase`, so `Phase::group` is exhaustive and a future
+/// `Phase` variant cannot be added without the compiler demanding a group for
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PhaseGroup {
+    /// CR 501.1: untap, upkeep, draw.
+    Beginning,
+    /// CR 505.1: the first main phase.
+    PrecombatMain,
+    /// CR 506.1: the five combat steps.
+    Combat,
+    /// CR 505.1: the second main phase.
+    PostcombatMain,
+    /// CR 512.1: end and cleanup.
+    Ending,
+}
+
 impl Phase {
     /// CR 506.1: The combat phase has five steps: beginning of combat, declare
     /// attackers, declare blockers, combat damage, and end of combat.
     pub fn is_combat(self) -> bool {
-        matches!(
-            self,
+        matches!(self.group(), PhaseGroup::Combat)
+    }
+
+    /// CR 500.1: which of the turn's five phases this step belongs to.
+    ///
+    /// Exhaustive by construction — no wildcard arm — so adding a `Phase`
+    /// variant is a compile error here rather than a silent mis-grouping.
+    pub fn group(self) -> PhaseGroup {
+        match self {
+            // CR 501.1
+            Phase::Untap | Phase::Upkeep | Phase::Draw => PhaseGroup::Beginning,
+            // CR 505.1
+            Phase::PreCombatMain => PhaseGroup::PrecombatMain,
+            // CR 506.1
             Phase::BeginCombat
-                | Phase::DeclareAttackers
-                | Phase::DeclareBlockers
-                | Phase::CombatDamage
-                | Phase::EndCombat
-        )
+            | Phase::DeclareAttackers
+            | Phase::DeclareBlockers
+            | Phase::CombatDamage
+            | Phase::EndCombat => PhaseGroup::Combat,
+            // CR 505.1
+            Phase::PostCombatMain => PhaseGroup::PostcombatMain,
+            // CR 512.1
+            Phase::End | Phase::Cleanup => PhaseGroup::Ending,
+        }
     }
 }
 

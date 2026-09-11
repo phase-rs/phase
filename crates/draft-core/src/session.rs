@@ -15,6 +15,14 @@ use crate::validation::{validate_limited_deck, LimitedDeckError};
 use engine::game::deck_validation::{draft_set_concessions_for, DraftSetConcessions};
 
 impl DraftSession {
+    /// Legacy Cube snapshots lack recoverable provenance and stay bounded to
+    /// an empty source. Ordinary drafts continue to use booster products.
+    pub fn booster_pack_pool_for_game(&self) -> Option<&[String]> {
+        self.booster_pack_pool
+            .as_deref()
+            .or_else(|| matches!(self.config.source, DraftSource::Cube { .. }).then_some(&[][..]))
+    }
+
     /// The round that pairings may next be generated for.
     ///
     /// Single authority. `AdvanceRound` deliberately leaves `current_round`
@@ -34,6 +42,7 @@ impl DraftSession {
     pub fn new(config: DraftConfig, seats: Vec<DraftSeat>, draft_code: String) -> Self {
         let pod_size = seats.len();
         DraftSession {
+            booster_pack_pool: None,
             set_code: config.set_code.clone(),
             kind: config.kind,
             status: DraftStatus::Lobby,
@@ -845,6 +854,7 @@ fn apply_start_draft(
     let mut rng = ChaCha20Rng::seed_from_u64(session.config.rng_seed);
 
     let all_packs = pack_source.generate_packs(&mut rng, &session.config, pod_size)?;
+    session.booster_pack_pool = pack_source.booster_pack_pool();
 
     // Record the shape of the boosters the source actually produced, in pack
     // order. Every seat opens the same set in the same pack round, so seat 0's
@@ -1094,6 +1104,96 @@ mod tests {
     // UNION (`draft_set_concessions_for`); these rows assert the union against
     // its parts, so they need the per-set answer too.
     use engine::game::deck_validation::draft_set_concessions;
+
+    #[test]
+    fn cube_booster_pool_captures_original_entries_before_picks_and_restores() {
+        for sentinel in ["Undealt A", "Undealt B"] {
+            let (mut session, fixture) = test_session(2);
+            session.config.source = DraftSource::Cube {
+                id: "custom-cube".into(),
+                name: "Same label".into(),
+            };
+            session.config.pack_count = 1;
+            session.config.cards_per_pack = 2;
+            let mut cards = fixture
+                .generate_pack(&mut ChaCha20Rng::seed_from_u64(1), 0, 0)
+                .0;
+            cards[0].name = sentinel.into();
+            cards[1].name = cards[2].name.clone();
+            let expected: Vec<_> = cards.iter().map(|card| card.name.clone()).collect();
+            let source = crate::cube::CubePackSource::new(cards);
+            apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+            assert_eq!(session.current_pack[0].as_ref().unwrap().0.len(), 2);
+            assert_eq!(session.booster_pack_pool.as_ref(), Some(&expected));
+            assert!(expected.len() > session.total_pack_cards() * 2);
+            assert!(
+                expected.iter().any(|name| !session
+                    .current_pack
+                    .iter()
+                    .flatten()
+                    .flat_map(|pack| &pack.0)
+                    .any(|card| &card.name == name)),
+                "original source includes entries absent from all dealt packs"
+            );
+            let picked = session.current_pack[0].as_ref().unwrap().0[0]
+                .instance_id
+                .clone();
+            apply(
+                &mut session,
+                DraftAction::Pick {
+                    seat: 0,
+                    card_instance_ids: vec![picked],
+                },
+                None,
+            )
+            .unwrap();
+            assert_eq!(session.pools[0].len(), 1);
+            let mut restored: DraftSession =
+                serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
+            for status in [
+                DraftStatus::Drafting,
+                DraftStatus::Deckbuilding,
+                DraftStatus::Complete,
+            ] {
+                restored.status = status;
+                let view = crate::view::filter_for_player(&restored, 0);
+                assert_eq!(view.status, status);
+                let json = serde_json::to_value(view).unwrap();
+                assert!(json.get("booster_pack_pool").is_none());
+                let spectator_json = serde_json::to_value(crate::view::filter_for_spectator(
+                    &restored,
+                    SpectatorVisibility::Public,
+                ))
+                .unwrap();
+                assert!(spectator_json.get("booster_pack_pool").is_none());
+                assert_eq!(
+                    restored.booster_pack_pool_for_game(),
+                    Some(expected.as_slice())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn failed_cube_start_does_not_latch_a_source_and_sets_have_no_pool() {
+        let (mut session, fixture) = test_session(2);
+        session.config.source = DraftSource::Cube {
+            id: "cube".into(),
+            name: "Cube".into(),
+        };
+        let too_small = crate::cube::CubePackSource::new(Vec::new());
+        assert!(matches!(
+            apply(&mut session, DraftAction::StartDraft, Some(&too_small)),
+            Err(DraftError::InsufficientCards { .. })
+        ));
+        assert_eq!(session.status, DraftStatus::Lobby);
+        assert_eq!(session.booster_pack_pool, None);
+        assert_eq!(session.booster_pack_pool_for_game(), Some(&[][..]));
+        let (mut ordinary, _) = test_session(2);
+        apply(&mut ordinary, DraftAction::StartDraft, Some(&fixture)).unwrap();
+        assert_eq!(ordinary.status, DraftStatus::Drafting);
+        assert_eq!(ordinary.booster_pack_pool_for_game(), None);
+    }
 
     fn test_session(pod_size: u8) -> (DraftSession, FixturePackSource) {
         let config = DraftConfig {

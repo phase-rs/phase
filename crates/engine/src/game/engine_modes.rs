@@ -455,10 +455,11 @@ fn handle_triggered_mode_choice(
             // stays set — construction continues through target selection.
             if !triggers::mutate_pending_trigger_entry(state, &trigger.ability) {
                 // Unexpected dangling cursor: the entry is gone before the target
-                // prompt could open. Recover per CR 608.2b / CR 800.4a (a stack
-                // object that has left the stack does not resolve) — record the
-                // diagnostic, abandon, return priority (re-normalized next pass;
-                // CR 117.3b would give the active player).
+                // prompt could open. Recover per CR 608.1 (resolution selects the
+                // spell or ability on top of the stack, so an entry absent from it
+                // is never selected to begin resolving) — record the diagnostic,
+                // abandon, return priority (re-normalized next pass; CR 117.3b
+                // would give the active player).
                 triggers::restore_trigger_event_context(state, mode_context_snapshot);
                 triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
                 return Ok(WaitingFor::Priority { player });
@@ -527,10 +528,11 @@ fn handle_triggered_mode_choice(
         // may fire this entry.
         if !triggers::finalize_pending_trigger_entry(state, &trigger.ability) {
             // Unexpected dangling cursor: the entry is no longer on the stack.
-            // Recover per CR 608.2b / CR 800.4a (a stack object that has left the
-            // stack does not resolve) — record the diagnostic, abandon, and hand
-            // back priority instead of panicking (re-normalized next pass; CR
-            // 117.3b would give the active player).
+            // Recover per CR 608.1 (resolution selects the spell or ability on
+            // top of the stack, so an entry absent from it is never selected to
+            // begin resolving) — record the diagnostic, abandon, and hand back
+            // priority instead of panicking (re-normalized next pass; CR 117.3b
+            // would give the active player).
             triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
             priority::clear_priority_passes(state);
             return Ok(WaitingFor::Priority { player });

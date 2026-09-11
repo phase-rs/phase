@@ -67,6 +67,13 @@ export function draft_procedure(kind: number, tournament_format: string): any;
 export function export_draft_session(): string;
 
 /**
+ * Get the host-only original cube multiset used to build in-game boosters.
+ * Cube sessions return their exact source (including duplicates), legacy Cube
+ * sessions return `[]`, and ordinary set sessions return `null`.
+ */
+export function booster_pack_pool_for_game(): string[] | null;
+
+/**
  * Narrow a limited-pool listing through the ENGINE's filtering authority
  * (#7546 review): the display sends the listing and a typed `PoolFilter`;
  * it renders exactly the returned instance ids. Each instance is classified
@@ -264,6 +271,7 @@ export interface InitOutput {
     readonly all_picks_submitted: () => [number, number, number];
     readonly apply_draft_action: (a: number, b: number) => [number, number, number];
     readonly auto_pick: () => [number, number, number];
+    readonly booster_pack_pool_for_game: () => [number, number, number];
     readonly create_multiplayer_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number];
     readonly draft_procedure: (a: number, b: number, c: number) => [number, number, number];
     readonly export_draft_session: () => [number, number, number, number];

@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // a no-op constructor mock is sufficient.
 vi.mock("../draft-adapter", () => ({
   DraftAdapter: vi.fn().mockImplementation(function () {
-    return {};
+    return { boosterPackPoolForGame: vi.fn(async () => null) };
   }),
 }));
 

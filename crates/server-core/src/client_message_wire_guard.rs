@@ -47,6 +47,25 @@ use crate::spectator_wire_guard::{guard_spectate_draft, guard_spectator_join};
 use engine::game::interaction::MAX_INTERACTION_STRING_LEN;
 use engine::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use engine::types::interaction::{InteractionPreviewRequest, InteractionSubmission};
+use lobby_broker::inbound_guard::validate_deck_list;
+
+/// A Cube source is larger than a constructed deck but still must be bounded
+/// before the Full-mode handler persists it. Order and duplicates are data.
+pub const MAX_BOOSTER_PACK_POOL_ENTRIES: usize = 8_192;
+
+/// The creating client names the pool, and with it every card an in-game pack
+/// can contain. A casual Cube match accepts that; a rated game must not let one
+/// participant choose what a pack opener finds, so a ranked room refuses any
+/// supplied pool, an empty one included.
+fn guard_booster_pack_pool(pool: &Option<Vec<String>>, ranked: bool) -> Result<(), String> {
+    let Some(pool) = pool else {
+        return Ok(());
+    };
+    if ranked {
+        return Err("booster_pack_pool is not accepted for a ranked game".to_string());
+    }
+    validate_deck_list("booster_pack_pool", pool, MAX_BOOSTER_PACK_POOL_ENTRIES)
+}
 
 /// Validate wire fields for any inbound `ClientMessage` before handler work.
 ///
@@ -130,6 +149,8 @@ pub fn guard_client_message_before_dispatch(
             room_name,
             host_peer_id,
             draft_metadata,
+            ranked,
+            booster_pack_pool,
             ..
         } => {
             guard_create_game_settings_inbound(CreateGameSettingsInbound {
@@ -143,7 +164,8 @@ pub fn guard_client_message_before_dispatch(
                 host_peer_id: host_peer_id.as_deref(),
                 draft_metadata: draft_metadata.as_ref(),
             })?;
-            guard_create_ai_seats(ai_seats, *player_count)
+            guard_create_ai_seats(ai_seats, *player_count)?;
+            guard_booster_pack_pool(booster_pack_pool, *ranked)
         }
         ClientMessage::JoinGameWithPassword {
             game_code,
@@ -617,6 +639,87 @@ mod tests {
         assert!(guard_client_message_before_dispatch(
             &ClientMessage::SubscribeLobby,
             ServerMode::Full
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn booster_pack_pool_guard_preserves_duplicates_and_rejects_oversize_or_bad_names() {
+        assert!(guard_booster_pack_pool(
+            &Some(vec![
+                "Cube Card".into(),
+                "Cube Card".into(),
+                "Undealt sentinel".into(),
+            ]),
+            false,
+        )
+        .is_ok());
+        assert!(guard_booster_pack_pool(
+            &Some(vec!["Card".into(); MAX_BOOSTER_PACK_POOL_ENTRIES + 1]),
+            false,
+        )
+        .unwrap_err()
+        .contains("booster_pack_pool"));
+        assert!(
+            guard_booster_pack_pool(&Some(vec!["bad\nname".into()]), false)
+                .unwrap_err()
+                .contains("booster_pack_pool")
+        );
+    }
+
+    /// A settings-create frame as the dispatch guard sees it: a two-seat duel
+    /// that passes every other bound, varying only `ranked` and the pool.
+    fn create_game_with_settings(
+        ranked: bool,
+        booster_pack_pool: Option<Vec<String>>,
+    ) -> ClientMessage {
+        ClientMessage::CreateGameWithSettings {
+            deck: crate::protocol::DeckData {
+                main_deck: vec!["Forest".to_string()],
+                ..Default::default()
+            },
+            display_name: "Alice".to_string(),
+            public: false,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: engine::types::match_config::MatchConfig::default(),
+            ai_seats: vec![],
+            format_config: None,
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+            start_when_full: true,
+            ranked,
+            booster_pack_pool,
+        }
+    }
+
+    /// A rated game must not let its creator choose every card a pack opener
+    /// can find, so any supplied pool, empty included, refuses a ranked room.
+    ///
+    /// REVERT-PROBE: drop the `ranked` refusal from `guard_booster_pack_pool`
+    /// and both ranked frames pass. The unranked and pool-less ranked frames are
+    /// the reach-guards: the refusal is the pool on a ranked room, not either
+    /// field alone.
+    #[test]
+    fn dispatch_guard_refuses_a_booster_pack_pool_on_a_ranked_game() {
+        for pool in [vec!["Cube Card".to_string()], Vec::new()] {
+            let err = guard_client_message_before_dispatch(
+                &create_game_with_settings(true, Some(pool.clone())),
+                ServerMode::Full,
+            )
+            .unwrap_err();
+            assert!(err.contains("booster_pack_pool"), "{pool:?}: {err}");
+            assert!(guard_client_message_before_dispatch(
+                &create_game_with_settings(false, Some(pool)),
+                ServerMode::Full,
+            )
+            .is_ok());
+        }
+        assert!(guard_client_message_before_dispatch(
+            &create_game_with_settings(true, None),
+            ServerMode::Full,
         )
         .is_ok());
     }

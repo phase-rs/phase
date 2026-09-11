@@ -940,8 +940,7 @@ pub enum GameAction {
     /// The CURRENT FRONTEND always sends `null` (`LoopShortcutModal`, pinned by that modal's T2
     /// test) — that is a client-side policy, NOT this action's contract. Engine-side per-iteration
     /// pin CAPTURE is what remains outstanding, as part of the "Shortcut-system rules-correctness
-    /// completion" follow-up in `.deferred-backlog.md` (see
-    /// `analysis::loop_check::ShortcutResponse`'s deficiency note).
+    /// completion" follow-up in `.deferred-backlog.md`.
     DeclareShortcut {
         count: crate::analysis::decision_template::IterationCount,
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1874,6 +1874,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::TappedForMana { .. }
         | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
+        | GameEvent::ManaBurn { .. }
         | GameEvent::ManaRecolored { .. }
         | GameEvent::PermanentTapped { .. }
         | GameEvent::CreatureExerted { .. }

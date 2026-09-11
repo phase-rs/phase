@@ -2440,6 +2440,7 @@ mod tests {
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::proposed_event::DrawEventStage;
     use crate::types::replacements::ReplacementEvent;
 
     fn setup() -> GameState {
@@ -4229,6 +4230,7 @@ mod tests {
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
             sacrifice_provenance: None,
@@ -4403,6 +4405,7 @@ mod tests {
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(2),
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
             sacrifice_provenance: None,

@@ -11,6 +11,7 @@ use super::events::GameEvent;
 use super::game_state::ProductionOverride;
 use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::keywords::{Keyword, KeywordKind};
+use super::phase::Phase;
 use super::player::PlayerId;
 use super::zones::Zone;
 
@@ -1531,6 +1532,18 @@ pub enum ManaExpiry {
     /// Mana persists through combat steps but drains at EndCombat → PostCombatMain.
     /// Used by Firebending and similar "mana lasts within combat" mechanics.
     EndOfCombat,
+    /// Mana persists through the steps of whichever of CR 500.1's five phases is
+    /// active, and drains only when the turn crosses into a different one.
+    ///
+    /// The pre-M10 mana-burn rule, which emptied pools at end of PHASE rather
+    /// than end of step (see the "Mana Burn (Obsolete)" glossary entry), and is
+    /// opted into per format by `LegacyRuleSet.mana_burn`.
+    ///
+    /// Generalizes [`ManaExpiry::EndOfCombat`], which is this same "survive my
+    /// phase's internal steps, drain at the real boundary" shape hardcoded to
+    /// one phase. Like its two siblings this variant names no specific phase —
+    /// it resolves against whichever group is active when it is checked.
+    EndOfPhaseGroup,
 }
 
 /// CR 205.4g: Supertype carried by produced mana (Snow today; extensible).
@@ -2316,12 +2329,67 @@ impl ManaPool {
     /// effect may still apply.
     ///
     /// - `EndOfCombat`: marker clears when leaving combat (CR 500.5a).
+    /// - `EndOfPhaseGroup`: marker clears when the turn crosses from one of
+    ///   CR 500.1's five phases into another.
     /// - `EndOfTurn`: marker remains until the cleanup action (CR 514.2).
     /// - `None`: already eligible for the ordinary empty-pool event.
-    pub fn clear_expired_end_of_combat_retention_markers(&mut self, in_combat: bool) {
+    ///
+    /// `from` is the PRE-transition phase and is `None` only for a `GameState`
+    /// saved before it was recorded. A phase-group crossing cannot be computed
+    /// without it, so such a resume leaves `EndOfPhaseGroup` units retained —
+    /// the conservative direction, since the alternative would burn a player
+    /// for mana at a boundary the engine cannot confirm they crossed.
+    ///
+    /// `EndOfCombat` deliberately still keys off the DESTINATION alone rather
+    /// than the crossing, preserving its existing behavior exactly: a stray
+    /// combat-retained unit drains at the next non-combat step whether or not
+    /// that step is a phase-group boundary.
+    pub fn clear_expired_retention_markers(&mut self, from: Option<Phase>, to: Phase) {
+        let leaving_phase_group = from.is_some_and(|from| from.group() != to.group());
         for unit in &mut self.mana {
-            if matches!(unit.expiry, Some(ManaExpiry::EndOfCombat)) && !in_combat {
+            let expired = match unit.expiry {
+                // CR 500.5a
+                Some(ManaExpiry::EndOfCombat) => !to.is_combat(),
+                // CR 500.1
+                Some(ManaExpiry::EndOfPhaseGroup) => leaving_phase_group,
+                // CR 514.2: cleared by the cleanup action, not here.
+                Some(ManaExpiry::EndOfTurn) => false,
+                None => false,
+            };
+            if expired {
                 unit.expiry = None;
+            }
+        }
+    }
+
+    /// Mana burn: hold unspent mana across the steps INSIDE one of CR 500.1's
+    /// five phases, so it empties only at the phase boundary — where the
+    /// emptied count is the life the player loses.
+    ///
+    /// Marks ordinary units with [`ManaExpiry::EndOfPhaseGroup`], reusing the
+    /// same retention mechanism Firebending's `EndOfCombat` already rides on,
+    /// rather than suppressing the drain: retention is what keeps a unit out of
+    /// the `Drop` set, and a second way to do that could disagree with the
+    /// first.
+    ///
+    /// **Marks here, not at each `ManaUnit` construction.** A unit cannot know
+    /// the format it was produced under — `ManaUnit::new` takes no state, and
+    /// there are well over a hundred construction sites, most of them tests.
+    /// The phase transition is the one place that has both the pool and the
+    /// resolved rules, and it is also the only place the mark is ever read.
+    ///
+    /// At a real crossing this deliberately does nothing, leaving the units
+    /// ordinary so [`Self::clear_expired_retention_markers`] and the
+    /// empty-pool pipeline treat them exactly as they treat any other unspent
+    /// mana. That is what makes the burn amount fall out of the existing drop
+    /// count instead of needing a second, separately-computed tally.
+    pub fn retain_across_phase_group_steps(&mut self, from: Option<Phase>, to: Phase) {
+        if from.is_some_and(|from| from.group() != to.group()) {
+            return;
+        }
+        for unit in &mut self.mana {
+            if unit.expiry.is_none() {
+                unit.expiry = Some(ManaExpiry::EndOfPhaseGroup);
             }
         }
     }
@@ -2777,7 +2845,7 @@ mod tests {
 
         // Non-cleanup transition: EndOfTurn unit survives; non-expiry unit
         // is left in place (the pipeline drives Drop disposition elsewhere).
-        pool.clear_expired_end_of_combat_retention_markers(false);
+        pool.clear_expired_retention_markers(Some(Phase::Upkeep), Phase::Draw);
         assert_eq!(pool.count_color(ManaType::Green), 1);
         assert_eq!(pool.count_color(ManaType::Red), 1);
         assert_eq!(pool.mana[0].expiry, Some(ManaExpiry::EndOfTurn));
@@ -2799,13 +2867,51 @@ mod tests {
 
         // In-combat transition (e.g., DeclareAttackers → DeclareBlockers):
         // EndOfCombat unit survives.
-        pool.clear_expired_end_of_combat_retention_markers(true);
+        pool.clear_expired_retention_markers(Some(Phase::DeclareAttackers), Phase::DeclareBlockers);
         assert_eq!(pool.count_color(ManaType::Red), 1);
         assert_eq!(pool.mana[0].expiry, Some(ManaExpiry::EndOfCombat));
 
         // Leaving combat ends the retention duration; ordinary empty-pool
         // processing decides the unit's final disposition.
-        pool.clear_expired_end_of_combat_retention_markers(false);
+        pool.clear_expired_retention_markers(Some(Phase::EndCombat), Phase::PostCombatMain);
+        assert_eq!(pool.total(), 1);
+        assert_eq!(pool.mana[0].expiry, None);
+    }
+
+    /// CR 500.1: the pre-M10 boundary is the PHASE, not the step. A unit must
+    /// survive every intra-phase step and clear only on a real crossing.
+    #[test]
+    fn mana_pool_clears_end_of_phase_group_marker_only_when_crossing_phases() {
+        let mut pool = ManaPool::default();
+        let mut burn_mana = make_unit(ManaType::Red);
+        burn_mana.expiry = Some(ManaExpiry::EndOfPhaseGroup);
+        pool.add(burn_mana);
+
+        // Intra-group steps, across three different groups, all retain. The
+        // combat pair is the one the old `EndOfCombat` rule already handled;
+        // the beginning-phase pair is the one it never could.
+        for (from, to) in [
+            (Phase::Untap, Phase::Upkeep),
+            (Phase::Upkeep, Phase::Draw),
+            (Phase::DeclareAttackers, Phase::DeclareBlockers),
+            (Phase::End, Phase::Cleanup),
+        ] {
+            pool.clear_expired_retention_markers(Some(from), to);
+            assert_eq!(
+                pool.mana[0].expiry,
+                Some(ManaExpiry::EndOfPhaseGroup),
+                "{from:?} -> {to:?} stays inside one phase and must retain"
+            );
+        }
+
+        // An unknown pre-transition phase (a save predating the field) also
+        // retains — the crossing cannot be confirmed, so it is not assumed.
+        pool.clear_expired_retention_markers(None, Phase::PreCombatMain);
+        assert_eq!(pool.mana[0].expiry, Some(ManaExpiry::EndOfPhaseGroup));
+
+        // A real crossing clears the marker, handing the unit to the ordinary
+        // empty-pool pipeline.
+        pool.clear_expired_retention_markers(Some(Phase::Draw), Phase::PreCombatMain);
         assert_eq!(pool.total(), 1);
         assert_eq!(pool.mana[0].expiry, None);
     }

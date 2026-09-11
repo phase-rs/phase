@@ -2019,15 +2019,17 @@ fn shortcut_reply_projection(waiting_for: &WaitingFor) -> Option<ShortcutReplyPr
     let WaitingFor::RespondToShortcut { proposal, .. } = waiting_for else {
         return None;
     };
-    let max_iteration = match proposal.count {
-        crate::analysis::decision_template::IterationCount::Fixed(iterations) => {
-            iterations.saturating_sub(1)
-        }
-        crate::analysis::decision_template::IterationCount::UntilLethal => u32::MAX,
-    };
+    // CR 732.2b: the proposal states which places it admits; this publishes that range's two
+    // ends verbatim, never a second derivation of them. The engine stays the authority inside
+    // that range: a place it cannot drive is refused at the responder's seam even though the
+    // published range admits it, so published and honored part company above the budget --
+    // `the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it` pins both
+    // sides. An empty range therefore arrives with its floor above its ceiling, which the
+    // submission guard reads as admitting no place at all.
+    let places = proposal.shortening_places();
     Some(ShortcutReplyProjection {
-        min_iteration: 0,
-        max_iteration,
+        min_iteration: *places.start(),
+        max_iteration: *places.end(),
     })
 }
 
@@ -2849,51 +2851,50 @@ struct VictimCharge {
 ///
 /// **A `victim_slot` magnitude is an aggregate, not a per-slot charge.** Every entry carries
 /// the same number — the worst single seat's life loss over the whole period — so no victim
-/// identity is recoverable from it, and reading it as one seat's charge names whichever seat
-/// loses the most. This therefore resolves a victim only on the shape where the aggregate
-/// provably IS the slot's charge: a period whose `delta.life` names exactly ONE losing seat,
-/// and where that seat is one the declaration allocates to. Outside it the answer is `None`
-/// and the fold keeps `payload_seat`'s own keys — an unsplit magnitude on the right seat
-/// beats a split one on the wrong seats.
+/// identity is recoverable from it, and no seat's rate either. The victim is identified from
+/// the period's own life map instead, on the one cardinality that names it without ambiguity:
+/// a `delta.life` with exactly ONE losing seat, and that seat one the declaration allocates
+/// to. Outside it the answer is `None` and the fold keeps `payload_seat`'s own keys — an
+/// unsplit magnitude on the right seat beats a split one on the wrong seats.
 ///
 /// Deliberately NOT `analysis::resource::slot_charged_life`, which answers a different
 /// question — what TOTAL is liftable, largest loss first, refusing a tie.
 ///
 /// Four refusals, all fail-closed: no entry for the slot, a period whose life map names zero or
-/// several losing seats, a losing seat the declaration does not announce, and a charge that is
-/// not the whole of that seat's per-period loss.
+/// several losing seats, a losing seat the declaration does not announce, and a per-period loss
+/// no negation can state.
 ///
-/// A resolved charge is POSITIVE by construction rather than by a guard of its own: the sum
-/// below is zero only when `rate` negates a magnitude the iterator already restricted to
-/// losses. `checked_add` states that over the whole of `i64`, so there is no negation to
-/// overflow and no positivity conjunct to keep.
+/// A resolved charge is POSITIVE because the iterator already restricted the map to losses;
+/// `checked_neg` is what refuses the one loss whose negation is not an `i64`, `i64::MIN`.
 ///
-/// That last one is the FOLD's precondition, not a second identification rule. CR 732.2a states
-/// a count's magnitudes as the period times the count, and `shortcut_preview_entries` re-states
-/// the charged seat's life by dropping that axis and re-adding `rate` once per allocated cycle.
-/// The substitution preserves the period's life total exactly when `rate` is the seat's whole
-/// loss; under any other charge the published magnitudes total less than the drain the
-/// declaration takes, and CR 119.3 is the number the player is deciding on. The equality is
-/// tested on the already-identified seat rather than used to pick one — filtering the life map
-/// by it would name whichever seat happened to match the aggregate.
+/// The `rate` is the identified seat's OWN per-period loss, read from the very life map that
+/// seat was identified in — the published `victim_slot` magnitude is consulted as the GATE
+/// saying this point's slot is one the period charges, and is otherwise discarded. That is what
+/// makes the FOLD's precondition hold by construction rather than by coincidence: CR 732.2a
+/// states a count's magnitudes as the period times the count, and `shortcut_preview_entries`
+/// re-states the charged seat's life by dropping that axis and re-adding `rate` once per
+/// allocated cycle, so the substitution preserves the period's life total exactly. The reader is
+/// thereby INDIFFERENT to which derivation minted the aggregate.
 fn victim_charge(
     periodic: &crate::analysis::resource::PeriodicDelta,
     point: &LoopShortcutPointProjection,
     seats: &[PlayerId],
 ) -> Option<VictimCharge> {
-    let rate = periodic
+    periodic
         .victim_slot
         .iter()
-        .find(|(slot, _)| *slot == point.slot)
-        .map(|(_, magnitude)| *magnitude)?;
+        .find(|(slot, _)| *slot == point.slot)?;
     let mut losing = periodic
         .delta
         .life
         .iter()
         .filter(|(_, magnitude)| **magnitude < 0);
     let (seat, loss) = losing.next()?;
-    (losing.next().is_none() && seats.contains(seat) && loss.checked_add(rate) == Some(0))
-        .then_some(VictimCharge { rate, seat: *seat })
+    (losing.next().is_none() && seats.contains(seat)).then_some(())?;
+    Some(VictimCharge {
+        rate: loss.checked_neg()?,
+        seat: *seat,
+    })
 }
 
 /// CR 119.3: how one element's count spreads the charged life magnitude over the seats the
@@ -3433,9 +3434,11 @@ fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequ
     // The single hidden-information authority has already set this to `None` for a viewer who
     // may not see the declaration, so an identity that authority dropped is unreachable here.
     let template = proposal.template.as_ref()?;
-    // The DECLARED count as a degenerate one-point window. Nothing on this path samples a count
-    // — the count sampler is never called here — so stating the declared count is the honest
-    // value for a field the offer-side projection requires.
+    // The proposal's LIVE count as a degenerate one-point window — the proposer's declaration
+    // until a responder shortens, and that responder's named place afterwards (CR 732.2b), which
+    // is what the seats still queued are being asked about. Nothing on this path samples a count
+    // — the count sampler is never called here — so reading the proposal's own count is the
+    // honest value for a field the offer-side projection requires.
     let count = match proposal.count {
         IterationCount::Fixed(iterations) => InteractionShortcutCountSpec::Fixed {
             min: iterations,
@@ -3614,11 +3617,11 @@ fn declared_sequence_preview(
     //
     // `victim_charge` refuses for FOUR reasons: no `victim_slot` entry for this point's slot; a
     // life map naming zero or several losing seats; a losing seat the seats-in-hand do not name;
-    // and a charge that is not the whole of that seat's per-period loss. Only the THIRD is about
-    // this call site's narrower domain — `basis.seats` here is the declaration's announced
-    // subjects, a subset of the offer's candidate domain. On the other three the offer's own
-    // element refuses in exactly the same way, so both sides fold the period's seat keys and
-    // stating the magnitudes is correct.
+    // and a per-period loss no negation can state. Only the THIRD is about this call site's
+    // narrower domain — `basis.seats` here is the declaration's announced subjects, a subset of
+    // the offer's candidate domain. On the other three the offer's own element refuses in
+    // exactly the same way, so both sides fold the period's seat keys and stating the
+    // magnitudes is correct.
     //
     // So re-ask the SAME landed rule over the life map's OWN KEYS. That domain satisfies the
     // third conjunct by construction (the seat it tests is drawn from that very map), leaving the

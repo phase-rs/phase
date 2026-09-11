@@ -586,6 +586,12 @@ export class DraftPodHostAdapter {
     return this.host.podCommanderDeckPayload(view, localSeat);
   }
 
+  /** Host-only cube source for the <=6-seat Commander game constructor. */
+  async boosterPackPoolForGame(): Promise<string[] | null> {
+    if (!this.host) throw new Error("Host not initialized");
+    return this.host.boosterPackPoolForGame();
+  }
+
   /**
    * CR 903.13a: every deck the completed Commander pod's launch needs. Sends
    * nothing — pair it with `sendCommanderLaunches` once the game is up. `view`

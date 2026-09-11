@@ -1958,6 +1958,7 @@ fn evaluate_condition_with_context(
                         recipient: recipient_id,
                         scoped_player: None,
                         damage_source: None,
+                        event_amount: None,
                     },
                 )
             };

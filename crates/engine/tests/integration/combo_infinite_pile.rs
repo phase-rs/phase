@@ -196,7 +196,7 @@ fn real_4p_object_growth_accept_writes_infinite_pile() {
 
     drive_all_accept(&mut state);
 
-    // The protocol closed cleanly back to ordinary priority (CR 800.4a).
+    // CR 732.2a: the protocol closed at its ending point — a place where a player has priority.
     assert!(
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "after all accept, materialize hands priority back, got {:?}",

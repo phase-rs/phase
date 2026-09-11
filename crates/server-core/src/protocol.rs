@@ -380,6 +380,10 @@ pub enum ClientMessage {
         /// Enable ranked rating updates for this room.
         #[serde(default)]
         ranked: bool,
+        /// Host-private Cube draft source for a native Full-server game. This
+        /// deliberately belongs to the Full session, never the lobby broker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        booster_pack_pool: Option<Vec<String>>,
     },
     JoinGameWithPassword {
         game_code: String,
@@ -1584,6 +1588,11 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            booster_pack_pool: Some(vec![
+                "Cube Card".into(),
+                "Cube Card".into(),
+                "Undealt sentinel".into(),
+            ]),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -1596,6 +1605,7 @@ mod tests {
                 player_count,
                 match_config,
                 room_name,
+                booster_pack_pool,
                 ..
             } => {
                 assert_eq!(display_name, "Alice");
@@ -1605,6 +1615,14 @@ mod tests {
                 assert_eq!(player_count, 4);
                 assert_eq!(match_config, MatchConfig::default());
                 assert_eq!(room_name, Some("Friday Night Commander".to_string()));
+                assert_eq!(
+                    booster_pack_pool,
+                    Some(vec![
+                        "Cube Card".into(),
+                        "Cube Card".into(),
+                        "Undealt sentinel".into()
+                    ])
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -2130,6 +2148,7 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            booster_pack_pool: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -2492,6 +2511,7 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            booster_pack_pool: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -3210,18 +3230,18 @@ mod tests {
         }
     }
 
-    /// The bump this number is at: `GameEvent` gained the tagged variant
-    /// `ExtraTurnCreated { player_id, anchor }`. `StateUpdate.events` and
-    /// `GameStarted.events` can now carry that tag, so a v68 peer must be
-    /// refused before it receives an event it cannot deserialize.
+    /// The bump this number is at: `OutsideGameChoiceSource::BoosterPack`
+    /// replaced `set_code` with a required `origin: PackOrigin`, so an opened
+    /// pack's `WaitingFor::OutsideGameChoice` is a shape a v69 peer cannot
+    /// decode and must be refused before it receives one.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_69_for_extra_turn_created_event() {
-        assert_eq!(PROTOCOL_VERSION, 69);
+    fn protocol_version_is_70_for_booster_pack_origin() {
+        assert_eq!(PROTOCOL_VERSION, 70);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3232,7 +3252,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_69_for_extra_turn_created_event` stays
+    /// `protocol_version_is_70_for_booster_pack_origin` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

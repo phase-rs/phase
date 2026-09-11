@@ -5222,7 +5222,7 @@ mod tests {
     use crate::types::mana::{
         ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaType, ManaUnit,
     };
-    use crate::types::proposed_event::{ProposedEvent, ReplacementId};
+    use crate::types::proposed_event::{DrawEventStage, ProposedEvent, ReplacementId};
     use crate::types::statics::{CostPaymentProhibition, ProhibitionScope, StaticMode};
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -5248,6 +5248,7 @@ mod tests {
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
             sacrifice_provenance: None,

@@ -54,6 +54,10 @@ pub struct PersistedSession {
     pub start_when_full: bool,
     #[serde(default)]
     pub ranked: bool,
+    /// Host-private native Cube source. Older persisted sessions restore as
+    /// `None`; the list itself intentionally preserves order and duplicates.
+    #[serde(default)]
+    pub booster_pack_pool: Option<Vec<String>>,
     /// Lobby metadata for games still waiting for players.
     pub lobby_meta: Option<PersistedLobbyMeta>,
 }

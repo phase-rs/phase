@@ -192,8 +192,9 @@ pub fn resolve(
     //
     // CR 115.7d, INVARIANT SC: the UNION is BASE's cascade EXTENDED, never
     // replaced, so it stays a literal prefix of BASE's (Invariant B) and the
-    // dischargeability gate below cannot newly fire where BASE's `:155` guard
-    // did not. Extend-if-absent rather than concatenate: a root position's
+    // dischargeability gate below cannot newly fire where BASE's flat
+    // `legal_new_targets.is_empty()` guard did not. Extend-if-absent rather
+    // than concatenate: a root position's
     // pool now frequently EQUALS the cascade, and blind concatenation would
     // double the list the projection renders. BASE's own internal duplicates
     // are preserved untouched — do NOT deduplicate `base` itself.
@@ -216,15 +217,15 @@ pub fn resolve(
     // candidates. Resolve as a no-change instead — mirroring the empty-
     // `current_targets` no-op guard above.
     //
-    // THIS GUARD MUST BE ASKED IN THE INDEX SPACE ADMISSION USES. At
-    // `bb28b0e8b` admission was membership in the flat cascade, so
+    // THIS GUARD MUST BE ASKED IN THE INDEX SPACE ADMISSION USES. At BASE
+    // admission was membership in the flat cascade, so
     // `legal_new_targets.is_empty()` was the whole question. Under INVARIANT
     // SC admission is per position, and a `Single` prompt whose position 0 has
     // an empty pool is unanswerable even though the UNION is not empty —
     // measured on Hallow whose declared target spell left the stack
     // (phase-rs/phase#8355 round-6 defect B10). For a `Legacy` position this
-    // predicate degenerates to `!base.is_empty()`, i.e. to `bb28b0e8b`'s test
-    // exactly; for `All` it IS `bb28b0e8b`'s test, because `All` always admits
+    // predicate degenerates to `!base.is_empty()`, i.e. to BASE's test
+    // exactly; for `All` it IS BASE's test, because `All` always admits
     // the no-change submission (CR 115.7d).
     if !retarget_prompt_is_dischargeable(scope, &slot_pools, &legal_new_targets) {
         events.push(GameEvent::EffectResolved {
@@ -250,8 +251,8 @@ pub fn resolve(
 
 /// CR 115.7a: a parked `RetargetChoice` must be DISCHARGEABLE — at least one
 /// submission `engine::apply_retarget` accepts must exist. This is the SAME
-/// question the flat `legal_new_targets.is_empty()` guard asked at
-/// `bb28b0e8b`; it is asked here in the index space admission now uses
+/// question the flat `legal_new_targets.is_empty()` guard asked at BASE;
+/// it is asked here in the index space admission now uses
 /// (INVARIANT SC: position `i` is admitted by `slot_pools[i]`, nothing else).
 ///
 /// "If a target can't be changed to another legal target, the original target
@@ -290,7 +291,8 @@ pub(crate) fn retarget_prompt_is_dischargeable(
         // CR 115.7d: `All` always admits the no-change submission (every
         // position takes `apply_retarget`'s unchanged-position skip), so it is
         // dischargeable whenever there is anything to RENDER. That is the
-        // union — `bb28b0e8b`'s `:155` test, preserved verbatim.
+        // union — BASE's flat `legal_new_targets.is_empty()` test,
+        // preserved verbatim.
         RetargetScope::All => !legal_new_targets.is_empty(),
         // Unreachable here: `RetargetScope::ForcedTo` has NO construction site
         // anywhere in the workspace (the parser emits only `Single`/`All`).
@@ -433,8 +435,8 @@ pub(crate) fn retarget_pool_controller(
 /// and `ai_support::candidates::retarget_actions` all READ that stored vector
 /// and none derives another.
 ///
-/// `find_legal_targets_for_ability_with_controller` (`targeting.rs:57`) is the
-/// one constructor that can serve both roles: it carries the addressed NODE
+/// `find_legal_targets_for_ability_with_controller` is the one constructor
+/// that can serve both roles: it carries the addressed NODE
 /// (so a filter's node-relative predicates resolve against the node that
 /// declares it) AND an explicit controller (CR 109.5 + CR 400.7a). Also CR
 /// 115.1 + CR 702.11b + CR 702.16b + CR 702.18a: that controller drives
@@ -674,9 +676,9 @@ mod tests {
     use crate::types::game_state::{CastingVariant, RetargetScope, StackEntry, StackEntryKind};
     use crate::types::identifiers::CardId;
 
-    /// P-GATE — `retarget_prompt_is_dischargeable` degenerates to `bb28b0e8b`'s
-    /// flat `:155` test in both degenerate cases, and is unconditionally
-    /// `false` for the unreachable `ForcedTo` arm. Each arm is exercised with
+    /// P-GATE — `retarget_prompt_is_dischargeable` degenerates to BASE's flat
+    /// `legal_new_targets.is_empty()` test in both degenerate cases, and is
+    /// unconditionally `false` for the unreachable `ForcedTo` arm. Each arm is exercised with
     /// BOTH verdicts, so no arm passes by being constantly true or false.
     #[test]
     fn retarget_prompt_is_dischargeable_degenerates_to_the_flat_test() {

@@ -1767,7 +1767,7 @@ mod tests {
     };
     use crate::types::mana::ManaCost;
     use crate::types::match_config::MatchType;
-    use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+    use crate::types::proposed_event::{CounterPlacement, DrawEventStage, ProposedEvent};
     use crate::types::replacements::ReplacementEvent;
 
     fn setup_two_player() -> GameState {
@@ -3316,6 +3316,7 @@ mod tests {
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
             sacrifice_provenance: None,
@@ -3415,6 +3416,7 @@ mod tests {
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
             sacrifice_provenance: None,
@@ -3490,6 +3492,7 @@ mod tests {
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
             sacrifice_provenance: None,

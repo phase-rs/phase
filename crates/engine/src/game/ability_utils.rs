@@ -9232,7 +9232,7 @@ fn node_slot_filters(ability: &ResolvedAbility) -> NodeSlotFilters {
 ///     (measured on Prey Upon, a printed `Fight` card, whose root is
 ///     fail-closed).
 ///
-///     BYTE-IDENTITY TO `bb28b0e8b` AT SUCH A POSITION IS CONDITIONAL, and the
+///     BYTE-IDENTITY TO BASE AT SUCH A POSITION IS CONDITIONAL, and the
 ///     condition is a DIFFERENT authority from the one that produced `Legacy`.
 ///     BASE's `retarget_slot_violation` is a no-op at a position exactly when
 ///

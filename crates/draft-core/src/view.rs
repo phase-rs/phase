@@ -3153,6 +3153,11 @@ mod tests {
             },
         );
         assert!(filter_for_player(&from_cube, 0).draft_set_codes.is_empty());
+        for original in [&from_cube, &from_set] {
+            let projected = filter_for_player(original, 0);
+            let json = serde_json::to_value(projected).unwrap();
+            assert!(json.get("booster_pack_pool").is_none());
+        }
 
         // (iii) CR 903.13 scopes both concessions to Commander Draft.
         let sealed = session_with(DraftKind::Sealed, DraftSource::single_set("CMM"));

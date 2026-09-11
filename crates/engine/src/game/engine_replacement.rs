@@ -15,7 +15,9 @@ use crate::types::game_state::{
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{AppliedReplacementKey, CounterPlacement, ProposedEvent};
+use crate::types::proposed_event::{
+    AppliedReplacementKey, CounterPlacement, DrawEventStage, ProposedEvent,
+};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -23,7 +25,7 @@ use super::ability_utils::build_resolved_from_def_with_targets;
 use super::effects;
 use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
 use super::effects::destroy::apply_destroy_after_replacement;
-use super::effects::draw::apply_draw_after_replacement;
+use super::effects::draw::{apply_draw_after_replacement, settle_draw_instruction};
 use super::effects::life::{
     apply_life_gain_after_replacement, apply_life_loss_after_replacement,
     drain_pending_life_total_assignment,
@@ -236,16 +238,26 @@ fn handle_replacement_choice_inner(
     // ownership before `continue_replacement` consumes the pending record.
     // The LifeLoss event is the sole resume authority; the already-applied
     // EmptyManaPool event must never be replayed.
-    let pending_was_phase_drain_life_loss = state
+    //
+    // Carries the LOSER rather than a bare bool: the `Prevented` arm has to
+    // consume that player's parked empty-pool provenance, and reading it back
+    // after `continue_replacement` is impossible — the record is gone.
+    let pending_phase_drain_life_loser = state
         .pending_phase_transition_progress
         .as_ref()
         .is_some_and(|progress| {
             progress.drain_state == crate::types::game_state::PhaseTransitionDrainState::Ready
         })
-        && state
-            .pending_replacement
-            .as_ref()
-            .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::LifeLoss { .. }));
+        .then(|| {
+            state
+                .pending_replacement
+                .as_ref()
+                .and_then(|pending| match pending.proposed {
+                    ProposedEvent::LifeLoss { player_id, .. } => Some(player_id),
+                    _ => None,
+                })
+        })
+        .flatten();
     // CR 701.24a: capture the parked library placement (W3) BEFORE
     // `continue_replacement` consumes (`.take()`s) the pending record, so the
     // ZoneChange resume arm below can thread it into the delivery `DeliveryCtx`
@@ -618,6 +630,24 @@ fn handle_replacement_choice_inner(
                         return Ok(state.waiting_for.clone());
                     }
                 }
+                // CR 121.2a: a draw INSTRUCTION whose consult paused on this
+                // choice. Settle its surviving count into its frame — nothing is
+                // delivered here; the resume loop below performs the individual
+                // draws, each with its own consult.
+                instruction @ ProposedEvent::Draw {
+                    stage: DrawEventStage::Instruction,
+                    player_id,
+                    ..
+                } => {
+                    settle_draw_instruction(state, instruction);
+                    // CR 805.4b: as in the individual-draw arm below, the draw-step
+                    // draw is now owned by its settled frame, which the resume loop
+                    // completes; pop it so the team drain does not re-enter
+                    // `execute_draw_for` and draw this player a second time.
+                    if state.pending_team_draw_step.first() == Some(&player_id) {
+                        state.pending_team_draw_step.remove(0);
+                    }
+                }
                 // CR 121.1 + CR 614.6 + CR 614.11: Draw accepted after
                 // replacement choice — delegate to the shared post-replacement
                 // helper so library-zone move + per-turn accounting match the
@@ -716,7 +746,21 @@ fn handle_replacement_choice_inner(
                 }
                 // CR 120.3: Life loss accepted after replacement choice.
                 loss @ ProposedEvent::LifeLoss { .. } => {
-                    apply_life_loss_after_replacement(state, loss, events);
+                    // Captured before the move: an empty-pool loss that
+                    // deferred here never returns to the phase-transition
+                    // drain, so this is the only place its cause can still be
+                    // named (a mana burn would otherwise land as an unexplained
+                    // life change).
+                    let loser = match &loss {
+                        ProposedEvent::LifeLoss { player_id, .. } => Some(*player_id),
+                        _ => None,
+                    };
+                    let actual = apply_life_loss_after_replacement(state, loss, events);
+                    if let Some(player_id) = loser {
+                        crate::game::turns::note_empty_pool_life_loss_resolved(
+                            state, player_id, actual, events,
+                        );
+                    }
                 }
                 // CR 701.9a: Discard accepted after replacement choice — move the
                 // object hand → graveyard and record/emit the discard event. The
@@ -1421,7 +1465,14 @@ fn handle_replacement_choice_inner(
             {
                 return Ok(state.waiting_for.clone());
             }
-            if pending_was_phase_drain_life_loss {
+            if let Some(loser) = pending_phase_drain_life_loser {
+                // CR 614.1a: the chosen replacement prevented the loss outright,
+                // so no life left this player and nothing may narrate one.
+                // Consume the parked provenance anyway — left behind, it is a
+                // record with no event, and the next same-player loss to resume
+                // through this pipeline would claim it and be logged as mana
+                // burn. `actual: 0` consumes without emitting.
+                super::turns::note_empty_pool_life_loss_resolved(state, loser, 0, events);
                 state.waiting_for = WaitingFor::Priority {
                     player: state.active_player,
                 };

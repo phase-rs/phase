@@ -1249,7 +1249,9 @@ fn parse_linked_exile_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRe
 /// source's linked-exile pool (which includes `ExileLinkKind::CraftMaterial`);
 /// `Owned { You }` rebinds per owner under player-scope iteration, matching the
 /// existing Skyclave linked-exile precedent (`parse_linked_exile_mana_value_ref`).
-fn linked_exile_owned_filter() -> TargetFilter {
+/// Also the cast target of "the exiled card's owner may cast that card" (Spell
+/// Queller), rebound in `oracle_effect::rewrite_player_scope_refs`.
+pub(crate) fn linked_exile_owned_filter() -> TargetFilter {
     TargetFilter::And {
         filters: vec![
             TargetFilter::ExiledBySource,

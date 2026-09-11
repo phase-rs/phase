@@ -291,6 +291,15 @@ def classify_scope(card: str, repl: dict) -> str:
             f"(and to KNOWN_QUANTITY_MODIFICATIONS), then re-freeze."
         )
 
+    # CR 121.2a: a typed antecedent threshold -- "draw N or more cards" lowered to
+    # an OnlyIfQuantity gating on the event's own draw count (EventContextAmount) --
+    # modifies the whole instruction before any individual draw, so it is
+    # InstructionCount even when the substitute is a fixed draw (Alms Collector).
+    # The instruction-count signal lives in the condition subtree, not just the
+    # execute's count.
+    condition = repl.get("condition")
+    if condition is not None and reads_event_context_amount(condition):
+        return "InstructionCount"
     effect = ((repl.get("execute") or {}).get("effect")) or {}
     if effect.get("type") == "Draw" and reads_event_context_amount(effect.get("count")):
         return "InstructionCount"
@@ -367,8 +376,9 @@ CORPUS_HEADER = """\
 # The scope column is the contract: when Plan 03 adds
 # `DrawReplacementScope` to `ReplacementDefinition`, the value each producer
 # assigns to these cards must equal the value frozen here. It is derived
-# mechanically (InstructionCount iff the substitute's Draw count reads
-# `EventContextAmount`, the CR 121.2a count-modifier shape), NOT hand-listed.
+# mechanically (InstructionCount iff the definition's condition or its
+# substitute's Draw count reads `EventContextAmount` -- the CR 121.2a
+# count-form threshold and count-modifier shapes), NOT hand-listed.
 #
 # `nested-draw` marks a substitute whose own execute starts a fresh Draw
 # instruction. Per CR 121.6b / CR 616.1g those drain as a *child* draw before

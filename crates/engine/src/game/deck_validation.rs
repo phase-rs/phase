@@ -4249,8 +4249,8 @@ mod tests {
 
     use crate::types::custom_format::{
         CombatDamageTiming, CommanderEligibilityRule, CustomFormatDef, CustomFormatId,
-        CustomFormatRules, LegacyRuleSet, LegendRuleScope, ManaBurnPolicy, PrintingFidelity,
-        ReprintPolicy, StructuralRules, WishOutsideGameScope,
+        CustomFormatRules, LegacyRuleSet, LegendRuleScope, PrintingFidelity, ReprintPolicy,
+        StructuralRules, WishOutsideGameScope,
     };
     use crate::types::format::DeckSizeRule;
     use crate::types::keywords::PartnerType;
@@ -10006,10 +10006,10 @@ mod tests {
         // freshly-implemented axis fails loudly here instead of silently
         // dropping out).
         let non_default_rulesets = [
-            LegacyRuleSet {
-                mana_burn: ManaBurnPolicy::Obsolete,
-                ..LegacyRuleSet::default()
-            },
+            // Mana burn is NOT in this list any more: Phase 2b implemented it,
+            // so it is no longer an undeclared axis and the gate correctly
+            // accepts it. This is the loop narrowing itself exactly as its
+            // comment above promised.
             LegacyRuleSet {
                 damage_timing: CombatDamageTiming::OnStack,
                 ..LegacyRuleSet::default()
@@ -10103,7 +10103,9 @@ mod tests {
 
         let mut legacy_rules =
             base_custom_rules(DeckSizeRule::Minimum(60), DeckCopyLimit::Unlimited);
-        legacy_rules.legality.legacy.mana_burn = ManaBurnPolicy::Obsolete;
+        // Damage timing, not mana burn: Phase 2b implemented mana burn, so a
+        // mana-burn config is no longer rejected here.
+        legacy_rules.legality.legacy.damage_timing = CombatDamageTiming::OnStack;
         let legacy_config = FormatConfig::for_custom_rules(&legacy_rules);
         let legacy_request = DeckCompatibilityRequest {
             main_deck: expand("Plains", 60),

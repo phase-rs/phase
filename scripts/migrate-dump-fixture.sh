@@ -3,25 +3,30 @@
 # its READ-ONLY pristine dump, stamping the `effect_kind` field that upstream
 # #6718 (0468df1f4) added to `TargetSelectionSlot` without `#[serde(default)]`.
 #
-# ⚠ THIS SCRIPT PREDATES UPSTREAM U5 AND HAS NO `deck_size` STAGE.
-# U5 typed `FormatConfig::deck_size` as `DeckSizeRule`, an adjacently-tagged enum
-# (`#[serde(tag = "type", content = "data")]`, crates/engine/src/types/format.rs)
-# carrying no `#[serde(default)]` and no untagged fallback. Every pristine dump in
-# this corpus predates that change and holds a bare `"deck_size": N`, which the
-# strict decoder REJECTS. Regeneration from pristine is therefore NECESSARY BUT NOT
-# SUFFICIENT: the bare `N` must additionally become `{"type":"<Minimum|Exactly>",
-# "data":N}`, with the variant taken from the sibling `format` field.
+# THE `deck_size` STAGE. U5 typed `FormatConfig::deck_size` as `DeckSizeRule`, an
+# adjacently-tagged enum (`#[serde(tag = "type", content = "data")]`,
+# crates/engine/src/types/format.rs) carrying no `#[serde(default)]` and no untagged
+# fallback. Every pristine dump in this corpus predates that change and holds a bare
+# `"deck_size": N`, which the strict decoder REJECTS. `--deck-size
+# <Minimum|Exactly>:<count>` rewrites that bare value into
+# `{"type":"<variant>","data":<count>}` at EVERY depth, on the filter tail SHARED
+# by the migration and both control regenerations. The predicate keys on the TRAILING KEY
+# at any path, so it is not keyed on an enumeration of the depths the corpus happens to
+# hold -- which is more than the self-tests below witness (see `deck_size_gate`).
 #
-# That mapping belongs to the ENGINE and is not recoverable from the dump's shape:
-# CR 903.13f(1) makes Commander Draft a command-zone format with a MINIMUM deck
-# size, so `command_zone` does not predict exactness. Rather than guess, this
-# script REFUSES to emit an untagged artifact -- see `deck_size_gate` below.
+# THE ENGINE STILL OWNS THE format->variant MAPPING, and the dump's shape does not
+# predict it: CR 903.13f(1) makes Commander Draft a command-zone format with a MINIMUM
+# deck size, so `command_zone` does not predict exactness. So the variant arrives as an
+# OPERATOR ARGUMENT, validated for SHAPE ONLY -- an identifier, a colon, digits -- never
+# against a variant list, which would re-copy an engine enum into bash. `deck_size_gate`
+# below still refuses to emit an untagged artifact, so an omitted or inapplicable
+# argument fails closed instead of shipping.
 #
-# THERE IS NO IN-REPO REMEDY, and the refusal now says so instead of sending the
-# reader in a circle. The pristine root is external to this checkout and READ-ONLY
-# (below), and `--expect-sha256` pins its digest: "migrate it" means editing a dump
-# this repo does not contain, then re-pinning that argument to the new digest.
-# Out-of-repo work this script can neither perform nor verify.
+# WHAT HOLDS THE OPERATOR TO THE ARGUMENT is a tracked row, exactly as for
+# `--effect-kind`: `fixture_deck_size_conformance` decodes every committed `*.json.gz`
+# through `FormatConfig` and, for a non-`Custom` format, requires the persisted
+# `deck_size` to equal the one `FormatConfig::for_format` defines. A wrong
+# `--deck-size` argument fails that row rather than shipping.
 #
 # WHY A REGENERATION AND NOT A SERDE SHIM. The maintainer publicly declined both
 # `#[serde(default)]` and an upstream save migration for this field
@@ -46,23 +51,24 @@
 #     --pristine  /path/to/dump.zip \
 #     --expect-sha256 <sha256 of that zip> \
 #     --effect-kind LoseLife \
+#     --deck-size Exactly:100 \
 #     --out crates/engine/tests/fixtures/name.json.gz
+#
+#   `--deck-size` is OPTIONAL: a post-U5 dump needs no stage, and `deck_size_gate` stays
+#   the authority on whether one was needed.
 #
 #   # Control mode: re-run the FULL recipe and check it against the committed
 #   # fixture, then check the patch had teeth. Runnable by anyone, at any time,
 #   # with no engine build.
 #   scripts/migrate-dump-fixture.sh --pristine ... --expect-sha256 ... \
-#     --effect-kind LoseLife \
+#     --effect-kind LoseLife --deck-size Exactly:100 \
 #     --out crates/engine/tests/fixtures/name.json.gz --control
 #
-# BOTH control arms matter, and a one-arm check passes vacuously:
-#   arm 1 => BYTE_IDENTICAL=true  the PATCHED regeneration reproduces the
-#            committed fixture byte for byte, so the committed bytes are exactly
-#            what this recipe produces from the read-only pristine dump.
-#   arm 2 => PATCHED_DIFFERS=true the same recipe run WITHOUT the patch differs
-#            from arm 1's output, so the jq filter actually REACHES target_slots.
-#            Without this arm, a filter that silently matched nothing would also
-#            report BYTE_IDENTICAL=true.
+# A PARTIAL CHECK CERTIFIES NOTHING. Each arm reports its own verdict, and a conclusion
+# may only be drawn from the arms that actually RAN -- an arm reporting `n/a` has
+# certified nothing, and one arm alone can pass vacuously. The arms are labelled where
+# they run rather than inventoried here, because a private copy drifts from the code:
+#   grep -inE '^ *# arm [0-9]' scripts/migrate-dump-fixture.sh scripts/stamp-fixture-firing.sh
 #
 # ⚠ ARM 1 IS BASELINED ON THE MIGRATED FIXTURE, and it has to be. The committed
 # fixture IS the patched artifact; comparing an UNPATCHED regeneration against it
@@ -84,12 +90,14 @@ PINNED_GZIP="gzip 1.14"
 PRISTINE=""
 EXPECT_SHA=""
 EFFECT_KIND=""
+DECK_SIZE=""
+DS_TYPE=""
+DS_DATA=""
 OUT=""
 CONTROL_MODE=0
 
 usage() {
-  # Range tracks the header block, which now ends at the TOOLCHAIN paragraph.
-  sed -n '2,77p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "${BASH_SOURCE[0]}"
   exit "${1:-1}"
 }
 
@@ -98,6 +106,7 @@ while [ $# -gt 0 ]; do
     --pristine)      PRISTINE="${2:?--pristine needs a path}"; shift 2 ;;
     --expect-sha256) EXPECT_SHA="${2:?--expect-sha256 needs a hash}"; shift 2 ;;
     --effect-kind)   EFFECT_KIND="${2:?--effect-kind needs an EffectKind variant name}"; shift 2 ;;
+    --deck-size)     DECK_SIZE="${2:?--deck-size needs <Minimum|Exactly>:<count>}"; shift 2 ;;
     --out)           OUT="${2:?--out needs a path}"; shift 2 ;;
     --control)       CONTROL_MODE=1; shift ;;
     -h|--help)       usage 0 ;;
@@ -111,6 +120,18 @@ done
 # Control mode needs --effect-kind too: arm 1 re-runs the FULL recipe, patch
 # included, because the committed fixture is the patched artifact.
 [ -n "$EFFECT_KIND" ] || { echo "missing --effect-kind" >&2; exit 1; }
+# SHAPE ONLY, never a variant list: pinning `Minimum|Exactly` here would re-copy an
+# engine enum into bash and rot silently when a variant is added. A tag naming no live
+# variant is `fixture_deck_size_conformance`'s business, the same division of labour
+# `deck_size_gate` below already keeps.
+if [ -n "$DECK_SIZE" ]; then
+  if [[ ! "$DECK_SIZE" =~ ^[A-Za-z_][A-Za-z0-9_]*:[0-9]+$ ]]; then
+    echo "--deck-size must be <identifier>:<digits>, e.g. Exactly:100 — got: $DECK_SIZE" >&2
+    exit 1
+  fi
+  DS_TYPE="${DECK_SIZE%%:*}"
+  DS_DATA="${DECK_SIZE#*:}"
+fi
 
 for tool in unzip jq gzip sha256sum; do
   command -v "$tool" >/dev/null 2>&1 || { echo "required tool not found: $tool" >&2; exit 1; }
@@ -156,16 +177,35 @@ FIRING_LIB="$(dirname "${BASH_SOURCE[0]}")/lib/trigger-firing.jq"
 # `gameState` is malformed and must not be quietly normalised into the husk shape.
 PROJECT='if (type == "object" and has("gameState")) then {gameState:.gameState} else . end'
 
+# THE DECK-SIZE STAGE, and it belongs to the tail SHARED by both modes rather than to the
+# patched branch. The rewrite is a SHAPE MIGRATION, not a content patch: the patched
+# branch's subjects are `effect_kind` and stage 2b, and neither reads `deck_size`. Put it
+# in the patched branch alone and `--control` dies at its UNPATCHED regeneration — which
+# `regenerate` gates too — before arm 1 can compare anything.
+#
+# The predicate is `deck_size_gate`'s own walk NARROWED TO THE NUMBER CASE, so the stage
+# repairs exactly the one legacy shape and every other malformed value stays the gate's
+# business. It is the identity when no `--deck-size` was given, and it is idempotent on an
+# already-tagged value (whose numbers sit at `.deck_size.data`, not at `.deck_size`).
+DECK_SIZE_STAGE='.'
+if [ -n "$DECK_SIZE" ]; then
+  DECK_SIZE_STAGE='reduce (paths(type == "number") | select(.[-1] == "deck_size")) as $p
+                     (.; setpath($p; {type: $ds_type, data: $ds_data}))'
+fi
+
 # Applies the recipe to stdin, writing to stdout. ONE definition of the transform, so
 # the migration, the control arms, and the self-tests cannot drift apart.
 transform() {   # transform <patched|unpatched>
-  local mode="$1" filter="$PROJECT"
+  local mode="$1" tail filter
+  tail="$DECK_SIZE_STAGE | $PROJECT"
+  filter="$tail"
   if [ "$mode" = patched ]; then
     filter="(if (.gameState.waiting_for.data.target_slots? // null) != null
                then .gameState.waiting_for.data.target_slots |= map(. + {effect_kind: \$k})
-               else . end) | stamp_trigger_firing | stamp_delayed_allocators | $PROJECT"
+               else . end) | stamp_trigger_firing | stamp_delayed_allocators | $tail"
   fi
-  jq -c --arg k "$EFFECT_KIND" -f <(printf '%s\n%s\n' "$(cat "$FIRING_LIB")" "$filter")
+  jq -c --arg k "$EFFECT_KIND" --arg ds_type "$DS_TYPE" --argjson ds_data "${DS_DATA:-0}" \
+    -f <(printf '%s\n%s\n' "$(cat "$FIRING_LIB")" "$filter")
 }
 
 # The `effect_kind` stage applies only to a dump whose prompt actually carries
@@ -173,8 +213,8 @@ transform() {   # transform <patched|unpatched>
 # prompt at all; for them this stage is vacuously absent, and `--effect-kind` is
 # inert. Guarding it (rather than letting `map` abort on null) is what lets ONE
 # recipe cover the whole corpus — an unguarded `|=` here made the script usable only
-# on the two dumps that happen to have a prompt, which is why the other four were
-# never regenerable through it.
+# on the dumps that happen to have a prompt, which is why the rest were never
+# regenerable through it.
 #
 # WRITES ATOMICALLY: stage to a temp file, `mv` only after the WHOLE pipeline
 # succeeded.
@@ -221,41 +261,31 @@ cleanup_stage_files() {
 }
 trap cleanup_stage_files EXIT INT TERM
 
-# DECK-SIZE GATE. The one field this recipe does NOT migrate, refused rather than
-# emitted. Without it the script exits 0 and prints its `MIGRATED` banner over an
-# artifact the strict decoder cannot load (measured on genuine pre-U5 dump content:
-# exit 0, `deck_size` still a bare `100`). A silent success is the worst failure
-# shape here, because the artifact it blesses is a committed fixture.
+# DECK-SIZE GATE. The check that no artifact leaves here still carrying the pre-U5 bare
+# `N`. Without it the script exits 0 and prints its `MIGRATED` banner over an artifact
+# the strict decoder cannot load (measured on genuine pre-U5 dump content: exit 0,
+# `deck_size` still a bare `100`). A silent success is the worst failure shape here,
+# because the artifact it blesses is a committed fixture.
 #
-# A REFUSAL, NOT A MIGRATION, deliberately. Repairing the value would mean choosing
-# `Minimum` vs `Exactly` from the sibling `format` field, and that table is the
-# ENGINE's (`crates/engine/src/types/format.rs`). Nothing in the dump's shape
-# predicts it — CR 903.13f(1) makes Commander Draft a command-zone format with a
-# MINIMUM deck size — so a jq `format`->variant table would re-derive an engine
-# mapping in jq, which is the one thing the header's `EffectKind` rule forbids too.
+# THE GATE AND THE STAGE ARE TWO HALVES, not alternatives. The stage above supplies the
+# variant from `--deck-size`; this gate asks, of the bytes actually about to be written,
+# whether the tagged shape is there — so an omitted argument, an argument that did not
+# apply, or a stage that stopped matching all fail closed at the same point.
 #
-# THE `EffectKind` PRECEDENT IS CITED FOR THAT PRINCIPLE, NOT FOR THIS REMEDY — the
-# two share the principle and DIVERGE on the remedy, so reading it as authority for
-# refusing gets it backwards. `EffectKind` resolved the same tension by
-# PARAMETERIZING: an explicit `--effect-kind`, precisely so the ENGINE stays the
-# authority. The symmetric third route here is therefore a `--deck-size Exactly:100`
-# operator argument, and it is declined for a reason that does NOT hold there: the
-# OPERATOR'S ERROR WOULD BE UNCAUGHT. A wrong `--effect-kind` fails a tracked row —
-# the reading test beside `load_dellian_dump` in `game/engine.rs` compares the WHOLE
-# slot (`TargetSelectionSlot` derives `PartialEq`/`Eq`, and `effect_kind` is one of
-# its fields) against `ability_utils::build_target_slots`. A wrong `--deck-size`
-# fails nothing, measured: both variants deserialize; NO test in this tree asserts
-# which variant a LOADED fixture carries (every `deck_size` assertion in the tree
-# runs against a `FormatConfig` constructor or a registry
-# default — none against a fixture); the only production read of a PERSISTED value
-# (`match_flow.rs`) goes through `min_cards()`, which returns the payload for BOTH
-# variants and so cannot discriminate them at equal payloads; and
-# `deck_validation.rs` re-derives the rule from the format enum, never reading the
-# persisted field at all. The client's mirror of the enum (`adapter/types.ts`) is
-# likewise keyed off the format registry, not off a loaded save, and today reads
-# only `.data`. An operator typo would therefore ship silently. Refusing is the
-# weaker remedy, and the safe one until a reading test exists that can hold an
-# operator to `--deck-size` the way that row holds one to `--effect-kind`.
+# THE `EffectKind` PRECEDENT IS FOLLOWED HERE, remedy and all. `EffectKind` resolved the
+# same tension by PARAMETERIZING: an explicit `--effect-kind`, precisely so the ENGINE
+# stays the authority for the migrated value. `deck_size` takes the symmetric route, and
+# what makes it safe is the condition that route always carried — that a wrong operator
+# argument fail a tracked row rather than ship. A wrong `--effect-kind` fails the reading
+# test beside `load_dellian_dump` in `game/engine.rs`, which compares the WHOLE slot
+# (`TargetSelectionSlot` derives `PartialEq`/`Eq`, and `effect_kind` is one of its
+# fields) against `ability_utils::build_target_slots`. A wrong `--deck-size` now fails
+# `fixture_deck_size_conformance` in the engine's integration suite, which decodes every
+# committed `*.json.gz` through `FormatConfig` and, for a non-`Custom` format, requires
+# the persisted `deck_size` to equal the one `FormatConfig::for_format` defines. That row
+# is deliberately not written against `min_cards()`, which returns the payload for BOTH
+# variants and so cannot discriminate them at equal payloads — the very blindness that
+# left an operator typo unobservable before it existed.
 #
 # One authority, guarded here.
 #
@@ -266,8 +296,8 @@ trap cleanup_stage_files EXIT INT TERM
 #
 # A FUNCTION, NOT AN INLINE BLOCK, so the self-test below can drive the SAME rule the
 # production path runs — the reason `transform` is one definition too. Inline, no
-# corpus fixture could witness a refusal (all 16 committed containers that carry a
-# `deck_size` are already tagged, and the pristine root is external to this
+# corpus fixture could witness a refusal (every committed container that carries a
+# `deck_size` is already tagged, and the pristine root is external to this
 # checkout), so nothing in the tree failed when the gate was deleted or inverted.
 # RESIDUAL of that arm, measured: neutering the RULE turns the self-test red every
 # way tried (refusal dropped, comparison inverted, probe blinded, shape validation
@@ -292,14 +322,20 @@ trap cleanup_stage_files EXIT INT TERM
 # preflight above, so that arm would make every run of this script depend on a tool it
 # does not otherwise need. The option is recorded here rather than taken.
 #
-# Keyed on SHAPE AT EVERY DEPTH rather than a fixed path: this corpus carries
-# `format_config` under both envelopes (top level and beneath `gameState`).
-# ABSENCE IS LEGAL and passes: measured over the 22 `*.json.gz` under
-# crates/engine/tests/fixtures/, 6 carry no `deck_size` at any depth (the four under
-# cr733/, plus combo_infinite_pile_decklist_4p and integration_cards) and the other
-# 16 all carry it, so keying on presence would fail those 6 spuriously. The bare
-# "two" this line used to quote counted only the 18 TOP-LEVEL archives, which is why
-# the population is named here rather than left to the reader.
+# Keyed on SHAPE AT EVERY DEPTH rather than a fixed path, and the depths are not a closed
+# pair -- regenerate the ones a `deck_size` is actually carried at with
+#   for f in $(git ls-files '*.json.gz'); do gzip -dc "$f" \
+#     | jq -r '[paths as $p | select($p[-1]=="deck_size")
+#               | ($p | map(if type=="number" then "N" else . end) | join("."))] | .[]'
+#   done | sort -u
+# and the same walk over `unzip -p` for the pristine dumps. The two corpora do not carry
+# the same set, and neither is the pair the self-tests below drive on.
+# ABSENCE IS LEGAL and passes: some committed fixtures carry no `deck_size` at any
+# depth, so keying on PRESENCE would fail exactly those spuriously. A transcribed
+# population figure rots — regenerate the two it would have quoted with
+#   find crates/engine/tests/fixtures -name '*.json.gz'
+# for the fixture population, piped through this gate's own `deck_size` predicate for
+# the carriers among them. Recursive, not depth-1: the two populations differ.
 #
 # RESIDUAL, so this is not read as more than it is: it checks the tagged SHAPE
 # (`type` a string, `data` a number), not that the tag names a live variant.
@@ -316,14 +352,16 @@ deck_size_gate() {   # deck_size_gate <staged> <dest> — refuse, and reap the s
                or ($v.data | type) != "number")
       | {at: ($p | join(".")), value: $v} ]')"
   [ "$bad" != "[]" ] || return 0
-  echo "REFUSING TO EMIT $dest — untagged deck_size (this script has no deck_size stage; see the header)" >&2
+  echo "REFUSING TO EMIT $dest — untagged deck_size" >&2
   echo "  offending: $bad" >&2
   echo "  required:  {\"type\":\"<Minimum|Exactly>\",\"data\":N} — DeckSizeRule, serde tag=\"type\" content=\"data\"" >&2
-  echo "  the variant follows from the sibling \`format\` field; the ENGINE owns that mapping" >&2
-  echo "  (crates/engine/src/types/format.rs) and this script will not infer it." >&2
-  echo "  NO IN-REPO REMEDY: the pristine dump is external to this checkout, read-only, and" >&2
-  echo "  digest-pinned by --expect-sha256; migrating it and re-pinning that digest is" >&2
-  echo "  out-of-repo work this script can neither perform nor verify." >&2
+  echo "  REMEDY: pass --deck-size <Minimum|Exactly>:<count> for this dump's format. The" >&2
+  echo "  variant follows from the sibling \`format\` field; the ENGINE owns that mapping" >&2
+  echo "  (crates/engine/src/types/format.rs), so this script takes it as an argument rather" >&2
+  echo "  than inferring it, and a wrong argument fails the tracked" >&2
+  echo "  fixture_deck_size_conformance row." >&2
+  echo "  If --deck-size WAS passed, the offending value above was not the bare pre-U5 shape" >&2
+  echo "  the stage repairs — read the path, not the argument." >&2
   rm -f "$staged"
   return 1
 }
@@ -369,6 +407,8 @@ regenerate() {   # regenerate <patched|unpatched> <destination>
 #                  tagged one, which is what reaches the shape clauses. Every committed
 #                  fixture is already tagged and the pristine dumps are external, so this
 #                  is the only thing in the tree that fails if the gate stops refusing.
+#                  With `--deck-size` supplied the same bare input must instead be
+#                  MIGRATED and then ACCEPTED, which is what proves the stage ran.
 #
 # Each has a paired POSITIVE control, or it would pass against a transform that did
 # nothing at all.
@@ -476,14 +516,42 @@ selftests() {
   # it: `{"type":"Exactly"}` is refused by the `data` clause ALONE and
   # `{"type":123,"data":100}` by the `type` clause ALONE (measured, dropping each in
   # turn). Driven through `deck_size_gate` itself, like (c), on the same in-memory path.
+  # ROUTED THROUGH `transform patched`, so the deck-size stage sits in this leg's path
+  # too and its subject becomes the stage's NARROWNESS as well as the gate's clauses: a
+  # stage widened past the number case repairs these malformed values and the gate then
+  # accepts them.
   for shape in '{"type":"Exactly"}' '{"type":123,"data":100}'; do
-    printf '%s\n' "{\"format_config\":{\"deck_size\":$shape}}" | gzip -9 -n > "$tmp/shape.json.gz"
+    printf '%s\n' "{\"format_config\":{\"deck_size\":$shape}}" \
+      | transform patched | gzip -9 -n > "$tmp/shape.json.gz"
     if deck_size_gate "$tmp/shape.json.gz" "$tmp/never" 2>/dev/null; then
       echo "SELFTEST DECK_SIZE_REFUSED=shape-blind — deck_size $shape was accepted; the" >&2
       echo "  shape clauses no longer discriminate, so a malformed tag reaches the fixture" >&2
       rm -rf "$tmp"; return 1
     fi
   done
+
+  # (c‴) THE MIGRATING LEG. Runs ONLY when `--deck-size` was supplied, and the condition
+  # IS the leg's premise: without the argument the stage is the identity, so demanding
+  # ACCEPTANCE on this input would assert the exact opposite of (c) — which stays
+  # unconditional and is this leg's negative control on the identical bytes — and
+  # `selftests` runs before `regenerate`, so the script would exit 1 before the gate ever
+  # spoke. Two ENVELOPE shapes, each driven through the same `transform` and the same
+  # `deck_size_gate` the production path uses. They are WITNESSES that the walk is
+  # depth-agnostic, never the corpus's depth set: both corpora carry a `deck_size` deeper
+  # than either shape here, and `deck_size_gate` names the walk that regenerates them.
+  if [ -n "$DECK_SIZE" ]; then
+    for shape in '{"format_config":{"deck_size":100}}' \
+                 '{"gameState":{"format_config":{"deck_size":100}}}'; do
+      printf '%s\n' "$shape" | transform patched | gzip -9 -n > "$tmp/migrated.json.gz"
+      if ! deck_size_gate "$tmp/migrated.json.gz" "$tmp/never"; then
+        echo "SELFTEST DECK_SIZE_MIGRATED=false — the stage left $shape untagged, so the" >&2
+        echo "  gate refused the very artifact this recipe would have emitted" >&2
+        rm -rf "$tmp"; return 1
+      fi
+      rm -f "$tmp/migrated.json.gz"
+    done
+    echo "SELFTEST DECK_SIZE_MIGRATED=true (both envelope shapes, driven through deck_size_gate)"
+  fi
 
   echo "SELFTEST ATOMIC_ON_FAILURE=true ENVELOPE_PRESERVED=true DECK_SIZE_REFUSED=true (each with a positive control)"
   rm -rf "$tmp"
@@ -492,10 +560,10 @@ selftests() {
 selftests || exit 1
 
 if [ "$CONTROL_MODE" -eq 1 ]; then
-  # 5. Control mode, TWO arms, both mandatory. Runnable by anyone, at any time,
-  #    with no engine build. Arm 1 re-runs the full recipe and holds it against
-  #    the committed fixture; arm 2 re-runs it WITHOUT the patch and requires the
-  #    result to differ, which is what proves the patch filter has teeth.
+  # 5. Control mode: re-run the recipe from the read-only pristine dump and hold the
+  #    result against what is committed. Runnable by anyone, at any time, with no
+  #    engine build. Each arm below states its own subject and its own verdict; read
+  #    the conclusion off the arms that RAN, never off their number.
   [ -f "$OUT" ] || { echo "control mode needs an existing committed fixture at $OUT" >&2; exit 1; }
   PATCHED="$(mktemp -t migrate-dump-patched-XXXXXX.json.gz)"
   UNPATCHED="$(mktemp -t migrate-dump-unpatched-XXXXXX.json.gz)"
@@ -509,7 +577,7 @@ if [ "$CONTROL_MODE" -eq 1 ]; then
   regenerate unpatched "$UNPATCHED"
 
   echo "CONTROL pristine=$(basename "$PRISTINE") sha256=$ACTUAL_SHA"
-  echo "CONTROL effect_kind=$EFFECT_KIND out=$OUT"
+  echo "CONTROL effect_kind=$EFFECT_KIND deck_size=${DECK_SIZE:-none} out=$OUT"
   echo "CONTROL jq=$JQ_VERSION gzip=$GZIP_VERSION"
 
   # ARM 1 — the patched regeneration reproduces the committed fixture.
@@ -543,7 +611,7 @@ if [ "$CONTROL_MODE" -eq 1 ]; then
   # That inference died when stage 2b landed: the patched filter also runs
   # `stamp_trigger_firing` and `stamp_delayed_allocators`, and the allocator stage
   # rewrites `next_delayed_trigger_token` / `..._instance` on EVERY `gameState`-shaped
-  # dump in this corpus (measured: all six move from absent/0 to 1). The unpatched
+  # dump in this corpus (measured: absent/0 -> 1 on each). The unpatched
   # filter runs neither stage. So the documents differed unconditionally, including on
   # the dumps that carry no target prompt at all — arm 2 reported `PATCHED_DIFFERS=true`
   # while the `effect_kind` filter had matched NOTHING. That is precisely the vacuous
@@ -615,8 +683,11 @@ regenerate patched "$OUT"
 OUT_SHA="$(sha256sum "$OUT" | cut -d' ' -f1)"
 SLOTS="$(gzip -dc "$OUT" | jq -c '[.gameState.waiting_for.data.target_slots[]?.effect_kind]')"
 
-# 4. Record the provenance on stdout so a commit message can quote it.
+# 4. Record the provenance on stdout so a commit message can quote it. Both operator
+#    arguments are named, because the recipe is not recoverable from the artifact:
+#    `Minimum:100` and `Exactly:100` both satisfy `deck_size_gate` and produce
+#    DIFFERENT bytes. `deck_size=none` records that no `--deck-size` was passed.
 echo "MIGRATED pristine=$(basename "$PRISTINE") sha256=$ACTUAL_SHA"
-echo "MIGRATED effect_kind=$EFFECT_KIND stamped_slots=$SLOTS"
+echo "MIGRATED effect_kind=$EFFECT_KIND deck_size=${DECK_SIZE:-none} stamped_slots=$SLOTS"
 echo "MIGRATED out=$OUT sha256=$OUT_SHA"
 echo "MIGRATED jq=$JQ_VERSION gzip=$GZIP_VERSION"

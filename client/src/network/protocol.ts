@@ -106,6 +106,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  53 — game_setup and state_update carry GameState, whose OutsideGameChoice
+ *       for an opened booster pack now names a required origin: PackOrigin in
+ *       place of set_code. First contact therefore rejects a v52 peer before
+ *       state delivery. Bumped in lockstep with full-game protocol 70.
  *  52 — game_setup and state_update carry GameEvent[] and can now carry the
  *       tagged ExtraTurnCreated event. First contact therefore rejects a v51
  *       peer before state delivery. Bumped in lockstep with full-game protocol
@@ -373,7 +377,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 52 as const;
+export const WIRE_PROTOCOL_VERSION = 53 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

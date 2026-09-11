@@ -26,6 +26,72 @@ use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit}
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CastFrequency, StaticMode};
 
+/// CR 608.2c: Karona's scoped upkeep player is the grammatical subject of the
+/// immediately following conjugated control clause, so it receives control of
+/// the named source rather than the ability controller taking it.
+#[test]
+fn karona_false_god_upkeep_scoped_subject_gives_control() {
+    let trigger = parse_trigger_line(
+        "At the beginning of each player's upkeep, that player untaps Karona and gains control of it.",
+        "Karona, False God",
+    );
+
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.phase, Some(Phase::Upkeep));
+    let untap = trigger.execute.as_deref().expect("Karona upkeep effect");
+    assert!(matches!(
+        untap.effect.as_ref(),
+        Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
+        }
+    ));
+    let control = untap
+        .sub_ability
+        .as_deref()
+        .expect("immediate gains-control continuation");
+    assert_eq!(
+        control.effect.as_ref(),
+        &Effect::GiveControl {
+            target: TargetFilter::SelfRef,
+            recipient: TargetFilter::ScopedPlayer,
+        }
+    );
+    assert_no_unimplemented(untap);
+}
+
+/// The scoped carry is restricted to the `each player's upkeep` context; a
+/// controller-scoped upkeep instruction must not fabricate a ScopedPlayer
+/// recipient merely because it also has a control clause.
+#[test]
+fn controller_upkeep_subject_does_not_become_scoped_player_recipient() {
+    let trigger = parse_trigger_line(
+        "At the beginning of your upkeep, you untap Karona and gain control of it.",
+        "Karona, False God",
+    );
+    let untap = trigger.execute.as_deref().expect("upkeep effect");
+    assert!(matches!(
+        untap.effect.as_ref(),
+        Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
+        }
+    ));
+    let control = untap
+        .sub_ability
+        .as_deref()
+        .expect("control continuation must be reached");
+    assert!(matches!(
+        control.effect.as_ref(),
+        Effect::GainControl {
+            target: TargetFilter::ParentTarget,
+        }
+    ));
+    assert_no_unimplemented(untap);
+}
+
 /// CR 603.4 + CR 601.2f: Liberator's intervening "if" survives the whole
 /// pipeline. Its printed wording predates the Increment keyword (CR 702.191a)
 /// and spells the same sentence out; before the mana-spent subject was widened
@@ -24100,6 +24166,95 @@ fn extract_no_mana_spent_condition() {
             text: "no mana was spent to cast it".to_string(),
         })
     );
+}
+
+/// CR 603.4 + CR 106.1a + CR 601.2h, issue #8807: Void Mirror's intervening-if
+/// gates on the COLOR axis of the payment record, not the amount. Before this
+/// was parsed the clause was dropped entirely and the trigger degraded to an
+/// unconditional "whenever a player casts a spell, counter that spell".
+#[test]
+fn extract_no_colored_mana_spent_condition() {
+    let (cleaned, cond) =
+        extract_if_condition("if no colored mana was spent to cast it, counter that spell");
+    assert_eq!(cleaned, "counter that spell");
+    assert_eq!(
+        cond,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                    metric: crate::types::ability::CastManaSpentMetric::DistinctColors,
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        })
+    );
+}
+
+/// CR 400.7d: the anaphor names whose payment record answers the clause —
+/// "it"/"that spell"/"this spell"/"them" is the object carried by the trigger
+/// event, "~" is the ability's own source. Every arm must both be accepted and
+/// map to its own scope; an arm that failed to parse would drop the
+/// intervening-if entirely rather than fail loudly.
+#[test]
+fn colored_mana_clause_maps_each_anaphor_to_its_payment_subject() {
+    use crate::types::ability::CastManaObjectScope;
+
+    for (anaphor, expected_scope) in [
+        ("it", CastManaObjectScope::TriggeringSpell),
+        ("that spell", CastManaObjectScope::TriggeringSpell),
+        ("this spell", CastManaObjectScope::TriggeringSpell),
+        ("them", CastManaObjectScope::TriggeringSpell),
+        ("~", CastManaObjectScope::SelfObject),
+    ] {
+        let text = format!("if no colored mana was spent to cast {anaphor}, counter that spell");
+        let (cleaned, cond) = extract_if_condition(&text);
+        assert_eq!(
+            cleaned, "counter that spell",
+            "the clause must be stripped from the effect text for {anaphor:?}"
+        );
+        let scope = match &cond {
+            Some(TriggerCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ManaSpentToCast { scope, metric },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }) => {
+                assert_eq!(
+                    *metric,
+                    crate::types::ability::CastManaSpentMetric::DistinctColors,
+                    "the colored qualifier must select the distinct-colors metric for {anaphor:?}"
+                );
+                *scope
+            }
+            other => {
+                panic!("expected a DistinctColors == 0 comparison for {anaphor:?}, got {other:?}")
+            }
+        };
+        assert_eq!(
+            scope, expected_scope,
+            "wrong payment subject for {anaphor:?}"
+        );
+    }
+}
+
+/// The bare "no mana" reading must NOT be shadowed by the qualified one: the
+/// amount axis keeps its own condition shape (Vexing Bauble, Lavinia).
+#[test]
+fn no_colored_mana_qualifier_does_not_capture_the_bare_amount_clause() {
+    for clause in [
+        "if no mana was spent to cast that spell, counter that spell",
+        "if no mana was spent to cast them, draw a card",
+    ] {
+        let (_, cond) = extract_if_condition(clause);
+        assert!(
+            matches!(cond, Some(TriggerCondition::ManaSpentCondition { .. })),
+            "bare no-mana clause must stay on the amount axis, got {cond:?} for {clause:?}"
+        );
+    }
 }
 
 #[test]

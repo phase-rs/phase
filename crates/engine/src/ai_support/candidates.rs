@@ -3327,9 +3327,12 @@ pub fn candidate_actions_broad_with_probe(
         // the prompt is. Must precede the general arm below.
         //
         // CR 732.2c: `max` is NOT a fixed 1000 — it is the count the table accepted
-        // (`pending_materialization_count`), so it can legitimately be 0 (a shortcut
-        // accepted at `Fixed(0)`). Clamp, or the generator's sole candidate is rejected by
-        // the reducer's `amount > max` guard and the AI has no legal action at this prompt.
+        // (`pending_materialization_count`), and a 0 in it reaches this prompt. No live path
+        // writes one: a shortcut answered at a count of zero performs nothing and stashes
+        // nothing, so it mints no prompt at all. A save written before that swallow decodes
+        // its 0 through the production restore and arrives here. Clamp, or the generator's
+        // sole candidate is rejected by the reducer's `amount > max` guard and the AI has no
+        // legal action at this prompt.
         //
         // AI-reachable since the bounded fast-forward landed, which is what stales the older
         // "the arm below only ever proposes `UntilLethal`" note this replaces: the

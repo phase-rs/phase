@@ -3,6 +3,7 @@ import { strToU8, zipSync } from "fflate";
 import type { EngineAdapter, GameState } from "../adapter/types.ts";
 import { canExportAuthoritativeState, useGameStore } from "../stores/gameStore.ts";
 import { copyText } from "./copyText";
+import { downloadBlob } from "./fileDownload";
 
 interface GameStateDebugSnapshot {
   gameState: GameState;
@@ -11,58 +12,13 @@ interface GameStateDebugSnapshot {
   turnCheckpoints: ReturnType<typeof useGameStore.getState>["turnCheckpoints"];
 }
 
-interface FileSystemWritableFileStream {
-  write: (data: Blob) => Promise<void>;
-  close: () => Promise<void>;
-}
-
-interface FileSystemFileHandle {
-  createWritable: () => Promise<FileSystemWritableFileStream>;
-}
-
-interface SaveFilePickerOptions {
-  suggestedName?: string;
-  types?: Array<{
-    description: string;
-    accept: Record<string, string[]>;
-  }>;
-}
-
-type WindowWithSaveFilePicker = Window & {
-  showSaveFilePicker?: (options?: SaveFilePickerOptions) => Promise<FileSystemFileHandle>;
-};
-
 async function downloadZip(baseName: string, contents: Record<string, Uint8Array>): Promise<string> {
   const zipFilename = `${baseName}.zip`;
   const zipped = zipSync(contents, { level: 9 });
   const blob = new Blob([zipped as BlobPart], { type: "application/zip" });
-
-  const saveFilePicker = (window as WindowWithSaveFilePicker).showSaveFilePicker;
-  if (saveFilePicker) {
-    const handle = await saveFilePicker({
-      suggestedName: zipFilename,
-      types: [
-        {
-          description: "ZIP archive",
-          accept: { "application/zip": [".zip"] },
-        },
-      ],
-    });
-    const writable = await handle.createWritable();
-    await writable.write(blob);
-    await writable.close();
-    return zipFilename;
-  }
-
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = zipFilename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  document.body.removeChild(anchor);
-  URL.revokeObjectURL(url);
-  return zipFilename;
+  return downloadBlob(zipFilename, blob, [
+    { description: "ZIP archive", accept: { "application/zip": [".zip"] } },
+  ]);
 }
 
 export function buildGameStateDebugSnapshot(gameState: GameState): GameStateDebugSnapshot {

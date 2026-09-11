@@ -79,15 +79,15 @@
 // resource, locally, on engine-source edits. It is NOT checked in GitHub CI, and CI
 // enrollment is policy-blocked (`.agents/pr-review-policy.toml` `[hard_stops]` lists
 // `.github/workflows/**`). A green block in a merged commit is not a CI-verified block.
-// PROBE-PIN:BEGIN manifest=probe-pin/engine-census.toml digest=sha256:8cf2e0fee5d61110
+// PROBE-PIN:BEGIN manifest=probe-pin/engine-census.toml digest=sha256:96dd4724d5620be1
 // instrument rustc = rustc 1.97.0-nightly (0febdbab2 2026-04-18)
 // | probe | mutation | expect | verdict | firing assertion (anchor) | provenance |
 // |---|---|---|---|---|---|
 // | P0_control | (none) | pass | pass | (control; no mounts) | — |
-// | P1_production_site_removed | scenario.rs ×1 | fail | fail | left: (22, 21) / right: (23, 21) / THE TEST HALF HAS BEEN ADJUDICATED FIVE TIMES | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P2_test_site_removed | projection.rs ×1 | fail | fail | left: (23, 20) / right: (23, 21) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P3_walk_reaches_phase_ai_and_skips_comments | lib.rs ×1 | fail | fail | left: (24, 21) / right: (23, 21) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P4_counting_is_per_line | lib.rs ×1 | fail | fail | left: (25, 21) / right: (23, 21) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P1_production_site_removed | scenario.rs ×1 | fail | fail | left: (22, 24) / right: (23, 24) / THE TEST HALF HAS BEEN ADJUDICATED SEVEN TIMES | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P2_test_site_removed | projection.rs ×1 | fail | fail | left: (23, 23) / right: (23, 24) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P3_walk_reaches_phase_ai_and_skips_comments | lib.rs ×1 | fail | fail | left: (24, 24) / right: (23, 24) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P4_counting_is_per_line | lib.rs ×1 | fail | fail | left: (25, 24) / right: (23, 24) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P5_relocation_preserves_the_count | scenario.rs ×1, interaction.rs ×1 | fail | fail | the COUNT can be preserved by a move that relocates a writer / ("engine/src/game/interaction.rs", 6) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P6_second_validate_pins_consumer | scenario.rs ×1 | fail | fail | expected `validate_pins(` to appear in production exactly twice | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P7_coverage_half_unpaired | decision_template.rs ×1 | fail | fail | validating pin VALUES without also running | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
@@ -270,9 +270,9 @@ fn census(needle: &str) -> Vec<Hit> {
 /// R8 CONJUNCT 1 — the offer-writer surface, pinned BIDIRECTIONALLY (an EQUALITY
 /// on each half, so a REMOVED site fails too) and by per-file multiset.
 ///
-/// ⚠ THE `#[cfg(test)]` HALF HAS MOVED REPEATEDLY — 12 ⇒ 13 ⇒ 14 ⇒ 16 ⇒ 17 ⇒ the
-/// value the assert below pins — AND EACH ADJUDICATION IS RECORDED RATHER THAN
-/// THE ASSERT RELAXED.
+/// ⚠ THE `#[cfg(test)]` HALF HAS MOVED REPEATEDLY — 12 ⇒ 13 ⇒ 14 ⇒ 16 ⇒ 17 ⇒ 21 ⇒ 22
+/// ⇒ the value the assert below pins — AND EACH ADJUDICATION IS RECORDED RATHER
+/// THAN THE ASSERT RELAXED.
 /// * 12 ⇒ 13: §6 R27 (b)
 ///   (`analysis::resource::tests::r27_b_a_stored_may_auto_choice_survives_the_ring`)
 ///   destructures the offer the mint RETURNED to count its published CR 603.5
@@ -283,7 +283,7 @@ fn census(needle: &str) -> Vec<Hit> {
 ///   `template.owner` — i.e. that arm (b)'s drive-seam configuration is
 ///   production-unreachable.
 /// * 14 ⇒ 16: both in `phase-ai/src/policies/loop_shortcut.rs`'s `#[cfg(test)]`
-///   module — `bounded_offer_with_period`, a builder minting an offer whose
+///   module — `bounded_offer_declaring`, a builder minting an offer whose
 ///   certificate carries a real `per_cycle` so the proposer-elimination arm can
 ///   be driven, and `certificate_of`, a READ accessor for the same rows.
 /// * 16 ⇒ 17: the cap-round row
@@ -291,16 +291,28 @@ fn census(needle: &str) -> Vec<Hit> {
 ///   `engine/src/analysis/resource.rs` — A READ, NOT A WRITER: it destructures
 ///   the offer it minted to assert an EMPTY `schema.points` beside a
 ///   `victim_slot` that still names the forced victim.
-/// * 17 ⇒ the pinned value: the CR 732.2a declaration change's two in-crate
+/// * 17 ⇒ 21: the CR 732.2a declaration change's two in-crate
 ///   rows spell the anchor FOUR
 ///   times between them — `game/visibility.rs` row D5-h's mint and its projection
 ///   read, and `ai_support/candidates.rs` row D6-n's mint and its reach-guard read.
+/// * 21 ⇒ 22: the frame-wise charge row
+///   `the_bound_charges_the_frame_wise_loss_not_the_period_endpoint_pair` in
+///   `engine/src/game/engine.rs` — A READ: it destructures the offer it minted
+///   through the production seam to assert the published `victim_slot` magnitude
+///   and `seat_life_charge` divisor.
+/// * 22 ⇒ the pinned value: the consumption-ceiling rows' shared fixture helper
+///   `signmix_offer_at_responder_beat` in `engine/src/game/engine.rs`, which
+///   spells the anchor TWICE — once destructuring the offer the production mint
+///   returned, once re-reading its schema for the published count before taking
+///   the declare path to the response window. Both READS in one `#[cfg(test)]`
+///   helper, shared by the ceiling row and the accepted-count row.
 ///
-/// All five are in a `#[cfg(test)]` scope — mints and reads both — which is the
-/// benign case this row's own failure message names: a test fixture cannot make
-/// the period machinery certify. The PRODUCTION half is UNCHANGED across all five
-/// — and so is the per-file multiset below, which is the half §10 ruling condition
-/// (2) is about. Its VALUE is the assert's, not this comment's.
+/// EVERY addition listed above is in a `#[cfg(test)]` scope — mints and reads
+/// both — which is the benign case this row's own failure message names: a test
+/// fixture cannot make the period machinery certify. The PRODUCTION half is
+/// UNCHANGED across all of them — and so is the per-file multiset below, which is
+/// the half §10 ruling condition (2) is about. Its VALUE is the assert's, not this
+/// comment's.
 ///
 /// ⚠ THE PRODUCTION HALF HAS BEEN ADJUDICATED TOO — `game/derived_views.rs`'s
 /// `derive_views` arm, on the ground the failure message already excludes
@@ -341,7 +353,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
 
     assert_eq!(
         (production.len(), in_test.len()),
-        (23, 21),
+        (23, 24),
         "CR 732.2a OFFER-WRITER SURFACE CHANGED (not re-measured — this number is an \
          INVARIANCE pin over the whole 5d U-series).\n\
          The three CERTIFICATION-PATH writers are `reconcile_terminal_result` (object-growth \
@@ -358,12 +370,12 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
          certify without declaring or driving — §10 ruling condition (2), i.e. \
          answer-legality-at-certification becomes OWED WORK and the U-series stops. A new READ \
          site is the benign case; adjudicate, do not relax the assert.\n\
-         THE TEST HALF HAS BEEN ADJUDICATED FIVE TIMES (12 ⇒ 13, §6 R27 (b)'s schema read in \
+         THE TEST HALF HAS BEEN ADJUDICATED SEVEN TIMES (12 ⇒ 13, §6 R27 (b)'s schema read in \
          `engine/src/analysis/resource.rs`; 13 ⇒ 14, 5d U4's `u4_park_on_offer` fixture in \
          `engine/src/game/engine.rs`, which parks a constructed board on an offer so §6 R28 \
          arm (b) can assert the DECLARE firewall refuses a hostile `template.owner`; 14 ⇒ 16, \
          BOTH in `phase-ai/src/policies/loop_shortcut.rs`'s `#[cfg(test)]` module — \
-         `bounded_offer_with_period`, a builder minting an offer whose certificate carries a \
+         `bounded_offer_declaring`, a builder minting an offer whose certificate carries a \
          real `per_cycle` so the proposer-elimination arm can be driven, and `certificate_of`, \
          a read accessor for the same rows. PRODUCTION STAYED AT 22 across that change, which \
          is the half this pin exists to protect: the new policy arm READS the certificate and \
@@ -397,6 +409,23 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
          offer the period machinery can certify. PRODUCTION STAYED AT 22 with an IDENTICAL \
          per-file multiset — C2b adds the field INSIDE existing literals and patterns and \
          introduces no new production anchor line.\n\
+         SIXTH ADJUDICATION, 21 => 22: the frame-wise charge row \
+         `the_bound_charges_the_frame_wise_loss_not_the_period_endpoint_pair` in \
+         `engine/src/game/engine.rs`, whose `WaitingFor::LoopShortcut` DESTRUCTURE reads the \
+         offer it minted through `try_offer_bounded_cycle_shortcut_metered` to assert that the \
+         published `victim_slot` magnitude and `seat_life_charge` divisor come from the \
+         period's frame-wise accumulation while `delta` still carries the endpoint pair. A \
+         READ, not a writer, in a `#[cfg(test)]` scope. PRODUCTION AND THE PER-FILE MULTISET \
+         ARE BOTH UNMOVED — the row adds no production anchor line.\n\
+         SEVENTH ADJUDICATION, 22 => 24: the consumption-ceiling rows in \
+         `engine/src/game/engine.rs` share ONE `#[cfg(test)]` fixture helper, \
+         `signmix_offer_at_responder_beat`, which spells the anchor twice — once to destructure \
+         the offer `try_offer_bounded_cycle_shortcut_metered` returned, once to re-read that \
+         offer's schema for the published count before taking the production DECLARE path to \
+         the CR 732.2b response window, where the consumption re-derivation is resolved on the \
+         live proposal. Two READS in one helper, not two writers: the helper mints through the \
+         production seam and writes no offer of its own. PRODUCTION AND THE PER-FILE MULTISET \
+         ARE BOTH UNMOVED.\n\
          measured per-file production multiset: {multiset:?}\n\
          production: {production:?}\n\
          test: {in_test:?}"

@@ -4785,20 +4785,21 @@ pub(crate) fn target_filter_is_single_object_target(filter: &TargetFilter) -> bo
 /// they aren't in `MULTI_TARGET_VERBS` (e.g. "put", "gain control of") — a
 /// `MULTI_TARGET_VERBS` verb like "exile" takes its min from
 /// `stripped_multi_target` upstream and never reaches this function. Scans at
-/// word boundaries for an "up to N target …" quantifier anywhere in the
-/// clause, not just immediately after the verb, so one detector covers every
-/// non-`MULTI_TARGET_VERBS` verb instead of each needing its own hardcoded
-/// prefix (the prior version only recognized "gain control of "). This does
-/// NOT recognize "any number of target …" — that arm lives in
-/// `strip_leading_quantifier`, which this function doesn't call; no card in
-/// the per-opponent-fanout class currently uses that form. Reusing
+/// word boundaries for an "up to N target …" / "any number of target …"
+/// quantifier anywhere in the clause, not just immediately after the verb, so
+/// one detector covers every non-`MULTI_TARGET_VERBS` verb instead of each
+/// needing its own hardcoded prefix (the prior version only recognized
+/// "gain control of "). When the article guard fires, "any number of
+/// [other|another] target …" is min 0 (CR 107.1c). Reusing
 /// `strip_optional_target_prefix` (rather than the bare `strip_leading_quantifier`
 /// used by `MULTI_TARGET_VERBS`) is the safety property this relies on: it only
 /// accepts a quantifier immediately followed by "target "/"other target "/
 /// "another target ", so it can't misfire on a resource-count quantifier that
 /// happens to precede the object noun (e.g. "put up to three +1/+1 counters on
 /// target creature" — the quantity there modifies the counters, not the
-/// target, and the "target " guard declines it).
+/// target, and the "target " guard declines it). The article guard — not
+/// "we don't recognize any number of" — is what keeps resource-count phrases
+/// from becoming optional target slots.
 fn per_opponent_target_fanout_min(text: &str) -> usize {
     let lower = text.to_ascii_lowercase();
     let found_optional_target_slot =
@@ -6095,35 +6096,45 @@ fn strip_performed_action_this_way_clause(
     ))
 }
 
+/// CR 607.2a + CR 108.3: The linked-exile owner subject — "the exiled card's
+/// owner", "the exiled cards' owners", "the owner of each card exiled with
+/// <source>" — naming the owner of each card the source's linked exile ability
+/// exiled. Consumes the trailing space, leaving the verb (or modal `may `).
+///
+/// Single authority for the subject grammar: the mandatory route
+/// (`strip_linked_exile_owner_subject`, Skyclave Apparition) and the optional
+/// route (`clause_shell::try_peel_opponent_may_prefix`, Spell Queller) both
+/// compose it, so the two cannot drift apart.
+pub(crate) fn parse_linked_exile_owner_subject(i: &str) -> OracleResult<'_, PlayerFilter> {
+    alt((
+        value(
+            PlayerFilter::OwnersOfCardsExiledBySource,
+            tag("the exiled card's owner "),
+        ),
+        value(
+            PlayerFilter::OwnersOfCardsExiledBySource,
+            tag("the exiled cards' owners "),
+        ),
+        // CR 406.2 + CR 610.3: "the owner of each card exiled with <source> "
+        // — the source-linked exile cleanup subject (Trial of a Time Lord IV:
+        // "the owner of each card exiled with ~ puts that card on the bottom
+        // of their library"). The self-ref token is `~` after normalization,
+        // or the literal "this saga" pre-normalization; compose the prefix
+        // with the source token rather than verbatim-matching the card name.
+        value(
+            PlayerFilter::OwnersOfCardsExiledBySource,
+            preceded(
+                tag("the owner of each card exiled with "),
+                (alt((tag("~"), tag("this saga"))), tag(" ")),
+            ),
+        ),
+    ))
+    .parse(i)
+}
+
 fn strip_linked_exile_owner_subject(text: &str) -> (Option<PlayerFilter>, String) {
     let lower = text.to_lowercase();
-    let scope_rest = nom_on_lower(text, &lower, |i| {
-        alt((
-            value(
-                PlayerFilter::OwnersOfCardsExiledBySource,
-                tag::<_, _, OracleError<'_>>("the exiled card's owner "),
-            ),
-            value(
-                PlayerFilter::OwnersOfCardsExiledBySource,
-                tag("the exiled cards' owners "),
-            ),
-            // CR 406.2 + CR 610.3: "the owner of each card exiled with <source> "
-            // — the source-linked exile cleanup subject (Trial of a Time Lord IV:
-            // "the owner of each card exiled with ~ puts that card on the bottom
-            // of their library"). The self-ref token is `~` after normalization,
-            // or the literal "this saga" pre-normalization; compose the prefix
-            // with the source token rather than verbatim-matching the card name.
-            value(
-                PlayerFilter::OwnersOfCardsExiledBySource,
-                preceded(
-                    tag("the owner of each card exiled with "),
-                    (alt((tag("~"), tag("this saga"))), tag(" ")),
-                ),
-            ),
-        ))
-        .parse(i)
-    });
-    let Some((scope, rest)) = scope_rest else {
+    let Some((scope, rest)) = nom_on_lower(text, &lower, parse_linked_exile_owner_subject) else {
         return (None, text.to_string());
     };
 
@@ -7203,10 +7214,11 @@ pub(super) fn extract_deal_damage_multi_target(text: &str) -> Option<MultiTarget
 
 /// CR 115.1d + CR 613.4d: Recover the `MultiTargetSpec` for the prepositional
 /// SwitchPT form ("switch the power and toughness of <subject>"). The
-/// imperative parser strips "each of" and "any number of" so `parse_target`
-/// sees a bare target phrase; this helper rebuilds the spec from the original
-/// text. Mirrors `extract_double_counter_multi_target` — the only axis of
-/// variation is the verb prefix.
+/// imperative parser strips "each of" and the optional-target quantifier so
+/// `parse_target` sees a bare target phrase; this helper rebuilds the spec from
+/// the original text via `strip_optional_target_prefix` after the verb prefix
+/// and optional `each of`. Mirrors `extract_double_counter_multi_target` — the
+/// only axis of variation is the verb prefix.
 pub(super) fn extract_switch_pt_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
     let (_, target_text) = preceded(
@@ -7222,20 +7234,6 @@ pub(super) fn extract_switch_pt_multi_target(text: &str) -> Option<MultiTargetSp
         .parse(target_text)
         .map(|(rest, _)| rest)
         .unwrap_or(target_text);
-    if let Ok((after_any_number, _)) =
-        tag::<_, _, OracleError<'_>>("any number of ").parse(after_each_of)
-    {
-        if alt((
-            tag::<_, _, OracleError<'_>>("target "),
-            tag("other target "),
-            tag("another target "),
-        ))
-        .parse(after_any_number)
-        .is_ok()
-        {
-            return Some(MultiTargetSpec::unlimited(0));
-        }
-    }
     let (_, multi_target) = strip_optional_target_prefix(after_each_of);
     multi_target
 }
@@ -7267,20 +7265,6 @@ pub(super) fn extract_double_counter_multi_target(text: &str) -> Option<MultiTar
     )
     .parse(lower.as_str())
     .ok()?;
-    if let Ok((after_any_number, _)) =
-        tag::<_, _, OracleError<'_>>("any number of ").parse(target_text)
-    {
-        if alt((
-            tag::<_, _, OracleError<'_>>("target "),
-            tag("other target "),
-            tag("another target "),
-        ))
-        .parse(after_any_number)
-        .is_ok()
-        {
-            return Some(MultiTargetSpec::unlimited(0));
-        }
-    }
     let (_, multi_target) = strip_optional_target_prefix(target_text);
     multi_target
 }
@@ -7590,8 +7574,32 @@ fn strip_distribute_among_target_quantifier<'a>(
 /// Strip optional target-count prefixes before a targeted phrase.
 /// For spells, CR 115.1a + CR 115.6 + CR 601.2c: the caster announces
 /// zero through the stated maximum legal targets as the spell is cast.
+/// CR 115.1d + CR 603.3d: triggered abilities choose the same optional
+/// target set after they are put on the stack.
 pub(crate) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTargetSpec>) {
     let lower = text.to_ascii_lowercase();
+    fn followed_by_target_article(input: &str) -> bool {
+        alt((
+            tag::<_, _, OracleError<'_>>("target "),
+            tag("other target "),
+            tag("another target "),
+        ))
+        .parse(input)
+        .is_ok()
+    }
+
+    // CR 107.1c + CR 115.6: "any number of [other|another] target …" includes
+    // zero and is legal with no chosen targets. Prefix match without the
+    // article guard must not consume, and must not fall through to "up to".
+    if let Ok((remainder, _)) = tag::<_, _, OracleError<'_>>("any number of ").parse(lower.as_str())
+    {
+        if followed_by_target_article(remainder) {
+            let consumed = lower.len() - remainder.len();
+            return (&text[consumed..], Some(MultiTargetSpec::unlimited(0)));
+        }
+        return (text, None);
+    }
+
     let Ok((after_up_to, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(lower.as_str()) else {
         return (text, None);
     };
@@ -7600,15 +7608,7 @@ pub(crate) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTar
     };
     let consumed = lower.len() - remainder.len();
     let rest = text[consumed..].trim_start();
-    let rest_lower = rest.to_ascii_lowercase();
-    if alt((
-        tag::<_, _, OracleError<'_>>("target "),
-        tag("other target "),
-        tag("another target "),
-    ))
-    .parse(rest_lower.as_str())
-    .is_err()
-    {
+    if !followed_by_target_article(&rest.to_ascii_lowercase()) {
         return (text, None);
     }
     (rest, Some(MultiTargetSpec::up_to(max)))

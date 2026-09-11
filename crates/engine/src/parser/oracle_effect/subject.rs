@@ -2604,26 +2604,20 @@ pub(super) fn parse_subject_application(
         application.multi_target = Some(MultiTargetSpec::exact(count));
         return Some(application);
     }
-    // CR 115.1d: "any number of target creatures" — variable-count targeting.
-    // Strip "any number of " prefix, delegate to parse_target for the filter,
-    // and attach MultiTargetSpec { min: 0, max: None } (unlimited).
-    if let Ok((after_prefix, _)) =
-        tag::<_, _, OracleError<'_>>("any number of ").parse(lower.as_str())
-    {
-        // CR 115.1d: Accept "any number of target X" and "any number of other
-        // target X". consumed is kept at the end of "any number of " so that
-        // target_text starts with "other target..." or "target..." and
-        // parse_target_with_ctx can add FilterProp::Another for the "other" form
-        // (Guardian of Faith: "any number of other target creatures you control").
-        let consumed = lower.len() - after_prefix.len();
-        let target_text = &subject[consumed..];
-        if alt((
-            tag::<_, _, OracleError<'_>>("target "),
-            tag("other target "),
-        ))
-        .parse(after_prefix)
+    // CR 107.1c + CR 115.1: "any number of [other|another] target X" —
+    // variable-count targeting with a zero minimum and no upper bound, for any
+    // spell or ability kind.
+    // `strip_optional_target_prefix` is the single authority for the quantifier
+    // and its target-article guard; it leaves `target_text` at "target …" /
+    // "other target …" / "another target …" so `parse_target_with_ctx` adds
+    // `FilterProp::Another` for the "other" forms (Guardian of Faith: "any
+    // number of other target creatures you control").
+    if tag::<_, _, OracleError<'_>>("any number of ")
+        .parse(lower.as_str())
         .is_ok()
-        {
+    {
+        let (target_text, multi_target) = super::strip_optional_target_prefix(subject);
+        if multi_target.is_some() {
             let (filter, rest) = parse_target_with_ctx(target_text, ctx);
             // CR 115.1d (issue #8581): "any number of target players other
             // than that player" (Curse of Surveillance) is not silently
@@ -2655,7 +2649,7 @@ pub(super) fn parse_subject_application(
                 return None;
             }
             let mut application = subject_filter_application(filter, true)?;
-            application.multi_target = Some(MultiTargetSpec::unlimited(0));
+            application.multi_target = multi_target;
             return Some(application);
         }
     }
@@ -9718,6 +9712,23 @@ mod tests {
         let app = parse_subject_application("any number of target creatures", &mut ctx)
             .expect("should parse");
         assert!(app.multi_target.is_some(), "multi_target must be set");
+    }
+
+    /// CR 107.1c + CR 115.1: the subject "any number of" arm delegates to
+    /// `strip_optional_target_prefix`, so it accepts every target article that
+    /// helper does — including "another target".
+    #[test]
+    fn any_number_of_another_target_produces_multi_target() {
+        let mut ctx = ParseContext::default();
+        let app = parse_subject_application("any number of another target creature", &mut ctx)
+            .expect("should parse");
+        assert_eq!(app.multi_target, Some(MultiTargetSpec::unlimited(0)));
+        assert!(
+            matches!(app.target, Some(TargetFilter::Typed(ref tf))
+                if tf.properties.iter().any(|p| matches!(p, FilterProp::Another))),
+            "filter must have FilterProp::Another for 'another', got {:?}",
+            app.target
+        );
     }
 
     // CR 115.1 + CR 115.1d: "one or more target X" variable-count subject tests.

@@ -113,9 +113,9 @@ claim = "the production half fails DOWNWARD, and the pinned tuple + adjudication
   count = 0
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (22, 21)",
-             "right: (23, 21)",
-             "THE TEST HALF HAS BEEN ADJUDICATED FIVE TIMES"]
+  anchor  = ["left: (22, 24)",
+             "right: (23, 24)",
+             "THE TEST HALF HAS BEEN ADJUDICATED SEVEN TIMES"]
 
 [[probe]]
 id    = "P2_test_site_removed"
@@ -131,7 +131,7 @@ claim = "the cfg(test) half is pinned INDEPENDENTLY of the production half"
   count = 1
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (23, 20)", "right: (23, 21)"]
+  anchor  = ["left: (23, 23)", "right: (23, 24)"]
 
 [[probe]]
 id    = "P3_walk_reaches_phase_ai_and_skips_comments"
@@ -148,7 +148,7 @@ claim = "the phase-ai root is walked, zero-hit files are visited, and COMMENT li
   count = 4
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (24, 21)", "right: (23, 21)"]
+  anchor  = ["left: (24, 24)", "right: (23, 24)"]
 
 [[probe]]
 id    = "P4_counting_is_per_line"
@@ -164,7 +164,7 @@ claim = "the count sums LINES, not files -- two planted lines in one file move i
   count = 2
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (25, 21)", "right: (23, 21)"]
+  anchor  = ["left: (25, 24)", "right: (23, 24)"]
 
 [[probe]]
 id    = "P5_relocation_preserves_the_count"

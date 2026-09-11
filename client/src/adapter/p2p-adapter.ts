@@ -195,6 +195,7 @@ interface DeckListPayload {
    * identically as constructed play (no grant).
    */
   draft_set_codes?: string[] | null;
+  booster_pack_pool?: string[] | null;
 }
 
 /** The desktop host has already ensured this exact local phase-server binary
@@ -236,7 +237,7 @@ class NativeP2PBridge {
   private fullKey: FullSessionKey | null = null;
 
   constructor(
-    private readonly hostDeck: DeckListPayload["player"],
+    private readonly hostDeckData: DeckListPayload,
     private readonly hostDisplayName: string,
     private readonly playerCount: number,
     private readonly formatConfig: FormatConfig | undefined,
@@ -266,7 +267,7 @@ class NativeP2PBridge {
     const host = new WebSocketAdapter(
       "native-engine://phase-server",
       "host",
-      this.hostDeck,
+      this.hostDeckData.player,
       undefined,
       undefined,
       undefined,
@@ -280,6 +281,7 @@ class NativeP2PBridge {
           aiSeats,
           formatConfig: this.formatConfig,
           matchConfig: this.matchConfig,
+          boosterPackPool: this.hostDeckData.booster_pack_pool,
         },
       },
     );
@@ -1105,7 +1107,7 @@ export class P2PHostAdapter implements EngineAdapter {
     }
     if (native) {
       this.nativeBridge = new NativeP2PBridge(
-        (hostDeckData as DeckListPayload).player,
+        hostDeckData as DeckListPayload,
         this.hostDisplayName ?? "Host",
         playerCount,
         formatConfig,
@@ -2164,6 +2166,7 @@ export class P2PHostAdapter implements EngineAdapter {
         // discarded before it can reach the engine. Naming it is what carries
         // the Commander Masters partner grant into the game.
         draft_set_codes: hostDeck.draft_set_codes,
+        booster_pack_pool: hostDeck.booster_pack_pool,
       };
       const playerCount = allowPartialStart
         ? orderedOpponents.length + 1

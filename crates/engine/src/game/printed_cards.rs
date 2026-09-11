@@ -1366,11 +1366,16 @@ fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
     // also runs on the mid-game debug-spawn path. `booster_shelf` is
     // `#[serde(skip)]`, so this is also the rebuild after any deserialize; it is
     // seeded from the persisted `rng_seed` rather than drawn from `state.rng`,
-    // so a restored or peer-rebuilt state shelves the same products instead of
-    // advancing the game stream a restore-count-dependent number of steps.
+    // so rebuilding never advances the game stream a restore-count-dependent
+    // number of steps. A restore of a later Bo3 game rebuilds set products from
+    // that game's own seed rather than the shelf carried from game one; see
+    // `match_flow::restart_between_games_with_starting_player`.
     if state.booster_shelf.is_empty() && crate::game::boosters::game_opens_booster_packs(state, db)
     {
-        state.booster_shelf = Arc::new(crate::game::boosters::build_shelf(db, state.rng_seed));
+        state.booster_shelf = Arc::new(match &state.booster_pack_pool {
+            Some(names) => crate::game::boosters::build_pool_shelf(db, names),
+            None => crate::game::boosters::build_shelf(db, state.rng_seed),
+        });
     }
 }
 
