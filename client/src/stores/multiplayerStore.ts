@@ -2061,6 +2061,17 @@ export function migratePersistedMultiplayerState(
 ): unknown {
   if (!persisted || typeof persisted !== "object") return persisted;
   const migrated = persisted as Record<string, unknown>;
+  // v6 → v7: tournament bearer credentials moved OFF localStorage. They are
+  // secrets that must not sit at rest in localStorage (readable by any
+  // same-origin script for the life of the profile); a dedicated sessionStorage
+  // sync owns them going forward and `partialize` no longer writes them here.
+  // Strip any a pre-v7 build persisted.
+  //
+  // Placed BEFORE the `version < 6` arm below, which returns early when a legacy
+  // `serverAddress` is present — a strip that ran after it could be skipped.
+  if (version < 7 && "tournamentCredentials" in migrated) {
+    delete migrated.tournamentCredentials;
+  }
   if (version < 3) {
     migrated.serverAddress = migrateOfficialServerAddress(
       migrated.serverAddress,
@@ -3459,7 +3470,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
     }),
     {
       name: "phase-multiplayer",
-      version: 6,
+      version: 7,
       // v0/v1 → v2: official hosted lobby addresses are deployment defaults,
       // not user intent. A self-hosted build must move returning browsers from
       // the official lobby to its configured default while preserving explicit
@@ -3490,6 +3501,12 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       // authorities it browses). A hand-typed address becomes both; an
       // official or build-default address is already derived as a preset, so
       // it becomes the hosting server only.
+      //
+      // v6 → v7: tournament bearer credentials leave this localStorage-backed
+      // persist for sessionStorage (secrets must not sit at rest in
+      // localStorage). The migration strips any a pre-v7 build wrote here;
+      // `partialize` no longer emits them and a dedicated sessionStorage sync
+      // (below the store) owns them.
       migrate: migratePersistedMultiplayerState,
       // Persisted state is external input. Migration only runs when the schema
       // version changes, so hydrate current-version blobs through the same
@@ -3502,9 +3519,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           ...current,
           ...saved,
           lastHostConfig: normalizeRememberedHostConfig(saved.lastHostConfig),
-          tournamentCredentials: normalizeTournamentCredentials(
-            saved.tournamentCredentials,
-          ),
+          // Tournament credentials are NEVER hydrated from this localStorage
+          // blob (v7): they live in sessionStorage now. Forcing the in-memory
+          // initial here — after `...saved` — guarantees a stray or
+          // pre-migration localStorage copy cannot win;
+          // `hydrateSessionTournamentCredentials` (below the store) fills the
+          // real value right after creation.
+          tournamentCredentials: current.tournamentCredentials,
           userLobbySources: normalizeUserLobbySources(saved.userLobbySources),
           disabledDirectorySources: normalizeDisabledDirectorySources(
             saved.disabledDirectorySources,
@@ -3541,11 +3562,84 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         // projection is rebuilt each session, never persisted.
         disabledDirectorySources: state.disabledDirectorySources,
         lastHostConfig: state.lastHostConfig,
-        tournamentCredentials: state.tournamentCredentials,
+        // `tournamentCredentials` is deliberately ABSENT: these are bearer
+        // secrets and must not be written to localStorage. They persist to
+        // sessionStorage instead — see `hydrateSessionTournamentCredentials`
+        // and the subscription just below the store.
       }),
     },
   ),
 );
+
+// ── Tournament credentials: sessionStorage, not localStorage ───────────────
+//
+// Bearer secrets (`organizer_token` / `player_token`) must not sit at rest in
+// localStorage, where any same-origin script can read them for the life of the
+// browser profile. They live in sessionStorage instead: preserved across a
+// refresh (an organizer keeps authority), cleared when the tab closes. This is
+// a separate persistence from the localStorage-backed `persist` above — the
+// store's `partialize` omits the credentials and its `merge` never hydrates
+// them from localStorage.
+
+const TOURNAMENT_CREDENTIALS_SESSION_KEY = "phase-tournament-credentials";
+
+/** Reads and validates the credential map from sessionStorage. Any failure
+ *  (absent, quota, disabled, malformed) yields an empty map — credentials then
+ *  simply do not survive, exactly as a fresh tab. */
+function readSessionTournamentCredentials(): Record<string, TournamentCredential> {
+  try {
+    const raw = sessionStorage.getItem(TOURNAMENT_CREDENTIALS_SESSION_KEY);
+    if (raw === null) return {};
+    return normalizeTournamentCredentials(JSON.parse(raw));
+  } catch {
+    return {};
+  }
+}
+
+/** Writes the credential map to sessionStorage, removing the key entirely when
+ *  the map is empty so a cleared session leaves nothing behind. */
+function writeSessionTournamentCredentials(
+  credentials: Record<string, TournamentCredential>,
+): void {
+  try {
+    if (Object.keys(credentials).length === 0) {
+      sessionStorage.removeItem(TOURNAMENT_CREDENTIALS_SESSION_KEY);
+      return;
+    }
+    sessionStorage.setItem(
+      TOURNAMENT_CREDENTIALS_SESSION_KEY,
+      JSON.stringify(credentials),
+    );
+  } catch {
+    // Non-fatal: with no sessionStorage the credentials just do not survive a
+    // refresh, which is a strictly safer failure than persisting them anyway.
+  }
+}
+
+/**
+ * Loads sessionStorage-persisted credentials into the store. Runs once at
+ * module load, after `create` has finished localStorage hydration, so it is the
+ * final word on the initial `tournamentCredentials` value. Idempotent and
+ * exported so a test can drive it against a seeded sessionStorage.
+ */
+export function hydrateSessionTournamentCredentials(): void {
+  const hydrated = readSessionTournamentCredentials();
+  if (Object.keys(hydrated).length > 0) {
+    useMultiplayerStore.setState({ tournamentCredentials: hydrated });
+  }
+}
+
+hydrateSessionTournamentCredentials();
+
+// Mirror every later change to the credential map back to sessionStorage. Keyed
+// on identity: `rememberTournamentCredential` and the fan-out both return a new
+// object only when the map actually changed, so unrelated store updates do not
+// touch storage.
+useMultiplayerStore.subscribe((state, prev) => {
+  if (state.tournamentCredentials !== prev.tournamentCredentials) {
+    writeSessionTournamentCredentials(state.tournamentCredentials);
+  }
+});
 
 export function getPlayerDisplayName(playerId: number, myId?: number): string {
   if (playerId === myId) return "You";
