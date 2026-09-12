@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, rest, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -13,7 +13,7 @@ use super::super::oracle_nom::enters_under::{
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::primitives::parse_keyword_name;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase_folding};
-use super::super::oracle_util::{contains_possessive, parse_count_expr, parse_ordinal, TextPair};
+use super::super::oracle_util::{parse_count_expr, parse_ordinal, TextPair};
 use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
@@ -503,21 +503,61 @@ fn parse_reveal_until_rest_zone(lower: &str) -> Option<Zone> {
     Some(Zone::Library)
 }
 
+/// CR 400.5 + CR 608.2c + CR 401.4: prefix-anchored rest-order suffix. More
+/// specific `" in a random order"` sits beside `" in any order"` (they do not
+/// share a nestable prefix). Call sites consume destination with nom first so
+/// this combinator sees the phrase at the start of remaining input.
+fn parse_dig_library_rest_order_suffix(input: &str) -> OracleResult<'_, DigRestOrder> {
+    alt((
+        value(DigRestOrder::Random, tag(" in a random order")),
+        value(DigRestOrder::PlayerChosen, tag(" in any order")),
+    ))
+    .parse(input)
+}
+
+fn parse_optional_dig_library_rest_order(input: &str) -> OracleResult<'_, DigRestOrder> {
+    let (input, order) = opt(parse_dig_library_rest_order_suffix).parse(input)?;
+    Ok((input, order.unwrap_or(DigRestOrder::Preserve)))
+}
+
+/// Dig-local library-bottom destination tags. Longer phrases first so the
+/// abbreviated `" on the bottom"` cannot steal `" on the bottom of your library"`.
+fn parse_dig_rest_library_bottom(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag(" on the bottom of your library")),
+        value((), tag(" on the bottom of their library")),
+        value((), tag(" on the bottom")),
+    ))
+    .parse(input)
+}
+
 /// Whole-line dig continuation "put the rest on the bottom of your library
 /// [in a random order | in any order]" following a `ChooseFromZone`.
 ///
 /// CR 400.5 + CR 608.2c: "in a random order" is an instruction distinct from
-/// the player-chosen ordering in "in any order".
+/// the player-chosen ordering in "in any order" (CR 401.4).
 fn parse_put_rest_on_bottom_line(input: &str) -> OracleResult<'_, DigRestOrder> {
     let (input, _) = tag("put the rest on the bottom of your library").parse(input)?;
-    let (input, rest_order) = opt(alt((
-        value(DigRestOrder::Random, tag(" in a random order")),
-        value(DigRestOrder::Preserve, tag(" in any order")),
-    )))
-    .parse(input)?;
+    let (input, rest_order) = parse_optional_dig_library_rest_order(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
     let (input, _) = eof(input)?;
-    Ok((input, rest_order.unwrap_or(DigRestOrder::Preserve)))
+    Ok((input, rest_order))
+}
+
+/// CR 401.4 + CR 608.2c: "Put those cards on the bottom of your library in any
+/// order" / "Put those cards into your graveyard". Destination is consumed
+/// before the order suffix so mid-clause Random still hits.
+fn parse_put_those_cards_rest_line(input: &str) -> OracleResult<'_, (Zone, DigRestOrder)> {
+    let (input, _) = tag("put those cards").parse(input)?;
+    let (input, dest) = alt((
+        parse_choice_partition_destination,
+        value(Zone::Library, tag(" on the bottom")),
+    ))
+    .parse(input)?;
+    let (input, order) = parse_optional_dig_library_rest_order(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    let (input, _) = eof(input)?;
+    Ok((input, (dest, order)))
 }
 
 /// Whole-line dig continuation matcher — delegates to [`parse_put_rest_on_bottom_line`]
@@ -930,7 +970,7 @@ fn parse_put_all_back_in_any_order(lower: &str) -> bool {
         .is_ok()
 }
 
-fn parse_put_one_dig_card_on_top(lower: &str) -> Option<DigRestOrder> {
+fn parse_put_one_dig_card_on_top(lower: &str) -> Option<(Option<Zone>, DigRestOrder)> {
     let (rest, _) = (
         alt((
             tag::<_, _, OracleError<'_>>("you may put "),
@@ -945,18 +985,20 @@ fn parse_put_one_dig_card_on_top(lower: &str) -> Option<DigRestOrder> {
     )
         .parse(lower.trim())
         .ok()?;
-    let (rest, order) = opt(value(
-        DigRestOrder::Random,
-        tag::<_, _, OracleError<'_>>(
-            " and the rest on the bottom of your library in a random order",
-        ),
+    let (rest, rider) = opt((
+        tag::<_, _, OracleError<'_>>(" and the rest"),
+        parse_dig_rest_library_bottom,
+        parse_optional_dig_library_rest_order,
     ))
     .parse(rest)
     .ok()?;
     terminated(opt(tag::<_, _, OracleError<'_>>(".")), eof)
         .parse(rest)
         .ok()?;
-    Some(order.unwrap_or(DigRestOrder::Preserve))
+    Some(match rider {
+        Some((_, _, order)) => (Some(Zone::Library), order),
+        None => (None, DigRestOrder::Preserve),
+    })
 }
 
 fn parse_exile_rest_clause(lower: &str) -> bool {
@@ -6929,29 +6971,25 @@ fn parse_of_them_rest_destination(lower: &str) -> Option<(Zone, DigRestOrder)> {
     let (_, (_, after_rest)) = nom_primitives::split_once_on(lower, " and the rest")
         .or_else(|_| nom_primitives::split_once_on(lower, " and the other"))
         .ok()?;
-    let destination = if contains_possessive(after_rest, "into", "graveyard") {
-        Zone::Graveyard
-    } else if contains_possessive(after_rest, "into", "hand") {
-        Zone::Hand
-    } else {
-        // Default: bottom of library ("on the bottom", "in any order", etc.)
-        Zone::Library
-    };
-    let random = opt(preceded(
-        take_until::<_, _, OracleError<'_>>(" in a random order"),
-        tag(" in a random order"),
+    // CR 401.4 + CR 608.2c: consume destination first, then the prefix-anchored
+    // order suffix. Dest-less remainder (empty / "." / eof / a leading order
+    // phrase) defaults to library bottom.
+    let (after_dest, dest) = alt((
+        parse_choice_partition_destination,
+        value(Zone::Library, tag(" on the bottom")),
+        value(
+            Zone::Library,
+            peek(alt((
+                value((), parse_dig_library_rest_order_suffix),
+                value((), tag(".")),
+                value((), eof),
+            ))),
+        ),
     ))
     .parse(after_rest)
-    .ok()
-    .is_some_and(|(_, matched)| matched.is_some());
-    Some((
-        destination,
-        if random {
-            DigRestOrder::Random
-        } else {
-            DigRestOrder::Preserve
-        },
-    ))
+    .ok()?;
+    let (_, order) = parse_optional_dig_library_rest_order(after_dest).ok()?;
+    Some((dest, order))
 }
 
 /// CR 608.2c: The controller follows a card's instructions in written order;
@@ -7640,17 +7678,14 @@ pub(super) fn parse_followup_continuation_ast(
         // Dig — keep up to one looked-at card on top, leaving the remainder
         // for a following rest-placement clause.
         Effect::Dig { .. } if parse_put_one_dig_card_on_top(&lower).is_some() => {
+            let (rest_destination, rest_order) = parse_put_one_dig_card_on_top(&lower)
+                .expect("continuation guard just matched");
             Some(ContinuationAst::DigFromAmong {
                 quantity: PutCount::up(1),
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Library),
-                rest_destination: matches!(
-                    parse_put_one_dig_card_on_top(&lower),
-                    Some(DigRestOrder::Random)
-                )
-                .then_some(Zone::Library),
-                rest_order: parse_put_one_dig_card_on_top(&lower)
-                    .expect("continuation guard just matched"),
+                rest_destination,
+                rest_order,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -7748,6 +7783,15 @@ pub(super) fn parse_followup_continuation_ast(
                 || nom_primitives::scan_contains(&lower, "put the rest")
                 || nom_primitives::scan_contains(&lower, "put those cards") =>
         {
+            if let Ok((_, (destination, rest_order))) =
+                parse_put_those_cards_rest_line(lower.trim())
+            {
+                return Some(ContinuationAst::PutRest {
+                    destination,
+                    reorder_all: false,
+                    rest_order,
+                });
+            }
             let destination = if nom_primitives::scan_contains(&lower, "into your graveyard")
                 || nom_primitives::scan_contains(&lower, "into their graveyard")
             {
@@ -7760,7 +7804,7 @@ pub(super) fn parse_followup_continuation_ast(
                 // Default: bottom of library (covers "on the bottom", "back in any order", etc.)
                 Zone::Library
             };
-            let rest_order = parse_put_rest_on_bottom_line(&lower)
+            let rest_order = parse_put_rest_on_bottom_line(lower.trim())
                 .map(|(_, order)| order)
                 .unwrap_or(DigRestOrder::Preserve);
             Some(ContinuationAst::PutRest {
@@ -10999,7 +11043,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChosen,
             })
         );
     }
@@ -11107,7 +11151,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChosen,
             })
         );
     }
@@ -11130,7 +11174,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChosen,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -11157,7 +11201,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChosen,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -11241,7 +11285,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChosen,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -11322,6 +11366,7 @@ mod tests {
             filter,
             destination,
             rest_destination,
+            rest_order,
             reveal_verb,
             ..
         }) = result
@@ -11332,6 +11377,11 @@ mod tests {
         // CR 401.4: kept card goes on TOP of the library; the rest go to the bottom.
         assert_eq!(destination, Some(Zone::Library));
         assert_eq!(rest_destination, Some(Zone::Library));
+        assert_eq!(
+            rest_order,
+            DigRestOrder::PlayerChosen,
+            "abbreviated 'on the bottom in any order' is player-chosen (CR 401.4)"
+        );
         // CR 701.20a vs 701.20e: "reveal ... from among them" is a public reveal,
         // so the Dig must be promoted to reveal:true even though the kept card
         // routes to a fixed library position.
@@ -11339,6 +11389,94 @@ mod tests {
         // The from-among filter restricts the kept card to a basic land card.
         let (expected_filter, _) = parse_target("basic land card");
         assert_eq!(filter, expected_filter);
+    }
+
+    #[test]
+    fn put_one_of_them_on_top_and_rest_on_bottom_any_order() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Put one of them back on top of your library and the rest on the bottom of your library in any order.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            destination,
+            rest_destination,
+            rest_order,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(destination, Some(Zone::Library));
+        assert_eq!(rest_destination, Some(Zone::Library));
+        assert_eq!(rest_order, DigRestOrder::PlayerChosen);
+    }
+
+    #[test]
+    fn put_one_of_them_on_top_and_rest_on_bottom_abbreviated_any_order() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Put one of them back on top of your library and the rest on the bottom in any order.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            destination,
+            rest_destination,
+            rest_order,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(destination, Some(Zone::Library));
+        assert_eq!(rest_destination, Some(Zone::Library));
+        assert_eq!(rest_order, DigRestOrder::PlayerChosen);
+    }
+
+    #[test]
+    fn put_one_of_them_on_top_without_rest_rider_is_preserve() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "You may put one of those cards back on top of your library.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            destination,
+            rest_destination,
+            rest_order,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(destination, Some(Zone::Library));
+        assert_eq!(rest_destination, None);
+        assert_eq!(rest_order, DigRestOrder::Preserve);
+    }
+
+    #[test]
+    fn put_one_of_them_on_top_and_rest_on_bottom_random() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Put one of them back on top of your library and the rest on the bottom of your library in a random order.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            destination,
+            rest_destination,
+            rest_order,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(destination, Some(Zone::Library));
+        assert_eq!(rest_destination, Some(Zone::Library));
+        assert_eq!(rest_order, DigRestOrder::Random);
     }
 
     #[test]

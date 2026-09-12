@@ -1785,6 +1785,12 @@
       "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
       "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
       "hint": "Drag to reorder · position 1 ends up on top of this pile"
+    },
+    "digBottom": {
+      "title": "Order the rest on the bottom",
+      "subtitle_one": "Put {{count}} looked-at card on the bottom of your library",
+      "subtitle_other": "Put {{count}} looked-at cards on the bottom of your library, in any order",
+      "hint": "Drag to reorder · position 1 ends up on top of this pile"
     }
   },
   "specializeColor": {

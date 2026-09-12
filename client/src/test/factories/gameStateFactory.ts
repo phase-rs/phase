@@ -46,6 +46,7 @@ type ResolutionOptionalPaymentWaitingFor = Extract<
   WaitingFor,
   { type: "ResolutionOptionalPaymentChoice" }
 >;
+type DigBottomOrderWaitingFor = Extract<WaitingFor, { type: "DigBottomOrder" }>;
 type WaitingForWithData = Extract<WaitingFor, { data: object }>;
 
 /**
@@ -515,6 +516,18 @@ export const buildCastOfferWaitingFor = ({
   return factory.build();
 };
 
+export class DigBottomOrderWaitingForFactory extends PlayerWaitingForFactory<DigBottomOrderWaitingFor> {}
+
+export const digBottomOrderWaitingForFactory =
+  DigBottomOrderWaitingForFactory.define((): DigBottomOrderWaitingFor => ({
+    type: "DigBottomOrder",
+    data: {
+      player: 0,
+      library_owner: 0,
+      cards: [],
+    },
+  }));
+
 interface WaitingForTransient {
   variant?: WaitingFor;
 }
@@ -595,6 +608,10 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
     if (player !== undefined) factory = factory.forPlayer(player);
     if (kind !== undefined) factory = factory.withKind(kind);
     return this.variant(factory.build());
+  }
+
+  digBottomOrder(data: Partial<DigBottomOrderWaitingFor["data"]> = {}) {
+    return this.variant(digBottomOrderWaitingForFactory.withData(data).build());
   }
 
   private variant(variant: WaitingFor) {

@@ -751,7 +751,7 @@ pub(crate) fn mark_pending_continuation_parent(state: &mut GameState, kind: Effe
 /// All `pending_continuation.take()` sites should use this helper rather
 /// than rolling their own `take + resolve_ability_chain`, so the parent
 /// event is never silently dropped.
-pub(super) fn restore_continuation_trigger_firing(
+pub(crate) fn restore_continuation_trigger_firing(
     state: &mut GameState,
     continuation_firing: Option<crate::types::identifiers::TriggerFiring>,
 ) {
@@ -3559,6 +3559,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             //      events exist — it would snapshot a permanent +0/+0.
             | WaitingFor::DieKeepChoice { .. }
             | WaitingFor::DigChoice { .. }
+            | WaitingFor::DigBottomOrder { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }

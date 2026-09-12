@@ -60,6 +60,7 @@ import {
   DigModal,
   RevealModal,
   RippleBottomOrderModal,
+  DigBottomOrderModal,
   ScryModal,
   ArrangePlanarDeckTopModal,
   SurveilModal,
@@ -140,6 +141,14 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return (
         <RippleBottomOrderModal
+          key={waitingFor.data.cards.join("-")}
+          data={waitingFor.data}
+        />
+      );
+    case "DigBottomOrder":
+      if (!canActForWaitingState) return null;
+      return (
+        <DigBottomOrderModal
           key={waitingFor.data.cards.join("-")}
           data={waitingFor.data}
         />

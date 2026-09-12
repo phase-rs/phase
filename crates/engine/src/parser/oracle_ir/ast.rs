@@ -408,8 +408,9 @@ pub(crate) enum ContinuationAst {
     PutRest {
         destination: Zone,
         reorder_all: bool,
-        /// CR 400.5 + CR 608.2c: Only exact "in a random order" text
-        /// randomizes the unchosen library remainder.
+        /// CR 400.5 + CR 608.2c + CR 401.4: `Random` from printed "in a random
+        /// order"; `PlayerChosen` from printed "in any order"; `Preserve` when
+        /// no order phrase is present.
         #[serde(default, skip_serializing_if = "DigRestOrder::is_preserve")]
         rest_order: DigRestOrder,
     },
@@ -430,8 +431,9 @@ pub(crate) enum ContinuationAst {
         /// "put two of them into your hand and the rest on the bottom of your library".
         /// When None, a subsequent PutRest continuation handles rest_destination.
         rest_destination: Option<Zone>,
-        /// CR 400.5 + CR 608.2c: Only exact "in a random order" text sets
-        /// `Random`; every other accepted form preserves existing behavior.
+        /// CR 400.5 + CR 608.2c + CR 401.4: `Random` from printed "in a random
+        /// order"; `PlayerChosen` from printed "in any order"; `Preserve` when
+        /// no order phrase is present.
         #[serde(default)]
         rest_order: DigRestOrder,
         /// CR 110.2a: Controller override for the kept cards' battlefield entry

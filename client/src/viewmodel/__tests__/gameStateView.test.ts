@@ -1111,6 +1111,7 @@ const PARTITION_FIXTURES: Record<
   ScryChoice: NO_TARGET_REF_LEGAL_SET,
   RippleRevealChoice: NO_TARGET_REF_LEGAL_SET,
   RippleBottomOrder: NO_TARGET_REF_LEGAL_SET,
+  DigBottomOrder: NO_TARGET_REF_LEGAL_SET,
   ArrangePlanarDeckTopChoice: NO_TARGET_REF_LEGAL_SET,
   RedistributeLifeTotals: NO_TARGET_REF_LEGAL_SET,
   CoinFlipKeepChoice: NO_TARGET_REF_LEGAL_SET,

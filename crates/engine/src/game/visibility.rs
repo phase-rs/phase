@@ -444,17 +444,16 @@ pub(crate) fn identity_projection_for_viewer(
             (HashSet::new(), HashSet::new())
         };
 
-    let dig_visible: HashSet<ObjectId> = if let WaitingFor::DigChoice {
-        player, ref cards, ..
-    } = state.waiting_for
-    {
-        if can_view_private_for_player(player) {
-            cards.iter().copied().collect()
-        } else {
-            HashSet::new()
+    let dig_visible: HashSet<ObjectId> = match &state.waiting_for {
+        WaitingFor::DigChoice { player, cards, .. }
+        | WaitingFor::DigBottomOrder { player, cards, .. } => {
+            if can_view_private_for_player(*player) {
+                cards.iter().copied().collect()
+            } else {
+                HashSet::new()
+            }
         }
-    } else {
-        HashSet::new()
+        _ => HashSet::new(),
     };
 
     // CR 701.22a: Scry instructs the player to look at the top N cards of
@@ -1377,6 +1376,25 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 source_id,
                 enter_tapped,
                 enters_attacking,
+            };
+        }
+    }
+
+    if let WaitingFor::DigBottomOrder {
+        player,
+        library_owner,
+        ref cards,
+        source_id,
+        ref completion,
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::DigBottomOrder {
+                player,
+                library_owner,
+                cards: cards.iter().map(|_| ObjectId(0)).collect(),
+                source_id,
+                completion: completion.clone(),
             };
         }
     }

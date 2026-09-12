@@ -1812,6 +1812,9 @@ pub fn fallback_action(
         WaitingFor::RippleBottomOrder { cards, .. } => Some(GameAction::SelectCards {
             cards: cards.clone(),
         }),
+        WaitingFor::DigBottomOrder { cards, .. } => Some(GameAction::SelectCards {
+            cards: cards.clone(),
+        }),
         // CR 608.2g + CR 601.2: Invoke Calamity's free-cast window — finish the
         // window (cast nothing) as the conservative default; the candidate
         // generator still explores casting each eligible spell.

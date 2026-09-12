@@ -98,13 +98,55 @@ fn fertile_thicket_keeps_revealed_basic_land_on_top_and_rest_on_bottom() {
         "only the basic land may be kept; selectable = {selectable_cards:?}"
     );
 
-    // Submit the keep-selection: the revealed Forest.
+    // Submit the keep-selection: the revealed Forest. Do NOT
+    // `advance_until_stack_empty()` here — PlayerChosen rest parks
+    // `DigBottomOrder`, which that helper will not answer.
     runner
         .act(GameAction::SelectCards {
             cards: vec![basic_land],
         })
         .expect("selecting the revealed basic land should succeed");
-    runner.advance_until_stack_empty();
+
+    let rest = match runner.state().waiting_for.clone() {
+        WaitingFor::DigBottomOrder { cards, .. } => cards,
+        other => panic!("expected DigBottomOrder after the keep, got {other:?}"),
+    };
+    let rest_set: std::collections::HashSet<_> = rest.iter().copied().collect();
+    let expected_rest: std::collections::HashSet<_> =
+        [other1, other2, other3, other4].into_iter().collect();
+    assert_eq!(
+        rest_set, expected_rest,
+        "DigBottomOrder cards are the four unkept looked-at ids"
+    );
+    let library_during: Vec<ObjectId> = runner.state().players[0].library.iter().copied().collect();
+    assert_eq!(
+        library_during.first().copied(),
+        Some(basic_land),
+        "Forest is already library[0] before the rest-order prompt; library = {library_during:?}"
+    );
+    for &id in &rest {
+        assert_eq!(
+            runner.state().objects[&id].zone,
+            Zone::Library,
+            "{id:?} must still be in Zone::Library during DigBottomOrder"
+        );
+        assert!(
+            library_during.contains(&id),
+            "{id:?} must still be in P0's library vec during DigBottomOrder; library = {library_during:?}"
+        );
+    }
+
+    // Non-identity permutation of the four rest cards (CR 401.4 + CR 608.2d).
+    let submitted = vec![other4, other3, other2, other1];
+    assert_ne!(
+        submitted, rest,
+        "reach-guard: the submitted order must differ from the offered identity"
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: submitted.clone(),
+        })
+        .expect("non-identity rest order");
 
     let state = runner.state();
     let library: Vec<ObjectId> = state.players[0].library.iter().copied().collect();
@@ -126,15 +168,11 @@ fn fertile_thicket_keeps_revealed_basic_land_on_top_and_rest_on_bottom() {
         Some(basic_land),
         "the chosen basic land must NOT be on the bottom of the library"
     );
-
-    // The other four cards are pushed to the bottom (in any order).
-    let bottom_four: Vec<ObjectId> = library.iter().skip(1).copied().collect();
-    for &id in &[other1, other2, other3, other4] {
-        assert!(
-            bottom_four.contains(&id),
-            "non-basic-land card {id:?} must be on the bottom; bottom = {bottom_four:?}"
-        );
-    }
+    assert_eq!(
+        &library[library.len() - 4..],
+        submitted.as_slice(),
+        "submitted rest order is the library suffix; library = {library:?}"
+    );
 
     // The kept land was not stolen into hand or onto the battlefield.
     assert!(
@@ -145,7 +183,9 @@ fn fertile_thicket_keeps_revealed_basic_land_on_top_and_rest_on_bottom() {
     // CR 701.20a (second assertion — fails if Step 2 reverted): the looked-at
     // cards were publicly revealed because the clause's verb is "reveal". If the
     // Dig were left at reveal:false (a private look), `revealed_cards` would be
-    // empty for these cards.
+    // empty for these cards. The kept Forest was not in the rest move, so it
+    // may remain in `revealed_cards` after the rest-order placement (CR 701.20d
+    // drops rest ids).
     assert!(
         state.revealed_cards.contains(&basic_land),
         "the revealed basic land must be publicly revealed (reveal:true); \

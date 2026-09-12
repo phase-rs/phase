@@ -1291,6 +1291,9 @@ pub fn candidate_actions_broad_with_probe(
         WaitingFor::RippleBottomOrder { player, cards, .. } => {
             select_cards_variants(*player, cards, Some(cards.len()))
         }
+        WaitingFor::DigBottomOrder { player, cards, .. } => {
+            select_cards_variants(*player, cards, Some(cards.len()))
+        }
         WaitingFor::ArrangePlanarDeckTopChoice {
             player,
             cards,

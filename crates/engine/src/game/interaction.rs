@@ -233,6 +233,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::KeepExactPermanentsChoice { .. }
         | WaitingFor::ScryChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
+        | WaitingFor::DigBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
         | WaitingFor::SurveilChoice { .. }
@@ -513,6 +514,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::KeepExactPermanentsChoice { .. }
         | WaitingFor::ScryChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
+        | WaitingFor::DigBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
         | WaitingFor::SurveilChoice { .. }
@@ -4147,6 +4149,7 @@ fn selection_projection(
         } => selectable_cards.len(),
         WaitingFor::SeparatePilesPartition { eligible, .. } => eligible.len(),
         WaitingFor::RippleBottomOrder { cards, .. } => cards.len(),
+        WaitingFor::DigBottomOrder { cards, .. } => cards.len(),
         _ => 0,
     };
     if candidate_count > MAX_INTERACTION_LIST_LEN {
@@ -4469,6 +4472,16 @@ fn selection_projection(
             intent: InteractionIntentCode::Choose,
             action: SelectionAction::SelectCards,
             source_id: Some(*source_id),
+        }),
+        WaitingFor::DigBottomOrder {
+            cards, source_id, ..
+        } => Some(SelectionProjection {
+            object_ids: cards.clone(),
+            constraint: count_constraint(cards.len(), cards.len()),
+            confirm: ConfirmSemantics::Explicit,
+            intent: InteractionIntentCode::Choose,
+            action: SelectionAction::SelectCards,
+            source_id: *source_id,
         }),
         WaitingFor::ArrangePlanarDeckTopChoice {
             cards, keep_on_top, ..

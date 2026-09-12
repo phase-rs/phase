@@ -92,7 +92,7 @@ pub fn resolve(
 
     let library_owner = super::resolve_player_for_context_ref(state, ability, library_owner_filter);
 
-    // CR 401.5 + CR 608.2c: This Dig's own outcome — not a stale value from an
+    // CR 608.2c / #1365: This Dig's own outcome — not a stale value from an
     // earlier link in the same chain — is what `apply_parent_chain_context`
     // relays to this Dig's immediate sub_ability. Reset here; the two "found
     // nothing" returns below (and in `resolve_from_prior_look`) set it back
@@ -127,7 +127,8 @@ pub fn resolve(
         .find(|p| p.id == library_owner)
         .ok_or(EffectError::PlayerNotFound)?;
 
-    // CR 401.5: If a library has fewer cards than required, use as many as available.
+    // CR 609.3 + CR 101.3: If a library has fewer cards than required, use as
+    // many as available (do as much as possible; ignore the impossible remainder).
     let count = dig_num.min(player.library.len());
     if count == 0 {
         // CR 608.2c: Nothing was looked at — a chained `ParentTarget` consumer
@@ -290,14 +291,73 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 701.20e + CR 608.2c: Resolve a Dig whose card set comes from a
-/// preceding look-only Dig (`source: DigSource::PriorLook`). Two sub-paths:
+/// CR 401.4 + CR 608.2c: Route PriorLook rest. Preserve/Random go through the
+/// `completion: None` wrapper (Parked must not happen). PlayerChosen threads
+/// `DigPriorLookRestComplete` and must not treat rest as placed on `Parked`.
+/// Corpus PriorLook today is Birthing Ritual (`in a random order` — stays
+/// Random); this arm is parked-aware for a future PriorLook + PlayerChosen parse.
+#[allow(clippy::too_many_arguments)]
+fn route_prior_look_rest(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    library_owner: crate::types::player::PlayerId,
+    cards: &[crate::types::identifiers::ObjectId],
+    dest: Zone,
+    rest_order: DigRestOrder,
+    source_id: crate::types::identifiers::ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    match rest_order {
+        DigRestOrder::PlayerChosen => {
+            match crate::game::engine_resolution_choices::open_dig_library_bottom_order_or_place(
+                state,
+                player,
+                library_owner,
+                cards,
+                dest,
+                rest_order,
+                Some(source_id),
+                Some(BatchCompletion::DigPriorLookRestComplete { player, source_id }),
+                events,
+            ) {
+                crate::game::engine_resolution_choices::DigLibraryBottomRoute::Parked
+                | crate::game::engine_resolution_choices::DigLibraryBottomRoute::Placed(_) => false,
+            }
+        }
+        DigRestOrder::Preserve | DigRestOrder::Random => {
+            match crate::game::engine_resolution_choices::route_rest_partition(
+                state,
+                player,
+                cards,
+                dest,
+                rest_order,
+                Some(source_id),
+                events,
+            ) {
+                crate::game::engine_resolution_choices::DigLibraryBottomRoute::Placed(
+                    crate::game::zone_pipeline::BatchMoveResult::Done,
+                ) => true,
+                crate::game::engine_resolution_choices::DigLibraryBottomRoute::Placed(
+                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice,
+                ) => {
+                    crate::game::zone_pipeline::defer_completion_on_pause(
+                        state,
+                        BatchCompletion::DigPriorLookRestComplete { player, source_id },
+                    );
+                    false
+                }
+                crate::game::engine_resolution_choices::DigLibraryBottomRoute::Parked => false,
+            }
+        }
+    }
+}
+
+/// CR 701.20e + CR 608.2c: Consume a previously looked-at card set
+/// (`state.private_look_ids`) as a Dig's source instead of re-looking at the
+/// library. Two paths:
 ///
-/// 1. **Decline branch** (`raw_keep_num == 0` with `rest_dest == Library`):
-///    No interactive choice. Route ALL looked-at cards to library bottom then
-///    clear the private look window. This fires when the player declined the
-///    optional sacrifice that gates the "if you do, put … from among those"
-///    instruction (Birthing Ritual).
+/// 1. **Decline / empty-filter** (`raw_keep_num == 0` or no filter match):
+///    route every looked-at card to `rest_dest`.
 ///
 /// 2. **Interactive path** (`raw_keep_num > 0`): Present `WaitingFor::DigChoice`
 ///    reading from `state.private_look_ids`. The sacrifice snapshot is already
@@ -339,25 +399,17 @@ fn resolve_from_prior_look(
     // cards to rest_dest without any interactive prompt.
     if raw_keep_count == 0 {
         if let Some(dest) = rest_dest {
-            match crate::game::engine_resolution_choices::route_rest_partition(
+            if !route_prior_look_rest(
                 state,
+                ability.controller,
+                library_owner,
                 &cards,
                 dest,
                 rest_order,
-                Some(ability.source_id),
+                ability.source_id,
                 events,
             ) {
-                crate::game::zone_pipeline::BatchMoveResult::Done => {}
-                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
-                    crate::game::zone_pipeline::defer_completion_on_pause(
-                        state,
-                        BatchCompletion::DigPriorLookRestComplete {
-                            player: ability.controller,
-                            source_id: ability.source_id,
-                        },
-                    );
-                    return Ok(());
-                }
+                return Ok(());
             }
         }
         state.private_look_ids.clear();
@@ -387,25 +439,17 @@ fn resolve_from_prior_look(
     // rest_dest instead of surfacing an impossible DigChoice prompt.
     if selectable_cards.is_empty() {
         if let Some(dest) = rest_dest {
-            match crate::game::engine_resolution_choices::route_rest_partition(
+            if !route_prior_look_rest(
                 state,
+                ability.controller,
+                library_owner,
                 &cards,
                 dest,
                 rest_order,
-                Some(ability.source_id),
+                ability.source_id,
                 events,
             ) {
-                crate::game::zone_pipeline::BatchMoveResult::Done => {}
-                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
-                    crate::game::zone_pipeline::defer_completion_on_pause(
-                        state,
-                        BatchCompletion::DigPriorLookRestComplete {
-                            player: ability.controller,
-                            source_id: ability.source_id,
-                        },
-                    );
-                    return Ok(());
-                }
+                return Ok(());
             }
         }
         state.private_look_ids.clear();
@@ -457,11 +501,14 @@ fn resolve_from_prior_look(
 /// order"). No `DigChoice` interaction is surfaced because the instruction
 /// admits no player choice.
 ///
-/// The rest pile is routed first (a deterministic library/zone placement), so a
-/// replacement-choice pause cannot let the selected delivery or its tracked-set
-/// publication overtake the printed rest instruction. Selected cards then move
-/// as one pipeline batch, with a typed completion that publishes only cards that
-/// actually reached the requested destination after every redirect settles.
+/// The rest pile is routed first for Preserve/Random (a deterministic
+/// library/zone placement), so a replacement-choice pause cannot let the
+/// selected delivery overtake the printed rest instruction. PlayerChosen
+/// inverts to keep-then-order (CR 608.2c). A future battlefield mass-put-all
+/// with PlayerChosen must park AfterKeptDoRestOrder so a kept ETB pause cannot
+/// clobber `waiting_for`; no such parsed card exists today (Variant C grep).
+/// Hand mass PlayerChosen keep-then-orders through the helper with Rest-stage
+/// `RevealRestPile` as the drain (`completion: None` would stick after place).
 #[allow(clippy::too_many_arguments)]
 fn resolve_mass_put_all(
     state: &mut GameState,
@@ -480,18 +527,76 @@ fn resolve_mass_put_all(
         .filter(|id| !selectable.contains(id))
         .copied()
         .collect();
+    let rest_zone = rest_destination.unwrap_or(Zone::Library);
 
-    // Route the (deterministic) rest pile first so a kept-card pause cannot
-    // strand it. None => bottom of library (CR 701.20a "in a random order").
+    if rest_order == DigRestOrder::PlayerChosen {
+        // CR 608.2c: keep-then-order. Do not treat wrapper `Placed(Done)` as
+        // license to move kept after a park.
+        move_mass_put_all_selected(
+            state,
+            ability.controller,
+            ability.source_id,
+            selectable.to_vec(),
+            dest,
+            EtbTapState::from_legacy_bool(enter_tapped),
+            enters_attacking,
+            events,
+        );
+        let library_owner = rest
+            .first()
+            .and_then(|&id| state.objects.get(&id).map(|obj| obj.owner))
+            .unwrap_or(ability.controller);
+        let completion = BatchCompletion::RevealRestPile {
+            delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
+            player: ability.controller,
+            source_id: Some(ability.source_id),
+            rest_cards: Vec::new(),
+            rest_destination: rest_zone,
+            rest_order,
+            clear_markers: Vec::new(),
+            publish_tracked_set: Some(selectable.to_vec()),
+            publish_tracked_set_cause: None,
+            emit_reveal_until_resolved: None,
+            manifested_for_continuation: None,
+            kept_delivery: Default::default(),
+            continuation_targets: Vec::new(),
+            rest_delivery: crate::types::game_state::DigRestDeliveryOutcome::pending(
+                state,
+                rest.clone(),
+                rest_zone,
+            ),
+        };
+        match crate::game::engine_resolution_choices::open_dig_library_bottom_order_or_place(
+            state,
+            ability.controller,
+            library_owner,
+            &rest,
+            rest_zone,
+            rest_order,
+            Some(ability.source_id),
+            Some(completion),
+            events,
+        ) {
+            crate::game::engine_resolution_choices::DigLibraryBottomRoute::Parked
+            | crate::game::engine_resolution_choices::DigLibraryBottomRoute::Placed(_) => {}
+        }
+        return;
+    }
+
+    // Preserve/Random stay rest-first so a kept ETB pause cannot strand rest.
+    // None => bottom of library (CR 701.20a "in a random order").
     match crate::game::engine_resolution_choices::route_rest_partition(
         state,
+        ability.controller,
         &rest,
-        rest_destination.unwrap_or(Zone::Library),
+        rest_zone,
         rest_order,
         Some(ability.source_id),
         events,
     ) {
-        crate::game::zone_pipeline::BatchMoveResult::Done => move_mass_put_all_selected(
+        crate::game::engine_resolution_choices::DigLibraryBottomRoute::Placed(
+            crate::game::zone_pipeline::BatchMoveResult::Done,
+        ) => move_mass_put_all_selected(
             state,
             ability.controller,
             ability.source_id,
@@ -501,7 +606,9 @@ fn resolve_mass_put_all(
             enters_attacking,
             events,
         ),
-        crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+        crate::game::engine_resolution_choices::DigLibraryBottomRoute::Placed(
+            crate::game::zone_pipeline::BatchMoveResult::NeedsChoice,
+        ) => {
             crate::game::zone_pipeline::defer_completion_on_pause(
                 state,
                 BatchCompletion::DigMassPutAllRestComplete {
@@ -514,6 +621,7 @@ fn resolve_mass_put_all(
                 },
             );
         }
+        crate::game::engine_resolution_choices::DigLibraryBottomRoute::Parked => {}
     }
 }
 
@@ -1619,6 +1727,115 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 401.4: Hand mass-put-all with `PlayerChosen` keep-then-orders
+    /// through the helper with Rest-stage `RevealRestPile` as the drain. After the
+    /// rest permutation, waiting is Priority — `completion: None` would stick.
+    #[test]
+    fn hand_mass_player_chosen_keep_then_orders_through_rest_stage_drain() {
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature A".to_string(),
+            Zone::Library,
+        );
+        let instant_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Instant A".to_string(),
+            Zone::Library,
+        );
+        let instant_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Instant B".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::Dig {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 3 },
+                destination: Some(Zone::Hand),
+                keep_count: Some(u32::MAX),
+                keep_count_expr: None,
+                up_to: false,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::PlayerChosen,
+                reveal: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                source: DigSource::Library,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Hand,
+            "keep-then-order: matching creature is already in hand before the rest prompt"
+        );
+        let rest = match state.waiting_for.clone() {
+            WaitingFor::DigBottomOrder { cards, .. } => cards,
+            other => panic!("expected DigBottomOrder for Hand mass PlayerChosen, got {other:?}"),
+        };
+        let rest_set: std::collections::HashSet<_> = rest.iter().copied().collect();
+        assert_eq!(
+            rest_set,
+            [instant_a, instant_b].into_iter().collect(),
+            "rest pile is the two non-matching cards"
+        );
+        for &id in &rest {
+            assert_eq!(state.objects[&id].zone, Zone::Library);
+            assert!(state.players[0].library.iter().any(|&member| member == id));
+        }
+
+        let submitted = vec![instant_b, instant_a];
+        let waiting = state.waiting_for.clone();
+        let outcome = handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards {
+                cards: submitted.clone(),
+            },
+            &mut events,
+        )
+        .expect("PlayerChosen rest-order submit");
+        assert!(
+            matches!(
+                outcome,
+                ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority { .. })
+            ),
+            "Rest-stage RevealRestPile drain must leave Priority, not a stuck DigBottomOrder"
+        );
+        let library: Vec<_> = state.players[0].library.iter().copied().collect();
+        assert_eq!(
+            &library[library.len() - 2..],
+            submitted.as_slice(),
+            "submitted order is the library suffix"
+        );
+        assert_eq!(state.objects[&creature].zone, Zone::Hand);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
     /// Runtime regression test for issue #4273 (Birthing Ritual). The parser
     /// now assembles: look-only Dig → Sacrifice → `from_prior_look` choice Dig.
     /// The choice Dig reads `state.private_look_ids` and evaluates the CMC
@@ -1841,8 +2058,12 @@ mod tests {
 
         // No interactive choice must be surfaced.
         assert!(
-            !matches!(state.waiting_for, WaitingFor::DigChoice { .. }),
-            "decline branch must not surface a DigChoice"
+            !matches!(
+                state.waiting_for,
+                WaitingFor::DigChoice { .. } | WaitingFor::DigBottomOrder { .. }
+            ),
+            "Random decline must not surface DigChoice or DigBottomOrder; waiting = {:?}",
+            state.waiting_for
         );
         // Both cards must be at the library bottom (last positions).
         let lib = &state.players[0].library;
@@ -1855,6 +2076,109 @@ mod tests {
             state.private_look_ids.is_empty(),
             "private_look_ids must be cleared after decline-branch routing"
         );
+    }
+
+    /// Row 23: hand-built PriorLook + PlayerChosen decline with 2+ looked-at ids
+    /// parks DigBottomOrder (ids still in library). After permutation, the look
+    /// window is cleared and waiting is Priority. Corpus PriorLook today is
+    /// Birthing Ritual (`in a random order`); this arm is parked-aware for a
+    /// future PriorLook + PlayerChosen parse.
+    #[test]
+    fn prior_look_player_chosen_decline_parks_then_clears_look_window() {
+        let mut state = GameState::new_two_player(42);
+        let card_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "CardA".into(),
+            Zone::Library,
+        );
+        let card_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "CardB".into(),
+            Zone::Library,
+        );
+        state.private_look_ids = vec![card_a, card_b];
+        state.private_look_player = Some(PlayerId(0));
+
+        let ability = ResolvedAbility::new(
+            Effect::Dig {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 2 },
+                destination: Some(Zone::Library),
+                keep_count: Some(0),
+                keep_count_expr: None,
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::PlayerChosen,
+                reveal: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                source: DigSource::PriorLook,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let rest = match state.waiting_for.clone() {
+            WaitingFor::DigBottomOrder { cards, .. } => cards,
+            other => {
+                panic!("expected DigBottomOrder on PriorLook PlayerChosen decline, got {other:?}")
+            }
+        };
+        let rest_set: std::collections::HashSet<_> = rest.iter().copied().collect();
+        assert_eq!(
+            rest_set,
+            [card_a, card_b].into_iter().collect(),
+            "both looked-at ids are offered for rest-order"
+        );
+        for &id in &rest {
+            assert_eq!(state.objects[&id].zone, Zone::Library);
+            assert!(state.players[0].library.iter().any(|&member| member == id));
+        }
+        assert_eq!(
+            state.private_look_ids,
+            vec![card_a, card_b],
+            "Parked must not clear the look window before the permutation"
+        );
+
+        let submitted = vec![card_b, card_a];
+        let waiting = state.waiting_for.clone();
+        let outcome = handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards {
+                cards: submitted.clone(),
+            },
+            &mut events,
+        )
+        .expect("PriorLook rest-order submit");
+        assert!(
+            matches!(
+                outcome,
+                ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority { .. })
+            ),
+            "after permutation waiting is Priority"
+        );
+        assert!(
+            state.private_look_ids.is_empty(),
+            "DigPriorLookRestComplete must clear the look window"
+        );
+        assert!(state.private_look_player.is_none());
+        let library: Vec<_> = state.players[0].library.iter().copied().collect();
+        assert_eq!(
+            &library[library.len() - 2..],
+            submitted.as_slice(),
+            "submitted order is the library suffix"
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 
     /// CR 201.2 + CR 201.2a: `FilterProp::NameMatchesAnyPermanent` must restrict
@@ -2373,8 +2697,9 @@ mod tests {
     }
 
     /// Issue #1365 (Thassa's Oracle reanimated via Dread Return with an empty
-    /// library — Hermit Druid milled the whole deck first). CR 401.5: a Dig
-    /// against an empty library looks at zero cards. The chained "put up to
+    /// library — Hermit Druid milled the whole deck first). CR 609.3 + CR 101.3:
+    /// a Dig against an empty library looks at zero cards (do as much as
+    /// possible). The chained "put up to
     /// one of them on top … the rest on the bottom" instruction has nothing to
     /// place, but the trailing `WinTheGame` gate (devotion >= library size)
     /// must still evaluate against the UNDISTURBED game state — Thassa's

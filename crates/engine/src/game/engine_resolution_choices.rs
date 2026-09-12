@@ -6,13 +6,13 @@ use rand::seq::SliceRandom;
 use crate::types::ability::{
     AbilityCost, ChoiceType, ChosenAttribute, DigRestOrder, Effect, EffectKind, GuessOutcome,
     LibraryPosition, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ResolvedAbility,
-    TargetRef,
+    TargetFilter, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, CastOfferKind, ChosenDamageSource, CopyChosenSelection, GameState,
-    OutsideGameChoiceSource, PayableResource, PendingContinuation,
+    ActionResult, BatchCompletion, CastOfferKind, ChosenDamageSource, CopyChosenSelection,
+    GameState, OutsideGameChoiceSource, PayableResource, PendingContinuation,
     PendingPlayerScopeSacrificeCompletion, PersistentAxisMaterialization, WaitingFor,
     ZoneOpponentChooserPurpose,
 };
@@ -894,6 +894,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             }
             | WaitingFor::RippleRevealChoice { .. }
             | WaitingFor::RippleBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
             | WaitingFor::CastOffer {
                 kind: CastOfferKind::FreeCastWindow { .. },
                 ..
@@ -1000,28 +1001,188 @@ fn dig_continuation_wants_rest_pile_for_count(ability: &ResolvedAbility) -> bool
     wants_rest
 }
 
+/// CR 401.4 + CR 608.2d: Dig-local result of routing a rest pile to a library
+/// (or other rest zone). `Parked` means `waiting_for` is `DigBottomOrder` and
+/// rest cards remain in the library — callers must not treat rest as placed.
+/// Do not add `Parked` to global `BatchMoveResult`.
+pub(crate) enum DigLibraryBottomRoute {
+    /// Rest pile was placed through the zone pipeline (Preserve / Random /
+    /// PlayerChosen with len < 2 / non-library). Inner value is that move's result.
+    Placed(crate::game::zone_pipeline::BatchMoveResult),
+    /// `state.waiting_for` is `DigBottomOrder`; rest cards remain in the library.
+    Parked,
+}
+
+/// CR 401.4 + CR 608.2d: Prompt for a player-chosen library-bottom order when
+/// 2+ rest cards go to a library; otherwise place immediately. This is the
+/// only Random shuffle for Dig rest-to-library.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_dig_library_bottom_order_or_place(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    library_owner: crate::types::player::PlayerId,
+    rest_ids: &[ObjectId],
+    rest_zone: Zone,
+    rest_order: DigRestOrder,
+    source_id: Option<ObjectId>,
+    completion: Option<BatchCompletion>,
+    events: &mut Vec<GameEvent>,
+) -> DigLibraryBottomRoute {
+    match rest_order {
+        DigRestOrder::PlayerChosen if rest_zone == Zone::Library && rest_ids.len() >= 2 => {
+            state.waiting_for = WaitingFor::DigBottomOrder {
+                player,
+                library_owner,
+                cards: rest_ids.to_vec(),
+                source_id,
+                completion,
+            };
+            DigLibraryBottomRoute::Parked
+        }
+        DigRestOrder::Random if rest_zone == Zone::Library => {
+            let mut ordered_ids = rest_ids.to_vec();
+            // CR 400.5 + CR 608.2c: Exact Oracle text requires a randomized
+            // remainder; only this rest pile, not the remainder of the library,
+            // consumes entropy.
+            ordered_ids.shuffle(&mut state.rng);
+            DigLibraryBottomRoute::Placed(route_rest_partition_then(
+                state,
+                &ordered_ids,
+                rest_zone,
+                source_id,
+                completion,
+                events,
+            ))
+        }
+        DigRestOrder::Preserve | DigRestOrder::PlayerChosen | DigRestOrder::Random => {
+            DigLibraryBottomRoute::Placed(route_rest_partition_then(
+                state, rest_ids, rest_zone, source_id, completion, events,
+            ))
+        }
+    }
+}
+
+/// Derive `library_owner` from the first rest card, falling back to `player`.
+fn library_owner_of_rest(
+    state: &GameState,
+    rest_ids: &[ObjectId],
+    player: crate::types::player::PlayerId,
+) -> crate::types::player::PlayerId {
+    rest_ids
+        .first()
+        .and_then(|&id| state.objects.get(&id).map(|obj| obj.owner))
+        .unwrap_or(player)
+}
+
+fn validate_card_permutation(order: &[ObjectId], offered: &[ObjectId]) -> bool {
+    order.len() == offered.len()
+        && order.iter().collect::<HashSet<_>>().len() == order.len()
+        && order.iter().all(|id| offered.contains(id))
+}
+
+/// CR 608.2c + CR 406.3 + CR 122.1: Peel keep-side `HideawayConceal` and the
+/// immediately following `PutCounter { target: ParentTarget }` off the live
+/// continuation frame and resolve them at depth 1 before a rest-order prompt
+/// parks. Remainder stays on the same `AbilityContinuationFrame`. No-ops when
+/// the root is not `HideawayConceal` (Duskwatch keep-to-hand).
+fn drain_keep_side_hideaway_prefix(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let Some(frame) = state.active_ability_continuation_frame() else {
+        return;
+    };
+    if !matches!(frame.pending.chain.effect, Effect::HideawayConceal { .. }) {
+        return;
+    }
+    let mut frame = state
+        .take_active_ability_continuation()
+        .expect("checked active continuation must be consumable")
+        .expect("checked active continuation must exist");
+    let bound_targets = frame.pending.chain.targets.clone();
+    effects::restore_continuation_trigger_firing(state, frame.pending.trigger_firing);
+    let previous_attach = std::mem::replace(
+        &mut state.resolving_continuation_attach_host,
+        frame.pending.search_attach_host,
+    );
+    let previous_scope = std::mem::replace(
+        &mut state.resolving_player_scope_linked_exile,
+        frame.pending.player_scope_linked_exile.clone(),
+    );
+    let trigger_snapshot = frame
+        .pending
+        .trigger_context
+        .as_ref()
+        .map(|ctx| super::triggers::push_resolving_trigger_context(state, ctx));
+
+    let remainder = {
+        let chain = &*frame.pending.chain;
+        let mut conceal_only = chain.clone();
+        conceal_only.targets = bound_targets.clone();
+        conceal_only.sub_ability = None;
+        // CR 406.3: conceal the just-exiled card (face down + Hideaway look-link)
+        // as a continuation resume, never a fresh depth-0 resolution.
+        let _ = effects::resolve_ability_chain(state, &conceal_only, events, 1);
+
+        match chain.sub_ability.as_deref() {
+            Some(child)
+                if matches!(
+                    &child.effect,
+                    Effect::PutCounter {
+                        target: TargetFilter::ParentTarget,
+                        ..
+                    }
+                ) =>
+            {
+                let mut counter_only = child.clone();
+                counter_only.targets = bound_targets;
+                counter_only.sub_ability = None;
+                // CR 122.1: the hatching (or other) counter is part of the exile
+                // clause, not after-rest continuation.
+                let _ = effects::resolve_ability_chain(state, &counter_only, events, 1);
+                child.sub_ability.clone()
+            }
+            Some(_) => chain.sub_ability.clone(),
+            None => None,
+        }
+    };
+
+    if let Some(snapshot) = trigger_snapshot {
+        super::triggers::restore_trigger_event_context(state, snapshot);
+    }
+    state.resolving_player_scope_linked_exile = previous_scope;
+    state.resolving_continuation_attach_host = previous_attach;
+
+    if let Some(remainder) = remainder {
+        frame.pending.chain = remainder;
+        state.push_ability_continuation(frame);
+    }
+}
+
 /// CR 701.20e / CR 701.23a + CR 401.4: Move the "rest" partition of an
 /// interactive selection (Dig's unkept cards, a search-split's non-primary
-/// cards) to a concrete destination zone. `Library` routes to the bottom of the
-/// owner's library (CR 401.4); every other zone uses the standard cross-zone
-/// mover. Extracted from the Dig rest-move block so the search-partition handler
-/// reuses the exact same routing.
+/// cards) to a concrete destination zone. Wrapper around
+/// [`open_dig_library_bottom_order_or_place`] with `completion: None`.
+/// Callers that can raise PlayerChosen must match `Parked` and must not send
+/// PlayerChosen through this None-completion wrapper.
 pub(crate) fn route_rest_partition(
     state: &mut GameState,
+    player: crate::types::player::PlayerId,
     rest_ids: &[ObjectId],
     rest_zone: Zone,
     rest_order: DigRestOrder,
     source_id: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
-) -> crate::game::zone_pipeline::BatchMoveResult {
-    let mut ordered_ids = rest_ids.to_vec();
-    if rest_zone == Zone::Library && rest_order == DigRestOrder::Random {
-        // CR 400.5 + CR 608.2c: Exact Oracle text requires a randomized
-        // remainder; only this rest pile, not the remainder of the library,
-        // consumes entropy.
-        ordered_ids.shuffle(&mut state.rng);
-    }
-    route_rest_partition_then(state, &ordered_ids, rest_zone, source_id, None, events)
+) -> DigLibraryBottomRoute {
+    let library_owner = library_owner_of_rest(state, rest_ids, player);
+    open_dig_library_bottom_order_or_place(
+        state,
+        player,
+        library_owner,
+        rest_ids,
+        rest_zone,
+        rest_order,
+        source_id,
+        None,
+        events,
+    )
 }
 
 pub(crate) fn route_rest_partition_then(
@@ -2718,16 +2879,79 @@ pub(super) fn handle_resolution_choice(
             GameAction::SelectCards { cards: order },
         ) => {
             let _ = player;
-            if order.len() != cards.len()
-                || order.iter().collect::<std::collections::HashSet<_>>().len() != order.len()
-                || !order.iter().all(|id| cards.contains(id))
-            {
+            if !validate_card_permutation(&order, &cards) {
                 return Err(EngineError::InvalidAction(
                     "Ripple bottom order must be a permutation of the revealed cards".to_string(),
                 ));
             }
             effects::ripple::place_on_library_bottom(state, source_id, &order, final_cast, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        // CR 608.2d + CR 401.4: Dig rest "in any order" — the controller announces
+        // the permutation of unkept looked-at cards. `order` must be a permutation
+        // of the offered pile, and every id must still sit in `library_owner`'s
+        // library (CR 701.20b/e).
+        (
+            WaitingFor::DigBottomOrder {
+                player,
+                library_owner,
+                cards,
+                source_id,
+                completion,
+            },
+            GameAction::SelectCards { cards: order },
+        ) => {
+            if !validate_card_permutation(&order, &cards) {
+                return Err(EngineError::InvalidAction(
+                    "Dig rest order must be a permutation of the remaining looked-at cards"
+                        .to_string(),
+                ));
+            }
+            let library_has = |id: ObjectId| {
+                state
+                    .objects
+                    .get(&id)
+                    .is_some_and(|obj| obj.zone == Zone::Library)
+                    && state
+                        .players
+                        .iter()
+                        .find(|p| p.id == library_owner)
+                        .is_some_and(|p| p.library.iter().any(|&member| member == id))
+            };
+            if !order.iter().copied().all(library_has) {
+                return Err(EngineError::InvalidAction(
+                    "Dig rest cards must still be in the library".to_string(),
+                ));
+            }
+            let had_completion = completion.is_some();
+            let result = route_rest_partition_then(
+                state,
+                &order,
+                Zone::Library,
+                source_id,
+                completion,
+                events,
+            );
+            match result {
+                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
+                crate::game::zone_pipeline::BatchMoveResult::Done => {
+                    // CR 701.20d: reordering library cards ends their revealed
+                    // identity. Drop rest ids from `revealed_cards` now, not at
+                    // the next action boundary.
+                    for id in &order {
+                        state.revealed_cards.remove(id);
+                    }
+                    if had_completion {
+                        ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                    } else {
+                        ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
+                            state, player, events,
+                        ))
+                    }
+                }
+            }
         }
         // CR 608.2g + CR 601.2 + CR 202.3: Invoke Calamity's free-cast window —
         // the controller either picks one candidate to cast for free or declines
@@ -3884,7 +4108,7 @@ pub(super) fn handle_resolution_choice(
             // filtered dig that matched nothing accepted arbitrary object ids.
             validate_dig_selection(&kept, &cards, &selectable_cards)?;
 
-            let mut unkept: Vec<_> = cards
+            let unkept: Vec<_> = cards
                 .iter()
                 .filter(|id| !kept.contains(id))
                 .copied()
@@ -3896,37 +4120,73 @@ pub(super) fn handle_resolution_choice(
                         .iter_mut()
                         .find(|candidate| candidate.id == library_owner)
                         .expect("player exists");
+                    // CR 701.20b/e: reseat kept on top without yanking unkept
+                    // from the library vec — PlayerChosen prompts while those
+                    // ids remain library members.
                     // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
-                    player_state.library.retain(|id| !cards.contains(id));
+                    player_state.library.retain(|id| !kept.contains(id));
                     for (index, &card_id) in kept.iter().enumerate() {
                         // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
                         player_state.library.insert(index, card_id);
                     }
                     match rest_destination {
-                        Some(Zone::Library) => {
-                            if rest_order == DigRestOrder::Random {
-                                // CR 400.5 + CR 608.2c: Randomize exactly the
-                                // unchosen pile immediately before bottom placement.
-                                unkept.shuffle(&mut state.rng);
-                            }
-                            for &obj_id in &unkept {
-                                // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
-                                player_state.library.push_back(obj_id);
-                            }
-                            None
-                        }
+                        Some(Zone::Library) => None,
                         Some(zone) => Some(zone),
                         None => Some(Zone::Graveyard),
                     }
                 };
                 // CR 701.20d: This direct library reorder has the same
                 // information boundary as the shared reorder helper. Advance
-                // product knowledge before any unkept cards leave the library.
+                // product knowledge before any unkept cards leave the library
+                // and before a PlayerChosen rest-order prompt.
                 state.advance_library_knowledge_epoch(library_owner);
                 // CR 401.5 + CR 611.3a: Dig kept cards on top by editing the
                 // library directly, so a `TopOfLibraryMatches` static must be
                 // re-evaluated (self-gated on liveness).
                 crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+                if move_unkept_to.is_none() {
+                    let completion = crate::types::game_state::BatchCompletion::RevealRestPile {
+                        delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
+                        player,
+                        source_id: dig_source_id,
+                        rest_cards: Vec::new(),
+                        rest_destination: Zone::Library,
+                        rest_order,
+                        clear_markers: Vec::new(),
+                        publish_tracked_set: None,
+                        publish_tracked_set_cause: None,
+                        emit_reveal_until_resolved: None,
+                        manifested_for_continuation: None,
+                        kept_delivery: Default::default(),
+                        continuation_targets: Vec::new(),
+                        rest_delivery: crate::types::game_state::DigRestDeliveryOutcome::pending(
+                            state,
+                            unkept.clone(),
+                            Zone::Library,
+                        ),
+                    };
+                    match open_dig_library_bottom_order_or_place(
+                        state,
+                        player,
+                        library_owner,
+                        &unkept,
+                        Zone::Library,
+                        rest_order,
+                        dig_source_id,
+                        Some(completion),
+                        events,
+                    ) {
+                        DigLibraryBottomRoute::Parked
+                        | DigLibraryBottomRoute::Placed(
+                            crate::game::zone_pipeline::BatchMoveResult::Done
+                            | crate::game::zone_pipeline::BatchMoveResult::NeedsChoice,
+                        ) => {
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
+                    }
+                }
                 if let Some(zone) = move_unkept_to {
                     // CR 614.6 + CR 603.10a: route the unkept pile through the
                     // zone-change pipeline so a per-card `Moved` graveyard→exile
@@ -4107,10 +4367,6 @@ pub(super) fn handle_resolution_choice(
                 .is_some_and(|cont| dig_continuation_needs_full_looked_at_tracked_set(&cont.chain));
             if !defer_rest_routing {
                 let rest_destination = rest_destination.unwrap_or(Zone::Graveyard);
-                let mut ordered_unkept = unkept.clone();
-                if rest_destination == Zone::Library && rest_order == DigRestOrder::Random {
-                    ordered_unkept.shuffle(&mut state.rng);
-                }
                 let completion = crate::types::game_state::BatchCompletion::RevealRestPile {
                     delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                     player,
@@ -4127,23 +4383,27 @@ pub(super) fn handle_resolution_choice(
                     continuation_targets: Vec::new(),
                     rest_delivery: crate::types::game_state::DigRestDeliveryOutcome::pending(
                         state,
-                        ordered_unkept.clone(),
+                        unkept.clone(),
                         rest_destination,
                     ),
                 };
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
-                    match route_rest_partition_then(
+                    match open_dig_library_bottom_order_or_place(
                         state,
-                        &ordered_unkept,
+                        player,
+                        library_owner,
+                        &unkept,
                         rest_destination,
+                        rest_order,
                         dig_source_id,
                         Some(completion),
                         events,
                     ) {
-                        crate::game::zone_pipeline::BatchMoveResult::Done
-                        | crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
-                            state.waiting_for.clone()
-                        }
+                        DigLibraryBottomRoute::Parked
+                        | DigLibraryBottomRoute::Placed(
+                            crate::game::zone_pipeline::BatchMoveResult::Done
+                            | crate::game::zone_pipeline::BatchMoveResult::NeedsChoice,
+                        ) => state.waiting_for.clone(),
                     },
                 ));
             }
@@ -8706,10 +8966,25 @@ pub(crate) fn run_batch_completion(
             if delivery_stage == crate::types::game_state::DigDeliveryStage::Kept
                 && !rest_cards.is_empty()
             {
-                let mut ordered_rest_cards = rest_cards.clone();
-                if rest_destination == Zone::Library && rest_order == DigRestOrder::Random {
-                    ordered_rest_cards.shuffle(&mut state.rng);
+                // CR 608.2c: Bind ParentTarget on the live frame from the settled
+                // kept delivery before peeling HideawayConceal, so a no-op
+                // Hideaway path still has the Rest-stage bind.
+                let kept_completed = kept_delivery.completed_ids();
+                if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                    let continuation: Vec<_> = continuation_targets
+                        .iter()
+                        .filter(|id| kept_completed.contains(id))
+                        .copied()
+                        .collect();
+                    frame.pending.chain.targets = continuation
+                        .iter()
+                        .map(|&id| TargetRef::Object(id))
+                        .collect();
+                    frame.pending.chain.context.optional_effect_performed =
+                        !continuation.is_empty();
                 }
+                drain_keep_side_hideaway_prefix(state, events);
+                let library_owner = library_owner_of_rest(state, &rest_cards, player);
                 let completion = BatchCompletion::RevealRestPile {
                     delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                     player,
@@ -8726,29 +9001,34 @@ pub(crate) fn run_batch_completion(
                     continuation_targets,
                     rest_delivery: crate::types::game_state::DigRestDeliveryOutcome::pending(
                         state,
-                        ordered_rest_cards.clone(),
+                        rest_cards.clone(),
                         rest_destination,
                     ),
                 };
-                return route_rest_partition_then(
+                return match open_dig_library_bottom_order_or_place(
                     state,
-                    &ordered_rest_cards,
+                    player,
+                    library_owner,
+                    &rest_cards,
                     rest_destination,
+                    rest_order,
                     source_id,
                     Some(completion),
                     events,
-                );
+                ) {
+                    DigLibraryBottomRoute::Parked => {
+                        crate::game::zone_pipeline::BatchMoveResult::Done
+                    }
+                    DigLibraryBottomRoute::Placed(result) => result,
+                };
             }
             // The dig path (`publish_tracked_set.is_some()`) routes the rest pile
-            // through `route_rest_partition` (ordered library bottom); the
-            // reveal-until path routes through `move_rest_then`, including
-            // Library-bottom placement and any CR 616.1 pause. Dispatch on the
-            // dig-only payload so each site keeps its synchronous semantics.
+            // through `open_dig_library_bottom_order_or_place` (ordered library
+            // bottom); the reveal-until path routes through `move_rest_then`,
+            // including Library-bottom placement and any CR 616.1 pause. Dispatch
+            // on the dig-only payload so each site keeps its synchronous semantics.
             if publish_tracked_set.is_some() && !rest_cards.is_empty() {
-                let mut ordered_rest_cards = rest_cards.clone();
-                if rest_destination == Zone::Library && rest_order == DigRestOrder::Random {
-                    ordered_rest_cards.shuffle(&mut state.rng);
-                }
+                let library_owner = library_owner_of_rest(state, &rest_cards, player);
                 let cleanup = BatchCompletion::RevealRestPile {
                     delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                     player,
@@ -8765,18 +9045,26 @@ pub(crate) fn run_batch_completion(
                     continuation_targets,
                     rest_delivery: crate::types::game_state::DigRestDeliveryOutcome::pending(
                         state,
-                        ordered_rest_cards.clone(),
+                        rest_cards.clone(),
                         rest_destination,
                     ),
                 };
-                return route_rest_partition_then(
+                return match open_dig_library_bottom_order_or_place(
                     state,
-                    &ordered_rest_cards,
+                    player,
+                    library_owner,
+                    &rest_cards,
                     rest_destination,
+                    rest_order,
                     source_id,
                     Some(cleanup),
                     events,
-                );
+                ) {
+                    DigLibraryBottomRoute::Parked => {
+                        crate::game::zone_pipeline::BatchMoveResult::Done
+                    }
+                    DigLibraryBottomRoute::Placed(result) => result,
+                };
             } else if !rest_cards.is_empty() {
                 // CR 701.20a + CR 616.1: Reveal-until rest piles are fully
                 // pipeline-owned, including Library-bottom placement. If a

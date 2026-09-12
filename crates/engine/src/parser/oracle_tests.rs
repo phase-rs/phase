@@ -20568,8 +20568,8 @@ fn commune_with_nature_dig_from_among() {
             assert_eq!(*rest_destination, Some(Zone::Library));
             assert_eq!(
                 *rest_order,
-                crate::types::ability::DigRestOrder::Preserve,
-                "'in any order' must not be misrepresented as a random instruction"
+                crate::types::ability::DigRestOrder::PlayerChosen,
+                "'in any order' is a player-chosen rest permutation (CR 401.4)"
             );
         }
         other => {
