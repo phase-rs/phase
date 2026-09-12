@@ -3629,6 +3629,17 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
         pos += consumed;
     }
 
+    // CR 120.6 + CR 120.9: bare reduced passive relative clause — "creature
+    // dealt damage this turn" (Inflame) with no "that was" at all. Tried after
+    // `parse_that_clause_suffix` (which already owns the "that was dealt damage
+    // this turn" full form) so a "that "-led clause is never double-consumed;
+    // this arm only fires on the participle-first surface `parse_that_clause_suffix`
+    // cannot see because it requires a leading "that ".
+    if let Some((prop, consumed)) = parse_bare_was_dealt_damage_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // CR 302.6 + CR 508.1a: trailing continuity exemption "..., except for
     // creatures [the/that player] hasn't controlled continuously since the
     // beginning of the turn" (Total War). The exempted set — creatures NOT
@@ -8369,6 +8380,41 @@ fn parse_dealt_damage_clause(input: &str) -> OracleResult<'_, FilterProp> {
     ))
 }
 
+/// CR 120.6 + CR 120.9: the REDUCED passive relative clause — "dealt damage
+/// this turn" appearing directly after a target noun with no relative pronoun
+/// at all (Inflame: "each creature dealt damage this turn"). English drops
+/// "that was" before a past participle used attributively ("the car damaged in
+/// the accident" = "the car that was damaged in the accident"); "dealt" here is
+/// that participle; a bare past participle immediately after a noun therefore
+/// reads passively, never as the active "that dealt damage" form (which needs
+/// the relative pronoun to distinguish it from a finished sentence). Confirmed
+/// against Inflame's localized Oracle text, which is unanimously passive
+/// ("creature to which damage was inflicted"/"wurde ... Schaden zugefügt").
+///
+/// Maps to the same unparameterized `WasDealtDamageThisTurn` the full "that was
+/// dealt damage this turn" clause produces (see `VERB_PHRASES` below) — there is
+/// no printed reduced form carrying the kind/recipient axes, so none is parsed
+/// here. Distinct from [`parse_dealt_damage_clause`], which is only reached
+/// after the caller has already consumed a literal "that ".
+pub(crate) fn parse_bare_was_dealt_damage_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("dealt damage this turn")
+        .parse(trimmed)
+        .ok()?;
+    let next_char_is_boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    if !next_char_is_boundary {
+        return None;
+    }
+    Some((
+        FilterProp::WasDealtDamageThisTurn,
+        leading_ws + (trimmed.len() - rest.len()),
+    ))
+}
+
 /// Parse "that [verb phrase]" relative clause suffix on target noun phrases.
 ///
 /// Handles multiple pattern classes:
@@ -8619,10 +8665,20 @@ pub(crate) fn parse_that_clause_suffix<'a>(
     }
 
     // --- Verb-phrase patterns: match fixed phrases after "that " ---
-    // CR 120.6 + CR 120.9: "that was dealt damage this turn"
+    // CR 120.6 + CR 120.9: "that was dealt damage this turn" — and its plural
+    // number-agreement form "that were dealt damage this turn" (Death-Rattle
+    // Oni: "destroy all other creatures that were dealt damage this turn").
+    // Both rows produce the same unparameterized `WasDealtDamageThisTurn` —
+    // "was"/"were" is English subject-verb agreement on one passive
+    // construction, not a distinct predicate, so this is a phrase-table
+    // synonym, not a new FilterProp.
     static VERB_PHRASES: &[(&str, FilterProp)] = &[
         (
             "was dealt damage this turn",
+            FilterProp::WasDealtDamageThisTurn,
+        ),
+        (
+            "were dealt damage this turn",
             FilterProp::WasDealtDamageThisTurn,
         ),
         (
