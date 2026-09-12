@@ -1649,6 +1649,110 @@ fn intervening_if_source_has_counters_on_it_populates_condition() {
     assert!(denry.execute.is_some());
 }
 
+/// Shared PutCounter + Unimplemented reach-guard for the fewer-than intervening-if
+/// SHAPE tests. Today's bug keeps PutCounter and drops only `condition`.
+fn assert_fewer_than_put_counter(
+    def: &TriggerDefinition,
+    counter_type: CounterType,
+    target: TargetFilter,
+) {
+    let execute = def.execute.as_deref().expect("trigger must have execute");
+    match execute.effect.as_ref() {
+        Effect::PutCounter {
+            counter_type: ct,
+            count,
+            target: tgt,
+        } => {
+            assert_eq!(ct, &counter_type, "PutCounter type");
+            assert_eq!(count, &QuantityExpr::Fixed { value: 1 }, "PutCounter count");
+            assert_eq!(tgt, &target, "PutCounter target");
+        }
+        other => panic!("expected PutCounter, got {other:?}"),
+    }
+    assert_no_unimplemented(execute);
+}
+
+/// CR 603.4 + CR 107.1 + CR 122.1: Runaway Steam-Kin's intervening-if
+/// "if this creature has fewer than three +1/+1 counters on it" populates
+/// `HasCounters { Plus1Plus1, 0, Some(2) }`. Revert the quantity arm →
+/// `condition == None`.
+#[test]
+fn intervening_if_fewer_than_three_plus1_steam_kin() {
+    let def = parse_trigger_line(
+        "Whenever you cast a red spell, if this creature has fewer than three +1/+1 counters on it, put a +1/+1 counter on this creature.",
+        "Runaway Steam-Kin",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            minimum: 0,
+            maximum: Some(2),
+        })
+    );
+    assert_fewer_than_put_counter(&def, CounterType::Plus1Plus1, TargetFilter::SelfRef);
+
+    let TargetFilter::Typed(tf) = def.valid_card.as_ref().expect("red spell filter") else {
+        panic!("expected Typed valid_card, got {:?}", def.valid_card);
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Card]);
+    assert!(
+        tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::HasColor {
+                color: ManaColor::Red
+            }
+        )),
+        "expected HasColor Red, got {:?}",
+        tf.properties
+    );
+}
+
+/// Adaptive Training Post: charge counters, N=3, SpellCast. Execute `it` is
+/// `TriggeringSource` (existing SpellCast anaphor) — pin, do not retarget.
+#[test]
+fn intervening_if_fewer_than_three_charge_adaptive_training_post() {
+    let def = parse_trigger_line(
+        "Whenever you cast an instant or sorcery spell, if this artifact has fewer than three charge counters on it, put a charge counter on it.",
+        "Adaptive Training Post",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Generic("charge".to_string())),
+            minimum: 0,
+            maximum: Some(2),
+        })
+    );
+    assert_fewer_than_put_counter(
+        &def,
+        CounterType::Generic("charge".to_string()),
+        TargetFilter::TriggeringSource,
+    );
+}
+
+/// Ayara's Oathsworn: bound `it`, N=4, combat-damage. First sentence only —
+/// the then-clause search is out of scope.
+#[test]
+fn intervening_if_fewer_than_four_plus1_ayara() {
+    let def = parse_trigger_line(
+        "Whenever this creature deals combat damage to a player, if it has fewer than four +1/+1 counters on it, put a +1/+1 counter on it.",
+        "Ayara's Oathsworn",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageDone);
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            minimum: 0,
+            maximum: Some(3),
+        })
+    );
+    assert_fewer_than_put_counter(&def, CounterType::Plus1Plus1, TargetFilter::SelfRef);
+}
+
 #[test]
 fn trigger_etb_self() {
     let def = parse_trigger_line(
