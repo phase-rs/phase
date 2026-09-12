@@ -1096,9 +1096,13 @@ export function shouldRenewCredential(
  * of) or one already past expiry (the broker would refuse it as unrenewable).
  * `now` is injectable for deterministic tests.
  *
- * Exported for direct testing of the version gate and the lost-reply recovery
- * path (the composed failure the #8782 review asked be covered), which are not
- * reachable through {@link shouldRenewCredential} alone.
+ * Concurrent near-expiry actions on the same authority share a single rotation
+ * (see {@link credentialRenewalsInFlight}), so two actions firing at once can
+ * never rotate twice and strand the first on a superseded secret.
+ *
+ * Exported for direct testing of the version gate, the lost-reply recovery path
+ * (the composed failure the #8782 review asked be covered), and the concurrent-
+ * rotation dedup — none reachable through {@link shouldRenewCredential} alone.
  */
 export async function maybeRenewNearExpiry(
   set: MultiplayerSet,
@@ -1124,6 +1128,60 @@ export async function maybeRenewNearExpiry(
   const expiry = tokenExpiryFor(get().tournamentCredentials[code], role);
   if (!shouldRenewCredential(expiry, now)) return heldToken;
 
+  // Dedupe concurrent near-expiry rotations of the SAME authority. Two gated
+  // actions firing at once each capture the same held token and would otherwise
+  // BOTH rotate: the broker parks the old secret on the first rotation, accepts
+  // it again during overlap for the second, and the second's fresh secret
+  // supersedes the first's — so the first action proceeds with a token that is
+  // now a mismatch and fails despite a successful renewal. Sharing one in-flight
+  // renewal makes both actions settle on the same surviving secret. Keyed on
+  // (code, role); the entry is cleared when the renewal settles so a later,
+  // non-concurrent action starts a fresh one.
+  const key = `${code}:${role}`;
+  const existing = credentialRenewalsInFlight.get(key);
+  if (existing !== undefined) return existing;
+
+  const inflight = performCredentialRotation(
+    set,
+    socket,
+    code,
+    role,
+    heldToken,
+    signal,
+  );
+  credentialRenewalsInFlight.set(key, inflight);
+  try {
+    return await inflight;
+  } finally {
+    if (credentialRenewalsInFlight.get(key) === inflight) {
+      credentialRenewalsInFlight.delete(key);
+    }
+  }
+}
+
+/**
+ * In-flight proactive renewals, keyed by `${code}:${role}`. The mechanism that
+ * makes {@link maybeRenewNearExpiry} rotate at most once per authority even when
+ * several near-expiry gated actions fire concurrently. Module-level because the
+ * concurrent callers are independent action dispatches, not one shared caller.
+ */
+const credentialRenewalsInFlight = new Map<string, Promise<string>>();
+
+/**
+ * The actual rotation round trip behind {@link maybeRenewNearExpiry}, split out
+ * so the in-flight dedup there wraps exactly one call. Adopts the fresh secret
+ * and expiry into the store on success; on any uncertain result returns the held
+ * token untouched — safe under the broker's bounded overlap (the held secret is
+ * still honored), so the next attempt recovers.
+ */
+async function performCredentialRotation(
+  set: MultiplayerSet,
+  socket: PhaseSocket,
+  code: string,
+  role: TournamentRole,
+  heldToken: string,
+  signal: AbortSignal,
+): Promise<string> {
   const result = await renewTournamentCredentialOver(
     socket,
     code,

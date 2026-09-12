@@ -2956,4 +2956,56 @@ describe("proactive credential rotation", () => {
     expect(stored?.organizerToken).toBe("old");
     expect(stored?.organizerTokenExpiresAtMs).toBe(NOW + 1000);
   });
+
+  // Superagent P2: two near-expiry gated actions firing at once must not rotate
+  // twice (the second would orphan the first's fresh secret). They share one
+  // in-flight renewal and both settle on the same surviving secret.
+  it("dedupes concurrent near-expiry rotations of the same authority", async () => {
+    seedOrganizer(NOW + 1000);
+    const newExpiry = NOW + 7 * 24 * 60 * 60 * 1000;
+    vi.mocked(renewTournamentCredentialOver).mockImplementation(async () => ({
+      ok: true,
+      value: {
+        code: "TOUR01",
+        role: "Organizer",
+        token: "fresh",
+        expires_at_ms: newExpiry,
+      },
+    }));
+
+    const controller = new AbortController();
+    // Fire both without awaiting between them, so the second observes the first's
+    // in-flight renewal rather than starting its own.
+    const [a, b] = await Promise.all([
+      maybeRenewNearExpiry(
+        useMultiplayerStore.setState,
+        useMultiplayerStore.getState,
+        socketAtLobbyVersion(9),
+        "TOUR01",
+        "organizer",
+        "old",
+        controller.signal,
+        NOW,
+      ),
+      maybeRenewNearExpiry(
+        useMultiplayerStore.setState,
+        useMultiplayerStore.getState,
+        socketAtLobbyVersion(9),
+        "TOUR01",
+        "organizer",
+        "old",
+        controller.signal,
+        NOW,
+      ),
+    ]);
+
+    // Rotated exactly once, and both actions carry the same surviving secret.
+    expect(renewTournamentCredentialOver).toHaveBeenCalledTimes(1);
+    expect(a).toBe("fresh");
+    expect(b).toBe("fresh");
+    expect(
+      useMultiplayerStore.getState().tournamentCredentials.TOUR01
+        ?.organizerToken,
+    ).toBe("fresh");
+  });
 });

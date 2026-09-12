@@ -259,17 +259,40 @@ impl TournamentCredential {
     /// secret they keep presenting keeps authorizing until a reply finally lands
     /// and moves them onto the new one. See [`PreviousSecret`].
     ///
+    /// **The overlap deadline is NON-REFRESHABLE.** Re-presenting an
+    /// already-parked overlap secret carries its existing `valid_until_ms`
+    /// forward unchanged; only a freshly superseded *current* secret earns a new
+    /// `now + `[`TOURNAMENT_CREDENTIAL_OVERLAP_MS`] window. Refreshing it on
+    /// every re-presentation would let a holder of a stolen *superseded* secret
+    /// renew just before each deadline and keep it alive forever, defeating the
+    /// bounded lockout. The fixed deadline still covers legitimate recovery in
+    /// full: a rotation only fires within one overlap window of expiry (the
+    /// client's renew margin equals the overlap), so the first deadline already
+    /// reaches the holder's believed expiry.
+    ///
     /// Returns the [`MintedCredential`] the caller must relay — the second and
     /// final egress for a plaintext secret, alongside [`Self::mint`].
     pub fn rotate(&mut self, presented: &str, env: &impl BrokerEnv) -> MintedCredential {
         let now_ms = env.now_ms();
         let secret = env.new_token();
         let expires_at_ms = now_ms + TOURNAMENT_CREDENTIAL_TTL_MS;
+        // NON-REFRESHABLE overlap deadline: a re-presented overlap secret (a
+        // holder recovering across consecutive lost replies, or an attacker
+        // re-using a superseded secret) carries its existing deadline forward;
+        // only a freshly superseded current secret earns a new window. See the
+        // doc comment for why this bounds a stolen superseded credential without
+        // costing legitimate recovery.
+        let valid_until_ms = match &self.previous {
+            Some(prev) if constant_time_eq(prev.secret.as_bytes(), presented.as_bytes()) => {
+                prev.valid_until_ms
+            }
+            _ => now_ms + TOURNAMENT_CREDENTIAL_OVERLAP_MS,
+        };
         self.secret = secret.clone();
         self.expires_at_ms = expires_at_ms;
         self.previous = Some(PreviousSecret {
             secret: presented.to_owned(),
-            valid_until_ms: now_ms + TOURNAMENT_CREDENTIAL_OVERLAP_MS,
+            valid_until_ms,
         });
         MintedCredential {
             secret,
@@ -5726,8 +5749,8 @@ mod tests {
 
         // Consecutive lost reply: the holder never learned token-1 and rotates
         // AGAIN presenting token-0. Because rotate parks the *presented* secret,
-        // token-0 is re-parked with a fresh window, while the never-delivered
-        // token-1 is orphaned — a holder stuck on token-0 is never stranded.
+        // token-0 stays honored while the never-delivered token-1 is orphaned —
+        // a holder stuck on token-0 is never stranded.
         env.advance_secs(60); // still inside the first overlap window
         let t_rot2 = env.now_ms();
         let minted2 = cred.rotate(&first.secret, &env);
@@ -5737,14 +5760,87 @@ mod tests {
             CredentialVerdict::Mismatch,
             "the never-delivered secret is orphaned, not carried into the overlap"
         );
+        // token-0's overlap deadline is NON-REFRESHABLE: it stays pinned to the
+        // FIRST rotation (`overlap_end`), NOT re-based to this second one. It is
+        // still accepted right up to that original deadline...
         assert_eq!(
-            cred.verdict(&first.secret, t_rot2 + TOURNAMENT_CREDENTIAL_OVERLAP_MS - 1),
+            cred.verdict(&first.secret, overlap_end - 1),
             CredentialVerdict::Accepted,
-            "the presented secret's overlap window is refreshed by re-presentation"
+            "the re-presented secret is still honored, to its original deadline"
         );
+        // ...and refused from it onward, even though a refresh would have pushed
+        // the window out to `t_rot2 + OVERLAP`. This is what bounds a stolen
+        // superseded secret to a single window from its first supersession.
         assert_eq!(
-            cred.verdict(&first.secret, t_rot2 + TOURNAMENT_CREDENTIAL_OVERLAP_MS),
-            CredentialVerdict::Expired
+            cred.verdict(&first.secret, overlap_end),
+            CredentialVerdict::Expired,
+            "re-presentation must not extend the overlap window"
+        );
+    }
+
+    /// P1 (Superagent): a holder of a STOLEN superseded secret must not be able
+    /// to keep it alive forever by renewing just before each overlap deadline.
+    /// Because the deadline is non-refreshable, repeated renewals with only the
+    /// superseded secret expire on schedule — after which it can neither
+    /// authorize nor renew.
+    #[test]
+    fn repeated_renewals_with_only_a_superseded_secret_still_expire() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        let created = mgr
+            .create_tournament(
+                "T",
+                CreateTournamentRequest {
+                    name: "Test Event".to_string(),
+                    arity: MatchArity::HEAD_TO_HEAD,
+                    scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
+                    bracket: BracketShape::Swiss,
+                    total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
+                    match_type: None,
+                },
+                &env,
+            )
+            .expect("create");
+        // The secret an attacker retains after it is superseded. The legitimate
+        // organizer rotates once to a secret the attacker never sees, so `stolen`
+        // becomes the parked overlap secret with a fixed deadline.
+        let stolen = created.secret;
+        let t0 = env.now_ms();
+        mgr.renew_credential("T", TournamentRole::Organizer, &stolen, &env)
+            .expect("legit rotation supersedes the stolen secret");
+        let deadline = t0 + TOURNAMENT_CREDENTIAL_OVERLAP_MS;
+
+        // The attacker renews with the stolen secret several times, each still
+        // inside the window. Every renewal succeeds (the overlap is honored) but
+        // must NOT push the deadline out.
+        for _ in 0..3 {
+            env.advance_secs(60);
+            assert!(
+                env.now_ms() < deadline,
+                "fixture must stay inside the original window for this leg"
+            );
+            mgr.renew_credential("T", TournamentRole::Organizer, &stolen, &env)
+                .expect("the stolen secret still renews within its fixed window");
+        }
+
+        // Once the FIRST deadline passes, the stolen secret is dead: it neither
+        // authorizes nor renews, no matter how many times it was refreshed.
+        env.set_now_ms(deadline);
+        assert!(
+            !mgr.get("T")
+                .expect("event")
+                .organizer_token
+                .accepts(&stolen, deadline),
+            "the stolen secret must lapse at its non-refreshable deadline"
+        );
+        let err = mgr
+            .renew_credential("T", TournamentRole::Organizer, &stolen, &env)
+            .expect_err("a lapsed superseded secret cannot renew");
+        assert!(
+            err.contains("expired"),
+            "expected the expiry message, got: {err}"
         );
     }
 
