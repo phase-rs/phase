@@ -25,25 +25,43 @@ const DOWNLOAD_EVENT: &str = "shell-download";
 /// written. The destination wry named when it requested the download narrows
 /// that, but it cannot settle it: a write that dies mid-file (ENOSPC, EIO)
 /// leaves a truncated file at that same destination. Nothing here can tell the
-/// two apart, so they report `Unknown` rather than claim a corrupt file.
+/// two apart, so they report `Unknown` rather than claim a corrupt file. A
+/// withheld attribution lands in the same place: it is a gap in this handler's
+/// bookkeeping, not evidence about the file.
 #[cfg(desktop)]
 fn finished_download_report(
     wry_path: Option<PathBuf>,
     wry_success: bool,
-    stashed_destination: Option<PathBuf>,
+    attribution: DownloadAttribution,
 ) -> (Option<PathBuf>, ShellDownloadOutcome) {
-    if wry_success {
+    use DownloadAttribution::{Ambiguous, Attributed, Unmatched};
+    use ShellDownloadOutcome::{Failed, Saved, Unknown};
+
+    match (wry_success, attribution) {
         // wry's macOS handler reports no path, so the destination it named when
         // it asked for the download is the only one there is.
-        return (
-            wry_path.or(stashed_destination),
-            ShellDownloadOutcome::Saved,
-        );
+        (true, Attributed(destination)) => (wry_path.or(Some(destination)), Saved),
+        (true, Ambiguous | Unmatched) => (wry_path, Saved),
+        (false, Attributed(destination)) if destination.exists() => (Some(destination), Unknown),
+        // Nothing reached the destination the request named.
+        (false, Attributed(_)) => (wry_path, Failed),
+        // No destination was attributable, so there is nothing to check and no
+        // grounds to call the download failed.
+        (false, Ambiguous) => (wry_path, Unknown),
+        (false, Unmatched) => (wry_path, Failed),
     }
-    match stashed_destination.filter(|destination| destination.exists()) {
-        Some(destination) => (Some(destination), ShellDownloadOutcome::Unknown),
-        None => (wry_path, ShellDownloadOutcome::Failed),
-    }
+}
+
+/// Which request a `Finished` event belongs to, as far as this handler can
+/// tell. `Ambiguous` is a completion whose destination was withheld because
+/// more than one request for its url was in flight; `Unmatched` is a completion
+/// for a url with nothing outstanding at all.
+#[cfg(desktop)]
+#[derive(Debug, PartialEq, Eq)]
+enum DownloadAttribution {
+    Attributed(PathBuf),
+    Ambiguous,
+    Unmatched,
 }
 
 /// The downloads wry has requested for one URL and not yet finished. A second
@@ -70,21 +88,26 @@ fn stash_download_destination(
     entry.destination = (entry.requests == 1).then_some(destination);
 }
 
-/// Consume one outstanding request for `url`, yielding its destination only
+/// Consume one outstanding request for `url`, attributing its destination only
 /// when that request was the only one in flight. The last completion drops the
 /// URL, so the map holds live downloads and nothing else.
 #[cfg(desktop)]
-fn take_download_destination(
+fn take_download_attribution(
     outstanding: &mut HashMap<String, OutstandingDownloads>,
     url: &str,
-) -> Option<PathBuf> {
-    let entry = outstanding.get_mut(url)?;
+) -> DownloadAttribution {
+    let Some(entry) = outstanding.get_mut(url) else {
+        return DownloadAttribution::Unmatched;
+    };
     entry.requests -= 1;
     let destination = entry.destination.take();
     if entry.requests == 0 {
         outstanding.remove(url);
     }
-    destination
+    destination.map_or(
+        DownloadAttribution::Ambiguous,
+        DownloadAttribution::Attributed,
+    )
 }
 
 /// Compress a leading home directory to `~`, or report nothing. The page is
@@ -287,13 +310,17 @@ pub fn run() {
                                 }
                             }
                             DownloadEvent::Finished { url, path, success } => {
-                                let stashed = download_destinations.lock().ok().and_then(
+                                // A record that cannot be read attributes
+                                // nothing, which is this handler's limitation
+                                // rather than evidence about the file.
+                                let attribution = download_destinations.lock().map_or(
+                                    DownloadAttribution::Ambiguous,
                                     |mut destinations| {
-                                        take_download_destination(&mut destinations, url.as_str())
+                                        take_download_attribution(&mut destinations, url.as_str())
                                     },
                                 );
                                 let (path, outcome) =
-                                    finished_download_report(path, success, stashed);
+                                    finished_download_report(path, success, attribution);
                                 eprintln!(
                                     "shell download finished: {url} -> {path:?} outcome={outcome:?}"
                                 );
@@ -510,6 +537,7 @@ mod tests {
     #[cfg(desktop)]
     #[test]
     fn finished_download_report_never_calls_a_reported_failure_saved() {
+        use super::DownloadAttribution::{Ambiguous, Attributed, Unmatched};
         use super::ShellDownloadOutcome::{Failed, Saved, Unknown};
 
         let written = std::env::temp_dir().join(format!(
@@ -520,28 +548,34 @@ mod tests {
         let missing = written.with_extension("absent");
 
         assert_eq!(
-            super::finished_download_report(Some(written.clone()), true, None),
+            super::finished_download_report(Some(written.clone()), true, Unmatched),
             (Some(written.clone()), Saved)
         );
         // wry's macOS handler reports success with no path at all.
         assert_eq!(
-            super::finished_download_report(None, true, Some(written.clone())),
+            super::finished_download_report(None, true, Attributed(written.clone())),
             (Some(written.clone()), Saved)
         );
         // Latched flag or truncated file: indistinguishable from here.
         assert_eq!(
-            super::finished_download_report(None, false, Some(written.clone())),
+            super::finished_download_report(None, false, Attributed(written.clone())),
             (Some(written.clone()), Unknown)
         );
         // Genuine failure: nothing was written to the destination.
         assert_eq!(
-            super::finished_download_report(None, false, Some(missing)),
+            super::finished_download_report(None, false, Attributed(missing)),
             (None, Failed)
         );
-        // A `Finished` with no matching `Requested` has nothing to check.
+        // A `Finished` with no matching `Requested` at all.
         assert_eq!(
-            super::finished_download_report(None, false, None),
+            super::finished_download_report(None, false, Unmatched),
             (None, Failed)
+        );
+        // Attribution withheld between same-url requests: the latched flag may
+        // still be reporting a written file.
+        assert_eq!(
+            super::finished_download_report(None, false, Ambiguous),
+            (None, Unknown)
         );
 
         fs::remove_file(&written).unwrap();
@@ -556,6 +590,8 @@ mod tests {
     fn a_repeated_download_url_lends_no_completion_another_requests_destination() {
         use std::{collections::HashMap, path::PathBuf};
 
+        use super::DownloadAttribution::{Ambiguous, Attributed, Unmatched};
+
         let url = "blob:https://phase-rs.dev/a";
         let other = "blob:https://phase-rs.dev/b";
         let first = PathBuf::from("/downloads/game-state.zip");
@@ -565,8 +601,8 @@ mod tests {
         // One in flight: the destination is this completion's, unambiguously.
         super::stash_download_destination(&mut outstanding, url.to_owned(), first.clone());
         assert_eq!(
-            super::take_download_destination(&mut outstanding, url),
-            Some(first.clone())
+            super::take_download_attribution(&mut outstanding, url),
+            Attributed(first.clone())
         );
         assert!(outstanding.is_empty(), "a finished url must not be kept");
 
@@ -574,12 +610,12 @@ mod tests {
         super::stash_download_destination(&mut outstanding, url.to_owned(), first.clone());
         super::stash_download_destination(&mut outstanding, url.to_owned(), second.clone());
         assert_eq!(
-            super::take_download_destination(&mut outstanding, url),
-            None
+            super::take_download_attribution(&mut outstanding, url),
+            Ambiguous
         );
         assert_eq!(
-            super::take_download_destination(&mut outstanding, url),
-            None
+            super::take_download_attribution(&mut outstanding, url),
+            Ambiguous
         );
         assert!(
             outstanding.is_empty(),
@@ -590,15 +626,15 @@ mod tests {
         // with them, and the url only becomes attributable again once idle.
         super::stash_download_destination(&mut outstanding, url.to_owned(), first.clone());
         super::stash_download_destination(&mut outstanding, url.to_owned(), second.clone());
-        super::take_download_destination(&mut outstanding, url);
+        super::take_download_attribution(&mut outstanding, url);
         super::stash_download_destination(&mut outstanding, url.to_owned(), first.clone());
         assert_eq!(
-            super::take_download_destination(&mut outstanding, url),
-            None
+            super::take_download_attribution(&mut outstanding, url),
+            Ambiguous
         );
         assert_eq!(
-            super::take_download_destination(&mut outstanding, url),
-            None
+            super::take_download_attribution(&mut outstanding, url),
+            Ambiguous
         );
         assert!(outstanding.is_empty());
 
@@ -606,20 +642,86 @@ mod tests {
         super::stash_download_destination(&mut outstanding, url.to_owned(), first.clone());
         super::stash_download_destination(&mut outstanding, other.to_owned(), second.clone());
         assert_eq!(
-            super::take_download_destination(&mut outstanding, other),
-            Some(second)
+            super::take_download_attribution(&mut outstanding, other),
+            Attributed(second)
         );
         assert_eq!(
-            super::take_download_destination(&mut outstanding, url),
-            Some(first)
+            super::take_download_attribution(&mut outstanding, url),
+            Attributed(first)
         );
         assert!(outstanding.is_empty());
 
-        // A completion with nothing outstanding has nothing to lend.
+        // A completion with nothing outstanding matches no request at all.
         assert_eq!(
-            super::take_download_destination(&mut outstanding, url),
-            None
+            super::take_download_attribution(&mut outstanding, url),
+            Unmatched
         );
+    }
+
+    /// Withholding a destination is a gap in the bookkeeping above, not a
+    /// verdict on the file: under wry's latched failure flag an ambiguous pair
+    /// may both have been written. Such a completion may therefore be reported
+    /// neither as a failed export nor with a destination it cannot claim.
+    #[cfg(desktop)]
+    #[test]
+    fn withheld_attribution_reports_neither_a_failure_nor_a_destination() {
+        use std::collections::HashMap;
+
+        use super::ShellDownloadOutcome::{Failed, Unknown};
+
+        let url = "blob:https://phase-rs.dev/export";
+        let written = std::env::temp_dir().join(format!(
+            "phase-rs-withheld-attribution-{}.tmp",
+            std::process::id()
+        ));
+        fs::write(&written, b"x").unwrap();
+        let missing = written.with_extension("absent");
+        let mut outstanding = HashMap::new();
+
+        // Two in flight for one url. The first destination is on disk, so a
+        // report of `Failed` here would be wrong about a file that exists, and
+        // a report of either destination would name a file this completion was
+        // never shown to be.
+        super::stash_download_destination(&mut outstanding, url.to_owned(), written.clone());
+        super::stash_download_destination(
+            &mut outstanding,
+            url.to_owned(),
+            written.with_extension("1.tmp"),
+        );
+        for _ in 0..2 {
+            let attribution = super::take_download_attribution(&mut outstanding, url);
+            assert_eq!(
+                super::finished_download_report(None, false, attribution),
+                (None, Unknown)
+            );
+        }
+
+        // One in flight and the file is there: the destination is reported.
+        super::stash_download_destination(&mut outstanding, url.to_owned(), written.clone());
+        let attribution = super::take_download_attribution(&mut outstanding, url);
+        assert_eq!(
+            super::finished_download_report(None, false, attribution),
+            (Some(written.clone()), Unknown)
+        );
+
+        // One in flight and nothing was written there: still a failure.
+        super::stash_download_destination(&mut outstanding, url.to_owned(), missing);
+        let attribution = super::take_download_attribution(&mut outstanding, url);
+        assert_eq!(
+            super::finished_download_report(None, false, attribution),
+            (None, Failed)
+        );
+
+        // The url is idle again, so this completion matches no request at all —
+        // the case withheld attribution must not be folded into.
+        assert!(outstanding.is_empty());
+        let attribution = super::take_download_attribution(&mut outstanding, url);
+        assert_eq!(
+            super::finished_download_report(None, false, attribution),
+            (None, Failed)
+        );
+
+        fs::remove_file(&written).unwrap();
     }
 
     /// The page is remotely served, so the destination it is handed must name
