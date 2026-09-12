@@ -158,6 +158,7 @@ mod issue_6634_aven_courier;
 mod issue_6678_captain_america_shield_tap_defender;
 mod issue_6858_draw_that_many_discard;
 mod issue_6877_departed_triggering_spell;
+mod issue_6889_wolf_enter_conjunctive_fight;
 mod issue_7386_ozolith_combat_counter_move;
 mod issue_8024_terminal_rest_captures;
 mod issue_8065_nightmare_shepherd;
