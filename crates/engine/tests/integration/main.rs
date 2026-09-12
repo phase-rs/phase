@@ -1332,6 +1332,7 @@ mod chaos_warp_owner_library;
 mod chicago_loop_pay_speed_x_mana;
 mod chord_of_calling;
 mod cinder_strike_additional_cost_instead;
+mod city_of_traitors_land_played_deferred;
 mod cloud_ex_soldier_live_power;
 mod coalition_victory_win_condition;
 mod coastal_wizard_bounce_self_and_another;

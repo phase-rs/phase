@@ -3257,6 +3257,13 @@ fn is_enters_counter_choice(branches: &[AbilityDefinition]) -> bool {
 /// `NamedChoice` + `ChooseOption` arm of `engine_resolution_choices.rs` for the
 /// other two shapes), so every ETB observer (constellation like Doomwake Giant,
 /// Soul Warden, …) sees the entry against the fully realized post-choice object.
+///
+/// For a played land, the sibling `GameEvent::LandPlayed` (emitted by
+/// `finalize_committed_land_play` in the land-play path) is captured alongside
+/// the entry `ZoneChanged`, so "play a land" observers (City of Traitors'
+/// "When you play another land, sacrifice this land", CR 305.1 + CR 603.2) also
+/// fire against the realized post-choice object rather than being dropped when
+/// the entry pauses on an as-enters choice (issue #8738).
 /// Without this, the entry event returns `WaitingFor::NamedChoice` instead of
 /// `Priority`, so the canonical priority-time trigger collection
 /// (`engine_priority::run_post_action_pipeline`) is skipped and every ETB
@@ -3323,6 +3330,10 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
             event,
             GameEvent::ZoneChanged { object_id, to, .. }
                 if *object_id == source_id && *to == Zone::Battlefield
+        ) || matches!(
+            event,
+            GameEvent::LandPlayed { object_id, .. }
+                if *object_id == source_id
         ) {
             state.deferred_entry_events.push(event.clone());
         }
