@@ -1380,6 +1380,16 @@ impl RepeatIterationChoice {
 /// the repeat accepts any body. A body with no linked-exile consumer can exile a
 /// card with the witness unchanged. A stalled witness therefore proves the loop
 /// is repeating itself only when nothing else moved either.
+///
+/// COUPLING, recorded: zone movement is a COMPLETE progress measure only
+/// because every stop predicate `should_stop_repeat_until` reads is itself
+/// driven by a zone change — a card exiled by this source reaching its
+/// controller's hand, or two cards exiled by it sharing a name. An iteration
+/// that instead changes a life total or a counter therefore moves the loop no
+/// closer to stopping, so classing it `Stationary` is right: CR 104.4b asks
+/// whether a loop has "no way to stop", not whether the game state changed.
+/// A stop predicate reading anything but a zone would break that argument, and
+/// this witness would have to gain the matching event kind in the same change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RepeatIterationMovement {
     /// The iteration emitted no `GameEvent::ZoneChanged`: no object changed
