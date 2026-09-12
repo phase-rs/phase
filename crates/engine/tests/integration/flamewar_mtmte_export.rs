@@ -54,7 +54,7 @@ fn flamewar_mtmte_from_production_export_casts_back_face() {
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let flamewar = scenario.add_real_card(P0, "Flamewar, Brash Veteran", Zone::Hand, &db);
+    let flamewar = scenario.add_real_card(P0, "Flamewar, Brash Veteran", Zone::Hand, db);
     scenario.with_mana_pool(
         P0,
         vec![
@@ -63,7 +63,7 @@ fn flamewar_mtmte_from_production_export_casts_back_face() {
         ],
     );
     let mut runner = scenario.build();
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
 
     let hand_object = runner
         .state()
@@ -101,12 +101,12 @@ fn battle_cry_goblin_pack_tactics_uses_the_declared_attack_batch() {
     for (other_power, should_trigger) in [(3, false), (4, true), (5, true)] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
-        let goblin = scenario.add_real_card(P0, "Battle Cry Goblin", Zone::Battlefield, &db);
+        let goblin = scenario.add_real_card(P0, "Battle Cry Goblin", Zone::Battlefield, db);
         let other = scenario
             .add_creature(P0, "Pack Tactics witness", other_power, 1)
             .id();
         let mut runner = scenario.build();
-        engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+        engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
         runner.advance_to_combat();
 
         runner
@@ -132,12 +132,12 @@ fn battle_cry_goblin_pack_tactics_rechecks_declaration_snapshot_after_departure(
     let db = shared_card_db().expect("integration card fixture must load");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let goblin = scenario.add_real_card(P0, "Battle Cry Goblin", Zone::Battlefield, &db);
+    let goblin = scenario.add_real_card(P0, "Battle Cry Goblin", Zone::Battlefield, db);
     let other = scenario
         .add_creature(P0, "Departing Pack Tactics witness", 4, 1)
         .id();
     let mut runner = scenario.build();
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
     runner.advance_to_combat();
 
     runner
