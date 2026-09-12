@@ -256,15 +256,14 @@ fn characteristic_view_for_object(
     state: &GameState,
     object_id: ObjectId,
 ) -> Option<CharacteristicView<'_>> {
-    let object = state.objects.get(&object_id)?;
-    if object.power.is_none() && object.toughness.is_none() {
-        state
+    match state.objects.get(&object_id) {
+        Some(object) if object.power.is_none() && object.toughness.is_none() => state
             .lki_cache
             .get(&object_id)
             .map(CharacteristicView::Lki)
-            .or(Some(CharacteristicView::Object(object)))
-    } else {
-        Some(CharacteristicView::Object(object))
+            .or(Some(CharacteristicView::Object(object))),
+        Some(object) => Some(CharacteristicView::Object(object)),
+        None => state.lki_cache.get(&object_id).map(CharacteristicView::Lki),
     }
 }
 
