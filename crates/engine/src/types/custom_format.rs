@@ -1,16 +1,18 @@
 //! Schema for engine-validated custom formats: types, validation, the
 //! registration gates, and the bundled Axis-B preset constructors.
 //!
-//! `IMPLEMENTED_LEGACY_AXES` is still empty, so no `LegacyRuleSet` axis has
-//! runtime behavior yet — later phases (2a/2b/2cd) wire them in (mana pool
-//! cleanup, combat damage step, etc.). The one exception is
+//! `IMPLEMENTED_LEGACY_AXES` lists the axes whose runtime behavior is wired in.
+//! Mana burn joined in Phase 2b (`game::mana_burn`); the Wish scope and the
+//! legend-rule scope joined in Phase 2cd (`game::wish_scope`,
+//! `game::legend_scope`). `CombatDamageTiming` is the one that remains, and it
+//! gates the Middle School and Classic Magic presets. A separate case is
 //! [`AntePolicy::Excluded`], whose CR 407.3 deck-construction consequence
 //! `game::deck_validation` enforces today; it is a default rather than a
 //! declared axis, which is why it needs no entry in that list.
 //!
-//! `custom_format_registry()` still returns `Vec::new()`, but no longer for
-//! want of a preset: [`swedish_old_school`] exists and passes both gates, and
-//! is withheld for the sourcing reason its own doc comment gives.
+//! [`swedish_old_school`] passes both gates and is nonetheless withheld, for
+//! the sourcing reason its own doc comment gives — a documentation blocker that
+//! no gate expresses.
 
 use serde::{Deserialize, Serialize};
 
@@ -163,9 +165,9 @@ pub enum AntePolicy {
 }
 
 /// `Default` is every axis at its modern value — the rule set an Axis-A
-/// lobby save always declares (it models no historical paper ruleset), and
-/// the only one `passes_legacy_axis_gate` accepts while
-/// `IMPLEMENTED_LEGACY_AXES` is empty.
+/// lobby save always declares (it models no historical paper ruleset), and the
+/// one `passes_legacy_axis_gate` accepts unconditionally. A non-default value
+/// is accepted only for an axis listed in `IMPLEMENTED_LEGACY_AXES`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LegacyRuleSet {
     pub mana_burn: ManaBurnPolicy,
@@ -680,7 +682,21 @@ pub enum LegacyAxis {
 /// School presets selectable — they were listed in `custom_format_registry`
 /// and rejected here from the moment they existed, and this one entry is the
 /// whole of what changed for them. See `game::mana_burn`.
-pub const IMPLEMENTED_LEGACY_AXES: &[LegacyAxis] = &[LegacyAxis::ManaBurn];
+///
+/// `WishOutsideGameScope` and `LegendRuleScope` joined in Phase 2cd (see
+/// `game::wish_scope` and `game::legend_scope`). Unlike `ManaBurn`, neither
+/// releases a bundled preset — no Eternal Central ruleset declares either —
+/// so what they release is the ability of a *lobby-saved* custom format to
+/// declare them. Adding an axis here widens what is reachable, which is the
+/// thing to re-check when reasoning about any behavior as unreachable.
+///
+/// `CombatDamageTiming` is the axis still absent, and it is the one gating the
+/// Middle School and Classic Magic presets.
+pub const IMPLEMENTED_LEGACY_AXES: &[LegacyAxis] = &[
+    LegacyAxis::ManaBurn,
+    LegacyAxis::WishOutsideGameScope,
+    LegacyAxis::LegendRuleScope,
+];
 
 fn declared_legacy_axes(rules: &LegacyRuleSet) -> Vec<LegacyAxis> {
     let mut axes = Vec::new();
@@ -1108,4 +1124,24 @@ pub fn custom_format_registry() -> Vec<CustomFormatDef> {
             passes_legacy_axis_gate(&def.rules.legality.legacy) && passes_reprint_fidelity_gate(def)
         })
         .collect()
+}
+
+/// A minimal, valid [`CustomFormatRules`] declaring exactly `legacy` — the test
+/// fixture for exercising a single `LegacyRuleSet` axis.
+///
+/// Built through [`CustomFormatDef::from_lobby_config`], the real Axis-A save
+/// path, rather than from a struct literal: a literal has to name every field of
+/// `StructuralRules` and `LegalityRules`, so it silently rots the moment either
+/// schema grows one, and each test that wrote its own would rot separately.
+/// Going through the production constructor also guarantees the fixture is a
+/// ruleset the engine would actually accept.
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_rules_with_legacy(legacy: LegacyRuleSet) -> CustomFormatRules {
+    let mut def = CustomFormatDef::from_lobby_config(
+        "Legacy axis fixture".to_string(),
+        &FormatConfig::standard(),
+    )
+    .expect("a Standard lobby save is a valid custom format");
+    def.rules.legality.legacy = legacy;
+    def.rules
 }

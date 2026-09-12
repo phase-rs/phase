@@ -15,8 +15,8 @@ use engine::types::custom_format::{
     passes_legacy_axis_gate, passes_reprint_fidelity_gate, swedish_old_school,
     validate_custom_rules_consistency, AntePolicy, CombatDamageTiming, CommandZoneMode,
     CommanderEligibilityRule, CustomFormatDef, CustomFormatId, CustomFormatRules, LegacyRuleSet,
-    LegalityRules, ManaBurnPolicy, PrintingFidelity, ReprintPolicy, SetCode, StructuralRules,
-    WishOutsideGameScope, LOBBY_SAVE_CUSTOM_FORMAT_ID,
+    LegalityRules, LegendRuleScope, ManaBurnPolicy, PrintingFidelity, ReprintPolicy, SetCode,
+    StructuralRules, WishOutsideGameScope, LOBBY_SAVE_CUSTOM_FORMAT_ID,
 };
 use engine::types::format::{
     DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, RangeOfInfluenceConfig, SelectedFormat,
@@ -172,14 +172,61 @@ fn legacy_axis_gate_rejects_undeclared_axis() {
     assert!(!passes_legacy_axis_gate(&def.rules.legality.legacy));
 }
 
-/// The other side of that change: an axis the engine now DOES implement must
-/// pass. Without this, `IMPLEMENTED_LEGACY_AXES` could be emptied again and
-/// only the EC presets' registry test would notice.
+/// The other side of that change: every axis the engine DOES implement must
+/// pass, named individually. Without this, `IMPLEMENTED_LEGACY_AXES` could be
+/// emptied again and only the EC presets' registry test would notice — and
+/// that test covers mana burn alone, since no bundled preset declares either
+/// scope axis.
 #[test]
-fn legacy_axis_gate_accepts_the_implemented_mana_burn_axis() {
-    let mut def = sample_def(1);
-    def.rules.legality.legacy.mana_burn = ManaBurnPolicy::Obsolete;
-    assert!(passes_legacy_axis_gate(&def.rules.legality.legacy));
+fn legacy_axis_gate_accepts_every_implemented_axis() {
+    for (label, legacy) in [
+        (
+            "mana burn (Phase 2b)",
+            LegacyRuleSet {
+                mana_burn: ManaBurnPolicy::Obsolete,
+                ..LegacyRuleSet::default()
+            },
+        ),
+        (
+            "pre-M10 Wish reach (Phase 2cd)",
+            LegacyRuleSet {
+                wish_scope: WishOutsideGameScope::PreM10ReachesExile,
+                ..LegacyRuleSet::default()
+            },
+        ),
+        (
+            "pre-M14 legend scope (Phase 2cd)",
+            LegacyRuleSet {
+                legend_rule_scope: LegendRuleScope::PreM14AnyController,
+                ..LegacyRuleSet::default()
+            },
+        ),
+    ] {
+        assert!(
+            passes_legacy_axis_gate(&legacy),
+            "{label} is implemented, so the gate must accept it"
+        );
+    }
+
+    // All three at once: the gate checks every declared axis, not just the
+    // first one it finds.
+    assert!(passes_legacy_axis_gate(&LegacyRuleSet {
+        mana_burn: ManaBurnPolicy::Obsolete,
+        wish_scope: WishOutsideGameScope::PreM10ReachesExile,
+        legend_rule_scope: LegendRuleScope::PreM14AnyController,
+        ..LegacyRuleSet::default()
+    }));
+
+    // Paired control: adding the one unimplemented axis to that same set
+    // flips it back to rejected, so the assertions above are about the gate
+    // and not about it being permissive.
+    assert!(!passes_legacy_axis_gate(&LegacyRuleSet {
+        mana_burn: ManaBurnPolicy::Obsolete,
+        wish_scope: WishOutsideGameScope::PreM10ReachesExile,
+        legend_rule_scope: LegendRuleScope::PreM14AnyController,
+        damage_timing: CombatDamageTiming::OnStack,
+        ..LegacyRuleSet::default()
+    }));
 }
 
 #[test]

@@ -1236,11 +1236,25 @@ fn legend_rule_exempt_with_gate(
 /// This is NOT destruction — indestructible does not prevent it.
 fn check_legend_rule(
     state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
-    _any_performed: &mut bool,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
     battlefield_snapshot: &[ObjectId],
 ) {
     let has_legend_rule_exemption_static = legend_rule_exemption_static_present(state);
+
+    // A format may declare the pre-M14 scope, which is a different rule rather
+    // than a variation on this one — global and choiceless. See
+    // `game::legend_scope` for what that variant models and why.
+    if crate::game::legend_scope::groups_across_controllers(state) {
+        check_legend_rule_pre_m14(
+            state,
+            events,
+            any_performed,
+            battlefield_snapshot,
+            has_legend_rule_exemption_static,
+        );
+        return;
+    }
 
     for player_idx in 0..state.players.len() {
         let player_id = state.players[player_idx].id;
@@ -1291,6 +1305,82 @@ fn check_legend_rule(
             return;
         }
     }
+}
+
+/// CR 704.5j with the M14 controller scope relaxed: before Magic 2014 the
+/// legend rule grouped same-named legendary permanents across **all**
+/// controllers, and every member of a two-or-more group was put into its
+/// owner's graveyard — no survivor, no choice.
+///
+/// Structurally this is `check_world_rule` (CR 704.5k), not the modern legend
+/// rule, so it is built the same way: one global pass, a deterministic doomed
+/// set, the shared SBA graveyard pipeline, and a simultaneous-departure mark.
+/// It needs no `WaitingFor`, which is why the modern path's choice machinery is
+/// not reused here — there is nothing to choose.
+///
+/// Reached only when [`crate::game::legend_scope::groups_across_controllers`]
+/// says the format declares the pre-M14 scope; that module documents which of
+/// the several pre-M14 forms this is.
+fn check_legend_rule_pre_m14(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+    battlefield_snapshot: &[ObjectId],
+    has_legend_rule_exemption_static: bool,
+) {
+    // BTreeMap (not HashMap) so the grouping is name-sorted and deterministic
+    // across processes — issue #4878, same reason as the modern path.
+    let mut by_name: std::collections::BTreeMap<String, Vec<ObjectId>> =
+        std::collections::BTreeMap::new();
+    for id in battlefield_snapshot.iter().copied() {
+        let Some(obj) = live_battlefield_object(state, &id) else {
+            continue;
+        };
+        if !obj.card_types.supertypes.contains(&Supertype::Legendary) {
+            continue;
+        }
+        let name = obj.name.clone();
+        // The exemption is scope-independent: a permanent a "legend rule
+        // doesn't apply" static exempts (Mirror Gallery, Sakashima, Mirror Box)
+        // is outside the grouping under either rule, so the shared filter is
+        // reused unchanged rather than re-derived.
+        if legend_rule_exempt_with_gate(state, id, has_legend_rule_exemption_static) {
+            continue;
+        }
+        by_name.entry(name).or_default().push(id);
+    }
+
+    // Every member of a group of two or more, not all but one.
+    let mut doomed: Vec<ObjectId> = by_name
+        .into_values()
+        .filter(|ids| ids.len() >= 2)
+        .flatten()
+        .collect();
+    // Deterministic order, mirroring check_world_rule's stable iteration.
+    doomed.sort_by_key(|id| id.0);
+
+    let mut performed_ids = Vec::new();
+    for id in doomed {
+        if live_battlefield_object(state, &id).is_none() {
+            continue;
+        }
+        // CR 704.5j + CR 614.6: the permanent is put into its owner's graveyard
+        // through the replacement pipeline (Moved redirects apply). This is not
+        // destruction, so indestructible does not prevent it — the pipeline is
+        // entered as a state-based-action move, exactly as the modern path's
+        // chosen losers are.
+        // CR 616.1: bail on a replacement-order pause; the SBA fixpoint
+        // re-derives the remaining doomed permanents on the next pass.
+        if move_to_graveyard_via_pipeline(state, id, events) {
+            return;
+        }
+        performed_ids.push(id);
+        *any_performed = true;
+    }
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously,
+    // so these permanents left the battlefield together — record the group so
+    // co-departing leaves-the-battlefield/dies observers observe each other.
+    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
 }
 
 /// CR 704.5m: An Aura attached to an illegal object or player, or that is no
