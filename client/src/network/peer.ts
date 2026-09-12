@@ -230,16 +230,19 @@ export function createPeerSession(
     disposeChannel();
   };
 
-  // FIFO receive queue mirrors the send queue. DecompressionStream is async,
-  // so concurrent onData invocations must be serialized to preserve the
-  // state_update N → state_update N+1 ordering invariant the engine depends on.
+  // Decode in wire order, but dispatch game messages on a separate FIFO.
+  // An async engine action must not strand an already-arrived ping/pong behind
+  // its handler: the keep-alive would otherwise close a healthy channel.
   let recvQueue: Promise<void> = Promise.resolve();
+  let dispatchQueue: Promise<void> = Promise.resolve();
 
-  // Returns the recvQueue entry's promise. Production callers (PeerJS event
+  // Returns this message's delivery promise. Production callers (PeerJS event
   // emitter) ignore it; the test fake uses it to deterministically await the
   // full inbound chain.
   const onData = (data: unknown): Promise<void> => {
+    let delivery: Promise<void> | undefined;
     recvQueue = recvQueue.then(async () => {
+      if (closed) return;
       if (!(data instanceof Uint8Array || data instanceof ArrayBuffer)) {
         // PeerJS "binary" mode can deliver either Uint8Array or ArrayBuffer
         // depending on msgpack unwrap path. Anything else means a version
@@ -271,36 +274,35 @@ export function createPeerSession(
         return;
       }
 
-      if (msg.type === "disconnect") {
-        handleDisconnect(msg.reason);
-        return;
-      }
-
-      if (messageHandlers.size === 0) {
-        pendingMessages.push(msg);
-        return;
-      }
-
-      // Await async handlers so the recvQueue chain reflects the full
-      // chain — handler-triggered sends complete before the next inbound
-      // message is dispatched. Sync handlers return undefined; awaiting
-      // it is a no-op microtask.
-      //
-      // Per-handler try/catch: a thrown handler must NOT reject the
-      // recvQueue promise. `.then(onFulfilled)` without `onRejected`
-      // propagates rejection forward, so the next onData would skip its
-      // body and silently freeze inbound dispatch for the rest of the
-      // session. Logging here is the same posture as decodeWireMessage's
-      // catch above — keep the channel alive, surface the error.
-      for (const handler of messageHandlers) {
-        try {
-          await handler(msg);
-        } catch (e) {
-          console.warn("[PeerSession] message handler threw:", e, msg.type);
+      delivery = dispatchQueue.then(async () => {
+        if (closed) return;
+        if (msg.type === "disconnect") {
+          handleDisconnect(msg.reason);
+          return;
         }
-      }
+
+        if (messageHandlers.size === 0) {
+          pendingMessages.push(msg);
+          return;
+        }
+
+        // Await each game handler to preserve action/state ordering. Catch
+        // failures per handler so a rejection cannot poison later deliveries.
+        for (const message of [...pendingMessages.splice(0), msg]) {
+          for (const handler of messageHandlers) {
+            try {
+              await handler(message);
+            } catch (e) {
+              console.warn("[PeerSession] message handler threw:", e, message.type);
+            }
+          }
+        }
+      });
+      dispatchQueue = delivery;
     });
-    return recvQueue;
+    // Tests can await this message's full delivery without making the decode
+    // queue itself wait for game work.
+    return recvQueue.then(() => delivery);
   };
 
   conn.on("data", onData);
@@ -317,20 +319,22 @@ export function createPeerSession(
       messageHandlers.add(handler);
 
       if (pendingMessages.length > 0) {
-        const queued = pendingMessages.splice(0);
-        // Flush buffered messages through the same serialized recvQueue used by
+        // Flush buffered messages through the same serialized dispatchQueue used by
         // onData, rather than dispatching them synchronously and un-awaited.
         // That keeps three guarantees the engine relies on:
         //  - async handlers are awaited, so a handler-triggered send completes
         //    before the next inbound message is dispatched (ordering invariant);
         //  - the buffered messages stay ordered relative to any inbound message
-        //    already queued on recvQueue;
+        //    already queued on dispatchQueue;
         //  - a throwing/rejecting handler is caught here instead of dropping an
         //    unhandled rejection or breaking the chain (matches onData).
-        recvQueue = recvQueue
+        dispatchQueue = dispatchQueue
           .catch(() => {})
           .then(async () => {
-            for (const msg of queued) {
+            // Drain at execution time: an earlier queued delivery may already
+            // have flushed these messages after this listener subscribed.
+            for (const msg of pendingMessages.splice(0)) {
+              if (closed) return;
               try {
                 await handler(msg);
               } catch (e) {

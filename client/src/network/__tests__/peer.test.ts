@@ -293,6 +293,77 @@ class SilentPeerConnection extends FakeDataConnection {
 // raw envelope path — no `CompressionStream`, which is what lets the real
 // protocol module run under fake timers here.
 describe("PeerSession keep-alive", () => {
+  it.each([false, true])("processes heartbeats during a slow game handler (buffered: %s)", async (buffered) => {
+    vi.useFakeTimers();
+    const { conn, session } = createTestSession();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    try {
+      const onDisconnect = vi.fn();
+      session.onDisconnect(onDisconnect);
+      const received: string[] = [];
+      const action: P2PMessage = {
+        type: "action", senderPlayerId: 1, action: { type: "PassPriority" },
+      };
+      if (buffered) await conn.simulateData(action);
+      session.onMessage(async (msg) => {
+        received.push(msg.type);
+        if (msg.type === "action") await blocked;
+      });
+      const first = buffered ? Promise.resolve() : conn.simulateData(action);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(received).toEqual(["action"]);
+      const second = conn.simulateData({ type: "concede" });
+
+      // Both directions of liveness must bypass game work. The fake answers
+      // our periodic pings; this inbound ping also requires us to answer it.
+      const inboundPing = conn.simulateData({ type: "ping", timestamp: 123 });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(onDisconnect).not.toHaveBeenCalled();
+      expect(conn.open).toBe(true);
+      expect(await conn.getSentMessages()).toContainEqual({ type: "pong", timestamp: 123 });
+      expect(received).toEqual(["action"]);
+
+      release();
+      await Promise.all([first, second, inboundPing]);
+      expect(received).toEqual(["action", "concede"]);
+    } finally {
+      release();
+      session.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("still disconnects a silent peer during a slow game handler", async () => {
+    vi.useFakeTimers();
+    const conn = new SilentPeerConnection();
+    const session = createPeerSession(conn as never);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    try {
+      const onDisconnect = vi.fn();
+      session.onDisconnect(onDisconnect);
+      const received: string[] = [];
+      session.onMessage(async (msg) => {
+        received.push(msg.type);
+        await blocked;
+      });
+      const first = conn.simulateData({ type: "concede" });
+      await vi.advanceTimersByTimeAsync(0);
+      const second = conn.simulateData({ type: "concede" });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(onDisconnect).toHaveBeenCalledExactlyOnceWith("Ping timeout");
+
+      release();
+      await Promise.all([first, second]);
+      expect(received).toEqual(["concede"]);
+    } finally {
+      release();
+      session.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("disconnects a peer that stops answering pings", async () => {
     vi.useFakeTimers();
     try {
