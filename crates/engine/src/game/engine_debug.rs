@@ -27,6 +27,7 @@ use super::engine::{
     EngineError,
 };
 use super::game_object::AttachTarget;
+use super::replacement::{self, ReplacementResult};
 use super::visibility::filter_action_rejection_for_viewer;
 use super::zones;
 use crate::database::CardDatabase;
@@ -828,8 +829,6 @@ pub fn route_debug_create_to_battlefield(
     run_etb: bool,
     attach_to: Option<AttachTarget>,
 ) -> ActionResult {
-    use super::replacement::{self, ReplacementResult};
-
     let mut events: Vec<GameEvent> = vec![];
 
     // "Run ETB effects" unchecked: place the staged object on the battlefield
