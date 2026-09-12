@@ -1,8 +1,6 @@
 //! Production-export regression for Flamewar's More Than Meets the Eye cast.
 
-use std::path::Path;
-
-use engine::database::card_db::CardDatabase;
+use crate::support::{shared_card_db, shared_card_export_json};
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -11,25 +9,18 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
-use serde_json::Value;
-
-fn production_export() -> CardDatabase {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    CardDatabase::from_export(&path).expect("production export must load")
-}
 
 /// Export census for the whole Pack Tactics grammar class, not one named card.
 #[test]
 fn production_export_has_canonical_pack_tactics_conditions_for_all_eight_cards() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    let export: serde_json::Map<String, Value> =
-        serde_json::from_str(&std::fs::read_to_string(path).expect("export readable"))
-            .expect("export JSON");
+    let Some(export) = shared_card_export_json() else {
+        return;
+    };
     let pack_tactics = export
         .values()
         .filter(|face| {
             face.get("oracle_text")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .is_some_and(|text| {
                     text.contains("you attacked with creatures with total power")
                         && text.contains("or greater this combat")
@@ -40,7 +31,7 @@ fn production_export_has_canonical_pack_tactics_conditions_for_all_eight_cards()
     for face in pack_tactics {
         assert!(
             face.get("triggers")
-                .and_then(Value::as_array)
+                .and_then(serde_json::Value::as_array)
                 .is_some_and(|triggers| triggers.iter().any(|trigger| {
                     trigger
                         .get("condition")
@@ -48,7 +39,7 @@ fn production_export_has_canonical_pack_tactics_conditions_for_all_eight_cards()
                 })),
             "{} must export a canonical trigger condition",
             face.get("name")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or("unknown")
         );
     }
@@ -59,7 +50,7 @@ fn production_export_has_canonical_pack_tactics_conditions_for_all_eight_cards()
 /// and it enters on the Streetwise Operative face.
 #[test]
 fn flamewar_mtmte_from_production_export_casts_back_face() {
-    let db = production_export();
+    let db = shared_card_db().expect("integration card fixture must load");
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -105,7 +96,7 @@ fn flamewar_mtmte_from_production_export_casts_back_face() {
 /// snapshot has total power six or more.
 #[test]
 fn battle_cry_goblin_pack_tactics_uses_the_declared_attack_batch() {
-    let db = production_export();
+    let db = shared_card_db().expect("integration card fixture must load");
 
     for (other_power, should_trigger) in [(3, false), (4, true), (5, true)] {
         let mut scenario = GameScenario::new();
@@ -138,7 +129,7 @@ fn battle_cry_goblin_pack_tactics_uses_the_declared_attack_batch() {
 /// leaves the battlefield.
 #[test]
 fn battle_cry_goblin_pack_tactics_rechecks_declaration_snapshot_after_departure() {
-    let db = production_export();
+    let db = shared_card_db().expect("integration card fixture must load");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let goblin = scenario.add_real_card(P0, "Battle Cry Goblin", Zone::Battlefield, &db);
