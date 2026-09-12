@@ -2815,12 +2815,17 @@ mod tests {
     fn cost_explicit_count_continuation_with_unmodeled_rider_stays_unimplemented() {
         // Terminal explicit-count guard: a "<N>=2 …" continuation whose object
         // phrase carries an unmodeled rider that `parse_type_phrase_folding` cannot fully
-        // consume ("… that were dealt damage this turn") must stay honest
-        // `Unimplemented` — it must NOT fall through to the count-1 fallback,
-        // which would emit a broad supported cost that drops both the rider and
-        // the real count.
+        // consume must stay honest `Unimplemented` — it must NOT fall through to
+        // the count-1 fallback, which would emit a broad supported cost that
+        // drops both the rider and the real count. The rider here is a
+        // deliberately fabricated adjective (mirroring the "frobnicating"
+        // pattern above) rather than a real card phrase: "that were dealt
+        // damage this turn" used to serve this purpose, but CR 120.6 + CR 120.9
+        // number-agreement support (the `were` sibling of `WasDealtDamageThisTurn`'s
+        // "was" row) now models it, which is the coverage gain that made this
+        // test's old example stop being an unmodeled rider.
         match parse_oracle_cost(
-            "Sacrifice a creature and two artifacts that were dealt damage this turn",
+            "Sacrifice a creature and two artifacts that are quantically entangled",
         ) {
             AbilityCost::Composite { costs } => {
                 assert!(

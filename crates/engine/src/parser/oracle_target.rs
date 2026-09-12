@@ -8693,10 +8693,20 @@ pub(crate) fn parse_that_clause_suffix<'a>(
     }
 
     // --- Verb-phrase patterns: match fixed phrases after "that " ---
-    // CR 120.6 + CR 120.9: "that was dealt damage this turn"
+    // CR 120.6 + CR 120.9: "that was dealt damage this turn" — and its plural
+    // number-agreement form "that were dealt damage this turn" (Death-Rattle
+    // Oni: "destroy all other creatures that were dealt damage this turn").
+    // Both rows produce the same unparameterized `WasDealtDamageThisTurn` —
+    // "was"/"were" is English subject-verb agreement on one passive
+    // construction, not a distinct predicate, so this is a phrase-table
+    // synonym, not a new FilterProp.
     static VERB_PHRASES: &[(&str, FilterProp)] = &[
         (
             "was dealt damage this turn",
+            FilterProp::WasDealtDamageThisTurn,
+        ),
+        (
+            "were dealt damage this turn",
             FilterProp::WasDealtDamageThisTurn,
         ),
         (

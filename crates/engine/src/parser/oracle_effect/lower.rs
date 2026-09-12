@@ -6665,6 +6665,22 @@ fn target_relative_clause_owns_suffix(input: &str) -> bool {
 /// on the bare participle phrase `parse_bare_was_dealt_damage_suffix` (the
 /// single authority for this reduced clause) recognizes instead of "that ".
 fn bare_dealt_damage_relative_clause_owns_suffix(input: &str) -> bool {
+    // CR 120.6 + CR 120.9: exclude the WITH-copula forms ("that was"/"that were
+    // dealt damage this turn") up front — those already carry a relative
+    // pronoun and are owned by `target_relative_clause_owns_suffix` (paired
+    // with the "was"/"were dealt damage this turn" `VERB_PHRASES` rows). This
+    // guard is only for the truly BARE participle with no copula at all, so a
+    // contiguous "was "/"were " immediately before "dealt damage this turn"
+    // must fall through to the sibling guard instead of being claimed here.
+    let has_leading_copula = alt((
+        take_until::<_, _, OracleError<'_>>("was dealt damage this turn"),
+        take_until("were dealt damage this turn"),
+    ))
+    .parse(input)
+    .is_ok();
+    if has_leading_copula {
+        return false;
+    }
     let Ok((relative_clause, _)) =
         take_until::<_, _, OracleError<'_>>(" dealt damage this turn").parse(input)
     else {

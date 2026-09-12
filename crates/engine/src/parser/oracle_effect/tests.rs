@@ -7165,6 +7165,39 @@ fn destroy_target_was_dealt_damage_preserves_relative_clause() {
     );
 }
 
+/// CR 120.6 + CR 120.9: number-agreement sibling of the test above — a plural
+/// head noun takes "were" instead of "was" ("all other creatures that WERE
+/// dealt damage this turn", Death-Rattle Oni). Regression: the "was"-only
+/// `VERB_PHRASES` row left "that were dealt damage this turn" unrecognized,
+/// which the trailing-duration stripper then mistook for a genuine
+/// until-end-of-turn duration and amputated before the target parser ran.
+#[test]
+fn destroy_all_were_dealt_damage_preserves_relative_clause() {
+    let def = parse_effect_chain(
+        "Destroy all other creatures that were dealt damage this turn.",
+        AbilityKind::Spell,
+    );
+    let Effect::DestroyAll { target, .. } = &*def.effect else {
+        panic!("expected DestroyAll, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(tf) = target else {
+        panic!("expected typed creature target, got {0:?}", target);
+    };
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    assert!(
+        tf.properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::WasDealtDamageThisTurn)),
+        "expected damage-history target property, got {:?}",
+        tf.properties
+    );
+    assert!(
+        def.duration.is_none(),
+        "damage-history target clause must not become a duration: {:?}",
+        def.duration
+    );
+}
+
 #[test]
 fn try_split_damage_compound_event_context_oath_of_kaya() {
     // CR 608.2k: "that player" event-context ref with compound remainder
