@@ -5685,6 +5685,36 @@ fn effect_damage_compound_each_creature_and_each_player() {
     }
 }
 
+/// CR 120.6 + CR 120.9: Inflame — "each creature dealt damage this turn" is a
+/// REDUCED passive relative clause (no "that was"). Regression for a bug where
+/// the missing relative pronoun caused the "dealt damage this turn" restriction
+/// to be dropped entirely, producing an unrestricted `DamageAll{Creature}` that
+/// hit every creature instead of only those already damaged this turn.
+#[test]
+fn effect_damage_all_creature_reduced_was_dealt_damage_clause() {
+    let e = parse_effect("~ deals 2 damage to each creature dealt damage this turn");
+    match e {
+        Effect::DamageAll {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Typed(tf),
+            player_filter: None,
+            damage_source: None,
+        } => {
+            assert!(tf
+                .type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Creature)));
+            assert!(
+                tf.properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::WasDealtDamageThisTurn)),
+                "expected WasDealtDamageThisTurn property, got {tf:?}"
+            );
+        }
+        other => panic!("expected DamageAll{{Creature, WasDealtDamageThisTurn}}, got {other:?}"),
+    }
+}
+
 /// Hurricane class — "each creature with flying and each player". The
 /// property suffix on the type half must be preserved, and the player
 /// filter must still be populated.
