@@ -23,6 +23,10 @@ import type {
   WaitingFor,
   Zone,
 } from "../../adapter/types.ts";
+import type {
+  InteractionId,
+  ViewerInteraction,
+} from "../../adapter/generated/interaction/index.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import {
   CancelButton,
@@ -117,6 +121,32 @@ type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
 type BeholdChoice = Extract<WaitingFor, { type: "BeholdChoice" }>;
 
+function effectZoneChoiceInteractionId(
+  interaction: ViewerInteraction | null,
+): InteractionId | null {
+  for (const opportunity of interaction?.opportunities ?? []) {
+    if (opportunity.response.type !== "schema") continue;
+    if (opportunity.response.data.spec.type === "select") {
+      return opportunity.interactionId;
+    }
+  }
+  return null;
+}
+
+function effectZoneChoiceFallbackKey(data: EffectZoneChoice["data"]): string {
+  return [
+    data.player,
+    data.source_id,
+    data.cards.join(","),
+    data.count,
+    data.min_count ?? 0,
+    data.up_to === true,
+    data.effect_kind,
+    data.zone,
+    data.destination ?? "",
+  ].join("|");
+}
+
 /**
  * Generic card choice modal for Scry, Dig, Surveil, Reveal, Search, and NamedChoice.
  * Renders based on the WaitingFor type.
@@ -126,6 +156,9 @@ export function CardChoiceModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
+  const effectZoneInteractionId = useGameStore((s) =>
+    effectZoneChoiceInteractionId(s.viewerInteraction),
+  );
 
   if (!waitingFor) return null;
 
@@ -206,7 +239,12 @@ export function CardChoiceModal() {
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
-      return <EffectZoneModal data={waitingFor.data} />;
+      return (
+        <EffectZoneModal
+          key={effectZoneInteractionId ?? effectZoneChoiceFallbackKey(waitingFor.data)}
+          data={waitingFor.data}
+        />
+      );
     case "DrawnThisTurnTopdeckChoice":
       if (!canActForWaitingState) return null;
       return <DrawnThisTurnTopdeckModal data={waitingFor.data} />;
@@ -1137,24 +1175,6 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
     !isTapUntapChoice;
   const isUpTo = data.up_to === true;
   const minCount = data.min_count ?? 0;
-  const selectionPromptKey = [
-    data.source_id,
-    data.cards.join(","),
-    data.count,
-    minCount,
-    isUpTo,
-    data.effect_kind,
-    data.zone,
-    data.destination ?? "",
-  ].join("|");
-
-  // A resolution can advance directly from one zone-choice prompt to another
-  // (for example, a sacrifice into a graveyard-to-battlefield return). The
-  // component instance is retained across that transition, so its local pick
-  // must not answer the next engine prompt.
-  useEffect(() => {
-    setSelected(new Set());
-  }, [selectionPromptKey]);
 
   const toggleSelect = useCallback(
     (id: ObjectId) => {
