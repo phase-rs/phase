@@ -4160,10 +4160,14 @@ mod tests {
             .all(|event| !matches!(event, GameEvent::SpellCopied { .. })));
     }
 
-    /// CR 712.8a + CR 707.2: copy uses stack-face characteristics, not the
-    /// post-bounce Hand face.
+    /// CR 712.8a + CR 707.2: copy uses stack-face characteristics captured at
+    /// the `lki_copiable_values` instant, not the post-cleanup Hand face.
     #[test]
     fn copy_from_lki_uses_stack_face_not_hand_face() {
+        use crate::game::game_object::BackFaceData;
+        use crate::game::printed_cards::apply_back_face_to_object;
+        use crate::types::card_type::CardType;
+
         let mut state = GameState::new_two_player(42);
         let original = ObjectId(10);
         push_spell(
@@ -4171,18 +4175,81 @@ mod tests {
             original,
             CardId(1),
             PlayerId(0),
-            "Back Face",
+            "Front Face",
             draw_ability(original),
             CastingVariant::Normal,
         );
-        state.objects.get_mut(&original).unwrap().modal_back_face = true;
+        // Same in-tree MDFC stack fixture as
+        // `mdfc_back_face_reverts_on_countered_spell_to_graveyard` (zones.rs):
+        // a back-face spell whose stored front face makes CR 712.8a cleanup
+        // actually swap on stack exit.
+        {
+            let obj = state.objects.get_mut(&original).unwrap();
+            obj.back_face = Some(BackFaceData {
+                is_swap_snapshot: false,
+                name: "Back Face".to_string(),
+                power: Some(6),
+                toughness: Some(6),
+                loyalty: None,
+                printed_loyalty: None,
+                defense: None,
+                card_types: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Planeswalker],
+                    subtypes: vec![],
+                },
+                mana_cost: crate::types::mana::ManaCost::default(),
+                keywords: vec![],
+                abilities: vec![],
+                trigger_definitions: Default::default(),
+                replacement_definitions: Default::default(),
+                static_definitions: Default::default(),
+                color: vec![],
+                printed_ref: None,
+                modal: None,
+                additional_cost: None,
+                strive_cost: None,
+                casting_restrictions: vec![],
+                casting_options: vec![],
+                layout_kind: Some(crate::types::card::LayoutKind::Modal),
+                parse_warnings: vec![],
+            });
+        }
+        let front_snapshot =
+            crate::game::printed_cards::snapshot_object_face(state.objects.get(&original).unwrap());
+        let back_data = state
+            .objects
+            .get_mut(&original)
+            .unwrap()
+            .back_face
+            .take()
+            .unwrap();
+        {
+            let obj = state.objects.get_mut(&original).unwrap();
+            apply_back_face_to_object(obj, back_data);
+            obj.back_face = Some(front_snapshot);
+            obj.modal_back_face = true;
+        }
+
         let pin = state.objects[&original].incarnation;
         bounce_spell_to_hand(&mut state, original);
         {
-            let live = state.objects.get_mut(&original).unwrap();
-            live.name = "Front Face".to_string();
-            live.modal_back_face = false;
+            let live = &state.objects[&original];
+            assert_eq!(live.zone, Zone::Hand);
+            assert_eq!(
+                live.name, "Front Face",
+                "CR 712.8a: engine cleanup must revert the Hand to the front face"
+            );
+            assert!(
+                !live.modal_back_face,
+                "CR 712.8a: modal back-face flag must clear off the stack"
+            );
+            assert!(
+                !live.card_types.core_types.contains(&CoreType::Planeswalker),
+                "CR 712.8a: Hand types must be the front face, not the stack face"
+            );
         }
+
         state.current_trigger_event = Some(spell_cast_event(original, Some(pin)));
         copy_triggering_source(&mut state);
         let copy_id = state
@@ -4193,12 +4260,24 @@ mod tests {
             .map(|entry| entry.id)
             .expect("copy of the stack face");
         let copy = &state.objects[&copy_id];
+        let live = &state.objects[&original];
         assert_eq!(copy.name, "Back Face");
         assert!(
             copy.modal_back_face,
-            "copy must carry the stack-face modal flag"
+            "copy must carry the stack-face modal flag from LKI"
         );
-        assert_eq!(state.objects[&original].name, "Front Face");
+        assert!(
+            copy.card_types.core_types.contains(&CoreType::Planeswalker),
+            "copy must carry the stack-face types from LKI"
+        );
+        assert_ne!(
+            copy.name, live.name,
+            "reach-guard: engine cleanup, not the test, diverged the live Hand name from the copy"
+        );
+        assert_ne!(
+            copy.card_types.core_types, live.card_types.core_types,
+            "reach-guard: engine cleanup, not the test, diverged the live Hand types from the copy"
+        );
     }
 
     /// CR 608.2h + CR 707.10: empty live stack still copies from stack-object
