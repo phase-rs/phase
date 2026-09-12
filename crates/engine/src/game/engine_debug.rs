@@ -937,6 +937,7 @@ fn route_debug_token_to_battlefield(
         .objects
         .remove(&object_id)
         .expect("debug token must exist before its entry is staged");
+    // allow-raw-zone: removes a private debug staging row before its CR 111.1 no-from-zone token entry; no game event may observe the staging zone.
     zones::remove_from_zone(state, object_id, staged.zone, staged.owner);
 
     let values = super::printed_cards::intrinsic_copiable_values(&staged);
