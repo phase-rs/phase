@@ -41,6 +41,7 @@ const wasm = vi.hoisted(() => ({
   suggest_lands: vi.fn(),
   get_bot_deck: vi.fn(),
   export_draft_session: vi.fn(() => "session"),
+  booster_pack_pool_for_game: vi.fn<() => string[] | null | undefined>(() => null),
 }));
 
 const persistence = vi.hoisted(() => ({
@@ -48,6 +49,7 @@ const persistence = vi.hoisted(() => ({
   drainQuickDraftPersistence: vi.fn(async () => undefined),
   inspectActiveQuickDraftLifecycle: vi.fn<() => Promise<unknown>>(async () => null),
   loadDraftRun: vi.fn<() => Promise<unknown>>(async () => null),
+  saveDraftRun: vi.fn(async (_id: string, _run: DraftRunState) => undefined),
   loadQuickDraftSession: vi.fn<() => Promise<unknown>>(async () => null),
   persistQuickDraftSnapshot: vi.fn<
     (
@@ -1391,7 +1393,61 @@ describe("draft store workspace authority", () => {
     await pick;
   });
 
-  it("reuses a durable initial launch stage after publication failure", async () => {
+  it.each([
+    { durable: undefined, projected: [], expected: [], saves: 1 },
+    { durable: undefined, projected: undefined, expected: undefined, saves: 0 },
+    { durable: ["Original", "Original"], projected: ["Other"], expected: ["Original", "Original"], saves: 0 },
+    { durable: [], projected: ["Other"], expected: [], saves: 0 },
+    { durable: null, projected: ["Other"], expected: null, saves: 0 },
+  ])("resumes legacy source metadata only from the host accessor: $durable / $projected", async ({ durable, projected, expected, saves }) => {
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "legacy", setCode: "custom-cube", setName: "Same label", difficulty: 2,
+      kind: "Quick", phase: "playing",
+    });
+    persistence.loadQuickDraftSession.mockResolvedValue({
+      sessionJson: "legacy session", mainDeck: [], landCounts: {},
+      poolSortMode: "color", poolPanelOpen: true, workspace: null,
+    });
+    persistence.loadDraftRun.mockResolvedValueOnce({
+      format: "run", results: [], playerDeck: [], opponentDeck: ["Opponent"],
+      usedBotSeats: [1], booster_pack_pool: durable,
+    });
+    const imported = view([card("picked")]);
+    wasm.import_draft_session.mockReturnValue(imported);
+    wasm.booster_pack_pool_for_game.mockReturnValue(projected);
+    await useDraftStore.getState().resumeDraft();
+    expect(wasm.import_draft_session).toHaveBeenCalledWith("legacy session", 2);
+    expect(useDraftStore.getState().view).toEqual(imported);
+    expect(useDraftStore.getState().runState?.booster_pack_pool).toEqual(expected);
+    expect(persistence.saveDraftRun).toHaveBeenCalledTimes(saves);
+    if (saves) expect(persistence.saveDraftRun).toHaveBeenCalledWith("legacy", expect.objectContaining({ booster_pack_pool: [] }));
+  });
+
+  it.each([false, true])("durably upgrades a legacy staged launch from the engine view (next=%s)", async (next) => {
+    const projected = view([card("spell")]);
+    wasm.start_quick_draft.mockReturnValue(projected);
+    wasm.booster_pack_pool_for_game.mockReturnValue([]);
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    const draftId = useDraftStore.getState().draftId!;
+    const run: DraftRunState = {
+      format: "run", results: [], playerDeck: ["spell"], opponentDeck: ["Opponent"], usedBotSeats: [1],
+      activeMatch: { draftId, gameId: "staged-legacy", format: "run", resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] },
+    };
+    persistence.loadDraftRun.mockResolvedValueOnce(run);
+    const navigate = vi.fn();
+    if (next) await useDraftStore.getState().launchNextMatch(navigate);
+    else await useDraftStore.getState().launchMatch(navigate);
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      run: expect.objectContaining({ booster_pack_pool: [] }),
+      payload: expect.objectContaining({ booster_pack_pool: [] }),
+    }));
+  });
+
+  it.each([
+    { pool: ["Cube A", "Cube A", "Undealt sentinel"] }, { pool: [] },
+    { pool: undefined }, { pool: null },
+  ])("retains the original cube source through initial publication, retry, and next match: $pool", async ({ pool }) => {
     const draftView = view([card("spell")]);
     draftView.seats = [{
       seat_index: 1,
@@ -1403,8 +1459,18 @@ describe("draft store workspace authority", () => {
       active_pack_count: 0,
       face_up_draft_cards: [],
     }];
-    wasm.start_quick_draft.mockReturnValue(draftView);
-    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    if (Array.isArray(pool)) {
+      vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
+      wasm.start_quick_cube_draft.mockReturnValue(draftView);
+      await useDraftStore.getState().startCubeDraft("cube", "Same label", {
+        pod_size: 8, pack_count: 3, cards_per_pack: 15, min_deck_size: 40,
+        addable_cards: { policy: "StandardBasics", custom: [] },
+      }, 2);
+    } else {
+      wasm.start_quick_draft.mockReturnValue(draftView);
+      await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    }
+    wasm.booster_pack_pool_for_game.mockReturnValue(pool);
     wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
     const randomUuid = vi.spyOn(crypto, "randomUUID")
       .mockReturnValue("00000000-0000-4000-8000-000000000123");
@@ -1416,7 +1482,14 @@ describe("draft store workspace authority", () => {
     const navigate = vi.fn();
 
     await expect(useDraftStore.getState().launchMatch(navigate)).rejects.toThrow("metadata failed");
+    expect(stagedRun).toMatchObject({ booster_pack_pool: pool });
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      run: expect.objectContaining({ booster_pack_pool: pool }),
+      payload: expect.objectContaining({ booster_pack_pool: pool }),
+    }));
     persistence.loadDraftRun.mockResolvedValueOnce(stagedRun);
+    // A later same-labelled cube must never replace an already bound source.
+    if (pool !== undefined) wasm.booster_pack_pool_for_game.mockReturnValue(["Other cube"]);
     await useDraftStore.getState().launchMatch(navigate);
 
     expect(randomUuid).toHaveBeenCalledOnce();
@@ -1424,5 +1497,17 @@ describe("draft store workspace authority", () => {
     expect(wasm.export_draft_session).toHaveBeenCalledOnce();
     expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
     expect(navigate).toHaveBeenCalledWith(expect.stringContaining("00000000-0000-4000-8000-000000000123"));
+    expect(persistence.publishStagedDraftMatch).toHaveBeenLastCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ booster_pack_pool: pool }),
+    }));
+    const completed = { ...(stagedRun as DraftRunState), activeMatch: undefined,
+      results: [{ gameId: "finished", result: "win" as const }] };
+    persistence.loadDraftRun.mockResolvedValueOnce(completed);
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(navigate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenLastCalledWith(expect.objectContaining({
+      run: expect.objectContaining({ booster_pack_pool: pool }),
+      payload: expect.objectContaining({ booster_pack_pool: pool }),
+    }));
   });
 });

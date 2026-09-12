@@ -1333,7 +1333,7 @@ fn departed_nonactive_controller_forfeits_its_gain_and_the_batch_still_completes
     assert_eq!(
         completion_at_drain,
         Some(Some(true)),
-        "CR 800.4a: the batch drains rather than stranding — no livelock — and \
+        "CR 800.4: the batch drains rather than stranding — no livelock — and \
          the sub-step it owns is marked complete on its OWN live CombatState"
     );
     assert_eq!(
@@ -1467,7 +1467,7 @@ fn departed_seat_forfeits_a_still_queued_gain_and_the_batch_still_completes() {
     }
     assert!(
         completed,
-        "CR 800.4a: the batch drains rather than stranding — no livelock"
+        "CR 800.4: the batch drains rather than stranding — no livelock"
     );
 
     assert_eq!(

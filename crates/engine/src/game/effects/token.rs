@@ -3152,9 +3152,10 @@ fn resolve_attach_host(
         // CR 608.2c: a numbered anaphor resolves against the whole resolving
         // chain's targets, which is why it routes through the same authority
         // `attach::resolve_object_filter` uses rather than reading this clause's
-        // nearest target.
+        // nearest target. CR 608.2b: a slot whose target was illegal at
+        // resolution (or whose pinned referent departed, CR 400.7) names no host.
         AttachHostAuthority::ParentSlot(index) => {
-            crate::game::targeting::resolve_parent_slot_from_root(state, ability, index)
+            crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, index)
                 .map(target_ref_to_attach_target)
         }
         AttachHostAuthority::Source => Some(AttachTarget::Object(ability.source_id)),

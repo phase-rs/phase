@@ -790,13 +790,31 @@ pub fn resolve(
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
 
+    // CR 608.2c + CR 609.3 (issue #8798): the immediate parent handed this
+    // "that card" move nothing to act on (an ExileTop/Dig on an empty library,
+    // an empty ChooseFromZone or reveal-choice). Resolve as a no-op here,
+    // before `resolved_targets`, whose unresolved-`ParentTarget` fallback would
+    // otherwise bind the ability's own source — an empty-library Tainted Pact
+    // would put itself into its controller's hand.
+    if matches!(target_filter, TargetFilter::ParentTarget)
+        && ability.parent_target_missing_reason.is_some()
+    {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(completed_result(0));
+    }
+
     // CR 608.2c + 603.10a: Resolve the subject across self-ref → event-context →
     // chosen-targets, the unified 3-tier dispatch shared by zone-change-style
     // effects whose subject can be the source itself, an event-context
     // referent, or a pre-selected target. See `targeting::resolved_targets`.
-    let effective_targets = crate::game::targeting::resolved_targets(ability, target_filter, state);
+    // CR 608.2b: a `ParentTargetSlot` whose target was illegal as the ability
+    // resolved moves nothing (Goblin Welder's graveyard artifact card).
     let targeted_objects =
-        crate::game::effects::effect_object_targets(target_filter, &effective_targets);
+        crate::game::effects::resolved_effect_object_ids(state, ability, target_filter);
     // CR 730.3c: when this effect references the object that just left the
     // battlefield (a flicker/blink's "return it") and that object was a merged
     // permanent's survivor, act on the component cards it split into as well, so
@@ -871,12 +889,28 @@ pub fn resolve(
         // that scan inert for ParentTarget today; this guard does not rely on
         // that distant `_ => false` arm.
         //
-        // Emits EffectResolved first, exactly as the three sibling guards in
-        // this block do (CR 115.6 optional targeting, CR 400.7 SelfRef,
-        // CR 701.23b fail-to-find): the trigger DID fire and DID resolve
+        // Emits EffectResolved first, exactly as the sibling guards in this
+        // block do (CR 115.6 optional targeting, CR 400.7 SelfRef, CR 608.2b
+        // slot, CR 701.23b fail-to-find): the trigger DID fire and DID resolve
         // (CR 603.7b) — it simply affected nothing, and the game log / event
         // observers / chain machinery must see that.
         if ability.pinned_object_targets_all_stale(state) {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(completed_result(0));
+        }
+
+        // CR 608.2b: "Illegal targets, if any, won't be affected by parts of a
+        // resolving spell's effect for which they're illegal." A slot anaphor
+        // names one declared target, never a zone population, so an empty slot
+        // (its target illegal as the ability resolved, or its pinned referent
+        // gone) moves nothing. Return before the untargeted zone scan below,
+        // which would otherwise find nothing only through `filter.rs`'s slot
+        // arm and would set `cost_payment_failed_flag` on the way out.
+        if matches!(target_filter, TargetFilter::ParentTargetSlot { .. }) {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,

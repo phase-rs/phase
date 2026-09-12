@@ -78,9 +78,7 @@ pub fn resolve(
     //       transform NOTHING), and for a `Typed` filter the scan would perform
     //       a battlefield-wide mass transform the card never printed (that is
     //       `resolve_all`'s job, and it returned above).
-    let effective_targets =
-        crate::game::targeting::resolved_targets(ability, &single_target, state);
-    let subjects = super::effect_object_targets(&single_target, &effective_targets);
+    let subjects = super::resolved_effect_object_ids(state, ability, &single_target);
 
     // CR 400.7 + CR 603.7c: a delayed transform whose pinned referent became a
     // new object transforms nothing — but that guard governs ONLY a referent

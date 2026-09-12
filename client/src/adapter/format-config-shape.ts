@@ -161,6 +161,10 @@ export function isCustomFormatRulesShape(value: unknown): value is CustomFormatR
   return (
     isStringArray(legality.banned)
     && isStringArray(legality.restricted)
+    // Absent is valid: a definition persisted before this field existed
+    // carries no `legal_cards` key, and rejecting those would discard every
+    // custom format a player had already saved.
+    && (legality.legal_cards === undefined || isStringArray(legality.legal_cards))
     && isLegacyRuleSet(legality.legacy)
   );
 }

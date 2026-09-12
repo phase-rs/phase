@@ -50,6 +50,9 @@ function customRules(id = 0): CustomFormatRules {
     },
     legality: {
       legal_sets: null,
+      // Present because the engine always emits it; the persisted-before-the-
+      // field case drops it explicitly in its own test below.
+      legal_cards: [],
       banned: [],
       restricted: [],
       legacy: {
@@ -287,6 +290,37 @@ describe("isCustomFormatRulesShape", () => {
         },
       }),
     ).toBe(false);
+  });
+
+  it("validates legal_cards, and accepts a definition persisted without it", () => {
+    const rules = customRules();
+
+    // Present and valid.
+    expect(
+      isCustomFormatRulesShape({
+        ...rules,
+        legality: { ...rules.legality, legal_cards: ["Arena", "Sewers of Estark"] },
+      }),
+    ).toBe(true);
+
+    // Absent: a definition saved before the field existed must still load, or
+    // every custom format a player had saved would be discarded.
+    const { legal_cards: _dropped, ...legalityWithout } = rules.legality;
+    expect(
+      isCustomFormatRulesShape({ ...rules, legality: legalityWithout }),
+    ).toBe(true);
+
+    // Present but the wrong type — the guard stands between `JSON.parse` and
+    // code that will index it, so a non-array must be refused rather than
+    // reaching a `.map`.
+    for (const bad of ["Arena", 7, {}, [1, 2]]) {
+      expect(
+        isCustomFormatRulesShape({
+          ...rules,
+          legality: { ...rules.legality, legal_cards: bad },
+        }),
+      ).toBe(false);
+    }
   });
 
   it("accepts a definition persisted before the ante axis existed", () => {

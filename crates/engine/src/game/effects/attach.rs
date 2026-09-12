@@ -1191,17 +1191,17 @@ fn resolve_object_filter<'a>(
         // CR 608.2c: a precise slot anaphor ("Attach it to the chosen creature"
         // → attachment slot 1, target slot 0) resolves against the whole
         // resolving chain's accumulated targets. The per-clause `ability.targets`
-        // may carry only this clause's nearest target, so route through
-        // `resolved_targets`, whose `ParentTargetSlot` arm walks the ROOT chain
-        // (CR 608.2c) — the same authority the GainControl handler falls back to.
+        // may carry only this clause's nearest target, so resolve through the
+        // chain-root slot authority — the same one the GainControl handler uses.
+        // CR 608.2b: a slot whose target was illegal at resolution (or whose
+        // pinned referent departed, CR 400.7) yields no operand.
         // The shared `target_slots` iterator is intentionally not consumed here.
         TargetFilter::ParentTargetSlot { index } => {
-            crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index).and_then(
-                |target| match target {
+            crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
+                .and_then(|target| match target {
                     TargetRef::Object(id) => Some(id),
                     TargetRef::Player(_) => None,
-                },
-            )
+                })
         }
         _ => {
             let ctx = FilterContext::from_ability(ability);

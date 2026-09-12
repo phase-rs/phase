@@ -1232,6 +1232,7 @@ mod tests {
                 game_started,
                 start_when_full: true,
                 ranked: false,
+                booster_pack_pool: None,
                 lobby_meta: None,
             },
         }

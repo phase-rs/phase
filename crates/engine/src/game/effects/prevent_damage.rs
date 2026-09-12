@@ -22,12 +22,11 @@ use crate::types::zones::Zone;
 fn resolve_and_prune_stack_spell_legs(
     filters: &[TargetFilter],
     state: &GameState,
-    source_id: ObjectId,
-    ability_targets: &[TargetRef],
+    ability: &ResolvedAbility,
 ) -> Vec<TargetFilter> {
     filters
         .iter()
-        .map(|inner| resolve_source_filter(inner, state, source_id, ability_targets))
+        .map(|inner| resolve_source_filter(inner, state, ability))
         .filter(|f| !matches!(f, TargetFilter::Any))
         .collect()
 }
@@ -38,21 +37,26 @@ fn resolve_and_prune_stack_spell_legs(
 pub(crate) fn resolve_source_filter(
     filter: &TargetFilter,
     state: &GameState,
-    source_id: ObjectId,
-    ability_targets: &[TargetRef],
+    ability: &ResolvedAbility,
 ) -> TargetFilter {
+    let source_id = ability.source_id;
+    let ability_targets = ability.targets.as_slice();
     match filter {
         // CR 609.7a: a cast-time-chosen source object ("target instant or
         // sorcery spell") is captured into a SpecificObject shield so it
-        // persists after the spell leaves the stack.
-        TargetFilter::ParentTargetSlot { index } => ability_targets
-            .get(*index)
-            .and_then(|t| match t {
-                TargetRef::Object(id) => Some(*id),
-                _ => None,
-            })
-            .map(|id| TargetFilter::SpecificObject { id })
-            .unwrap_or(TargetFilter::None),
+        // persists after the spell leaves the stack. The slot is resolved from
+        // the chain root (CR 608.2c), not the node's locally-propagated targets.
+        // CR 608.2b + CR 400.7: a slot whose target was illegal as the ability
+        // resolved, or whose object left and returned, captures no source.
+        TargetFilter::ParentTargetSlot { index } => {
+            crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
+                .and_then(|t| match t {
+                    TargetRef::Object(id) => Some(id),
+                    _ => None,
+                })
+                .map(|id| TargetFilter::SpecificObject { id })
+                .unwrap_or(TargetFilter::None)
+        }
         TargetFilter::ChosenDamageSource { .. } => state
             .last_chosen_damage_source
             .as_ref()
@@ -63,8 +67,7 @@ pub(crate) fn resolve_source_filter(
                 match &choice.source_filter {
                     TargetFilter::ChosenDamageSource { .. } | TargetFilter::Any => identity,
                     other => {
-                        let recheck =
-                            resolve_source_filter(other, state, source_id, ability_targets);
+                        let recheck = resolve_source_filter(other, state, ability);
                         if matches!(recheck, TargetFilter::Any) {
                             identity
                         } else {
@@ -77,12 +80,7 @@ pub(crate) fn resolve_source_filter(
             })
             .unwrap_or(TargetFilter::None),
         TargetFilter::Not { filter: inner } => TargetFilter::Not {
-            filter: Box::new(resolve_source_filter(
-                inner,
-                state,
-                source_id,
-                ability_targets,
-            )),
+            filter: Box::new(resolve_source_filter(inner, state, ability)),
         },
         // CR 609.7a: A `StackSpell` leg ("instant or sorcery SPELL") is a
         // targeting-enumeration predicate (zone presence on the stack), not a
@@ -95,11 +93,10 @@ pub(crate) fn resolve_source_filter(
         // (instant/sorcery) recheck (CR 609.7b) intact.
         TargetFilter::StackSpell => TargetFilter::Any,
         TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: resolve_and_prune_stack_spell_legs(filters, state, source_id, ability_targets),
+            filters: resolve_and_prune_stack_spell_legs(filters, state, ability),
         },
         TargetFilter::And { filters } => {
-            let pruned =
-                resolve_and_prune_stack_spell_legs(filters, state, source_id, ability_targets);
+            let pruned = resolve_and_prune_stack_spell_legs(filters, state, ability);
             // An `And` reduced to a single non-trivial leg collapses to that leg.
             match pruned.len() {
                 0 => TargetFilter::Any,
@@ -548,8 +545,7 @@ pub fn resolve(
     // Filters using IsChosenColor need the chosen color resolved from the source object
     // and converted to a concrete HasColor filter for the shield.
     if let Some(src_filter) = effect_source_filter {
-        let resolved_filter =
-            resolve_source_filter(&src_filter, state, ability.source_id, &ability.targets);
+        let resolved_filter = resolve_source_filter(&src_filter, state, ability);
         shield = shield.damage_source_filter(resolved_filter);
     }
 
@@ -755,8 +751,8 @@ mod tests {
         PreventionAmount, PtValue, QuantityExpr, QuantityRef, ShieldKind, TypedFilter,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::game_state::ChosenDamageSource;
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::game_state::{ChosenDamageSource, StackEntry, StackEntryKind};
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
@@ -2692,22 +2688,68 @@ mod tests {
         );
     }
 
-    /// CR 609.7a: A source-scoped prevent's `ParentTargetSlot { 0 }` sentinel is
-    /// concretized into a `SpecificObject` shield from the ability's chosen
-    /// target, so the prevention persists after the spell leaves the stack. The
-    /// sibling `Typed` leg survives for the CR 609.7b damage-time recheck.
-    /// Mirrors `chosen_damage_source_resolves_to_specific_source_and_rechecked_filter`.
+    /// CR 609.7a + CR 608.2c: `ParentTargetSlot { 0 }` resolves from the chain
+    /// ROOT, not the leaf's locally-propagated targets. A nested source-target
+    /// chain where the leaf holds only the most-recent target must still bind the
+    /// shield to the first DECLARED slot (and keep the sibling `Typed` leg for the
+    /// CR 609.7b damage-time recheck).
     #[test]
-    fn parent_target_slot_resolves_to_specific_chosen_spell() {
+    fn parent_target_slot_resolves_root_slot_in_nested_chain() {
         use crate::types::ability::TypeFilter;
         let mut state = GameState::new_two_player(42);
-        let spell = create_object(
+        let source = ObjectId(500);
+        let first_spell = create_object(
             &mut state,
             CardId(1),
             PlayerId(1),
             "Lightning Bolt".to_string(),
             Zone::Stack,
         );
+        let second_spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Shock".to_string(),
+            Zone::Stack,
+        );
+
+        // Root chain declares two spell targets: slot 0 = first, slot 1 = second.
+        let root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(first_spell)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(second_spell)],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+
+        // The leaf carries only the locally-propagated most-recent target.
+        let leaf = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(second_spell)],
+            source,
+            PlayerId(0),
+        );
+
         let typed_leg =
             TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::AnyOf(vec![
                 TypeFilter::Instant,
@@ -2719,18 +2761,13 @@ mod tests {
                 typed_leg.clone(),
             ],
         };
-        let resolved = resolve_source_filter(
-            &source_filter,
-            &state,
-            ObjectId(99),
-            &[TargetRef::Object(spell)],
-        );
+        let resolved = resolve_source_filter(&source_filter, &state, &leaf);
         assert_eq!(
             resolved,
             TargetFilter::And {
-                filters: vec![TargetFilter::SpecificObject { id: spell }, typed_leg],
+                filters: vec![TargetFilter::SpecificObject { id: first_spell }, typed_leg],
             },
-            "ParentTargetSlot must resolve to the chosen spell's SpecificObject, keeping the Typed leg"
+            "ParentTargetSlot must resolve to the root slot 0 (first spell), not the leaf's local target"
         );
     }
 
@@ -2868,6 +2905,89 @@ mod tests {
             "damage from a non-chosen source must NOT be prevented"
         );
         assert_eq!(state.players[0].life, 17);
+    }
+
+    /// CR 608.2b + CR 400.7 + CR 609.7a: a source slot captures no source when
+    /// its declared target was illegal as the ability resolved (the resolution
+    /// carrier's `illegal_target_slots` stamp) or when its pinned object left
+    /// and returned as a new object under the same id. Either way the shield
+    /// must not bind that object.
+    #[test]
+    fn parent_target_slot_source_is_not_captured_once_illegal_or_departed() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Prevention Source".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let mut root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(creature)],
+            source,
+            PlayerId(0),
+        );
+        root.set_target_incarnations_recursive(vec![ObjectIncarnationRef::from_object(
+            &state.objects[&creature],
+        )]);
+        let install = |state: &mut GameState, root: &ResolvedAbility| {
+            state.resolving_stack_entry = Some(StackEntry {
+                id: source,
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: source,
+                    ability: Box::new(root.clone()),
+                },
+            });
+        };
+        let slot_zero = TargetFilter::ParentTargetSlot { index: 0 };
+
+        install(&mut state, &root);
+        assert_eq!(
+            resolve_source_filter(&slot_zero, &state, &root),
+            TargetFilter::SpecificObject { id: creature },
+            "reach guard: a legal, current slot captures its object"
+        );
+
+        let mut stamped = root.clone();
+        stamped.illegal_target_slots = vec![0];
+        install(&mut state, &stamped);
+        assert_eq!(
+            resolve_source_filter(&slot_zero, &state, &stamped),
+            TargetFilter::None,
+            "an illegal declared source must not be captured"
+        );
+
+        install(&mut state, &root);
+        let mut events = Vec::new();
+        for zone in [Zone::Graveyard, Zone::Battlefield] {
+            let _ = crate::game::zone_pipeline::move_object(
+                &mut state,
+                crate::game::zone_pipeline::ZoneMoveRequest::effect(creature, zone, source),
+                &mut events,
+            );
+        }
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Battlefield,
+            "reach guard: the object is back under the same id"
+        );
+        assert_eq!(
+            resolve_source_filter(&slot_zero, &state, &root),
+            TargetFilter::None,
+            "a departed-and-returned source is a new object and must not be captured"
+        );
     }
 
     /// CR 615.5 + CR 700.2d: A `ContinuationStep` rider (Gatta and Luzzu) is

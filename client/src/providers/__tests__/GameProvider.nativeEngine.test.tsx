@@ -21,6 +21,7 @@ const {
   gameStoreState,
   getSharedAdapter,
   loadActiveGame,
+  loadDraftRun,
   nativeAdapterInitialize,
   nativeAdapters,
   multiplayerDraftGetState,
@@ -126,7 +127,7 @@ const {
     adapter: null as unknown,
     gameId: null as string | null,
     gameState: null,
-    initGame: vi.fn(async (gameId: string, adapter: { initialize: () => Promise<void> }) => {
+    initGame: vi.fn(async (gameId: string, adapter: { initialize: () => Promise<void> }, ..._payload: unknown[]) => {
       gameStoreState.gameId = gameId;
       gameStoreState.adapter = adapter;
       await adapter.initialize();
@@ -175,6 +176,7 @@ const {
     gameStoreState,
     getSharedAdapter,
     loadActiveGame: vi.fn<() => Record<string, unknown> | null>(() => null),
+    loadDraftRun: vi.fn<() => Promise<Record<string, unknown> | null>>(async () => null),
     nativeAdapterInitialize,
     nativeAdapters,
     multiplayerDraftGetState,
@@ -313,7 +315,7 @@ vi.mock("../../pwa/updateMarker", () => ({
 }));
 
 vi.mock("../../services/quickDraftPersistence", () => ({
-  loadDraftRun: vi.fn(),
+  loadDraftRun,
 }));
 
 vi.mock("../../services/serverDetection", () => ({
@@ -328,6 +330,9 @@ import { clearPromptOverlayState } from "../../game/sessionCleanup";
 describe("GameProvider native AI routing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    sessionStorage.clear();
+    loadDraftRun.mockReset();
+    loadDraftRun.mockResolvedValue(null);
     useGameStore.subscribe.mockReset();
     useGameStore.subscribe.mockImplementation(() => () => {});
     clearActiveGame.mockReset();
@@ -360,6 +365,48 @@ describe("GameProvider native AI routing", () => {
     gameStoreState.adapter = null;
     gameStoreState.gameId = null;
     gameStoreState.gameState = null;
+  });
+
+  it.each([
+    ["original", ["Cube A", "Cube A", "Undealt sentinel"]],
+    ["upgraded legacy Cube", []],
+    ["ordinary legacy run", undefined],
+  ])("recovers the %s durable booster source after the handoff is gone", async (_label, pool) => {
+    const playerDeck = ["Drafted player card"];
+    const opponentDeck = ["Drafted opponent card"];
+    loadDraftRun.mockResolvedValue({
+      format: "run", results: [], usedBotSeats: [1], playerDeck, opponentDeck,
+      booster_pack_pool: pool,
+    });
+    render(<GameProvider gameId="recovered-cube" mode="ai" source="draft" draftId="cube-run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    expect(getSharedAdapter).toHaveBeenCalled();
+    expect(gameStoreState.initGame.mock.calls[0][2]).toMatchObject({
+      player: { main_deck: playerDeck }, opponent: { main_deck: opponentDeck },
+      booster_pack_pool: pool,
+    });
+    expect(loadDraftRun).toHaveBeenCalledWith("cube-run");
+    expect(ensureNativeEngine).not.toHaveBeenCalled();
+  });
+
+  it.each([7, 8])("consumes all %i Commander seats and cube metadata on the desktop local route", async (playerCount) => {
+    const deck = (seat: number) => ({ main_deck: [`Draft seat ${seat}`], sideboard: [], commander: [`Legend ${seat}`] });
+    const payload = {
+      player: deck(0), opponent: deck(1),
+      ai_decks: Array.from({ length: playerCount - 2 }, (_, i) => deck(i + 2)),
+      booster_pack_pool: ["Cube A", "Cube A", "Undealt sentinel"],
+    };
+    const key = `phase:draft-deck:commander-${playerCount}`;
+    sessionStorage.setItem(key, JSON.stringify(payload));
+    render(<GameProvider gameId={`commander-${playerCount}`} mode="ai" source="multiplayer" playerCount={playerCount}><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    expect(getSharedAdapter).toHaveBeenCalled();
+    expect(gameStoreState.initGame.mock.calls[0][2]).toEqual(payload);
+    expect(gameStoreState.initGame.mock.calls[0][4]).toBe(playerCount);
+    expect(sessionStorage.getItem(key)).toBeNull();
+    expect(nativeAdapterInitialize).not.toHaveBeenCalled();
+    expect(ensureNativeEngine).not.toHaveBeenCalled();
+    expect(loadDraftRun).not.toHaveBeenCalled();
   });
 
   it("falls back to WASM when release parity rejects the native engine", async () => {

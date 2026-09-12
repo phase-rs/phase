@@ -68,27 +68,79 @@ import { assignAvatarForSeat } from "../services/playerAvatars";
  * Prepare a host snapshot for the publicly retrievable P2P backup endpoint.
  *
  * IndexedDB keeps the full host snapshot and is the only durable location from
- * which a Chaos draft can resume. The HTTP backup is reachable by a derivable
- * host peer id, so it may retain the candidate intent but must never upload the
- * per-seat Chaos assignment matrix. The server repeats this redaction at its
- * trust boundary.
+ * which a host can resume. The HTTP backup is reachable by a derivable host
+ * peer id, so it is a public projection, never an authority. The server
+ * repeats this redaction at its trust boundary.
  */
-function redactChaosAssignmentsFromPublicBackup(
+function sanitizePublicBackup(
   snapshot: PersistedDraftHostSession,
 ): PersistedDraftHostSession {
-  if (snapshot.draftSessionJson === null) return snapshot;
+  // Never mutate the IndexedDB authority while preparing an upload. JSON is
+  // appropriate here because PersistedDraftHostSession is deliberately a JSON
+  // wire shape; unlike a shallow spread it also isolates nested poolInput and
+  // match launch records.
+  const publicSnapshot = JSON.parse(JSON.stringify(snapshot)) as PersistedDraftHostSession;
+  const rawPublicSnapshot = publicSnapshot as unknown as Record<string, unknown>;
+  delete rawPublicSnapshot.booster_pack_pool;
 
-  try {
-    const session: unknown = JSON.parse(snapshot.draftSessionJson);
-    if (!isJsonRecord(session) || !isJsonRecord(session.config)) return snapshot;
-    if (!redactChaosAssignmentsFromSource(session.config.source)) return snapshot;
+  redactPoolInputCubeList(publicSnapshot.poolInput);
+  redactMatchLaunchPools(rawPublicSnapshot.matchLaunches);
+  redactIntergameCommandLaunchPools(rawPublicSnapshot.intergameCommands);
+  redactDraftSessionPoolAndChaos(rawPublicSnapshot);
+  return publicSnapshot;
+}
 
-    return { ...snapshot, draftSessionJson: JSON.stringify(session) };
-  } catch {
-    // The server also redacts at the trust boundary. Keeping an unexpected
-    // opaque payload intact preserves the existing best-effort backup behavior.
-    return snapshot;
+function redactPoolInputCubeList(poolInput: unknown): void {
+  if (!isJsonRecord(poolInput) || !isJsonRecord(poolInput.data)) return;
+  delete poolInput.data.cube_list_text;
+}
+
+function redactMatchLaunchPools(matchLaunches: unknown): void {
+  if (!Array.isArray(matchLaunches)) return;
+  for (const matchLaunch of matchLaunches) {
+    if (!isJsonRecord(matchLaunch) || !isJsonRecord(matchLaunch.launch)) continue;
+    if (!isJsonRecord(matchLaunch.launch.deckPayload)) continue;
+    delete matchLaunch.launch.deckPayload.booster_pack_pool;
   }
+}
+
+/** Held Bo3 commands retain their original launch payload for recovery. That
+ * payload is just as public in an HTTP backup as an ordinary match launch. */
+function redactIntergameCommandLaunchPools(intergameCommands: unknown): void {
+  if (!Array.isArray(intergameCommands)) return;
+  for (const command of intergameCommands) {
+    if (!isJsonRecord(command) || !isJsonRecord(command.launchPayload)) continue;
+    if (!isJsonRecord(command.launchPayload.deckPayload)) continue;
+    delete command.launchPayload.deckPayload.booster_pack_pool;
+  }
+}
+
+function redactDraftSessionPoolAndChaos(snapshot: Record<string, unknown>): void {
+  const draftSessionJson = snapshot.draftSessionJson;
+  if (typeof draftSessionJson === "string") {
+    try {
+      const session: unknown = JSON.parse(draftSessionJson);
+      if (!isJsonRecord(session)) {
+        delete snapshot.draftSessionJson;
+        return;
+      }
+      redactDraftSessionObject(session);
+      snapshot.draftSessionJson = JSON.stringify(session);
+    } catch {
+      // An opaque string cannot be safely redacted, so it cannot appear in the
+      // public backup projection.
+      delete snapshot.draftSessionJson;
+    }
+  } else if (isJsonRecord(draftSessionJson)) {
+    redactDraftSessionObject(draftSessionJson);
+  } else if (draftSessionJson !== null) {
+    delete snapshot.draftSessionJson;
+  }
+}
+
+function redactDraftSessionObject(session: Record<string, unknown>): void {
+  delete session.booster_pack_pool;
+  if (isJsonRecord(session.config)) redactChaosAssignmentsFromSource(session.config.source);
 }
 
 function redactChaosAssignmentsFromSource(source: unknown): boolean {
@@ -2276,7 +2328,27 @@ export class P2PDraftHost {
       opponent,
       ai_decks: aiDecks,
       draft_set_codes: view.draft_set_codes,
+      booster_pack_pool: await this.adapter.boosterPackPoolForGame(),
     };
+  }
+
+  /** Host-only cube source for a launch assembled outside this coordinator. */
+  async boosterPackPoolForGame(): Promise<string[] | null> {
+    return this.adapter.boosterPackPoolForGame();
+  }
+
+  /**
+   * The booster source for a pairwise launch whose engine runs on
+   * `authoritySeat`. The original Cube multiset is private to this device: the
+   * host is always pod seat 0, and only its own draft session holds the source.
+   * Any other authority is a guest's device, which must never learn the undealt
+   * entries or their duplicate counts, so its launch names no source at all.
+   * That engine then opens ordinary set boosters, exactly as every draft game
+   * did before Cube sources existed; opening from the Cube there would need a
+   * host-side pack request the match authority can call without holding the pool.
+   */
+  private async boosterPackPoolForMatchAuthority(authoritySeat: number): Promise<string[] | null> {
+    return authoritySeat === 0 ? this.adapter.boosterPackPoolForGame() : null;
   }
 
   private async dispatchMatchLaunch(pairing: PairingView, view: DraftPlayerView): Promise<void> {
@@ -2302,6 +2374,7 @@ export class P2PDraftHost {
         player: humanDeck,
         opponent: botDeck,
         ai_decks: [],
+        booster_pack_pool: await this.boosterPackPoolForMatchAuthority(humanSeat),
       };
 
       await this.sendMatchLaunch(humanSeat, {
@@ -2330,6 +2403,7 @@ export class P2PDraftHost {
       player: hostDeck,
       opponent: guestDeck,
       ai_decks: [],
+      booster_pack_pool: await this.boosterPackPoolForMatchAuthority(matchHostSeat),
     };
 
     await this.sendMatchLaunch(matchHostSeat, {
@@ -3082,7 +3156,7 @@ export class P2PDraftHost {
   private async uploadBackupSnapshot(snapshot: PersistedDraftHostSession): Promise<void> {
     if (!this.backupEndpoint || !this.draftCode) return;
     try {
-      const publicSnapshot = redactChaosAssignmentsFromPublicBackup(snapshot);
+      const publicSnapshot = sanitizePublicBackup(snapshot);
       await fetch(`${this.backupEndpoint}/p2p-draft-backup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

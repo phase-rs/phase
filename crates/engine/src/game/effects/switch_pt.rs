@@ -25,9 +25,7 @@ pub fn resolve(
     // resolves to the source object regardless of `ability.targets` (issue #323
     // class — chained `SwitchPT { target: SelfRef }` sub-abilities would
     // otherwise inherit the parent's targets via chain propagation).
-    let effective_targets =
-        crate::game::targeting::resolved_targets(ability, &target_filter, state);
-    let ids = super::effect_object_targets(&target_filter, &effective_targets);
+    let ids = super::resolved_effect_object_ids(state, ability, &target_filter);
 
     for obj_id in ids {
         // CR 608.2b: If a target has left the battlefield, skip it.

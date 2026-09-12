@@ -141,4 +141,57 @@ describe("gameStateExport", () => {
     );
     expect(exportPersistenceState).not.toHaveBeenCalled();
   });
+
+  it("falls back to an anchor download when the save picker fails", async () => {
+    // Chrome exposes showSaveFilePicker but the picker path can fail there;
+    // the export must then degrade to the plain download Firefox uses.
+    Object.defineProperty(window, "showSaveFilePicker", {
+      configurable: true,
+      value: vi.fn(async () => {
+        throw new DOMException("The picker is unavailable", "SecurityError");
+      }),
+    });
+    let downloadedBlob: Blob | null = null;
+    vi.spyOn(URL, "createObjectURL").mockImplementation((blob) => {
+      downloadedBlob = blob as Blob;
+      return "blob:mock-url";
+    });
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const trustedState = JSON.stringify({ state: "trusted-envelope" });
+    const adapter = buildEngineAdapterMock(undefined, {
+      exportPersistenceState: vi.fn().mockResolvedValue(trustedState),
+    });
+    useGameStore.setState({ gameMode: "ai" });
+
+    const filename = await exportAuthoritativeGameStateZip(adapter);
+
+    expect(filename).toMatch(/^authoritative-game-state-.*\.zip$/);
+    expect(clickSpy).toHaveBeenCalledOnce();
+    expect(downloadedBlob).not.toBeNull();
+    const entries = unzipSync(new Uint8Array(await downloadedBlob!.arrayBuffer()));
+    const [entryName] = Object.keys(entries);
+    expect(entryName).toMatch(/^authoritative-game-state-.*\.json$/);
+    expect(strFromU8(entries[entryName])).toBe(trustedState);
+  });
+
+  it("does not download when the user cancels the save picker", async () => {
+    Object.defineProperty(window, "showSaveFilePicker", {
+      configurable: true,
+      value: vi.fn(async () => {
+        throw new DOMException("The user aborted a request", "AbortError");
+      }),
+    });
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const adapter = buildEngineAdapterMock(undefined, {
+      exportPersistenceState: vi.fn().mockResolvedValue("{}"),
+    });
+    useGameStore.setState({ gameMode: "ai" });
+
+    const err = await exportAuthoritativeGameStateZip(adapter).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(DOMException);
+    expect((err as DOMException).name).toBe("AbortError");
+    expect(clickSpy).not.toHaveBeenCalled();
+  });
 });

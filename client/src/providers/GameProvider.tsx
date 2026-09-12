@@ -1546,8 +1546,8 @@ export function GameProvider({
       }
 
       // No saved state — start a new game.
-      // Draft mode: deck data was pre-built by DraftPage and stored in
-      // sessionStorage. Use it directly instead of loadActiveDeck + buildDeckList.
+      // Quick drafts and local Commander pods publish their full engine payload
+      // in sessionStorage, including opaque original cube metadata.
       const draftDeckKey = `phase:draft-deck:${gameId}`;
       const draftDeckRaw = sessionStorage.getItem(draftDeckKey);
       if (draftDeckRaw) {
@@ -1556,14 +1556,9 @@ export function GameProvider({
           player: ExpandedDeck;
           opponent: ExpandedDeck;
           ai_decks: ExpandedDeck[];
-          // CR 903.13f(3): every set the draft contained, passed through
-          // opaquely to the engine. NO pod path writes it here any more — the
-          // Commander launch carries the set list straight into its host
-          // adapter, and the only surviving writer of this sessionStorage key
-          // is quick-draft persistence, whose payload has no such field. Kept
-          // because the type describes what this reader accepts, not what any
-          // producer currently sends.
+          // Every set the draft contained, passed opaquely to the engine.
           draft_set_codes?: string[] | null;
+          booster_pack_pool?: string[] | null;
         };
         try {
           await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
@@ -1587,6 +1582,7 @@ export function GameProvider({
         const run = await loadDraftRun(draftId);
         if (run) {
           const deckList = {
+            booster_pack_pool: run.booster_pack_pool,
             player: {
               main_deck: run.playerDeck,
               sideboard: [] as string[],

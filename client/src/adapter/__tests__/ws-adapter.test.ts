@@ -897,6 +897,7 @@ describe("WebSocketAdapter", () => {
             playerCount: 4,
             aiSeats: [],
             formatConfig,
+            boosterPackPool: ["Cube Card", "Cube Card", "Undealt sentinel"],
           },
         },
       );
@@ -907,6 +908,7 @@ describe("WebSocketAdapter", () => {
       const frame = JSON.parse(calls[calls.length - 1]![0] as string);
       expect(frame.type).toBe("CreateGameWithSettings");
       expect(frame.data.format_config).toEqual(formatConfig);
+      expect(frame.data.booster_pack_pool).toEqual(["Cube Card", "Cube Card", "Undealt sentinel"]);
 
       nativeSocket.dispatchSynthetic(
         "message",

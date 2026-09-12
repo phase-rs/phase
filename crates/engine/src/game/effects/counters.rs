@@ -2217,15 +2217,16 @@ fn resolve_defined_or_targets(
     // +1/+1 counter on the creature you control", index 0). The counter node's
     // local `ability.targets` may have been replaced with the most-recent parent
     // slot by chain propagation, so resolve against the flattened chain root
-    // (single authority in `targeting`), then keep only the object at `index`.
+    // through the single slot authority in `targeting`.
     //
-    // CR 400.7 + CR 603.7c: deliberately NOT pin-filtered — see the standing
+    // CR 608.2b + CR 400.7 + CR 603.7c: the authority indexes the declared
+    // slots first and only then drops the selected referent when it was an
+    // illegal target at resolution or its pin went stale, so no later slot is
+    // renumbered. Never pre-filter the slot list itself — see the standing
     // constraint recorded at the `ParentTargetSlot` arm in
-    // `targeting::resolved_object_ids_for_filter_with_context`. Slot numbering
-    // is declared, not live, so filtering here would renumber later slots. Do
-    // not "complete the pattern" by adding a pin check.
+    // `targeting::resolved_object_ids_for_filter_with_context`.
     if let Some(TargetFilter::ParentTargetSlot { index }) = target_spec {
-        return crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+        return crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
             .into_iter()
             .filter_map(|target| match target {
                 TargetRef::Object(id) => Some(id),

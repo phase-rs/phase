@@ -340,6 +340,36 @@ impl StructuralRules {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LegalityRules {
     pub legal_sets: Option<Vec<SetCode>>,
+    /// Cards legal in this format REGARDLESS of `legal_sets`, named
+    /// individually — unioned with the set-code check, never subtracted from
+    /// it.
+    ///
+    /// Exists because real rulesets name cards, not only sets. Both Eternal
+    /// Central Old School lists declare specific promos legal (Arena, Sewers of
+    /// Estark, Nalathni Dragon; 95 adds Giant Badger, Windseeker Centaur, Mana
+    /// Crypt), and set-code granularity cannot express that: FIVE of those six
+    /// share one 5-card set (`PHPR` — Arena, Sewers of Estark, Giant Badger,
+    /// Windseeker Centaur, Mana Crypt; only Nalathni Dragon is elsewhere, alone
+    /// in `PDRC`). Two of those five are legal in 93/94 and three are not, so
+    /// admitting `PHPR` would admit cards 93/94 forbids while omitting it
+    /// rejects cards it allows. Neither is the ruleset.
+    ///
+    /// Additive only, and deliberately so. It widens the pool; it never
+    /// narrows it, and it never overrides `banned`/`restricted`, which are
+    /// applied afterwards. Old School 95 depends on exactly that ordering: it
+    /// names Mana Crypt here AND restricts it, so the card becomes legal at one
+    /// copy rather than legal outright.
+    ///
+    /// Not gated by `IMPLEMENTED_LEGACY_AXES`, for the same reason
+    /// `legal_sets`/`banned`/`restricted` are not: this is declarative
+    /// card-pool data the evaluator applies in full, not a promise of runtime
+    /// behavior that might be unbuilt. See `passes_legacy_axis_gate`.
+    ///
+    /// `#[serde(default)]` because it postdates the Axis-A save path; an
+    /// already-persisted definition carries no `legal_cards` key, and an empty
+    /// list means exactly what such a save meant.
+    #[serde(default)]
+    pub legal_cards: Vec<CardName>,
     pub banned: Vec<CardName>,
     pub restricted: Vec<CardName>,
     pub legacy: LegacyRuleSet,
@@ -483,7 +513,7 @@ impl CustomFormatDef {
     /// method would silently save something the host never configured.
     ///
     /// `legality` is left at defaults (`legal_sets: None`, empty
-    /// banned/restricted, default `LegacyRuleSet`): a lobby save models no
+    /// legal_cards/banned/restricted, default `LegacyRuleSet`): a lobby save models no
     /// published paper ruleset, so it has no card-pool or era intent to
     /// declare. `reprint_policy: None` / `printing_fidelity: NotApplicable`
     /// for the same reason.
@@ -503,7 +533,7 @@ impl CustomFormatDef {
         config: &FormatConfig,
     ) -> Result<Self, FormatConfigError> {
         // Re-saving an already-custom format is out of scope for Axis A: the
-        // source's `legality` (legal_sets/banned/restricted/legacy) has no
+        // source's `legality` (legal_sets/legal_cards/banned/restricted/legacy) has no
         // home in this conversion, which always writes defaults, so the save
         // would silently drop it. `from_source_format` below would reject
         // `Custom` too, but only when the command-zone branch is reached —
@@ -512,8 +542,8 @@ impl CustomFormatDef {
         if let GameFormat::Custom(id) = config.format {
             return Err(FormatConfigError(format!(
                 "from_lobby_config cannot save Custom({}) as a new custom format — the source's \
-                 own legality rules (legal_sets/banned/restricted/legacy) have no representation \
-                 in a lobby save and would be silently dropped",
+                 own legality rules (legal_sets/legal_cards/banned/restricted/legacy) have no \
+                 representation in a lobby save and would be silently dropped",
                 id.0
             )));
         }
@@ -592,6 +622,7 @@ impl CustomFormatDef {
                 structural,
                 legality: LegalityRules {
                     legal_sets: None,
+                    legal_cards: Vec::new(),
                     banned: Vec::new(),
                     restricted: Vec::new(),
                     legacy: LegacyRuleSet::default(),
@@ -644,7 +675,12 @@ pub enum LegacyAxis {
 
 /// Axes of `LegacyRuleSet` the engine actually enforces at runtime. Empty in
 /// Phase 1a; later phases populate this as each axis's behavior is wired in.
-pub const IMPLEMENTED_LEGACY_AXES: &[LegacyAxis] = &[];
+///
+/// `ManaBurn` joined in Phase 2b, which is what makes the Eternal Central Old
+/// School presets selectable — they were listed in `custom_format_registry`
+/// and rejected here from the moment they existed, and this one entry is the
+/// whole of what changed for them. See `game::mana_burn`.
+pub const IMPLEMENTED_LEGACY_AXES: &[LegacyAxis] = &[LegacyAxis::ManaBurn];
 
 fn declared_legacy_axes(rules: &LegacyRuleSet) -> Vec<LegacyAxis> {
     let mut axes = Vec::new();
@@ -682,8 +718,8 @@ fn declared_legacy_axes(rules: &LegacyRuleSet) -> Vec<LegacyAxis> {
 /// deserialized custom format that declares an unimplemented axis would
 /// otherwise get behavior the engine silently does not enforce.
 ///
-/// Deliberately asymmetric with `legal_sets`/`banned`/`restricted`, which are
-/// NOT gated: those are declarative card-pool data the evaluator either
+/// Deliberately asymmetric with `legal_sets`/`legal_cards`/`banned`/`restricted`,
+/// which are NOT gated: those are declarative card-pool data the evaluator either
 /// applies in full or not at all, so there is no partial-implementation risk.
 /// A `LegacyRuleSet` axis instead promises runtime behavior (mana burn, the
 /// legend rule's scope, Wish reach, an ante zone) that may not be built yet,
@@ -795,6 +831,10 @@ pub fn swedish_old_school() -> CustomFormatDef {
                         .map(|code| SetCode(code.to_string()))
                         .collect(),
                 ),
+                // The Swedish source names no card outside its set list — the
+                // promo carve-outs are an Eternal Central thing. An empty list
+                // is the honest value, not an unfilled one.
+                legal_cards: Vec::new(),
                 banned: Vec::new(),
                 restricted: [
                     "Ancestral Recall",
@@ -855,24 +895,16 @@ pub const OLD_SCHOOL_95_ID: CustomFormatId = CustomFormatId(3);
 /// Both Eternal Central Old School rulesets define legality partly by
 /// PRINTING — "all non-foil cards from the sets above, that were reprinted in
 /// any language with the original frame and original art" — while this engine
-/// knows only set-code membership (`printed_in_any_set`). Two concrete
-/// divergences, both verified against Scryfall at implementation time rather
-/// than asserted:
+/// knows only set-code membership (`printed_in_any_set`). So frame/foil is not
+/// enforced: a foil or modern-frame copy of a legal card passes here and would
+/// not pass in paper. Over-permissive.
 ///
-/// - **Frame/foil is not enforced.** A foil or modern-frame copy of a legal
-///   card passes here and would not pass in paper. Over-permissive.
-/// - **The promo carve-outs are not included.** Both rulesets name specific
-///   legal promos — Arena, Sewers of Estark and Nalathni Dragon for 93/94,
-///   plus Giant Badger, Windseeker Centaur and Mana Crypt for 95 — and their
-///   sets are NOT in `legal_sets`, so those cards are rejected. Under-
-///   permissive, and not fixable at set-code granularity for 93/94: four of
-///   those six live in `PHPR` (HarperPrism Book Promos, 5 cards), of which
-///   only Arena and Sewers of Estark are 93/94-legal, so admitting the set
-///   would admit three cards the format does not allow — one of them Mana
-///   Crypt. See this phase's PR discussion.
+/// The rulesets' named promo carve-outs are not a divergence: both presets name
+/// them in [`LegalityRules::legal_cards`], whose doc records why set-code
+/// granularity could not express them.
 const SET_CODE_APPROXIMATION_DISCLOSURE: &str =
-    "Legality is approximated at the set-code level; original-printing frame/foil and the \
-     ruleset's named promo cards are not enforced.";
+    "Legality is approximated at the set-code level; original-printing frame/foil is not \
+     enforced.";
 
 fn set_codes(codes: &[&str]) -> Vec<SetCode> {
     codes.iter().map(|code| SetCode(code.to_string())).collect()
@@ -897,10 +929,10 @@ fn card_names(names: &[&str]) -> Vec<CardName> {
 /// kept because the source states them, and because they must survive a future
 /// format that legitimately plays for ante.
 ///
-/// **Not registerable yet:** `mana_burn: Obsolete` is a `LegacyRuleSet` axis
-/// the engine does not implement, so `custom_format_registry`'s legacy-axis
-/// gate filters this out until Phase 2b lands. That is the gate working as
-/// designed, not a defect — see the registry's own doc comment.
+/// **Selectable as of Phase 2b.** `mana_burn: Obsolete` held this preset out
+/// of the registry from the moment it existed; adding `LegacyAxis::ManaBurn`
+/// to [`IMPLEMENTED_LEGACY_AXES`] is the entire change that released it — this
+/// constructor was not touched. See `game::mana_burn`.
 pub fn old_school_93_94() -> CustomFormatDef {
     CustomFormatDef {
         rules: CustomFormatRules {
@@ -917,6 +949,10 @@ pub fn old_school_93_94() -> CustomFormatDef {
                 legal_sets: Some(set_codes(&[
                     "LEA", "LEB", "2ED", "CED", "CEI", "ARN", "ATQ", "3ED", "LEG", "DRK", "FEM",
                 ])),
+                // The source names these three promos legal outright. Their
+                // sets are not in `legal_sets` and cannot be: `PHPR` holds two
+                // of them plus three cards this format forbids.
+                legal_cards: card_names(&["Arena", "Sewers of Estark", "Nalathni Dragon"]),
                 banned: card_names(&[
                     "Bronze Tablet",
                     "Contract from Below",
@@ -984,7 +1020,7 @@ pub fn old_school_93_94() -> CustomFormatDef {
 /// remaining CR 407.3 ante cards, which this era's pool newly contains.
 ///
 /// Everything else is inherited verbatim, including `mana_burn: Obsolete`, so
-/// this preset is withheld by the same legacy-axis gate until Phase 2b.
+/// this preset became selectable alongside its base in Phase 2b.
 pub fn old_school_95() -> CustomFormatDef {
     let mut def = old_school_93_94();
 
@@ -1001,6 +1037,16 @@ pub fn old_school_95() -> CustomFormatDef {
         .legal_sets
         .get_or_insert_with(Vec::new)
         .extend(set_codes(&["4ED", "ICE", "CHR", "REN", "HML"]));
+    // The three promos 95 adds to 93/94's own three. Mana Crypt is named here
+    // AND restricted below, which is the whole reason the two lists are applied
+    // in that order: without the entry its only era printing (`PHPR`) is in no
+    // legal set, so the restriction below would name a card that could never
+    // reach the deck — a dead list entry rather than a one-copy limit.
+    def.rules.legality.legal_cards.extend(card_names(&[
+        "Giant Badger",
+        "Windseeker Centaur",
+        "Mana Crypt",
+    ]));
     def.rules
         .legality
         .restricted
@@ -1041,13 +1087,12 @@ pub fn bundled_presets() -> Vec<CustomFormatDef> {
 /// Authoritative list of bundled custom-format presets, filtered through
 /// both registration gates.
 ///
-/// **Still resolves to empty, and every preset here is withheld for a stated
-/// reason rather than by omission.** The two Eternal Central presets are
-/// listed and then REJECTED by `passes_legacy_axis_gate`, because both declare
-/// `mana_burn: Obsolete` and the engine implements no mana burn yet; Phase 2b
-/// adds `LegacyAxis::ManaBurn` to `IMPLEMENTED_LEGACY_AXES` and they become
-/// selectable with no edit here. Listing them is the point — until now the
-/// gates filtered an empty vector and could not fail.
+/// **As of Phase 2b this returns the two Eternal Central presets** — the first
+/// custom formats the engine actually offers. They were listed here from the
+/// start and rejected by `passes_legacy_axis_gate` for declaring
+/// `mana_burn: Obsolete`; adding `LegacyAxis::ManaBurn` to
+/// [`IMPLEMENTED_LEGACY_AXES`] released both without touching either
+/// constructor, which is exactly what listing-then-filtering was for.
 ///
 /// [`swedish_old_school`] is the exception, and is deliberately NOT in this
 /// list: it PASSES both gates, so listing it would register it, and CONTEXT.md

@@ -2366,7 +2366,7 @@ pub enum ChosenAttribute {
     /// cannot be confused at a read site, and so `game::visibility` redacts on
     /// the type rather than on a condition it might forget to check.
     RevealedNumber(u32),
-    /// Stores the chosen opponent/player ID (CR 800.4a).
+    /// Stores the chosen opponent/player ID.
     Player(PlayerId),
     /// Stores two chosen colors as a pair.
     TwoColors([ManaColor; 2]),
@@ -2602,7 +2602,6 @@ impl ChoiceValue {
                     .then_some(Self::CardPredicate(predicate))
             }
             ChoiceType::LandType => Some(Self::LandType(value.to_string())),
-            // CR 800.4a: Parse player ID from string.
             ChoiceType::Opponent { .. } | ChoiceType::Player { .. } => value
                 .parse::<u8>()
                 .ok()
@@ -19834,7 +19833,7 @@ impl Effect {
     /// for the non-targeted population tier. Their targeted/anaphoric recipients
     /// are resolved on separate paths: `MultiplyCounter` through
     /// `counters::resolve_defined_or_targets`, `Double { Counters }` through
-    /// `effects::double::resolve_object_targets` → `targeting::resolved_targets`.
+    /// `effects::resolved_effect_object_ids` → `targeting::resolved_targets`.
     /// Single authority for that pair so the swallow detector and the
     /// multi-target fixup cannot drift apart.
     pub(crate) fn is_counter_multiplication(&self) -> bool {
@@ -23517,8 +23516,12 @@ pub struct AbilityDefinition {
     /// any-opponent permission. Requires `optional: true`; prompts use APNAP order.
     pub optional_for: Option<OpponentMayScope>,
     /// Variable-count targeting: min/max targets the player can choose.
-    /// When present, resolution enters MultiTargetSelection instead of immediate resolve.
-    /// CR 601.2c + CR 115.1d.
+    /// When present, target choice emits one `TargetSelectionSlot` per allowed
+    /// target (up to the resolved max), with slots at or above the resolved min
+    /// marked optional (CR 115.6: a targeted spell or ability may allow zero
+    /// targets). The slots surface via `WaitingFor::TargetSelection` for spells
+    /// (CR 601.2c) and activated abilities (CR 602.2b), or via
+    /// `WaitingFor::TriggerTargetSelection` for triggered abilities (CR 603.3d).
     pub multi_target: Option<MultiTargetSpec>,
     /// CR 115.1 + CR 601.2c: Additional legality constraints across selected targets.
     pub target_constraints: Vec<TargetSelectionConstraint>,
@@ -24768,7 +24771,7 @@ pub enum AbilityCondition {
         use_lki: bool,
         /// CR 608.2c: When `Some(n)`, the anaphoric subject tests the object in
         /// declared chain slot `n` (resolved from the flattened root chain via
-        /// `resolve_parent_slot_from_root`) rather than this node's local
+        /// `resolve_live_parent_slot_from_root`) rather than this node's local
         /// most-recent target. `None` (default) preserves the legacy
         /// first-object / `TriggeringSource` behavior. Set by the two-target
         /// counter-chain rewrite in `lower_effect_chain_ir` so a condition on the
@@ -28396,10 +28399,11 @@ pub enum CombatDamageScope {
 /// corpus by `scripts/draw_replacement_census.py`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DrawReplacementScope {
-    /// Modifies the draw *instruction*'s count before any individual draw happens
-    /// (CR 121.2a). Quantum Riddler — "if you would draw one or more cards, you
-    /// draw that many cards plus one instead" — is the only card in the pool that
-    /// does this.
+    /// Applies to the draw *instruction* before any individual draw happens
+    /// (CR 121.2a): it modifies the instruction's count (Quantum Riddler — "if you
+    /// would draw one or more cards, you draw that many cards plus one instead") or,
+    /// behind a count-form threshold, replaces it (Alms Collector — "If an opponent
+    /// would draw two or more cards, instead you and that player each draw a card").
     InstructionCount,
     /// Replaces or prevents a single individual card draw (CR 121.6b). Dredge,
     /// Notion Thief, Hullbreacher, and the runtime "you can't draw" shields.
@@ -29880,13 +29884,13 @@ impl CopyCountStatus {
 }
 
 /// CR 608.2c: Distinguishes WHY an immediately-chained `ParentTarget` child
-/// ability was handed off with nothing to act on. The three sources are
-/// mutually exclusive per hand-off (only one effect can be the immediate
-/// parent of a given child). Downstream consumers inspect the typed reason only
-/// when their exact `ParentTarget` operation needs to distinguish a missing
-/// referent from an ordinary empty target list. These used to be three parallel
-/// boolean fields on `ResolvedAbility` / `GameState` before being consolidated
-/// here (see the PR #5834/#5836 review that requested this).
+/// ability was handed off with nothing to act on. The sources are mutually
+/// exclusive per hand-off (only one effect can be the immediate parent of a
+/// given child). Downstream consumers inspect the typed reason only when their
+/// exact `ParentTarget` operation needs to distinguish a missing referent from
+/// an ordinary empty target list. The first three used to be parallel boolean
+/// fields on `ResolvedAbility` / `GameState` before being consolidated here
+/// (see the PR #5834/#5836 review that requested this).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParentTargetMissingReason {
     /// CR 401.5 (issue #1365): A `Dig` looked at an empty library. Consulted
@@ -29915,6 +29919,15 @@ pub enum ParentTargetMissingReason {
     /// objects to a hard no-op (CR 608.2c: nothing to choose) instead of the
     /// whole-hand fallback.
     RevealHandChoice,
+    /// CR 609.3 + CR 608.2c (issue #8798, Tainted Pact): an `ExileTop` found
+    /// an empty library, so no card was exiled and nothing was bound as
+    /// "that card" for the chained `ParentTarget` child. Consulted by the
+    /// `ParentTarget` `ChangeZone` no-op guard (`change_zone.rs`) and by the
+    /// optional-effect feasibility probe (`optional_effect_is_infeasible`):
+    /// "you may put that card into your hand" with no exiled card is neither
+    /// an offerable option (CR 608.2d) nor a license for the generic
+    /// source fallback, which would move the resolving spell itself.
+    ExileTop,
 }
 
 /// CR 608.2c: what a chain split — a `player_scope` fan-out, or a multi-target
@@ -30130,6 +30143,18 @@ pub struct ResolvedAbility {
     /// whose keyed pins are reserved for delayed-trigger referents.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_target_incarnations: Vec<ObjectIncarnationRef>,
+    /// CR 608.2b: Declared target slots — numbered as
+    /// `ability_utils::flatten_targets_in_chain` numbers this chain — whose
+    /// target failed the legality check made as the chain began to resolve.
+    /// Stamped only on the resolution carrier's root by `stack::resolve_top`
+    /// (overwritten on every resolution, empty when nothing was checked) and
+    /// read only from the carrier by
+    /// `targeting::resolve_live_parent_slot_from_root`, which drops those
+    /// slots' targets. A clone of the carrier (a spell copying
+    /// itself, CR 707.10) carries the stamp unread until its own resolution
+    /// overwrites it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub illegal_target_slots: Vec<usize>,
     pub controller: PlayerId,
     /// CR 109.5: The controller of the spell or ability before any
     /// resolution-time player-scope iteration rebinds the acting player.
@@ -30523,6 +30548,7 @@ impl ResolvedAbility {
             force_block_attacker: None,
             target_incarnations: Vec::new(),
             selected_target_incarnations: Vec::new(),
+            illegal_target_slots: Vec::new(),
             modal: None,
             mode_abilities: Vec::new(),
             parent_target_missing_reason: None,
@@ -33976,6 +34002,34 @@ mod tests {
         );
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
+        assert_eq!(ability, deserialized);
+    }
+
+    /// CR 608.2b: a resolution carrier's illegal-slot stamp survives a
+    /// persist/restore round trip, and an unstamped ability omits the field.
+    #[test]
+    fn resolved_ability_illegal_target_slots_roundtrip() {
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![
+                TargetRef::Object(ObjectId(10)),
+                TargetRef::Object(ObjectId(11)),
+            ],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let unstamped = serde_json::to_string(&ability).unwrap();
+        assert!(
+            !unstamped.contains("illegal_target_slots"),
+            "an empty stamp is not serialized"
+        );
+
+        ability.illegal_target_slots = vec![1];
+        let json = serde_json::to_string(&ability).unwrap();
+        let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.illegal_target_slots, vec![1]);
         assert_eq!(ability, deserialized);
     }
 

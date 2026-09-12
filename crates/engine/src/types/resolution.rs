@@ -5261,13 +5261,14 @@ mod tests {
     };
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
-        CastingVariant, CopyChosenStage, DrainStatus, DrawSequenceOrigin, GameState,
-        PendingBatchDeliveries, PendingChooseOneOf, PendingCopyTokenResolution,
+        CastingVariant, CopyChosenStage, DrainStatus, DrawSequenceOrigin, ExiledStopInput,
+        GameState, PendingBatchDeliveries, PendingChooseOneOf, PendingCopyTokenResolution,
         PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
         PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingPerCategoryZoneChoice,
         PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil,
         PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
-        ResidentDrainPolicy, StackEntry, StackEntryKind, ZoneDeliveryExileTracking,
+        RepeatUntilStopWitness, ResidentDrainPolicy, StackEntry, StackEntryKind,
+        ZoneDeliveryExileTracking,
     };
 
     use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
@@ -7009,6 +7010,67 @@ mod tests {
         assert_reserializes_current_only(mutate);
     }
 
+    /// CR 104.4b: save-compat for the `stop_progress` progress witness.
+    ///
+    /// A v1 `RepeatUntil` payload predates the field entirely, so it must
+    /// deserialize to `None` — "no baseline recorded", which can never cause a
+    /// stop and costs at most one extra iteration, the safe direction to fail.
+    /// Mirrors the `forwarded_result_context` discipline in `types/ability.rs`.
+    #[test]
+    fn v1_repeat_until_payload_without_stop_progress_restores_as_no_baseline() {
+        let mut repeat_ability = resolved_draw(212);
+        repeat_ability.repeat_until = Some(RepeatContinuation::UntilStopConditions {
+            stop_on_put_to_hand: true,
+            stop_on_duplicate_exiled_names: true,
+        });
+
+        let legacy = serde_json::json!({
+            "ability": serde_json::to_value(&repeat_ability).expect("ability serializes"),
+        });
+        let restored: PendingRepeatUntil =
+            serde_json::from_value(legacy).expect("v1 payload without stop_progress deserializes");
+        assert_eq!(
+            restored.stop_progress, None,
+            "a legacy payload carries no baseline, and `None` can never stop the repeat"
+        );
+        // Positive reach-guard: the payload really parsed — the frame's ability
+        // survived intact, so `stop_progress == None` is not a parse failure.
+        assert_eq!(
+            *restored.ability, repeat_ability,
+            "the legacy fixture must deserialize its ability, proving it parsed at all"
+        );
+
+        // Both ledger vecs carry a row, and DIFFERENT rows, so a round trip
+        // that dropped or conflated either one is visible.
+        let witness = RepeatUntilStopWitness {
+            exiled_this_turn: vec![ExiledStopInput {
+                object_id: ObjectId(212),
+                zone: Zone::Exile,
+                controller: PlayerId(0),
+                name: "Exiled This Way".to_string(),
+            }],
+            linked: vec![ExiledStopInput {
+                object_id: ObjectId(213),
+                zone: Zone::Hand,
+                controller: PlayerId(1),
+                name: "Linked This Way".to_string(),
+            }],
+        };
+        let frame = PendingRepeatUntil {
+            ability: Box::new(repeat_ability),
+            stop_progress: Some(witness.clone()),
+        };
+        let round_tripped: PendingRepeatUntil =
+            serde_json::from_str(&serde_json::to_string(&frame).expect("frame serializes"))
+                .expect("frame round-trips");
+        assert_eq!(
+            round_tripped.stop_progress,
+            Some(witness),
+            "a recorded baseline must survive a save/restore round trip"
+        );
+        assert_eq!(round_tripped, frame);
+    }
+
     #[test]
     fn v1_after_child_fixtures_resume_on_the_real_priority_drain() {
         let continuation = GameState::new_two_player(110);
@@ -7044,6 +7106,7 @@ mod tests {
             repeat_until,
             PendingRepeatUntil {
                 ability: Box::new(repeat_ability),
+                stop_progress: None,
             },
         ));
         assert!(matches!(

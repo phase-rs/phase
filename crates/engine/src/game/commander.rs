@@ -150,6 +150,13 @@ pub fn commander_eligible_for_zone_return(state: &GameState) -> Option<(ObjectId
         if state.commander_declined_zone_return.contains(&obj.id) {
             return None;
         }
+        // CR 903.9a + CR 800.4a: the return is the OWNER's choice, and a player who has left
+        // the game is no longer one of CR 102.1's people in the game — their owned objects
+        // left with them and they no longer receive priority to answer. Offering it would park
+        // the SBA loop on a choice nobody can make.
+        if !crate::game::players::is_alive(state, obj.owner) {
+            return None;
+        }
         Some((obj.id, obj.owner, obj.zone))
     })
 }
@@ -571,6 +578,112 @@ mod tests {
 
         assert!(commander_eligible_for_zone_return(&state).is_none());
         let _ = obj_id; // suppress unused warning
+    }
+
+    /// CR 903.9a + CR 800.4a: the command-zone return is a choice, and a player who has left
+    /// the game makes none. The pair differs in owner liveness alone, so the refusal is
+    /// attributable to that and not to a board that produces no choice at all.
+    #[test]
+    fn zone_return_eligibility_ends_at_the_games_edge() {
+        let mut state = setup_commander_game();
+        let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(1), "Kaalia", vec![]);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Exile, &mut events);
+
+        assert_eq!(
+            commander_eligible_for_zone_return(&state),
+            Some((cmd_id, PlayerId(1), Zone::Exile)),
+            "control: with its owner in the game the exiled commander is eligible"
+        );
+
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(1))
+            .expect("seat exists")
+            .is_eliminated = true;
+        assert_eq!(
+            commander_eligible_for_zone_return(&state),
+            None,
+            "CR 102.1: the owner is no longer one of the people in the game"
+        );
+    }
+
+    /// CR 903.9a: the liveness conjunct is added BESIDE the already-declined filter, so a
+    /// living owner who declined this cycle is still refused.
+    #[test]
+    fn a_living_owner_who_declined_is_still_refused() {
+        let mut state = setup_commander_game();
+        let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(1), "Kaalia", vec![]);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Exile, &mut events);
+        assert!(
+            commander_eligible_for_zone_return(&state).is_some(),
+            "control: the same board before the decline is eligible"
+        );
+
+        state.commander_declined_zone_return.insert(cmd_id);
+        assert!(
+            crate::game::players::is_alive(&state, PlayerId(1)),
+            "reach-guard: the owner must be ALIVE, else the liveness conjunct answers first \
+             and this row stops testing the declined filter"
+        );
+        assert_eq!(commander_eligible_for_zone_return(&state), None);
+    }
+
+    /// CR 903.9a + CR 800.4a at the SBA pause the predicate feeds: a seat eliminated while its
+    /// commander sits in exile is not asked to choose. Both halves run through
+    /// `check_state_based_actions`, the production entry, on the same board shape and the same
+    /// commander.
+    #[test]
+    fn a_departed_seat_is_not_parked_on_a_commander_zone_choice() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::types::game_state::WaitingFor;
+
+        let build = || {
+            let mut state = setup_commander_game();
+            let cmd_id =
+                create_commander_in_command_zone(&mut state, PlayerId(1), "Kaalia", vec![]);
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Exile, &mut events);
+            (state, cmd_id, events)
+        };
+
+        let (mut alive, cmd_id, mut events) = build();
+        check_state_based_actions(&mut alive, &mut events);
+        assert!(
+            matches!(
+                alive.waiting_for,
+                WaitingFor::CommanderZoneChoice {
+                    player: PlayerId(1),
+                    commander_id,
+                    current_zone: Zone::Exile,
+                } if commander_id == cmd_id
+            ),
+            "control: with its owner in the game this board DOES park the choice; got {:?}",
+            alive.waiting_for
+        );
+
+        let (mut departed, cmd_id, mut events) = build();
+        crate::game::elimination::eliminate_player(&mut departed, PlayerId(1), &mut events);
+        assert_eq!(
+            departed.objects[&cmd_id].zone,
+            Zone::Exile,
+            "reach-guard: CR 800.4a leaves the owned commander in exile, so every conjunct \
+             except liveness still admits it"
+        );
+        assert!(
+            departed.players.iter().filter(|p| !p.is_eliminated).count() >= 2,
+            "reach-guard: the game must continue past the departure, or the SBA loop ends \
+             before it reaches the CR 903.9a check"
+        );
+
+        check_state_based_actions(&mut departed, &mut events);
+        assert!(
+            !matches!(departed.waiting_for, WaitingFor::CommanderZoneChoice { .. }),
+            "CR 800.4a: the departed owner receives no priority and makes no choice; got {:?}",
+            departed.waiting_for
+        );
     }
 
     #[test]

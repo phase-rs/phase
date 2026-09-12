@@ -3010,6 +3010,7 @@ fn preview_offer_with_points(
                 delta,
                 declarable_victims: Vec::new(),
                 victim_slot,
+                seat_life_charge: Vec::new(),
             }),
         },
         schema: ShortcutDecisionSchema {
@@ -3712,6 +3713,7 @@ fn respond_window_on(
                 ),
             }),
             per_cycle,
+            shortened_by: None,
         },
     };
     bind(&mut state, "respond-declared");
@@ -3801,6 +3803,7 @@ fn respond_period(
         delta,
         declarable_victims: Vec::new(),
         victim_slot,
+        seat_life_charge: Vec::new(),
     }
 }
 
@@ -3876,6 +3879,10 @@ fn declared_amounts(element: &InteractionShortcutPreview) -> Vec<u32> {
 /// the declaration does NOT announce — because folding it without a split would key the whole
 /// drain on the seat the period was measured on, which is the number the responder decides on.
 ///
+/// Leg 1b is the same class on a period whose announced charge is DECOUPLED from that seat's own
+/// loss — the shape a sign-mixed period now mints. The reader resolves on it, so the guard is
+/// what withholds it.
+///
 /// # What the guard withholds is the MAGNITUDES, never the partition
 ///
 /// Segment lengths are not magnitudes, so the declaration's own partition is published on the
@@ -3888,8 +3895,10 @@ fn declared_amounts(element: &InteractionShortcutPreview) -> Vec<u32> {
 /// declaration's own two distinct segments — so "the projection published nothing" cannot satisfy
 /// any of them.
 ///
-/// REVERT-PROBES: delete the guard ⇒ leg 1's empty-entries assertion flips (the responder is
-/// handed `[Life P4 −72]`, the whole drain attributed to a seat the declaration never names);
+/// REVERT-PROBES: delete the guard ⇒ legs 1 and 1b's empty-entries assertions flip (the
+/// responder is handed the whole drain attributed to a seat the declaration never names);
+/// restore the cancel conjunct between the announced charge and the seat's loss ⇒ leg 1b's
+/// assertion flips instead, since the reader would refuse and both sides would fold alike;
 /// delete the `!announced.contains(..)` conjunct ⇒ leg 2 fails; take the charge probe without the
 /// `basis.seats` wrapper ⇒ leg 4 fails; use `basis.charge.is_none()` as the probe ⇒ leg 3 fails
 /// on its first assertion; refuse the whole element on the magnitude leg instead of emptying its
@@ -3937,6 +3946,39 @@ fn the_declared_magnitudes_are_withheld_only_when_the_periods_charge_escapes_the
         "CR 119.3: the period's per-slot charge resolves to a seat this declaration never \
          announces, so NO magnitude is stated rather than one keying the whole drain on the seat \
          the period was measured on. got {:?}",
+        element.entries
+    );
+
+    // ── LEG 1b — the SAME class, on a period whose announced charge is NOT the seat's own
+    //    loss. The reader resolves on it all the same, and the seat it resolves is unannounced.
+    let decoupled = respond_window(
+        IterationCount::Fixed(COUNT),
+        Some(respond_period(
+            &[(R_DRAINED, -36)],
+            vec![(slot.clone(), 12)],
+        )),
+        vec![piecewise_pin(
+            slot.clone(),
+            &STARTS,
+            &seat_subjects(&announced),
+        )],
+    );
+    let reply = respond_reply_of(&decoupled);
+    let element = reply
+        .declared
+        .as_ref()
+        .expect("the partition is published on this board too");
+    assert_eq!(
+        declared_amounts(element),
+        vec![2, 4],
+        "ANTI-VACUITY: TWO segments, pairwise DISTINCT — an element emptied wholesale cannot \
+         satisfy this"
+    );
+    assert!(
+        element.entries.is_empty(),
+        "CR 119.3: an announced charge that is not the seat's own loss no longer refuses, so \
+         the guard is what withholds a drain keyed on the seat the period was measured on. \
+         got {:?}",
         element.entries
     );
 
@@ -4000,10 +4042,6 @@ fn the_declared_magnitudes_are_withheld_only_when_the_periods_charge_escapes_the
         (
             "a life map naming TWO losing seats",
             respond_period(&[(P0, -12), (R_DRAINED, -36)], vec![(slot.clone(), 36)]),
-        ),
-        (
-            "a charge that is not the whole of the seat's loss",
-            respond_period(&[(R_DRAINED, -36)], vec![(slot.clone(), 12)]),
         ),
     ] {
         let expected: Vec<InteractionShortcutPreviewEntry> = period
@@ -5876,27 +5914,29 @@ fn the_allocation_is_empty_exactly_when_the_first_targets_point_holds_no_candida
 }
 
 /// CR 119.3: the published life magnitudes follow the allocation when — and only when — the
-/// period's life map names exactly one losing seat that the declaration itself announces and
-/// the announced charge is the whole of that seat's loss, which is what makes the charge
-/// positive.
+/// period's life map names exactly one losing seat that the declaration itself announces, at
+/// THAT seat's own per-period loss.
 ///
-/// The announced magnitude is an aggregate over every seat, so on any other shape it names the
-/// worst-off seat rather than this slot's victim. The ambiguous, uneven and unannounced-loser
-/// legs carry the magnitude production would announce for their own life map; the
-/// negative-magnitude, undercharge and unnegatable legs stage a charge DECOUPLED from the
-/// period, which production does not emit but the type admits and `WaitingFor` carries across
-/// the persistence boundary.
+/// The announced magnitude is an aggregate over every seat, so it is read as the GATE saying
+/// this point's slot is one the period charges and never as a rate. The ambiguous, uneven and
+/// unannounced-loser legs carry the magnitude production would announce for their own life map;
+/// the gain, undercharge and overcharge legs stage a charge DECOUPLED from the period, which
+/// the sign-mixed periods this engine now mints make ordinary and which `WaitingFor` carries
+/// across the persistence boundary either way. Those three sit at BOTH ends of the same axis —
+/// a charge under, over and unrelated to the seat's loss — and all three resolve alike, which
+/// is what proves the class rather than one end of it.
 ///
 /// REVERT-PROBES: fold with no split at all ⇒ the positive leg publishes one `Life` seat where
 /// the allocation names several; take the FIRST losing seat instead of requiring exactly one ⇒
 /// the ambiguous leg re-attributes a tied seat; pick the seat BY the announced magnitude
 /// instead of by "exactly one loser" ⇒ the uneven leg re-attributes the worst-off seat; drop
 /// the announced-seat requirement ⇒ the unannounced-loser leg erases that seat and charges
-/// announced seats that lose nothing; drop the equality with the losing seat's own loss ⇒ the
-/// negative-magnitude leg spreads a GAIN across the allocated seats and, behind it, the
-/// undercharge leg's `Life` magnitudes total the charge times the count where the period takes
-/// three times that; respell that equality as one against the NEGATED charge ⇒ the unnegatable
-/// leg overflows where the addition refuses.
+/// announced seats that lose nothing; restore the cancel conjunct between the announced charge
+/// and the seat's loss ⇒ the gain, undercharge and overcharge legs all refuse where a spread is
+/// asserted; keep the ANNOUNCED magnitude as the rate ⇒ the undercharge and overcharge legs
+/// publish different amounts where they are asserted identical, and the gain leg spreads a
+/// positive rate; drop `checked_neg` ⇒ the unnegatable leg publishes a split where the unsplit
+/// saturated fold is asserted.
 #[test]
 fn the_preview_spreads_a_charged_life_magnitude_only_over_an_unambiguous_positive_charge() {
     let seats = [P1, PlayerId(2), PlayerId(3)];
@@ -5938,6 +5978,30 @@ fn the_preview_spreads_a_charged_life_magnitude_only_over_an_unambiguous_positiv
         published.sort_unstable();
         published
     };
+    // The spread this producer publishes at `rate`: every allocated candidate charged the rate
+    // times ITS OWN share of the count, plus any seat the split does not name keeping its own
+    // per-cycle term times the whole count.
+    let spread_at =
+        |element: &InteractionShortcutPreview, rate: i64, unsplit: &[(PlayerId, i64)]| {
+            let mut expected: Vec<(Option<u8>, i32)> = seats
+                .iter()
+                .zip(element.allocation.iter())
+                .map(|(seat, assignment)| {
+                    (
+                        Some(seat.0),
+                        i32::try_from(-rate * i64::from(assignment.amount)).unwrap(),
+                    )
+                })
+                .collect();
+            for (seat, per_cycle) in unsplit {
+                expected.push((
+                    Some(seat.0),
+                    i32::try_from(per_cycle * i64::from(element.count)).unwrap(),
+                ));
+            }
+            expected.sort_unstable();
+            expected
+        };
 
     // ── THE CHARGE RESOLVES: rate 3, one matching seat, three announced candidates.
     let rate = 3i64;
@@ -6070,8 +6134,11 @@ fn the_preview_spreads_a_charged_life_magnitude_only_over_an_unambiguous_positiv
         );
     }
 
-    // ── HOSTILE: the announced magnitude is a GAIN, which no losing seat's loss can balance.
-    let gaining_period = vec![(P0, 2i64), (P1, -2i64)];
+    // ── THE CLASS AT ONE END: the announced magnitude is a GAIN — decoupled from the period in
+    //    sign as well as size. The rate is the identified seat's OWN loss, so the split stands.
+    let gain_loss = -2i64;
+    let gain_charge = -2i64;
+    let gaining_period = vec![(P0, 2i64), (P1, gain_loss)];
     assert_eq!(
         gaining_period
             .iter()
@@ -6079,29 +6146,31 @@ fn the_preview_spreads_a_charged_life_magnitude_only_over_an_unambiguous_positiv
             .count(),
         1,
         "reach-guard: exactly one announced seat loses life and that seat is announced, so \
-         this period reaches the charge/loss equality and only that equality refuses it"
+         the period reaches the identification and only the announced charge is unusual"
     );
-    let gaining = offer_at(gaining_period, -2);
+    assert_ne!(
+        gain_charge, -gain_loss,
+        "reach-guard: the announced charge must NOT cancel the seat's loss, or this leg is a \
+         period the superseded conjunct also resolved on and proves nothing"
+    );
+    let gaining = offer_at(gaining_period, gain_charge);
     for element in &gaining.preview {
         assert!(!element.allocation.is_empty());
         assert_eq!(
             life_entries(element),
-            vec![
-                (Some(P0.0), 2 * i32::try_from(element.count).unwrap()),
-                (Some(P1.0), -2 * i32::try_from(element.count).unwrap()),
-            ],
-            "an announced GAIN can never be a losing seat's own loss, so it is refused \
-             rather than spread over the announced candidates"
+            spread_at(element, -gain_loss, &[(P0, 2)]),
+            "CR 119.3: the drain the declaration takes is the identified seat's own 2 per \
+             cycle, spread over the seats it allocates to — the announced GAIN states nothing \
+             about a rate. The seat the split does not name keeps its own term"
         );
     }
 
-    // ── HOSTILE: exactly one losing seat, that seat announced, and the charge positive —
-    //    every conjunct but the equality holds — but the charge is SMALLER than the seat's own
-    //    per-period loss. The fold re-states the charged seat by dropping its whole `Life`
-    //    axis and re-adding the charge once per allocated cycle, so a split here publishes a
-    //    shallower drain than the count actually runs.
+    // ── THE CLASS AT BOTH ENDS: exactly one losing seat, that seat announced, and the charge
+    //    positive but UNEQUAL to the seat's own per-period loss — smaller on one leg, larger on
+    //    the other. The rate is the seat's loss either way, so the two resolve IDENTICALLY.
     let seat_loss = 3i64;
     let undercharge = 1i64;
+    let overcharge = 12i64;
     let coupled = offer_at(vec![(P1, -seat_loss)], seat_loss);
     assert!(
         coupled.preview.iter().any(|element| {
@@ -6112,49 +6181,60 @@ fn the_preview_spreads_a_charged_life_magnitude_only_over_an_unambiguous_positiv
                 .count()
                 > 1
         }),
-        "PAIRED CONTROL: the SAME life map charged its own loss DOES spread over several \
-         seats, so the refusal below is the charge's doing and not an unreachable arm"
+        "PAIRED CONTROL: the SAME life map charged its own loss spreads over several seats, so \
+         the two legs below are read against a charge that changes nothing"
     );
-    let shallow = offer_at(vec![(P1, -seat_loss)], undercharge);
-    for element in &shallow.preview {
-        assert!(
-            !element.allocation.is_empty(),
-            "the declaration is still published — the allocation is its shape, not a \
-             magnitude claim"
+    for (label, charge) in [("undercharge", undercharge), ("overcharge", overcharge)] {
+        assert_ne!(
+            charge, seat_loss,
+            "reach-guard: the {label} charge must NOT be the seat's own loss, or this leg is \
+             the paired control again"
         );
+        let decoupled = offer_at(vec![(P1, -seat_loss)], charge);
         assert_eq!(
-            life_entries(element),
-            vec![(
-                Some(P1.0),
-                -i32::try_from(seat_loss * i64::from(element.count)).unwrap()
-            )],
-            "an undercharge is refused, so the only losing seat keeps its whole per-period loss"
+            decoupled.preview.len(),
+            coupled.preview.len(),
+            "reach-guard: the {label} board publishes the same element set as the control, so \
+             the comparison below is element for element"
         );
-        assert_eq!(
-            life_entries(element)
-                .iter()
-                .map(|(_, amount)| i64::from(*amount))
-                .sum::<i64>(),
-            -seat_loss * i64::from(element.count),
-            "CR 119.3: the published life magnitudes total the period the count runs — a \
-             split at the announced charge states {undercharge} per cycle where the period \
-             takes {seat_loss}"
-        );
+        for (element, control) in decoupled.preview.iter().zip(&coupled.preview) {
+            assert!(
+                !element.allocation.is_empty(),
+                "the declaration is still published — the allocation is its shape, not a \
+                 magnitude claim"
+            );
+            assert_eq!(
+                life_entries(element),
+                spread_at(element, seat_loss, &[]),
+                "CR 119.3: the {label} states nothing about a rate, so the seat's own \
+                 per-period loss is spread over the seats the declaration allocates to"
+            );
+            assert_eq!(
+                life_entries(element),
+                life_entries(control),
+                "and the {label} resolves IDENTICALLY to the charge that equals the loss — \
+                 the class is proved at both ends of the same axis, not at one"
+            );
+            assert_eq!(
+                life_entries(element)
+                    .iter()
+                    .map(|(_, amount)| i64::from(*amount))
+                    .sum::<i64>(),
+                -seat_loss * i64::from(element.count),
+                "the split is exact: the seats together absorb the whole period the count runs"
+            );
+        }
     }
 
-    // ── HOSTILE: a charge no magnitude can negate. `i64::MIN` reaches the same equality
-    //    every leg above ends at, and the addition answers over the whole of `i64` where a
-    //    negation would overflow.
-    let unnegatable = offer_at(vec![(P1, -seat_loss)], i64::MIN);
+    // ── HOSTILE: a per-period loss no negation can state. `i64::MIN` reaches the identified
+    //    seat's own rate, where `checked_neg` refuses over the whole of `i64`.
+    let unnegatable = offer_at(vec![(P1, i64::MIN)], seat_loss);
     for element in &unnegatable.preview {
         assert_eq!(
             life_entries(element),
-            vec![(
-                Some(P1.0),
-                -i32::try_from(seat_loss * i64::from(element.count)).unwrap()
-            )],
-            "a charge that cannot be balanced is refused, so the losing seat keeps its whole \
-             per-period loss"
+            vec![(Some(P1.0), i32::MIN)],
+            "a loss that cannot be negated resolves no charge, so the element folds the \
+             period's own seat key unsplit and saturated"
         );
     }
 }
@@ -9977,6 +10057,7 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
             win_kind: engine::analysis::loop_check::WinKind::Advantage,
             template: Some(declared),
             per_cycle: None,
+            shortened_by: None,
         },
     };
     let wire = serde_json::to_string(&carrying).expect("serialize the pending proposal");

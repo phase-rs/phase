@@ -64,19 +64,29 @@
 //!
 //! ## Why the `IterationCount` gate is load-bearing for the CLASS
 //!
-//! `materialize_fixed_shortcut` NEVER consults `predicted_winner`: it drives `n` whole cycles and
-//! COMMITS each atomically (an object-growth `None` offer is routed to
-//! `materialize_object_growth_shortcut`). A `Fixed(n)` declare is real, committed board progress
-//! needing no crown — so a reject that ignored the count would be wrong for the class. Today's AI
-//! candidate generator only ever emits `UntilLethal`, but `Fixed(n)` is reachable through the
-//! public `GameAction` surface: `handle_declare_shortcut` moves `count` into the proposal with
-//! ZERO validation (the fail-closed firewall validates only `template` pins, and it runs against
-//! the RESOLVED template rather than the payload's: the handler shadows it with
+//! `materialize_fixed_shortcut` drives `n` whole cycles and COMMITS each atomically (an
+//! object-growth `None` offer is routed to `materialize_object_growth_shortcut`). It reads
+//! `predicted_winner` at ONE point only — its cross-lethal arm refuses to crown a verdict that
+//! name contradicts — so a count crossing nothing crowns nobody, and a `Fixed(n)` declare is real,
+//! committed board progress needing no crown whoever is latched. A reject that ignored the count
+//! would therefore be wrong for the class. The AI candidate generator itself proposes
+//! `Fixed(max_iterations)` against a bounded offer, and offers `UntilLethal` only against an offer
+//! that narrowed no bound; `Fixed(n)` is additionally reachable through the public `GameAction`
+//! surface. `handle_declare_shortcut` checks the declared count against the global cap and against
+//! the offer's own `max_iterations`, and refuses `UntilLethal` against a bounded offer; what it
+//! never checks is the declared shape against the schema's *suggested* `iteration_count` (the
+//! fail-closed pin firewall validates only `template` pins, and it runs against the RESOLVED
+//! template rather than the payload's: the handler shadows it with
 //! `template.or_else(|| offer.declaration.cloned())` before the `match`, so a payload carrying
 //! `None` against an offer that PUBLISHED a declaration reaches the `Some` arm and IS
 //! pin-validated by `declaration_conforms`. The firewall is skipped only when the payload carried
 //! none AND the offer published none — the arm that still refuses unless the proposer controls
 //! the recorded loop period).
+//!
+//! The count gate is what keeps the three rulings off the AI's own bounded candidate. Every offer
+//! the AI answers with `Fixed` is a bounded one, and every production mint of a bounded offer
+//! latches `predicted_winner: None` — ruling 2's antecedent shape, which a count-blind reject would
+//! fire on.
 //!
 //! ## Why the verdict reads `proposer` from the state, never `ctx.ai_player`
 //!
@@ -87,7 +97,7 @@
 //! ever scores this state under a different seat's value lens — whereas gating on
 //! `ctx.ai_player == proposer` would silently DROP the veto in that case.
 
-use engine::analysis::decision_template::IterationCount;
+use engine::analysis::decision_template::{DecisionPoint, DecisionTemplate, IterationCount};
 use engine::analysis::loop_check::LoopCertificate;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -135,7 +145,7 @@ impl TacticalPolicy for LoopShortcutPolicy {
         // `DeclineShortcut` exits here, so the policy can never reject BOTH candidates.
         // (`softmax_select_pairs` also self-heals on an all-`-inf` vector via its
         // `!total.is_finite()` argmax fallback — belt and braces.)
-        let GameAction::DeclareShortcut { count, .. } = &ctx.candidate.action else {
+        let GameAction::DeclareShortcut { count, template } = &ctx.candidate.action else {
             return na();
         };
         let WaitingFor::LoopShortcut {
@@ -143,10 +153,7 @@ impl TacticalPolicy for LoopShortcutPolicy {
             predicted_winner,
             schema,
             certificate,
-            // Scoring reads the offer's BOUND and its certificate, never its pins: the
-            // engine-published declaration is what the candidate already carries, so re-reading
-            // it here would score the same value twice.
-            declaration: _,
+            declaration,
         } = &ctx.state.waiting_for
         else {
             return na();
@@ -222,22 +229,26 @@ impl TacticalPolicy for LoopShortcutPolicy {
             // producer could not compute a bound publishes `MAX_SHORTCUT_CYCLES`, so it states
             // no CR 704 threshold for a domination argument to stand on, and a count-blind
             // reject would be wrong for the CLASS: `materialize_fixed_shortcut` drives and
-            // COMMITS `n` whole cycles without ever reading `predicted_winner`, so a small-`n`
-            // `Fixed` is genuine committed board progress whoever is latched.
+            // COMMITS `n` whole cycles, and a count that crosses nothing crowns nobody, so a
+            // small-`n` `Fixed` is genuine committed board progress whoever is latched.
             //
             // NOTE (tripwire, still live for the unbounded branch): a `Fixed(n)` large enough
-            // to cross lethal WOULD commit a `GameOver` crowning whoever the DRIVE's
-            // state-based actions crown — `materialize_fixed_shortcut`'s `CrossLethal` arm
-            // forwards the SBA's own `Option<PlayerId>` WITHOUT filtering on
-            // `proposal.predicted_winner`, unlike both `UntilLethal` crown gates. Such a
-            // declare by a faller proposer is a committed self-loss, exactly what the
-            // `UntilLethal` arm above rejects. On a BOUNDED offer that hazard is discharged by
-            // `elimination_bounds`' contract rather than by an AI-side computation: it narrows to
-            // `min over living seats of (life - 1) / per-cycle loss` with FLOOR division, so
-            // `n * loss <= life - 1` for every seat and every `n` within `max_iterations`.
+            // to cross lethal WOULD commit a `GameOver` — and against an offer whose name is
+            // RIGHT it still does. `materialize_fixed_shortcut`'s `CrossLethal` arm now crowns
+            // only the seat `proposal.predicted_winner` names (or any seat when it names
+            // nobody), so what lets such a declare through is no longer the absence of a filter
+            // but the offer's own prediction agreeing with the drive. Such a declare by a faller
+            // proposer is a committed self-loss, exactly what the `UntilLethal` arm above
+            // rejects, and this arm is still neutral on it. On a BOUNDED offer that hazard is
+            // discharged by the `loop_shortcut_declare_eliminates_proposer` arm BELOW, which asks
+            // `cycles_to_proposer_elimination` of the proposer alone. It is NOT discharged by
+            // `elimination_bounds`' contract: that bound admits a crossing as the sequence's
+            // FINAL iteration, so `max_iterations` can equal the proposer's own fatal count and
+            // `Fixed(max_iterations)` — the AI's only bounded candidate — can name it. That
+            // arm's remaining limit is stated where it sits, not assumed away here.
             //
-            // ⚠ THAT PREMISE WAS FALSE WHEN THIS ARM SHIPPED, and it is stated here only because
-            // it has since been made true and RE-MEASURED. At `c6d834040`
+            // ⚠ AN EARLIER FORM OF THIS ARM ALSO RESTED ON A DRIVE THAT DID NOT HONOUR THE
+            // PUBLISHED BOUND, which is why the delimiter's history is kept here. At `c6d834040`
             // `materialize_fixed_shortcut` had no cycle delimiter for the basis-B class, so the
             // drive ran to the beat cap and `Fixed(1)` on a bounded 3p/4p drain eliminated the
             // whole table — the arithmetic above described a bound the drive never honoured. Fix
@@ -268,7 +279,9 @@ impl TacticalPolicy for LoopShortcutPolicy {
             ),
 
             // CR 732.2a: within the offered bound on a bounded offer ⇒ committed board
-            // progress that eliminates nobody. Game-deciding ⇒ critical band, via the
+            // progress that eliminates at most the binding seat, and only on the sequence's
+            // FINAL iteration. Never the proposer — the `Some(fatal)` branch below is what
+            // refuses that. Game-deciding ⇒ critical band, via the
             // auto-banding `PolicyVerdict::score` (NEVER `preference`, whose `debug_assert!`
             // band domain panics on this field's default). Both declare kinds route through
             // the one reused config field on purpose: the winning arm above and this one are
@@ -285,46 +298,73 @@ impl TacticalPolicy for LoopShortcutPolicy {
             // DECIDING side's job, and nothing was doing it: a bounded offer always carries
             // `predicted_winner: None`, so the "hands somebody else the win" arm above is
             // structurally unreachable here, and the AI's only bounded candidate is
-            // `Fixed(max_iterations)` — the maximum, never a smaller n. A self-mill period whose
-            // binding seat is the proposer therefore scored CRITICAL for running the proposer's
-            // own library to exactly 0.
+            // `Fixed(max_iterations)` — the maximum, never a smaller n, and now a count the
+            // producer carries all the way to the binding seat's own crossing. A self-mill
+            // period whose binding seat is the proposer therefore scored CRITICAL for running
+            // the proposer's own library to exactly 0.
             //
             // This arm asks the question the producer declines to ask, on the proposer's behalf
             // only, and REJECTS rather than dropping to `na()`: neutral would still leave the
             // declare competing on other policies' scores, and the domination argument here is
             // the same shape as the zero-count arm's — a declare that eliminates the declarer is
             // weakly dominated by declining, which rolls back to exactly where a decline lands.
-            (_, IterationCount::Fixed(n))
-                if cycles_to_proposer_elimination(ctx.state, certificate, *proposer)
-                    .is_some_and(|fatal| i64::from(*n) >= fatal) =>
-            {
-                PolicyVerdict::reject(
-                    PolicyReason::new("loop_shortcut_declare_eliminates_proposer")
-                        .with_fact("declared", i64::from(*n))
-                        .with_fact(
-                            "eliminates_at",
-                            cycles_to_proposer_elimination(ctx.state, certificate, *proposer)
-                                .unwrap_or_default(),
-                        ),
-                )
+            //
+            // IT IS THE WHOLE DISCHARGE ON A BOUNDED OFFER. It charges the proposer's life
+            // through the DECLARATION this candidate would propose: a `template: None` declare
+            // is "no override of what the offer published", which is how
+            // `handle_declare_shortcut` resolves it, so the pins charged here are the pins the
+            // drive replays. The offer's own declaration is also the OBSERVATION the charge is
+            // measured against: the engine derives it from what the proposer answered in the
+            // window the period was certified over. A slot the declaration moves onto the
+            // proposer is charged to the proposer even when the observed period drained
+            // someone else (CR 119.3). One limit is named rather than hidden: the predicate is
+            // proposer-only by construction.
+            (_, IterationCount::Fixed(n)) => {
+                let declared = template.as_ref().or(declaration.as_ref());
+                match cycles_to_proposer_elimination(
+                    ctx.state,
+                    certificate,
+                    &schema.points,
+                    declared,
+                    declaration.as_ref(),
+                    *proposer,
+                    *n,
+                ) {
+                    Some(fatal) => PolicyVerdict::reject(
+                        PolicyReason::new("loop_shortcut_declare_eliminates_proposer")
+                            .with_fact("declared", i64::from(*n))
+                            .with_fact("eliminates_at", fatal),
+                    ),
+                    None => PolicyVerdict::score(
+                        ctx.penalties().loop_shortcut_winning_declare_bonus,
+                        PolicyReason::new("loop_shortcut_bounded_declare_progress")
+                            .with_fact("declared", i64::from(*n)),
+                    ),
+                }
             }
-
-            (_, IterationCount::Fixed(n)) => PolicyVerdict::score(
-                ctx.penalties().loop_shortcut_winning_declare_bonus,
-                PolicyReason::new("loop_shortcut_bounded_declare_progress")
-                    .with_fact("declared", i64::from(*n)),
-            ),
         }
     }
 }
 
-/// The fewest whole cycles of this offer's certified period that drive `proposer` to a CR 704
-/// elimination threshold, or `None` if no measured axis ever does.
+/// The fewest whole cycles of this offer's certified period, at most `declared`, that drive
+/// `proposer` to a CR 704 elimination threshold under `declaration`, or `None` if the proposer
+/// survives all `declared` of them. `observed` is the declaration the offer published, the
+/// allocation the period was measured under.
 ///
 /// This is the inverse of `ResourceVector::elimination_bounds` (engine `analysis/resource.rs`),
-/// mirrored axis for axis and asked of ONE seat instead of narrowed over all of them:
+/// asked of ONE seat under ONE declaration instead of narrowed over all seats and every
+/// declaration:
 ///
-/// - **life**, CR 704.5a — reaching **0 or less** is the threshold.
+/// - **life**, CR 704.5a — reaching **0 or less** is the threshold, and CR 704.3 checks it at
+///   every priority beat, inside a repetition as well as between two. Repetition `k` is fatal
+///   when what the earlier repetitions NETTED plus the deepest DIP inside `k` reaches the life
+///   total. A period that pays 1 and gains 1 therefore never kills a proposer above 1 life,
+///   and one that pays 4 and gains 3 kills a 5-life proposer in its second repetition, after
+///   netting only 1. Both numbers come from `PeriodicDelta::declared_seat_life_charges`,
+///   never re-derived here, one pair per repetition because a scheduled pin may name a
+///   different seat at each index. Measured against the net-only rate this replaced, the
+///   check only tightens: each repetition's net and dip are both at least what the period
+///   itself nets off the proposer, so every declare that rate refused is still refused.
 /// - **poison**, CR 704.5c — reaching **10 or more** is the threshold.
 ///
 /// **LIBRARY IS DELIBERATELY EXCLUDED, and that is the non-obvious part of this function.**
@@ -355,19 +395,20 @@ impl TacticalPolicy for LoopShortcutPolicy {
 /// stricter than it.
 ///
 /// **That is also why life STAYS, and the line is principled rather than an ad-hoc keep/drop.**
-/// `per_cycle.delta.life` is IN-CYCLE realization: the drain happens inside the certified period
-/// and is state-based-checkable at cycle boundaries, so the certificate does prove the death it
-/// implies. The One Ring's life loss would only enter a certificate the same way if the upkeep
-/// trigger were inside the loop span. Both surviving axes are immediate state-based losses on
-/// state alone (CR 704), requiring no intervening action — which is exactly the property an empty
-/// library lacks.
+/// A certified period's life loss is IN-CYCLE realization: the drain happens inside the certified
+/// period and is state-based-checkable at its priority beats, so the certificate does prove the
+/// death it implies. The One Ring's life loss would only enter a certificate the same way if the
+/// upkeep trigger were inside the loop span. Both surviving axes are immediate state-based losses
+/// on state alone (CR 704), requiring no intervening action — which is exactly the property an
+/// empty library lacks.
 ///
 /// Only movement TOWARD death counts: a life gain or a poison decrease yields no bound on that
-/// axis, which is why each rate is tested `> 0` before it is allowed to divide.
+/// axis. The engine's life charge is a non-negative magnitude by construction, and the poison
+/// rate is tested `> 0` before it is allowed to divide.
 ///
-/// Returns the MINIMUM across axes, so the caller compares one number against the declared
-/// count. `None` means "no axis kills the proposer at any n" — including the case where this
-/// offer carries no certified period at all. That last branch is unreachable for the bounded
+/// Returns the MINIMUM across axes, so the caller asks one question: `Some` refuses the declare.
+/// `None` means "no axis kills the proposer within `declared` cycles" — including the case where
+/// this offer carries no certified period at all. That last branch is unreachable for the bounded
 /// class (`certified_bounded_cycle_offer` mints `per_cycle: Some(periodic)`), and it is written
 /// as a plain `?` rather than an `expect` because a policy must never panic on a state shape;
 /// the reach-guards in `loop_shortcut_declare_that_kills_the_proposer_on_life_is_refused` and
@@ -376,34 +417,40 @@ impl TacticalPolicy for LoopShortcutPolicy {
 fn cycles_to_proposer_elimination(
     state: &GameState,
     certificate: &LoopCertificate,
+    points: &[DecisionPoint],
+    declaration: Option<&DecisionTemplate>,
+    observed: Option<&DecisionTemplate>,
     proposer: PlayerId,
+    declared: u32,
 ) -> Option<i64> {
     let period = certificate.per_cycle.as_ref()?;
     let player = state.players.get(proposer.0 as usize)?;
-    let per_cycle = |axis: &std::collections::BTreeMap<PlayerId, i64>| {
-        axis.get(&proposer).copied().unwrap_or(0)
-    };
 
-    // `headroom / rate` rounded UP: the first whole cycle at which the threshold is met.
-    // Written long-hand rather than with `i64::div_ceil`, which is still unstable on this
-    // toolchain (`int_roundings`). Both operands are non-negative here — `headroom` is clamped
-    // and `rate` is guarded `> 0` — so the `+ rate - 1` form is exact, with no negative-operand
-    // truncation-toward-zero trap.
-    let cycles = |headroom: i64, rate: i64| -> Option<i64> {
-        (rate > 0).then(|| (headroom.max(0) + rate - 1) / rate)
-    };
+    // CR 704.3 + CR 704.5a: the first repetition inside which the proposer can reach 0 or less
+    // life. Accumulated rather than divided, because a scheduled pin may name the proposer at
+    // some repetitions and another seat at the rest.
+    let life = i64::from(player.life);
+    let mut netted = 0i64;
+    let life_fatal = (1..=i64::from(declared))
+        .zip(period.declared_seat_life_charges(proposer, declaration, observed, points, state))
+        .find_map(|(repetition, charge)| {
+            let fatal = netted + charge.dip >= life;
+            netted += charge.net;
+            fatal.then_some(repetition)
+        });
 
-    [
-        // No library term — see the CR 121.4 exclusion in this function's doc comment.
-        cycles(i64::from(player.life), -per_cycle(&period.delta.life)),
-        cycles(
-            10 - i64::from(player.poison_counters),
-            per_cycle(&period.delta.poison),
-        ),
-    ]
-    .into_iter()
-    .flatten()
-    .min()
+    // CR 704.5c: `headroom / rate` rounded UP, the first whole cycle at which ten poison
+    // counters is met. Written long-hand rather than with `i64::div_ceil`, which is still
+    // unstable on this toolchain (`int_roundings`). Both operands are non-negative here —
+    // `headroom` is clamped and `rate` is guarded `> 0` — so the `+ rate - 1` form is exact,
+    // with no negative-operand truncation-toward-zero trap.
+    let poison_rate = period.delta.poison.get(&proposer).copied().unwrap_or(0);
+    let poison_fatal = (poison_rate > 0)
+        .then(|| ((10 - i64::from(player.poison_counters)).max(0) + poison_rate - 1) / poison_rate)
+        .filter(|fatal| *fatal <= i64::from(declared));
+
+    // No library term — see the CR 121.4 exclusion in this function's doc comment.
+    life_fatal.into_iter().chain(poison_fatal).min()
 }
 
 #[cfg(test)]
@@ -415,10 +462,17 @@ mod tests {
     use crate::search::{choose_action, score_candidates_with_session};
     use crate::session::AiSession;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
-    use engine::analysis::decision_template::ShortcutDecisionSchema;
+    use engine::analysis::decision_template::{
+        AnnouncementSubject, DecisionGroupKey, DecisionPointKind, DecisionSlot, PinnedDecision,
+        Ranking, ReplayMode, ShortcutDecisionSchema, TargetPin, TargetSchedule,
+    };
     use engine::analysis::loop_check::{LoopCertificate, WinKind};
     use engine::analysis::resource::{BoardDelta, PeriodicDelta, ResourceVector};
-    use engine::types::identifiers::ObjectId;
+    use engine::game::zones::create_object;
+    use engine::types::ability::TargetRef;
+    use engine::types::game_state::YieldTarget;
+    use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::zones::Zone;
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
 
@@ -602,9 +656,9 @@ mod tests {
         assert_eq!(kind_of(&v), "loop_shortcut_untillethal_cannot_crown");
     }
 
-    /// Rows 3 + 5 + 7 — THE CLASS GUARD: `materialize_fixed_shortcut` never reads
-    /// `predicted_winner` and COMMITS every cycle it drives, so a `Fixed(n)` declare is real board
-    /// progress for ANY latched winner. Proves the reject set is not one state too wide.
+    /// Rows 3 + 5 + 7 — THE CLASS GUARD: `materialize_fixed_shortcut` COMMITS every cycle it
+    /// drives, and a count that crosses nothing crowns nobody, so a `Fixed(n)` declare is real
+    /// board progress for ANY latched winner. Proves the reject set is not one state too wide.
     ///
     /// This row stays green LEGITIMATELY, not by luck: `ShortcutDecisionSchema::default()`
     /// carries `max_iterations == MAX_SHORTCUT_CYCLES`, so `is_bounded()` is FALSE and the
@@ -648,7 +702,25 @@ mod tests {
     /// `certified_bounded_cycle_offer` actually mints (`per_cycle: Some(periodic)`), as opposed
     /// to [`cert`]'s `None`.
     fn bounded_offer_with_period(max_iterations: u32, period: PeriodicDelta) -> GameState {
-        let mut state = GameState::new_two_player(0);
+        bounded_offer_declaring(
+            GameState::new_two_player(0),
+            max_iterations,
+            period,
+            Vec::new(),
+            None,
+        )
+    }
+
+    /// The same bounded offer on a caller-built board, publishing `points` and the engine's
+    /// own `declaration` for them. The single offer literal the self-cost rows share, so the
+    /// CR 732.2a offer-writer census counts one fixture site however many shapes they stage.
+    fn bounded_offer_declaring(
+        mut state: GameState,
+        max_iterations: u32,
+        period: PeriodicDelta,
+        points: Vec<DecisionPoint>,
+        declaration: Option<DecisionTemplate>,
+    ) -> GameState {
         state.waiting_for = WaitingFor::LoopShortcut {
             proposer: P0,
             predicted_winner: None,
@@ -658,9 +730,10 @@ mod tests {
             },
             schema: ShortcutDecisionSchema {
                 max_iterations,
+                points,
                 ..Default::default()
             },
-            declaration: None,
+            declaration,
         };
         state
     }
@@ -676,6 +749,7 @@ mod tests {
             },
             victim_slot: vec![],
             declarable_victims: vec![],
+            seat_life_charge: vec![],
         }
     }
 
@@ -692,6 +766,7 @@ mod tests {
             },
             victim_slot: vec![],
             declarable_victims: vec![],
+            seat_life_charge: vec![],
         }
     }
 
@@ -803,8 +878,8 @@ mod tests {
     /// refuse profitable loops the proposer survives. One cycle short leaves 2 life, and that
     /// must still score.
     ///
-    /// REVERT-PROBE: delete the `cycles_to_proposer_elimination` guard arm ⇒ `Fixed(10)` falls
-    /// through to the scoring arm and reads `loop_shortcut_bounded_declare_progress`, so the
+    /// REVERT-PROBE: delete the `Some(fatal)` reject branch ⇒ `Fixed(10)` falls
+    /// through to the scoring branch and reads `loop_shortcut_bounded_declare_progress`, so the
     /// first assertion FAILS while the `Fixed(9)` row stays green — the two rows fail
     /// independently, which is what makes the pair discriminating rather than redundant.
     #[test]
@@ -829,6 +904,347 @@ mod tests {
             kind_of(&verdict_for(&state, &declare(IterationCount::Fixed(9)))),
             "loop_shortcut_bounded_declare_progress",
             "9 cycles leave the proposer at 2 life — alive, so the scoring arm still owns it"
+        );
+    }
+
+    /// CR 704.5a: **the multi-authority pair — the same declared count, on two boards that
+    /// differ only in WHICH seat the period drains.**
+    ///
+    /// The engine publishes a legal bound either way; the AI must refuse only the board where
+    /// the seat the bound's arithmetic names is the PROPOSER. That refusal is now load-bearing
+    /// rather than redundant: the published bound reaches the binding seat's own crossing, so
+    /// `max_iterations` can EQUAL `cycles_to_proposer_elimination`, and the AI's only bounded
+    /// candidate is `Fixed(max_iterations)`. Both boards assert that equality (or its absence)
+    /// off the predicate itself, so the row states the re-attribution instead of assuming it.
+    ///
+    /// REVERT-PROBE: delete the `Some(fatal)` reject branch ⇒ the proposer-as-faller board falls
+    /// through to `loop_shortcut_bounded_declare_progress` and SCORES ⇒ the first assertion
+    /// FAILS while the opponent sibling stays green.
+    #[test]
+    fn loop_shortcut_declare_at_the_bound_is_refused_only_when_the_proposer_is_the_faller() {
+        // 20 life at 2 per cycle: the strict headroom is 9 and the crossing is 10, which is
+        // the count the producer now publishes for a board with one binding seat.
+        const BOUND: u32 = 10;
+
+        let proposer_falls = bounded_offer_with_period(BOUND, periodic(&[], &[(P0, -2)]));
+        let opponent_falls = bounded_offer_with_period(BOUND, periodic(&[], &[(P1, -2)]));
+
+        assert_eq!(
+            cycles_to_proposer_elimination(
+                &proposer_falls,
+                certificate_of(&proposer_falls),
+                &[],
+                None,
+                None,
+                P0,
+                BOUND
+            ),
+            Some(i64::from(BOUND)),
+            "REACH-GUARD: the declared MAXIMUM must be exactly the proposer's fatal count, or \
+             this row is the over-bound case and not the at-the-bound one"
+        );
+        assert_eq!(
+            cycles_to_proposer_elimination(
+                &opponent_falls,
+                certificate_of(&opponent_falls),
+                &[],
+                None,
+                None,
+                P0,
+                BOUND
+            ),
+            None,
+            "REACH-GUARD: the sibling board must charge the proposer NOTHING, so the two arms \
+             differ in the faller's identity and in nothing else"
+        );
+
+        assert_eq!(
+            kind_of(&verdict_for(
+                &proposer_falls,
+                &declare(IterationCount::Fixed(BOUND))
+            )),
+            "loop_shortcut_declare_eliminates_proposer",
+            "the engine may legally publish a count whose final iteration removes the \
+             proposer; declining is the AI's own job"
+        );
+        assert_eq!(
+            kind_of(&verdict_for(
+                &opponent_falls,
+                &declare(IterationCount::Fixed(BOUND))
+            )),
+            "loop_shortcut_bounded_declare_progress",
+            "PAIRED POSITIVE: the same declare at the same count on a board whose faller is an \
+             opponent still scores — without it the refusal above could be a blanket one"
+        );
+    }
+
+    /// The offered bound of [`slot_charged_offer`]: P0 at 18 life charged 2 per repetition
+    /// crosses on the 9th, and P1 at 20 does not until the 10th, so P0 is the sole binding seat.
+    const SLOT_BOUND: u32 = 9;
+
+    /// A CR 601.2c target schedule pinning each slot onto its seat at every repetition — the
+    /// TARGET-class spelling `record_trigger_target_answer` journals.
+    fn seat_declaration(pins: &[(&DecisionSlot, PlayerId)]) -> DecisionTemplate {
+        let sources: Vec<_> = pins.iter().map(|(slot, _)| slot.source.clone()).collect();
+        DecisionTemplate {
+            owner: P0,
+            decisions: pins
+                .iter()
+                .map(|(slot, seat)| PinnedDecision::Targets {
+                    slot: (*slot).clone(),
+                    targets: vec![TargetPin::Scheduled(TargetSchedule::Constant(
+                        Ranking::one(AnnouncementSubject::Seat(*seat)),
+                    ))],
+                })
+                .collect(),
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(SLOT_BOUND),
+            },
+            key: DecisionGroupKey::from_sources(
+                &sources,
+                engine::analysis::decision_template::DecisionKind::LoopChoice,
+            ),
+        }
+    }
+
+    /// A trigger source P0 controls, announcing one player-target slot.
+    fn announced_slot(state: &mut GameState, card: CardId) -> DecisionSlot {
+        let source_id = create_object(
+            state,
+            card,
+            P0,
+            "Drain Engine".to_string(),
+            Zone::Battlefield,
+        );
+        DecisionSlot::target(YieldTarget::ThisObject {
+            source_id,
+            incarnation: None,
+            trigger_description: None,
+        })
+    }
+
+    /// The published CR 115.2 legal set of a slot that may name either seat.
+    fn either_seat_point(slot: &DecisionSlot) -> DecisionPoint {
+        DecisionPoint {
+            slot: slot.clone(),
+            kind: DecisionPointKind::Targets {
+                legal_targets: vec![TargetRef::Player(P0), TargetRef::Player(P1)],
+                min_targets: 1,
+                max_targets: 1,
+                ordered: false,
+            },
+        }
+    }
+
+    /// CR 119.3: a board whose loop source P0 controls announces a player-target slot that may
+    /// name either seat, and whose certified period saw that slot drain P1 by 2. The period
+    /// carries what the engine mint publishes for that window — the slot charged to BOTH
+    /// reached seats, because the bound is reserved against every legal declaration — and the
+    /// offer publishes the engine's own declaration, pinned where the window saw the slot aim:
+    /// on P1.
+    fn slot_charged_offer() -> (GameState, DecisionSlot) {
+        let mut state = GameState::new_two_player(0);
+        state.players[P0.0 as usize].life = 18;
+        let slot = announced_slot(&mut state, CardId(1));
+        let period = PeriodicDelta {
+            frames_per_period: 1,
+            delta: ResourceVector {
+                life: [(P1, -2)].into_iter().collect(),
+                ..Default::default()
+            },
+            victim_slot: vec![(slot.clone(), 2)],
+            declarable_victims: vec![P0, P1],
+            seat_life_charge: vec![(P0, 2), (P1, 2)],
+        };
+        let point = either_seat_point(&slot);
+        let published = seat_declaration(&[(&slot, P1)]);
+        let state =
+            bounded_offer_declaring(state, SLOT_BOUND, period, vec![point], Some(published));
+        (state, slot)
+    }
+
+    /// CR 704.5a + CR 119.3 + CR 732.2a — **a declaration that aims a charged target slot at the
+    /// proposer is refused, even though the observed period drained somebody else.**
+    ///
+    /// The certified period's NET delta charges the proposer nothing: the window saw the slot
+    /// drain P1. A declaration may still pin that slot onto P0 (it is one of the slot's
+    /// published legal targets), and CR 119.3 then takes 2 life off P0 every repetition. At the
+    /// offered bound that is 18 life to 0, a CR 704.5a loss the declarer handed itself.
+    ///
+    /// THREE LEGS, one offer, differing only in the declaration or the count:
+    /// * ⓐ pinned onto P0 at the bound ⇒ refused.
+    /// * ⓑ PAIRED CONTROL: the offer's own published declaration (a `template: None` declare,
+    ///   which the declare handler resolves against it), pinned on P1 ⇒ P0 is charged nothing
+    ///   and the declare still scores.
+    /// * ⓒ THRESHOLD: pinned onto P0 one repetition short of the bound ⇒ P0 ends at 2 life and
+    ///   the declare still scores, so the refusal is a threshold and not a blanket veto on any
+    ///   declaration charging the proposer.
+    ///
+    /// REVERT-PROBES, each failing a different leg:
+    /// * charge the proposer only by the period's net `delta.life` (the pre-fix predicate) ⇒ ⓐ
+    ///   reads `loop_shortcut_bounded_declare_progress` ⇒ FAILS.
+    /// * accumulate the published per-seat charge, blind to the declaration ⇒ ⓑ is refused ⇒
+    ///   FAILS.
+    /// * pass no `observed` declaration ⇒ the slot may have been on P0, so ⓑ is refused ⇒
+    ///   FAILS.
+    /// * drop the fallback to the offer's `declaration` ⇒ ⓑ's unpinned slot may land on P0 and
+    ///   is refused ⇒ FAILS.
+    #[test]
+    fn loop_shortcut_declare_that_aims_a_charged_slot_at_the_proposer_is_refused() {
+        let (state, slot) = slot_charged_offer();
+        assert!(
+            schema_of(&state).is_bounded(),
+            "REACH-GUARD: the arm under test is bounded-only; max_iterations = {}",
+            schema_of(&state).max_iterations
+        );
+        let period = certificate_of(&state)
+            .per_cycle
+            .as_ref()
+            .expect("REACH-GUARD: a certificate with no period makes every assertion vacuous");
+        assert_eq!(
+            period.delta.life.get(&P0),
+            None,
+            "REACH-GUARD: the observed period charges the proposer NOTHING, so a refusal below \
+             can only come from the declared slot"
+        );
+        let declare_onto_proposer = |count: u32| CandidateAction {
+            action: GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(count),
+                template: Some(seat_declaration(&[(&slot, P0)])),
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Utility),
+        };
+
+        // ⓐ
+        assert_eq!(
+            kind_of(&verdict_for(&state, &declare_onto_proposer(SLOT_BOUND))),
+            "loop_shortcut_declare_eliminates_proposer",
+            "9 repetitions of a slot pinned onto the proposer take 18 life to 0"
+        );
+
+        // ⓑ
+        let as_published = verdict_for(&state, &declare(IterationCount::Fixed(SLOT_BOUND)));
+        assert_eq!(
+            kind_of(&as_published),
+            "loop_shortcut_bounded_declare_progress",
+            "PAIRED CONTROL: the published declaration pins the slot on P1, so the proposer \
+             loses nothing and the same count still scores; got {as_published:?}"
+        );
+        assert!(delta_of(&as_published) > STRONG_MAX);
+
+        // ⓒ
+        assert_eq!(
+            kind_of(&verdict_for(&state, &declare_onto_proposer(SLOT_BOUND - 1))),
+            "loop_shortcut_bounded_declare_progress",
+            "8 repetitions leave the proposer at 2 life — alive, so the scoring branch owns it"
+        );
+    }
+
+    /// CR 119.3 + CR 704.3 + CR 704.5a — **the swap board, declared both ways at the offered
+    /// bound.** P0 at 7 life pays 2 a repetition. S1 ("target player loses 1 life") was seen on
+    /// P0 and S2 ("target player loses 2 life") on P1, so the period nets P0 −3 and P1 −2, both
+    /// slots carry the worst loss, 3, and each seat is reserved 6. P0 binds at 2 repetitions.
+    ///
+    /// * ⓐ AS PUBLISHED: S2 stays off P0 in both templates, and P0 loses 3 a repetition,
+    ///   7 → 4 → 1, so the declare scores.
+    /// * ⓑ SWAPPED: P0 loses 2 + 2 = 4 a repetition and is removed inside the second, so the
+    ///   same count is refused.
+    ///
+    /// REVERT-PROBES, each failing a different leg:
+    /// * charge every dip the full reserved charge, blind to the declaration ⇒ ⓐ's second
+    ///   repetition reads 3 + 6 against 7 and is refused ⇒ FAILS.
+    /// * charge the proposer only by the period's net `delta.life` (the pre-fix predicate) ⇒
+    ///   ⓑ reads 3 + 3 against 7 and scores ⇒ FAILS.
+    #[test]
+    fn loop_shortcut_declare_on_the_swap_board_scores_as_published_and_is_refused_swapped() {
+        const SWAP_BOUND: u32 = 2;
+        let mut state = GameState::new_two_player(0);
+        state.players[P0.0 as usize].life = 7;
+        let s1 = announced_slot(&mut state, CardId(1));
+        let s2 = announced_slot(&mut state, CardId(2));
+        let period = PeriodicDelta {
+            victim_slot: vec![(s1.clone(), 3), (s2.clone(), 3)],
+            declarable_victims: vec![P0, P1],
+            seat_life_charge: vec![(P0, 6), (P1, 6)],
+            ..periodic(&[], &[(P0, -3), (P1, -2)])
+        };
+        let points = vec![either_seat_point(&s1), either_seat_point(&s2)];
+        let published = seat_declaration(&[(&s1, P0), (&s2, P1)]);
+        let state = bounded_offer_declaring(state, SWAP_BOUND, period, points, Some(published));
+        assert!(
+            schema_of(&state).is_bounded(),
+            "REACH-GUARD: the arm under test is bounded-only"
+        );
+
+        // ⓐ
+        let as_published = verdict_for(&state, &declare(IterationCount::Fixed(SWAP_BOUND)));
+        assert_eq!(
+            kind_of(&as_published),
+            "loop_shortcut_bounded_declare_progress",
+            "as published P0 ends the second repetition at 1 life; got {as_published:?}"
+        );
+
+        // ⓑ
+        let swapped = CandidateAction {
+            action: GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(SWAP_BOUND),
+                template: Some(seat_declaration(&[(&s1, P1), (&s2, P0)])),
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Utility),
+        };
+        assert_eq!(
+            kind_of(&verdict_for(&state, &swapped)),
+            "loop_shortcut_declare_eliminates_proposer",
+            "swapped, P0 loses 4 a repetition and the second takes it from 3 to 0 or less"
+        );
+    }
+
+    /// CR 704.3 + CR 704.5a — **the proposer is checked at every priority beat, and charged
+    /// only what a repetition nets between two.** Two boards, each offered at the proposer's
+    /// own crossing, where the engine's frame-wise charge exceeds what the period nets:
+    ///
+    /// * PAY 1, GAIN 1 at 10 life: frame-wise charge 1, net 0. The total dips to 9 and comes
+    ///   back every repetition, so the offered 10 repetitions kill nobody and the declare
+    ///   scores.
+    /// * PAY 4, GAIN 3 at 5 life: frame-wise charge 4, net 1. The first repetition dips to 1
+    ///   and ends at 4; the second pays 4 from 4, and CR 704.5a removes the proposer before
+    ///   the gain resolves. The declare is refused although 2 repetitions net only 2.
+    ///
+    /// REVERT-PROBES, one per board:
+    /// * accumulate the frame-wise charge (the dip) as if every repetition netted it ⇒ the
+    ///   first board reads 10 lost at the 10th repetition and is refused ⇒ FAILS.
+    /// * accumulate only the net and never read the dip ⇒ the second board reads 2 lost of 5
+    ///   and scores ⇒ FAILS.
+    #[test]
+    fn loop_shortcut_declare_checks_the_proposer_inside_a_repetition_not_only_between_two() {
+        let at_life = |life: i32, bound: u32, net_loss: i64, frame_wise: i64| {
+            let mut state = GameState::new_two_player(0);
+            state.players[P0.0 as usize].life = life;
+            let period = PeriodicDelta {
+                seat_life_charge: vec![(P0, frame_wise)],
+                ..periodic(&[], &[(P0, -net_loss)])
+            };
+            bounded_offer_declaring(state, bound, period, Vec::new(), None)
+        };
+
+        let even = at_life(10, 10, 0, 1);
+        assert!(
+            schema_of(&even).is_bounded(),
+            "REACH-GUARD: the arm under test is bounded-only"
+        );
+        let even_verdict = verdict_for(&even, &declare(IterationCount::Fixed(10)));
+        assert_eq!(
+            kind_of(&even_verdict),
+            "loop_shortcut_bounded_declare_progress",
+            "a repetition that pays 1 and gains 1 never takes a 10-life proposer below 9; got \
+             {even_verdict:?}"
+        );
+
+        let dipping = at_life(5, 2, 1, 4);
+        assert_eq!(
+            kind_of(&verdict_for(&dipping, &declare(IterationCount::Fixed(2)))),
+            "loop_shortcut_declare_eliminates_proposer",
+            "the second repetition pays 4 from 4 life before its gain resolves"
         );
     }
 
@@ -861,9 +1277,8 @@ mod tests {
 
     /// CR 732.2a — the BOUNDED branch, both halves, on ONE schema differing only in `n`.
     ///
-    /// (i) `Fixed(4)` with `max_iterations == 10` ⇒ committed progress that eliminates nobody
-    /// (`elimination_bounds`' contract), so the critical band `PolicyVerdict::score` routes
-    /// `8.0` to. (ii) `Fixed(11)` ⇒ the engine hands it back fail-closed with ZERO committed
+    /// (i) `Fixed(4)` with `max_iterations == 10` ⇒ committed progress well inside every
+    /// seat's headroom, so the critical band `PolicyVerdict::score` routes `8.0` to. (ii) `Fixed(11)` ⇒ the engine hands it back fail-closed with ZERO committed
     /// cycles and the CR 732.2b window spent, i.e. weakly dominated by declining.
     ///
     /// REVERT-PROBES, each flipping a DIFFERENT subset so neither dominates the other:

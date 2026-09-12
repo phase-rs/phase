@@ -246,6 +246,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         force_block_attacker: _,   // exact force-block referent, no dynamic read
         target_incarnations: _,    // CR 400.7 referent pins, no dynamic read
         selected_target_incarnations: _, // CR 400.7 selected-target pins, no dynamic read
+        illegal_target_slots: _,   // CR 608.2b resolution legality stamp, no dynamic read
         controller: _,             // player id
         original_controller: _,    // player id
         scoped_player: _,          // player id (iteration binding)
@@ -2941,7 +2942,7 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
         AbilityCondition::TargetHasKeywordInstead { keyword: _ } => Axes::NONE,
         // `subject_slot: _` is a target-slot INDEX selector (CR 608.2c): `Some(n)`
         // tests `filter` against declared chain slot `n` (via
-        // `resolve_parent_slot_from_root`), `None` against the local most-recent
+        // `resolve_live_parent_slot_from_root`), `None` against the local most-recent
         // target. It reroutes WHICH already-declared target the filter reads and
         // introduces no new event/sibling/projected resource — the game-state read
         // is entirely through `filter` (scanned below). Axes-neutral; destructured

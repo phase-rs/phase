@@ -1009,7 +1009,9 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
    * CMM+CLB draft that forwarded a single representative code could drop the
    * very set the grant keys on.
    */
-  it("carries the pod's draft set codes through the rebuilt payload to the engine", async () => {
+  it.each([
+    { pool: ["Cube A", "Cube A", "Undealt sentinel"] }, { pool: [] }, { pool: undefined },
+  ])("carries the pod's metadata through the rebuilt payload to the engine: $pool", async ({ pool }) => {
     const { peer, onGuestConnected } = createFakePeer();
     const adapter = new P2PHostAdapter(
       {
@@ -1017,6 +1019,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         opponent: { main_deck: ["Forest"], sideboard: [] },
         ai_decks: [],
         draft_set_codes: ["CMM", "CLB"],
+        booster_pack_pool: pool,
       },
       peer as unknown as Peer,
       onGuestConnected,
@@ -1041,9 +1044,10 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     // be read at all — the same reason `nativeWebSocketMocks.onEvent`'s
     // recorded handler is cast where it is read.
     const [payload] = mockInitializeHostGame.mock.calls[0] as unknown as [
-      { draft_set_codes?: string[] },
+      { draft_set_codes?: string[]; booster_pack_pool?: string[] },
     ];
     expect(payload.draft_set_codes).toEqual(["CMM", "CLB"]);
+    expect(payload.booster_pack_pool).toEqual(pool);
   });
 
   it("does not reinitialize the host during the lobby-to-game handoff", async () => {
@@ -4407,14 +4411,14 @@ describe("P2P wire-protocol version gate", () => {
   // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
   // cannot tell a bumped client from an unbumped one, which is why every
   // other handshake fixture in the suite is useless as an instrument for a
-  // bump. Revert 52 → 51 and BOTH halves red: the v51 frame stops being
-  // refused, and the v52 frame stops being admitted. The admitting half is
-  // the reach-guard — without it "refuses v51" is also satisfied by a client
+  // bump. Revert 53 → 52 and BOTH halves red: the v52 frame stops being
+  // refused, and the v53 frame stops being admitted. The admitting half is
+  // the reach-guard — without it "refuses v52" is also satisfied by a client
   // that refuses everything.
-  it("refuses the previous wire protocol (v51) and admits its own (v52)", async () => {
+  it("refuses the previous wire protocol (v52) and admits its own (v53)", async () => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
-    await refusing.conn.simulateData(setupFrameAt(51));
+    await refusing.conn.simulateData(setupFrameAt(52));
 
     await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
@@ -4426,7 +4430,7 @@ describe("P2P wire-protocol version gate", () => {
 
     const admitting = makeGuest();
     await admitting.adapter.initialize();
-    await admitting.conn.simulateData(setupFrameAt(52));
+    await admitting.conn.simulateData(setupFrameAt(53));
 
     await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
     expect(admitting.emitted).not.toHaveBeenCalledWith(

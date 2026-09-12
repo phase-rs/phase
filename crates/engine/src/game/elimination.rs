@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActiveSearchDecisionAuthority, CollectEvidenceResume, CostResume, DeferredLifeCostResume,
-    GameState, PayCostKind, PendingCast, PendingCostMoveResume, PendingDiscardForCostResume,
-    PendingSacrificeCostCompletion, WaitingFor,
+    GameEnd, GameState, PayCostKind, PendingCast, PendingCostMoveResume,
+    PendingDiscardForCostResume, PendingSacrificeCostCompletion, WaitingFor,
 };
 use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::match_config::MatchPhase;
@@ -1662,6 +1662,14 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         return;
     }
 
+    // CR 104.1: the game already ended earlier in this action, and a later step overwrote
+    // `waiting_for`. The recorded result stands; its `GameEvent::GameOver` was already
+    // emitted by `end_game`.
+    if let Some(GameEnd { winner }) = state.game_end {
+        state.waiting_for = WaitingFor::GameOver { winner };
+        return;
+    }
+
     let living: Vec<PlayerId> = state
         .players
         .iter()
@@ -1685,8 +1693,7 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         } else {
             return;
         };
-        events.push(GameEvent::GameOver { winner });
-        state.waiting_for = WaitingFor::GameOver { winner };
+        end_game(state, winner, events);
     } else if super::topology::has_two_headed_giant_shared_resources(state) {
         let mut living_teams = std::collections::BTreeSet::new();
         for &pid in &living {
@@ -1702,21 +1709,37 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
             } else {
                 None // draw
             };
-            events.push(GameEvent::GameOver { winner });
-            state.waiting_for = WaitingFor::GameOver { winner };
+            end_game(state, winner, events);
         }
     } else {
         // Non-team: game over when 0 or 1 living players
         if living.len() <= 1 {
             let winner = living.first().copied();
-            events.push(GameEvent::GameOver { winner });
-            state.waiting_for = WaitingFor::GameOver { winner };
+            end_game(state, winner, events);
         }
     }
 }
 
+/// CR 104.1: end the game, with `winner: None` for a draw (CR 104.4). The single writer of
+/// the terminal result: it records it on [`GameState::game_end`], emits the one
+/// `GameEvent::GameOver`, and parks the game on `WaitingFor::GameOver`. The record is what
+/// lets [`ensure_game_over_if_terminal`] restore that wait when a later step of the same
+/// action overwrites it; a result that `is_eliminated` cannot re-derive (the CR 104.4b
+/// mandatory-loop draw) would otherwise be lost. Callers that finish the match themselves
+/// still call `match_flow::handle_game_over_transition` afterwards.
+pub(super) fn end_game(
+    state: &mut GameState,
+    winner: Option<PlayerId>,
+    events: &mut Vec<GameEvent>,
+) {
+    state.game_end = Some(GameEnd { winner });
+    events.push(GameEvent::GameOver { winner });
+    state.waiting_for = WaitingFor::GameOver { winner };
+}
+
 /// Re-establish the CR 104 terminal-state invariant if an outer action path
-/// overwrote the `WaitingFor::GameOver` produced by elimination.
+/// overwrote the `WaitingFor::GameOver` produced by elimination or by [`end_game`]
+/// (restored from [`GameState::game_end`] without a second `GameEvent::GameOver`).
 pub(super) fn ensure_game_over_if_terminal(state: &mut GameState, events: &mut Vec<GameEvent>) {
     check_game_over(state, events);
 }
@@ -1743,7 +1766,8 @@ mod tests {
         ObjectIncarnationRef, TriggerFiring,
     };
     use crate::types::mana::ManaCost;
-    use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+    use crate::types::match_config::MatchType;
+    use crate::types::proposed_event::{CounterPlacement, DrawEventStage, ProposedEvent};
     use crate::types::replacements::ReplacementEvent;
 
     fn setup_two_player() -> GameState {
@@ -2696,6 +2720,60 @@ mod tests {
         )));
     }
 
+    /// CR 104.1 + CR 104.4b: a result recorded by `end_game` survives a later
+    /// overwrite of `waiting_for` in the same action. No player is eliminated,
+    /// so `is_eliminated` cannot re-derive this draw; only the record can.
+    #[test]
+    fn ensure_game_over_restores_a_recorded_draw_without_a_second_event() {
+        let mut state = setup_two_player();
+        let mut events = Vec::new();
+
+        end_game(&mut state, None, &mut events);
+        // Stand-in for a writer that remains after the CR 104.1 pipeline guard
+        // (e.g. a CR 616.1 replacement-order prompt raised in `resolve_top`).
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        ensure_game_over_if_terminal(&mut state, &mut events);
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::GameOver { winner: None }),
+            "the recorded draw must be restored, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::GameOver { .. }))
+                .count(),
+            1,
+            "restoring the result must not announce the game's end a second time"
+        );
+    }
+
+    /// The restore sits behind `check_game_over`'s `InGame` guard. Once the
+    /// match has moved past the game (a best-of-three sideboard prompt), the
+    /// recorded result must not overwrite that prompt.
+    #[test]
+    fn a_recorded_result_leaves_the_between_games_prompt_alone() {
+        let mut state = setup_two_player();
+        state.match_config.match_type = MatchType::Bo3;
+        let mut events = Vec::new();
+
+        end_game(&mut state, None, &mut events);
+        crate::game::match_flow::handle_game_over_transition(&mut state);
+        assert_eq!(
+            state.match_phase,
+            MatchPhase::BetweenGames,
+            "reach guard: the draw moved the match between games"
+        );
+        let sideboard_prompt = state.waiting_for.clone();
+
+        ensure_game_over_if_terminal(&mut state, &mut events);
+
+        assert_eq!(state.waiting_for, sideboard_prompt);
+    }
+
     // --- 3-player elimination (game continues) ---
 
     #[test]
@@ -3238,6 +3316,7 @@ mod tests {
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
             sacrifice_provenance: None,
@@ -3337,6 +3416,7 @@ mod tests {
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
             sacrifice_provenance: None,
@@ -3412,6 +3492,7 @@ mod tests {
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
+                stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
             sacrifice_provenance: None,

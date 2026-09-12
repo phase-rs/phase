@@ -291,7 +291,12 @@ fn run_post_action_pipeline_from_with_policy(
             || deferred_trigger_batch_was_sba_choice_parked
         {
             triggers::collect_triggers_into_deferred(state, &filtered_events);
-        } else {
+        } else if state.game_end.is_none() {
+            // CR 104.1: only while the game is still going. Once this action
+            // has recorded a result on `GameState::game_end` (e.g. a CR 104.4b
+            // draw declared mid-resolution), the game has already ended, so
+            // abilities that triggered on the action's events never go on the
+            // stack.
             triggers::process_triggers(state, &filtered_events);
         }
     }
@@ -405,14 +410,29 @@ fn run_post_action_pipeline_from_with_policy(
         }
     }
 
-    // CR 610.3a: "until this leaves" returns are immediate one-shot effects.
+    // CR 610.3: "until this leaves" returns are immediate one-shot effects.
     // A resolving effect can remove the source and then pause for a later
     // SearchChoice (Boseiju) or other resolution choice. Process the return
     // before that choice is surfaced; otherwise the source's ZoneChanged
     // event is lost with this pipeline pass and its exiled card never returns.
     let events_before_exile_returns = events.len();
     let deferred_trigger_count_before_exile_returns = state.deferred_triggers.len();
-    check_exile_returns(state, events);
+    // CR 104.1: only while the game is still going. Once this action has recorded
+    // a result on `GameState::game_end`, the game has already ended, so a source
+    // that left the battlefield must not move its linked exiled card back through
+    // the zone-change pipeline. The reachable case is the game-ending elimination
+    // itself: CR 800.4a sweeps every object the losing player owns off the
+    // battlefield BEFORE `end_game` records the result, so the source's
+    // `ZoneChanged` is already sitting in this batch when the pass runs.
+    // `game_end` is the authority here, not `waiting_for`: a later step of the
+    // same action can overwrite the wait (a CR 616.1 replacement-order prompt on
+    // the resolving spell's own zone move), and only
+    // `engine::reconcile_terminal_result` restores it at the action boundary. The
+    // collection block below is keyed on the events this call appends, so it goes
+    // inert with it rather than needing a second guard.
+    if state.game_end.is_none() {
+        check_exile_returns(state, events);
+    }
     if events.len() > events_before_exile_returns {
         let exile_return_events: Vec<_> = events[events_before_exile_returns..].to_vec();
         let consumed_exile_return_events =

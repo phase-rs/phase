@@ -63,6 +63,12 @@ name = "set-check"
 path = "src/bin/set_check.rs"
 
 [[bin]]
+name = "preset-audit"
+path = "src/bin/preset_audit.rs"
+# Test-enabled: inline tests pin how Scryfall responses are classified, with
+# canned bodies and no network access.
+
+[[bin]]
 name = "parser-gap-analyzer"
 path = "src/bin/parser_gap_analyzer.rs"
 test = false

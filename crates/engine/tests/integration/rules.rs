@@ -16,6 +16,86 @@ pub use engine::types::phase::Phase;
 pub use engine::types::player::PlayerId;
 pub use engine::types::zones::{ExileCostSourceZone, Zone};
 
+use engine::types::ability::TargetRef;
+
+/// An instant `player` casts at `target` the first time they hold priority
+/// while the spell or ability [`drive_with_response`] drives is on the stack.
+pub struct PriorityResponse {
+    pub player: PlayerId,
+    pub instant: ObjectId,
+    pub target: ObjectId,
+}
+
+/// The action casting `spell` with automatic payment; its targets are answered
+/// at the prompts [`drive_with_response`] drives.
+pub fn cast_spell_action(runner: &GameRunner, spell: ObjectId) -> GameAction {
+    GameAction::CastSpell {
+        object_id: spell,
+        card_id: runner.state().objects[&spell].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    }
+}
+
+/// Submit `action` (a cast or an activation) and drive until the stack is
+/// empty, answering target prompts with `targets` in order and passing every
+/// other priority. `response` is cast above the driven object, so it resolves
+/// first; its own target prompt is answered with its `target`. Returns every
+/// event emitted.
+pub fn drive_with_response(
+    runner: &mut GameRunner,
+    action: GameAction,
+    targets: &[ObjectId],
+    response: Option<PriorityResponse>,
+) -> Vec<GameEvent> {
+    drive_modal_with_response(runner, action, &[], targets, response)
+}
+
+/// [`drive_with_response`] for a modal spell (CR 700.2): `modes` answers the
+/// `WaitingFor::ModeChoice` window that precedes target selection, as printed
+/// indices. The two share one loop so a driven modal cast reaches the same
+/// windows, in the same order, as every other driven cast.
+pub fn drive_modal_with_response(
+    runner: &mut GameRunner,
+    action: GameAction,
+    modes: &[usize],
+    targets: &[ObjectId],
+    mut response: Option<PriorityResponse>,
+) -> Vec<GameEvent> {
+    let mut events = runner.act(action).expect("submit the driven action").events;
+
+    // The targets still to choose for the spell or ability being put on the stack.
+    let mut pending = targets.to_vec();
+    for _ in 0..60 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::ModeChoice { .. } => GameAction::SelectModes {
+                indices: modes.to_vec(),
+            },
+            WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
+            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(pending.remove(0))),
+            },
+            WaitingFor::Priority { player } => {
+                if runner.state().stack.is_empty() {
+                    return events;
+                }
+                match response.take_if(|queued| queued.player == *player) {
+                    Some(PriorityResponse {
+                        instant, target, ..
+                    }) => {
+                        pending = vec![target];
+                        cast_spell_action(runner, instant)
+                    }
+                    None => GameAction::PassPriority,
+                }
+            }
+            other => panic!("unexpected window: {other:?}"),
+        };
+        events.extend(runner.act(action).expect("drive window").events);
+    }
+    panic!("the stack did not empty within the window budget");
+}
+
 /// Shared damage fixture: a non-combat source dealing `amount` to `target`,
 /// controlled by P1 (the opponent of the shield controller in the CR 614.9
 /// redirection fixtures). Shared by `heroic_sacrifice_redirect`,

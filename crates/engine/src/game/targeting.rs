@@ -963,7 +963,9 @@ pub fn resolved_targets(
     }
     // CR 608.2c: ParentTarget / ParentTargetSlot inherit propagated targets;
     // StackSpell uses player-chosen stack targets at ETB (issue #2351).
-    // Slot indexing for ParentTargetSlot happens in `effect_object_targets`.
+    // Slot indexing for ParentTargetSlot happens in `effect_object_targets`;
+    // `effects::resolved_effect_object_ids` binds the slot through the live
+    // slot authority instead.
     //
     // CR 400.7 + CR 603.7c: a delayed ability's pinned referent that has since
     // become a new object is dropped here — it "left that zone and then
@@ -1035,22 +1037,38 @@ pub(crate) fn resolving_root_ability<'a>(
     state: &'a GameState,
     ability: &'a ResolvedAbility,
 ) -> &'a ResolvedAbility {
-    state
-        .resolving_stack_entry
-        .as_ref()
-        .filter(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
+    resolution_carrier_entry(state, ability)
         .or_else(|| {
             state
                 .stack
                 .iter()
-                .find(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
+                .find(|entry| entry_carries_ability(entry, ability))
         })
-        .and_then(|entry| entry.ability())
+        .and_then(StackEntry::ability)
         .unwrap_or(ability)
 }
 
-/// CR 608.2c: Resolve a single earlier target slot by its declared `index` from
-/// the flattened chain root. `None` when the index is out of range.
+/// Whether `entry` is the stack entry `ability` (a node of its chain) belongs to.
+fn entry_carries_ability(entry: &StackEntry, ability: &ResolvedAbility) -> bool {
+    entry.id == ability.source_id || entry.source_id == ability.source_id
+}
+
+/// The resolution carrier (`resolving_stack_entry`) when `ability` belongs to it.
+fn resolution_carrier_entry<'a>(
+    state: &'a GameState,
+    ability: &ResolvedAbility,
+) -> Option<&'a StackEntry> {
+    state
+        .resolving_stack_entry
+        .as_ref()
+        .filter(|entry| entry_carries_ability(entry, ability))
+}
+
+/// CR 608.2c: The DECLARED target of slot `index` in the flattened chain root,
+/// with no legality or pin check. `None` when the index is out of range. Only
+/// for reading the chain's declared shape (the dual-fighter recovery in
+/// `effects::fight`); a consumer that AFFECTS or MATCHES the referent must use
+/// [`resolve_live_parent_slot_from_root`].
 pub(crate) fn resolve_parent_slot_from_root(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1059,6 +1077,52 @@ pub(crate) fn resolve_parent_slot_from_root(
     parent_chain_targets_from_root(state, ability)
         .into_iter()
         .nth(index)
+}
+
+/// CR 608.2c + CR 608.2b + CR 400.7 + CR 603.7c: Resolve the declared slot
+/// `index` from the flattened chain root, then drop it when
+/// - its target failed the legality check made as the chain began to resolve
+///   (CR 608.2b: "Illegal targets, if any, won't be affected by parts of a
+///   resolving spell's effect for which they're illegal"), read from the
+///   resolution carrier's `illegal_target_slots` stamp; or
+/// - it names an object whose captured pin has gone stale (the referent left
+///   its zone and returned as a new object).
+///
+/// The stamp is read only from the resolution carrier: a stack entry cloned
+/// from a stamped carrier (a spell copying itself, CR 707.10) has made no
+/// legality check of its own yet. Indexing happens BEFORE either check, so
+/// dropping a referent never renumbers a later slot. A legal player slot
+/// passes through unchanged.
+///
+/// This is the single authority every consumer that AFFECTS or MATCHES a slot
+/// referent routes through: transient grants, damage recipients, counter
+/// recipients, required defenders, prevention sources, attach operands and
+/// token hosts, gained-control objects, fighters, player slots (including
+/// `effects::resolve_player_for_context_ref`), slot conditions, filter
+/// matching, and every effect subject resolved by
+/// `effects::resolved_effect_object_ids`. Callers that still read
+/// `resolved_targets`' whole-chain return for a `ParentTargetSlot` filter
+/// (first object or whole list) bypass it: destroy, bounce, sacrifice, counter,
+/// put-on-top-or-bottom, exchange control, pair with, change targets, the
+/// damage-replacement filters, gain control's give, and the
+/// `ObjectsShareQuality` / `TargetSharesNameWithOtherExiledThisWay`
+/// conditions; so does `put_on_top`'s positional read, whose declared list
+/// also feeds its stale-source guard.
+pub(crate) fn resolve_live_parent_slot_from_root(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    index: usize,
+) -> Option<TargetRef> {
+    let illegal_at_resolution = resolution_carrier_entry(state, ability)
+        .and_then(StackEntry::ability)
+        .is_some_and(|root| root.illegal_target_slots.contains(&index));
+    if illegal_at_resolution {
+        return None;
+    }
+    resolve_parent_slot_from_root(state, ability, index).filter(|target| match target {
+        TargetRef::Object(id) => ability.target_pin_is_current(*id, state),
+        TargetRef::Player(_) => true,
+    })
 }
 
 pub(crate) fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
@@ -1193,21 +1257,14 @@ pub(crate) fn resolved_object_ids_for_filter_with_context(
         // CR 400.7 + CR 603.7c: mirror the `resolved_targets` pin check on the
         // untargeted-pool path (the second SelfRef chokepoint).
         TargetFilter::ParentTarget => object_targets(&ability.live_object_targets(state)).collect(),
-        // CR 400.7 + CR 603.7c: `ParentTargetSlot` is deliberately NOT
-        // pin-filtered. Slot numbering is declared, not live:
+        // CR 400.7 + CR 603.7c: `ParentTargetSlot`'s slot LIST is deliberately
+        // NOT pin-filtered. Slot numbering is declared, not live:
         // `effects::effect_object_targets` indexes `ParentTargetSlot { index }`
         // straight into whatever slice it is handed (the single slot-indexing
         // authority, 22 call sites), so dropping a stale element anywhere
-        // upstream would renumber every later slot.
-        //
-        // No slot pin-check exists anywhere in the engine, and none is needed
-        // today: the only delayed-trigger card carrying a `ParentTargetSlot`
-        // (`stolen uniform`, `WhenNextEvent { ChangesController, valid_card:
-        // ParentTargetSlot }`) is denied a pin by
-        // `condition_names_referent_zone_change` — `ChangesController` is not on
-        // `mode_provably_leaves_referent_in_place`'s allowlist — so
-        // `target_pin_is_current` is vacuously true for every slot id in
-        // practice.
+        // upstream would renumber every later slot. Only the SELECTED referent
+        // is legality- and pin-checked, after indexing, by
+        // `resolve_live_parent_slot_from_root`.
         //
         // THE STANDING CONSTRAINT FOR ALL 22 CALL SITES: never hand
         // `effect_object_targets` a pin-filtered slice when the filter may be
@@ -1215,9 +1272,8 @@ pub(crate) fn resolved_object_ids_for_filter_with_context(
         // see one, and it passes the raw `ability.targets` for exactly that
         // reason.
         TargetFilter::ParentTargetSlot { index } => {
-            resolve_parent_slot_from_root(state, ability, *index)
+            resolve_live_parent_slot_from_root(state, ability, *index)
                 .and_then(|target| target_ref_object(&target))
-                .filter(|id| ability.target_pin_is_current(*id, state))
                 .into_iter()
                 .collect()
         }
@@ -1874,6 +1930,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::TappedForMana { .. }
         | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
+        | GameEvent::ManaBurn { .. }
         | GameEvent::ManaRecolored { .. }
         | GameEvent::PermanentTapped { .. }
         | GameEvent::CreatureExerted { .. }
@@ -6344,6 +6401,65 @@ mod tests {
                 &TargetFilter::ParentTargetSlot { index: 1 },
             ),
             vec![ObjectId(2)],
+        );
+    }
+
+    /// CR 608.2b: a declared slot the resolution carrier recorded as an
+    /// illegal target yields no referent, and the later slot keeps its number.
+    /// A stack entry carrying the same stamp (a copy cloned from a stamped
+    /// carrier, CR 707.10) has checked nothing yet, so its slots stay live.
+    #[test]
+    fn live_parent_slot_drops_a_slot_the_carrier_recorded_as_illegal() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let first = TargetRef::Object(ObjectId(1));
+        let second = TargetRef::Object(ObjectId(2));
+        let target_only = |target: TargetRef| {
+            ResolvedAbility::new(
+                crate::types::ability::Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                vec![target],
+                source,
+                PlayerId(0),
+            )
+        };
+        let mut root = target_only(first.clone()).sub_ability(target_only(second.clone()));
+        root.illegal_target_slots = vec![0];
+        let body = target_only(second.clone());
+        let entry = StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        };
+
+        state.resolving_stack_entry = Some(entry.clone());
+        assert_eq!(
+            resolve_parent_slot_from_root(&state, &body, 0),
+            Some(first.clone()),
+            "reach guard: the declared slot 0 still names the first target"
+        );
+        assert_eq!(
+            resolve_live_parent_slot_from_root(&state, &body, 0),
+            None,
+            "an illegal slot must not name its target"
+        );
+        assert_eq!(
+            resolve_live_parent_slot_from_root(&state, &body, 1),
+            Some(second),
+            "dropping slot 0 must not renumber slot 1"
+        );
+
+        state.resolving_stack_entry = None;
+        state.stack.push_back(entry);
+        assert_eq!(
+            resolve_live_parent_slot_from_root(&state, &body, 0),
+            Some(first),
+            "a stamp on a non-resolving stack entry is not a legality check"
         );
     }
 

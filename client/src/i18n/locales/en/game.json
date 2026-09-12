@@ -17,10 +17,10 @@
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
     "respondTitle": "Loop Shortcut Proposed",
-    "respondSubtitle": "An opponent proposes taking a loop shortcut. Accept it, or break out to keep playing manually.",
+    "respondSubtitle": "An opponent proposes taking a loop shortcut. Accept it, or name the place where the sequence stops.",
     "confirm": "Take the shortcut",
     "accept": "Accept",
-    "shorten": "Break out",
+    "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
     "fixedCount_one": "Repeat at most once.",
@@ -2414,10 +2414,12 @@
   "outsideGame": {
     "fromExile": "From exile",
     "fromSideboard": "From sideboard",
-    "fromBoosterPack": "From {{setCode}} booster pack"
+    "fromBoosterPack": "From {{setCode}} booster pack",
+    "fromCubeBoosterPack": "From a Cube booster pack"
   },
   "boosterPack": {
     "title": "{{setCode}} Booster Pack",
+    "cubeTitle": "Cube Booster Pack",
     "subtitleExact_one": "Choose {{count}} card to keep — the rest are removed from the game",
     "subtitleExact_other": "Choose {{count}} cards to keep — the rest are removed from the game",
     "subtitleUpTo_one": "Choose up to {{count}} card to keep — the rest are removed from the game",

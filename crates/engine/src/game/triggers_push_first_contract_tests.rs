@@ -587,11 +587,12 @@ fn random_modal_trigger_resolves_without_prompting() {
 /// rules-legal causes were both proven unreachable (a controller leaving is
 /// handled upstream by `elimination::do_eliminate`; countering/removal
 /// mid-construction is impossible because modes/targets are chosen before anyone
-/// has priority, CR 603.3d) — so this test surgically injects the corrupt state
-/// rather than reproducing the producer. See the follow-up issue for the hunt.
+/// has priority, CR 603.3c + CR 603.3d) — so this test surgically injects the
+/// corrupt state rather than reproducing the producer. See the follow-up issue
+/// for the hunt.
 ///
-/// The recovery (`triggers::abandon_ceased_pending_trigger`, CR 608.2b / CR
-/// 800.4a recovery semantics) must NOT panic in
+/// The recovery (`triggers::abandon_ceased_pending_trigger`, CR 608.1 recovery
+/// semantics) must NOT panic in
 /// `assign_pending_trigger_entry_ability`; it must record a distinguishable
 /// diagnostic, clean the vanished entry's side tables, clear all pending-trigger
 /// state, and hand control back to the game via `Priority`.

@@ -215,7 +215,7 @@ fn actor_owns_everything_they_control(state: &GameState, actor: PlayerId) -> boo
 }
 
 /// Is a landing zone confined — i.e. can the seat NOT act on what arrives there,
-/// inside the window the Shorten hands back?
+/// inside the window a Shorten opens for the responder?
 ///
 /// This is the single authority for that question, and it exists because the two
 /// doors out of a library drifted apart exactly once: the `ChangeZone` arm gated
@@ -364,8 +364,8 @@ fn effect_window_reach(effect: &Effect) -> WindowReach {
         // OWNERSHIP IS NOT ENOUGH WHEN THE DESTINATION IS THE BATTLEFIELD.
         // CR 110.5b: "Permanents enter the battlefield untapped, unflipped, face
         // up, and phased in unless a spell or ability says otherwise." A land
-        // that arrives UNTAPPED taps for mana in the very window the Shorten
-        // hands the responder — CR 601.2g runs mana abilities during the cast
+        // that arrives UNTAPPED taps for mana in the very window a Shorten opens
+        // for the responder — CR 601.2g runs mana abilities during the cast
         // they fund, and CR 302.6's summoning-sickness bar is a CREATURE rule
         // that never applies to a land. So an untapped fetch is the
         // `Effect::Mana` case below with one extra step, and the reasoning that
@@ -387,7 +387,7 @@ fn effect_window_reach(effect: &Effect) -> WindowReach {
         // evidence. The question this module asks is never "is the moved card
         // the actor's own?" — the deleted `Effect::Mana` arm is what happens when
         // ownership is mistaken for confinement. It is "can the seat DO something
-        // with the result inside the window the Shorten hands back?"
+        // with the result inside the window a Shorten opens?"
         //
         // * `Battlefield` — an untapped permanent taps for mana during the very
         //   cast it funds (CR 601.2g), so only a PROVABLY tapped arrival is
@@ -547,8 +547,8 @@ fn effect_window_reach(effect: &Effect) -> WindowReach {
         // So mana is FUNGIBLE REACH, and the earlier arm's inference —
         // "producing it removes nothing from the board" — answers where the mana
         // LANDS, which is not what this classifier asks. The question is whether
-        // the action widens what the seat can do inside the window
-        // `game::engine`'s `RespondToShortcut(Shorten)` arm hands back.
+        // the action widens what the seat can do inside the window a Shorten opens —
+        // the ending point `game::engine` seats the shortener at once the shortcut is taken.
         //
         // Whether it does is NOT a function of the AST: it depends on the rest of
         // the hand, the board, the colors produced, and on what other permanents
@@ -2722,7 +2722,7 @@ mod tests {
     ///
     /// Why the untapped one is reach: the fetched land arrives ready (CR 302.6's
     /// summoning-sickness bar is a creature rule), taps for mana inside the
-    /// window the Shorten hands back, and CR 601.2g runs that mana ability during
+    /// window a Shorten opens, and CR 601.2g runs that mana ability during
     /// the cast it funds. `v10c` in `tests/integration/shorten_efficacy.rs`
     /// measures that whole chain on the real 4p board; this row pins the AST
     /// premise it rests on.
@@ -2756,7 +2756,7 @@ mod tests {
                 reach(card, 0),
                 WindowReach::MayInterfere,
                 "{name}[0] puts a land onto the battlefield UNTAPPED (CR 110.5b), which taps for \
-                 mana inside the window the Shorten hands back — the Effect::Mana case with one \
+                 mana inside the window a Shorten opens — the Effect::Mana case with one \
                  extra step"
             );
         }

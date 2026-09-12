@@ -554,6 +554,19 @@ fn register_transient_effect(
     let direct_binding_uses_targets = target_filter.is_some()
         || application_filter.is_some_and(generic_effect_affected_uses_inherited_targets)
         || inherited_object_target;
+    // CR 608.2b + CR 608.2c: a `ParentTargetSlot` anaphor names a DECLARED slot
+    // of the resolving chain root, so it binds through the carrier rather than
+    // through this node's local list. Chain propagation copies the immediately
+    // preceding parent's targets, and resolution-time re-validation compacts an
+    // illegal one away — so a chain whose LAST declared slot was illegal reaches
+    // its slot-bound grant with an EMPTY local list (Blizzard Brawl when the
+    // opponent's fighter gains hexproof in response). Gating the targeted branch
+    // on that list alone would send the still-legal slot referent down the
+    // broadcast path and drop its grant, but CR 608.2b's Plague Spores example
+    // keeps it: "other parts of the effect for which those targets are not
+    // illegal may still affect them."
+    let slot_anaphor_binding = application_filter
+        .is_some_and(|filter| matches!(filter, TargetFilter::ParentTargetSlot { .. }));
 
     // CR 611.1 + CR 611.2c + CR 115.1: Targeted effects — register one transient
     // continuous effect per target. `TargetRef::Object` binds to
@@ -567,7 +580,7 @@ fn register_transient_effect(
     // that scan `state.transient_continuous_effects` directly.
     // A `ControllerRef::TargetPlayer` affected filter is different: its player
     // target parameterizes a broadcast object filter and is resolved below.
-    if (!ability.targets.is_empty() || forwarded_parent_target)
+    if (!ability.targets.is_empty() || forwarded_parent_target || slot_anaphor_binding)
         && direct_binding_uses_targets
         && !static_affected_references_target_player
     {
@@ -862,19 +875,39 @@ fn transient_bound_filters(
                 .map(|id| TargetFilter::SpecificObject { id })
                 .collect();
         }
-        // Slot carve-out (§5.4b): this hands its list straight to
-        // `effect_object_targets`, which indexes `ParentTargetSlot`
-        // POSITIONALLY. A pin-filtered list would renumber the slots, so the
-        // raw list is passed for that shape only.
-        let pool: &[TargetRef] = if matches!(filter, TargetFilter::ParentTargetSlot { .. }) {
-            &ability.targets
-        } else {
-            &live_targets
-        };
-        return crate::game::effects::effect_object_targets(filter, pool)
+        // CR 608.2c: `ParentTargetSlot { index }` numbers the DECLARED target
+        // slots of the WHOLE resolving chain, not the current node's local
+        // targets. Chain propagation (`resolve_chain_body`) replaces a
+        // slot-less node's `targets` with the IMMEDIATELY PRECEDING parent's,
+        // so a node reached after a two-target declaration holds only the last
+        // target — indexing that local list would bind "the creature you
+        // control" (Blizzard Brawl's snow-conditional buff) to the opponent's
+        // creature. Resolve through the shared chain-root slot authority. The
+        // slot list is never filtered (slot numbering is declared, so dropping
+        // an element would renumber every later slot); the SELECTED referent is
+        // dropped when it was an illegal target at resolution (CR 608.2b) or
+        // departed and returned (CR 400.7).
+        if let TargetFilter::ParentTargetSlot { index } = filter {
+            return parent_target_slot_filters(state, ability, *index);
+        }
+        // Non-slot inherited references (`ParentTarget`, …) resolve against the
+        // pin-filtered live targets so a departed-and-returned referent is
+        // dropped (CR 400.7).
+        return crate::game::effects::effect_object_targets(filter, &live_targets)
             .into_iter()
             .map(|id| TargetFilter::SpecificObject { id })
             .collect();
+    }
+
+    // CR 608.2c: the slot anaphor resolves independently of
+    // `inherited_object_target`. That flag requires an object target (or a
+    // forwarded result), so a player-only chain referencing a `ParentTargetSlot`
+    // would otherwise fall through to the positional live-target fan-out below
+    // and bind EVERY target instead of the one named slot — mirroring
+    // `ability_utils::collect_player_targets`, which resolves the player slot at
+    // the top of its own target resolution.
+    if let Some(TargetFilter::ParentTargetSlot { index }) = resolved_filter {
+        return parent_target_slot_filters(state, ability, *index);
     }
 
     // The `skip` is positional (it drops a companion player slot), but it skips
@@ -888,6 +921,26 @@ fn transient_bound_filters(
         .map(|target| match target {
             TargetRef::Object(obj_id) => TargetFilter::SpecificObject { id: *obj_id },
             TargetRef::Player(player_id) => TargetFilter::SpecificPlayer { id: *player_id },
+        })
+        .collect()
+}
+
+/// CR 608.2c + CR 400.7: Bind a `ParentTargetSlot { index }` anaphor to the
+/// transient-effect filter for its referent, resolved through the shared
+/// chain-root slot authority
+/// (`targeting::resolve_live_parent_slot_from_root`). A referent that was an
+/// illegal target at resolution (CR 608.2b), a stale object referent, or an
+/// out-of-range index yields an empty list.
+fn parent_target_slot_filters(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    index: usize,
+) -> Vec<TargetFilter> {
+    crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, index)
+        .into_iter()
+        .map(|target| match target {
+            TargetRef::Object(id) => TargetFilter::SpecificObject { id },
+            TargetRef::Player(id) => TargetFilter::SpecificPlayer { id },
         })
         .collect()
 }
@@ -1266,7 +1319,8 @@ mod tests {
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
-    use crate::types::identifiers::{CardId, TrackedSetId};
+    use crate::types::game_state::{StackEntry, StackEntryKind};
+    use crate::types::identifiers::{CardId, ObjectIncarnationRef, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -1843,6 +1897,223 @@ mod tests {
             TargetFilter::SpecificObject {
                 id: target_creature
             }
+        );
+    }
+
+    /// CR 608.2c: a `ParentTargetSlot` naming a PLAYER slot resolves against the
+    /// chain-root declared slots even when the ability's local (propagated)
+    /// targets differ. `inherited_object_target` is false for a player-only
+    /// chain, so without the independent slot arm the anaphor falls through to
+    /// the positional fan-out and binds the leaf's local target instead of the
+    /// named root slot.
+    #[test]
+    fn parent_target_slot_resolves_root_player_slot_in_chain() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(500);
+
+        // Root chain declares two player targets: slot 0 = P0, slot 1 = P1.
+        let root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+
+        // The leaf carries only the locally-propagated most-recent target (P1),
+        // but `ParentTargetSlot { index: 0 }` must resolve to root slot 0 (P0).
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTargetSlot { index: 0 })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        let leaf = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &leaf, &mut events).unwrap();
+
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "only the chain-root slot 0 should be bound, not the leaf's local target"
+        );
+        assert_eq!(
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) }
+        );
+    }
+
+    /// CR 400.7 + CR 603.7c: the positive control for the departed-referent test —
+    /// a referent that STAYED keeps its captured pin and still receives the effect.
+    #[test]
+    fn parent_target_slot_binds_referent_that_stayed() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Continuous Source".to_string(),
+            Zone::Stack,
+        );
+        let target_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTargetSlot { index: 0 })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        let mut ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![TargetRef::Object(target_creature)],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        // Production pin capture: pin the referent to its current incarnation.
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&target_creature]);
+        ability.set_target_incarnations_recursive(vec![pin]);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        assert_eq!(
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificObject {
+                id: target_creature
+            }
+        );
+    }
+
+    /// CR 400.7 + CR 603.7c: a `ParentTargetSlot` referent that left and returned
+    /// (a new incarnation) must be dropped. The pin is captured the production way
+    /// (`set_target_incarnations_recursive`) and the object actually moves zones —
+    /// battlefield → graveyard → battlefield — so the captured pin goes stale.
+    #[test]
+    fn parent_target_slot_drops_referent_that_left_and_returned() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Continuous Source".to_string(),
+            Zone::Stack,
+        );
+        let target_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTargetSlot { index: 0 })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        let mut ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![TargetRef::Object(target_creature)],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        // Production pin capture: pin the referent to its current incarnation.
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&target_creature]);
+        ability.set_target_incarnations_recursive(vec![pin]);
+
+        // Real zone transition: leave the battlefield and return. Each move bumps
+        // the incarnation (CR 400.7), so the captured pin is now stale. Route both
+        // moves through the replacement-aware pipeline (`move_object`) rather than
+        // the raw `zones::move_to_zone` primitive, so a replacement effect could
+        // still modify or prevent either transition.
+        let mut events = Vec::new();
+        let _ = crate::game::zone_pipeline::move_object(
+            &mut state,
+            crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                target_creature,
+                Zone::Graveyard,
+                source,
+            ),
+            &mut events,
+        );
+        let _ = crate::game::zone_pipeline::move_object(
+            &mut state,
+            crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                target_creature,
+                Zone::Battlefield,
+                source,
+            ),
+            &mut events,
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.transient_continuous_effects.is_empty(),
+            "a departed-and-returned referent must not receive the effect"
         );
     }
 

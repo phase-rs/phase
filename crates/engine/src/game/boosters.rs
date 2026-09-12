@@ -10,6 +10,10 @@
 //! from the loaded card database and collates a fresh pack from one of them on
 //! demand.
 //!
+//! Cube-derived games instead hydrate their original source entries with
+//! [`build_pool_shelf`]. [`open_pack`] samples fifteen entries from that source,
+//! preserving its copies and ignoring set printings and rarity buckets.
+//!
 //! # Why a shelf and not the whole corpus
 //!
 //! There is no `CardDatabase` at effect-resolution time — resolvers see only
@@ -46,12 +50,15 @@ use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
 };
 use crate::types::card::{CardFace, Rarity};
-use crate::types::game_state::{BoosterProduct, BoosterShelf, GameState};
+use crate::types::game_state::{BoosterProduct, BoosterShelf, GameState, PackOrigin};
 
 /// How many booster products a game stocks. Each `Effect::OpenBoosterPack`
 /// resolution picks one at random, so this is the number of distinct sets a
 /// single game can open packs from — not a cap on how many packs it can open.
 pub const SHELF_PRODUCTS: usize = 8;
+
+/// Digital Cube convention: every in-game booster contains fifteen entries.
+pub const CUBE_PACK_SIZE: usize = 15;
 
 /// Maximum cards sampled into one product's rarity bucket. Caps the resident
 /// cost of sets with very large card pools (compilation products such as "The
@@ -85,6 +92,12 @@ const SHELF_SEED_SALT: u64 = 0xB005_7E12_5EA1_ED00;
 /// every deck-pool entry — through the shared `ability_visit` walkers, so a card
 /// that only reaches the game from a sideboard or a companion slot still stocks
 /// the shelf.
+///
+/// `GameState::booster_pack_pool` is deliberately not part of that surface: its
+/// entries are what a pack can deal, and a card reaches the game from a pack
+/// only after something already in the game opened one. Scanning it would stock
+/// the shelf, and so widen an AI worker to the full card database, for every
+/// Cube that merely contains an opener.
 pub fn game_opens_booster_packs(state: &GameState, db: &CardDatabase) -> bool {
     let mut found = false;
     let mut visit = |effect: &Effect| {
@@ -206,7 +219,47 @@ pub fn build_shelf(db: &CardDatabase, seed: u64) -> BoosterShelf {
     // Deterministic shelf order regardless of the shuffle, so a product index is
     // stable for logs and tests.
     products.sort_by(|a, b| a.set_code.cmp(&b.set_code));
-    BoosterShelf { products }
+    BoosterShelf::Products(products)
+}
+
+/// Hydrate the original source atomically. Missing entries make the bounded
+/// source unavailable instead of changing membership or substituting a set.
+pub fn build_pool_shelf(db: &CardDatabase, names: &[String]) -> BoosterShelf {
+    let cards = names
+        .iter()
+        .map(|name| db.get_face_by_name(name).cloned())
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+    BoosterShelf::Cube(cards)
+}
+
+/// Open from the active source. Cube entries are sampled without replacement
+/// within each shuffled cycle; small cubes refill until fifteen are dealt.
+/// Every opening starts with the full source, retaining duplicate occurrences.
+/// Returns `None` when the source cannot deal a pack.
+pub fn open_pack(shelf: &BoosterShelf, rng: &mut impl Rng) -> Option<(PackOrigin, Vec<CardFace>)> {
+    match shelf {
+        BoosterShelf::Products(products) => {
+            let product = products.choose(rng)?;
+            Some((
+                PackOrigin::Set(product.set_code.clone()),
+                collate_pack(product, rng),
+            ))
+        }
+        BoosterShelf::Cube(cards) => {
+            if cards.is_empty() {
+                return None;
+            }
+            let mut pack = Vec::with_capacity(CUBE_PACK_SIZE);
+            let mut indices: Vec<_> = (0..cards.len()).collect();
+            while pack.len() < CUBE_PACK_SIZE {
+                indices.shuffle(rng);
+                let remaining = CUBE_PACK_SIZE - pack.len();
+                pack.extend(indices.iter().take(remaining).map(|&i| cards[i].clone()));
+            }
+            Some((PackOrigin::Cube, pack))
+        }
+    }
 }
 
 /// Collate one booster pack from `product`, drawing from `rng`.
@@ -334,6 +387,14 @@ mod tests {
         value
     }
 
+    /// The products of a set-product shelf; a Cube shelf here is a test bug.
+    fn products(shelf: &BoosterShelf) -> &[BoosterProduct] {
+        match shelf {
+            BoosterShelf::Products(products) => products,
+            BoosterShelf::Cube(_) => panic!("build_shelf stocks set products"),
+        }
+    }
+
     fn db_from(entries: serde_json::Map<String, serde_json::Value>) -> CardDatabase {
         CardDatabase::from_json_str(&serde_json::Value::Object(entries).to_string())
             .expect("synthetic export parses")
@@ -378,8 +439,7 @@ mod tests {
     #[test]
     fn only_sets_that_can_fill_a_pack_are_shelved() {
         let shelf = build_shelf(&db_with_one_fillable_set(), 7);
-        let codes: Vec<&str> = shelf
-            .products
+        let codes: Vec<&str> = products(&shelf)
             .iter()
             .map(|product| product.set_code.as_str())
             .collect();
@@ -404,7 +464,7 @@ mod tests {
     fn a_collated_pack_is_the_full_skeleton_with_no_repeats() {
         let db = db_with_one_fillable_set();
         let shelf = build_shelf(&db, 3);
-        let product = &shelf.products[0];
+        let product = &products(&shelf)[0];
         let mut rng = ChaCha20Rng::seed_from_u64(11);
         let pack = collate_pack(product, &mut rng);
 
@@ -464,8 +524,7 @@ mod tests {
         );
 
         let shelf = build_shelf(&db_from(entries), 5);
-        let product = shelf
-            .products
+        let product = products(&shelf)
             .iter()
             .find(|product| product.set_code == "DFC")
             .expect("DFC can fill a pack from its twelve front-face commons");

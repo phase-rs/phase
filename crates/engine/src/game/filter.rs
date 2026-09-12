@@ -3692,9 +3692,15 @@ fn filter_inner_for_object(
         TargetFilter::ParentTargetSlot { index } => ability.is_some_and(|ability| {
             !ability.target_incarnations.is_empty()
                 && matches!(
-                    ability.targets.get(*index),
-                    Some(TargetRef::Object(id))
-                        if *id == object_id && ability.target_pin_is_current(*id, state)
+                    // CR 608.2c: the slot is resolved from the chain root, not the
+                    // current node's locally-propagated targets — the selected
+                    // object is then checked by the same authority, so a referent
+                    // that was an illegal target at resolution (CR 608.2b) or that
+                    // departed and returned (CR 400.7) no longer matches.
+                    crate::game::targeting::resolve_live_parent_slot_from_root(
+                        state, ability, *index,
+                    ),
+                    Some(TargetRef::Object(id)) if id == object_id
                 )
         }),
         // ParentTargetController/ParentTargetOwner/PostReplacementSourceController
@@ -5390,10 +5396,11 @@ fn matches_combat_relation(
     }
 }
 
-fn referenced_targets_for_filter<'a>(
+fn referenced_targets_for_filter(
+    state: &GameState,
     target: &TargetFilter,
-    ability: Option<&'a ResolvedAbility>,
-) -> Vec<&'a TargetRef> {
+    ability: Option<&ResolvedAbility>,
+) -> Vec<TargetRef> {
     let Some(ability) = ability else {
         return vec![];
     };
@@ -5406,9 +5413,14 @@ fn referenced_targets_for_filter<'a>(
         // `ParentTarget` referent is the effect-context LKI snapshot consulted by
         // `parent_target_shared_quality_values`, not this list — the empty arm is
         // intentional, not a gap.
-        TargetFilter::ParentTarget => ability.targets.iter().collect(),
+        TargetFilter::ParentTarget => ability.targets.clone(),
+        // CR 608.2c + CR 608.2b + CR 400.7: a declared slot of the whole
+        // resolving chain, resolved (legality- and pin-checked) through the
+        // shared chain-root authority.
         TargetFilter::ParentTargetSlot { index } => {
-            ability.targets.get(*index).into_iter().collect()
+            crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
+                .into_iter()
+                .collect()
         }
         _ => vec![],
     }
@@ -5717,7 +5729,7 @@ fn matches_filter_prop(
             let Keyword::Enchant(enchant_filter) = keyword else {
                 return false;
             };
-            referenced_targets_for_filter(target, source.ability)
+            referenced_targets_for_filter(state, target, source.ability)
                 .iter()
                 .any(|target_ref| {
                     aura_can_enchant_referenced_target(
@@ -7982,8 +7994,10 @@ mod tests {
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{AttachmentSnapshot, ZoneChangeRecord};
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::game_state::{
+        AttachmentSnapshot, StackEntry, StackEntryKind, ZoneChangeRecord,
+    };
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
@@ -12450,6 +12464,87 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 400.7: `ParentTargetSlot` matching resolves the slot from
+    /// the chain ROOT and pin-checks the selected incarnation. A nested chain
+    /// whose root slot 0 names object A must match A — not the leaf's locally-
+    /// propagated target B — and only while A's recorded incarnation is current.
+    #[test]
+    fn matches_parent_target_slot_from_chain_root_with_pin_check() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Alpha".to_string(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Beta".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Root chain declares slot 0 = A, slot 1 = B.
+        let root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(a)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(b)],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+
+        // The leaf carries only the locally-propagated most-recent target (B).
+        let mut leaf = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(b)],
+            source,
+            PlayerId(0),
+        );
+        leaf.set_target_incarnations_recursive(vec![ObjectIncarnationRef::from_object(
+            &state.objects[&a],
+        )]);
+
+        let ctx = FilterContext::from_ability(&leaf);
+        let slot0 = TargetFilter::ParentTargetSlot { index: 0 };
+        assert!(
+            super::matches_target_filter(&state, a, &slot0, &ctx),
+            "root slot 0 names A, so A must match"
+        );
+        assert!(
+            !super::matches_target_filter(&state, b, &slot0, &ctx),
+            "root slot 0 is A, not the leaf's local target B"
+        );
+    }
+
     #[test]
     fn has_chosen_name_matches_object_with_chosen_card_name() {
         let mut state = setup();
@@ -12833,6 +12928,141 @@ mod tests {
         let ctx = FilterContext::from_ability(&ability);
 
         assert!(!super::matches_target_filter(&state, aura, &filter, &ctx));
+    }
+
+    /// Install `root` as the stack entry currently resolving for `source`, so a
+    /// chained node's `ParentTargetSlot` resolves against `root`'s flattened
+    /// declared slots (`targeting::resolving_root_ability`).
+    fn install_resolving_root(state: &mut GameState, source: ObjectId, root: ResolvedAbility) {
+        state.resolving_stack_entry = Some(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+    }
+
+    /// CR 608.2b: the `ParentTargetSlot` member predicate stops matching a
+    /// declared slot the resolution carrier recorded as an illegal target, while
+    /// the referent is still the same object with a current pin.
+    #[test]
+    fn parent_target_slot_filter_rejects_a_slot_illegal_at_resolution() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = add_creature(&mut state, PlayerId(0), "Your Creature");
+        let mut root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(creature)],
+            source,
+            PlayerId(0),
+        );
+        root.set_target_incarnations_recursive(vec![ObjectIncarnationRef::from_object(
+            &state.objects[&creature],
+        )]);
+        let slot_zero = TargetFilter::ParentTargetSlot { index: 0 };
+        let ctx = FilterContext::from_ability(&root);
+
+        install_resolving_root(&mut state, source, root.clone());
+        assert!(
+            super::matches_target_filter(&state, creature, &slot_zero, &ctx),
+            "reach guard: an unstamped slot names its pinned creature"
+        );
+
+        let mut stamped = root.clone();
+        stamped.illegal_target_slots = vec![0];
+        install_resolving_root(&mut state, source, stamped);
+        assert!(
+            !super::matches_target_filter(&state, creature, &slot_zero, &ctx),
+            "a slot that was an illegal target at resolution matches nothing"
+        );
+    }
+
+    /// CR 608.2c + CR 303.4: `CanEnchant`'s `ParentTargetSlot` referent is the
+    /// chain-root declared slot, not the chained node's local most-recent target.
+    #[test]
+    fn can_enchant_parent_target_slot_reads_chain_root_slot() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = add_creature(&mut state, PlayerId(0), "Host Creature");
+        let aura = create_object(
+            &mut state,
+            CardId(202),
+            PlayerId(0),
+            "Creature Aura".to_string(),
+            Zone::Library,
+        );
+        {
+            let aura_obj = state.objects.get_mut(&aura).unwrap();
+            aura_obj.card_types.core_types.push(CoreType::Enchantment);
+            aura_obj.card_types.subtypes.push("Aura".to_string());
+            aura_obj.keywords.push(Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature(),
+            )));
+        }
+        // Root chain declares slot 0 = the creature, slot 1 = the opponent.
+        install_resolving_root(
+            &mut state,
+            source,
+            ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                vec![TargetRef::Object(creature)],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                vec![TargetRef::Player(PlayerId(1))],
+                source,
+                PlayerId(0),
+            )),
+        );
+        // The chained node carries only the locally-propagated player target.
+        let leaf = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        let can_enchant_slot = |index: usize| {
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment).properties(vec![
+                FilterProp::CanEnchant {
+                    target: Box::new(TargetFilter::ParentTargetSlot { index }),
+                },
+            ]))
+        };
+        let ctx = FilterContext::from_ability(&leaf);
+
+        assert!(
+            super::matches_target_filter(&state, aura, &can_enchant_slot(0), &ctx),
+            "slot 0 is the chain-root creature the Aura can enchant"
+        );
+        assert!(
+            !super::matches_target_filter(&state, aura, &can_enchant_slot(1), &ctx),
+            "slot 1 is a player, which a creature Aura cannot enchant"
+        );
     }
 
     /// CR 107.2: Bare context (no ability in scope) — `Variable("X")` resolves to 0,

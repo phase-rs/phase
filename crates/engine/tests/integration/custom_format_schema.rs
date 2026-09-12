@@ -46,6 +46,7 @@ fn sample_rules(id: u16) -> CustomFormatRules {
         structural: sample_structural(),
         legality: LegalityRules {
             legal_sets: None,
+            legal_cards: Vec::new(),
             banned: Vec::new(),
             restricted: Vec::new(),
             legacy: LegacyRuleSet {
@@ -90,6 +91,7 @@ fn custom_format_def_serde_roundtrip() {
 fn legal_sets_none_and_some_are_distinguishable() {
     let unrestricted = LegalityRules {
         legal_sets: None,
+        legal_cards: Vec::new(),
         banned: Vec::new(),
         restricted: Vec::new(),
         legacy: sample_rules(0).legality.legacy,
@@ -162,9 +164,22 @@ fn validate_custom_rules_consistency_accepts_every_builtin_default() {
 
 #[test]
 fn legacy_axis_gate_rejects_undeclared_axis() {
+    // Uses damage timing, not mana burn: Phase 2b implemented mana burn, so it
+    // is no longer an example of an UNimplemented axis. The gate's job is
+    // unchanged — the set it checks against simply grew.
+    let mut def = sample_def(1);
+    def.rules.legality.legacy.damage_timing = CombatDamageTiming::OnStack;
+    assert!(!passes_legacy_axis_gate(&def.rules.legality.legacy));
+}
+
+/// The other side of that change: an axis the engine now DOES implement must
+/// pass. Without this, `IMPLEMENTED_LEGACY_AXES` could be emptied again and
+/// only the EC presets' registry test would notice.
+#[test]
+fn legacy_axis_gate_accepts_the_implemented_mana_burn_axis() {
     let mut def = sample_def(1);
     def.rules.legality.legacy.mana_burn = ManaBurnPolicy::Obsolete;
-    assert!(!passes_legacy_axis_gate(&def.rules.legality.legacy));
+    assert!(passes_legacy_axis_gate(&def.rules.legality.legacy));
 }
 
 #[test]
@@ -323,6 +338,22 @@ fn old_school_93_94_declares_its_sourced_card_pool() {
     );
 }
 
+/// The promo carve-out, asserted as DATA on the shipped preset: both EC
+/// rulesets name specific cards legal, and `legal_sets` cannot express it.
+#[test]
+fn the_eternal_central_presets_name_their_legal_promos() {
+    assert_eq!(
+        names(&old_school_93_94().rules.legality.legal_cards),
+        BTreeSet::from(["Arena", "Sewers of Estark", "Nalathni Dragon"]),
+        "the three promos the 93/94 source declares legal"
+    );
+
+    // Swedish names none — the carve-out is an Eternal Central thing, and an
+    // empty list here is the honest value rather than an unfilled one. Without
+    // this, `legal_cards` could be populated for every preset by reflex.
+    assert!(swedish_old_school().rules.legality.legal_cards.is_empty());
+}
+
 /// PLAN.md §2's preset-inheritance requirement: 95 must carry every 93/94
 /// entry PLUS exactly its own declared additions. Asserting only that the
 /// additions are present would let a future edit silently drop or duplicate
@@ -352,6 +383,15 @@ fn old_school_95_extends_93_94_by_exactly_its_declared_deltas() {
         BTreeSet::from(["Demonic Consultation", "Mana Crypt"])
     );
 
+    // The promo carve-out the set list cannot express: 95 names three more.
+    let base_named = names(&base.rules.legality.legal_cards);
+    let extended_named = names(&extended.rules.legality.legal_cards);
+    assert!(base_named.is_subset(&extended_named));
+    assert_eq!(
+        &extended_named - &base_named,
+        BTreeSet::from(["Giant Badger", "Windseeker Centaur", "Mana Crypt"])
+    );
+
     let base_banned = names(&base.rules.legality.banned);
     let extended_banned = names(&extended.rules.legality.banned);
     assert!(base_banned.is_subset(&extended_banned));
@@ -366,6 +406,7 @@ fn old_school_95_extends_93_94_by_exactly_its_declared_deltas() {
         extended.rules.legality.legal_sets.as_ref().unwrap().len(),
         16
     );
+    assert_eq!(extended.rules.legality.legal_cards.len(), 6);
     assert_eq!(extended.rules.legality.restricted.len(), 24);
     assert_eq!(extended.rules.legality.banned.len(), 9);
 
@@ -380,16 +421,16 @@ fn old_school_95_extends_93_94_by_exactly_its_declared_deltas() {
     assert_ne!(extended.short_label, base.short_label);
 }
 
-/// The legacy-axis gate, exercised against real entries for the first time.
-/// Both EC presets declare `mana_burn: Obsolete`, which the engine does not
-/// implement, so `custom_format_registry()` must list and then reject them.
+/// Phase 2b's payoff: the two EC presets are now SELECTABLE. They were listed
+/// in `bundled_presets()` and rejected by the legacy-axis gate from the moment
+/// they existed; implementing mana burn released them without either
+/// constructor changing.
 #[test]
-fn the_eternal_central_presets_are_listed_but_withheld_by_the_legacy_axis_gate() {
-    // "Listed but withheld" is a claim about `bundled_presets()`, so assert it
-    // there. Checking only that the registry is empty would keep passing if
-    // both presets were quietly dropped from the list — the registry would
-    // still be empty, and independently-constructed presets would still fail
-    // the gate, so nothing would catch it.
+fn the_eternal_central_presets_are_registered_once_mana_burn_is_implemented() {
+    // Still asserted against the pre-gate list, for the same reason as before:
+    // "registered" is only meaningful if they were considered in the first
+    // place, and a registry assertion alone cannot tell a listed-and-passing
+    // preset from one that was never listed.
     let listed: BTreeSet<u16> = bundled_presets().iter().map(|def| def.rules.id.0).collect();
     assert!(
         listed.contains(&old_school_93_94().rules.id.0)
@@ -403,18 +444,20 @@ fn the_eternal_central_presets_are_listed_but_withheld_by_the_legacy_axis_gate()
     for preset in bundled_presets() {
         let label = preset.label.clone();
         assert!(
-            !passes_legacy_axis_gate(&preset.rules.legality.legacy),
-            "{label} declares mana burn, which IMPLEMENTED_LEGACY_AXES does not cover yet"
+            passes_legacy_axis_gate(&preset.rules.legality.legacy),
+            "{label} declares only mana burn, which IMPLEMENTED_LEGACY_AXES now covers"
         );
-        // The OTHER gate must pass, so the rejection above is attributable to
-        // the unimplemented axis and not to mismatched reprint metadata.
         assert!(passes_reprint_fidelity_gate(&preset), "{label}");
         assert_no_lobby_save_sentinel_collision(&[preset]);
     }
 
-    assert!(
-        engine::types::custom_format::custom_format_registry().is_empty(),
-        "neither EC preset is selectable until mana burn lands (Phase 2b)"
+    let registry = engine::types::custom_format::custom_format_registry();
+    let registered: BTreeSet<u16> = registry.iter().map(|def| def.rules.id.0).collect();
+    assert_eq!(
+        registered,
+        BTreeSet::from([old_school_93_94().rules.id.0, old_school_95().rules.id.0]),
+        "exactly the two EC presets are selectable; got {:?}",
+        registry.iter().map(|def| &def.label).collect::<Vec<_>>()
     );
 }
 
@@ -490,9 +533,13 @@ fn custom_format_registry_withholds_swedish_old_school_on_open_item_6() {
         "Swedish passes both gates, so listing it in bundled_presets() would register it"
     );
 
+    // The registry is no longer empty as of Phase 2b, so absence has to be
+    // asserted by identity rather than by emptiness — which is the stronger
+    // assertion anyway, and would have caught a Swedish entry appearing
+    // alongside the EC ones.
     let registry = engine::types::custom_format::custom_format_registry();
     assert!(
-        registry.is_empty(),
+        !registry.iter().any(|def| def.rules.id == preset.rules.id),
         "swedish_old_school() must not be selectable while Open item 6 is unresolved; got {:?}",
         registry.iter().map(|def| &def.label).collect::<Vec<_>>()
     );
@@ -935,6 +982,94 @@ fn plains_only_db_json() -> String {
     .to_string()
 }
 
+/// Drives `legal_cards` through the AUTHORITATIVE deck-admission entry point,
+/// not the private pool.
+///
+/// A field can serialize, validate and pass a unit test on `DeclaredPool` while
+/// being dropped or bypassed where decks are actually admitted — so this drives
+/// `validate_name_deck_for_format_full` and asserts the admit and the reject on
+/// the same deck, changing only whether the card is named.
+#[test]
+fn validate_name_deck_for_format_full_admits_a_card_only_named_in_legal_cards() {
+    use engine::database::CardDatabase;
+    use engine::game::deck_validation::validate_name_deck_for_format_full;
+
+    let db = CardDatabase::from_json_str(&plains_only_db_json()).expect("card database");
+    let main_deck: Vec<String> = std::iter::repeat_n("Plains".to_string(), 60).collect();
+
+    // A finite pool the card is NOT in: the fixture records no printings, so
+    // `printed_in_any_set` fails closed against any restrictive `legal_sets`.
+    // That is the whole point — the card can reach the deck ONLY by being
+    // named, so an admit here cannot come from the set check.
+    let mut rules = sample_rules(1);
+    rules.legality.legal_sets = Some(vec![SetCode("LEA".to_string())]);
+
+    let reject_config = FormatConfig::for_custom_rules(&rules);
+    let rejected = validate_name_deck_for_format_full(
+        &db,
+        &main_deck,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &reject_config,
+        None,
+        2,
+    );
+    assert!(
+        rejected.is_err(),
+        "a card outside legal_sets and not named must be rejected"
+    );
+
+    // Same deck, same sets, same everything — one name added.
+    rules.legality.legal_cards = vec!["Plains".to_string()];
+    let admit_config = FormatConfig::for_custom_rules(&rules);
+    assert_eq!(
+        validate_name_deck_for_format_full(
+            &db,
+            &main_deck,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &admit_config,
+            None,
+            2,
+        ),
+        Ok(()),
+        "naming the card must admit it through the production validator"
+    );
+
+    // ...and naming it does NOT override the ban lists, which apply after the
+    // pool check. Without this, `legal_cards` could be read as "always legal".
+    rules.legality.banned = vec!["Plains".to_string()];
+    let banned_config = FormatConfig::for_custom_rules(&rules);
+    assert!(
+        validate_name_deck_for_format_full(
+            &db,
+            &main_deck,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &banned_config,
+            None,
+            2,
+        )
+        .is_err(),
+        "legal_cards widens the pool; it must not override `banned`"
+    );
+}
+
 /// Phase 1d: `validate_name_deck_for_format_full` now runs a `Resolved`
 /// Custom format through the REAL evaluator (`evaluate_custom_format`) rather
 /// than an honest "not yet supported" rejection. `custom_config` is built via
@@ -1262,12 +1397,16 @@ fn format_config_deserialization_rejects_a_custom_payload_forging_a_looser_copy_
 fn format_config_deserialization_rejects_a_custom_payload_declaring_an_unimplemented_legacy_axis() {
     // Hostile fixture: structurally self-consistent (the resolver check
     // would pass), but custom_rules.legality.legacy declares
-    // ManaBurnPolicy::Obsolete — a LegacyAxis not in IMPLEMENTED_LEGACY_AXES.
-    // Accepting it would promise mana-burn behavior no engine code enforces.
-    // The registry gate alone does not cover this: a deserialized Custom
-    // config never passes through custom_format_registry().
+    // CombatDamageTiming::OnStack — a LegacyAxis not in
+    // IMPLEMENTED_LEGACY_AXES. Accepting it would promise damage-on-the-stack
+    // behavior no engine code enforces. The registry gate alone does not cover
+    // this: a deserialized Custom config never passes through
+    // custom_format_registry().
+    //
+    // Was mana burn until Phase 2b implemented it; the axis had to change for
+    // the fixture to stay hostile, which is the gate auto-narrowing as designed.
     let mut rules = sample_rules(5);
-    rules.legality.legacy.mana_burn = ManaBurnPolicy::Obsolete;
+    rules.legality.legacy.damage_timing = CombatDamageTiming::OnStack;
     let config = FormatConfig::for_custom_rules(&rules);
     let json = serde_json::to_value(&config).unwrap();
     let error = serde_json::from_value::<FormatConfig>(json)
@@ -2232,7 +2371,7 @@ fn from_lobby_config_rejects_an_empty_or_whitespace_only_name() {
 #[test]
 fn from_lobby_config_rejects_a_custom_source_whatever_its_command_zone_flag() {
     // Re-saving a save is out of scope: the source's own legality rules
-    // (legal_sets/banned/restricted/legacy) have no home in this conversion
+    // (legal_sets/legal_cards/banned/restricted/legacy) have no home in this conversion
     // and would be silently dropped. Both flag values are exercised because
     // the Custom check must not depend on reaching the command-zone branch.
     let mut with_zone = sample_custom_config(5);
@@ -2503,6 +2642,8 @@ fn a_preset_claiming_the_lobby_save_sentinel_id_trips_the_registration_assert() 
 fn presets_with_ordinary_ids_pass_the_sentinel_guard() {
     // Paired positive control: the guard must not reject every preset.
     assert_no_lobby_save_sentinel_collision(&[sample_def(1), sample_def(2)]);
-    // And the real registry construction path still runs it without firing.
-    assert!(engine::types::custom_format::custom_format_registry().is_empty());
+    // And the real registry construction path still runs it without firing —
+    // now over real entries rather than an empty vector, which is what makes
+    // this a live check on the shipped presets.
+    assert!(!engine::types::custom_format::custom_format_registry().is_empty());
 }

@@ -824,6 +824,9 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // protocol ships projections to viewers on purpose. Last-writer-wins:
     // re-projecting a projection for another viewer re-latches to that viewer.
     filtered.viewer_projection = Some(viewer);
+    // The original Cube multiset is authoritative pack-generation input. A viewer
+    // learns the opened pack through `waiting_for`, never every undealt entry.
+    filtered.booster_pack_pool = None;
     // Analysis provenance is meaningful only to the clone executing a preview;
     // never carry it into a viewer projection.
     filtered.life_safety_probe = Box::default();
@@ -2539,6 +2542,25 @@ mod tests {
     use crate::types::resolution::OptionalEffectFrame;
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
+
+    #[test]
+    fn viewer_projection_redacts_private_cube_booster_pool() {
+        let mut state = GameState::new_two_player(42);
+        let expected_pool = vec![
+            "Dealt cube card".to_string(),
+            "Undealt cube sentinel".to_string(),
+            "Undealt cube sentinel".to_string(),
+        ];
+        state.booster_pack_pool = Some(Arc::new(expected_pool.clone()));
+
+        let projected = filter_state_for_viewer(&state, PlayerId(1));
+
+        assert_eq!(state.booster_pack_pool.as_deref(), Some(&expected_pool));
+        assert!(projected.booster_pack_pool.is_none());
+        assert!(!serde_json::to_string(&projected)
+            .expect("viewer projection serializes")
+            .contains("Undealt cube sentinel"));
+    }
 
     /// CR 701.17c + CR 400.2: an effect can find a milled card only when the
     /// zone it moved to from the library is a PUBLIC zone. The action event
@@ -7734,6 +7756,7 @@ mod tests {
                     key: DecisionGroupKey::from_sources(&[slot.source], DecisionKind::LoopChoice),
                 }),
                 per_cycle: None,
+                shortened_by: None,
             },
         };
         state

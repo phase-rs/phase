@@ -29,8 +29,9 @@
 # Cargo excludes from the workspace (`client/src-tauri`, `lobby-worker/broker-wasm`,
 # 4 `.rs` files); neither mentions `ReplacementEvent` at all.
 #
-# Earlier cuts scanned less and said so imprecisely. The current scanner covers
-# the whole workspace, including raw-string-containing source files.
+# The scanner covers the whole workspace, including raw-string-containing source
+# files, so the population is defined by the workspace glob rather than a
+# hand-maintained list.
 #
 # COVERAGE BOUNDARY, stated so this is not mistaken for "every possible source":
 # a `ReplacementDefinition` also comes back to life via its plain serde derive
@@ -45,7 +46,7 @@ crates/engine/src/database/forge/replacement.rs	translate_replacement_event	even
 crates/engine/src/database/synthesis.rs	synthesize_dredge	constructor	1
 crates/engine/src/game/effects/create_draw_replacement.rs	resolve	constructor	1
 crates/engine/src/parser/oracle_replacement.rs	parse_conditional_draw_replacement	constructor	1
-crates/engine/src/parser/oracle_replacement.rs	parse_replacement_line_inner	constructor	1
+crates/engine/src/parser/oracle_replacement.rs	parse_draw_replacement	constructor	1
 crates/engine/src/types/replacements.rs	from_str	event-decode	2
 crates/phase-ai/src/policies/tests/draw_payoff.rs	add_draw_replacement	constructor	1
 crates/phase-ai/src/policies/tests/sac_outlet_drain_repro.rs	add_opposing_notion_thief	constructor	1

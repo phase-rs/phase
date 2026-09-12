@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { P2PDraftHost } from "../p2p-draft-host";
+import type { DraftPlayerView, PairingView } from "../draft-adapter";
+import type { DraftMatchLaunch } from "../../network/draftProtocol";
 
 /**
  * U17 — the commander designation's submission channel at the P2P host seam.
@@ -45,6 +47,9 @@ type PrivateHost = {
   guestSessions: Map<number, { send: ReturnType<typeof vi.fn> }>;
   adapter: Record<string, ReturnType<typeof vi.fn>>;
   handleGuestMessage: (seat: number, message: unknown) => Promise<void>;
+  dispatchMatchLaunch: (pairing: PairingView, view: DraftPlayerView) => Promise<void>;
+  persistSessionStrict: () => Promise<void>;
+  matchLaunches: Map<string, Map<number, DraftMatchLaunch>>;
 };
 
 function asPrivate(host: P2PDraftHost): PrivateHost {
@@ -83,6 +88,92 @@ function seatGuestSession(privateHost: PrivateHost, seat: number) {
 }
 
 describe("P2P deck-submission channel", () => {
+  /**
+   * The original Cube multiset is private to the host's device. In a pod of
+   * three or more, a pairing that excludes seat 0 elects a guest as its engine
+   * authority (`HumanHost`, or the human side of a `Bot` launch); that
+   * launch must name no source (its engine then opens ordinary set boosters),
+   * never the undealt sentinel or its duplicate count. The same pod's seat-0
+   * pairing is the reach-guard: the host's own launch still carries the exact
+   * source Booster Tutor opens from.
+   *
+   * REVERT-PROBE: return `this.adapter.boosterPackPoolForGame()` unconditionally
+   * from `boosterPackPoolForMatchAuthority` (the pre-fix behaviour) and the
+   * seat-2 launch assertions fail on `booster_pack_pool: null` and on the
+   * sentinel scan.
+   */
+  it.each([false, true])(
+    "withholds the Cube source from a participant match authority (bot opponents: %s)",
+    async (bot) => {
+      const host = newHost("Premier");
+      const privateHost = asPrivate(host);
+      const source = ["Cube A", "Cube A", "Undealt sentinel"];
+      const draftView = {
+        seats: [0, 1, 2, 3].map((seat_index) => ({
+          seat_index,
+          is_bot: bot && (seat_index === 1 || seat_index === 3),
+        })),
+        match_config: { match_type: "Bo1" },
+      } as DraftPlayerView;
+      privateHost.adapter = stubAdapter({
+        exportSession: vi.fn(async () => JSON.stringify({
+          pools: [[], [], [], []], submitted_decks: {
+            0: { seat: 0, main_deck: ["Host deck"], commanders: [] },
+            1: { seat: 1, main_deck: ["Seat 1 deck"], commanders: [] },
+            2: { seat: 2, main_deck: ["Human deck"], commanders: [] },
+            3: { seat: 3, main_deck: ["Guest deck"], commanders: [] },
+          },
+        })),
+        getBotDeck: vi.fn(async () => ({ main_deck: ["Bot deck"], lands: {}, commander: [] })),
+        boosterPackPoolForGame: vi.fn(async () => source),
+      });
+      privateHost.persistSessionStrict = vi.fn(async () => {});
+      const hostLaunches: DraftMatchLaunch[] = [];
+      host.onEvent((event) => {
+        if (event.type === "matchStart") hostLaunches.push(event.launch);
+      });
+      const seatSends = [1, 2, 3].map((seat) => seatGuestSession(privateHost, seat));
+
+      await privateHost.dispatchMatchLaunch({
+        match_id: "host-match", round: 1, seat_a: 0, seat_b: 1, name_a: "Host", name_b: "Seat 1",
+      } as PairingView, draftView);
+      await privateHost.dispatchMatchLaunch({
+        match_id: "guest-match", round: 1, seat_a: 2, seat_b: 3, name_a: "Human", name_b: "Other",
+      } as PairingView, draftView);
+
+      // Reach-guard: the host's own launch opens from the exact original source.
+      expect(hostLaunches).toHaveLength(1);
+      expect(hostLaunches[0]).toMatchObject({
+        type: bot ? "Bot" : "HumanHost", localSeat: 0,
+        deckPayload: { booster_pack_pool: source, player: { main_deck: ["Host deck"] } },
+      });
+
+      // The guest authority receives no source, exactly like a set draft.
+      expect(seatSends[1]).toHaveBeenCalledWith(expect.objectContaining({
+        type: "draft_match_start", launch: expect.objectContaining({
+          type: bot ? "Bot" : "HumanHost", localSeat: 2,
+          deckPayload: expect.objectContaining({ booster_pack_pool: null,
+            player: expect.objectContaining({ main_deck: ["Human deck"] }) }),
+        }),
+      }));
+      // Every guest frame, and the guest match's durable launch record (which
+      // is persisted and later echoed as Bo3 intergame launch authority),
+      // must be free of every source entry.
+      const participantFrames = JSON.stringify(seatSends.map((send) => send.mock.calls));
+      const guestRecord = JSON.stringify([...privateHost.matchLaunches.get("guest-match")!.values()]);
+      for (const entry of source) {
+        expect(participantFrames).not.toContain(entry);
+        expect(guestRecord).not.toContain(entry);
+      }
+
+      // The host-local N-seat Commander payload never leaves this device.
+      const commander = await host.podCommanderDeckPayload({ ...draftView, seats: draftView.seats.slice(2) }, 3);
+      expect(commander.booster_pack_pool).toEqual(source);
+      expect(commander.player.main_deck).toEqual([bot ? "Bot deck" : "Guest deck"]);
+      expect(commander.opponent.main_deck).toEqual(["Human deck"]);
+    },
+  );
+
   /**
    * V-TS-1. The wire message's designation reaches the adapter, in order.
    *

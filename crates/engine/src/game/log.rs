@@ -103,6 +103,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::DamageDealt { .. }
         | GameEvent::CombatDamageDealtToPlayer { .. }
         | GameEvent::LifeChanged { .. }
+        | GameEvent::ManaBurn { .. }
         | GameEvent::CreatureDestroyed { .. }
         | GameEvent::PermanentSacrificed { .. }
         | GameEvent::TokenCreated { .. }
@@ -261,6 +262,8 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::PlayerLost { .. }
         | GameEvent::PlayerEliminated { .. } => LogTone::Negative,
         GameEvent::LifeChanged { amount, .. } if *amount < 0 => LogTone::Negative,
+        // Mana burn only ever costs life.
+        GameEvent::ManaBurn { .. } => LogTone::Negative,
         GameEvent::SpellCast { .. }
         | GameEvent::SpellCopied { .. }
         | GameEvent::AbilityActivated { .. }
@@ -590,7 +593,9 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::TappedForMana { .. }
         | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
-        | GameEvent::ManaRecolored { .. } => LogCategory::Mana,
+        | GameEvent::ManaRecolored { .. }
+        // The mana-side explanation; the LifeChanged it causes is categorized Life.
+        | GameEvent::ManaBurn { .. } => LogCategory::Mana,
 
         GameEvent::PermanentTapped { .. }
         | GameEvent::PermanentUntapped { .. }
@@ -1016,6 +1021,15 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 ]
             }
         }
+
+        // Names the rule, not just the loss: the `LifeChanged` event that
+        // follows says a player lost life, and only this says why.
+        GameEvent::ManaBurn { player_id, amount } => vec![
+            player_seg(state, *player_id),
+            text(" loses "),
+            num(*amount as i32),
+            text(" life to mana burn"),
+        ],
 
         GameEvent::SpeedChanged {
             player,

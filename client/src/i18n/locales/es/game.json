@@ -17,10 +17,10 @@
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
     "respondTitle": "Loop Shortcut Proposed",
-    "respondSubtitle": "An opponent proposes taking a loop shortcut. Accept it, or break out to keep playing manually.",
+    "respondSubtitle": "An opponent proposes taking a loop shortcut. Accept it, or name the place where the sequence stops.",
     "confirm": "Take the shortcut",
     "accept": "Accept",
-    "shorten": "Break out",
+    "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
     "fixedCount_one": "Repeat at most once.",
@@ -2376,10 +2376,12 @@
   "outsideGame": {
     "fromExile": "Desde el exilio",
     "fromSideboard": "Desde el banquillo",
-    "fromBoosterPack": "De un sobre de {{setCode}}"
+    "fromBoosterPack": "De un sobre de {{setCode}}",
+    "fromCubeBoosterPack": "De un sobre del cube"
   },
   "boosterPack": {
     "title": "Sobre de {{setCode}}",
+    "cubeTitle": "Sobre del cube",
     "subtitleExact_one": "Elige {{count}} carta para quedártela; el resto se retira de la partida",
     "subtitleExact_other": "Elige {{count}} cartas para quedártelas; el resto se retira de la partida",
     "subtitleUpTo_one": "Elige hasta {{count}} carta para quedártela; el resto se retira de la partida",

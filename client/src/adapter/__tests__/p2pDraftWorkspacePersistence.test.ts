@@ -15,7 +15,7 @@ const persistenceMocks = vi.hoisted(() => ({
 vi.mock("../../services/draftPersistence", () => persistenceMocks);
 vi.mock("../draft-adapter", () => ({
   DraftAdapter: vi.fn().mockImplementation(function () {
-    return {};
+    return { boosterPackPoolForGame: vi.fn(async () => null) };
   }),
   EMPTY_DRAFT_POOL_GROUPS: {
     color_groups: [],

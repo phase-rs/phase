@@ -1062,7 +1062,7 @@ impl<'de> Deserialize<'de> for FormatConfig {
                 if config != expected {
                     // Reports the derived target values rather than dumping
                     // both whole structs: `custom_rules.legality`'s
-                    // banned/restricted/legal_sets lists are caller-sized and
+                    // banned/restricted/legal_sets/legal_cards lists are caller-sized and
                     // have no business in an error string.
                     return Err(serde::de::Error::custom(format!(
                         "FormatConfig for {} contradicts its own custom_rules.structural — every \
@@ -1260,7 +1260,7 @@ impl GameFormat {
             | GameFormat::CommanderDraft
             | GameFormat::Limited => None,
             // A custom format's legality is entirely governed by its own
-            // `LegalityRules` (legal_sets/banned/restricted), never by the
+            // `LegalityRules` (legal_sets/legal_cards/banned/restricted), never by the
             // built-in `LegalityFormat` table.
             GameFormat::Custom(_) => None,
         }
@@ -3662,6 +3662,7 @@ mod tests {
                 },
                 legality: LegalityRules {
                     legal_sets: None,
+                    legal_cards: Vec::new(),
                     banned: Vec::new(),
                     restricted: Vec::new(),
                     legacy: LegacyRuleSet::default(),

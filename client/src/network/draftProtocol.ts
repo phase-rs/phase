@@ -159,8 +159,12 @@ import type {
  *  28 — authoritative per-seat Auto Lands requests and correlated results,
  *       including explicit rejection so an older peer cannot leave a waiter
  *       pending after an otherwise exact handshake.
+ *  29 — a Cube match launch run on the host's own seat names the original
+ *       entries as its in-game booster source; a guest authority and public
+ *       draft views never receive them.
+ *       Older hosts would silently discard the in-game booster source.
  */
-export const DRAFT_PROTOCOL_VERSION = 28 as const;
+export const DRAFT_PROTOCOL_VERSION = 29 as const;
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
@@ -207,6 +211,13 @@ export interface DraftMatchDeckPayload {
   player: DraftDeckPayload;
   opponent: DraftDeckPayload;
   ai_decks: DraftDeckPayload[];
+  /**
+   * In-game booster source. Original Cube entries, including duplicates, only
+   * when the launch's engine runs on the host's own seat; null for a guest
+   * authority, which must never learn the private multiset and so opens
+   * ordinary set boosters.
+   */
+  booster_pack_pool?: string[] | null;
   /**
    * Every set whose draft boosters these decks' draft CONTAINED, supplied
    * verbatim from `DraftPlayerView.draft_set_codes`, populated by
@@ -1093,8 +1104,12 @@ function normalizeDraftPlayerView(raw: unknown): DraftPlayerView {
   }
   const pool_groups = normalizePoolGroups(view.pool_groups);
   const source = normalizeDraftSourceView(view.source);
+  // A v28 peer may still send this former public-view field. Do not preserve
+  // it through a permissive object spread: the host-only source belongs only
+  // to the local WASM session and launch payloads, never a participant frame.
+  const { booster_pack_pool: _boosterPackPool, ...publicView } = view;
   return {
-    ...view,
+    ...publicView,
     ...(pool_groups !== undefined ? { pool_groups } : {}),
     ...(source !== undefined ? { source } : {}),
     draft_effects: normalizeArrayField(view, "draft_effects"),

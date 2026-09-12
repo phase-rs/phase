@@ -471,142 +471,40 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // "would draw a card" hooks one individual draw; a count-form "would draw one
     // or more cards" hooks the instruction, which CR 121.2a modifies "before
     // considering any of the individual card draws".
-    let draw_scope = nom_primitives::scan_at_word_boundaries(&lower, |i| {
+    // The count-form arm captures N via `parse_number` (build for the class: any
+    // "<N> or more cards" threshold, not a "two or more" special case). A count
+    // form scopes the whole instruction (InstructionCount); "N >= 2" additionally
+    // carries a typed threshold (Alms Collector) wired below as an OnlyIfQuantity
+    // over the pending draw count. "one or more" (N == 1) is vacuously true, so it
+    // takes no threshold — its InstructionCount comes from the antecedent alone.
+    let draw_antecedent = nom_primitives::scan_at_word_boundaries(&lower, |i| {
         alt((
             value(
-                DrawReplacementScope::IndividualDraw,
+                (DrawReplacementScope::IndividualDraw, None),
                 tag::<_, _, OracleError<'_>>("would draw a card"),
             ),
-            value(
-                DrawReplacementScope::InstructionCount,
-                tag("would draw one or more cards"),
-            ),
+            (
+                tag("would draw "),
+                nom_primitives::parse_number,
+                tag(" or more cards"),
+            )
+                .map(|(_, n, _)| {
+                    (
+                        DrawReplacementScope::InstructionCount,
+                        if n >= 2 { Some(n) } else { None },
+                    )
+                }),
         ))
         .parse(i)
     });
-    if let Some(draw_scope) = draw_scope {
-        // CR 614.1a: An "As long as <state>, if you would draw a
-        // card, ..." gate (Archmage Ascension) precedes the draw antecedent with
-        // its own comma clause. Split it off so effect extraction anchors on the
-        // draw clause's comma — not the gate's — and lift the state into a typed
-        // `ReplacementCondition`. `Unparsed` means the gate is present but its
-        // condition can't be carried, so fail closed rather than emit an
-        // ungated, always-on draw replacement.
-        let (effect_source, as_long_as_gate): (&str, Option<ReplacementCondition>) =
-            match strip_as_long_as_draw_gate(&normalized) {
-                AsLongAsDrawGate::Absent => (&normalized, None),
-                AsLongAsDrawGate::Parsed {
-                    remainder,
-                    condition,
-                } => (remainder, Some(condition)),
-                AsLongAsDrawGate::Unparsed => return None,
-            };
-        let effect_text = extract_replacement_effect(effect_source);
-        let mut def = ReplacementDefinition::new(ReplacementEvent::Draw)
-            .draw_scope(draw_scope)
-            .description(text.to_string());
-        // CR 614.6 + CR 121.6 + CR 614.1a: "you may skip that draw [instead]"
-        // (Obstinate Familiar) and "instead you may skip that draw" (Island
-        // Sanctuary) are OPTIONAL draw-suppression replacements. Must precede
-        // the mandatory `body_is_draw_skip` arm (Living Conundrum) and the
-        // generic `you may instead {effect}` execute path (Abundance).
-        if let Some(effect) = effect_text.as_deref() {
-            let effect_lower = effect.to_lowercase();
-            if let Some(remainder) = strip_optional_draw_skip(&effect_lower, effect) {
-                def = def.mode(ReplacementMode::Optional { decline: None });
-                def = def.quantity_modification(QuantityModification::Prevent);
-                def = attach_optional_draw_skip_rider(def, remainder)?;
-                apply_draw_player_scope(&lower, &mut def);
-                // CR 504.1 + CR 614.1a + CR 614.11: draw-step timing and "while …"
-                // quantity gates are independent antecedent dimensions — compose
-                // both rather than mutually excluding them.
-                match compose_draw_replacement_conditions(&lower, "would draw a card") {
-                    Ok(Some(condition)) => def = def.condition(condition),
-                    Ok(None) => {}
-                    Err(()) => return None,
-                }
-                return Some(def);
-            }
-        }
-        // CR 614.6 + CR 121.6: "skip that draw instead" fully suppresses the
-        // draw (Living Conundrum: "If you would draw a card while your library
-        // has no cards in it, skip that draw instead"). The body lowers to a
-        // bare "skip that draw" which `parse_effect_chain` would turn into an
-        // `Unimplemented` no-op (a silent runtime passthrough that still draws).
-        // Instead, emit the structured `Prevent` quantity modification — the
-        // same negation surface the lifegain-negation arm uses — which the draw
-        // pipeline honors via `ReplacementResult::Prevented` (no draw happens).
-        // A `Prevent` replacement carries no `execute`, so no stray
-        // `Unimplemented` pollutes the AST.
-        let body_skips_draw = effect_text
-            .as_deref()
-            .is_some_and(|e| body_is_draw_skip(&e.to_lowercase()));
-        if body_skips_draw {
-            def = def.quantity_modification(QuantityModification::Prevent);
-            apply_draw_player_scope(&lower, &mut def);
-            if let Some(condition) = as_long_as_gate {
-                def = def.condition(condition);
-            } else {
-                match parse_while_antecedent(&lower, "would draw a card") {
-                    WhileAntecedent::Parsed(condition) => def = def.condition(condition),
-                    WhileAntecedent::Unparsed => return None,
-                    WhileAntecedent::Absent => {}
-                }
-            }
-            return Some(def);
-        }
-        if let Some(e) = effect_text {
-            // CR 614.1a + CR 614.6 + CR 121.6: "you may instead {effect}" makes
-            // the draw replacement optional. The player is offered an
-            // accept/decline prompt; on decline, the original draw event
-            // proceeds unmodified (CR 614.6: only the accept branch replaces
-            // the event), so `decline: None` is correct — no synthetic
-            // draw-on-decline ability (which would double-draw on accept and
-            // shadow the engine's native draw on decline). Strip the lead-in
-            // before handing the remainder to `parse_effect_chain`.
-            let (optional_modal_present, effect_after_modal) = strip_optional_instead_lead_in(&e);
-            if optional_modal_present {
-                def = def.mode(ReplacementMode::Optional { decline: None });
-            }
-            let mut execute = parse_effect_chain(effect_after_modal, AbilityKind::Spell);
-            rewrite_draw_replacement_execute_referents(&mut execute);
-            def = def.execute(execute);
-        }
-        // CR 614.1a: Player scope for draw replacements.
-        apply_draw_player_scope(&lower, &mut def);
-        // CR 614.1a: A parsed "As long as <state>" gate takes precedence — it is
-        // the antecedent's own restriction, not a mid-clause "while" or
-        // except-first exception.
-        if let Some(condition) = as_long_as_gate {
-            def = def.condition(condition);
-            return Some(def);
-        }
-        // CR 121.1 + CR 504.1 + CR 614.6: Detect Alhammarret's Archive's
-        // "except the first one [you|they] draw in each of [your|their] draw
-        // steps" exception clause and gate the replacement so it does NOT
-        // apply to the draw step's mandatory first draw.
-        if has_except_first_draw_in_draw_step_clause(&lower) {
-            def = def.condition(ReplacementCondition::ExceptFirstDrawInDrawStep);
-        } else {
-            // CR 614.11 + CR 614.1a: "...while your library has no cards in
-            // it..." antecedent — gate the replacement so a win-on-draw
-            // (Laboratory Maniac, Jace, Wielder of Mysteries) fires only on an
-            // empty-library draw. CR 614.11: draw replacements apply even when
-            // the library is empty, which is precisely the case this gate
-            // selects. Without the gate the WinTheGame post-effect replaces
-            // *every* draw, which both wins spuriously and leaks an un-drained
-            // post-replacement continuation into later turns.
-            match parse_while_antecedent(&lower, "would draw a card") {
-                WhileAntecedent::Parsed(condition) => def = def.condition(condition),
-                // Guard present but unparseable: fail closed. Emitting an
-                // unconditional Draw replacement would fire the (often
-                // game-ending) effect on every draw — the exact regression
-                // this discipline exists to prevent.
-                WhileAntecedent::Unparsed => return None,
-                WhileAntecedent::Absent => {}
-            }
-        }
-        return Some(def);
+    if let Some((draw_scope, threshold)) = draw_antecedent {
+        let def = parse_draw_replacement(&text, &normalized, &lower, draw_scope)?;
+        // CR 121.2a: the single composition step for a count-form antecedent's
+        // threshold, applied to every draw-replacement form parsed above.
+        return match threshold {
+            Some(n) => with_draw_count_threshold(def, n),
+            None => Some(def),
+        };
     }
 
     // --- "If [player] would gain life, {effect}" ---
@@ -9235,6 +9133,170 @@ fn apply_draw_player_scope(lower: &str, def: &mut ReplacementDefinition) {
     // else: "you would draw" → valid_player stays None (controller-only).
 }
 
+/// CR 614.1a + CR 121.2: Lower one "If [player] would draw ..., {effect}" line
+/// (the antecedent already recognized, `draw_scope` read from its grammatical
+/// number) into a `Draw` replacement: an optional or mandatory skip, an
+/// "as long as" gate, or a substitute `execute`, each with its player scope
+/// and antecedent conditions. A count-form threshold is composed by the caller,
+/// once, after whichever form succeeds.
+fn parse_draw_replacement(
+    text: &str,
+    normalized: &str,
+    lower: &str,
+    draw_scope: DrawReplacementScope,
+) -> Option<ReplacementDefinition> {
+    // CR 614.1a: An "As long as <state>, if you would draw a
+    // card, ..." gate (Archmage Ascension) precedes the draw antecedent with
+    // its own comma clause. Split it off so effect extraction anchors on the
+    // draw clause's comma — not the gate's — and lift the state into a typed
+    // `ReplacementCondition`. `Unparsed` means the gate is present but its
+    // condition can't be carried, so fail closed rather than emit an
+    // ungated, always-on draw replacement.
+    let (effect_source, as_long_as_gate): (&str, Option<ReplacementCondition>) =
+        match strip_as_long_as_draw_gate(normalized) {
+            AsLongAsDrawGate::Absent => (normalized, None),
+            AsLongAsDrawGate::Parsed {
+                remainder,
+                condition,
+            } => (remainder, Some(condition)),
+            AsLongAsDrawGate::Unparsed => return None,
+        };
+    let effect_text = extract_replacement_effect(effect_source);
+    let mut def = ReplacementDefinition::new(ReplacementEvent::Draw)
+        .draw_scope(draw_scope)
+        .description(text.to_string());
+    // CR 614.6 + CR 121.6 + CR 614.1a: "you may skip that draw [instead]"
+    // (Obstinate Familiar) and "instead you may skip that draw" (Island
+    // Sanctuary) are OPTIONAL draw-suppression replacements. Must precede
+    // the mandatory `body_is_draw_skip` arm (Living Conundrum) and the
+    // generic `you may instead {effect}` execute path (Abundance).
+    if let Some(effect) = effect_text.as_deref() {
+        let effect_lower = effect.to_lowercase();
+        if let Some(remainder) = strip_optional_draw_skip(&effect_lower, effect) {
+            def = def.mode(ReplacementMode::Optional { decline: None });
+            def = def.quantity_modification(QuantityModification::Prevent);
+            def = attach_optional_draw_skip_rider(def, remainder)?;
+            apply_draw_player_scope(lower, &mut def);
+            // CR 504.1 + CR 614.1a + CR 614.11: draw-step timing and "while …"
+            // quantity gates are independent antecedent dimensions — compose
+            // both rather than mutually excluding them.
+            match compose_draw_replacement_conditions(lower, "would draw") {
+                Ok(Some(condition)) => def = def.condition(condition),
+                Ok(None) => {}
+                Err(()) => return None,
+            }
+            return Some(def);
+        }
+    }
+    // CR 614.6 + CR 121.6: "skip that draw instead" fully suppresses the
+    // draw (Living Conundrum: "If you would draw a card while your library
+    // has no cards in it, skip that draw instead"). The body lowers to a
+    // bare "skip that draw" which `parse_effect_chain` would turn into an
+    // `Unimplemented` no-op (a silent runtime passthrough that still draws).
+    // Instead, emit the structured `Prevent` quantity modification — the
+    // same negation surface the lifegain-negation arm uses — which the draw
+    // pipeline honors via `ReplacementResult::Prevented` (no draw happens).
+    // A `Prevent` replacement carries no `execute`, so no stray
+    // `Unimplemented` pollutes the AST.
+    let body_skips_draw = effect_text
+        .as_deref()
+        .is_some_and(|e| body_is_draw_skip(&e.to_lowercase()));
+    if body_skips_draw {
+        def = def.quantity_modification(QuantityModification::Prevent);
+        apply_draw_player_scope(lower, &mut def);
+        if let Some(condition) = as_long_as_gate {
+            def = def.condition(condition);
+        } else {
+            match parse_while_antecedent(lower, "would draw") {
+                WhileAntecedent::Parsed(condition) => def = def.condition(condition),
+                WhileAntecedent::Unparsed => return None,
+                WhileAntecedent::Absent => {}
+            }
+        }
+        return Some(def);
+    }
+    if let Some(e) = effect_text {
+        // CR 614.1a + CR 614.6 + CR 121.6: "you may instead {effect}" makes
+        // the draw replacement optional. The player is offered an
+        // accept/decline prompt; on decline, the original draw event
+        // proceeds unmodified (CR 614.6: only the accept branch replaces
+        // the event), so `decline: None` is correct — no synthetic
+        // draw-on-decline ability (which would double-draw on accept and
+        // shadow the engine's native draw on decline). Strip the lead-in
+        // before handing the remainder to `parse_effect_chain`.
+        let (optional_modal_present, effect_after_modal) = strip_optional_instead_lead_in(&e);
+        if optional_modal_present {
+            def = def.mode(ReplacementMode::Optional { decline: None });
+        }
+        let mut execute = parse_effect_chain(effect_after_modal, AbilityKind::Spell);
+        rewrite_draw_replacement_execute_referents(&mut execute);
+        def = def.execute(execute);
+    }
+    // CR 614.1a: Player scope for draw replacements.
+    apply_draw_player_scope(lower, &mut def);
+    // CR 614.1a: A parsed "As long as <state>" gate takes precedence — it is
+    // the antecedent's own restriction, not a mid-clause "while" or
+    // except-first exception.
+    if let Some(condition) = as_long_as_gate {
+        def = def.condition(condition);
+        return Some(def);
+    }
+    // CR 121.1 + CR 504.1 + CR 614.6: Detect Alhammarret's Archive's
+    // "except the first one [you|they] draw in each of [your|their] draw
+    // steps" exception clause and gate the replacement so it does NOT
+    // apply to the draw step's mandatory first draw.
+    if has_except_first_draw_in_draw_step_clause(lower) {
+        def = def.condition(ReplacementCondition::ExceptFirstDrawInDrawStep);
+    } else {
+        // CR 614.11 + CR 614.1a: "...while your library has no cards in
+        // it..." antecedent — gate the replacement so a win-on-draw
+        // (Laboratory Maniac, Jace, Wielder of Mysteries) fires only on an
+        // empty-library draw. CR 614.11: draw replacements apply even when
+        // the library is empty, which is precisely the case this gate
+        // selects. Without the gate the WinTheGame post-effect replaces
+        // *every* draw, which both wins spuriously and leaks an un-drained
+        // post-replacement continuation into later turns.
+        match parse_while_antecedent(lower, "would draw") {
+            WhileAntecedent::Parsed(condition) => def = def.condition(condition),
+            // Guard present but unparseable: fail closed. Emitting an
+            // unconditional Draw replacement would fire the (often
+            // game-ending) effect on every draw — the exact regression
+            // this discipline exists to prevent.
+            WhileAntecedent::Unparsed => return None,
+            WhileAntecedent::Absent => {}
+        }
+    }
+    Some(def)
+}
+
+/// CR 121.2a: Gate a count-form draw replacement ("would draw N or more
+/// cards", N >= 2) on the proposed draw instruction drawing at least N cards —
+/// an `OnlyIfQuantity` over the event's own count (`EventContextAmount`),
+/// composed with any gate the definition already carries so neither is lost.
+/// Fails closed on a threshold the typed quantity cannot represent.
+fn with_draw_count_threshold(
+    mut def: ReplacementDefinition,
+    n: u32,
+) -> Option<ReplacementDefinition> {
+    let threshold = ReplacementCondition::OnlyIfQuantity {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed {
+            value: i32::try_from(n).ok()?,
+        },
+        active_player_req: None,
+    };
+    def.condition = Some(match def.condition.take() {
+        Some(existing) => ReplacementCondition::And {
+            conditions: vec![existing, threshold],
+        },
+        None => threshold,
+    });
+    Some(def)
+}
+
 fn parse_color_word(word: &str) -> Option<ManaColor> {
     match word {
         "white" => Some(ManaColor::White),
@@ -12943,22 +13005,36 @@ fn rewrite_reveal_top_player_to_post_replacement_target(def: &mut AbilityDefinit
 /// `ParentTargetController` or `TriggeringPlayer`; neither resolves correctly
 /// once the replacement continuation runs. Rewrite that recipient to the
 /// explicit post-replacement event target at the parser seam.
+///
+/// CR 614.6 + CR 109.5: the compound-subject distributor ("you and that player
+/// each draw a card", Alms Collector) lowers its "that player" half to
+/// `ScopedPlayer`, which resolves to the controller outside a `player_scope`
+/// fan-out. In a replacement execute with no enclosing fan-out, that "that
+/// player" is the replaced event's affected player, so it is rewritten too; under
+/// a fan-out, `ScopedPlayer` is the iterated player and stays.
 fn rewrite_replacement_event_recipient_to_post_replacement_target(def: &mut AbilityDefinition) {
+    rewrite_replacement_event_recipient(def, false);
+}
+
+fn rewrite_replacement_event_recipient(def: &mut AbilityDefinition, in_player_fan_out: bool) {
+    let in_player_fan_out = in_player_fan_out || def.player_scope.is_some();
     super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
-        if matches!(
-            f,
+        let names_event_recipient = match f {
             TargetFilter::Player
-                | TargetFilter::TriggeringPlayer
-                | TargetFilter::ParentTargetController
-        ) {
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::ParentTargetController => true,
+            TargetFilter::ScopedPlayer => !in_player_fan_out,
+            _ => false,
+        };
+        if names_event_recipient {
             *f = TargetFilter::PostReplacementDamageTarget;
         }
     });
     if let Some(sub) = def.sub_ability.as_mut() {
-        rewrite_replacement_event_recipient_to_post_replacement_target(sub);
+        rewrite_replacement_event_recipient(sub, in_player_fan_out);
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
-        rewrite_replacement_event_recipient_to_post_replacement_target(else_branch);
+        rewrite_replacement_event_recipient(else_branch, in_player_fan_out);
     }
 }
 
@@ -23175,6 +23251,118 @@ mod tests {
                     qty: QuantityRef::EventContextAmount
                 }
             ) && *offset == 1
+        ));
+    }
+
+    #[test]
+    fn alms_collector_count_form_threshold_gates_on_instruction_draw_count() {
+        // #5678 / CR 121.2a: "If an opponent would draw two or more cards, instead
+        // you and that player each draw a card." The count-form antecedent must
+        // (1) scope the whole instruction (InstructionCount), (2) carry N=2 as a
+        // typed OnlyIfQuantity over the pending draw count (EventContextAmount) so
+        // a one-card draw does not match, and (3) apply only to an opponent's draw.
+        let def = parse_replacement_line(
+            "If an opponent would draw two or more cards, instead you and that player each draw a card.",
+            "Alms Collector",
+        )
+        .expect("Alms Collector's count-form antecedent must lower to a Draw replacement");
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert_eq!(def.draw_scope, Some(DrawReplacementScope::InstructionCount));
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+                active_player_req: None,
+            }),
+            "N=2 must lower to OnlyIfQuantity(EventContextAmount >= 2)"
+        );
+        // CR 614.6: the substitute is one draw for Alms Collector's controller
+        // and one for the drawing opponent. "that player" is the replaced draw's
+        // player, so it must not stay `ScopedPlayer` (which resolves to the
+        // controller outside a player fan-out and would hand both cards to "you").
+        let execute = def.execute.as_deref().expect("substitute execute");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::Draw {
+                target: TargetFilter::OriginalController,
+                ..
+            }
+        ));
+        assert!(matches!(
+            execute.sub_ability.as_deref().map(|a| &*a.effect),
+            Some(Effect::Draw {
+                target: TargetFilter::PostReplacementDamageTarget,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn count_form_threshold_composes_onto_early_return_draw_skip_forms() {
+        // CR 121.2a + CR 614.6: the count-form threshold is composed once, after
+        // whichever draw-replacement form matched, so the mandatory and optional
+        // "skip that draw" forms (which return before the substitute path) still
+        // carry `EventContextAmount >= N`, and-composed with any gate they parse.
+        let threshold = ReplacementCondition::OnlyIfQuantity {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+            active_player_req: None,
+        };
+
+        let mandatory = parse_replacement_line(
+            "If a player would draw three or more cards, skip that draw instead.",
+            "Test Card",
+        )
+        .expect("mandatory count-form skip");
+        assert_eq!(
+            mandatory.quantity_modification,
+            Some(QuantityModification::Prevent)
+        );
+        assert_eq!(
+            mandatory.draw_scope,
+            Some(DrawReplacementScope::InstructionCount)
+        );
+        assert_eq!(mandatory.condition, Some(threshold.clone()));
+
+        let optional = parse_replacement_line(
+            "If you would draw three or more cards, you may skip that draw instead.",
+            "Test Card",
+        )
+        .expect("optional count-form skip");
+        assert!(matches!(
+            optional.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        assert_eq!(
+            optional.quantity_modification,
+            Some(QuantityModification::Prevent)
+        );
+        assert_eq!(optional.condition, Some(threshold.clone()));
+
+        let gated = parse_replacement_line(
+            "If you would draw three or more cards while your library has no cards in it, skip that draw instead.",
+            "Test Card",
+        )
+        .expect("gated count-form skip");
+        let Some(ReplacementCondition::And { conditions }) = &gated.condition else {
+            panic!(
+                "while-gate and threshold must both survive, got {:?}",
+                gated.condition
+            );
+        };
+        assert_eq!(conditions.len(), 2);
+        assert_eq!(conditions[1], threshold);
+        assert!(matches!(
+            conditions[0],
+            ReplacementCondition::OnlyIfQuantity { .. }
         ));
     }
 

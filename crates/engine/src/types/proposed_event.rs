@@ -252,6 +252,32 @@ pub enum CounterMoveStage {
     Add,
 }
 
+/// CR 121.2 + CR 121.2a: which stage of a draw a `ProposedEvent::Draw` is at.
+///
+/// "Draw N cards" is one instruction performed as N individual card draws
+/// (CR 121.2), and a replacement that refers to the number of cards drawn
+/// modifies the instruction "before considering any of the individual card
+/// draws" (CR 121.2a). The draw sequence proposes the instruction once, whole,
+/// then proposes each surviving individual draw. A definition's
+/// [`DrawReplacementScope`](super::ability::DrawReplacementScope) names the one
+/// stage it watches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum DrawEventStage {
+    /// The whole draw instruction, carrying its full count.
+    Instruction,
+    /// One individual card draw.
+    #[default]
+    Individual,
+}
+
+impl DrawEventStage {
+    /// Keeping the default omitted preserves the existing wire shape of an
+    /// individual draw event.
+    pub fn is_individual(&self) -> bool {
+        matches!(self, Self::Individual)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CounterPlacement {
@@ -549,6 +575,9 @@ pub enum ProposedEvent {
     Draw {
         player_id: PlayerId,
         count: u32,
+        /// CR 121.2a: the instruction, or one of its individual draws.
+        #[serde(default, skip_serializing_if = "DrawEventStage::is_individual")]
+        stage: DrawEventStage,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -1350,6 +1379,7 @@ mod tests {
         let mut event = ProposedEvent::Draw {
             player_id: PlayerId(0),
             count: 1,
+            stage: DrawEventStage::Individual,
             applied: HashSet::new(),
         };
         let rid = ReplacementId {

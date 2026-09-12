@@ -31,7 +31,8 @@ use crate::types::game_state::{
     PendingContinuation, PendingCostMoveResume, PendingDiscardBatchCompletion,
     PendingPlayerScopeLinkedExile, PendingPlayerScopeSacrificeChoice,
     PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
-    ResolutionOptionalPaymentOption, WaitingFor, ZoneChangeRecord, ZoneOpponentChooserPurpose,
+    RepeatUntilStopWitness, ResolutionOptionalPaymentOption, WaitingFor, ZoneChangeRecord,
+    ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -272,6 +273,30 @@ pub(crate) fn effect_object_targets(
     }
 }
 
+/// CR 608.2c + CR 608.2b: The objects an effect handler's `target` designates:
+/// `targeting::resolved_targets` indexed by [`effect_object_targets`], except a
+/// bare `ParentTargetSlot`, which binds through the live slot authority
+/// (`targeting::resolve_live_parent_slot_from_root`) so a slot whose target was
+/// illegal as the chain began to resolve, or whose pinned referent went stale,
+/// affects nothing. `resolved_targets` itself keeps returning the whole
+/// declared chain for that filter: the callers that index it need declared
+/// numbering, which dropping an illegal target would shift.
+pub(crate) fn resolved_effect_object_ids(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    match target_filter {
+        TargetFilter::ParentTargetSlot { .. } => {
+            crate::game::targeting::resolved_object_ids_for_filter(state, ability, target_filter)
+        }
+        _ => effect_object_targets(
+            target_filter,
+            &crate::game::targeting::resolved_targets(ability, target_filter, state),
+        ),
+    }
+}
+
 /// Resolve the battlefield object(s) an effect's `target` slot designates,
 /// falling back to a zone scan when the ability declared no explicit object
 /// target (mass / population forms). Shared by the `turn_face_up` and
@@ -283,8 +308,7 @@ pub(crate) fn resolved_battlefield_object_ids(
     ability: &ResolvedAbility,
     target: &TargetFilter,
 ) -> Vec<ObjectId> {
-    let resolved = crate::game::targeting::resolved_targets(ability, target, state);
-    let explicit = effect_object_targets(target, &resolved);
+    let explicit = resolved_effect_object_ids(state, ability, target);
     if !explicit.is_empty() {
         return explicit;
     }
@@ -914,7 +938,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         && state.active_repeat_for().is_none()
         && state.active_repeat_until().is_some()
     {
-        drain_active_repeat_until(state);
+        drain_active_repeat_until(state, events);
     }
     clear_post_replacement_token_choice_seed_if_resolution_drained(state);
 }
@@ -1042,7 +1066,7 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             crate::game::cipher::arm_parked_encode_offer(state, events);
         }
         ResolutionFrame::RepeatFor(_) => drain_active_repeat_for(state, events),
-        ResolutionFrame::RepeatUntil(_) => drain_active_repeat_until(state),
+        ResolutionFrame::RepeatUntil(_) => drain_active_repeat_until(state, events),
         ResolutionFrame::RepeatedOptionalPayment(_) => {
             // The payment action owns the next offer and its reflexive tail.
             // Its completed AfterChild form is settled by the reflexive mode
@@ -1189,15 +1213,20 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
 /// CR 608.2c + CR 107.1c: Resume a "repeat this process" loop that paused when
 /// an iteration's process entered an interactive `WaitingFor` state. Called by
 /// `drain_pending_continuation` once the iteration's choice (and any chained
-/// continuation) has fully drained.
-fn drain_active_repeat_until(state: &mut GameState) {
+/// continuation) has fully drained. A resumed iteration's events join the
+/// caller's `events`, so its zone changes reach trigger collection and a
+/// CR 104.4b draw reaches the action result.
+fn drain_active_repeat_until(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let Some(pending) = state
         .take_active_repeat_until()
         .expect("repeat-until drain may consume only the active repeat-until frame")
     else {
         return;
     };
-    let crate::types::game_state::PendingRepeatUntil { ability } = pending;
+    let crate::types::game_state::PendingRepeatUntil {
+        ability,
+        stop_progress,
+    } = pending;
     match &ability.repeat_until {
         // CR 107.1c: the iteration's choice has resolved — prompt the
         // controller whether to repeat the process.
@@ -1211,16 +1240,29 @@ fn drain_active_repeat_until(state: &mut GameState) {
             stop_on_put_to_hand,
             stop_on_duplicate_exiled_names,
         }) => {
-            if should_stop_repeat_until(
+            // CR 104.4b: `stop_progress` is the pre-iteration baseline stashed
+            // at the pause. Comparing it HERE — after the iteration's player
+            // choice and any chained continuation have fully drained — measures
+            // the whole iteration, interactive tail included.
+            //
+            // The iteration paused for a player decision, so it is classed
+            // `OptionalOffered`: a stalled one ends the process and never draws.
+            // Why that bound is deliberate, and where it departs from the rules,
+            // is documented on `repeat_until_verdict`'s `Stop` arm.
+            match repeat_until_verdict(
                 state,
                 &ability,
                 *stop_on_put_to_hand,
                 *stop_on_duplicate_exiled_names,
+                stop_progress.as_ref(),
+                RepeatIterationChoice::OptionalOffered,
             ) {
-                return;
+                RepeatUntilVerdict::Repeat => {
+                    let _ = resolve_ability_chain(state, &ability, events, 1);
+                }
+                RepeatUntilVerdict::Stop => {}
+                RepeatUntilVerdict::MandatoryLoopDraw => declare_mandatory_loop_draw(state, events),
             }
-            let mut events = Vec::new();
-            let _ = resolve_ability_chain(state, &ability, &mut events, 1);
         }
         // CR 608.2c: resume a paused `WhileCondition` loop after the iteration's
         // interactive choice (Claim Jumper's library search) has drained. The
@@ -1242,8 +1284,7 @@ fn drain_active_repeat_until(state: &mut GameState) {
                 condition: condition.clone(),
                 max_iterations: remaining,
             });
-            let mut events = Vec::new();
-            let _ = resolve_ability_chain(state, &next, &mut events, 1);
+            let _ = resolve_ability_chain(state, &next, events, 1);
         }
         None => {}
     }
@@ -1253,11 +1294,21 @@ fn drain_active_repeat_until(state: &mut GameState) {
 /// complete child stack its iteration raised. The frame count captured before
 /// the body runs is the exact child-stack boundary, so consumers remain
 /// strictly top-only without searching for a buried parent.
+///
+/// CR 104.4b: the pre-iteration `stop_progress` witness rides this same funnel
+/// and the frame is built HERE, in exactly one production place, so a pause can
+/// never lose the baseline the drain needs to tell a stalled repeat from a
+/// progressing one.
 fn park_repeat_until_after_inner_pause(
     state: &mut GameState,
-    pending: crate::types::game_state::PendingRepeatUntil,
+    ability: Box<ResolvedAbility>,
+    stop_progress: Option<RepeatUntilStopWitness>,
     stack_depth_before_iteration: ChildStackDepth,
 ) {
+    let pending = crate::types::game_state::PendingRepeatUntil {
+        ability,
+        stop_progress,
+    };
     match state
         .resolution_stack
         .capture_child_boundary()
@@ -1274,7 +1325,13 @@ fn park_repeat_until_after_inner_pause(
 }
 
 /// CR 608.2c + CR 107.1c: Stop predicates for `RepeatContinuation::UntilStopConditions`.
-fn should_stop_repeat_until(
+///
+/// `pub(crate)` so `exile_links`'s witness tests can pin the standing argument
+/// for `ExiledStopInput::controller`: a control change with the zone held
+/// constant leaves this predicate false while moving the witness. The witness
+/// builder and this predicate must read the same rows, so the test that proves
+/// they diverge nowhere lives beside the builder.
+pub(crate) fn should_stop_repeat_until(
     state: &GameState,
     ability: &ResolvedAbility,
     stop_on_put_to_hand: bool,
@@ -1299,6 +1356,185 @@ fn should_stop_repeat_until(
     }
     stop_on_duplicate_exiled_names
         && crate::game::exile_links::duplicate_name_among_exiled_by_source(state, ability.source_id)
+}
+
+/// CR 104.4b: whether one `UntilStopConditions` iteration gave a player any
+/// decision — the carve-out separating a loop of mandatory actions (a draw)
+/// from a loop that contains an optional action (not a draw).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepeatIterationChoice {
+    /// The iteration never left the resolving `WaitingFor`, and its chain
+    /// carries no may-trigger key a stored "may" answer could have used in
+    /// place of a prompt. Every action in it was mandatory: an optional
+    /// instruction that could not be performed was never offered
+    /// (CR 608.2d — `optional_effect_is_infeasible` auto-declines it).
+    ///
+    /// Only an iteration that finished inside the loop can be classed here, so
+    /// only that caller can observe its whole event slice and say whether it
+    /// moved anything.
+    MandatoryOnly(RepeatIterationMovement),
+    /// The iteration paused for a player decision, or a stored "may" answer
+    /// (CR 603.5, keyed by `may_trigger_origin`) could have stood in for one.
+    OptionalOffered,
+}
+
+impl RepeatIterationChoice {
+    /// CR 603.5: a stored "may" answer keys on `may_trigger_origin`
+    /// (`upfront_optional_gate`), which `ResolvedAbility::
+    /// set_may_trigger_origin_recursive` stamps on a may-trigger's whole chain,
+    /// root included, as it goes on the stack. Any other optional instruction
+    /// reaches a player only by changing `WaitingFor`, which parks the
+    /// iteration instead of finishing it in the loop.
+    ///
+    /// `iteration_events` is exactly the events the iteration emitted.
+    fn for_unpaused_iteration(ability: &ResolvedAbility, iteration_events: &[GameEvent]) -> Self {
+        match ability.may_trigger_origin {
+            None => Self::MandatoryOnly(RepeatIterationMovement::of(iteration_events)),
+            Some(_) => Self::OptionalOffered,
+        }
+    }
+}
+
+/// Whether a mandatory-only `UntilStopConditions` iteration moved any object.
+///
+/// The stop witness (`exile_links::repeat_until_stop_witness`) is not a
+/// complete progress measure. It counts only linked-exile rows, which are
+/// written only when `exile_links::should_track_exiled_by_source` holds, while
+/// the repeat accepts any body. A body with no linked-exile consumer can exile a
+/// card with the witness unchanged. A stalled witness therefore proves the loop
+/// is repeating itself only when nothing else moved either.
+///
+/// COUPLING, recorded: zone movement is a COMPLETE progress measure only
+/// because every stop predicate `should_stop_repeat_until` reads is itself
+/// driven by a zone change — a card exiled by this source reaching its
+/// controller's hand, or two cards exiled by it sharing a name. An iteration
+/// that instead changes a life total or a counter therefore moves the loop no
+/// closer to stopping, so classing it `Stationary` is right: CR 104.4b asks
+/// whether a loop has "no way to stop", not whether the game state changed.
+/// A stop predicate reading anything but a zone would break that argument, and
+/// this witness would have to gain the matching event kind in the same change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepeatIterationMovement {
+    /// The iteration emitted no `GameEvent::ZoneChanged`: no object changed
+    /// zones and no token was created.
+    Stationary,
+    /// The iteration emitted at least one `GameEvent::ZoneChanged`.
+    ObjectsMoved,
+}
+
+impl RepeatIterationMovement {
+    fn of(iteration_events: &[GameEvent]) -> Self {
+        if iteration_events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+        {
+            Self::ObjectsMoved
+        } else {
+            Self::Stationary
+        }
+    }
+}
+
+/// CR 608.2c + CR 104.4b: what an `UntilStopConditions` repeat does after one
+/// iteration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepeatUntilVerdict {
+    /// Follow the process again.
+    Repeat,
+    /// The process is over: a printed stop condition is met, or the witness
+    /// stalled on an iteration the verdict cannot prove is a mandatory loop.
+    Stop,
+    /// CR 104.4b + CR 732.4: the iteration was mandatory-only, moved no object,
+    /// and changed nothing the stop conditions read, so the repeat is a loop of
+    /// mandatory actions with no way to stop — the game is a draw.
+    MandatoryLoopDraw,
+}
+
+/// CR 608.2c + CR 104.4b: the SINGLE authority deciding what an
+/// `UntilStopConditions` repeat does next. Both decision sites — the loop in
+/// `resolve_ability_chain` and the resume in `drain_active_repeat_until` — call
+/// THIS, so they cannot diverge.
+///
+///  1. A printed stop condition is met (`should_stop_repeat_until`) → `Stop`.
+///  2. The iteration changed the stop witness (`baseline` differs from the
+///     current `repeat_until_stop_witness`) → `Repeat`.
+///  3. Otherwise the witness stalled. CR 104.4b: an iteration of only
+///     mandatory actions that moved nothing is a loop repeating itself with no
+///     way to stop, so the game is a draw. Every other stalled iteration ends
+///     the process (see the `Stop` arm).
+///
+/// CR 104.4f / CR 801.16 (limited range of influence) cannot apply:
+/// `FormatConfig::reject_unimplemented_range_of_influence` refuses that option,
+/// so the draw is always the whole-game CR 104.4b outcome.
+fn repeat_until_verdict(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    stop_on_put_to_hand: bool,
+    stop_on_duplicate_exiled_names: bool,
+    baseline: Option<&RepeatUntilStopWitness>,
+    choice: RepeatIterationChoice,
+) -> RepeatUntilVerdict {
+    if should_stop_repeat_until(
+        state,
+        ability,
+        stop_on_put_to_hand,
+        stop_on_duplicate_exiled_names,
+    ) {
+        return RepeatUntilVerdict::Stop;
+    }
+    let stalled = baseline.is_some_and(|baseline| {
+        *baseline == crate::game::exile_links::repeat_until_stop_witness(state, ability.source_id)
+    });
+    match (stalled, choice) {
+        (false, _) => RepeatUntilVerdict::Repeat,
+        (true, RepeatIterationChoice::MandatoryOnly(RepeatIterationMovement::Stationary)) => {
+            RepeatUntilVerdict::MandatoryLoopDraw
+        }
+        // CR 104.4b + CR 608.2c: a deliberate bound. The witness stalled, but
+        // the iteration is not provably a loop of mandatory actions, so the
+        // process ends here rather than following its instructions again. The
+        // alternative, repeating, has no termination guarantee once the witness
+        // stops measuring progress. Two cases land here:
+        //  - A stalled iteration that offered a choice. CR 104.4b says a loop
+        //    containing an optional action is not a draw, and the rules would
+        //    follow the process again and re-offer the same decision. This also
+        //    covers every paused iteration: a pause is a decision but not
+        //    necessarily an optional one (a CR 616.1 replacement-order prompt is
+        //    mandatory), and the parked frame does not record which kind paused
+        //    it, so a stall whose only pause was mandatory stops instead of
+        //    drawing.
+        //  - A mandatory-only iteration that moved an object while the witness
+        //    stalled. The witness only sees linked-exile rows, so the moved
+        //    object is progress it cannot measure. The rules would follow the
+        //    process again, and a later iteration that moves nothing could
+        //    still be a CR 104.4b draw.
+        // Neither is reachable for Tainted Pact. Its optional instruction is
+        // offered only when a card was exiled, and its linked-exile consumer
+        // records that card, so the witness moves. In its empty-library stall
+        // nothing moves, so the iteration is mandatory-only and stationary.
+        (true, RepeatIterationChoice::MandatoryOnly(RepeatIterationMovement::ObjectsMoved))
+        | (true, RepeatIterationChoice::OptionalOffered) => RepeatUntilVerdict::Stop,
+    }
+}
+
+/// CR 104.4b + CR 732.4: end the game in a draw from inside a resolution.
+///
+/// Goes through `elimination::end_game`, the single terminal-result writer, so
+/// the draw is recorded on `GameState::game_end`. That record is what makes it
+/// durable. The CR 104.1 guard in `run_post_action_pipeline` keeps triggers on
+/// the spell's move to the graveyard off the finished game's stack at the
+/// source. Writers that remain can still overwrite `waiting_for`, such as a
+/// CR 616.1 replacement-order prompt on that move raised in `resolve_top`, and
+/// `engine::reconcile_terminal_result` restores `WaitingFor::GameOver` from the
+/// record.
+///
+/// Like effect-driven elimination, it leaves the match transition to the action
+/// pipeline (`engine_priority`'s post-resolution `handle_game_over_transition`,
+/// `engine::reconcile_terminal_result`). Running that transition mid-resolution
+/// could replace `WaitingFor::GameOver` with a best-of-three sideboard prompt
+/// before the resolution unwinds.
+fn declare_mandatory_loop_draw(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    crate::game::elimination::end_game(state, None, events);
 }
 
 /// CR 303.4f + CR 614.12b + CR 614.1c + CR 614.13: Resume a multi-target
@@ -3122,8 +3358,8 @@ fn apply_parent_chain_context(
     }
     // CR 401.5 + CR 608.2c (issue #1365) + CR 609.3 + issue #4950
     // (Thoughtseize): `state.last_parent_target_missing_reason` is `Some` for
-    // the narrow window between a Dig/ChooseFromZone/RevealHand reveal-choice
-    // coming up with nothing and the very next parent->child hand-off — this
+    // the narrow window between a Dig/ChooseFromZone/RevealHand reveal-choice/
+    // ExileTop coming up with nothing and the very next parent->child hand-off — this
     // IS that hand-off, so stamp the typed, per-ability signal onto `child`
     // and consume (take) the transient global flag immediately. Consuming
     // here (rather than where `child` is later resolved) means the signal can
@@ -8388,6 +8624,15 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                 },
             )
         }
+        // CR 608.2d + CR 609.3 (issue #8798): "you may put that card into your
+        // hand" is impossible when the parent hand-off records that no card was
+        // produced (Tainted Pact's ExileTop on an empty library). Offering it
+        // would let the player "choose" to move nothing, and accepting would
+        // reach `change_zone::resolve`'s missing-referent no-op anyway.
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            ..
+        } => ability.parent_target_missing_reason.is_some(),
         Effect::CastFromZone {
             mode,
             target,
@@ -9103,6 +9348,27 @@ pub(crate) fn resolve_player_for_context_ref(
 ) -> PlayerId {
     if matches!(target_filter, TargetFilter::ScopedPlayer) {
         return ability.scoped_player.unwrap_or(ability.controller);
+    }
+
+    // CR 608.2c: a `ParentTargetSlot` anaphor names a specific DECLARED slot of
+    // the resolving chain. A player-valued slot must resolve from the chain root
+    // (not the node's locally-propagated targets), mirroring
+    // `collect_player_targets`' top-level slot arm; an object-valued slot yields
+    // nothing here and is handled by the caller's object path. CR 608.2b: a
+    // player slot that was an illegal target at resolution names no player
+    // either, and falls through to the fallbacks below because this resolver
+    // must return some player; a caller that must affect no one for an illegal
+    // slot resolves the slot itself (`force_attack::defender_referent`).
+    if let TargetFilter::ParentTargetSlot { index } = target_filter {
+        if let Some(player) =
+            crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
+                .and_then(|target| match target {
+                    TargetRef::Player(player) => Some(player),
+                    TargetRef::Object(_) => None,
+                })
+        {
+            return player;
+        }
     }
 
     // CR 608.2c + CR 109.4: A player-only reference to the Nth chosen player
@@ -11757,11 +12023,13 @@ pub fn resolve_ability_chain(
             if state.waiting_for != initial_waiting_for {
                 // Inner pause: stash so the drain re-sets the repeat prompt
                 // after the iteration's player choice resolves.
+                //
+                // No progress witness: this mode re-prompts the controller
+                // every iteration, so it cannot loop unattended.
                 park_repeat_until_after_inner_pause(
                     state,
-                    crate::types::game_state::PendingRepeatUntil {
-                        ability: Box::new(ability.clone()),
-                    },
+                    Box::new(ability.clone()),
+                    None,
                     stack_depth_before_iteration,
                 );
             } else {
@@ -11778,26 +12046,44 @@ pub fn resolve_ability_chain(
             stop_on_put_to_hand,
             stop_on_duplicate_exiled_names,
         }) => loop {
+            // CR 104.4b: pre-iteration baseline. Captured INSIDE the loop so
+            // each iteration is measured against its own start, not the
+            // repeat's start — a repeat that makes progress and THEN stalls
+            // must still terminate.
+            let progress_baseline =
+                crate::game::exile_links::repeat_until_stop_witness(state, ability.source_id);
+            // Where this iteration's events begin, so the verdict can see
+            // whether it moved an object the witness does not count.
+            let iteration_events_start = events.len();
             let initial_waiting_for = state.waiting_for.clone();
             let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
             resolve_chain_body(state, ability, events, depth)?;
             if state.waiting_for != initial_waiting_for {
                 park_repeat_until_after_inner_pause(
                     state,
-                    crate::types::game_state::PendingRepeatUntil {
-                        ability: Box::new(ability.clone()),
-                    },
+                    Box::new(ability.clone()),
+                    Some(progress_baseline),
                     stack_depth_before_iteration,
                 );
                 return Ok(());
             }
-            if should_stop_repeat_until(
+            match repeat_until_verdict(
                 state,
                 ability,
                 stop_on_put_to_hand,
                 stop_on_duplicate_exiled_names,
+                Some(&progress_baseline),
+                RepeatIterationChoice::for_unpaused_iteration(
+                    ability,
+                    &events[iteration_events_start..],
+                ),
             ) {
-                return Ok(());
+                RepeatUntilVerdict::Repeat => {}
+                RepeatUntilVerdict::Stop => return Ok(()),
+                RepeatUntilVerdict::MandatoryLoopDraw => {
+                    declare_mandatory_loop_draw(state, events);
+                    return Ok(());
+                }
             }
         },
         // CR 608.2c: "[if <condition>,] repeat this process [once]" — re-follow
@@ -11839,11 +12125,13 @@ pub fn resolve_ability_chain(
                         condition: condition.clone(),
                         max_iterations: remaining,
                     });
+                    // No progress witness: this mode is bounded by its own
+                    // `max_iterations`, threaded above via
+                    // `should_repeat_while_condition`.
                     park_repeat_until_after_inner_pause(
                         state,
-                        crate::types::game_state::PendingRepeatUntil {
-                            ability: Box::new(paused),
-                        },
+                        Box::new(paused),
+                        None,
                         stack_depth_before_iteration,
                     );
                     return Ok(());
@@ -12890,8 +13178,9 @@ fn resolve_chain_body(
         && !optionality_is_per_iteration(state, ability)
         && optional_effect_is_infeasible(state, ability);
 
-    // CR 608.2c + CR 608.2d: An infeasible optional cast/play instruction or
-    // exact object selection does not happen. Route either outcome through the existing
+    // CR 608.2c + CR 608.2d: An infeasible optional cast/play instruction,
+    // exact object selection, or "put that card" move with no card does not
+    // happen. Route each outcome through the existing
     // decline authority instead of merely suppressing the prompt and falling
     // through to `resolve_effect`: a missing exact parent could consume an
     // unrelated inherited target, while another current-legality failure (such
@@ -12905,6 +13194,7 @@ fn resolve_chain_body(
     let auto_decline_infeasible_optional = matches!(
         &ability.effect,
         Effect::CastFromZone { .. }
+            | Effect::ChangeZone { .. }
             | Effect::MoveCounters { .. }
             | Effect::ChooseObjectsIntoTrackedSet {
                 cardinality: Some(ObjectSelectionCardinality::Exactly { .. }),
@@ -16473,7 +16763,10 @@ pub(crate) fn evaluate_condition(
             // chain slot (Malamet's condition reads slot 0, the you-control
             // fighter) — the current node's local `targets` were overwritten by
             // most-recent-only chain propagation, so resolve against the
-            // flattened root chain instead of `targets.first()`.
+            // flattened root chain instead of `targets.first()`. CR 608.2b: "If
+            // part of the effect requires information about an illegal target,
+            // it fails to determine any such information", so a slot that was
+            // an illegal target at resolution tests as unmatched.
             // CR 109.4 + CR 603.2: without a slot, "that creature" / "it" is the
             // ability's first object target, OR — for subject-based triggers that
             // carry no chosen target — the triggering event's subject object.
@@ -16481,8 +16774,9 @@ pub(crate) fn evaluate_condition(
             // `targets` has no object, resolve the anaphor against
             // `TriggeringSource` from the current trigger event.
             let target_id = if let Some(index) = subject_slot {
-                match crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
-                {
+                match crate::game::targeting::resolve_live_parent_slot_from_root(
+                    state, ability, *index,
+                ) {
                     Some(TargetRef::Object(id)) => Some(id),
                     _ => None,
                 }
@@ -26567,6 +26861,7 @@ mod tests {
         };
         state.push_repeat_until(crate::types::game_state::PendingRepeatUntil {
             ability: Box::new(ability),
+            stop_progress: None,
         });
 
         let mut events = Vec::new();
@@ -35818,6 +36113,115 @@ mod tests {
                 ability.targets
             );
         }
+    }
+
+    /// CR 608.2d + CR 609.3 (issue #8798): "you may put that card into your
+    /// hand" is offerable only when the parent hand-off produced a card.
+    #[test]
+    fn optional_parent_target_move_is_infeasible_only_without_a_referent() {
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Hand,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![TargetRef::Object(ObjectId(901))],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        ability.optional = true;
+        assert!(
+            !optional_effect_is_infeasible(&state, &ability),
+            "a parent hand-off that produced a card keeps the move offerable"
+        );
+
+        ability.targets.clear();
+        ability.parent_target_missing_reason =
+            Some(crate::types::ability::ParentTargetMissingReason::ExileTop);
+        assert!(
+            optional_effect_is_infeasible(&state, &ability),
+            "an ExileTop that exiled nothing leaves no card to put into hand"
+        );
+    }
+
+    /// CR 104.4b + CR 603.5: a stalled `UntilStopConditions` iteration whose
+    /// optional action was answered by a stored "may" preference still contained
+    /// an optional action, so it ends the process instead of drawing the game.
+    #[test]
+    fn stalled_repeat_answered_by_a_stored_may_choice_ends_without_a_draw() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(100);
+        let origin = MayTriggerOrigin::Printed { trigger_index: 0 };
+        state.set_may_trigger_auto_choice(
+            MayTriggerAutoChoiceKey {
+                player: PlayerId(0),
+                source_id,
+                origin: origin.clone(),
+            },
+            AutoMayChoice::Decline,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: crate::types::ability::LibraryPosition::Top,
+                face_down: false,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(optional_gain_life(source_id, PlayerId(0), 3)));
+        ability.repeat_until = Some(RepeatContinuation::UntilStopConditions {
+            stop_on_put_to_hand: true,
+            stop_on_duplicate_exiled_names: false,
+        });
+        ability.set_may_trigger_origin_recursive(origin);
+        assert!(
+            state.players[0].library.is_empty(),
+            "precondition: the producer is starved, so the first iteration stalls"
+        );
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ExileTop,
+                    ..
+                }
+            )),
+            "reach guard: the repeat body ran"
+        );
+        assert_eq!(
+            state.players[0].life, 20,
+            "reach guard: the stored decline answered the may without a prompt"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "a loop containing an optional action is not a draw, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::GameOver { .. })),
+            "no GameOver may be emitted for a loop with an optional action"
+        );
+        assert!(state.active_repeat_until().is_none());
     }
 
     /// CR 608.2d: a concrete exact target is actionable; genuine parent hand-offs

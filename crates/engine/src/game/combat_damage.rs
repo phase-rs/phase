@@ -1823,7 +1823,7 @@ fn drain_combat_lifelink(
             // `mark_phase_transition_awaiting_post_replacement` only for the
             // substitution variant), so the divergence here is deliberate, not an
             // oversight.
-            Err(ReplacementDeferred::SubstitutionContinuation) => {
+            Err(ReplacementDeferred::SubstitutionContinuation { .. }) => {
                 state.waiting_for = waiting_before.clone();
             }
         }

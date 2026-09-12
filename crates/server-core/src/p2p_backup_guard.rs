@@ -65,7 +65,7 @@ pub fn guard_p2p_backup(host_peer_id: &str, snapshot_json: &str) -> Result<(), S
 
 /// Keys stripped from a P2P host backup snapshot before SQLite persistence or
 /// HTTP response. These are session credentials, not recoverable draft state.
-const P2P_BACKUP_SECRET_KEYS: &[&str] = &["seatTokens", "kickedTokens"];
+const P2P_BACKUP_SECRET_KEYS: &[&str] = &["seatTokens", "kickedTokens", "booster_pack_pool"];
 
 /// Host snapshot field carrying a serialized [`draft_core::types::DraftSession`].
 const DRAFT_SESSION_JSON_KEY: &str = "draftSessionJson";
@@ -98,33 +98,42 @@ fn redact_secret_keys(obj: &mut Map<String, Value>) {
         obj.remove(*key);
     }
     redact_nested_draft_session_json(obj);
+    redact_pool_input_cube_list(obj);
+    redact_match_launch_pools(obj);
+    redact_intergame_command_launch_pools(obj);
 }
 
 fn redact_nested_draft_session_json(obj: &mut Map<String, Value>) {
-    let Some(nested_value) = obj.get_mut(DRAFT_SESSION_JSON_KEY) else {
-        return;
-    };
-    match nested_value {
+    let remove_serialized_non_record = match obj.get_mut(DRAFT_SESSION_JSON_KEY) {
+        None => return,
         // Canonical shape: the session serialized into a JSON string. Parse,
         // redact, re-serialize so the field keeps its wire type.
-        Value::String(nested_raw) => {
-            let Ok(mut nested) = serde_json::from_str::<Value>(nested_raw) else {
-                return;
-            };
-            let Some(nested_obj) = nested.as_object_mut() else {
-                return;
-            };
-            redact_draft_session_object(nested_obj);
-            if let Ok(serialized) = serde_json::to_string(&nested) {
-                *nested_value = Value::String(serialized);
-            }
-        }
+        Some(Value::String(nested_raw)) => match serde_json::from_str::<Value>(nested_raw) {
+            Ok(mut nested) => match nested.as_object_mut() {
+                Some(nested_obj) => {
+                    redact_draft_session_object(nested_obj);
+                    if let Ok(serialized) = serde_json::to_string(&nested) {
+                        *nested_raw = serialized;
+                    }
+                    false
+                }
+                None => true,
+            },
+            Err(_) => true,
+        },
         // The same payload sent inline as an object. `snapshot_json` is an
         // opaque host-supplied blob, so nothing upstream pins the field to a
         // string — matching only the string shape let a host keep unopened
         // packs and the rng seed simply by not encoding them twice.
-        Value::Object(nested_obj) => redact_draft_session_object(nested_obj),
-        _ => {}
+        Some(Value::Object(nested_obj)) => {
+            redact_draft_session_object(nested_obj);
+            false
+        }
+        Some(Value::Null) => false,
+        Some(_) => true,
+    };
+    if remove_serialized_non_record {
+        obj.remove(DRAFT_SESSION_JSON_KEY);
     }
 }
 
@@ -132,9 +141,69 @@ fn redact_draft_session_object(session: &mut Map<String, Value>) {
     for key in NESTED_DRAFT_SECRET_KEYS {
         session.remove(*key);
     }
+    session.remove("booster_pack_pool");
     if let Some(Value::Object(config)) = session.get_mut("config") {
         config.insert("rng_seed".to_string(), Value::Number(0.into()));
         redact_chaos_assignments(config);
+    }
+}
+
+/// The cube list is the host-only source multiset. `poolInput` is retained for
+/// public backup compatibility, but never with the private Cube text attached.
+fn redact_pool_input_cube_list(snapshot: &mut Map<String, Value>) {
+    let Some(Value::Object(pool_input)) = snapshot.get_mut("poolInput") else {
+        return;
+    };
+    let Some(Value::Object(data)) = pool_input.get_mut("data") else {
+        return;
+    };
+    data.remove("cube_list_text");
+}
+
+/// Match launches can retain a deck payload for recovery metadata, but that
+/// payload must not turn the unauthenticated backup into a cube-list oracle.
+fn redact_match_launch_pools(snapshot: &mut Map<String, Value>) {
+    let Some(Value::Array(match_launches)) = snapshot.get_mut("matchLaunches") else {
+        return;
+    };
+    for match_launch in match_launches {
+        let Some(match_launch) = match_launch.as_object_mut() else {
+            continue;
+        };
+        let Some(launch) = match_launch
+            .get_mut("launch")
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        let Some(deck_payload) = launch.get_mut("deckPayload").and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        deck_payload.remove("booster_pack_pool");
+    }
+}
+
+/// Held intergame commands retain a launch payload for host recovery. Public
+/// backup storage must project this alias exactly as it projects match launches.
+fn redact_intergame_command_launch_pools(snapshot: &mut Map<String, Value>) {
+    let Some(Value::Array(commands)) = snapshot.get_mut("intergameCommands") else {
+        return;
+    };
+    for command in commands {
+        let Some(command) = command.as_object_mut() else {
+            continue;
+        };
+        let Some(launch) = command
+            .get_mut("launchPayload")
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        let Some(deck) = launch.get_mut("deckPayload").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        deck.remove("booster_pack_pool");
     }
 }
 
@@ -362,15 +431,112 @@ mod tests {
     }
 
     #[test]
-    fn redact_p2p_backup_snapshot_secrets_leaves_non_session_shapes_alone() {
-        // A `draftSessionJson` that is neither a string nor an object carries no
-        // session to redact; it must pass through rather than error.
-        let raw = serde_json::json!({ "draftSessionJson": 7, "draftStarted": true });
+    fn redact_p2p_backup_snapshot_secrets_drops_unredactable_serialized_draft_sessions() {
+        for (draft_session_json, sentinel) in [
+            (
+                Value::String("malformed-draft-session-sentinel".to_string()),
+                "malformed-draft-session-sentinel",
+            ),
+            (
+                Value::String(serde_json::json!(["serialized-array-session-sentinel"]).to_string()),
+                "serialized-array-session-sentinel",
+            ),
+        ] {
+            let raw = serde_json::json!({
+                "draftSessionJson": draft_session_json,
+                "public_note": "retain this outer field"
+            });
+            let redacted = redact_p2p_backup_snapshot_secrets(&raw.to_string()).unwrap();
+            let public: Value = serde_json::from_str(&redacted).unwrap();
+
+            assert!(public.get("draftSessionJson").is_none());
+            assert!(!redacted.contains(sentinel));
+            assert_eq!(public["public_note"], "retain this outer field");
+        }
+    }
+
+    #[test]
+    fn redact_p2p_backup_snapshot_secrets_strips_all_cube_aliases_in_every_session_shape() {
+        for draft_session_json in [
+            Value::String(serde_json::json!({ "booster_pack_pool": ["nested"] }).to_string()),
+            serde_json::json!({ "booster_pack_pool": ["nested"] }),
+            Value::Null,
+        ] {
+            let raw = serde_json::json!({
+                "booster_pack_pool": ["top-level"],
+                "draftSessionJson": draft_session_json,
+                "poolInput": { "type": "Cube", "data": {
+                    "cube_list_text": "private cube", "cube_name": "Cube"
+                }},
+                "matchLaunches": [{ "launch": { "deckPayload": {
+                    "booster_pack_pool": ["launch"]
+                }}}],
+                "intergameCommands": [{ "launchPayload": { "deckPayload": {
+                    "booster_pack_pool": ["intergame launch"]
+                }}}]
+            });
+            let redacted = redact_p2p_backup_snapshot_secrets(&raw.to_string()).unwrap();
+            let public: Value = serde_json::from_str(&redacted).unwrap();
+            assert!(public.get("booster_pack_pool").is_none());
+            assert!(public["poolInput"]["data"].get("cube_list_text").is_none());
+            assert!(public["matchLaunches"][0]["launch"]["deckPayload"]
+                .get("booster_pack_pool")
+                .is_none());
+            assert!(
+                public["intergameCommands"][0]["launchPayload"]["deckPayload"]
+                    .get("booster_pack_pool")
+                    .is_none()
+            );
+            match &raw["draftSessionJson"] {
+                Value::String(_) => {
+                    let nested: Value =
+                        serde_json::from_str(public["draftSessionJson"].as_str().unwrap()).unwrap();
+                    assert!(nested.get("booster_pack_pool").is_none());
+                }
+                Value::Object(_) => assert!(public["draftSessionJson"]
+                    .get("booster_pack_pool")
+                    .is_none()),
+                Value::Null => assert!(public["draftSessionJson"].is_null()),
+                _ => unreachable!(),
+            }
+            // The redactor consumes a serialized clone; the caller's local
+            // authority is untouched by this public projection.
+            assert!(raw.get("booster_pack_pool").is_some());
+            assert!(raw["poolInput"]["data"].get("cube_list_text").is_some());
+        }
+    }
+
+    #[test]
+    fn redact_p2p_backup_snapshot_secrets_keeps_null_draft_session() {
+        let raw = serde_json::json!({ "draftSessionJson": null, "draftStarted": true });
         let redacted =
             redact_p2p_backup_snapshot_secrets(&raw.to_string()).expect("valid snapshot");
         let parsed: Value = serde_json::from_str(&redacted).unwrap();
-        assert_eq!(parsed["draftSessionJson"], 7);
+        assert!(parsed["draftSessionJson"].is_null());
         assert_eq!(parsed["draftStarted"], true);
+    }
+
+    #[test]
+    fn redact_p2p_backup_snapshot_secrets_drops_direct_inline_non_record_sessions() {
+        for (shape, draft_session_json) in [
+            (
+                "array",
+                serde_json::json!(["direct-array-private-cube-sentinel"]),
+            ),
+            ("number", serde_json::json!(73)),
+            ("boolean", serde_json::json!(true)),
+        ] {
+            let raw = serde_json::json!({
+                "draftSessionJson": draft_session_json,
+                "public_note": "retain this outer field"
+            });
+            let redacted = redact_p2p_backup_snapshot_secrets(&raw.to_string()).unwrap();
+            let public: Value = serde_json::from_str(&redacted).unwrap();
+
+            assert!(public.get("draftSessionJson").is_none(), "{shape}");
+            assert!(!redacted.contains("direct-array-private-cube-sentinel"));
+            assert_eq!(public["public_note"], "retain this outer field", "{shape}");
+        }
     }
 
     #[test]
