@@ -299,7 +299,7 @@ function CreateCardForm({ onDispatch }: Props) {
               attach_to: buildAttachTo(),
               run_etb: runEtb,
               nonlegendary,
-              is_token: isToken,
+              creation_kind: isToken ? "Token" : "Card",
               count,
             },
           })

@@ -1998,7 +1998,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
           zone: "Hand",
           run_etb: false,
           nonlegendary: false,
-          is_token: false,
+          creation_kind: "Card",
           count: 0,
         },
       },
@@ -2045,6 +2045,45 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(mockGetViewerSnapshot).not.toHaveBeenCalled();
     expect(mockGetState).not.toHaveBeenCalled();
   });
+
+  it.each(["Card", "Token"] as const)(
+    "preserves the %s creation kind from the guest action envelope to the host engine",
+    async (creationKind) => {
+      const { adapter, emitConnection } = makeHost(2);
+      await adapter.initialize();
+      const guest = await joinGuest(emitConnection, {
+        type: "guest_deck",
+        deckData: { player: { main_deck: [], sideboard: [] } },
+      });
+      await adapter.initializeGame();
+      mockSubmitAction.mockClear();
+
+      const action: GameAction = {
+        type: "Debug",
+        data: {
+          type: "CreateCard",
+          data: {
+            card_name: "Lightning Bolt",
+            owner: 1,
+            zone: "Battlefield",
+            run_etb: false,
+            nonlegendary: false,
+            creation_kind: creationKind,
+            count: 1,
+          },
+        },
+      };
+
+      await guest.simulateData({
+        type: "action",
+        senderPlayerId: 1,
+        action,
+      });
+
+      expect(mockSubmitAction).toHaveBeenCalledWith(action, 1);
+      adapter.dispose();
+    },
+  );
 
   it("holds the seat on guest disconnect and NEVER auto-concedes on grace expiry", async () => {
     const { adapter, emitConnection } = makeHost(3, 5_000);
@@ -3451,7 +3490,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
           zone: "Hand",
           run_etb: false,
           nonlegendary: false,
-          is_token: false,
+          creation_kind: "Card",
           count: 0,
         },
       },

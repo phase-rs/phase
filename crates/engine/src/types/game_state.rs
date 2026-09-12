@@ -24,7 +24,7 @@ use super::ability::{
     TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef,
     TriggerDefinitionRef, TriggerEntry,
 };
-use super::actions::ResolveAllScope;
+use super::actions::{DebugCardCreationKind, ResolveAllScope};
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
@@ -4165,7 +4165,7 @@ pub struct PendingDebugCardEntries {
     pub attach_to: Option<AttachTarget>,
     pub nonlegendary: bool,
     #[serde(default)]
-    pub is_token: bool,
+    pub creation_kind: DebugCardCreationKind,
     pub remaining: u32,
 }
 

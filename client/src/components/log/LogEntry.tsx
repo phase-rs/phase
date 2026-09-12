@@ -55,7 +55,7 @@ function renderSegment(
           type="button"
           data-segment="CardName"
           onClick={() => onInspectObjectSticky(segment.value.object_id, segment.value.name)}
-          className="rounded-sm font-bold text-yellow-200 underline decoration-yellow-500/50 underline-offset-2 transition hover:text-yellow-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-300"
+          className="-my-3 inline-flex min-h-11 min-w-11 items-center justify-center rounded-sm align-middle font-bold text-yellow-200 underline decoration-yellow-500/50 underline-offset-2 transition hover:text-yellow-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-300"
         >
           {segment.value.name}
         </button>

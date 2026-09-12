@@ -22,7 +22,7 @@ use engine::game::{
     DebugCardCreateRequest,
 };
 use engine::types::action_rejection::ActionRejection;
-use engine::types::actions::{DebugAction, GameAction};
+use engine::types::actions::{DebugAction, DebugCardCreationKind, GameAction};
 use engine::types::events::GameEvent;
 use engine::types::format::{validate_starting_life_bounds, FormatConfig};
 use engine::types::game_state::{GameState, PersistedGameState};
@@ -2273,7 +2273,7 @@ impl SessionManager {
                 attach_to,
                 run_etb,
                 nonlegendary,
-                is_token,
+                creation_kind,
                 ..
             }) => {
                 let result = create_debug_cards_with_rejection(
@@ -2288,7 +2288,7 @@ impl SessionManager {
                         attach_to,
                         run_etb,
                         nonlegendary,
-                        is_token,
+                        creation_kind,
                     },
                 )
                 .map_err(SessionActionError::Rejected)?;
@@ -5415,7 +5415,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
-                    is_token: true,
+                    creation_kind: DebugCardCreationKind::Token,
                 }),
                 Some(&*db),
             )
@@ -5483,7 +5483,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
-                    is_token: false,
+                    creation_kind: DebugCardCreationKind::Card,
                 }),
             ),
             (
@@ -5546,7 +5546,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
-                    is_token: false,
+                    creation_kind: DebugCardCreationKind::Card,
                 }),
             )
             .expect_err("an invalid owner must fail before database lookup");
@@ -5573,7 +5573,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
-                    is_token: false,
+                    creation_kind: DebugCardCreationKind::Card,
                 }),
             )
             .expect_err("a valid nonzero request requires a database");
@@ -5601,7 +5601,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
-                    is_token: false,
+                    creation_kind: DebugCardCreationKind::Card,
                 }),
             )
             .expect_err("a real entry off Priority must fail before database lookup");
@@ -6337,7 +6337,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
-                    is_token: false,
+                    creation_kind: DebugCardCreationKind::Card,
                 }),
                 None,
             )

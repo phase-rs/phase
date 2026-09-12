@@ -462,28 +462,19 @@ fn merged_ability_sets(
 
     let mut triggers = Vec::new();
     let mut trigger_printed_origins = Vec::new();
+    let augment_origins = printed_cards::base_trigger_printed_origins(augment);
     for (printed_occurrence, trigger) in augment.base_trigger_definitions.iter().enumerate() {
         if trigger.execute.is_none() {
             if let Some(body) = host_body.clone() {
                 let mut combined = trigger.clone();
                 combined.execute = Some(Box::new(body));
                 triggers.push(combined);
-                trigger_printed_origins.push(augment.base_printed_ref.clone().map(|printed_ref| {
-                    crate::types::ability::TriggerPrintedOrigin {
-                        printed_ref,
-                        printed_occurrence,
-                    }
-                }));
+                trigger_printed_origins.push(augment_origins[printed_occurrence].clone());
             }
             continue;
         }
         triggers.push(trigger.clone());
-        trigger_printed_origins.push(augment.base_printed_ref.clone().map(|printed_ref| {
-            crate::types::ability::TriggerPrintedOrigin {
-                printed_ref,
-                printed_occurrence,
-            }
-        }));
+        trigger_printed_origins.push(augment_origins[printed_occurrence].clone());
     }
 
     let statics = augment.base_static_definitions.iter().cloned().collect();

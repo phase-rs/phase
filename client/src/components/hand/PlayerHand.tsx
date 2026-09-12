@@ -396,6 +396,11 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
       arrowRotateRaw.set(0);
       insertionSlotMV.set(-1);
       draggingIndexMV.set(-1);
+      // A choice overlay can appear after the pointer-down that began this
+      // gesture. The container's pointer-events guard prevents new gestures,
+      // but Framer still completes an already-active drag, so reject the stale
+      // drop before it can reorder or play a card behind the overlay.
+      if (interactionDisabled) return false;
       const bounds = handContainerRef.current?.getBoundingClientRect();
       const releasedInsideHand =
         bounds != null
@@ -448,7 +453,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
       playCard(objectId);
       return true;
     },
-    [hasPriority, playCard, hand, playerId, pendingObjectId, organizeActive, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
+    [hasPriority, playCard, hand, playerId, pendingObjectId, organizeActive, interactionDisabled, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
   );
 
   const handleCardClick = useCallback(

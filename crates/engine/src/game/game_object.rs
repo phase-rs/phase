@@ -2903,23 +2903,53 @@ impl GameObject {
             RoomDoor::Left => RoomDoor::Right,
             RoomDoor::Right => RoomDoor::Left,
         };
-        let base = Arc::make_mut(&mut self.base_trigger_definitions);
-        for definition in base.iter_mut() {
-            if definition.room_door.is_none() {
-                definition.room_door = Some(live_door);
+        let should_install_other_door = {
+            let base = Arc::make_mut(&mut self.base_trigger_definitions);
+            for definition in base.iter_mut() {
+                if definition.room_door.is_none() {
+                    definition.room_door = Some(live_door);
+                }
             }
-        }
-        if let Some(back) = &self.back_face {
-            if !base
-                .iter()
-                .any(|definition| definition.room_door == Some(other_door))
-            {
-                base.extend(back.trigger_definitions.iter_all().map(|printed| {
+            self.back_face.as_ref().is_some_and(|_| {
+                !base
+                    .iter()
+                    .any(|definition| definition.room_door == Some(other_door))
+            })
+        };
+        if should_install_other_door {
+            let mut origins = crate::game::printed_cards::base_trigger_printed_origins(self)
+                .as_ref()
+                .clone();
+            let back = self
+                .back_face
+                .as_ref()
+                .expect("other Room door requires a stored face");
+            let back_origins =
+                back.trigger_definitions
+                    .iter_all()
+                    .enumerate()
+                    .map(|(printed_occurrence, _)| {
+                        back.trigger_printed_origins
+                            .get(printed_occurrence)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                back.printed_ref
+                                    .clone()
+                                    .map(|printed_ref| TriggerPrintedOrigin {
+                                        printed_ref,
+                                        printed_occurrence,
+                                    })
+                            })
+                    });
+            origins.extend(back_origins);
+            Arc::make_mut(&mut self.base_trigger_definitions).extend(
+                back.trigger_definitions.iter_all().map(|printed| {
                     let mut definition = printed.clone();
                     definition.room_door = Some(other_door);
                     definition
-                }));
-            }
+                }),
+            );
+            self.base_trigger_printed_origins = origins;
         }
         self.materialize_base_trigger_definitions();
 
@@ -3938,6 +3968,47 @@ mod tests {
         let deserialized: GameObject = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "Test Card");
         assert_eq!(deserialized.id, ObjectId(1));
+    }
+
+    #[test]
+    fn room_door_install_keeps_both_faces_trigger_origins_aligned() {
+        let live_ref = PrintedCardRef {
+            oracle_id: "room-oracle".to_string(),
+            face_name: "Left Door".to_string(),
+        };
+        let back_ref = PrintedCardRef {
+            oracle_id: "room-oracle".to_string(),
+            face_name: "Right Door".to_string(),
+        };
+        let mut object = trigger_test_object();
+        object.base_printed_ref = Some(live_ref.clone());
+        object.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::Phase)]);
+        object.back_face = Some(BackFaceData {
+            printed_ref: Some(back_ref.clone()),
+            trigger_definitions: vec![TriggerDefinition::new(TriggerMode::Attacks)].into(),
+            ..Default::default()
+        });
+
+        object.install_room_door_text();
+
+        assert_eq!(object.base_trigger_definitions.len(), 2);
+        assert_eq!(
+            object.base_trigger_printed_origins,
+            vec![
+                Some(TriggerPrintedOrigin {
+                    printed_ref: live_ref,
+                    printed_occurrence: 0,
+                }),
+                Some(TriggerPrintedOrigin {
+                    printed_ref: back_ref,
+                    printed_occurrence: 0,
+                }),
+            ]
+        );
+        object
+            .validate_trigger_definitions()
+            .expect("Room trigger definitions and origins remain aligned");
     }
 
     #[test]

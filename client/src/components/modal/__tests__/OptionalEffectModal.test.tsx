@@ -139,8 +139,10 @@ describe("OptionalEffectModalContent", () => {
     );
 
     const sameCardLabel = "Use this choice for every copy of this card this game";
+    const rememberLabel = "Don't ask again this game";
     fireEvent.click(screen.getByLabelText(sameCardLabel));
     expect(screen.getByLabelText(sameCardLabel)).toBeChecked();
+    expect(screen.getByLabelText(rememberLabel)).toBeChecked();
 
     rerender(
       <OptionalEffectModalContent
@@ -149,5 +151,6 @@ describe("OptionalEffectModalContent", () => {
       />,
     );
     expect(screen.getByLabelText(sameCardLabel)).not.toBeChecked();
+    expect(screen.getByLabelText(rememberLabel)).not.toBeChecked();
   });
 });

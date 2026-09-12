@@ -7,8 +7,8 @@ use crate::types::ability::{DurationEvent, EffectKind, KeywordAction, TargetRef}
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use crate::types::actions::{
-    DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, ResolveAllConsentDecision,
-    ResolveAllScope, TriggerOrderTemplateOp,
+    DebugAction, DebugCardCreationKind, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp,
+    ResolveAllConsentDecision, ResolveAllScope, TriggerOrderTemplateOp,
 };
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -15190,7 +15190,7 @@ pub fn preflight_debug_action(
         zone,
         count,
         run_etb,
-        is_token,
+        creation_kind,
         ..
     } = action
     {
@@ -15202,7 +15202,11 @@ pub fn preflight_debug_action(
         // CR 111.7 + CR 704.5d: debug card-tokens are battlefield fixtures.
         // Reject impossible direct placement in another zone rather than
         // returning a state in which a token survives where it should cease.
-        if *count != 0 && *is_token && *zone != Zone::Battlefield {
+        let token_outside_battlefield = match creation_kind {
+            DebugCardCreationKind::Card => false,
+            DebugCardCreationKind::Token => *zone != Zone::Battlefield,
+        };
+        if *count != 0 && token_outside_battlefield {
             return Err(EngineError::InvalidAction(
                 "Debug::CreateCard tokens must be created on the battlefield".into(),
             ));

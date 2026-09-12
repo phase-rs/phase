@@ -9646,13 +9646,12 @@ pub(crate) fn compute_current_copiable_values(
                     if !triggers.iter().any(|t| t == &trigger) {
                         triggers.push(trigger);
                         Arc::make_mut(&mut values.trigger_printed_origins).push(
-                            state.objects[&effect.source_id]
-                                .base_printed_ref
-                                .clone()
-                                .map(|printed_ref| crate::types::ability::TriggerPrintedOrigin {
-                                    printed_ref,
-                                    printed_occurrence: *source_trigger_index,
-                                }),
+                            crate::game::printed_cards::base_trigger_printed_origins(
+                                &state.objects[&effect.source_id],
+                            )
+                            .get(*source_trigger_index)
+                            .cloned()
+                            .flatten(),
                         );
                     }
                 }
@@ -9689,17 +9688,14 @@ pub(crate) fn compute_current_copiable_values(
                     }
                     let triggers = Arc::make_mut(&mut values.trigger_definitions);
                     let origins = Arc::make_mut(&mut values.trigger_printed_origins);
+                    let source_origins =
+                        crate::game::printed_cards::base_trigger_printed_origins(src);
                     for (printed_occurrence, trigger) in
                         src.base_trigger_definitions.iter().enumerate()
                     {
                         if !triggers.contains(trigger) {
                             triggers.push(trigger.clone());
-                            origins.push(src.base_printed_ref.clone().map(|printed_ref| {
-                                crate::types::ability::TriggerPrintedOrigin {
-                                    printed_ref,
-                                    printed_occurrence,
-                                }
-                            }));
+                            origins.push(source_origins[printed_occurrence].clone());
                         }
                     }
                     let statics = Arc::make_mut(&mut values.static_definitions);

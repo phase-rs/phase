@@ -674,12 +674,10 @@ impl FoldableCopyException<'_> {
                         triggers.push(trigger);
                         std::sync::Arc::make_mut(&mut values.trigger_printed_origins).push(
                             source.and_then(|source| {
-                                source.base_printed_ref.clone().map(|printed_ref| {
-                                    crate::types::ability::TriggerPrintedOrigin {
-                                        printed_ref,
-                                        printed_occurrence: *source_trigger_index,
-                                    }
-                                })
+                                crate::game::printed_cards::base_trigger_printed_origins(source)
+                                    .get(*source_trigger_index)
+                                    .cloned()
+                                    .flatten()
                             }),
                         );
                     }
@@ -707,17 +705,14 @@ impl FoldableCopyException<'_> {
                     }
                     let triggers = std::sync::Arc::make_mut(&mut values.trigger_definitions);
                     let origins = std::sync::Arc::make_mut(&mut values.trigger_printed_origins);
+                    let source_origins =
+                        crate::game::printed_cards::base_trigger_printed_origins(source);
                     for (printed_occurrence, trigger) in
                         source.base_trigger_definitions.iter().enumerate()
                     {
                         if !triggers.contains(trigger) {
                             triggers.push(trigger.clone());
-                            origins.push(source.base_printed_ref.clone().map(|printed_ref| {
-                                crate::types::ability::TriggerPrintedOrigin {
-                                    printed_ref,
-                                    printed_occurrence,
-                                }
-                            }));
+                            origins.push(source_origins[printed_occurrence].clone());
                         }
                     }
                     let statics = std::sync::Arc::make_mut(&mut values.static_definitions);

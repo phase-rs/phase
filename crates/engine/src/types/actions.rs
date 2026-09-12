@@ -1113,6 +1113,17 @@ fn default_debug_create_count() -> u32 {
     1
 }
 
+/// Whether a sandbox Create Card request materializes a printed card object or
+/// a token with that card's printed characteristics.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub enum DebugCardCreationKind {
+    #[default]
+    Card,
+    Token,
+}
+
 /// Direct game-state manipulation actions for debugging, testing, and remediation.
 /// Bypasses `WaitingFor` validation — fires from any game state without disrupting
 /// the current prompt. Gated on `GameState::debug_mode`.
@@ -1161,11 +1172,11 @@ pub enum DebugAction {
         /// characteristics.
         #[serde(default)]
         nonlegendary: bool,
-        /// Mark the created printed card object as a token. It retains the
-        /// card's printed copiable characteristics and artwork while obeying
-        /// token zone behavior once it leaves the battlefield.
+        /// A token retains the card's printed copiable characteristics and
+        /// artwork while obeying token zone behavior once it leaves the
+        /// battlefield.
         #[serde(default)]
-        is_token: bool,
+        creation_kind: DebugCardCreationKind,
     },
     /// Remove an object from the game entirely.
     RemoveObject { object_id: ObjectId },
@@ -1484,7 +1495,7 @@ impl DebugAction {
                 attach_to,
                 run_etb,
                 nonlegendary,
-                is_token,
+                creation_kind,
             } => {
                 let attach_suffix = match attach_to {
                     Some(AttachTarget::Object(id)) => format!(" attached to {}", obj(*id)),
@@ -1495,7 +1506,10 @@ impl DebugAction {
                 };
                 let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
                 let nonlegendary_suffix = if *nonlegendary { " (nonlegendary)" } else { "" };
-                let token_suffix = if *is_token { " (token)" } else { "" };
+                let token_suffix = match creation_kind {
+                    DebugCardCreationKind::Card => "",
+                    DebugCardCreationKind::Token => " (token)",
+                };
                 format!(
                     "CreateCard ({} ×{} for {} in {:?}{}{}{}{})",
                     card_name,

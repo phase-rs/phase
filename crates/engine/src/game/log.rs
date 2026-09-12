@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::game::combat::AttackTarget;
 use crate::game::planechase::PlanarDieFace;
 use crate::types::ability::{AbilityTag, TargetRef};
@@ -20,6 +22,7 @@ pub fn resolve_log_entries(
     before: &GameState,
     after: &GameState,
 ) -> Vec<GameLogEntry> {
+    let redundant_combat_summaries = redundant_combat_summary_indices(events);
     let has_game_start = events
         .iter()
         .any(|event| matches!(event, GameEvent::GameStarted));
@@ -37,30 +40,30 @@ pub fn resolve_log_entries(
         .enumerate()
         .filter_map(|(index, event)| {
             cursor.apply(event);
-            (!should_exclude_event(event, after) && !is_redundant_log_event(events, index)).then(
-                || {
-                    let segments = format_segments(event, after);
-                    (!segments.is_empty()).then(|| GameLogEntry {
-                        seq: 0, // Assigned by frontend
-                        turn: cursor.turn,
-                        phase: cursor.phase,
-                        category: categorize(event),
-                        segments,
-                        presentation: presentation(event),
-                    })
-                },
-            )?
+            (!should_exclude_event(event, after)
+                && !redundant_combat_summaries.contains(&index)
+                && !is_redundant_log_event(events, index))
+            .then(|| {
+                let segments = format_segments(event, after);
+                (!segments.is_empty()).then(|| GameLogEntry {
+                    seq: 0, // Assigned by frontend
+                    turn: cursor.turn,
+                    phase: cursor.phase,
+                    category: categorize(event),
+                    segments,
+                    presentation: presentation(event),
+                })
+            })?
         })
         .collect()
 }
 
-/// Prefer source-aware damage rows over derivative life-loss and aggregate
-/// combat-summary rows. Toxic's poison-counter event and its replacement-pipeline
-/// bookkeeping may sit between damage's life-loss consequence and its source-aware
-/// event; no effect-resolution boundary is skipped. `apply_damage_after_replacement`
-/// emits this exact sequence, while separate chained instructions each emit
-/// `EffectResolved` before the next instruction begins, so unrelated life loss is
-/// not hidden by later damage.
+/// Prefer source-aware damage rows over derivative life-loss rows. Toxic's
+/// poison-counter event and its replacement-pipeline bookkeeping may sit between
+/// damage's life-loss consequence and its source-aware event; no effect-resolution
+/// boundary is skipped. `apply_damage_after_replacement` emits this exact sequence,
+/// while separate chained instructions each emit `EffectResolved` before the next
+/// instruction begins, so unrelated life loss is not hidden by later damage.
 fn is_redundant_log_event(events: &[GameEvent], index: usize) -> bool {
     match events.get(index) {
         Some(GameEvent::LifeChanged { player_id, amount }) if *amount < 0 => {
@@ -89,31 +92,57 @@ fn is_redundant_log_event(events: &[GameEvent], index: usize) -> bool {
                 }) if damaged_player == player_id && *damage == amount.unsigned_abs()
             )
         }
-        Some(GameEvent::CombatDamageDealtToPlayer {
-            player_id,
-            source_amounts,
-            ..
-        }) => {
-            !source_amounts.is_empty()
-                && source_amounts.iter().all(|(source_id, amount)| {
-                    events.iter().any(|event| {
-                        matches!(
-                            event,
-                            GameEvent::DamageDealt {
-                                source_id: damage_source,
-                                target: TargetRef::Player(damaged_player),
-                                amount: damage,
-                                is_combat: true,
-                                ..
-                            } if damage_source == source_id
-                                && damaged_player == player_id
-                                && damage == amount
-                        )
-                    })
-                })
-        }
         _ => false,
     }
+}
+
+/// Match each aggregate only against the unconsumed combat-damage rows since
+/// that player's previous aggregate. Clearing the player's pending rows at
+/// every aggregate makes the aggregate itself the damage-group boundary, while
+/// retaining rows for other players whose aggregates follow in the same
+/// simultaneous combat-damage batch.
+fn redundant_combat_summary_indices(events: &[GameEvent]) -> HashSet<usize> {
+    let mut pending_damage = Vec::<(PlayerId, ObjectId, u32)>::new();
+    let mut redundant = HashSet::new();
+
+    for (index, event) in events.iter().enumerate() {
+        match event {
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Player(player),
+                amount,
+                is_combat: true,
+                ..
+            } => pending_damage.push((*player, *source_id, *amount)),
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id,
+                source_amounts,
+                ..
+            } => {
+                let mut available = pending_damage
+                    .iter()
+                    .filter(|(player, _, _)| player == player_id)
+                    .map(|(_, source, amount)| (*source, *amount))
+                    .collect::<Vec<_>>();
+                let complete = !source_amounts.is_empty()
+                    && source_amounts.iter().all(|row| {
+                        let Some(matched) = available.iter().position(|candidate| candidate == row)
+                        else {
+                            return false;
+                        };
+                        available.remove(matched);
+                        true
+                    });
+                if complete {
+                    redundant.insert(index);
+                }
+                pending_damage.retain(|(player, _, _)| player != player_id);
+            }
+            _ => {}
+        }
+    }
+
+    redundant
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2632,6 +2661,35 @@ mod tests {
             .iter()
             .flat_map(|entry| &entry.segments)
             .any(|segment| matches!(segment, LogSegment::Text(text) if text == " loses ")));
+    }
+
+    #[test]
+    fn an_earlier_identical_damage_row_does_not_hide_an_incomplete_later_summary() {
+        let events = [
+            GameEvent::DamageDealt {
+                source_id: ObjectId(7),
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 5,
+                is_combat: true,
+                excess: 0,
+            },
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(1),
+                source_amounts: vec![(ObjectId(7), 5)],
+                total_damage: 5,
+            },
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(1),
+                source_amounts: vec![(ObjectId(7), 5)],
+                total_damage: 5,
+            },
+        ];
+
+        assert_eq!(
+            redundant_combat_summary_indices(&events),
+            HashSet::from([1]),
+            "the first aggregate consumes its damage row; the later incomplete group remains visible"
+        );
     }
 
     #[test]

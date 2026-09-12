@@ -244,7 +244,7 @@ describe("DebugPanel — desktop solo capability", () => {
           attach_to: undefined,
           run_etb: true,
           nonlegendary: true,
-          is_token: true,
+          creation_kind: "Token",
           count: 1,
         },
       },

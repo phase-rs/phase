@@ -269,7 +269,8 @@ describe("GameLogPanel", () => {
     });
     render(<GameLogPanel />);
 
-    const row = screen.getByRole("button", { name: "Aetherling" }).closest("[data-category]");
+    const cardButton = screen.getByRole("button", { name: "Aetherling" });
+    const row = cardButton.closest("[data-category]");
     expect(row).toHaveAttribute("data-category", "Combat");
     expect(row).toHaveAttribute("data-tone", "Negative");
     expect(row).toHaveAttribute("data-importance", "Essential");
@@ -277,6 +278,7 @@ describe("GameLogPanel", () => {
     expect(row?.querySelector('[aria-hidden="true"]')).toHaveTextContent("⚔");
     expect(row?.querySelector('[data-segment="Number"]')).toHaveClass("tabular-nums", "bg-white/10");
     expect(row?.querySelector('[data-segment="CardName"]')).toHaveClass("font-bold", "text-yellow-200");
+    expect(cardButton).toHaveClass("min-h-11", "min-w-11", "-my-3");
     expect(row?.querySelector('[data-segment="PlayerName"]')).toHaveClass("font-bold");
     expect(row?.querySelector('[data-segment="Zone"]')).toHaveClass("bg-sky-950/70");
     expect(row?.querySelector('[data-segment="Keyword"]')).toHaveClass("bg-violet-950/70");

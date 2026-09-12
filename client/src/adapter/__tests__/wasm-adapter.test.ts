@@ -650,7 +650,7 @@ describe("WasmAdapter", () => {
           zone: "Hand" as const,
           run_etb: false,
           nonlegendary: false,
-          is_token: false,
+          creation_kind: "Card" as const,
           count,
         },
       },

@@ -5,7 +5,7 @@ use crate::types::ability::{
     TargetRef,
 };
 use crate::types::action_rejection::ActionRejection;
-use crate::types::actions::{DebugAction, DebugTokenRequest, GameAction};
+use crate::types::actions::{DebugAction, DebugCardCreationKind, DebugTokenRequest, GameAction};
 use crate::types::card::CardFace;
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -936,7 +936,7 @@ pub struct DebugCardCreateRequest {
     pub attach_to: Option<AttachTarget>,
     pub run_etb: bool,
     pub nonlegendary: bool,
-    pub is_token: bool,
+    pub creation_kind: DebugCardCreationKind,
 }
 
 impl DebugCardCreateRequest {
@@ -949,7 +949,7 @@ impl DebugCardCreateRequest {
             attach_to: self.attach_to,
             run_etb: self.run_etb,
             nonlegendary: self.nonlegendary,
-            is_token: self.is_token,
+            creation_kind: self.creation_kind,
         }
     }
 }
@@ -982,7 +982,7 @@ pub fn create_debug_cards(
         attach_to,
         run_etb,
         nonlegendary,
-        is_token,
+        creation_kind,
     } = request;
     let mut events = Vec::new();
 
@@ -1003,7 +1003,7 @@ pub fn create_debug_cards(
                     None
                 },
                 nonlegendary,
-                is_token,
+                creation_kind,
                 initial_zone,
             );
             if zone == Zone::Battlefield {
@@ -1024,7 +1024,7 @@ pub fn create_debug_cards(
                 owner,
                 attach_to,
                 nonlegendary,
-                is_token,
+                creation_kind,
                 remaining: count,
             },
             &mut events,
@@ -1098,7 +1098,7 @@ fn drain_debug_card_entries(
             pending.owner,
             pending.attach_to,
             pending.nonlegendary,
-            pending.is_token,
+            pending.creation_kind,
             Zone::Hand,
         );
         pending.remaining -= 1;
@@ -1127,7 +1127,7 @@ fn materialize_debug_card(
     owner: PlayerId,
     attach_to: Option<AttachTarget>,
     nonlegendary: bool,
-    is_token: bool,
+    creation_kind: DebugCardCreationKind,
     initial_zone: Zone,
 ) -> ObjectId {
     // CR 400.7: The object receives an identity only at the point its own
@@ -1148,7 +1148,10 @@ fn materialize_debug_card(
     object.back_face = source.back_face.clone();
     // CR 111.3 + CR 111.7: the sandbox may define a token from the printed
     // characteristics above; shared zone/SBA paths enforce token disappearance.
-    object.is_token = is_token;
+    object.is_token = match creation_kind {
+        DebugCardCreationKind::Card => false,
+        DebugCardCreationKind::Token => true,
+    };
     // CR 205.4a-b: The sandbox override removes only the legendary
     // supertype from both copiable and current characteristics.
     if nonlegendary {
@@ -1248,7 +1251,7 @@ mod tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
-            is_token: false,
+            creation_kind: DebugCardCreationKind::Card,
         };
         let owner_error = preflight_debug_action(&state, PlayerId(0), &invalid_owner)
             .expect_err("CreateCard must name an existing owner");
@@ -1262,7 +1265,7 @@ mod tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
-            is_token: false,
+            creation_kind: DebugCardCreationKind::Card,
         };
         let priority_error = preflight_debug_action(&state, PlayerId(0), &real_entry)
             .expect_err("a real battlefield entry may start only from Priority");
@@ -1276,7 +1279,7 @@ mod tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
-            is_token: false,
+            creation_kind: DebugCardCreationKind::Card,
         };
         preflight_debug_action(&state, PlayerId(0), &zero_entry)
             .expect("zero is a no-op even off Priority");
@@ -1288,7 +1291,7 @@ mod tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
-            is_token: false,
+            creation_kind: DebugCardCreationKind::Card,
         };
         preflight_debug_action(&state, PlayerId(0), &hand_create)
             .expect("off-battlefield creation is synchronous off Priority");
@@ -1300,7 +1303,7 @@ mod tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
-            is_token: true,
+            creation_kind: DebugCardCreationKind::Token,
         };
         let token_zone_error = preflight_debug_action(&state, PlayerId(0), &token_in_hand)
             .expect_err("a debug card-token cannot be created outside the battlefield");
@@ -1315,7 +1318,7 @@ mod tests {
             attach_to: None,
             run_etb: false,
             nonlegendary: false,
-            is_token: false,
+            creation_kind: DebugCardCreationKind::Card,
         };
         preflight_debug_action(&state, PlayerId(0), &raw_battlefield_create)
             .expect("raw battlefield creation is synchronous off Priority");
@@ -1342,7 +1345,7 @@ mod tests {
                 attach_to: None,
                 run_etb: true,
                 nonlegendary: false,
-                is_token: false,
+                creation_kind: DebugCardCreationKind::Card,
             },
         )
         .expect_err("the source-bound creator must reuse the shared owner preflight");
@@ -1369,7 +1372,7 @@ mod tests {
                 attach_to: None,
                 run_etb: true,
                 nonlegendary: false,
-                is_token: false,
+                creation_kind: DebugCardCreationKind::Card,
             },
         )
         .expect_err("the actor carried by the source-bound request must be authorized");
@@ -1393,7 +1396,7 @@ mod tests {
                 attach_to: None,
                 run_etb: true,
                 nonlegendary: false,
-                is_token: false,
+                creation_kind: DebugCardCreationKind::Card,
             }),
         )
         .expect_err("the action-boundary zero fast path must validate CreateCard owner");
@@ -1425,7 +1428,7 @@ mod tests {
                 attach_to: None,
                 run_etb: true,
                 nonlegendary: false,
-                is_token: true,
+                creation_kind: DebugCardCreationKind::Token,
             },
         )
         .expect("an authorized debug batch should succeed");
@@ -1463,7 +1466,7 @@ mod tests {
             owner: PlayerId(0),
             attach_to: None,
             nonlegendary: false,
-            is_token: false,
+            creation_kind: DebugCardCreationKind::Card,
             remaining: 1,
         });
 
@@ -1523,7 +1526,7 @@ mod tests {
                 attach_to: None,
                 run_etb: true,
                 nonlegendary: false,
-                is_token: false,
+                creation_kind: DebugCardCreationKind::Card,
             },
         )
         .expect("an authorized debug batch should start");

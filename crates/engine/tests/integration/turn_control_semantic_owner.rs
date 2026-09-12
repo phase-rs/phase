@@ -733,7 +733,7 @@ fn zero_count_create() -> GameAction {
         attach_to: None,
         run_etb: false,
         nonlegendary: false,
-        is_token: false,
+        creation_kind: engine::types::actions::DebugCardCreationKind::Card,
     })
 }
 
