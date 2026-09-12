@@ -250,6 +250,24 @@ impl<'a> CharacteristicView<'a> {
     }
 }
 
+/// Prefer last-known characteristics when an off-battlefield object no longer
+/// carries power or toughness in its live representation.
+fn characteristic_view_for_object(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<CharacteristicView<'_>> {
+    let object = state.objects.get(&object_id)?;
+    if object.power.is_none() && object.toughness.is_none() {
+        state
+            .lki_cache
+            .get(&object_id)
+            .map(CharacteristicView::Lki)
+            .or(Some(CharacteristicView::Object(object)))
+    } else {
+        Some(CharacteristicView::Object(object))
+    }
+}
+
 /// CR 109.2 + CR 400.1: Walk the population a [`CardTypeSetSource`] names,
 /// yielding one [`CharacteristicView`] per member.
 ///
@@ -317,11 +335,9 @@ fn visit_characteristic_leaf<'s>(
                             obj.owner,
                         );
                         if owner_matches {
-                            visit(
-                                CharacteristicMember::Object(obj_id),
-                                CharacteristicView::Object(obj),
-                                false,
-                            );
+                            if let Some(view) = characteristic_view_for_object(state, obj_id) {
+                                visit(CharacteristicMember::Object(obj_id), view, false);
+                            }
                         }
                     }
                 }
@@ -335,12 +351,8 @@ fn visit_characteristic_leaf<'s>(
                         ZoneRef::Exile => unreachable!(),
                     };
                     for &obj_id in zone_ids {
-                        if let Some(obj) = state.objects.get(&obj_id) {
-                            visit(
-                                CharacteristicMember::Object(obj_id),
-                                CharacteristicView::Object(obj),
-                                false,
-                            );
+                        if let Some(view) = characteristic_view_for_object(state, obj_id) {
+                            visit(CharacteristicMember::Object(obj_id), view, false);
                         }
                     }
                 }
@@ -348,12 +360,8 @@ fn visit_characteristic_leaf<'s>(
         },
         CardTypeSetSource::ExiledBySource => {
             for linked in linked_exile_for_context(state, &ctx) {
-                if let Some(obj) = state.objects.get(&linked.exiled_id) {
-                    visit(
-                        CharacteristicMember::Object(linked.exiled_id),
-                        CharacteristicView::Object(obj),
-                        false,
-                    );
+                if let Some(view) = characteristic_view_for_object(state, linked.exiled_id) {
+                    visit(CharacteristicMember::Object(linked.exiled_id), view, false);
                 }
             }
         }
@@ -363,11 +371,7 @@ fn visit_characteristic_leaf<'s>(
         // the exact same members as object-count quantities.
         CardTypeSetSource::Objects { filter } => {
             for obj_id in object_count_matching_ids(state, filter, filter_ctx, ctx.source) {
-                let view = state
-                    .objects
-                    .get(&obj_id)
-                    .map(CharacteristicView::Object)
-                    .or_else(|| state.lki_cache.get(&obj_id).map(CharacteristicView::Lki));
+                let view = characteristic_view_for_object(state, obj_id);
                 if let Some(view) = view {
                     visit(CharacteristicMember::Object(obj_id), view, false);
                 }
@@ -416,11 +420,7 @@ fn visit_characteristic_leaf<'s>(
                     }
                 }
                 for object_id in crate::game::targeting::extract_sources_from_event(event) {
-                    let view = state
-                        .objects
-                        .get(&object_id)
-                        .map(CharacteristicView::Object)
-                        .or_else(|| state.lki_cache.get(&object_id).map(CharacteristicView::Lki));
+                    let view = characteristic_view_for_object(state, object_id);
                     if let Some(view) = view {
                         visit(CharacteristicMember::Object(object_id), view, false);
                     }
@@ -453,11 +453,7 @@ fn visit_characteristic_leaf<'s>(
                     }),
                 };
                 if cause_ok {
-                    let view = state
-                        .objects
-                        .get(&oid)
-                        .map(CharacteristicView::Object)
-                        .or_else(|| state.lki_cache.get(&oid).map(CharacteristicView::Lki));
+                    let view = characteristic_view_for_object(state, oid);
                     if let Some(view) = view {
                         visit(CharacteristicMember::Object(oid), view, false);
                     }
