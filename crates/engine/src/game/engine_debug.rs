@@ -11,11 +11,12 @@ use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, DebugCardEntrySource, GameState, PendingDebugCardEntries, WaitingFor,
+    ActionResult, DebugCardEntrySource, GameState, LiminalEntry, PendingDebugCardEntries,
+    PendingLiminalEntryResume, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::{PlayerCounterKind, PlayerId};
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent};
 use crate::types::resolved_commands::ResolvedPlayerEdit;
 use crate::types::zones::Zone;
 
@@ -825,6 +826,7 @@ pub fn route_debug_create_to_battlefield(
     state: &mut GameState,
     object_id: ObjectId,
     run_etb: bool,
+    attach_to: Option<AttachTarget>,
 ) -> ActionResult {
     use super::replacement::{self, ReplacementResult};
 
@@ -853,6 +855,14 @@ pub fn route_debug_create_to_battlefield(
         };
     }
 
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.is_token)
+    {
+        return route_debug_token_to_battlefield(state, object_id, attach_to);
+    }
+
     let from = state
         .objects
         .get(&object_id)
@@ -864,7 +874,7 @@ pub fn route_debug_create_to_battlefield(
         from,
         to: Zone::Battlefield,
         cause: None,
-        attach_to: None,
+        attach_to,
         enter_tapped: Default::default(),
         enters_attacking: false,
         enter_with_counters: vec![],
@@ -902,6 +912,130 @@ pub fn route_debug_create_to_battlefield(
             super::sba::check_state_based_actions(state, &mut events); // CR 704: Check SBAs
         }
         ReplacementResult::Prevented => {}
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+        }
+    }
+
+    ActionResult {
+        events,
+        waiting_for: state.waiting_for.clone(),
+        log_entries: vec![],
+    }
+}
+
+/// CR 111.1 + CR 614.12: A token does not move from a staging zone onto the
+/// battlefield. Convert the debug-selected printed characteristics into the
+/// same liminal token projection used by copy-token effects, then consult the
+/// standard token-entry replacement and delivery pipeline.
+fn route_debug_token_to_battlefield(
+    state: &mut GameState,
+    object_id: ObjectId,
+    attach_to: Option<AttachTarget>,
+) -> ActionResult {
+    let mut events = Vec::new();
+    let staged = state
+        .objects
+        .remove(&object_id)
+        .expect("debug token must exist before its entry is staged");
+    zones::remove_from_zone(state, object_id, staged.zone, staged.owner);
+
+    let values = super::printed_cards::intrinsic_copiable_values(&staged);
+    let copy = CopyTokenSpec {
+        values: Box::new(values.clone()),
+        display_source: staged.display_source,
+        printed_ref: staged.printed_ref.clone(),
+        token_image_ref: staged.token_image_ref.clone(),
+        extra_keywords: Vec::new(),
+        additional_modifications: Vec::new(),
+        tapped: false,
+        enters_attacking: false,
+        sacrifice_at: None,
+        source_id: object_id,
+        controller: staged.controller,
+    };
+    let mut token = super::game_object::GameObject::new(
+        object_id,
+        CardId(0),
+        staged.owner,
+        values.name.clone(),
+        Zone::Battlefield,
+    );
+    let entry_timestamp = state.next_timestamp();
+    super::effects::token::materialize_token_copy_body(
+        &mut token,
+        &copy,
+        &crate::types::resolved_commands::ResolvedCopyBodyModifications::NoExceptions,
+        state.turn_number,
+        entry_timestamp,
+        false,
+    );
+    state.liminal_entries.insert(
+        object_id,
+        LiminalEntry {
+            object: crate::types::game_state::LiminalEntrant::Token(
+                crate::types::game_state::TokenProjection::materialize(token),
+            ),
+            name: values.name,
+            source_id: object_id,
+            controller: staged.controller,
+            enters_attacking: false,
+            attach_to,
+            sacrifice_at: None,
+            remaining_count: 0,
+            created_ids: Vec::new(),
+            copy_resume: Some(Box::new(copy)),
+            spec_resume: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            kind: crate::types::game_state::LiminalEntryKind::Token,
+            replacement_applied: HashSet::new(),
+        },
+    );
+
+    let proposed = ProposedEvent::TokenEntry {
+        entry_ref: object_id,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enter_with_counters: Vec::new(),
+        applied: HashSet::new(),
+    };
+    match replacement::replace_event(state, proposed, &mut events) {
+        ReplacementResult::Execute(event) => {
+            if state.has_post_replacement_drain() {
+                if let Some(waiting_for) =
+                    super::engine_replacement::apply_pending_post_replacement_effect(
+                        state,
+                        Some(object_id),
+                        None,
+                        Some(crate::types::replacements::ReplacementEvent::Moved),
+                        &mut events,
+                    )
+                {
+                    state.pending_liminal_entry_resume = Some(PendingLiminalEntryResume::Token {
+                        source_id: object_id,
+                        player: waiting_for.acting_player().unwrap_or(staged.controller),
+                        event,
+                    });
+                    state.waiting_for = waiting_for;
+                    return ActionResult {
+                        events,
+                        waiting_for: state.waiting_for.clone(),
+                        log_entries: vec![],
+                    };
+                }
+            }
+            if super::effects::token::commit_liminal_token_entry_and_continue_copy_batch(
+                state,
+                event,
+                &mut events,
+            ) {
+                super::triggers::process_triggers(state, &events);
+                super::sba::check_state_based_actions(state, &mut events);
+            }
+        }
+        ReplacementResult::Prevented => {
+            state.liminal_entries.remove(&object_id);
+        }
         ReplacementResult::NeedsChoice(player) => {
             state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
         }
@@ -1007,7 +1141,7 @@ pub fn create_debug_cards(
                 initial_zone,
             );
             if zone == Zone::Battlefield {
-                let entry = route_debug_create_to_battlefield(state, object_id, false);
+                let entry = route_debug_create_to_battlefield(state, object_id, false, None);
                 events.extend(entry.events);
             }
         }
@@ -1096,13 +1230,13 @@ fn drain_debug_card_entries(
             state,
             &pending.source,
             pending.owner,
-            pending.attach_to,
+            None,
             pending.nonlegendary,
             pending.creation_kind,
             Zone::Hand,
         );
         pending.remaining -= 1;
-        let entry = route_debug_create_to_battlefield(state, object_id, true);
+        let entry = route_debug_create_to_battlefield(state, object_id, true, pending.attach_to);
         events.extend(entry.events);
         state.waiting_for = entry.waiting_for;
 
