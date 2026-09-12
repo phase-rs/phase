@@ -85,6 +85,14 @@ describe("GameLogPanel", () => {
     vi.restoreAllMocks();
   });
 
+  it("layers the drawer above stack target arcs portaled over the board", () => {
+    render(<GameLogPanel />);
+
+    const drawer = screen.getByRole("heading", { name: "Game Log" }).closest("aside");
+    expect(drawer).not.toBeNull();
+    expect(drawer).toHaveClass("relative", "z-40");
+  });
+
   it("follows appended entries only when the reader is at the bottom", () => {
     const requestFrame = vi.fn((callback: FrameRequestCallback) => {
       callback(0);

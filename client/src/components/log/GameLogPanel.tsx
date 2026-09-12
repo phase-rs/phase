@@ -243,7 +243,7 @@ export function GameLogPanel() {
         <aside
           role="region"
           aria-label={t("log.panelLabel")}
-          className="flex h-[min(50dvh,28rem)] w-full shrink-0 flex-col border-t border-gray-700 bg-gray-900/95 pb-[env(safe-area-inset-bottom)] shadow-2xl lg:h-full lg:w-80 lg:border-l lg:border-t-0"
+          className="relative z-40 flex h-[min(50dvh,28rem)] w-full shrink-0 flex-col border-t border-gray-700 bg-gray-900/95 pb-[env(safe-area-inset-bottom)] shadow-2xl lg:h-full lg:w-80 lg:border-l lg:border-t-0"
         >
           <div className="flex items-center justify-between border-b border-gray-700 px-3 py-2">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-300">{t("log.title")}</h3>
