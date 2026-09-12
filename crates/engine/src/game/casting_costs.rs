@@ -11,7 +11,7 @@ use crate::types::ability::{
     TapCreaturesSelectionMode, TargetFilter, ThisWayCause, TypeFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
-use crate::types::events::{GameEvent, ManaTapState};
+use crate::types::events::{GameEvent, ManaTapState, TapCause, TapCostKind};
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, AssistState, CastOccurrence, CastPaymentMode,
     CastingPermissionIndex, CastingVariant, ConvokeMode, CostResume, CounterCostChoice,
@@ -4390,7 +4390,106 @@ pub(crate) fn tap_creatures_total_power(state: &GameState, ids: &[ObjectId]) -> 
         .sum()
 }
 
+/// CR 601.2b: Whether an additional-cost wrapper contains a TapCreatures
+/// component (face additional, flow, conspire, kicker, choice).
+fn additional_cost_contains_tap_creatures(cost: &AdditionalCost) -> bool {
+    match cost {
+        AdditionalCost::Required(c) | AdditionalCost::Optional { cost: c, .. } => {
+            c.contains_tap_creatures()
+        }
+        AdditionalCost::Choice(a, b) => a.contains_tap_creatures() || b.contains_tap_creatures(),
+        AdditionalCost::Kicker { costs, .. } => {
+            costs.iter().any(AbilityCost::contains_tap_creatures)
+        }
+    }
+}
+
+fn origin_is_tap_creatures_shaped(
+    state: &GameState,
+    pending: &PendingCast,
+    origin: AdditionalCostOrigin,
+) -> bool {
+    match origin {
+        AdditionalCostOrigin::Teamwork => true,
+        AdditionalCostOrigin::Casualty
+        | AdditionalCostOrigin::Bargain
+        | AdditionalCostOrigin::Gift
+        | AdditionalCostOrigin::Offspring
+        | AdditionalCostOrigin::Squad
+        | AdditionalCostOrigin::Replicate
+        | AdditionalCostOrigin::Kicker => false,
+        AdditionalCostOrigin::Other => {
+            let face = state
+                .objects
+                .get(&pending.object_id)
+                .and_then(|obj| obj.additional_cost.as_ref())
+                .is_some_and(additional_cost_contains_tap_creatures);
+            let flow = pending
+                .additional_cost_flow
+                .as_ref()
+                .is_some_and(additional_cost_contains_tap_creatures);
+            let conspire = effective_conspire_additional_cost(
+                state,
+                pending.ability.controller,
+                pending.object_id,
+            )
+            .as_ref()
+            .is_some_and(additional_cost_contains_tap_creatures);
+            face || flow || conspire
+        }
+    }
+}
+
+/// CR 601.2b: Derive the in-flight additional-cost origin at the spell/activation
+/// tap-creatures payment site from the payment already recorded on the ability
+/// context. No new `PendingCast` field. Called only from
+/// [`handle_tap_creatures_for_spell_cost`].
+///
+/// Arm order is load-bearing (C1.5(e)): activation-stripped windows return
+/// `None` before walking payments; newest tap-shaped recorded payment wins;
+/// alternative `NoCost` windows return `None`; unrecorded required additional
+/// TapCreatures yield `Some(Other)`.
+pub(crate) fn in_flight_tap_creatures_origin(
+    state: &GameState,
+    pending: &PendingCast,
+) -> Option<AdditionalCostOrigin> {
+    // 1. Activation-cost TapCreatures window: `surface_next_unpaid_interactive`
+    //    strips TapCreatures from `activation_cost` before boxing. Additional-cost
+    //    taps on an activated ability still have that leg on `activation_cost`
+    //    (additional costs are paid first).
+    if pending.activation_ability_index.is_some()
+        && !pending
+            .activation_cost
+            .as_ref()
+            .is_some_and(AbilityCost::contains_tap_creatures)
+    {
+        return None;
+    }
+
+    // 2. Newest recorded payment whose origin is tap-creatures-shaped.
+    if let Some(payment) = pending
+        .ability
+        .context
+        .additional_cost_payments
+        .iter()
+        .rev()
+        .find(|payment| origin_is_tap_creatures_shaped(state, pending, payment.origin))
+    {
+        return Some(payment.origin);
+    }
+
+    // 3. Alternative-cost window (Lady of Otaria / timing-required non-mana alt).
+    //    Required face additional uses the printed mana cost, not `NoCost`.
+    if pending.activation_ability_index.is_none() && matches!(pending.cost, ManaCost::NoCost) {
+        return None;
+    }
+
+    // 4. Unrecorded Required additional TapCreatures (7043 bypass / 1201 queue pop).
+    Some(AdditionalCostOrigin::Other)
+}
+
 /// CR 118.3 + CR 701.26a: Complete the tap-creatures cost after player selection.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn pay_tap_creatures_selection(
     state: &mut GameState,
     min_count: usize,
@@ -4399,6 +4498,7 @@ pub(crate) fn pay_tap_creatures_selection(
     legal_creatures: &[ObjectId],
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
+    origin: Option<AdditionalCostOrigin>,
 ) -> Result<(), EngineError> {
     // CR 601.2b: Validate the chosen set against the cost's requirement shape.
     // `Fixed`/`VariableX` are the count-bounded forms (tap a count within
@@ -4466,7 +4566,12 @@ pub(crate) fn pay_tap_creatures_selection(
     // CR 701.26a + CR 508.1f: Tap each chosen creature, routed through the single
     // authority so a "can't become tapped" creature is refused.
     for &id in chosen {
-        crate::game::restrictions::tap_permanent_for_cost(state, id, events)?;
+        crate::game::restrictions::tap_permanent_for_cost(
+            state,
+            id,
+            events,
+            TapCause::CostPayment(TapCostKind::TapCreatures { origin }),
+        )?;
     }
 
     Ok(())
@@ -4485,6 +4590,7 @@ pub(crate) fn handle_tap_creatures_for_spell_cost(
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let origin = in_flight_tap_creatures_origin(state, &pending);
     pay_tap_creatures_selection(
         state,
         min_count,
@@ -4493,6 +4599,7 @@ pub(crate) fn handle_tap_creatures_for_spell_cost(
         legal_creatures,
         chosen,
         events,
+        origin,
     )?;
     // CR 107.3a: the selected payment count defines X for this activation while
     // its ability is on the stack — but *only* for the X-sentinel shape. The
@@ -12400,7 +12507,7 @@ fn auto_tap_mana_sources_inner(
                 {
                     events.push(GameEvent::PermanentTapped {
                         object_id: option.object_id,
-                        caused_by: None,
+                        cause: TapCause::CostPayment(TapCostKind::TapSymbol),
                     });
                 }
                 mana_payment::produce_mana(
@@ -14557,9 +14664,10 @@ mod tests {
     use crate::game::scenario::GameScenario;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
-        ManaContribution, ManaProduction, PtStat, PtValue, PtValueScope, QuantityExpr,
-        ReplacementDefinition, ReplacementMode, StaticDefinition, TargetFilter, TargetRef,
+        AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, AdditionalCostInstancePayment,
+        AdditionalCostOrigin, Comparator, ControllerRef, Effect, FilterProp, ManaContribution,
+        ManaProduction, PtStat, PtValue, PtValueScope, QuantityExpr, ReplacementDefinition,
+        ReplacementMode, StaticDefinition, TapCreaturesRequirement, TargetFilter, TargetRef,
         TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
@@ -25669,6 +25777,142 @@ its replicate cost was paid.)\nDraw a card.";
                 .expect("bound")
                 .is_current(&state),
             "CR 400.7: a move AFTER the cost completed makes the referent a new              object again; the re-pin must not bless it"
+        );
+    }
+
+    fn tap_creatures_cost() -> AbilityCost {
+        AbilityCost::TapCreatures {
+            requirement: TapCreaturesRequirement::count(1),
+            filter: TargetFilter::Any,
+        }
+    }
+
+    fn pending_for_origin(
+        state: &mut GameState,
+        cost: ManaCost,
+        payments: &[AdditionalCostOrigin],
+    ) -> PendingCast {
+        let object_id = create_object(
+            state,
+            CardId(99),
+            PlayerId(0),
+            "In-flight spell".to_string(),
+            Zone::Stack,
+        );
+        let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), object_id, PlayerId(0));
+        ability.context.additional_cost_payments = payments
+            .iter()
+            .copied()
+            .map(|origin| AdditionalCostInstancePayment::new(origin, 1))
+            .collect();
+        PendingCast::new(object_id, CardId(99), ability, cost)
+    }
+
+    /// C1.5: `in_flight_tap_creatures_origin` arm order is load-bearing.
+    #[test]
+    fn in_flight_tap_creatures_origin_table() {
+        let mut state = GameState::new_two_player(42);
+
+        // C1.5(a)(d): Casualty then Teamwork — newest tap-shaped origin wins.
+        let pending = pending_for_origin(
+            &mut state,
+            ManaCost::generic(1),
+            &[
+                AdditionalCostOrigin::Casualty,
+                AdditionalCostOrigin::Teamwork,
+            ],
+        );
+        assert_eq!(
+            in_flight_tap_creatures_origin(&state, &pending),
+            Some(AdditionalCostOrigin::Teamwork),
+            "newest tap-shaped recorded payment is Teamwork"
+        );
+
+        // Arm 1: stripped activation cost does not walk payments, even with a
+        // stale Teamwork recording on the same pending.
+        let mut pending = pending_for_origin(
+            &mut state,
+            ManaCost::generic(1),
+            &[AdditionalCostOrigin::Teamwork],
+        );
+        pending.activation_ability_index = Some(0);
+        pending.activation_cost = Some(AbilityCost::Tap);
+        assert_eq!(
+            in_flight_tap_creatures_origin(&state, &pending),
+            None,
+            "activation without TapCreatures on activation_cost yields None"
+        );
+
+        // Activation whose remaining cost still contains TapCreatures reads the
+        // recorded origin instead of short-circuiting.
+        let mut pending = pending_for_origin(
+            &mut state,
+            ManaCost::generic(1),
+            &[AdditionalCostOrigin::Teamwork],
+        );
+        pending.activation_ability_index = Some(0);
+        pending.activation_cost = Some(tap_creatures_cost());
+        assert_eq!(
+            in_flight_tap_creatures_origin(&state, &pending),
+            Some(AdditionalCostOrigin::Teamwork),
+            "activation_cost still containing TapCreatures uses the recorded origin"
+        );
+
+        // C1.5(e): Lady of Otaria / alternative NoCost window.
+        let pending = pending_for_origin(&mut state, ManaCost::NoCost, &[]);
+        assert_eq!(
+            in_flight_tap_creatures_origin(&state, &pending),
+            None,
+            "alternative NoCost must not collapse into Some(Other)"
+        );
+
+        // Required unrecorded additional TapCreatures (printed mana, not NoCost).
+        let pending = pending_for_origin(&mut state, ManaCost::generic(2), &[]);
+        assert_eq!(
+            in_flight_tap_creatures_origin(&state, &pending),
+            Some(AdditionalCostOrigin::Other),
+            "unrecorded required additional yields Some(Other), not None"
+        );
+
+        // Casualty recorded, then a required tap that is not yet recorded.
+        let pending = pending_for_origin(
+            &mut state,
+            ManaCost::generic(1),
+            &[AdditionalCostOrigin::Casualty],
+        );
+        assert_eq!(
+            in_flight_tap_creatures_origin(&state, &pending),
+            Some(AdditionalCostOrigin::Other),
+            "non-tap-shaped Casualty must not steal the subsequent required tap"
+        );
+
+        // Recorded Other is tap-shaped only when the face additional cost is.
+        let mut pending = pending_for_origin(
+            &mut state,
+            ManaCost::generic(1),
+            &[AdditionalCostOrigin::Other],
+        );
+        state
+            .objects
+            .get_mut(&pending.object_id)
+            .expect("pending object")
+            .additional_cost = Some(AdditionalCost::Required(tap_creatures_cost()));
+        assert_eq!(
+            in_flight_tap_creatures_origin(&state, &pending),
+            Some(AdditionalCostOrigin::Other),
+            "recorded Other with a tap-creatures face additional is tap-shaped"
+        );
+
+        pending.ability.context.additional_cost_payments.clear();
+        state
+            .objects
+            .get_mut(&pending.object_id)
+            .expect("pending object")
+            .additional_cost = None;
+        assert_eq!(
+            in_flight_tap_creatures_origin(&state, &pending),
+            Some(AdditionalCostOrigin::Other),
+            "cleared payments still take arm 4 for a printed-mana required window"
         );
     }
 }

@@ -6,7 +6,7 @@ use crate::types::ability::{
     TargetChoiceTiming, TargetFilter, TargetRef,
 };
 use crate::types::counter::CounterType;
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, TapCause};
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::proposed_event::ProposedEvent;
@@ -182,12 +182,18 @@ pub(crate) fn process_one_tap(
     }
     let proposed = ProposedEvent::Tap {
         object_id,
+        source_id,
         applied: HashSet::new(),
     };
 
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            if let ProposedEvent::Tap { object_id, .. } = event {
+            if let ProposedEvent::Tap {
+                object_id,
+                source_id,
+                ..
+            } = event
+            {
                 if crate::game::object_state::resolve_and_apply_object_edit(
                     state,
                     object_id,
@@ -198,7 +204,7 @@ pub(crate) fn process_one_tap(
                 {
                     events.push(GameEvent::PermanentTapped {
                         object_id,
-                        caused_by: Some(source_id),
+                        cause: TapCause::Effect { source: source_id },
                     });
                 }
             }

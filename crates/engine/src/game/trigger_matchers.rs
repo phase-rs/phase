@@ -6,7 +6,7 @@ use crate::types::ability::{
     DieResultFilter, EffectKind, ManaAbilityProducedFilter, OriginConstraint, TargetFilter,
     TargetRef, TriggerDefinition, TypedFilter,
 };
-use crate::types::events::{GameEvent, PlayerActionKind};
+use crate::types::events::{GameEvent, PlayerActionKind, TapCause};
 use crate::types::game_state::{GameState, TriggerSourceContext};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -2423,18 +2423,14 @@ pub(super) fn match_taps(
     state: &GameState,
 ) -> bool {
     let source_id = source_event_subject_id(source_context);
-    if let GameEvent::PermanentTapped {
-        object_id,
-        caused_by,
-    } = event
-    {
+    if let GameEvent::PermanentTapped { object_id, cause } = event {
         // If valid_card is set, check the tapped object matches (e.g. "opponent's creature")
         if trigger.valid_card.is_some() {
             if !valid_card_matches(trigger, state, *object_id, source_context) {
                 return false;
             }
             // CR 701.26: "you tap an untapped creature an opponent controls" requires
-            // an external cause. Only apply caused_by gating when the trigger explicitly
+            // an external cause. Only apply cause gating when the trigger explicitly
             // filters for opponent-controlled objects.
             let requires_opponent = matches!(
                 &trigger.valid_card,
@@ -2444,19 +2440,20 @@ pub(super) fn match_taps(
                 }))
             );
             if requires_opponent {
-                match caused_by {
-                    Some(cause_id) => {
-                        // The cause must be controlled by the trigger's controller
+                match cause {
+                    TapCause::Effect { source } => {
+                        // Live lookup, no new LKI. If the source has left play,
+                        // controller is None and the gate refuses — same fail-closed
+                        // as the former `caused_by` path.
                         let trigger_controller = source_context.source_read(state).controller();
-                        let cause_controller = state.objects.get(cause_id).map(|o| o.controller);
+                        let cause_controller = state.objects.get(source).map(|o| o.controller);
                         if Some(trigger_controller) != cause_controller {
                             return false;
                         }
                     }
-                    None => {
-                        // Self-initiated tap — doesn't qualify as "you tap opponent's creature"
-                        return false;
-                    }
+                    // CR 508.1f: attacker-declaration tapping is not a cost, and
+                    // CR 601.2h cost taps are self-initiated for this gate.
+                    TapCause::AttackDeclaration | TapCause::CostPayment(_) => return false,
                 }
             }
             true
@@ -5349,18 +5346,21 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle_trigger::parse_trigger_line;
     use crate::types::ability::{
-        Comparator, ControllerRef, DamageAmountScope, DamageAmountThreshold, FilterProp,
-        QuantityExpr, ResolvedAbility, TargetFilter, TriggerCondition, TriggerDefinition,
-        TypeFilter, TypedFilter,
+        AdditionalCostOrigin, Comparator, ControllerRef, DamageAmountScope, DamageAmountThreshold,
+        FilterProp, QuantityExpr, ResolvedAbility, TargetFilter, TriggerCondition,
+        TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::events::{ClashResult, GameEvent, ManaTapState, PlayerActionKind};
+    use crate::types::events::{
+        ClashResult, GameEvent, ManaTapState, PlayerActionKind, TapCause, TapCostKind,
+    };
     use crate::types::game_state::{
-        CastingVariant, GameState, StackEntry, StackEntryKind, ZoneChangeRecord,
+        CastingVariant, ConvokeMode, GameState, StackEntry, StackEntryKind, ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::player::{PlayerCounterKind, PlayerId};
+    use crate::types::statics::CrewAction;
     use crate::types::zones::Zone;
 
     fn setup() -> GameState {
@@ -14806,9 +14806,54 @@ mod tests {
         // Tapped by your effect — should fire
         let event = GameEvent::PermanentTapped {
             object_id: opp_creature,
-            caused_by: Some(your_source),
+            cause: TapCause::Effect {
+                source: your_source,
+            },
         };
         assert!(match_taps(
+            &event,
+            &trigger,
+            &test_trigger_source_context(&state, trigger_src),
+            &state
+        ));
+    }
+
+    #[test]
+    fn tap_opponent_creature_via_their_effect_does_not_fire() {
+        let mut state = setup();
+        let trigger_src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hylda".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Their Tapper".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&opp_creature) {
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let mut trigger = make_trigger(TriggerMode::Taps);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+        let event = GameEvent::PermanentTapped {
+            object_id: opp_creature,
+            cause: TapCause::Effect { source: opp_source },
+        };
+        assert!(!match_taps(
             &event,
             &trigger,
             &test_trigger_source_context(&state, trigger_src),
@@ -14845,7 +14890,7 @@ mod tests {
         // Self-initiated tap (e.g. mana ability) — should NOT fire
         let event = GameEvent::PermanentTapped {
             object_id: opp_creature,
-            caused_by: None,
+            cause: TapCause::CostPayment(TapCostKind::TapSymbol),
         };
         assert!(!match_taps(
             &event,
@@ -14884,7 +14929,9 @@ mod tests {
         // Tapping your own creature — doesn't match opponent filter
         let event = GameEvent::PermanentTapped {
             object_id: own_creature,
-            caused_by: Some(trigger_src),
+            cause: TapCause::Effect {
+                source: trigger_src,
+            },
         };
         assert!(!match_taps(
             &event,
@@ -14924,7 +14971,7 @@ mod tests {
         // Opponent taps their own creature (self-initiated) — should still fire
         let event = GameEvent::PermanentTapped {
             object_id: any_creature,
-            caused_by: None,
+            cause: TapCause::CostPayment(TapCostKind::TapSymbol),
         };
         assert!(match_taps(
             &event,
@@ -14943,10 +14990,103 @@ mod tests {
         );
         let event2 = GameEvent::PermanentTapped {
             object_id: any_creature,
-            caused_by: Some(opp_source),
+            cause: TapCause::Effect { source: opp_source },
         };
         assert!(match_taps(
             &event2,
+            &trigger,
+            &test_trigger_source_context(&state, trigger_src),
+            &state
+        ));
+    }
+
+    /// C1.3: opponent-tap gate translates onto `TapCause` without changing
+    /// verdicts. AttackDeclaration and every CostPayment variant are
+    /// self-initiated siblings of `Effect { source }`.
+    #[test]
+    fn tap_opponent_gate_refuses_attack_and_every_cost_payment_kind() {
+        let mut state = setup();
+        let trigger_src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hylda".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&opp_creature) {
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let mut trigger = make_trigger(TriggerMode::Taps);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+        let ctx = test_trigger_source_context(&state, trigger_src);
+
+        let hostile = [
+            TapCause::AttackDeclaration,
+            TapCause::CostPayment(TapCostKind::TapSymbol),
+            TapCause::CostPayment(TapCostKind::TapCreatures { origin: None }),
+            TapCause::CostPayment(TapCostKind::TapCreatures {
+                origin: Some(AdditionalCostOrigin::Teamwork),
+            }),
+            TapCause::CostPayment(TapCostKind::TapCreatures {
+                origin: Some(AdditionalCostOrigin::Other),
+            }),
+            TapCause::CostPayment(TapCostKind::ManaShard(ConvokeMode::Convoke)),
+            TapCause::CostPayment(TapCostKind::CrewFamily(CrewAction::Crew)),
+            TapCause::CostPayment(TapCostKind::Enlist),
+            TapCause::CostPayment(TapCostKind::Harmonize),
+        ];
+        for cause in hostile {
+            let event = GameEvent::PermanentTapped {
+                object_id: opp_creature,
+                cause,
+            };
+            assert!(
+                !match_taps(&event, &trigger, &ctx, &state),
+                "opponent-tap gate must refuse {cause:?}"
+            );
+        }
+    }
+
+    /// C1.1: unqualified `Taps` stays cause-blind, including Teamwork payment.
+    #[test]
+    fn unqualified_taps_fires_on_teamwork_cost_payment() {
+        let mut state = setup();
+        let trigger_src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Payer".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&creature) {
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let mut trigger = make_trigger(TriggerMode::Taps);
+        trigger.valid_card = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let event = GameEvent::PermanentTapped {
+            object_id: creature,
+            cause: TapCause::CostPayment(TapCostKind::TapCreatures {
+                origin: Some(AdditionalCostOrigin::Teamwork),
+            }),
+        };
+        assert!(match_taps(
+            &event,
             &trigger,
             &test_trigger_source_context(&state, trigger_src),
             &state

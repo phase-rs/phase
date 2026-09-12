@@ -1,6 +1,6 @@
 use crate::game::combat::{AttackTarget, DamageAssignment, DamageTarget, TrampleKind};
 use crate::types::ability::{CostPaidObjectSnapshot, TargetRef};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, TapCause, TapCostKind};
 use crate::types::game_state::{
     CombatDamageAssignmentMode, CombatTaxContext, CombatTaxPending, DamageSlot, GameState,
     WaitingFor,
@@ -277,7 +277,13 @@ pub(super) fn apply_attack_enlist(
     // which already excludes such creatures at the offer layer. Unlike the
     // attacker-declaration tap (CR 508.1f), this tap IS a cost and is not exempt.
     let tap_event_start = events.len();
-    crate::game::restrictions::tap_permanent_for_cost(state, tapped, events)?;
+    crate::game::restrictions::tap_permanent_for_cost(
+        state,
+        tapped,
+        events,
+        // CR 702.154a: enlisted creature is tapped to pay an optional attack cost.
+        TapCause::CostPayment(TapCostKind::Enlist),
+    )?;
 
     let enlisted = GameEvent::CreatureEnlisted {
         attacker,

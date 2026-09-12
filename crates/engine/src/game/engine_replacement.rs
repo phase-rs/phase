@@ -8,7 +8,7 @@ use crate::types::ability::{
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
-use crate::types::events::{GameEvent, ManaTapState};
+use crate::types::events::{GameEvent, ManaTapState, TapCause};
 use crate::types::game_state::{
     GameState, PendingCostMoveResume, PendingCounterPostAction, TokenEntryEventEmission, WaitingFor,
 };
@@ -569,7 +569,11 @@ fn handle_replacement_choice_inner(
                     }
                 }
                 // CR 701.26a: Tap accepted after replacement choice.
-                ProposedEvent::Tap { object_id, .. } => {
+                ProposedEvent::Tap {
+                    object_id,
+                    source_id,
+                    ..
+                } => {
                     if crate::game::object_state::resolve_and_apply_object_edit(
                         state,
                         object_id,
@@ -580,7 +584,7 @@ fn handle_replacement_choice_inner(
                     {
                         events.push(GameEvent::PermanentTapped {
                             object_id,
-                            caused_by: None,
+                            cause: TapCause::Effect { source: source_id },
                         });
                     }
                 }
@@ -4001,6 +4005,7 @@ mod tests {
     #[test]
     fn tap_replacement_accepted_applies_tap() {
         let mut state = GameState::new_two_player(42);
+        let source = make_creature(&mut state, PlayerId(0), "Tapper");
         let target = make_creature(&mut state, PlayerId(0), "Bear");
         assert!(!state.objects[&target].tapped, "precondition");
         install_optional_replacement(&mut state, ReplacementEvent::Tap);
@@ -4008,6 +4013,7 @@ mod tests {
         let mut events = Vec::new();
         let proposed = ProposedEvent::Tap {
             object_id: target,
+            source_id: source,
             applied: std::collections::HashSet::new(),
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -4017,11 +4023,21 @@ mod tests {
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
         state.priority_player = player;
 
-        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).expect("accept");
+        let accepted = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept");
 
         assert!(
             state.objects[&target].tapped,
             "Tap accepted after replacement choice must tap the target"
+        );
+        let cause = accepted.events.iter().find_map(|event| match event {
+            GameEvent::PermanentTapped { object_id, cause } if *object_id == target => Some(*cause),
+            _ => None,
+        });
+        assert_eq!(
+            cause,
+            Some(TapCause::Effect { source }),
+            "C1.2: replacement resume must stamp Effect {{ source }}, not a self-initiated cause"
         );
     }
 

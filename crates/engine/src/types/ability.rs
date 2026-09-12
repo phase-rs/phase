@@ -13128,6 +13128,48 @@ impl AbilityCost {
             | AbilityCost::Unimplemented { .. } => false,
         }
     }
+
+    /// CR 601.2b: Whether this cost tree contains a TapCreatures component.
+    /// Recurses `Composite` / `OneOf` / `PerCounter { base }` the same way
+    /// [`Self::consumes_source`] walks the tree.
+    pub fn contains_tap_creatures(&self) -> bool {
+        match self {
+            AbilityCost::TapCreatures { .. } => true,
+            AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                costs.iter().any(AbilityCost::contains_tap_creatures)
+            }
+            AbilityCost::PerCounter { base, .. } => base.contains_tap_creatures(),
+            AbilityCost::Mana { .. }
+            | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::Sacrifice(_)
+            | AbilityCost::PayLife { .. }
+            | AbilityCost::Discard { .. }
+            | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::ExileWithAggregate { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::PayEnergy { .. }
+            | AbilityCost::PaySpeed { .. }
+            | AbilityCost::ReturnToHand { .. }
+            | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Blight { .. }
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Behold { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::EffectCost { .. }
+            | AbilityCost::KeywordCostOfCastSpell { .. }
+            | AbilityCost::GetPlayerCounters { .. }
+            | AbilityCost::Unimplemented { .. } => false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

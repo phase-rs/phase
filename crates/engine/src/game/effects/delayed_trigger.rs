@@ -1469,6 +1469,7 @@ mod tests {
         AbilityDefinition, AbilityKind, BounceSelection, DamageKindFilter, DelayedTriggerCondition,
         Effect, ManaProduction, ObjectScope, PtValue, QuantityExpr, QuantityRef, TriggerDefinition,
     };
+    use crate::types::events::{TapCause, TapCostKind};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
@@ -1654,7 +1655,7 @@ mod tests {
 
         state.current_trigger_event = Some(GameEvent::PermanentTapped {
             object_id: ObjectId(7),
-            caused_by: None,
+            cause: TapCause::CostPayment(TapCostKind::TapSymbol),
         });
         assert_eq!(triggering_source_destination_zone(&state), None);
     }

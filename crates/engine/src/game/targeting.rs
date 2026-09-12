@@ -3023,6 +3023,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{Comparator, ContinuousModification, Duration, QuantityExpr};
     use crate::types::card_type::CoreType;
+    use crate::types::events::{TapCause, TapCostKind};
     use crate::types::game_state::{
         CastingVariant, DrainStatus, PostReplacementDrain, ResidentDrainPolicy,
     };
@@ -3058,7 +3059,7 @@ mod tests {
         // An event none of these functions has an object/amount arm for.
         let tapped = GameEvent::PermanentTapped {
             object_id: ObjectId(9),
-            caused_by: None,
+            cause: TapCause::CostPayment(TapCostKind::TapSymbol),
         };
 
         assert_eq!(extract_source_from_event(&milled), Some(ObjectId(7)));
@@ -3118,7 +3119,7 @@ mod tests {
         assert_eq!(
             resolve(&GameEvent::PermanentTapped {
                 object_id: ObjectId(9),
-                caused_by: None,
+                cause: TapCause::CostPayment(TapCostKind::TapSymbol),
             }),
             None
         );
