@@ -1138,6 +1138,14 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const isUpTo = data.up_to === true;
   const minCount = data.min_count ?? 0;
 
+  // A resolution can advance directly from one zone-choice prompt to another
+  // (for example, a sacrifice into a graveyard-to-battlefield return). The
+  // component instance is retained across that transition, so its local pick
+  // must not answer the next engine prompt.
+  useEffect(() => {
+    setSelected(new Set());
+  }, [data]);
+
   const toggleSelect = useCallback(
     (id: ObjectId) => {
       setSelected((prev) => {

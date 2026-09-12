@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject, WaitingFor } from "../../../adapter/types.ts";
@@ -296,6 +296,55 @@ describe("Discard cost modal", () => {
     expect(screen.getByText("Exile")).toBeInTheDocument();
     expect(screen.getByText("Choose 1 card to exile")).toBeInTheDocument();
     expect(screen.queryByText(/battlefield/i)).not.toBeInTheDocument();
+  });
+
+  it("clears a prior zone-choice pick before confirming the next prompt", () => {
+    const firstPrompt = buildEffectZoneChoiceWaitingFor({
+      player: 0,
+      cards: [10],
+      count: 1,
+      min_count: 0,
+      up_to: false,
+      source_id: 1,
+      effect_kind: "ChangeZone",
+      zone: "Graveyard",
+      destination: "Battlefield",
+    });
+    const secondPrompt = buildEffectZoneChoiceWaitingFor({
+      player: 0,
+      cards: [11],
+      count: 1,
+      min_count: 0,
+      up_to: false,
+      source_id: 1,
+      effect_kind: "ChangeZone",
+      zone: "Graveyard",
+      destination: "Battlefield",
+    });
+    const objects: Record<string, GameObject> = {
+      10: { ...makeObject(10, "Midnight Reaper"), zone: "Graveyard" },
+      11: { ...makeObject(11, "Verdant Sun's Avatar"), zone: "Graveyard" },
+    };
+
+    setWaitingFor(firstPrompt, objects);
+    render(<CardChoiceModal />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Loading Midnight Reaper" }));
+
+    act(() => {
+      setWaitingFor(secondPrompt, objects);
+    });
+
+    const confirm = screen.getByRole("button", { name: "Put (0/1)" });
+    expect(confirm).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Loading Verdant Sun's Avatar" }));
+    fireEvent.click(confirm);
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [11] },
+    });
   });
 
   it("allocates any-combination mana with color steppers", () => {
