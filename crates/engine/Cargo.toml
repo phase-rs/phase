@@ -56,7 +56,7 @@ same-file = "1"
 [[bin]]
 name = "coverage-report"
 path = "src/bin/coverage_report.rs"
-test = false
+# Test-enabled: inline tests cover unavailable data and successful report rendering.
 
 [[bin]]
 name = "set-check"
