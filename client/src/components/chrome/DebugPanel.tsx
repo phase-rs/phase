@@ -180,21 +180,21 @@ export function DebugPanel({
         // Under the desktop shell the message waits for the real destination;
         // a browser can only ever name the file it asked for.
         if (result.kind === "failed") {
-          return setStatus({ type: "error", message: "Failed to export game state" });
+          return setStatus({ type: "error", message: t("help.status.exportFailed") });
         }
         const message =
           result.kind === "requested"
-            ? `Export requested (${result.filename})`
+            ? t("help.status.exportRequested", { filename: result.filename })
             : result.path
-              ? `Exported to ${result.path}`
-              : `Exported ${result.filename}`;
+              ? t("help.status.exportedTo", { path: result.path })
+              : t("help.status.exported", { filename: result.filename });
         setStatus({ type: "success", message });
       })
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
-        setStatus({ type: "error", message: "Failed to export game state" });
+        setStatus({ type: "error", message: t("help.status.exportFailed") });
       });
-  }, [adapter]);
+  }, [adapter, t]);
 
   // Same destination as the top-left report flag. Close this panel first — it
   // renders at z-[9999], above the report dialog's z-50 overlay, so leaving it
