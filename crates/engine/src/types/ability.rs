@@ -29265,7 +29265,7 @@ pub struct RoomCopiableHalves {
 /// values. This is semantic provenance, not display routing: merged permanents
 /// can contain trigger slots from several printed cards while showing only the
 /// top component's art and name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TriggerPrintedOrigin {
     pub printed_ref: PrintedCardRef,
     pub printed_occurrence: usize,
