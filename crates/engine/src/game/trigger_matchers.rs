@@ -4409,7 +4409,9 @@ pub(super) fn matching_you_attack_events_by_attacked_player(
     state: &GameState,
 ) -> Vec<GameEvent> {
     let GameEvent::AttackersDeclared {
-        defending_player, ..
+        defending_player,
+        declaration_records,
+        ..
     } = event
     else {
         return Vec::new();
@@ -4435,7 +4437,7 @@ pub(super) fn matching_you_attack_events_by_attacked_player(
             attacker_ids: attacks.iter().map(|(id, _)| *id).collect(),
             defending_player: attacked,
             attacks,
-            declaration_records: Vec::new(),
+            declaration_records: declaration_records.clone(),
         })
         .collect()
 }

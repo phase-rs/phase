@@ -1407,24 +1407,26 @@ fn singleton_attack_events(
         .collect()
 }
 
-/// Preserve declaration-time LKI when an attack event is narrowed for a
-/// per-firing trigger context. Object IDs may recur across distinct declaration
-/// records, so filter the records themselves rather than rebuilding snapshots.
+/// CR 508.1a + CR 603.4: Preserve declaration-time LKI when an attack event is
+/// narrowed for a per-firing trigger context. Object IDs may recur across
+/// distinct declaration records, so filter the records themselves rather than
+/// rebuilding snapshots.
 fn declaration_records_for_attackers(
     event: &GameEvent,
     attackers: &[ObjectId],
 ) -> Vec<crate::types::game_state::AttackDeclarationRecord> {
-    match event {
-        GameEvent::AttackersDeclared {
-            declaration_records,
-            ..
-        } => declaration_records
-            .iter()
-            .filter(|record| attackers.contains(&record.object_id))
-            .cloned()
-            .collect(),
-        _ => Vec::new(),
-    }
+    let GameEvent::AttackersDeclared {
+        declaration_records,
+        ..
+    } = event
+    else {
+        return Vec::new();
+    };
+    declaration_records
+        .iter()
+        .filter(|record| attackers.contains(&record.object_id))
+        .cloned()
+        .collect()
 }
 
 fn split_attack_event_into_singletons(event: &GameEvent) -> Option<Vec<GameEvent>> {

@@ -184,6 +184,43 @@ fn attacks_observer_fires_once_per_event() {
     );
 }
 
+/// CR 508.1a + CR 603.4: narrowing an attack event retains every
+/// declaration-time record for the selected attacker, including records with
+/// a repeated object id.
+#[test]
+fn singleton_attack_events_retain_duplicate_declaration_records() {
+    let mut state = setup();
+    let attacker = make_creature(&mut state, PlayerId(0), "Attacker", 2, 2);
+    let first = state.objects[&attacker].snapshot_for_attack_declaration(attacker);
+    let mut second = first.clone();
+    second.lki.power = Some(4);
+
+    let events = singleton_attack_events(
+        PlayerId(1),
+        vec![(
+            attacker,
+            crate::game::combat::AttackTarget::Player(PlayerId(1)),
+        )],
+        vec![first, second],
+    );
+
+    let [GameEvent::AttackersDeclared {
+        declaration_records,
+        ..
+    }] = events.as_slice()
+    else {
+        panic!("one attacker must produce one narrowed event");
+    };
+    assert_eq!(
+        declaration_records
+            .iter()
+            .map(|record| record.lki.power)
+            .collect::<Vec<_>>(),
+        vec![Some(2), Some(4)],
+        "record-level filtering must not deduplicate declarations by object id"
+    );
+}
+
 /// SpellCast observer: spell-cast triggers register once per SpellCast event.
 #[test]
 fn spell_cast_observer_fires_once_per_event() {
