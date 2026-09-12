@@ -15190,12 +15190,21 @@ pub fn preflight_debug_action(
         zone,
         count,
         run_etb,
+        is_token,
         ..
     } = action
     {
         if !state.players.iter().any(|player| player.id == *owner) {
             return Err(EngineError::InvalidAction(
                 "Debug: invalid owner player id".into(),
+            ));
+        }
+        // CR 111.7 + CR 704.5d: debug card-tokens are battlefield fixtures.
+        // Reject impossible direct placement in another zone rather than
+        // returning a state in which a token survives where it should cease.
+        if *count != 0 && *is_token && *zone != Zone::Battlefield {
+            return Err(EngineError::InvalidAction(
+                "Debug::CreateCard tokens must be created on the battlefield".into(),
             ));
         }
         // Real entry can park a private parent frame while replacements or
@@ -18512,6 +18521,7 @@ mod priority_principal_tests {
             .unwrap()
             .back_face = Some(BackFaceData {
             is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Blow Off Steam".to_string(),
             power: None,
             toughness: None,

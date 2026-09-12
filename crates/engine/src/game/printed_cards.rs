@@ -4,7 +4,7 @@ use crate::database::CardDatabase;
 use crate::types::ability::{
     AbilityDefinition, ConjureSource, CopiableValues, Effect, PtValue, QuantityExpr,
     ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
-    StaticDefinition, TargetFilter, TriggerDefinition,
+    StaticDefinition, TargetFilter, TriggerDefinition, TriggerDefinitionOccurrenceRef,
 };
 // `VoteSubject` is NOT re-imported here: `mod tests`'s only use of it
 // (`crate::types::ability::VoteSubject::Named`) is fully qualified, so a gated
@@ -302,6 +302,7 @@ pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &Ca
     back_face.keywords = card_face.keywords.clone();
     back_face.abilities = card_face.abilities.clone();
     back_face.trigger_definitions = card_face.triggers.clone().into();
+    back_face.trigger_printed_origins.clear();
     back_face.replacement_definitions = card_face.replacements.clone().into();
     back_face.static_definitions = card_face.static_abilities.clone().into();
     back_face.color = color;
@@ -343,8 +344,16 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.base_keywords = back_face.keywords;
     obj.base_abilities = Arc::new(back_face.abilities);
     let trigger_definitions = Arc::new(back_face.trigger_definitions.iter_all().cloned().collect());
-    obj.install_trigger_base_definitions(trigger_definitions)
+    if back_face.trigger_printed_origins.is_empty() {
+        obj.install_trigger_base_definitions(trigger_definitions)
+            .expect("trigger base-set generation must not overflow");
+    } else {
+        obj.install_copiable_trigger_base_definitions(
+            trigger_definitions,
+            Arc::new(back_face.trigger_printed_origins),
+        )
         .expect("trigger base-set generation must not overflow");
+    }
     obj.base_replacement_definitions = Arc::new(
         back_face
             .replacement_definitions
@@ -529,6 +538,31 @@ pub fn self_etb_counter_replacements(
         .collect()
 }
 
+pub(crate) fn base_trigger_printed_origins(
+    obj: &GameObject,
+) -> Arc<Vec<Option<crate::types::ability::TriggerPrintedOrigin>>> {
+    if !obj.base_trigger_printed_origins.is_empty() {
+        return Arc::new(obj.base_trigger_printed_origins.clone());
+    }
+    Arc::new(
+        obj.base_printed_ref
+            .clone()
+            .map(|printed_ref| {
+                obj.base_trigger_definitions
+                    .iter()
+                    .enumerate()
+                    .map(|(printed_occurrence, _)| {
+                        Some(crate::types::ability::TriggerPrintedOrigin {
+                            printed_ref: printed_ref.clone(),
+                            printed_occurrence,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![None; obj.base_trigger_definitions.len()]),
+    )
+}
+
 pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
     // CR 707.2 + CR 710.2: a flipped flip permanent's `base_*` fields hold the
     // ALTERNATIVE half (written there by `flip::apply_flipped_face_to_object`),
@@ -552,6 +586,7 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
         // is both correct and zero-allocation.
         abilities: Arc::clone(&obj.base_abilities),
         trigger_definitions: Arc::clone(&obj.base_trigger_definitions),
+        trigger_printed_origins: base_trigger_printed_origins(obj),
         replacement_definitions: copiable_replacement_definitions(obj),
         static_definitions: Arc::clone(&obj.base_static_definitions),
         // CR 709.5 + CR 709.5b: a Room's per-half identities are copiable —
@@ -662,6 +697,7 @@ pub(crate) fn is_runtime_non_copiable_replacement(def: &ReplacementDefinition) -
 /// for a creature card chosen from the format pool, which exists only as a
 /// `CardFace` (no battlefield object to read via `compute_current_copiable_values`).
 pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValues {
+    let printed_ref = printed_ref_from_face(result_face);
     CopiableValues {
         name: result_face.name.clone(),
         mana_cost: result_face.mana_cost.clone(),
@@ -675,6 +711,21 @@ pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValue
         keywords: result_face.keywords.clone(),
         abilities: Arc::new(result_face.abilities.clone()),
         trigger_definitions: Arc::new(result_face.triggers.clone()),
+        trigger_printed_origins: Arc::new(
+            result_face
+                .triggers
+                .iter()
+                .enumerate()
+                .map(|(printed_occurrence, _)| {
+                    printed_ref.clone().map(|printed_ref| {
+                        crate::types::ability::TriggerPrintedOrigin {
+                            printed_ref,
+                            printed_occurrence,
+                        }
+                    })
+                })
+                .collect(),
+        ),
         replacement_definitions: Arc::new(result_face.replacements.clone()),
         // A format-pool face is never a Room half pair.
         room_halves: None,
@@ -689,6 +740,8 @@ pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValue
 /// missing keyword trigger so copies function correctly.
 pub(crate) fn ensure_keyword_triggers_for_copiable_values(values: &mut CopiableValues) {
     let triggers = Arc::make_mut(&mut values.trigger_definitions);
+    let origins = Arc::make_mut(&mut values.trigger_printed_origins);
+    origins.resize(triggers.len(), None);
     for keyword in &values.keywords {
         for trigger in KeywordTriggerInstaller::triggers_for(keyword) {
             if triggers.iter().any(|existing| existing == &trigger) {
@@ -700,6 +753,7 @@ pub(crate) fn ensure_keyword_triggers_for_copiable_values(values: &mut CopiableV
                 continue;
             }
             triggers.push(trigger);
+            origins.push(None);
         }
     }
 }
@@ -737,6 +791,11 @@ pub fn apply_copiable_values(
                 crate::types::ability::TriggerDefinitionOccurrenceRef::CopiedValue {
                     copy_effect,
                     copied_slot,
+                    printed_origin: values
+                        .trigger_printed_origins
+                        .get(copied_slot)
+                        .cloned()
+                        .flatten(),
                 },
                 definition,
             )
@@ -801,8 +860,11 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
     obj.base_abilities = Arc::clone(&values.abilities);
     obj.base_replacement_definitions = Arc::clone(&values.replacement_definitions);
     obj.base_static_definitions = Arc::clone(&values.static_definitions);
-    obj.install_trigger_base_definitions(Arc::clone(&values.trigger_definitions))
-        .expect("trigger base-set generation must not overflow");
+    obj.install_copiable_trigger_base_definitions(
+        Arc::clone(&values.trigger_definitions),
+        Arc::clone(&values.trigger_printed_origins),
+    )
+    .expect("trigger base-set generation must not overflow");
     // CR 709.5b: a materialized duplicate of a Room keeps both printed halves.
     // The base slots hold the LEFT half and a synthesized back face the right
     // one — identity only (name and door cost): the halves' TEXT rides in the
@@ -858,6 +920,44 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
             .iter_all()
             .map(|entry| entry.definition.clone())
             .collect(),
+        trigger_printed_origins: if obj.base_trigger_printed_origins.is_empty()
+            && !obj.trigger_definitions.iter_all().any(|entry| {
+                matches!(
+                    &entry.occurrence,
+                    TriggerDefinitionOccurrenceRef::CopiedValue { .. }
+                )
+            }) {
+            Vec::new()
+        } else {
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| match &entry.occurrence {
+                    TriggerDefinitionOccurrenceRef::Printed { printed_index, .. } => {
+                        if obj.base_trigger_printed_origins.is_empty() {
+                            obj.base_printed_ref.clone().map(|printed_ref| {
+                                crate::types::ability::TriggerPrintedOrigin {
+                                    printed_ref,
+                                    printed_occurrence: *printed_index,
+                                }
+                            })
+                        } else {
+                            obj.base_trigger_printed_origins
+                                .get(*printed_index)
+                                .cloned()
+                                .flatten()
+                        }
+                    }
+                    TriggerDefinitionOccurrenceRef::CopiedValue { printed_origin, .. } => {
+                        printed_origin.clone()
+                    }
+                    TriggerDefinitionOccurrenceRef::KeywordCompanion { .. }
+                    | TriggerDefinitionOccurrenceRef::CopyRetained { .. }
+                    | TriggerDefinitionOccurrenceRef::Granted { .. }
+                    | TriggerDefinitionOccurrenceRef::ExpandedGrant { .. }
+                    | TriggerDefinitionOccurrenceRef::Unmaterialized => None,
+                })
+                .collect()
+        },
         // CR 611.2c + CR 613.1 (issue #8485): a face snapshot captures the FACE's
         // characteristics. A replacement created by the resolution of a spell or
         // ability is not one of them, so it must not ride out with the face.
@@ -936,6 +1036,7 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
         // Share the Arc rather than deep-cloning the Vec — semantically
         // identical and avoids an allocation on every face-down resolution.
         trigger_definitions: Arc::clone(&obj.base_trigger_definitions).into(),
+        trigger_printed_origins: obj.base_trigger_printed_origins.clone(),
         replacement_definitions: Arc::clone(&obj.base_replacement_definitions).into(),
         static_definitions: Arc::clone(&obj.base_static_definitions).into(),
         color: obj.base_color.clone(),
@@ -1207,6 +1308,7 @@ fn back_face_for_card_face_with_printed_ref(
         parse_warnings: Vec::new(),
         layout_kind: None,
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
     };
     apply_card_face_to_back_face(&mut back, face);
     if layout_kind != LayoutKind::Single {
@@ -1998,13 +2100,49 @@ mod tests {
                 crate::types::ability::TriggerDefinitionOccurrenceRef::CopiedValue {
                     copy_effect: first_effect,
                     copied_slot: 0,
+                    ..
                 },
                 crate::types::ability::TriggerDefinitionOccurrenceRef::CopiedValue {
                     copy_effect: second_effect,
                     copied_slot: 1,
+                    ..
                 },
             ] if *first_effect == copy_effect && *second_effect == copy_effect
         ));
+    }
+
+    #[test]
+    fn face_snapshot_preserves_layer_copy_trigger_origins() {
+        let mut values = trigger_copiable_values();
+        let component_origin = crate::types::ability::TriggerPrintedOrigin {
+            printed_ref: PrintedCardRef {
+                oracle_id: "component-oracle".to_string(),
+                face_name: "Component Face".to_string(),
+            },
+            printed_occurrence: 3,
+        };
+        values.trigger_printed_origins = Arc::new(vec![Some(component_origin.clone()), None]);
+        let copy_effect = crate::types::ability::CopyEffectInstanceRef {
+            continuous_effect_id: 17,
+            modification_index: 2,
+        };
+        let mut recipient = copy_recipient(2);
+
+        apply_copiable_values(&mut recipient, &values, copy_effect);
+        let snapshot = snapshot_object_face(&recipient);
+
+        assert_eq!(
+            snapshot.trigger_printed_origins,
+            vec![Some(component_origin.clone()), None],
+            "the face snapshot keeps both a merged-component origin and an intentional synthesized slot"
+        );
+
+        apply_back_face_to_object(&mut recipient, snapshot);
+        assert_eq!(
+            recipient.base_trigger_printed_origins,
+            vec![Some(component_origin), None],
+            "the restored face keeps copied trigger identity instead of deriving it from display art"
+        );
     }
 
     #[test]
@@ -2202,6 +2340,7 @@ mod tests {
         object.base_color = vec![ManaColor::White];
         object.back_face = Some(BackFaceData {
             is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: normal_half.name.clone(),
             power: None,
             toughness: None,

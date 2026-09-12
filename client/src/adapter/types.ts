@@ -2633,6 +2633,7 @@ export type DebugAction =
         attach_to?: AttachTarget;
         run_etb: boolean;
         nonlegendary: boolean;
+        is_token: boolean;
         count: number;
       };
     }

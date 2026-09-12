@@ -236,6 +236,24 @@ pub(crate) fn flipped_normal_copiable_values(obj: &GameObject) -> Option<Copiabl
                 .cloned()
                 .collect(),
         ),
+        trigger_printed_origins: Arc::new(
+            obj.base_printed_ref
+                .clone()
+                .map(|printed_ref| {
+                    normal_face
+                        .trigger_definitions
+                        .iter_all()
+                        .enumerate()
+                        .map(|(printed_occurrence, _)| {
+                            Some(crate::types::ability::TriggerPrintedOrigin {
+                                printed_ref: printed_ref.clone(),
+                                printed_occurrence,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
         // CR 707.2 + CR 611.2b: runtime replacements durably parked in the
         // definition set are not printed characteristics — same exclusion the
         // unflipped path applies via `copiable_replacement_definitions`.
@@ -436,6 +454,7 @@ mod tests {
 
         obj.back_face = Some(BackFaceData {
             is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Kenzo the Hardhearted".to_string(),
             power: Some(3),
             toughness: Some(4),

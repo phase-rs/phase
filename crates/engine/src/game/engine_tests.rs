@@ -1789,6 +1789,7 @@ fn broadside_bombardiers_boast_activates_after_attacking_and_requires_sacrifice(
 fn room_back_face(name: &str) -> BackFaceData {
     BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: name.to_string(),
         power: None,
         toughness: None,

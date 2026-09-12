@@ -13957,6 +13957,7 @@ mod game_submission_tests {
                 attach_to: None,
                 run_etb: false,
                 nonlegendary: false,
+                is_token: false,
             }))
         };
 

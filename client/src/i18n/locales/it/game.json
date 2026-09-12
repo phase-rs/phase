@@ -104,6 +104,7 @@
   },
   "debugCreate": {
     "copies": "Copie",
+    "asToken": "Crea come pedina",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
@@ -310,8 +311,10 @@
     "underAttack_one": "Attaccato da {{count}} creatura",
     "underAttack_other": "Attaccato da {{count}} creature",
     "target": "Bersaglio",
+    "token": "Pedina",
+    "tokenTooltip": "Pedina che è una copia di una carta reale",
     "copy": "Copia",
-    "copyTooltip": "Copia pedina di una carta reale",
+    "copyTooltip": "Permanente non pedina che copia un'altra carta",
     "cantBeBlocked": "Non può essere bloccata",
     "ringBearer": "Anello",
     "ringBearerTooltip": "Portatore dell'Anello",
@@ -2215,7 +2218,7 @@
     "yes": "Sì",
     "no": "No",
     "dontAskAgain": "Non chiedere di nuovo in questa partita",
-    "dontAskAgainForSameCard": "Applica a ogni copia di questa carta"
+    "dontAskAgainForSameCard": "Usa questa scelta per ogni copia di questa carta in questa partita"
   },
   "resolutionOptionalPayment": {
     "title": "Scegli un pagamento opzionale",

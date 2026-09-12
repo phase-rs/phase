@@ -104,6 +104,7 @@
   },
   "debugCreate": {
     "copies": "Copies",
+    "asToken": "Créer comme jeton",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
@@ -310,8 +311,10 @@
     "underAttack_one": "Attaqué par {{count}} créature",
     "underAttack_other": "Attaqué par {{count}} créatures",
     "target": "Cible",
+    "token": "Jeton",
+    "tokenTooltip": "Jeton qui est une copie d'une vraie carte",
     "copy": "Copie",
-    "copyTooltip": "Jeton-copie d'une vraie carte",
+    "copyTooltip": "Permanent non-jeton copiant une autre carte",
     "cantBeBlocked": "Ne peut pas être bloquée",
     "ringBearer": "Anneau",
     "ringBearerTooltip": "Porteur de l'Anneau",
@@ -2215,7 +2218,7 @@
     "yes": "Oui",
     "no": "Non",
     "dontAskAgain": "Ne plus demander pendant cette partie",
-    "dontAskAgainForSameCard": "Appliquer à chaque exemplaire de cette carte"
+    "dontAskAgainForSameCard": "Utiliser ce choix pour chaque copie de cette carte dans cette partie"
   },
   "resolutionOptionalPayment": {
     "title": "Choisissez un paiement optionnel",

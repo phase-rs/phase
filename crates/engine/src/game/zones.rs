@@ -4033,6 +4033,7 @@ mod tests {
             obj.base_card_types = obj.card_types.clone();
             obj.back_face = Some(BackFaceData {
                 is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "Summon: Esper Maduin".to_string(),
                 power: None,
                 toughness: None,
@@ -4101,6 +4102,7 @@ mod tests {
             obj.base_card_types = obj.card_types.clone();
             obj.back_face = Some(BackFaceData {
                 is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "Summon: Esper Maduin".to_string(),
                 power: None,
                 toughness: None,
@@ -4549,6 +4551,7 @@ mod tests {
             // Store back face data (original MDFC back face).
             obj.back_face = Some(BackFaceData {
                 is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "Back Face".to_string(),
                 power: Some(6),
                 toughness: Some(6),
@@ -4903,6 +4906,7 @@ mod tests {
             let obj = state.objects.get_mut(&id).unwrap();
             obj.back_face = Some(BackFaceData {
                 is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "Back Face".to_string(),
                 power: Some(6),
                 toughness: Some(6),

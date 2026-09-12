@@ -1913,6 +1913,7 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
         attach_to,
         run_etb,
         nonlegendary,
+        is_token,
     }) = action
     {
         return handle_debug_create_card(DebugCreateCardRequest {
@@ -1924,6 +1925,7 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
             attach_to,
             run_etb,
             nonlegendary,
+            is_token,
         });
     }
 
@@ -2043,6 +2045,7 @@ struct DebugCreateCardRequest<'a> {
     attach_to: Option<engine::game::game_object::AttachTarget>,
     run_etb: bool,
     nonlegendary: bool,
+    is_token: bool,
 }
 
 fn handle_debug_create_card(request: DebugCreateCardRequest<'_>) -> JsValue {
@@ -2054,6 +2057,7 @@ fn handle_debug_create_card(request: DebugCreateCardRequest<'_>) -> JsValue {
         attach_to: request.attach_to,
         run_etb: request.run_etb,
         nonlegendary: request.nonlegendary,
+        is_token: request.is_token,
     };
     match with_state(|state| {
         preflight_debug_action_with_rejection(state, request.actor, &debug_action)
@@ -2085,6 +2089,7 @@ fn handle_debug_create_card_inner(
         attach_to,
         run_etb,
         nonlegendary,
+        is_token,
     } = request;
     let debug_action = engine::types::actions::DebugAction::CreateCard {
         card_name: card_name.to_string(),
@@ -2094,6 +2099,7 @@ fn handle_debug_create_card_inner(
         attach_to,
         run_etb,
         nonlegendary,
+        is_token,
     };
     let waiting_for = with_state(|state| {
         engine::game::preflight_debug_action(state, actor, &debug_action)
@@ -2130,6 +2136,7 @@ fn handle_debug_create_card_inner(
                 attach_to,
                 run_etb,
                 nonlegendary,
+                is_token,
             },
         )
         .map_err(|error| format!("Engine error: {error}"))?;
@@ -5537,6 +5544,7 @@ mod replay_bridge_tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: true,
+            is_token: true,
         })
         .expect("debug create-card should succeed in this fixture");
         assert_eq!(
@@ -5571,6 +5579,7 @@ mod replay_bridge_tests {
                 .values()
                 .find(|object| object.name == "Test Card")
                 .expect("debug-created card should exist");
+            assert!(card.is_token, "the WASM boundary must preserve is_token");
             assert!(!card
                 .card_types
                 .supertypes
@@ -5634,6 +5643,7 @@ mod replay_bridge_tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
+            is_token: false,
         })
         .expect("a real battlefield debug batch should succeed");
 
@@ -5700,6 +5710,7 @@ mod replay_bridge_tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
+            is_token: false,
         })
         .expect("an authorized zero request is a no-op without a card database");
         assert!(result.events.is_empty());
@@ -5743,6 +5754,7 @@ mod replay_bridge_tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
+            is_token: false,
         })
         .expect_err("an invalid owner must fail before database access");
         assert!(owner_error.contains("invalid owner player id"));
@@ -5757,6 +5769,7 @@ mod replay_bridge_tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
+            is_token: false,
         })
         .expect_err("a real entry off Priority must fail before database access");
         assert!(priority_error.contains("Priority window"));
@@ -5771,6 +5784,7 @@ mod replay_bridge_tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
+            is_token: false,
         })
         .expect_err("a missing database must reject a valid nonzero request");
         assert!(lookup_error.contains("card database not loaded"));

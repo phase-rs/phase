@@ -910,6 +910,7 @@ mod tests {
         obj.base_toughness = Some(3);
         obj.back_face = Some(BackFaceData {
             is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Ral, Leyline Prodigy".to_string(),
             power: None,
             toughness: None,

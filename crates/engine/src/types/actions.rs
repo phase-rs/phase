@@ -1161,6 +1161,11 @@ pub enum DebugAction {
         /// characteristics.
         #[serde(default)]
         nonlegendary: bool,
+        /// Mark the created printed card object as a token. It retains the
+        /// card's printed copiable characteristics and artwork while obeying
+        /// token zone behavior once it leaves the battlefield.
+        #[serde(default)]
+        is_token: bool,
     },
     /// Remove an object from the game entirely.
     RemoveObject { object_id: ObjectId },
@@ -1479,6 +1484,7 @@ impl DebugAction {
                 attach_to,
                 run_etb,
                 nonlegendary,
+                is_token,
             } => {
                 let attach_suffix = match attach_to {
                     Some(AttachTarget::Object(id)) => format!(" attached to {}", obj(*id)),
@@ -1489,8 +1495,9 @@ impl DebugAction {
                 };
                 let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
                 let nonlegendary_suffix = if *nonlegendary { " (nonlegendary)" } else { "" };
+                let token_suffix = if *is_token { " (token)" } else { "" };
                 format!(
-                    "CreateCard ({} ×{} for {} in {:?}{}{}{})",
+                    "CreateCard ({} ×{} for {} in {:?}{}{}{}{})",
                     card_name,
                     count,
                     player_label(*owner),
@@ -1498,6 +1505,7 @@ impl DebugAction {
                     attach_suffix,
                     etb_suffix,
                     nonlegendary_suffix,
+                    token_suffix,
                 )
             }
             DebugAction::RemoveObject { object_id } => {

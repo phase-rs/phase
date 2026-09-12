@@ -2273,6 +2273,7 @@ impl SessionManager {
                 attach_to,
                 run_etb,
                 nonlegendary,
+                is_token,
                 ..
             }) => {
                 let result = create_debug_cards_with_rejection(
@@ -2287,6 +2288,7 @@ impl SessionManager {
                         attach_to,
                         run_etb,
                         nonlegendary,
+                        is_token,
                     },
                 )
                 .map_err(SessionActionError::Rejected)?;
@@ -5413,6 +5415,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    is_token: true,
                 }),
                 Some(&*db),
             )
@@ -5449,6 +5452,7 @@ mod tests {
                     object.name == "Server Debug Creature"
                         && object.owner == PlayerId(1)
                         && object.zone == Zone::Battlefield
+                        && object.is_token
                 })
                 .count(),
             2
@@ -5479,6 +5483,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    is_token: false,
                 }),
             ),
             (
@@ -5541,6 +5546,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    is_token: false,
                 }),
             )
             .expect_err("an invalid owner must fail before database lookup");
@@ -5567,6 +5573,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    is_token: false,
                 }),
             )
             .expect_err("a valid nonzero request requires a database");
@@ -5594,6 +5601,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    is_token: false,
                 }),
             )
             .expect_err("a real entry off Priority must fail before database lookup");
@@ -6329,6 +6337,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    is_token: false,
                 }),
                 None,
             )

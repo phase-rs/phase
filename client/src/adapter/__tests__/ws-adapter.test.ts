@@ -1725,6 +1725,7 @@ describe("WebSocketAdapter", () => {
               zone: "Hand",
               run_etb: false,
               nonlegendary: false,
+              is_token: false,
               count: 0,
             },
           },

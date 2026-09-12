@@ -1,14 +1,17 @@
 use crate::game::combat::AttackTarget;
+use crate::game::planechase::PlanarDieFace;
 use crate::types::ability::{AbilityTag, TargetRef};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::log::{
     GameLogEntry, LogBoundary, LogCategory, LogImportance, LogPresentation, LogSegment, LogTone,
     LogVisibility,
 };
+use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::stickers::StickerKind;
 
 /// Resolve a batch of events into structured log entries.
 /// Events that could leak hidden information are tagged for an explicit diagnostic opt-in.
@@ -31,21 +34,86 @@ pub fn resolve_log_entries(
 
     events
         .iter()
-        .filter_map(|event| {
+        .enumerate()
+        .filter_map(|(index, event)| {
             cursor.apply(event);
-            (!should_exclude_event(event, after)).then(|| {
-                let segments = format_segments(event, after);
-                (!segments.is_empty()).then(|| GameLogEntry {
-                    seq: 0, // Assigned by frontend
-                    turn: cursor.turn,
-                    phase: cursor.phase,
-                    category: categorize(event),
-                    segments,
-                    presentation: presentation(event),
-                })
-            })?
+            (!should_exclude_event(event, after) && !is_redundant_log_event(events, index)).then(
+                || {
+                    let segments = format_segments(event, after);
+                    (!segments.is_empty()).then(|| GameLogEntry {
+                        seq: 0, // Assigned by frontend
+                        turn: cursor.turn,
+                        phase: cursor.phase,
+                        category: categorize(event),
+                        segments,
+                        presentation: presentation(event),
+                    })
+                },
+            )?
         })
         .collect()
+}
+
+/// Prefer source-aware damage rows over derivative life-loss and aggregate
+/// combat-summary rows. Toxic's poison-counter event and its replacement-pipeline
+/// bookkeeping may sit between damage's life-loss consequence and its source-aware
+/// event; no effect-resolution boundary is skipped. `apply_damage_after_replacement`
+/// emits this exact sequence, while separate chained instructions each emit
+/// `EffectResolved` before the next instruction begins, so unrelated life loss is
+/// not hidden by later damage.
+fn is_redundant_log_event(events: &[GameEvent], index: usize) -> bool {
+    match events.get(index) {
+        Some(GameEvent::LifeChanged { player_id, amount }) if *amount < 0 => {
+            let mut next_index = index + 1;
+            let mut poison_seen = false;
+            loop {
+                match events.get(next_index) {
+                    Some(GameEvent::ReplacementApplied { .. }) => next_index += 1,
+                    Some(GameEvent::PlayerCounterChanged {
+                        player,
+                        counter_kind: crate::types::player::PlayerCounterKind::Poison,
+                        delta,
+                    }) if !poison_seen && player == player_id && *delta > 0 => {
+                        poison_seen = true;
+                        next_index += 1;
+                    }
+                    _ => break,
+                }
+            }
+            matches!(
+                events.get(next_index),
+                Some(GameEvent::DamageDealt {
+                    target: TargetRef::Player(damaged_player),
+                    amount: damage,
+                    ..
+                }) if damaged_player == player_id && *damage == amount.unsigned_abs()
+            )
+        }
+        Some(GameEvent::CombatDamageDealtToPlayer {
+            player_id,
+            source_amounts,
+            ..
+        }) => {
+            !source_amounts.is_empty()
+                && source_amounts.iter().all(|(source_id, amount)| {
+                    events.iter().any(|event| {
+                        matches!(
+                            event,
+                            GameEvent::DamageDealt {
+                                source_id: damage_source,
+                                target: TargetRef::Player(damaged_player),
+                                amount: damage,
+                                is_combat: true,
+                                ..
+                            } if damage_source == source_id
+                                && damaged_player == player_id
+                                && damage == amount
+                        )
+                    })
+                })
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -521,6 +589,76 @@ fn num(n: i32) -> LogSegment {
     LogSegment::Number(n)
 }
 
+fn phase_label(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Untap => "Untap step",
+        Phase::Upkeep => "Upkeep",
+        Phase::Draw => "Draw step",
+        Phase::PreCombatMain => "First main phase",
+        Phase::BeginCombat => "Beginning of combat",
+        Phase::DeclareAttackers => "Declare attackers",
+        Phase::DeclareBlockers => "Declare blockers",
+        Phase::CombatDamage => "Combat damage",
+        Phase::EndCombat => "End of combat",
+        Phase::PostCombatMain => "Second main phase",
+        Phase::End => "End step",
+        Phase::Cleanup => "Cleanup step",
+    }
+}
+
+fn player_action_label(action: PlayerActionKind) -> &'static str {
+    match action {
+        PlayerActionKind::AcceptedOptionalEffect => "accepts an optional effect",
+        PlayerActionKind::SearchedLibrary => "searches their library",
+        PlayerActionKind::Scry => "scries",
+        PlayerActionKind::Surveil => "surveils",
+        PlayerActionKind::CollectEvidence => "collects evidence",
+        PlayerActionKind::ShuffledLibrary => "shuffles their library",
+        PlayerActionKind::Proliferate => "proliferates",
+        PlayerActionKind::Investigate => "investigates",
+        PlayerActionKind::Forage => "forages",
+        PlayerActionKind::Draw => "draws",
+    }
+}
+
+fn mana_type_symbol(mana_type: ManaType) -> &'static str {
+    match mana_type {
+        ManaType::White => "{W}",
+        ManaType::Blue => "{U}",
+        ManaType::Black => "{B}",
+        ManaType::Red => "{R}",
+        ManaType::Green => "{G}",
+        ManaType::Colorless => "{C}",
+    }
+}
+
+fn mana_color_name(color: ManaColor) -> &'static str {
+    match color {
+        ManaColor::White => "white",
+        ManaColor::Blue => "blue",
+        ManaColor::Black => "black",
+        ManaColor::Red => "red",
+        ManaColor::Green => "green",
+    }
+}
+
+fn planar_die_face_label(face: PlanarDieFace) -> &'static str {
+    match face {
+        PlanarDieFace::Planeswalk => "planeswalk",
+        PlanarDieFace::Chaos => "chaos",
+        PlanarDieFace::Blank => "blank",
+    }
+}
+
+fn sticker_kind_label(kind: StickerKind) -> &'static str {
+    match kind {
+        StickerKind::Name => "name",
+        StickerKind::Ability => "ability",
+        StickerKind::PowerToughness => "power/toughness",
+        StickerKind::Art => "art",
+    }
+}
+
 /// Exhaustive categorization of game events.
 fn categorize(event: &GameEvent) -> LogCategory {
     match event {
@@ -721,7 +859,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         ],
 
         GameEvent::PhaseChanged { phase } => {
-            vec![text("Phase: "), text(&format!("{phase:?}"))]
+            vec![text(phase_label(*phase))]
         }
 
         GameEvent::PriorityPassed { player_id } => {
@@ -748,8 +886,8 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_id, action, ..
         } => vec![
             player_seg(state, *player_id),
-            text(" performed action "),
-            text(&format!("{action:?}")),
+            text(" "),
+            text(player_action_label(*action)),
         ],
         GameEvent::CardPredicateGuessMade {
             player_id,
@@ -1185,7 +1323,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             num(*total_damage as i32),
             text(" combat damage by "),
             num(source_amounts.len() as i32),
-            text(" creature(s)"),
+            text(if source_amounts.len() == 1 {
+                " creature"
+            } else {
+                " creatures"
+            }),
         ],
 
         GameEvent::ManaAdded {
@@ -1195,7 +1337,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         } => vec![
             card_seg(state, *source_id),
             text(" adds "),
-            LogSegment::Mana(format!("{mana_type:?}")),
+            LogSegment::Mana(mana_type_symbol(*mana_type).to_string()),
             text(" mana"),
         ],
         // CR 500.5 + CR 703.4q: A unit was emptied from a pool at step end.
@@ -1204,7 +1346,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         } => vec![
             player_seg(state, *player_id),
             text(" loses "),
-            LogSegment::Mana(format!("{color:?}")),
+            LogSegment::Mana(mana_type_symbol(*color).to_string()),
             text(" mana"),
         ],
         // CR 614.1a + CR 703.4q: A Transform handler recolored a unit at step end.
@@ -1215,9 +1357,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         } => vec![
             player_seg(state, *player_id),
             text("'s "),
-            LogSegment::Mana(format!("{from:?}")),
+            LogSegment::Mana(mana_type_symbol(*from).to_string()),
             text(" mana becomes "),
-            LogSegment::Mana(format!("{to:?}")),
+            LogSegment::Mana(mana_type_symbol(*to).to_string()),
         ],
 
         GameEvent::PermanentTapped { object_id, .. } => {
@@ -1267,8 +1409,12 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         } => vec![
             num(*count as i32),
             text(" "),
-            LogSegment::Keyword(format!("{counter_type:?}")),
-            text(" counter(s) on "),
+            LogSegment::Keyword(counter_type.display_phrase().into_owned()),
+            text(if *count == 1 {
+                " counter on "
+            } else {
+                " counters on "
+            }),
             card_seg(state, *object_id),
         ],
 
@@ -1289,8 +1435,12 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         } => vec![
             num(*count as i32),
             text(" "),
-            LogSegment::Keyword(format!("{counter_type:?}")),
-            text(" counter(s) removed from "),
+            LogSegment::Keyword(counter_type.display_phrase().into_owned()),
+            text(if *count == 1 {
+                " counter removed from "
+            } else {
+                " counters removed from "
+            }),
             card_seg(state, *object_id),
         ],
 
@@ -1307,7 +1457,8 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::Specialized { object_id, color } => {
             vec![
                 card_seg(state, *object_id),
-                text(&format!(" specializes ({color:?})")),
+                text(" specializes into "),
+                text(mana_color_name(*color)),
             ]
         }
 
@@ -1381,11 +1532,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::TokenCreated {
             object_id, name, ..
         } => vec![
-            text("Token created: "),
             LogSegment::CardName {
                 name: name.clone(),
                 object_id: *object_id,
             },
+            text(" token is created"),
         ],
 
         GameEvent::ObjectConjured { object_id, name } => vec![
@@ -1421,13 +1572,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *new_controller),
         ],
 
-        GameEvent::EffectResolved {
-            kind, source_id, ..
-        } => vec![
-            card_seg(state, *source_id),
-            text(": "),
-            text(&format!("{kind:?}")),
-        ],
+        GameEvent::EffectResolved { source_id, .. } => {
+            vec![card_seg(state, *source_id), text("'s effect resolves")]
+        }
 
         GameEvent::BecomesTarget {
             target, source_id, ..
@@ -1738,7 +1885,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::Planeswalked { .. } => vec![text("Planeswalked")],
         GameEvent::ChaosEnsued { .. } => vec![text("Chaos ensues")],
         GameEvent::PlanarDieRolled { face, .. } => {
-            vec![text(&format!("Rolled the planar die: {face:?}"))]
+            vec![
+                text("The planar die lands on "),
+                text(planar_die_face_label(*face)),
+            ]
         }
         GameEvent::SchemeSetInMotion { scheme_id, .. } => {
             vec![text("Set scheme in motion: "), card_seg(state, *scheme_id)]
@@ -1764,7 +1914,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             object_id, kind, ..
         } => vec![
             text("Placed "),
-            text(&format!("{kind:?}").to_lowercase()),
+            text(sticker_kind_label(*kind)),
             text(" sticker on "),
             card_seg(state, *object_id),
         ],
@@ -1839,7 +1989,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *player),
             text(" declined combat tax ("),
             num(dropped.len() as i32),
-            text(" creature(s) dropped)"),
+            text(if dropped.len() == 1 {
+                " creature dropped)"
+            } else {
+                " creatures dropped)"
+            }),
         ],
         GameEvent::CascadeMissed {
             controller,
@@ -2043,7 +2197,7 @@ mod tests {
                 num(7),
                 text(" combat damage by "),
                 num(2),
-                text(" creature(s)"),
+                text(" creatures"),
             ]
         );
     }
@@ -2425,6 +2579,123 @@ mod tests {
             .iter()
             .any(|s| matches!(s, LogSegment::Text(t) if t == " loses ")));
         assert!(segs.iter().any(|s| matches!(s, LogSegment::Number(3))));
+    }
+
+    #[test]
+    fn source_aware_toxic_damage_replaces_its_life_loss_and_summary_lines() {
+        let state = GameState::new_two_player(42);
+        let entries = resolve_log_entries(
+            &[
+                GameEvent::LifeChanged {
+                    player_id: PlayerId(1),
+                    amount: -5,
+                },
+                GameEvent::ReplacementApplied {
+                    source_id: ObjectId(9),
+                    event_type: "AddPlayerCounter".to_string(),
+                },
+                GameEvent::PlayerCounterChanged {
+                    player: PlayerId(1),
+                    counter_kind: crate::types::player::PlayerCounterKind::Poison,
+                    delta: 1,
+                },
+                GameEvent::DamageDealt {
+                    source_id: ObjectId(7),
+                    target: TargetRef::Player(PlayerId(1)),
+                    amount: 5,
+                    is_combat: true,
+                    excess: 0,
+                },
+                GameEvent::CombatDamageDealtToPlayer {
+                    player_id: PlayerId(1),
+                    source_amounts: vec![(ObjectId(7), 5)],
+                    total_damage: 5,
+                },
+            ],
+            &state,
+            &state,
+        );
+
+        assert_eq!(
+            entries.len(),
+            2,
+            "keep the poison row and source-aware damage row"
+        );
+        assert!(entries
+            .iter()
+            .any(|entry| entry.category == LogCategory::Combat));
+        assert!(entries
+            .iter()
+            .flat_map(|entry| &entry.segments)
+            .any(|segment| matches!(segment, LogSegment::Text(text) if text == " deals ")));
+        assert!(!entries
+            .iter()
+            .flat_map(|entry| &entry.segments)
+            .any(|segment| matches!(segment, LogSegment::Text(text) if text == " loses ")));
+    }
+
+    #[test]
+    fn independent_life_loss_remains_visible() {
+        let state = GameState::new_two_player(42);
+        let entries = resolve_log_entries(
+            &[GameEvent::LifeChanged {
+                player_id: PlayerId(1),
+                amount: -5,
+            }],
+            &state,
+            &state,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0]
+            .segments
+            .iter()
+            .any(|segment| matches!(segment, LogSegment::Text(text) if text == " loses ")));
+    }
+
+    #[test]
+    fn equal_life_loss_from_an_earlier_effect_is_not_folded_into_damage() {
+        let state = GameState::new_two_player(42);
+        let entries = resolve_log_entries(
+            &[
+                GameEvent::LifeChanged {
+                    player_id: PlayerId(1),
+                    amount: -5,
+                },
+                GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::LoseLife,
+                    source_id: ObjectId(8),
+                    subject: None,
+                },
+                GameEvent::LifeChanged {
+                    player_id: PlayerId(1),
+                    amount: -5,
+                },
+                GameEvent::DamageDealt {
+                    source_id: ObjectId(7),
+                    target: TargetRef::Player(PlayerId(1)),
+                    amount: 5,
+                    is_combat: false,
+                    excess: 0,
+                },
+            ],
+            &state,
+            &state,
+        );
+
+        assert_eq!(
+            entries
+                .iter()
+                .flat_map(|entry| &entry.segments)
+                .filter(|segment| matches!(segment, LogSegment::Text(text) if text == " loses "))
+                .count(),
+            1,
+            "keep the independent life-loss row and hide only damage's derivative row"
+        );
+        assert!(entries
+            .iter()
+            .flat_map(|entry| &entry.segments)
+            .any(|segment| matches!(segment, LogSegment::Text(text) if text == " deals ")));
     }
 
     #[test]

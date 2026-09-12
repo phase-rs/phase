@@ -104,6 +104,7 @@
   },
   "debugCreate": {
     "copies": "Copias",
+    "asToken": "Crear como ficha",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
@@ -310,8 +311,10 @@
     "underAttack_one": "Atacado por {{count}} criatura",
     "underAttack_other": "Atacado por {{count}} criaturas",
     "target": "Objetivo",
+    "token": "Ficha",
+    "tokenTooltip": "Ficha que es una copia de una carta real",
     "copy": "Copia",
-    "copyTooltip": "Ficha copia de una carta real",
+    "copyTooltip": "Permanente que no es ficha y copia otra carta",
     "cantBeBlocked": "No puede ser bloqueada",
     "ringBearer": "Anillo",
     "ringBearerTooltip": "Portador del Anillo",
@@ -2215,7 +2218,7 @@
     "yes": "Sí",
     "no": "No",
     "dontAskAgain": "No volver a preguntar en esta partida",
-    "dontAskAgainForSameCard": "Aplicar a cada copia de esta carta"
+    "dontAskAgainForSameCard": "Usar esta elección para cada copia de esta carta en esta partida"
   },
   "resolutionOptionalPayment": {
     "title": "Elige un pago opcional",

@@ -15,6 +15,7 @@ import type { FilterKey } from "../components/modal/cardChoice/gridSelection";
  */
 export type BlockerAssignments = Map<ObjectId, Set<ObjectId>>;
 export type PreviewPlacement = "cursor" | "side";
+export type PreviewSource = "playerHand";
 export type DebugContextMenuSurface =
   | "game"
   | "zone-viewer"
@@ -200,6 +201,9 @@ interface UiStoreState {
   inspectedFaceIndex: number;
   /** Presentation requested by the element that opened the current preview. */
   previewPlacement: PreviewPlacement;
+  /** UI surface that owns the active or pending preview, when cleanup must be
+   * scoped more narrowly than the inspected object's current zone. */
+  previewSource: PreviewSource | null;
   altHeld: boolean;
   /** Whether the Shift key is currently held. Drives the "shift" card-preview
    *  mode (preview shows only while Shift is down). Tracked as held-state via
@@ -314,6 +318,7 @@ interface UiStoreActions {
     faceIndex?: number,
     timing?: "hover" | "immediate",
     placement?: PreviewPlacement,
+    source?: PreviewSource,
   ) => void;
   /** Open a preview from an explicit interaction and keep it visible until a
    * later outside interaction dismisses it. */
@@ -322,6 +327,7 @@ interface UiStoreActions {
     faceIndex?: number,
     placement?: PreviewPlacement,
     fallbackCardName?: string,
+    source?: PreviewSource,
   ) => void;
   dismissPreview: () => void;
   setAltHeld: (held: boolean) => void;
@@ -410,6 +416,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   inspectedCardName: null,
   inspectedFaceIndex: 0,
   previewPlacement: "cursor",
+  previewSource: null,
   altHeld: false,
   shiftHeld: false,
   selectedCardIds: [],
@@ -457,7 +464,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   setDebugHighlightedPlayerId: (id) => set({ debugHighlightedPlayerId: id }),
   setAltHeld: (held) => set({ altHeld: held }),
   setShiftHeld: (held) => set({ shiftHeld: held }),
-  inspectObject: (id, faceIndex, timing = "hover", placement = "cursor") => {
+  inspectObject: (id, faceIndex, timing = "hover", placement = "cursor", source) => {
     if (id != null) {
       // Setting a new inspection target: cancel any pending clear, and drop a
       // pending delayed-show for a previous target before scheduling this one.
@@ -472,6 +479,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
           inspectedCardName: null,
           inspectedFaceIndex: faceIndex ?? 0,
           previewPlacement: placement,
+          previewSource: source ?? null,
           // Inspecting a DIFFERENT object replaces (dismisses) the previous
           // preview, so a pinned Alt state must not leak onto the new card —
           // Alt has to be pressed again to expand it. Re-inspecting the SAME
@@ -497,6 +505,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
           ? prefs.cardPreviewHoverDelayMs
           : 0;
       if (delay > 0) {
+        set({ previewSource: source ?? null });
         const show: PendingPreviewShow = {
           timer: null,
           ready: false,
@@ -553,6 +562,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
           inspectedCardName: null,
           inspectedFaceIndex: 0,
           previewPlacement: "cursor",
+          previewSource: null,
           previewSticky: false,
           altHeld: false,
         });
@@ -560,7 +570,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     }
   },
 
-  inspectObjectSticky: (id, faceIndex = 0, placement = "cursor", fallbackCardName) => {
+  inspectObjectSticky: (id, faceIndex = 0, placement = "cursor", fallbackCardName, source) => {
     if (pendingClearTimer != null) {
       clearTimeout(pendingClearTimer);
       pendingClearTimer = null;
@@ -571,6 +581,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
       inspectedCardName: fallbackCardName ?? null,
       inspectedFaceIndex: faceIndex,
       previewPlacement: placement,
+      previewSource: source ?? null,
       previewSticky: true,
       altHeld: false,
     });
@@ -587,6 +598,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
       inspectedCardName: null,
       inspectedFaceIndex: 0,
       previewPlacement: "cursor",
+      previewSource: null,
       previewSticky: false,
       altHeld: false,
       mobileHandGesture: null,

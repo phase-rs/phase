@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { TFunction } from "i18next";
 import { Trans, useTranslation } from "react-i18next";
+import { useNavigate } from "react-router";
 
 import { onEngineLost, onEngineSlow } from "../../game/engineRecovery";
 import { exportGameStateDebugZip } from "../../services/gameStateExport";
@@ -47,6 +48,7 @@ interface EngineLostSnapshot {
 
 export function EngineLostModal() {
   const { t } = useTranslation("game");
+  const navigate = useNavigate();
   const [snapshot, setSnapshot] = useState<EngineLostSnapshot | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -96,6 +98,10 @@ export function EngineLostModal() {
   };
   const handleContinueWaiting = () => {
     setSnapshot(null);
+  };
+  const handleMainMenu = () => {
+    setSnapshot(null);
+    navigate("/");
   };
 
   const isPanic = panic !== null;
@@ -229,6 +235,15 @@ export function EngineLostModal() {
               autoFocus
             >
               {t("engineLost.continueWaiting")}
+            </button>
+          )}
+          {!isSlowRequest && (
+            <button
+              type="button"
+              onClick={handleMainMenu}
+              className="rounded-lg bg-gray-700 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-600"
+            >
+              {t("common:gameMenu.mainMenu")}
             </button>
           )}
           <button
