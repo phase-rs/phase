@@ -5304,11 +5304,30 @@ fn trigger_battalion() {
 #[test]
 fn trigger_pack_tactics() {
     let def = parse_trigger_line(
-            "Whenever Werewolf Pack Leader attacks, if the total power of creatures you control is 6 or greater, draw a card.",
+            "Whenever this creature attacks, if you attacked with creatures with total power 6 or greater this combat, draw a card.",
             "Werewolf Pack Leader",
         );
-    // Pack tactics is a different pattern (if-condition), not battalion
     assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TrackedSet {
+                            set: crate::types::ability::TrackedAnaphorSource::TriggeringBatch,
+                            caused_by: None,
+                        },
+                    )
+                    .expect("statically valid property aggregate"),
+                ),
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 6 },
+        })
+    );
 }
 
 #[test]

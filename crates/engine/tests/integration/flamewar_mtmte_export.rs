@@ -1,0 +1,172 @@
+//! Production-export regression for Flamewar's More Than Meets the Eye cast.
+
+use std::path::Path;
+
+use engine::database::card_db::CardDatabase;
+use engine::game::combat::AttackTarget;
+use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::actions::AlternativeCastDecision;
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::phase::Phase;
+use engine::types::zones::Zone;
+use serde_json::Value;
+
+fn production_export() -> CardDatabase {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
+    CardDatabase::from_export(&path).expect("production export must load")
+}
+
+/// Export census for the whole Pack Tactics grammar class, not one named card.
+#[test]
+fn production_export_has_canonical_pack_tactics_conditions_for_all_eight_cards() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
+    let export: serde_json::Map<String, Value> =
+        serde_json::from_str(&std::fs::read_to_string(path).expect("export readable"))
+            .expect("export JSON");
+    let pack_tactics = export
+        .values()
+        .filter(|face| {
+            face.get("oracle_text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| {
+                    text.contains("you attacked with creatures with total power")
+                        && text.contains("or greater this combat")
+                })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pack_tactics.len(), 8, "Pack Tactics export census changed");
+    for face in pack_tactics {
+        assert!(
+            face.get("triggers")
+                .and_then(Value::as_array)
+                .is_some_and(|triggers| triggers.iter().any(|trigger| {
+                    trigger
+                        .get("condition")
+                        .is_some_and(|condition| !condition.is_null())
+                })),
+            "{} must export a canonical trigger condition",
+            face.get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        );
+    }
+}
+
+/// CR 702.162a + CR 601.2b: the checked-in export hydrates Flamewar's real
+/// transform pair and alternative cost; choosing it casts the converted spell
+/// and it enters on the Streetwise Operative face.
+#[test]
+fn flamewar_mtmte_from_production_export_casts_back_face() {
+    let db = production_export();
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let flamewar = scenario.add_real_card(P0, "Flamewar, Brash Veteran", Zone::Hand, &db);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+
+    let hand_object = runner
+        .state()
+        .objects
+        .get(&flamewar)
+        .expect("Flamewar in hand");
+    assert_eq!(
+        hand_object
+            .back_face
+            .as_ref()
+            .map(|face| face.name.as_str()),
+        Some("Flamewar, Streetwise Operative"),
+        "real export must hydrate Flamewar's transform back face"
+    );
+    runner
+        .cast(flamewar)
+        .alternative_cast(AlternativeCastDecision::Alternative)
+        .resolve();
+
+    let permanent = runner
+        .state()
+        .objects
+        .get(&flamewar)
+        .expect("Flamewar remains represented after resolution");
+    assert!(permanent.transformed, "MTMTE cast enters transformed");
+    assert_eq!(permanent.name, "Flamewar, Streetwise Operative");
+}
+
+/// CR 603.4: the real Pack Tactics trigger fires only when this declaration's
+/// snapshot has total power six or more.
+#[test]
+fn battle_cry_goblin_pack_tactics_uses_the_declared_attack_batch() {
+    let db = production_export();
+
+    for (other_power, should_trigger) in [(3, false), (4, true), (5, true)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let goblin = scenario.add_real_card(P0, "Battle Cry Goblin", Zone::Battlefield, &db);
+        let other = scenario
+            .add_creature(P0, "Pack Tactics witness", other_power, 1)
+            .id();
+        let mut runner = scenario.build();
+        engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+        runner.advance_to_combat();
+
+        runner
+            .declare_attackers(&[
+                (goblin, AttackTarget::Player(P1)),
+                (other, AttackTarget::Player(P1)),
+            ])
+            .expect("attack declaration accepted");
+        assert_eq!(
+            !runner.state().stack.is_empty(),
+            should_trigger,
+            "2 + {other_power} declaration must {} trigger Pack Tactics",
+            if should_trigger { "" } else { "not" }
+        );
+    }
+}
+
+/// CR 603.4 + CR 508.1a: the resolution-time intervening-if recheck reads the
+/// original declaration records after an attacker changes characteristics and
+/// leaves the battlefield.
+#[test]
+fn battle_cry_goblin_pack_tactics_rechecks_declaration_snapshot_after_departure() {
+    let db = production_export();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let goblin = scenario.add_real_card(P0, "Battle Cry Goblin", Zone::Battlefield, &db);
+    let other = scenario
+        .add_creature(P0, "Departing Pack Tactics witness", 4, 1)
+        .id();
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), &db);
+    runner.advance_to_combat();
+
+    runner
+        .declare_attackers(&[
+            (goblin, AttackTarget::Player(P1)),
+            (other, AttackTarget::Player(P1)),
+        ])
+        .expect("six-power attack declaration accepted");
+    assert!(
+        !runner.state().stack.is_empty(),
+        "Pack Tactics trigger queued"
+    );
+    runner.state_mut().objects.get_mut(&other).unwrap().power = Some(0);
+    engine::game::zones::move_to_zone(runner.state_mut(), other, Zone::Graveyard, &mut Vec::new());
+    runner.advance_until_stack_empty();
+
+    assert!(
+        runner.state().objects.values().any(|object| {
+            object.zone == Zone::Battlefield && object.controller == P0 && object.name == "Goblin"
+        }),
+        "the snapshot-qualified trigger resolves after its attacker departs"
+    );
+}

@@ -167,6 +167,7 @@ fn attacks_observer_fires_once_per_event() {
             attacker,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1229,6 +1230,7 @@ fn isshin_doubles_attack_triggers() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1329,6 +1331,7 @@ fn panharmonicon_does_not_double_attack_triggers() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1426,6 +1429,7 @@ fn veyran_does_not_double_attack_triggers() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1588,6 +1592,7 @@ fn splinter_doubles_ninja_source_trigger() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1635,6 +1640,7 @@ fn splinter_does_not_double_non_ninja_source_trigger() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1670,6 +1676,7 @@ fn harmonic_prodigy_parsed_static_doubles_wizard_source_trigger() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1706,6 +1713,7 @@ fn harmonic_prodigy_parsed_static_does_not_double_unrelated_source_trigger() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1742,6 +1750,7 @@ fn delney_parsed_static_doubles_low_power_creature_trigger() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1778,6 +1787,7 @@ fn delney_parsed_static_does_not_double_high_power_creature_trigger() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1813,6 +1823,7 @@ fn delney_parsed_static_does_not_double_non_creature_source_trigger() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -1857,6 +1868,7 @@ fn isshin_and_panharmonicon_only_isshin_matches_attack_event() {
             observer,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     };
 
     process_triggers(&mut state, &[event]);
@@ -2100,6 +2112,7 @@ fn attack_event(attacker: ObjectId) -> GameEvent {
             attacker,
             crate::game::combat::AttackTarget::Player(PlayerId(1)),
         )],
+        declaration_records: Vec::new(),
     }
 }
 
@@ -2400,6 +2413,7 @@ fn mangara_trigger_fires_when_exactly_one_attacker() {
         attacker_ids: vec![attacker],
         defending_player: controller,
         attacks: vec![(attacker, AttackTarget::Player(controller))],
+        declaration_records: Vec::new(),
     };
 
     // Verify the condition is met
@@ -2493,6 +2507,7 @@ fn mangara_trigger_does_not_fire_when_two_attackers() {
             (attacker1, AttackTarget::Player(controller)),
             (attacker2, AttackTarget::Player(controller)),
         ],
+        declaration_records: Vec::new(),
     };
 
     // Verify the condition is NOT met
@@ -2670,6 +2685,7 @@ fn breena_triggers_when_defending_opponent_has_more_life_than_another_opponent()
                 (attacker, AttackTarget::Player(defending_player)),
                 (second_attacker, AttackTarget::Player(defending_player)),
             ],
+            declaration_records: Vec::new(),
         }],
     );
 
@@ -2708,6 +2724,7 @@ fn breena_triggers_when_defending_opponent_has_more_life_than_another_opponent()
                 (attacker, AttackTarget::Player(defending_player)),
                 (second_attacker, AttackTarget::Player(defending_player)),
             ],
+            declaration_records: Vec::new(),
         }],
     );
 
@@ -2767,6 +2784,7 @@ fn defending_player_life_quantity_reads_attack_event_player_target() {
         attacker_ids: vec![attacker],
         defending_player: attacked_player,
         attacks: vec![(attacker, AttackTarget::Player(attacked_player))],
+        declaration_records: Vec::new(),
     };
 
     assert!(

@@ -312,6 +312,7 @@ mod tests {
                 attacker_ids: vec![bearer],
                 defending_player: PlayerId(1),
                 attacks: Vec::new(),
+                declaration_records: Vec::new(),
             }],
         );
 

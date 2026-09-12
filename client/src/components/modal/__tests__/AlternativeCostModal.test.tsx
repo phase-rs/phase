@@ -117,6 +117,24 @@ describe("AlternativeCostModal", () => {
     });
   });
 
+  it("renders and dispatches More Than Meets the Eye through AlternativeCastChoice", () => {
+    setSpectacleChoice("MoreThanMeetsTheEye");
+    render(<AlternativeCostModal />);
+
+    expect(screen.getByText("More Than Meets the Eye")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Cast Converted/ }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "ChooseAlternativeCast",
+      data: { choice: { type: "Alternative" } },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Cast Normally/ }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "ChooseAlternativeCast",
+      data: { choice: { type: "Normal" } },
+    });
+  });
+
   // The other engine `AlternativeCastKeyword` variants that the FE switch had
   // also been missing must likewise render without throwing.
   it.each<AltKeyword>(["Emerge", "Impending", "Prototype", "Prowl"])(

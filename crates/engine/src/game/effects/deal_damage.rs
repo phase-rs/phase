@@ -5400,6 +5400,7 @@ mod tests {
             attacker_ids: vec![star_athlete],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         });
         // Zero targets chosen for "up to one target nonland permanent".
         let ability = ResolvedAbility::new(
@@ -5454,6 +5455,7 @@ mod tests {
             attacker_ids: vec![star_athlete],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         });
         let ability = ResolvedAbility::new(
             Effect::DealDamage {
