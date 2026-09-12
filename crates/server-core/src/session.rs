@@ -22,7 +22,7 @@ use engine::game::{
     DebugCardCreateRequest,
 };
 use engine::types::action_rejection::ActionRejection;
-use engine::types::actions::{DebugAction, DebugCardCreationKind, GameAction};
+use engine::types::actions::{DebugAction, GameAction};
 use engine::types::events::GameEvent;
 use engine::types::format::{validate_starting_life_bounds, FormatConfig};
 use engine::types::game_state::{GameState, PersistedGameState};
@@ -2688,7 +2688,8 @@ mod tests {
     use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::ability::{Effect, ResolvedAbility, TargetRef};
     use engine::types::actions::{
-        PrecastCopyShortcutResponse, ResolveAllConsentDecision, ResolveAllScope,
+        DebugCardCreationKind, PrecastCopyShortcutResponse, ResolveAllConsentDecision,
+        ResolveAllScope,
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::CardType;

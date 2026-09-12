@@ -402,15 +402,14 @@ pub(crate) fn apply_flipped_face_to_object(obj: &mut GameObject, face: BackFaceD
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, TriggerDefinition, TriggerMode,
-    };
+    use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, TriggerDefinition};
     use crate::types::card::PrintedCardRef;
     use crate::types::card_type::{CardType, CoreType, Supertype};
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
+    use crate::types::triggers::TriggerMode;
 
     /// `{W}` — Bushi Tenderfoot's printed mana cost (CR 202.1).
     fn white_mana_cost() -> ManaCost {
