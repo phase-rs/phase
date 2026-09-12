@@ -44,7 +44,9 @@ import {
   normalizeRememberedHostConfig,
   normalizeUserLobbySources,
   hydrateSessionTournamentCredentials,
+  maybeRenewNearExpiry,
   rememberTournamentCredential,
+  shouldRenewCredential,
   userLobbySource,
   type AmbientLobbyFrame,
   type HostingSettings,
@@ -52,6 +54,8 @@ import {
   type LobbySource,
   useMultiplayerStore,
 } from "../multiplayerStore";
+import { renewTournamentCredentialOver } from "../../services/tournamentClient";
+import type { PhaseSocket } from "../../services/openPhaseSocket";
 import { SERVER_PRESETS } from "../../services/serverDetection";
 import {
   DIRECTORY_VERSION,
@@ -145,6 +149,16 @@ vi.mock("../../services/brokerClient", () => ({
   lookupJoinTargetOver: brokerMocks.lookupJoinTargetOver,
   resolveGuestOver: brokerMocks.resolveGuestOver,
 }));
+
+// Only `renewTournamentCredentialOver` is stubbed — every other tournament
+// sender stays real (importActual) so unrelated store tests are untouched.
+// Stubbing this one lets `maybeRenewNearExpiry`'s gate and lost-reply-recovery
+// paths be driven directly, without a live socket exchange.
+vi.mock("../../services/tournamentClient", async (importActual) => {
+  const actual =
+    await importActual<typeof import("../../services/tournamentClient")>();
+  return { ...actual, renewTournamentCredentialOver: vi.fn() };
+});
 
 /**
  * The metrics module is MOCKED here, module-level, and that is the mitigation —
@@ -2759,3 +2773,187 @@ describe("tournament credential storage (sessionStorage, not localStorage)", () 
   });
 });
 
+
+describe("proactive credential rotation", () => {
+  const NOW = 1_700_000_000_000;
+  const MARGIN = 24 * 60 * 60 * 1000;
+
+  /** A socket whose only load-bearing property here is the broker's advertised
+   *  lobby version — the version gate reads exactly that. */
+  function socketAtLobbyVersion(
+    lobbyProtocolVersion: number | undefined,
+  ): PhaseSocket {
+    return {
+      serverInfo: {
+        version: "0.0.0",
+        buildCommit: "test",
+        protocolVersion: 1,
+        mode: "LobbyOnly",
+        lobbyProtocolVersion,
+      },
+    } as unknown as PhaseSocket;
+  }
+
+  function seedOrganizer(expiresAtMs: number | undefined): void {
+    useMultiplayerStore.setState({
+      tournamentCredentials: {
+        TOUR01: {
+          organizerToken: "old",
+          ...(expiresAtMs !== undefined
+            ? { organizerTokenExpiresAtMs: expiresAtMs }
+            : {}),
+          updatedAt: 0,
+        },
+      },
+    });
+  }
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    vi.mocked(renewTournamentCredentialOver).mockReset();
+    useMultiplayerStore.setState({ tournamentCredentials: {} });
+  });
+
+  it("shouldRenewCredential renews only a still-valid credential inside the margin", () => {
+    // No expiry known (a pre-v6 broker minted none) -> never.
+    expect(shouldRenewCredential(undefined, NOW, MARGIN)).toBe(false);
+    // Already expired -> never: an expired credential is unrenewable, so this
+    // would only draw a refusal.
+    expect(shouldRenewCredential(NOW, NOW, MARGIN)).toBe(false);
+    expect(shouldRenewCredential(NOW - 1, NOW, MARGIN)).toBe(false);
+    // Valid but outside the margin -> not yet (no needless round trip).
+    expect(shouldRenewCredential(NOW + MARGIN + 1, NOW, MARGIN)).toBe(false);
+    // Valid and within the margin (inclusive at exactly the margin) -> renew.
+    expect(shouldRenewCredential(NOW + MARGIN, NOW, MARGIN)).toBe(true);
+    expect(shouldRenewCredential(NOW + 1, NOW, MARGIN)).toBe(true);
+  });
+
+  it("does NOT rotate against a broker below the recoverable-rotation floor", async () => {
+    // Near expiry, so the ONLY thing stopping a rotation is the version gate:
+    // an old broker invalidates instantly, so proactively rotating there would
+    // risk stranding on a lost reply.
+    seedOrganizer(NOW + 1000);
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(8),
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+    expect(token).toBe("old");
+    expect(renewTournamentCredentialOver).not.toHaveBeenCalled();
+    expect(
+      useMultiplayerStore.getState().tournamentCredentials.TOUR01
+        ?.organizerToken,
+    ).toBe("old");
+  });
+
+  it("does NOT rotate a credential that is not yet near expiry", async () => {
+    seedOrganizer(NOW + MARGIN + 60_000); // well outside the margin
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+    expect(token).toBe("old");
+    expect(renewTournamentCredentialOver).not.toHaveBeenCalled();
+  });
+
+  it("does NOT rotate a credential with no known expiry", async () => {
+    seedOrganizer(undefined); // pre-v6 broker minted no expiry
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+    expect(token).toBe("old");
+    expect(renewTournamentCredentialOver).not.toHaveBeenCalled();
+  });
+
+  it("rotates and adopts the fresh secret when near expiry against a v9 broker", async () => {
+    seedOrganizer(NOW + 1000);
+    const newExpiry = NOW + 7 * 24 * 60 * 60 * 1000;
+    vi.mocked(renewTournamentCredentialOver).mockResolvedValue({
+      ok: true,
+      value: {
+        code: "TOUR01",
+        role: "Organizer",
+        token: "fresh",
+        expires_at_ms: newExpiry,
+      },
+    });
+
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+
+    expect(renewTournamentCredentialOver).toHaveBeenCalledWith(
+      expect.anything(),
+      "TOUR01",
+      "Organizer", // the CAPITALIZED wire role
+      "old",
+      expect.objectContaining({ signal: controller.signal }),
+    );
+    expect(token).toBe("fresh");
+    const stored = useMultiplayerStore.getState().tournamentCredentials.TOUR01;
+    expect(stored?.organizerToken).toBe("fresh");
+    expect(stored?.organizerTokenExpiresAtMs).toBe(newExpiry);
+  });
+
+  // The #8782 [HIGH] regression, client layer: a renewal reply lost in transit
+  // must NOT strand the holder. Under the v9 overlap the held secret is still
+  // valid, so keeping it (and recovering on the next attempt) is correct.
+  it("keeps the held token when a renewal reply is lost, leaving the store untouched", async () => {
+    seedOrganizer(NOW + 1000);
+    // An uncertain/lost result: the RPC could not confirm an outcome.
+    vi.mocked(renewTournamentCredentialOver).mockResolvedValue({
+      ok: false,
+      reason: "aborted",
+      message: "aborted",
+    });
+
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+
+    expect(renewTournamentCredentialOver).toHaveBeenCalledTimes(1);
+    // The held token flows through to the action unchanged...
+    expect(token).toBe("old");
+    // ...and nothing about the stored credential was mutated on the failure.
+    const stored = useMultiplayerStore.getState().tournamentCredentials.TOUR01;
+    expect(stored?.organizerToken).toBe("old");
+    expect(stored?.organizerTokenExpiresAtMs).toBe(NOW + 1000);
+  });
+});

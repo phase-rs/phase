@@ -15,6 +15,7 @@ import type {
   PlayerId,
   PodOutcome,
   TournamentCreatedReply,
+  TournamentCredentialRole,
   TournamentJoinedReply,
   TournamentSummary,
   TournamentUpdateReply,
@@ -26,6 +27,7 @@ import { AI_DIFFICULTIES } from "../constants/ai";
 import { FORMAT_REGISTRY } from "../data/formatRegistry";
 import {
   MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE,
+  MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION,
   serverProtocolRejection,
   type ServerInfo,
 } from "../adapter/ws-adapter";
@@ -52,6 +54,7 @@ import {
   getTournamentOver,
   joinTournamentOver,
   matchTypeNeedsCapability,
+  renewTournamentCredentialOver,
   reportMatchResultOver,
   startTournamentRoundOver,
   subscribeTournamentsOver,
@@ -1007,6 +1010,150 @@ async function runTournamentRpc<T>(
 }
 
 /**
+ * How long before a credential's `expires_at_ms` the client proactively rotates
+ * it. Rotation MUST be driven from the client's own stored expiry and MUST land
+ * while the credential is still valid: the broker refuses to renew an
+ * already-expired credential (rotation extends nothing that has lapsed), and its
+ * reject is a generic wire `Error` with no typed "expired" signal to react to.
+ *
+ * Sized against the broker's 7-day credential TTL (`TOURNAMENT_CREDENTIAL_TTL_MS`,
+ * `crates/lobby-broker/src/tournament.rs`): a day of headroom means a genuinely
+ * multi-day event refreshes on its organizer's next action well before the
+ * window closes, while a normal same-day event — whose credential never enters
+ * this margin — never spends a rotation round trip.
+ *
+ * **Load-bearing invariant:** the broker's `TOURNAMENT_CREDENTIAL_OVERLAP_MS`
+ * (the window a just-superseded secret stays valid) is sized to be `>=` this
+ * margin. That is what makes a lost renewal reply recoverable no matter how long
+ * the organizer waits before acting again: a rotation only fires within this
+ * margin of expiry, so the parked old secret outlives the client's own believed
+ * expiry. Shrinking this margin below the overlap is safe; growing it past the
+ * overlap re-opens the strand. Keep the two in step.
+ */
+const TOURNAMENT_CREDENTIAL_RENEW_MARGIN_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The wire role (`crates/lobby-broker/src/tournament.rs::TournamentRole`) for a
+ * store display role. The two spellings are wire-incompatible — the broker
+ * rejects the lowercase form with a serde unknown-variant error. See
+ * {@link TournamentCredentialRole}.
+ */
+function wireRoleFor(role: TournamentRole): TournamentCredentialRole {
+  return role === "organizer" ? "Organizer" : "Player";
+}
+
+/** The stored expiry for `code`'s `role` token, or `undefined` when none is
+ *  known (a pre-v6 broker minted it, or nothing is held for that authority). */
+function tokenExpiryFor(
+  credential: TournamentCredential | undefined,
+  role: TournamentRole,
+): number | undefined {
+  return role === "organizer"
+    ? credential?.organizerTokenExpiresAtMs
+    : credential?.playerTokenExpiresAtMs;
+}
+
+/**
+ * Whether a credential should be proactively rotated now. Three conjuncts, each
+ * a real boundary:
+ *  - a known expiry (a pre-v6 broker minted none — nothing to rotate ahead of);
+ *  - still valid (`> now`): an already-expired credential is UNRENEWABLE, so
+ *    rotating it would only draw a refusal — leave it for the action itself;
+ *  - within `marginMs` of lapsing: outside the margin costs a needless round trip.
+ *
+ * Pure and exported so the boundaries are tested directly, without a socket.
+ */
+export function shouldRenewCredential(
+  expiresAtMs: number | undefined,
+  now: number,
+  marginMs: number = TOURNAMENT_CREDENTIAL_RENEW_MARGIN_MS,
+): boolean {
+  if (expiresAtMs === undefined) return false;
+  if (expiresAtMs <= now) return false;
+  return expiresAtMs - now <= marginMs;
+}
+
+/**
+ * Proactive credential rotation, run once before a gated action goes out. When
+ * the held `role` credential for `code` is still valid but within
+ * {@link TOURNAMENT_CREDENTIAL_RENEW_MARGIN_MS} of its expiry, this rotates it
+ * and returns the fresh secret; otherwise it returns `heldToken` untouched.
+ *
+ * **Gated on the broker's lobby protocol version.** Proactive rotation is only
+ * SAFE against a broker that keeps a just-superseded secret valid through the
+ * bounded overlap window ({@link MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION}):
+ * there, a renewal reply lost after the server commits is survivable, because
+ * the held secret still authorizes and the best-effort "return the held token"
+ * below recovers on the next attempt. Against an older broker the same fallback
+ * would strand the holder on a secret the broker invalidated instantly, so this
+ * does not rotate at all below the floor — leaving the pre-rotation behavior
+ * (the credential simply lapses at its TTL) rather than introducing a strand.
+ *
+ * Best-effort otherwise by design: a failed, timed-out or unsupported rotation
+ * returns the held token and lets the gated action proceed and surface any
+ * refusal itself — rotation must never turn a working action into a failed one.
+ * It never rotates a credential with no known expiry (nothing to rotate ahead
+ * of) or one already past expiry (the broker would refuse it as unrenewable).
+ * `now` is injectable for deterministic tests.
+ *
+ * Exported for direct testing of the version gate and the lost-reply recovery
+ * path (the composed failure the #8782 review asked be covered), which are not
+ * reachable through {@link shouldRenewCredential} alone.
+ */
+export async function maybeRenewNearExpiry(
+  set: MultiplayerSet,
+  get: MultiplayerGet,
+  socket: PhaseSocket,
+  code: string,
+  role: TournamentRole,
+  heldToken: string,
+  signal: AbortSignal,
+  now: number = Date.now(),
+): Promise<string> {
+  // Version gate first: without the broker's bounded overlap, a lost renewal
+  // reply strands the holder, so proactive rotation is only correct at or above
+  // the recoverable-rotation floor. An absent version predates the floor.
+  const brokerVersion = socket.serverInfo.lobbyProtocolVersion;
+  if (
+    brokerVersion === undefined ||
+    brokerVersion < MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION
+  ) {
+    return heldToken;
+  }
+
+  const expiry = tokenExpiryFor(get().tournamentCredentials[code], role);
+  if (!shouldRenewCredential(expiry, now)) return heldToken;
+
+  const result = await renewTournamentCredentialOver(
+    socket,
+    code,
+    wireRoleFor(role),
+    heldToken,
+    { signal },
+  );
+  if (!result.ok) return heldToken;
+
+  const patch =
+    role === "organizer"
+      ? {
+          organizerToken: result.value.token,
+          organizerTokenExpiresAtMs: result.value.expires_at_ms,
+        }
+      : {
+          playerToken: result.value.token,
+          playerTokenExpiresAtMs: result.value.expires_at_ms,
+        };
+  set((state) => ({
+    tournamentCredentials: rememberTournamentCredential(
+      state.tournamentCredentials,
+      code,
+      patch,
+    ),
+  }));
+  return result.value.token;
+}
+
+/**
  * Single authority for token-gated tournament RPCs. Resolves the required
  * authority for `code` and refuses locally when it is absent — before any
  * socket is opened, so a call with no credential costs nothing and puts
@@ -1069,9 +1216,23 @@ async function runGatedTournamentRpc<T>(
     };
   }
   const heldToken = token;
-  return runTournamentRpc(set, get, (socket, signal) =>
-    send(socket, heldToken, signal),
-  );
+  return runTournamentRpc(set, get, async (socket, signal) => {
+    // Proactive rotation before the action: a credential nearing its expiry is
+    // refreshed while still valid, since an expired one cannot be renewed. A
+    // fresh credential (or a broker below the recoverable-rotation floor) falls
+    // straight through — `maybeRenewNearExpiry` returns the held token with no
+    // round trip.
+    const freshToken = await maybeRenewNearExpiry(
+      set,
+      get,
+      socket,
+      code,
+      role,
+      heldToken,
+      signal,
+    );
+    return send(socket, freshToken, signal);
+  });
 }
 
 export interface AiSeatConfig {
@@ -1624,8 +1785,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export interface TournamentCredential {
   /** Organizer authority for this code. Present iff this browser created it. */
   organizerToken?: string;
+  /**
+   * When `organizerToken` stops being accepted (epoch ms), as the minting reply
+   * reported it. Absent when a pre-v6 broker minted the token without an
+   * expiry — that absence is itself the rotation capability gate: with no
+   * expiry there is nothing to renew ahead of, so {@link maybeRenewNearExpiry}
+   * never fires. Independent of the player token's expiry: the two secrets are
+   * rotated separately.
+   */
+  organizerTokenExpiresAtMs?: number;
   /** Entrant authority for this code. Present iff this browser joined it. */
   playerToken?: string;
+  /** When `playerToken` stops being accepted (epoch ms). Same semantics as
+   * {@link TournamentCredential.organizerTokenExpiresAtMs}. */
+  playerTokenExpiresAtMs?: number;
   /**
    * The `player_key` this browser joined under — the identity every later
    * `TournamentView` keys on (`PlayerSummary.player_key`). Stored beside the
@@ -1741,9 +1914,26 @@ export function normalizeTournamentCredentials(
     const playerKey =
       typeof raw.playerKey === "string" ? raw.playerKey : undefined;
     if (organizerToken === undefined && playerToken === undefined) continue;
+    // An expiry is kept only beside a token that actually survived — a bare
+    // expiry with no token is meaningless, and its token's absence already
+    // dropped the authority above.
+    const organizerTokenExpiresAtMs =
+      organizerToken !== undefined && isFiniteNumber(raw.organizerTokenExpiresAtMs)
+        ? raw.organizerTokenExpiresAtMs
+        : undefined;
+    const playerTokenExpiresAtMs =
+      playerToken !== undefined && isFiniteNumber(raw.playerTokenExpiresAtMs)
+        ? raw.playerTokenExpiresAtMs
+        : undefined;
     out[code] = {
       ...(organizerToken !== undefined ? { organizerToken } : {}),
+      ...(organizerTokenExpiresAtMs !== undefined
+        ? { organizerTokenExpiresAtMs }
+        : {}),
       ...(playerToken !== undefined ? { playerToken } : {}),
+      ...(playerTokenExpiresAtMs !== undefined
+        ? { playerTokenExpiresAtMs }
+        : {}),
       ...(playerKey !== undefined ? { playerKey } : {}),
       updatedAt:
         typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt)
@@ -1759,6 +1949,16 @@ function isIntegerInRange(value: unknown, upperBound: number): value is number {
     && Number.isInteger(value)
     && value > 0
     && value <= upperBound;
+}
+
+/**
+ * A finite `number`, no range bound. Credential expiries are epoch-ms `u64`s
+ * that overflow i32, so the `isI32` family does not fit — but a persisted
+ * `Infinity`/`NaN`/non-number must still be rejected before it reaches the
+ * near-expiry arithmetic in {@link maybeRenewNearExpiry}.
+ */
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
 }
 
 function isI32(value: unknown): value is number {
@@ -3409,7 +3609,16 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               tournamentCredentials: rememberTournamentCredential(
                 state.tournamentCredentials,
                 result.value.code,
-                { organizerToken: result.value.organizer_token },
+                {
+                  organizerToken: result.value.organizer_token,
+                  // Guarded, not merely read: the reply TYPE marks
+                  // `expires_at_ms` required, but a pre-v6 broker omits it and
+                  // the field is `undefined` at this trust boundary. No expiry
+                  // stored means rotation never fires for this credential.
+                  ...(isFiniteNumber(result.value.expires_at_ms)
+                    ? { organizerTokenExpiresAtMs: result.value.expires_at_ms }
+                    : {}),
+                },
               ),
             }));
           }
@@ -3434,7 +3643,14 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               tournamentCredentials: rememberTournamentCredential(
                 state.tournamentCredentials,
                 result.value.code,
-                { playerToken: result.value.player_token, playerKey },
+                {
+                  playerToken: result.value.player_token,
+                  playerKey,
+                  // Guarded for the same reason as the organizer mint above.
+                  ...(isFiniteNumber(result.value.expires_at_ms)
+                    ? { playerTokenExpiresAtMs: result.value.expires_at_ms }
+                    : {}),
+                },
               ),
             }));
           }

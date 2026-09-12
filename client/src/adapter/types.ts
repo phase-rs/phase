@@ -4870,6 +4870,25 @@ export interface TournamentPairingView {
 export type TournamentCredentialRole = "Organizer" | "Player";
 
 /**
+ * `LobbyServerMessage::TournamentCredentialRenewed`'s payload
+ * (`crates/lobby-broker/src/protocol.rs:1341`) — the point reply to
+ * `RenewTournamentCredential`. Carries the FRESHLY MINTED secret that replaces
+ * the presented one. Under lobby protocol v9 the presented secret is NOT
+ * refused instantly: a rotation parks it for a bounded overlap window
+ * (`TOURNAMENT_CREDENTIAL_OVERLAP_MS`, `crates/lobby-broker/src/tournament.rs`)
+ * so a lost reply cannot strand the holder — but the caller should switch to
+ * this new secret immediately regardless. `role` echoes which authority was
+ * rotated, and `expires_at_ms` is the new expiry, measured from now. Never
+ * broadcast.
+ */
+export interface TournamentCredentialRenewedReply {
+  code: string;
+  role: TournamentCredentialRole;
+  token: string;
+  expires_at_ms: number;
+}
+
+/**
  * One row of the tournament list. Mirrors
  * `crates/lobby-broker/src/protocol.rs:507-528` (citation predates the v6 shift).
  *
@@ -4961,14 +4980,16 @@ export interface TournamentView {
  * (`crates/lobby-broker/src/protocol.rs:830-834`; citation predates the v6 shift).
  * A point reply only — `organizer_token` is minted here and is never broadcast.
  *
- * NOTE (protocol v6, client-render deferred): the wire payload now also carries
- * a required `expires_at_ms` beside the token (credential expiry). It is
- * intentionally not mirrored here yet — the credential-rotation client
- * follow-up adds and consumes it; the unknown field is ignored on parse.
+ * `expires_at_ms` (epoch ms) is when `organizer_token` stops being accepted. It
+ * rides the mint reply because expiry is per-holder and no broadcast frame can
+ * carry it. The credential-rotation client consumes it so a holder can renew
+ * (`RenewTournamentCredential`) before the credential lapses — an already-lapsed
+ * one is unrenewable (`crates/lobby-broker/src/tournament.rs`).
  */
 export interface TournamentCreatedReply {
   code: string;
   organizer_token: string;
+  expires_at_ms: number;
   view: TournamentView;
 }
 
@@ -4977,14 +4998,14 @@ export interface TournamentCreatedReply {
  * (`crates/lobby-broker/src/protocol.rs:837-841`; citation predates the v6 shift).
  * A point reply only — `player_token` is minted here and is never broadcast.
  *
- * NOTE (protocol v6, client-render deferred): the wire payload now also carries
- * a required `expires_at_ms` beside the token (credential expiry). It is
- * intentionally not mirrored here yet — the credential-rotation client
- * follow-up adds and consumes it; the unknown field is ignored on parse.
+ * `expires_at_ms` (epoch ms) is when `player_token` stops being accepted — same
+ * reasoning as {@link TournamentCreatedReply}'s. Consumed by the credential
+ * rotation client to renew before the entrant token lapses.
  */
 export interface TournamentJoinedReply {
   code: string;
   player_token: string;
+  expires_at_ms: number;
   view: TournamentView;
 }
 

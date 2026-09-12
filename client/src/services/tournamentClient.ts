@@ -9,6 +9,8 @@ import type {
   TournamentActionAckReply,
   TournamentActionRejectedReply,
   TournamentCreatedReply,
+  TournamentCredentialRenewedReply,
+  TournamentCredentialRole,
   TournamentJoinedReply,
   TournamentSummary,
   TournamentUpdateReply,
@@ -707,6 +709,63 @@ export function getTournamentOver(
     socket,
     { type: "GetTournament", data: { code } },
     matchReply<TournamentUpdateReply>("TournamentUpdate", code),
+    opts,
+  );
+}
+
+/**
+ * `RenewTournamentCredential` → `TournamentCredentialRenewed` (point reply,
+ * carrying the freshly minted secret and its new expiry). Uncorrelated, exactly
+ * like {@link createTournamentOver} / {@link joinTournamentOver}: rotation is
+ * NOT one of the four gated actions (`crates/lobby-broker/src/protocol.rs:1128` —
+ * it carries no `request_id`), and its reply is a distinguishable point reply
+ * naming the `code` and `role` it answers for.
+ *
+ * `role` is the WIRE spelling (`"Organizer"` / `"Player"`, capitalized), never
+ * the store's lowercase display role — the broker rejects the lowercase form
+ * with a serde unknown-variant error. The matcher binds on BOTH `code` and
+ * `role`, because an organizer who also joined holds two authorities on one code
+ * and could rotate both concurrently on one socket; a `code`-only filter would
+ * let the other authority's reply settle this call with the wrong token.
+ *
+ * The presented `token` must still be accepted: the broker refuses rotation of
+ * an already-expired credential (it extends nothing that has lapsed,
+ * `crates/lobby-broker/src/tournament.rs`), so the caller renews from the client
+ * clock BEFORE `expires_at_ms`, never after a rejection. Under lobby protocol v9
+ * the just-presented secret keeps being honored through a bounded overlap
+ * window, which is what makes a lost reply recoverable — but the caller adopts
+ * the returned secret immediately all the same.
+ */
+export function renewTournamentCredentialOver(
+  socket: PhaseSocket,
+  code: string,
+  role: TournamentCredentialRole,
+  token: string,
+  opts: TournamentRequestOptions = {},
+): Promise<TournamentRpcResult<TournamentCredentialRenewedReply>> {
+  return requestOver<TournamentCredentialRenewedReply>(
+    socket,
+    { type: "RenewTournamentCredential", data: { code, role, token } },
+    (msg) => {
+      if (msg.type !== "TournamentCredentialRenewed") return null;
+      // Read as optional-everything at the trust boundary, as the other
+      // matchers here do: the frame is what it claims to be, not what has been
+      // established about it.
+      const data = msg.data as
+        | Partial<TournamentCredentialRenewedReply>
+        | undefined
+        | null;
+      if (data == null) return null;
+      if (data.code !== code || data.role !== role) return null;
+      if (typeof data.token !== "string") return null;
+      if (typeof data.expires_at_ms !== "number") return null;
+      return {
+        code: data.code,
+        role: data.role,
+        token: data.token,
+        expires_at_ms: data.expires_at_ms,
+      };
+    },
     opts,
   );
 }

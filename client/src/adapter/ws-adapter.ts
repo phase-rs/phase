@@ -487,13 +487,26 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * Wire version of the LOBBY message set, independent of PROTOCOL_VERSION.
  * Must match `LOBBY_PROTOCOL_VERSION` in `crates/lobby-broker/src/protocol.rs`.
  *
- * Bump ONLY when a lobby message variant changes shape. A full-game bump must
- * NOT move this number: no lobby variant carries GameState or GameAction, so
- * full-game churn cannot break lobby traffic. Sharing one integer between the
- * two surfaces is what took preview multiplayer down — PROTOCOL_VERSION moved
- * twice for GameState-only changes and the derived lobby window went disjoint
- * from the deployed broker's.
+ * Bump ONLY when a lobby message variant changes shape — OR when a lobby
+ * message's SEMANTICS change in a way this client must gate behavior on (see 9).
+ * A full-game bump must NOT move this number: no lobby variant carries GameState
+ * or GameAction, so full-game churn cannot break lobby traffic. Sharing one
+ * integer between the two surfaces is what took preview multiplayer down —
+ * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
+ * window went disjoint from the deployed broker's.
  *
+ * 9 — Recoverable credential rotation (behavioral, NOT a shape change). No lobby
+ *     variant changes: RenewTournamentCredential and TournamentCredentialRenewed
+ *     are byte-identical to 8. A rotation now keeps the just-presented secret
+ *     valid through a bounded overlap window server-side, instead of
+ *     invalidating it instantly, so a renewal reply lost in transit no longer
+ *     strands the holder. This client gates on it:
+ *     `maybeRenewNearExpiry` (multiplayerStore) only rotates proactively — and
+ *     only then relies on the held token surviving an uncertain result — against
+ *     a broker at or above MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION below.
+ *     Purely additive/behavioral, so MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays
+ *     at 2: every older broker still parses every v9 frame, and this client
+ *     simply does not proactively rotate against one.
  * 8 — Tournament match structure. CreateTournament gains `match_type` (Bo1 /
  *     Bo3), optional (`#[serde(default)]`); `None` resolves to the arity default
  *     (Bo3 head-to-head, Bo1 for pods — single-game per MSTR), preserving pre-8
@@ -569,7 +582,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 8;
+export const LOBBY_PROTOCOL_VERSION = 9;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
@@ -658,6 +671,32 @@ export const MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING = 6;
  * it forward and start refusing v8 brokers.
  */
 export const MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE = 8;
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose credential rotation is
+ * RECOVERABLE — i.e. keeps a just-presented secret valid through a bounded
+ * overlap window rather than invalidating it the instant the new one is minted
+ * (`TOURNAMENT_CREDENTIAL_OVERLAP_MS`, `crates/lobby-broker/src/tournament.rs`).
+ *
+ * This is the capability that makes proactive rotation SAFE. Against a broker at
+ * or above this floor, a renewal reply lost after the server commits is
+ * survivable: the held secret still authorizes through the overlap, so keeping
+ * it on an uncertain result and recovering on the next renewal is correct.
+ * Against a broker below it, that same "keep the held token" fallback strands
+ * the holder on a secret the broker invalidated instantly — so
+ * `maybeRenewNearExpiry` (`stores/multiplayerStore`) does not proactively rotate
+ * at all below this floor, leaving the pre-rotation behavior (the credential
+ * simply lapses at its TTL) untouched rather than introducing a strand.
+ *
+ * A CLIENT-side behavioral floor with no shared Rust constant to mirror, so —
+ * like {@link MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE} — it is NOT value-pinned by an
+ * EXPECTED_* assertion in `scripts/check-protocol-version.mjs`, only listed in
+ * its authored-literals classifier. Frozen at 9 (the version that made rotation
+ * recoverable) and written as a bare literal, never derived from
+ * LOBBY_PROTOCOL_VERSION, so a future bump cannot silently drag it forward and
+ * start refusing v9 brokers that recover perfectly.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION = 9;
 
 /** Identity advertised by the server in its `ServerHello`. */
 export interface ServerInfo {

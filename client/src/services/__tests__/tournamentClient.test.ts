@@ -20,6 +20,7 @@ import {
   getTournamentOver,
   joinTournamentOver,
   matchTypeNeedsCapability,
+  renewTournamentCredentialOver,
   reportMatchResultOver,
   startTournamentRoundOver,
   subscribeTournamentsOver,
@@ -372,6 +373,60 @@ describe("matchTypeNeedsCapability", () => {
     expect(matchTypeNeedsCapability(2, null)).toBe(false);
     expect(matchTypeNeedsCapability(2, undefined)).toBe(false);
     expect(matchTypeNeedsCapability(4, null)).toBe(false);
+  });
+});
+
+describe("renewTournamentCredentialOver", () => {
+  it("sends the RenewTournamentCredential frame with the CAPITALIZED wire role", async () => {
+    const ws = new MockWebSocket();
+    const controller = new AbortController();
+    const promise = renewTournamentCredentialOver(
+      makePhaseSocket(ws),
+      CODE,
+      "Organizer",
+      "tok",
+      { signal: controller.signal },
+    );
+
+    // Uncorrelated (no request_id), and the role is the wire spelling — the
+    // broker rejects a lowercase "organizer" with a serde unknown-variant error.
+    expect(ws.send).toHaveBeenCalledWith(
+      `{"type":"RenewTournamentCredential","data":{"code":"${CODE}","role":"Organizer","token":"tok"}}`,
+    );
+
+    controller.abort();
+    await expect(promise).resolves.toMatchObject({ ok: false, reason: "aborted" });
+  });
+
+  it("settles ok on a TournamentCredentialRenewed matching code and role", async () => {
+    const ws = new MockWebSocket();
+    const promise = renewTournamentCredentialOver(makePhaseSocket(ws), CODE, "Player", "tok");
+    ws.deliver(
+      JSON.stringify({
+        type: "TournamentCredentialRenewed",
+        data: { code: CODE, role: "Player", token: "fresh-tok", expires_at_ms: 1_800_000_000_000 },
+      }),
+    );
+    await expect(promise).resolves.toEqual({
+      ok: true,
+      value: { code: CODE, role: "Player", token: "fresh-tok", expires_at_ms: 1_800_000_000_000 },
+    });
+  });
+
+  it("does NOT settle on a renewal of the OTHER authority on the same code", async () => {
+    const ws = new MockWebSocket();
+    // An organizer who also joined holds both authorities on one code; a Player
+    // renewal reply must not settle an Organizer request with the wrong token.
+    const promise = renewTournamentCredentialOver(makePhaseSocket(ws), CODE, "Organizer", "tok", {
+      timeoutMs: 40,
+    });
+    ws.deliver(
+      JSON.stringify({
+        type: "TournamentCredentialRenewed",
+        data: { code: CODE, role: "Player", token: "wrong-authority", expires_at_ms: 1 },
+      }),
+    );
+    await expect(promise).resolves.toMatchObject({ ok: false, reason: "timeout" });
   });
 });
 
