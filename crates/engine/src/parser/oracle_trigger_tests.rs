@@ -9794,6 +9794,10 @@ fn trigger_becomes_tapped() {
         );
     assert_eq!(def.mode, TriggerMode::Taps);
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    assert!(
+        def.tap_cause.is_none(),
+        "unqualified becomes-tapped must stay cause-blind"
+    );
 }
 
 /// CR 701.26 + CR 603.2c: Batched plural form "become tapped" for
@@ -12737,6 +12741,10 @@ fn captain_america_becomes_tapped_during_your_turn_constraint() {
         Some(TriggerCondition::FirstTimeObjectTappedThisTurn),
         "the first-tap intervening-if must be preserved"
     );
+    assert!(
+        def.tap_cause.is_none(),
+        "turn-constraint peel must not invent a tap_cause"
+    );
 }
 
 /// Regression guard: a bare "becomes tapped" trigger (no turn phrase) must NOT
@@ -12749,6 +12757,92 @@ fn becomes_tapped_without_turn_phrase_has_no_constraint() {
     );
     assert_eq!(def.mode, TriggerMode::Taps);
     assert_eq!(def.constraint, None);
+    assert!(
+        def.tap_cause.is_none(),
+        "unqualified becomes-tapped must stay cause-blind"
+    );
+}
+
+/// C2.2 SHAPE: verbatim Agent Maria Hill Oracle binds the frozen identity.
+#[test]
+fn agent_maria_hill_becomes_tapped_to_pay_teamwork_binds_tap_cause() {
+    const HILL: &str = "Whenever Agent Maria Hill becomes tapped to pay a teamwork cost, put a +1/+1 counter on her and draw a card.";
+    let def = parse_trigger_line(HILL, "Agent Maria Hill");
+    assert_eq!(def.mode, TriggerMode::Taps);
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.tap_cause,
+        Some(TapCause::CostPayment(TapCostKind::TapCreatures {
+            origin: Some(AdditionalCostOrigin::Teamwork),
+        }))
+    );
+    let exec = def.execute.as_deref().expect("Hill execute");
+    assert!(
+        matches!(
+            exec.effect.as_ref(),
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            }
+        ),
+        "Hill execute must be PutCounter P1P1 on SelfRef, got {:?}",
+        exec.effect
+    );
+    let draw = exec.sub_ability.as_deref().expect("chained Draw");
+    assert!(
+        matches!(
+            draw.effect.as_ref(),
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }
+        ),
+        "Hill must chain Draw, got {:?}",
+        draw.effect
+    );
+    assert_no_unimplemented(exec);
+}
+
+/// Unprinted class: modelled teamwork qualifier plus a leading turn constraint.
+#[test]
+fn becomes_tapped_to_pay_teamwork_during_your_turn_keeps_both() {
+    let def = parse_trigger_line(
+        "Whenever ~ becomes tapped to pay a teamwork cost during your turn, draw a card.",
+        "Probe",
+    );
+    assert_eq!(def.mode, TriggerMode::Taps);
+    assert_eq!(
+        def.tap_cause,
+        Some(TapCause::CostPayment(TapCostKind::TapCreatures {
+            origin: Some(AdditionalCostOrigin::Teamwork),
+        }))
+    );
+    assert_eq!(
+        def.constraint,
+        Some(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn)
+    );
+}
+
+/// C2.4 SHAPE: unmodelled `to pay a bargain cost` is Unknown, not unqualified Taps.
+/// Paired with `agent_maria_hill_becomes_tapped_to_pay_teamwork_binds_tap_cause`
+/// in this module as the positive reach-guard that the BecomesTapped arm still
+/// produces Taps when the origin is modelled.
+#[test]
+fn becomes_tapped_to_pay_bargain_is_unknown_not_taps() {
+    let def = parse_trigger_line(
+        "Whenever Bargain Probe becomes tapped to pay a bargain cost, draw a card.",
+        "Bargain Probe",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "unmodelled to-pay tail must be Unknown, got {:?}",
+        def.mode
+    );
+    assert!(
+        !matches!(def.mode, TriggerMode::Taps),
+        "must not silently emit unqualified Taps"
+    );
 }
 
 #[test]

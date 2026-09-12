@@ -84,6 +84,7 @@ const TRIGGER_KEYS: &[&str] = &[
     "mana_ability_produced",
     "clash_result",
     "room_door",
+    "tap_cause",
 ];
 const STATIC_KEYS: &[&str] = &[
     "mode",

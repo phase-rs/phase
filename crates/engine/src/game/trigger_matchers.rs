@@ -2424,8 +2424,7 @@ pub(super) fn match_taps(
 ) -> bool {
     let source_id = source_event_subject_id(source_context);
     if let GameEvent::PermanentTapped { object_id, cause } = event {
-        // If valid_card is set, check the tapped object matches (e.g. "opponent's creature")
-        if trigger.valid_card.is_some() {
+        let subject_ok = if trigger.valid_card.is_some() {
             if !valid_card_matches(trigger, state, *object_id, source_context) {
                 return false;
             }
@@ -2459,7 +2458,20 @@ pub(super) fn match_taps(
             true
         } else {
             *object_id == source_id
+        };
+        if !subject_ok {
+            return false;
         }
+        // CR 603.2 + CR 603.2e: a cost-qualified "becomes tapped" trigger matches
+        // only its required cause. None is the unqualified class (permissive).
+        // Equality runs on both subject-success paths; Agent Maria Hill is
+        // `valid_card: Some(SelfRef)` and would miss a gate on the else branch.
+        if let Some(required) = trigger.tap_cause {
+            if *cause != required {
+                return false;
+            }
+        }
+        true
     } else {
         false
     }
@@ -15091,6 +15103,137 @@ mod tests {
             &test_trigger_source_context(&state, trigger_src),
             &state
         ));
+    }
+
+    fn teamwork_cause() -> TapCause {
+        TapCause::CostPayment(TapCostKind::TapCreatures {
+            origin: Some(AdditionalCostOrigin::Teamwork),
+        })
+    }
+
+    /// C2.3: Hill-shaped `SelfRef` + `tap_cause: Some(Teamwork)` fires only on
+    /// the frozen identity. Reaches the `valid_card.is_some()` subject-success
+    /// path (Hill's production branch).
+    #[test]
+    fn hill_shaped_taps_equality_requires_teamwork_cause() {
+        let mut state = setup();
+        let hill = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Agent Maria Hill".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&hill) {
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let mut trigger = make_trigger(TriggerMode::Taps);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.tap_cause = Some(teamwork_cause());
+        let ctx = test_trigger_source_context(&state, hill);
+
+        let teamwork_event = GameEvent::PermanentTapped {
+            object_id: hill,
+            cause: teamwork_cause(),
+        };
+        assert!(
+            match_taps(&teamwork_event, &trigger, &ctx, &state),
+            "Hill must fire on Teamwork cost-payment cause"
+        );
+
+        let hostiles = [
+            TapCause::AttackDeclaration,
+            TapCause::Effect { source: hill },
+            TapCause::CostPayment(TapCostKind::TapSymbol),
+            TapCause::CostPayment(TapCostKind::TapCreatures { origin: None }),
+            TapCause::CostPayment(TapCostKind::TapCreatures {
+                origin: Some(AdditionalCostOrigin::Kicker),
+            }),
+            TapCause::CostPayment(TapCostKind::TapCreatures {
+                origin: Some(AdditionalCostOrigin::Other),
+            }),
+            TapCause::CostPayment(TapCostKind::TapCreatures {
+                origin: Some(AdditionalCostOrigin::Bargain),
+            }),
+            TapCause::CostPayment(TapCostKind::CrewFamily(CrewAction::Crew)),
+            TapCause::CostPayment(TapCostKind::Enlist),
+            TapCause::CostPayment(TapCostKind::Harmonize),
+            TapCause::CostPayment(TapCostKind::ManaShard(ConvokeMode::Convoke)),
+        ];
+        for cause in hostiles {
+            let event = GameEvent::PermanentTapped {
+                object_id: hill,
+                cause,
+            };
+            assert!(
+                !match_taps(&event, &trigger, &ctx, &state),
+                "Hill-shaped trigger must refuse {cause:?}"
+            );
+        }
+    }
+
+    /// C2.3: `TriggerDefinition::new(Taps)` (string-mapper default) is
+    /// permissive on every TapCause, including AttackDeclaration and Teamwork.
+    #[test]
+    fn unqualified_new_taps_with_selfref_is_permissive() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Lookout".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&source) {
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let mut trigger = make_trigger(TriggerMode::Taps);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        let ctx = test_trigger_source_context(&state, source);
+        for cause in [
+            TapCause::AttackDeclaration,
+            teamwork_cause(),
+            TapCause::CostPayment(TapCostKind::TapSymbol),
+        ] {
+            let event = GameEvent::PermanentTapped {
+                object_id: source,
+                cause,
+            };
+            assert!(
+                match_taps(&event, &trigger, &ctx, &state),
+                "None tap_cause must fire on {cause:?}"
+            );
+        }
+    }
+
+    /// Equality also gates the `valid_card.is_none()` else branch.
+    #[test]
+    fn tap_cause_equality_gates_self_source_else_branch() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::Taps);
+        trigger.valid_card = None;
+        trigger.tap_cause = Some(teamwork_cause());
+        let ctx = test_trigger_source_context(&state, source);
+        let teamwork_event = GameEvent::PermanentTapped {
+            object_id: source,
+            cause: teamwork_cause(),
+        };
+        assert!(match_taps(&teamwork_event, &trigger, &ctx, &state));
+        let attack = GameEvent::PermanentTapped {
+            object_id: source,
+            cause: TapCause::AttackDeclaration,
+        };
+        assert!(
+            !match_taps(&attack, &trigger, &ctx, &state),
+            "else-branch equality must refuse AttackDeclaration"
+        );
     }
 
     // ── Work Item 6: Expend ───────────────────────────────────────

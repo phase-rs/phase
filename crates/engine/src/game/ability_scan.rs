@@ -3511,6 +3511,10 @@ fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes {
         taps_for_mana_produced: _,
         mana_ability_produced: _,
         clash_result: _,
+        // Event-shape discriminator (CR 603.2 + CR 603.2e). No TargetFilter /
+        // QuantityExpr payload. A required cause can only NARROW which Taps
+        // triggers fire, so it cannot inflate growing-class census.
+        tap_cause: _,
     } = t;
 
     let mut acc = Axes::NONE;

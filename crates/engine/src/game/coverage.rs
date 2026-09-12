@@ -18,8 +18,8 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
-    ActivationRestriction, AdditionalCost, AggregateFunction, AttackScope, AttackSubject,
-    CardTypeSetSource, ChoiceType, CoinFlipResult, CommanderOwnership, Comparator,
+    ActivationRestriction, AdditionalCost, AdditionalCostOrigin, AggregateFunction, AttackScope,
+    AttackSubject, CardTypeSetSource, ChoiceType, CoinFlipResult, CommanderOwnership, Comparator,
     ContinuousModification, ControllerRef, CountScope, CounterKindChooser, CounterKindDomain,
     CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
     EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
@@ -35,11 +35,13 @@ use crate::types::ability::{
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::events::{TapCause, TapCostKind};
+use crate::types::game_state::ConvokeMode;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::{CostModifyMode, StaticMode};
+use crate::types::statics::{CostModifyMode, CrewAction, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::{EtbTapState, Zone};
 use nom::branch::alt;
@@ -4332,6 +4334,9 @@ fn trigger_details(trig: &TriggerDefinition) -> Vec<(String, String)> {
     if let Some(atf) = &trig.attack_target_filter {
         d.push(("attack target".into(), fmt_attack_target_filter(atf).into()));
     }
+    if let Some(cause) = trig.tap_cause {
+        d.push(("tap cause".into(), fmt_tap_cause(cause).into()));
+    }
     if let Some(constraint) = &trig.constraint {
         d.push(("constraint".into(), fmt_trigger_constraint(constraint)));
     }
@@ -4775,6 +4780,40 @@ fn fmt_attack_target_filter(filter: &crate::types::triggers::AttackTargetFilter)
         // CR 725.1: the monarch is a player designation, and no player is the
         // monarch until an effect creates one.
         ATF::Monarch => "the monarch",
+    }
+}
+
+/// Render a required [`TapCause`] for parse-details / Alt-hover (C2.4(iii)).
+/// Key is `"tap cause"`; omitted when `None` (#5507). Parser only produces
+/// `"teamwork cost"` today; the formatter still covers the `TapCause` class.
+fn fmt_tap_cause(cause: TapCause) -> &'static str {
+    match cause {
+        TapCause::AttackDeclaration => "attack declaration",
+        TapCause::Effect { .. } => "effect",
+        TapCause::CostPayment(kind) => match kind {
+            TapCostKind::TapSymbol => "tap symbol",
+            TapCostKind::TapCreatures { origin } => match origin {
+                None => "tap creatures",
+                Some(AdditionalCostOrigin::Teamwork) => "teamwork cost",
+                Some(AdditionalCostOrigin::Kicker) => "kicker cost",
+                Some(AdditionalCostOrigin::Casualty) => "casualty cost",
+                Some(AdditionalCostOrigin::Offspring) => "offspring cost",
+                Some(AdditionalCostOrigin::Squad) => "squad cost",
+                Some(AdditionalCostOrigin::Replicate) => "replicate cost",
+                Some(AdditionalCostOrigin::Bargain) => "bargain cost",
+                Some(AdditionalCostOrigin::Gift) => "gift cost",
+                Some(AdditionalCostOrigin::Other) => "additional cost",
+            },
+            TapCostKind::ManaShard(ConvokeMode::Convoke) => "convoke",
+            TapCostKind::ManaShard(ConvokeMode::Waterbend) => "waterbend",
+            TapCostKind::ManaShard(ConvokeMode::Improvise) => "improvise",
+            TapCostKind::ManaShard(ConvokeMode::Delve) => "delve",
+            TapCostKind::CrewFamily(CrewAction::Crew) => "crew",
+            TapCostKind::CrewFamily(CrewAction::Saddle) => "saddle",
+            TapCostKind::CrewFamily(CrewAction::Station) => "station",
+            TapCostKind::Enlist => "enlist",
+            TapCostKind::Harmonize => "harmonize",
+        },
     }
 }
 
@@ -13396,6 +13435,90 @@ mod tests {
             labels.len(),
             8,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
+        );
+    }
+
+    /// C2.4(iii): `tap_cause` is a firing qualifier like `attack_target_filter`.
+    /// `None` omits the `"tap cause"` key (#5507). Distinct values stay distinct.
+    #[test]
+    fn tap_cause_reaches_parse_details() {
+        use crate::types::ability::AdditionalCostOrigin;
+        use crate::types::events::{TapCause, TapCostKind};
+
+        let details = |cause: Option<TapCause>| -> Vec<(String, String)> {
+            let mut trig = TriggerDefinition::new(TriggerMode::Taps);
+            trig.tap_cause = cause;
+            trigger_details(&trig)
+        };
+
+        assert!(
+            !details(None).iter().any(|(k, _)| k == "tap cause"),
+            "a trigger with no required tap cause must emit no key, so \
+             unqualified signatures stay byte-identical (#5507)"
+        );
+
+        let teamwork = details(Some(TapCause::CostPayment(TapCostKind::TapCreatures {
+            origin: Some(AdditionalCostOrigin::Teamwork),
+        })));
+        assert!(
+            teamwork
+                .iter()
+                .any(|(k, v)| k == "tap cause" && v == "teamwork cost"),
+            "Teamwork-qualified taps must render under tap cause: {teamwork:?}"
+        );
+
+        assert_ne!(
+            teamwork,
+            details(Some(TapCause::CostPayment(TapCostKind::TapSymbol))),
+            "teamwork cost and tap symbol must not collapse to the same signature"
+        );
+        assert_ne!(
+            teamwork,
+            details(Some(TapCause::AttackDeclaration)),
+            "teamwork cost and attack declaration must not collapse"
+        );
+    }
+
+    /// C2.4(i): unmodelled `to pay …` is parser-side Unknown, which the
+    /// classifier already reds. `build_trigger_item` / `check_trigger` are
+    /// unchanged; this exhibits that path.
+    #[test]
+    fn unmodelled_to_pay_tail_is_unknown_red_in_card_face_gaps() {
+        use crate::parser::oracle_trigger::parse_trigger_line;
+
+        let bargain = parse_trigger_line(
+            "Whenever Bargain Probe becomes tapped to pay a bargain cost, draw a card.",
+            "Bargain Probe",
+        );
+        assert!(
+            matches!(bargain.mode, TriggerMode::Unknown(_)),
+            "unmodelled to-pay tail must not parse as Taps, got {:?}",
+            bargain.mode
+        );
+        let face = CardFace {
+            name: "Bargain Probe".into(),
+            triggers: vec![bargain],
+            ..Default::default()
+        };
+        let gaps = super::card_face_gaps(&face);
+        assert!(
+            gaps.iter().any(|g| g.starts_with("Trigger:")),
+            "parsed bargain face must be red via Unknown, gaps: {gaps:?}"
+        );
+
+        let synthetic = CardFace {
+            name: "Synthetic Unknown".into(),
+            triggers: vec![TriggerDefinition::new(TriggerMode::Unknown(
+                "becomes tapped to pay a bargain cost".into(),
+            ))],
+            ..Default::default()
+        };
+        let syn_gaps = super::card_face_gaps(&synthetic);
+        assert!(
+            syn_gaps
+                .iter()
+                .any(|g| g.contains("becomes tapped to pay a bargain cost")),
+            "synthetic Unknown must remain red, gaps: {syn_gaps:?}"
         );
     }
 
