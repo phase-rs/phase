@@ -410,7 +410,7 @@ fn run_post_action_pipeline_from_with_policy(
         }
     }
 
-    // CR 610.3a: "until this leaves" returns are immediate one-shot effects.
+    // CR 610.3: "until this leaves" returns are immediate one-shot effects.
     // A resolving effect can remove the source and then pause for a later
     // SearchChoice (Boseiju) or other resolution choice. Process the return
     // before that choice is surfaced; otherwise the source's ZoneChanged
