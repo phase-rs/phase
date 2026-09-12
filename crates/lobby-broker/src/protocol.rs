@@ -480,8 +480,8 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does **not** move: every older client
 ///     parses every v9 frame unchanged and an older broker parses every v9 frame
 ///     unchanged; the only observable difference is that a v9 broker honors a
-///     just-rotated secret a few minutes longer, inert to a client that does not
-///     rely on it. [`PROTOCOL_VERSION`] does not move: no variant here carries
+///     just-rotated secret through a bounded overlap window, inert to a client
+///     that does not rely on it. [`PROTOCOL_VERSION`] does not move: no variant here carries
 ///     `GameState`. (One unbroken paragraph on purpose — see entry 5's note on
 ///     the rustdoc indented-code-block trap.)
 /// 8 — Tournament match structure: a per-event best-of choice. `CreateTournament`

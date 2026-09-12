@@ -101,11 +101,23 @@ pub const TOURNAMENT_CREDENTIAL_TTL_MS: u64 = IN_PROGRESS_ABANDON_SECS * 1000;
 /// near-expiry renewal recovers a confirmed new secret. See
 /// [`TournamentCredential::rotate`] and [`TournamentCredential::verdict`].
 ///
-/// Sized to comfortably cover a client's next action/retry after a lost reply,
-/// yet stay a rounding error against the seven-day [`TOURNAMENT_CREDENTIAL_TTL_MS`]
-/// so the dual-validity surface (two of the holder's own secrets live at once)
-/// is bounded to minutes, never the credential's whole lifetime.
-pub const TOURNAMENT_CREDENTIAL_OVERLAP_MS: u64 = 10 * 60 * 1000;
+/// **Sized to the client's proactive renew margin, and that is a load-bearing
+/// invariant, not a coincidence.** The client rotates proactively once a
+/// credential comes within `TOURNAMENT_CREDENTIAL_RENEW_MARGIN_MS` of expiry
+/// (24h, `client/src/stores/multiplayerStore.ts`) and re-attempts only on its
+/// next gated action — which, between tournament rounds, can be hours or days
+/// away. If this overlap were shorter than that margin, a reply lost right
+/// before a between-round gap would let the parked secret lapse before the
+/// holder acted again, re-stranding exactly the multi-day event the seven-day
+/// TTL exists to serve. Setting the overlap *equal to* the margin makes the
+/// parked secret outlive the holder's own believed expiry (a rotation only
+/// fires within `margin` of expiry, so `now + overlap >= believed_expiry`), so
+/// a lost reply never moves the effective expiry earlier than a client with no
+/// rotation at all would see. The dual-validity surface (two of the holder's
+/// own secrets live at once) is bounded to one day against the seven-day
+/// [`TOURNAMENT_CREDENTIAL_TTL_MS`] — a seventh of the credential's life, never
+/// its whole span. **Keep this `>=` the client margin if either moves.**
+pub const TOURNAMENT_CREDENTIAL_OVERLAP_MS: u64 = 24 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Bearer credentials
@@ -2148,8 +2160,8 @@ impl TournamentManager {
     /// transit cannot strand the holder (see [`Self::rotate`] and the module
     /// constant). Extending the expiry *in place* — one secret, ever-later
     /// expiry — is still refused: that is the unbounded shared access this
-    /// mechanism exists to prevent, and the overlap is bounded to minutes
-    /// against the seven-day TTL.
+    /// mechanism exists to prevent, and the overlap is bounded to one day
+    /// against the seven-day TTL (see [`TOURNAMENT_CREDENTIAL_OVERLAP_MS`]).
     ///
     /// `role` is the [`TournamentRole`] axis rather than two sibling methods,
     /// per "parameterize, don't proliferate".
