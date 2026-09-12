@@ -18,7 +18,13 @@
 //! IS NOT AVAILABLE TO THIS PHASE and is never cited below: it is empty for
 //! this population (none of the 21 census card names appears in any of the 303
 //! `.snap` files), so green there could not witness a regression here. Every
-//! label in this file therefore names a paired red-at-base positive.
+//! label below that claims a pairing names a paired red-at-base positive.
+//! The standard binds every green-at-base row this phase writes, whether or not
+//! the charter requires that row. Three green-at-base rows have none of the
+//! three pairings and comply BY DISCLOSURE — their labels say so and they are
+//! reported: the Scroll Rack smoke (no discriminating pairing exists at
+//! runtime) and the two Once and Future records (an in-row reach guard plus a
+//! discriminating positive, which is not one of the three named pairings).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{EffectKind, TargetRef};
@@ -86,6 +92,10 @@ fn bauble_board(graveyard: &[&str]) -> (GameRunner, ObjectId, Vec<ObjectId>, Obj
 /// bottom of P0's library and the chained draw still happens. Without this
 /// row, "nothing moved and the run reached Priority" would be equally
 /// satisfied by a fixture whose Bauble was never activated at all.
+///
+/// GREEN AT THIS PHASE'S BASE. It is a reach guard, not a discriminator; its
+/// paired RED-AT-BASE row is
+/// `conjurers_bauble_declined_target_with_nonempty_graveyard_resolves_as_noop`.
 #[test]
 fn conjurers_bauble_places_its_declared_target_on_the_bottom() {
     let (mut runner, bauble, gy, lib_top, lib_second) = bauble_board(&["Graveyard Bear"]);
@@ -164,9 +174,12 @@ fn conjurers_bauble_with_empty_graveyard_activates_and_still_draws() {
 /// number of targets announces how many it will choose) + CR 115.6 (a spell or
 /// ability that requires targets may allow zero to be chosen) make the BASE
 /// behaviour — one REQUIRED slot, so the announced target cannot be declined —
-/// the rules-incorrect one. It changes for all five `optional_targeting: false`
-/// members of the "up to one target" sub-class: Boseiju Reaches Skyward,
-/// Conjurer's Bauble, Dovin's Dismissal, Once and Future, Treason of Isengard.
+/// the rules-incorrect one. It changes for four of the five
+/// `optional_targeting: false` members of the "up to one target" sub-class:
+/// Boseiju Reaches Skyward, Conjurer's Bauble, Dovin's Dismissal, Treason of
+/// Isengard. The fifth, Once and Future, is observationally inert under this
+/// phase because its placement clause mints no target slot — see
+/// `once_and_future_known_bad_else_ability_placement_gets_no_target_slot`.
 ///
 /// Paired positive reach guard:
 /// `conjurers_bauble_places_its_declared_target_on_the_bottom` — the same
@@ -254,6 +267,9 @@ fn cast_drake_to_battlefield(runner: &mut GameRunner, drake: ObjectId) {
 /// With ONE card in an opponent's graveyard, the ETB moves exactly that card to
 /// the bottom of ITS OWNER's library — proving the fixture reaches the placement
 /// at all, and that the Drake really did enter the battlefield.
+///
+/// GREEN AT THIS PHASE'S BASE. It is a reach guard, not a discriminator; its
+/// paired RED-AT-BASE row is `swiftgear_drake_declined_target_resolves_as_noop`.
 #[test]
 fn swiftgear_drake_places_its_declared_target_on_the_bottom() {
     let (mut runner, drake, gy) = drake_board(&[(P1, "Opponent Graveyard Bear")]);
@@ -827,24 +843,27 @@ const SCROLL_RACK_ORACLE: &str = "{1}, {T}: Exile any number of cards from your 
      Put that many cards from the top of your library into your hand. Then look at the exiled \
      cards and put them on top of your library in any order.";
 
-/// P1-C6 runtime half — ANCESTOR CONTAINMENT. Scroll Rack's placement clause is
-/// a chained sub-ability beneath an ability that carries its own `multi_target`
-/// ("exile any number of cards from your hand"). The descendant placement must
-/// not inherit that ancestor spec and start placing the wrong set.
+/// P1-C6 runtime half — RECORDED RUNTIME SMOKE. Scroll Rack's placement clause
+/// is a chained sub-ability beneath an ability that carries its own
+/// `multi_target` ("exile any number of cards from your hand"). This row
+/// records that the placement puts back exactly the cards that were exiled.
 ///
 /// The board exiles TWO cards on purpose: "places exactly the cards it exiled"
 /// is satisfied vacuously by a smoke that exiles none.
 ///
-/// GREEN AT THIS PHASE'S BASE. Its non-vacuity comes from a PAIRED
-/// RED-AT-BASE POSITIVE on the same seam — a clause-level spec attached
-/// BENEATH a parent ability — namely
-/// `bow_of_nylea_mode_four_gains_up_to_four_target_set_shape`, whose
-/// `multi_target == Some(up_to(Fixed 4))` reads `null` in the pre-phase corpus.
-/// That row proves a spec minted inside a sub-ability DOES reach
-/// `ResolvedAbility.multi_target`, which is what makes this row's contrary
-/// claim — that Scroll Rack's descendant placement does NOT inherit its
-/// ancestor's spec — a real containment assertion. The in-row `hand contains
-/// l1 && l2` reach guard is the local support, not the pairing itself.
+/// GREEN AT THIS PHASE'S BASE, with NO discriminating pairing available at
+/// runtime; it is reported under the charter's green-at-base standard
+/// ("reported rather than silently kept"). It guards no containment mechanism,
+/// because there is no inheritance path to contain: `game/ability_utils.rs`
+/// builds each node's `multi_target` from that node's own definition
+/// (`resolved.multi_target = def.multi_target.clone()`,
+/// `overridden.multi_target = sub.multi_target.clone()`), so a descendant never
+/// receives an ancestor's spec. Nor does it discriminate `put_on_top`'s count
+/// source: for this placement node `collected_targets` (the exiled-by-source
+/// scan) and `count = Ref(CardsExiledBySource)` already agree, and a mutation
+/// reducing `put_on_top`'s condition to `target_choice_timing == Stack` left
+/// this row green. The in-row `hand contains l1 && l2` reach guard shows only
+/// that the exile-and-refill half ran.
 #[test]
 fn scroll_rack_places_exactly_the_cards_it_exiled() {
     let mut scenario = GameScenario::new();
