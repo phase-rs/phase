@@ -10845,11 +10845,9 @@ mod tests {
         );
         assert_eq!(chunks.len(), 2, "expected two chunks, got {chunks:?}");
         assert_eq!(chunks[0], "you gain 3 life");
-        assert!(
-            chunks[1]
-                .trim_start()
-                .strip_prefix("that creature fights")
-                .is_some(),
+        assert_eq!(
+            chunks[1],
+            "that creature fights up to one target creature you don't control",
             "fight conjunct must be its own chunk, got {:?}",
             chunks[1]
         );
