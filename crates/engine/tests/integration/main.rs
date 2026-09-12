@@ -143,6 +143,7 @@ mod copied_ability_transform_generation;
 mod copy_gy_creature_mana_value_x;
 mod copy_retarget_past_rider;
 mod copy_token_except_keyword_and_quoted_ability;
+mod corpse_appraiser;
 mod cosmic_intervention_graveyard_redirect;
 mod cost_x_carrier_runtime;
 mod cost_zone_pipeline;
