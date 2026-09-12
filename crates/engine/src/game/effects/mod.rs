@@ -20780,6 +20780,7 @@ mod tests {
             controller: PlayerId(1),
             object_id: ObjectId(99),
             cast_mana_value: None,
+            incarnation: None,
         });
 
         let mut events = Vec::new();
@@ -36263,6 +36264,7 @@ mod tests {
             controller: PlayerId(1),
             object_id: ObjectId(9000),
             cast_mana_value: None,
+            incarnation: None,
         });
 
         assert!(
@@ -36394,6 +36396,7 @@ mod tests {
             controller: PlayerId(0),
             object_id: ObjectId(9000),
             cast_mana_value: None,
+            incarnation: None,
         });
 
         // The caster (seat 0) and its teammate (seat 1) are NOT opponents.

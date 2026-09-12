@@ -782,6 +782,10 @@ pub fn resolve(
                 // the library", which is where a "…, then exile it" clause on a
                 // mill trigger must move it from.
                 GameEvent::Milled { to, .. } => Some(*to),
+                // CR 112.1 + CR 400.7: a SpellCast "return that spell" ChangeZone
+                // expects that object on the stack, not a later incarnation or a
+                // GY/Hand card.
+                GameEvent::SpellCast { .. } => Some(Zone::Stack),
                 _ => None,
             });
     }
@@ -1289,6 +1293,31 @@ pub fn resolve(
                     )
                     .expect("muzzled ChangeZone member remains in its original zone");
                 continue;
+            }
+        }
+
+        // CR 112.1 + CR 400.7: skip moving the SpellCast anaphor when that
+        // incarnation is no longer the live spell on the stack (GY/Hand or a
+        // recast at the same storage id). Do not put this skip in
+        // `process_one_zone_move` — that would also skip unrelated subjects
+        // while a SpellCast event is current.
+        if super::filter_refs_triggering_source(target_filter) {
+            if let Some(event) = state.current_trigger_event.as_ref() {
+                if let Some(pin) = crate::game::targeting::spell_cast_pin(event) {
+                    if *obj_id == pin.object_id
+                        && !crate::game::targeting::spell_cast_anaphor_is_live_on_stack(state, pin)
+                    {
+                        logical_zone_change_group
+                            .record_delivery_completion(
+                                *obj_id,
+                                crate::types::game_state::ZoneMoveCompletion::Remained,
+                            )
+                            .expect(
+                                "SpellCast anaphor ChangeZone remains when the pin is not live",
+                            );
+                        continue;
+                    }
+                }
             }
         }
 
@@ -2482,7 +2511,9 @@ mod tests {
     use crate::types::card::PrintedLoyalty;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
-    use crate::types::game_state::{ExileLinkKind, StackEntry, StackEntryKind, ZoneChangeRecord};
+    use crate::types::game_state::{
+        CastingVariant, ExileLinkKind, StackEntry, StackEntryKind, ZoneChangeRecord,
+    };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
@@ -10824,5 +10855,168 @@ mod tests {
 
         assert_eq!(state.objects[&obj].zone, Zone::Battlefield);
         assert_eq!(state.objects[&obj].controller, PlayerId(2));
+    }
+
+    fn spell_cast_event(object_id: ObjectId, incarnation: Option<u64>) -> GameEvent {
+        GameEvent::SpellCast {
+            card_id: CardId(1),
+            controller: PlayerId(0),
+            object_id,
+            cast_mana_value: None,
+            incarnation,
+        }
+    }
+
+    fn triggering_source_to_hand() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Hand,
+                target: TargetFilter::TriggeringSource,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+    }
+
+    fn put_instant(state: &mut GameState, name: &str, zone: Zone) -> ObjectId {
+        let obj_id = create_object(state, CardId(1), PlayerId(0), name.to_string(), zone);
+        if zone == Zone::Stack {
+            state.stack.push_back(StackEntry {
+                id: obj_id,
+                source_id: obj_id,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(1),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+        }
+        obj_id
+    }
+
+    fn resolve_triggering_source_to_hand(state: &mut GameState) {
+        let ability = triggering_source_to_hand();
+        let mut events = Vec::new();
+        resolve(state, &ability, &mut events).expect("change zone resolves");
+    }
+
+    /// CR 112.1 + CR 400.7: SpellCast "return that spell" ChangeZone does not
+    /// yoink the card from the graveyard.
+    #[test]
+    fn spellcast_changezone_from_graveyard_is_noop() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = put_instant(&mut state, "Shock", Zone::Graveyard);
+        state.current_trigger_event = Some(spell_cast_event(obj_id, Some(0)));
+        resolve_triggering_source_to_hand(&mut state);
+        assert_eq!(
+            state.objects[&obj_id].zone,
+            Zone::Graveyard,
+            "SpellCast ChangeZone must not return a graveyard card"
+        );
+    }
+
+    /// Matching incarnation on the stack still returns the spell (positive
+    /// reach-guard for the GY/recast no-ops).
+    #[test]
+    fn spellcast_changezone_matching_pin_on_stack_returns_to_hand() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = put_instant(&mut state, "Shock", Zone::Stack);
+        let incarnation = state.objects[&obj_id].incarnation;
+        state.current_trigger_event = Some(spell_cast_event(obj_id, Some(incarnation)));
+        resolve_triggering_source_to_hand(&mut state);
+        assert_eq!(state.objects[&obj_id].zone, Zone::Hand);
+    }
+
+    /// CR 112.1 + CR 400.7: leftover lose after recast must not return the new
+    /// incarnation (P-R3-CZ inverted).
+    #[test]
+    fn spellcast_changezone_after_recast_does_not_return_recast() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = put_instant(&mut state, "Shock", Zone::Stack);
+        state.objects.get_mut(&obj_id).unwrap().incarnation = 2;
+        state.current_trigger_event = Some(spell_cast_event(obj_id, Some(0)));
+        resolve_triggering_source_to_hand(&mut state);
+        assert_eq!(
+            state.objects[&obj_id].zone,
+            Zone::Stack,
+            "recast at a later incarnation must stay on the stack"
+        );
+        assert!(state.stack.iter().any(|entry| entry.id == obj_id));
+    }
+
+    /// CR 400.7: a missing SpellCast pin is fail-closed and never live-hits
+    /// incarnation 0.
+    #[test]
+    fn none_pin_changezone_does_not_live_hit_incarnation_zero() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = put_instant(&mut state, "Shock", Zone::Stack);
+        assert_eq!(state.objects[&obj_id].incarnation, 0);
+        state.current_trigger_event = Some(spell_cast_event(obj_id, None));
+        resolve_triggering_source_to_hand(&mut state);
+        assert_eq!(state.objects[&obj_id].zone, Zone::Stack);
+    }
+
+    /// P-R4-CZ-CREATURE: SpellCast current event must not skip a non-
+    /// TriggeringSource ChangeZone (exile target creature) after the spell left.
+    #[test]
+    fn spellcast_changezone_of_creature_still_moves() {
+        let mut state = GameState::new_two_player(42);
+        let spell = put_instant(&mut state, "Shock", Zone::Graveyard);
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        state.current_trigger_event = Some(spell_cast_event(spell, Some(0)));
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("change zone resolves");
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Exile,
+            "non-TriggeringSource ChangeZone must still move the creature"
+        );
+        assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
     }
 }

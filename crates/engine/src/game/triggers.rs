@@ -20297,6 +20297,7 @@ pub mod tests {
                 controller: player,
                 object_id: spell,
                 cast_mana_value: None,
+                incarnation: None,
             }],
         );
 
@@ -21773,6 +21774,7 @@ pub mod tests {
             controller: PlayerId(0),
             object_id: spell,
             cast_mana_value: None,
+            incarnation: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -21827,6 +21829,7 @@ pub mod tests {
             controller: PlayerId(0),
             object_id: creature_spell,
             cast_mana_value: None,
+            incarnation: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -21881,6 +21884,7 @@ pub mod tests {
             controller: PlayerId(1),
             object_id: spell,
             cast_mana_value: None,
+            incarnation: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -25914,6 +25918,7 @@ pub mod tests {
                 object_id: source,
                 card_id: CardId(0x98),
                 cast_mana_value: None,
+                incarnation: None,
             }),
             modal: Some(ModalChoice {
                 min_choices: 1,
@@ -27846,6 +27851,7 @@ pub mod tests {
             controller: PlayerId(0),
             object_id: spell_id,
             cast_mana_value: None,
+            incarnation: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -33333,6 +33339,7 @@ pub mod tests {
             controller: PlayerId(0),
             object_id: spell,
             cast_mana_value: None,
+            incarnation: None,
         };
 
         // 2 mana spent: 2 > 3 false, 2 > 4 false — trigger does NOT fire.
@@ -33435,6 +33442,7 @@ pub mod tests {
             controller: PlayerId(1),
             object_id: spell,
             cast_mana_value: None,
+            incarnation: None,
         };
 
         state
@@ -33481,6 +33489,7 @@ pub mod tests {
             controller: PlayerId(1),
             object_id: spell,
             cast_mana_value: None,
+            incarnation: None,
         };
 
         state
@@ -33540,6 +33549,7 @@ pub mod tests {
             controller: PlayerId(0),
             object_id: ObjectId(1000),
             cast_mana_value: None,
+            incarnation: None,
         };
 
         // Case A: first qualifying spell — record has exactly one X-cost cast.
@@ -33799,6 +33809,7 @@ pub mod tests {
                 controller: PlayerId(0),
                 object_id: opponent_spell,
                 cast_mana_value: None,
+                incarnation: None,
             }],
         );
         assert!(
@@ -33824,6 +33835,7 @@ pub mod tests {
                 controller: PlayerId(1),
                 object_id: controller_spell,
                 cast_mana_value: None,
+                incarnation: None,
             }],
         );
 
@@ -36171,6 +36183,7 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(2),
                 cast_mana_value: None,
+                incarnation: None,
             }],
         );
 
@@ -36217,6 +36230,7 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(1),
                 cast_mana_value: None,
+                incarnation: None,
             }],
         );
 
@@ -36280,6 +36294,7 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(2),
                 cast_mana_value: None,
+                incarnation: None,
             }],
         );
 
@@ -36324,6 +36339,7 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(1),
                 cast_mana_value: None,
+                incarnation: None,
             }],
         );
 
@@ -36403,6 +36419,7 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(2),
                 cast_mana_value: None,
+                incarnation: None,
             }],
         );
 
@@ -36460,6 +36477,7 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(1),
                 cast_mana_value: None,
+                incarnation: None,
             }],
         );
 
@@ -36501,6 +36519,7 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(1),
                 cast_mana_value: None,
+                incarnation: None,
             }],
         );
 
@@ -36540,6 +36559,7 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(1),
                 cast_mana_value: None,
+                incarnation: None,
             }],
         );
 
@@ -36615,6 +36635,7 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(2),
                 cast_mana_value: None,
+                incarnation: None,
             }],
         );
 
@@ -36703,6 +36724,7 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(2),
                 cast_mana_value: None,
+                incarnation: None,
             }],
         );
 
@@ -36786,6 +36808,7 @@ pub mod tests {
                 controller: caster,
                 card_id: CardId(1),
                 cast_mana_value: None,
+                incarnation: None,
             }],
         );
 
@@ -47833,6 +47856,7 @@ pub mod tests {
             object_id: ObjectId(999),
             controller,
             cast_mana_value: None,
+            incarnation: None,
         };
 
         // Attacking: the copy trigger lands on the stack.

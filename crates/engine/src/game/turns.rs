@@ -1124,6 +1124,8 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     state.lki_cache.clear();
     state.lki_copiable_values.clear();
     state.lki_by_incarnation.clear();
+    // CR 400.7: stack-object LKI is step-scoped with the other LKI maps.
+    state.lki_stack_objects.clear();
     // CR 607.2b + CR 603.10e: linked-exile LKI is likewise step-scoped — it only
     // needs to outlive the resolution of the ability whose source just left.
     state.linked_exile_lki.clear();

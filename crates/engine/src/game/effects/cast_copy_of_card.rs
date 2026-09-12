@@ -263,6 +263,13 @@ fn cast_one_copy(
                 .expect("cast copy must remain available for SpellCast event")
                 .spell_mana_value(),
         ),
+        incarnation: Some(
+            state
+                .objects
+                .get(&copy_id)
+                .expect("cast copy must remain available for SpellCast event")
+                .incarnation,
+        ),
     });
     if let Some(obj) = state.objects.get(&copy_id).cloned() {
         // CR 707.12 + CR 601.2i: casting the object copy is a real cast, so the

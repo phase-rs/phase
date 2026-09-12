@@ -721,6 +721,7 @@ fn ensure_terminal_cast_spell_triggers_collected(
         controller: object.controller,
         object_id,
         cast_mana_value: Some(object.spell_mana_value()),
+        incarnation: Some(object.incarnation),
     };
     triggers::collect_triggers_into_deferred(state, &[event]);
 }

@@ -10616,6 +10616,13 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 .expect("finalized spell must remain available for cast event")
                 .spell_mana_value(),
         ),
+        incarnation: Some(
+            state
+                .objects
+                .get(&object_id)
+                .expect("finalized spell must remain available for cast event")
+                .incarnation,
+        ),
     });
 
     // CR 608.2c + CR 608.2g + CR 601.2i: A paid during-resolution cast is the

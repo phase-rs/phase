@@ -392,6 +392,18 @@ pub fn resolve(
         // resume path deliver the paused move. Any remaining targets are
         // abandoned (single-target is the dominant shape, and no parsed card
         // combines a multi-target bounce with a double destination redirect).
+        // CR 112.1 + CR 400.7 + CR 608.2h: a SpellCast "return that spell" can
+        // only move that spell; a card in GY/Hand, or a recast at the same
+        // storage id, is a new object.
+        if super::filter_refs_triggering_source(target_filter) {
+            if let Some(event) = state.current_trigger_event.as_ref() {
+                if let Some(pin) = crate::game::targeting::spell_cast_pin(event) {
+                    if !crate::game::targeting::spell_cast_anaphor_is_live_on_stack(state, pin) {
+                        continue;
+                    }
+                }
+            }
+        }
         let current_zone = state.objects.get(&obj_id).map(|o| o.zone);
         let move_dest = if matches!(current_zone, Some(Zone::Battlefield | Zone::Graveyard)) {
             Some(destination)
@@ -594,7 +606,7 @@ mod tests {
     use crate::game::effects::change_zone;
     use crate::game::zones::create_object;
     use crate::types::card_type::CoreType;
-    use crate::types::game_state::{CastingVariant, StackEntry};
+    use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -1731,5 +1743,123 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::EffectResolved { .. })));
+    }
+
+    fn spell_cast_event(object_id: ObjectId, incarnation: Option<u64>) -> GameEvent {
+        GameEvent::SpellCast {
+            card_id: CardId(1),
+            controller: PlayerId(0),
+            object_id,
+            cast_mana_value: None,
+            incarnation,
+        }
+    }
+
+    fn put_instant_on_stack(state: &mut GameState, name: &str, zone: Zone) -> ObjectId {
+        let obj_id = create_object(state, CardId(1), PlayerId(0), name.to_string(), zone);
+        if zone == Zone::Stack {
+            state.stack.push_back(StackEntry {
+                id: obj_id,
+                source_id: obj_id,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(1),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+        }
+        obj_id
+    }
+
+    fn bounce_triggering_source(state: &mut GameState, obj_id: ObjectId) {
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::TriggeringSource,
+                destination: None,
+                selection: BounceSelection::Targeted,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(state, &ability, &mut events).unwrap();
+        let _ = obj_id;
+    }
+
+    /// CR 112.1 + CR 400.7: a SpellCast "return that spell" does not yoink the
+    /// card from the graveyard (P-D inverted).
+    #[test]
+    fn spellcast_bounce_from_graveyard_is_noop() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = put_instant_on_stack(&mut state, "Shock", Zone::Graveyard);
+        state.current_trigger_event = Some(spell_cast_event(obj_id, Some(0)));
+        bounce_triggering_source(&mut state, obj_id);
+        assert_eq!(
+            state.objects[&obj_id].zone,
+            Zone::Graveyard,
+            "SpellCast bounce must not return a graveyard card"
+        );
+    }
+
+    /// CR 112.1 + CR 400.7: leftover lose after recast must not bounce the new
+    /// incarnation (P-R3-BOUNCE inverted).
+    #[test]
+    fn spellcast_bounce_after_recast_does_not_return_recast() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = put_instant_on_stack(&mut state, "Shock", Zone::Stack);
+        state.objects.get_mut(&obj_id).unwrap().incarnation = 2;
+        state.current_trigger_event = Some(spell_cast_event(obj_id, Some(0)));
+        bounce_triggering_source(&mut state, obj_id);
+        assert_eq!(
+            state.objects[&obj_id].zone,
+            Zone::Stack,
+            "recast at a later incarnation must stay on the stack"
+        );
+        assert!(state.stack.iter().any(|entry| entry.id == obj_id));
+    }
+
+    /// CR 400.7: a missing SpellCast pin is fail-closed and never live-hits
+    /// incarnation 0.
+    #[test]
+    fn none_pin_bounce_does_not_live_hit_incarnation_zero() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = put_instant_on_stack(&mut state, "Shock", Zone::Stack);
+        assert_eq!(state.objects[&obj_id].incarnation, 0);
+        state.current_trigger_event = Some(spell_cast_event(obj_id, None));
+        bounce_triggering_source(&mut state, obj_id);
+        assert_eq!(state.objects[&obj_id].zone, Zone::Stack);
+    }
+
+    /// Matching pin on the stack still returns the spell (positive reach-guard).
+    #[test]
+    fn spellcast_bounce_matching_pin_on_stack_returns_to_hand() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = put_instant_on_stack(&mut state, "Shock", Zone::Stack);
+        let incarnation = state.objects[&obj_id].incarnation;
+        state.current_trigger_event = Some(spell_cast_event(obj_id, Some(incarnation)));
+        bounce_triggering_source(&mut state, obj_id);
+        assert_eq!(state.objects[&obj_id].zone, Zone::Hand);
+    }
+
+    /// Rancor-class: non-SpellCast TriggeringSource in the graveyard still returns.
+    #[test]
+    fn non_spellcast_triggering_source_bounce_from_graveyard_still_returns() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = put_instant_on_stack(&mut state, "Rancor", Zone::Graveyard);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: obj_id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                obj_id,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        });
+        bounce_triggering_source(&mut state, obj_id);
+        assert_eq!(state.objects[&obj_id].zone, Zone::Hand);
     }
 }

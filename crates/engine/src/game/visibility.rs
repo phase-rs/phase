@@ -2124,6 +2124,7 @@ pub fn filter_events_for_viewer(
             GameEvent::SpellCast {
                 controller,
                 object_id,
+                incarnation,
                 ..
             } if !viewer_has_private_access_to_player(state, viewer, *controller)
                 && (spectator
@@ -2137,6 +2138,7 @@ pub fn filter_events_for_viewer(
                     controller: *controller,
                     object_id: *object_id,
                     cast_mana_value: None,
+                    incarnation: *incarnation,
                 }
             }
             other => other.clone(),
@@ -3322,18 +3324,21 @@ mod tests {
                 controller: PlayerId(1),
                 object_id: face_down_spell,
                 cast_mana_value: Some(4),
+                incarnation: None,
             },
             GameEvent::SpellCast {
                 card_id: CardId(702),
                 controller: PlayerId(0),
                 object_id: own_spell,
                 cast_mana_value: Some(4),
+                incarnation: None,
             },
             GameEvent::SpellCast {
                 card_id: CardId(703),
                 controller: PlayerId(1),
                 object_id: opponent_face_up_spell,
                 cast_mana_value: Some(4),
+                incarnation: None,
             },
         ];
 
@@ -3346,18 +3351,21 @@ mod tests {
                     controller: PlayerId(1),
                     object_id,
                     cast_mana_value: None,
+                    incarnation: None,
                 },
                 GameEvent::SpellCast {
                     card_id: CardId(702),
                     controller: PlayerId(0),
                     object_id: own_object_id,
                     cast_mana_value: Some(4),
+                    incarnation: None,
                 },
                 GameEvent::SpellCast {
                     card_id: CardId(703),
                     controller: PlayerId(1),
                     object_id: face_up_object_id,
                     cast_mana_value: Some(4),
+                    incarnation: None,
                 },
             ] if *object_id == face_down_spell
                 && *own_object_id == own_spell

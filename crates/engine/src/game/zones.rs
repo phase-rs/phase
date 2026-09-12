@@ -1,7 +1,8 @@
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    GameState, ResolutionSourceRelatch, StackEntry, StackEntryKind, ZoneChangeCombatStatus,
+    GameState, ResolutionSourceRelatch, StackEntry, StackEntryKind, StackObjectLki,
+    ZoneChangeCombatStatus,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -270,6 +271,20 @@ pub(crate) fn apply_zone_exit_cleanup(
                 .entry(object_id)
                 .or_default()
                 .insert(incarnation, lki);
+            // CR 712.8a + CR 708.9 + CR 109.4 + CR 608.2h: characteristics LKI
+            // of the spell as it existed on the stack, captured at the same
+            // instant as `lki_copiable_values` (after cast_occurrence clear,
+            // before face/controller cleanup).
+            if from == Zone::Stack {
+                let snapshot = obj.clone();
+                let history = state.lki_stack_objects.entry(object_id).or_default();
+                let mut row = history
+                    .get(&incarnation)
+                    .cloned()
+                    .unwrap_or(StackObjectLki::default());
+                row.object = Some(snapshot);
+                history.insert(incarnation, row);
+            }
         }
         if let Some(values) = lki_copiable_values {
             state.lki_copiable_values.insert(object_id, values);

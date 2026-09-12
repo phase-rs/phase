@@ -1,5 +1,6 @@
 use crate::game::ability_utils::build_resolved_from_def;
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::game_object::GameObject;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, CopyRetargetPermission,
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
@@ -53,9 +54,22 @@ pub fn resolve(
     // The helper handles explicit object targets (Twincast / Gogo), SelfRef
     // (Casualty triggers whose intermediate stack pushes would make stack.last()
     // wrong), and untargeted fallback (top of stack).
-    let top_entry = copy_source_entry(state, ability).ok_or_else(|| {
-        EffectError::MissingParam("No spell or ability on stack to copy".to_string())
-    })?;
+    let Some(top_entry) = copy_source_entry(state, ability) else {
+        // CR 608.2h: a SpellCast "copy that spell" miss is a clean no-op (the
+        // original left and no LKI remains), not MissingParam — the repeat_for
+        // swallow would otherwise hide the miss with empty events.
+        if is_spell_cast_triggering_source_copy(ability, state) {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(());
+        }
+        return Err(EffectError::MissingParam(
+            "No spell or ability on stack to copy".to_string(),
+        ));
+    };
 
     if stack_entry_cant_be_copied(state, &top_entry) {
         events.push(GameEvent::EffectResolved {
@@ -106,9 +120,10 @@ pub fn resolve(
     // CR 707.10: A spell copy is itself a spell on the stack. Ability stack
     // entries are objects too, but this engine does not store GameObjects for
     // activated/triggered ability entries; clone a GameObject only when the
-    // copied stack entry already has one.
-    if let Some(source_obj) = state.objects.get(&top_entry.id) {
-        let mut copy_obj = source_obj.clone();
+    // copied stack entry already has one. SpellCast LKI uses the stack-time
+    // snapshot when the live object is absent, off-stack, or a later incarnation.
+    if let Some(source_obj) = source_object_for_spell_copy(state, &top_entry) {
+        let mut copy_obj = source_obj;
         copy_obj.id = copy_id;
         copy_obj.controller = copy_controller;
         // allow-raw-zone: spell-copy birth directly on stack has no from-zone event (CR 707.10).
@@ -585,17 +600,95 @@ pub(crate) fn copy_count_with_replacements(
     count
 }
 
+fn is_spell_cast_triggering_source_copy(ability: &ResolvedAbility, state: &GameState) -> bool {
+    matches!(
+        &ability.effect,
+        Effect::CopySpell {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    ) && state
+        .current_trigger_event
+        .as_ref()
+        .and_then(crate::game::targeting::spell_cast_pin)
+        .is_some()
+}
+
+fn stack_object_lki(
+    state: &GameState,
+    pin: ObjectIncarnationRef,
+) -> Option<&crate::types::game_state::StackObjectLki> {
+    state
+        .lki_stack_objects
+        .get(&pin.object_id)?
+        .get(&pin.incarnation)
+}
+
+fn live_stack_entry_matching_pin(
+    state: &GameState,
+    pin: ObjectIncarnationRef,
+) -> Option<StackEntry> {
+    if !crate::game::targeting::spell_cast_anaphor_is_live_on_stack(state, pin) {
+        return None;
+    }
+    state
+        .stack
+        .iter()
+        .rev()
+        .find(|entry| entry.id == pin.object_id)
+        .cloned()
+}
+
+fn source_object_for_spell_copy(state: &GameState, top_entry: &StackEntry) -> Option<GameObject> {
+    if let Some(pin) = state
+        .current_trigger_event
+        .as_ref()
+        .and_then(crate::game::targeting::spell_cast_pin)
+    {
+        if let Some(snapshot) = stack_object_lki(state, pin).and_then(|lki| lki.object.clone()) {
+            let live_is_that_spell = state.objects.get(&top_entry.id).is_some_and(|live| {
+                live.zone == Zone::Stack && ObjectIncarnationRef::from_object(live) == pin
+            });
+            if !live_is_that_spell {
+                return Some(snapshot);
+            }
+        }
+    }
+    state.objects.get(&top_entry.id).cloned()
+}
+
 fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<StackEntry> {
     if let Effect::CopySpell {
         target, retarget, ..
     } = &ability.effect
     {
-        if matches!(target, TargetFilter::TriggeringSource)
-            || matches!(
-                retarget,
-                CopyRetargetPermission::RetargetEachCopyToIterationMember
-            )
-        {
+        if matches!(target, TargetFilter::TriggeringSource) {
+            match state
+                .current_trigger_event
+                .as_ref()
+                .and_then(crate::game::targeting::spell_cast_pin)
+            {
+                Some(pin) => {
+                    if let Some(entry) = live_stack_entry_matching_pin(state, pin) {
+                        return Some(entry);
+                    }
+                    if let Some(entry) =
+                        stack_object_lki(state, pin).and_then(|lki| lki.entry.clone())
+                    {
+                        return Some(entry);
+                    }
+                    return None;
+                }
+                None => {
+                    if let Some(entry) = triggering_spell_stack_entry(state) {
+                        return Some(entry);
+                    }
+                }
+            }
+        } else if matches!(
+            retarget,
+            CopyRetargetPermission::RetargetEachCopyToIterationMember
+        ) {
             if let Some(entry) = triggering_spell_stack_entry(state) {
                 return Some(entry);
             }
@@ -995,6 +1088,51 @@ mod tests {
                 actual_mana_spent: 0,
             },
         });
+    }
+
+    fn spell_cast_event(object_id: ObjectId, incarnation: Option<u64>) -> GameEvent {
+        GameEvent::SpellCast {
+            card_id: CardId(1),
+            controller: PlayerId(0),
+            object_id,
+            cast_mana_value: None,
+            incarnation,
+        }
+    }
+
+    fn draw_ability(source: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+    }
+
+    fn copy_triggering_source(state: &mut GameState) -> Vec<GameEvent> {
+        let ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::TriggeringSource,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(state, &ability, &mut events).unwrap();
+        events
+    }
+
+    fn bounce_spell_to_hand(state: &mut GameState, obj_id: ObjectId) {
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(state, obj_id, Zone::Hand, &mut events);
     }
 
     #[test]
@@ -2085,6 +2223,7 @@ mod tests {
             object_id: cast_spell_id,
             controller: PlayerId(0),
             cast_mana_value: None,
+            incarnation: None,
         });
 
         let copy_ability = ResolvedAbility::new(
@@ -2187,6 +2326,7 @@ mod tests {
                 object_id: cast_spell_id,
                 controller: PlayerId(0),
                 cast_mana_value: None,
+                incarnation: None,
             }),
         );
 
@@ -3404,6 +3544,7 @@ mod tests {
             object_id: ObjectId(10),
             controller: PlayerId(0),
             cast_mana_value: None,
+            incarnation: None,
         });
         let mut events = Vec::new();
         resolve(&mut state, &copy, &mut events).expect("automatic copy must resolve");
@@ -3872,6 +4013,333 @@ mod tests {
             "a copy of the exiled instant must be on the stack (ExiledBySource read), \
              got stack of {} entries",
             state.stack.len()
+        );
+    }
+
+    /// P-G inverted: SpellCast TriggeringSource must not fall through to
+    /// `stack.last()` / an unrelated live spell when the pinned referent has
+    /// left without LKI.
+    #[test]
+    fn triggering_source_off_stack_does_not_copy_unrelated() {
+        let mut state = GameState::new_two_player(42);
+        let original = ObjectId(10);
+        let unrelated = ObjectId(11);
+        push_spell(
+            &mut state,
+            original,
+            CardId(1),
+            PlayerId(0),
+            "Shock",
+            draw_ability(original),
+            CastingVariant::Normal,
+        );
+        push_spell(
+            &mut state,
+            unrelated,
+            CardId(2),
+            PlayerId(0),
+            "Unrelated Instant",
+            draw_ability(unrelated),
+            CastingVariant::Normal,
+        );
+        state.stack.retain(|entry| entry.id != original);
+        state.objects.get_mut(&original).unwrap().zone = Zone::Hand;
+        state.current_trigger_event = Some(spell_cast_event(original, Some(0)));
+        let events = copy_triggering_source(&mut state);
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "must not copy the unrelated live stack spell"
+        );
+        assert_eq!(state.stack[0].id, unrelated);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::EffectResolved { .. })),
+            "SpellCast miss must resolve as a no-op"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, GameEvent::SpellCopied { .. })),
+            "no copy must be created"
+        );
+    }
+
+    /// P-R3-COPY-B: leftover win after recast copies the first announcement,
+    /// not the live recast scanned by ObjectId.
+    #[test]
+    fn triggering_source_miss_does_not_scan_recast_by_object_id() {
+        let mut state = GameState::new_two_player(42);
+        let original = ObjectId(10);
+        let mut first = draw_ability(original);
+        first.chosen_x = Some(1);
+        push_spell(
+            &mut state,
+            original,
+            CardId(1),
+            PlayerId(0),
+            "Draw Spell",
+            first,
+            CastingVariant::Normal,
+        );
+        let pin = state.objects[&original].incarnation;
+        bounce_spell_to_hand(&mut state, original);
+
+        let mut recast = draw_ability(original);
+        recast.chosen_x = Some(5);
+        state.objects.get_mut(&original).unwrap().zone = Zone::Stack;
+        state.stack.push_back(StackEntry {
+            id: original,
+            source_id: original,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(Box::new(recast)),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.current_trigger_event = Some(spell_cast_event(original, Some(pin)));
+        let events = copy_triggering_source(&mut state);
+        let copy = state
+            .stack
+            .iter()
+            .rev()
+            .find(|entry| entry.id != original)
+            .expect("LKI copy of the first announcement");
+        assert_eq!(
+            copy.ability().and_then(|ability| ability.chosen_x),
+            Some(1),
+            "leftover win must copy the first announcement's X, not the recast"
+        );
+        assert_eq!(
+            state
+                .stack
+                .iter()
+                .find(|entry| entry.id == original)
+                .and_then(|entry| entry.ability())
+                .and_then(|ability| ability.chosen_x),
+            Some(5),
+            "recast remains on the stack with the new X"
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::SpellCopied { .. })));
+    }
+
+    /// CR 400.7: a missing SpellCast pin is fail-closed and never live-hits
+    /// incarnation 0.
+    #[test]
+    fn none_pin_does_not_live_hit_incarnation_zero() {
+        let mut state = GameState::new_two_player(42);
+        let original = ObjectId(10);
+        push_spell(
+            &mut state,
+            original,
+            CardId(1),
+            PlayerId(0),
+            "Shock",
+            draw_ability(original),
+            CastingVariant::Normal,
+        );
+        assert_eq!(state.objects[&original].incarnation, 0);
+        state.current_trigger_event = Some(spell_cast_event(original, None));
+        let events = copy_triggering_source(&mut state);
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "must not copy incarnation 0 on a None pin"
+        );
+        assert_eq!(state.stack[0].id, original);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::EffectResolved { .. })));
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, GameEvent::SpellCopied { .. })));
+    }
+
+    /// CR 712.8a + CR 707.2: copy uses stack-face characteristics, not the
+    /// post-bounce Hand face.
+    #[test]
+    fn copy_from_lki_uses_stack_face_not_hand_face() {
+        let mut state = GameState::new_two_player(42);
+        let original = ObjectId(10);
+        push_spell(
+            &mut state,
+            original,
+            CardId(1),
+            PlayerId(0),
+            "Back Face",
+            draw_ability(original),
+            CastingVariant::Normal,
+        );
+        state.objects.get_mut(&original).unwrap().modal_back_face = true;
+        let pin = state.objects[&original].incarnation;
+        bounce_spell_to_hand(&mut state, original);
+        {
+            let live = state.objects.get_mut(&original).unwrap();
+            live.name = "Front Face".to_string();
+            live.modal_back_face = false;
+        }
+        state.current_trigger_event = Some(spell_cast_event(original, Some(pin)));
+        copy_triggering_source(&mut state);
+        let copy_id = state
+            .stack
+            .iter()
+            .rev()
+            .find(|entry| entry.id != original)
+            .map(|entry| entry.id)
+            .expect("copy of the stack face");
+        let copy = &state.objects[&copy_id];
+        assert_eq!(copy.name, "Back Face");
+        assert!(
+            copy.modal_back_face,
+            "copy must carry the stack-face modal flag"
+        );
+        assert_eq!(state.objects[&original].name, "Front Face");
+    }
+
+    /// CR 608.2h + CR 707.10: empty live stack still copies from stack-object
+    /// LKI, including announced X.
+    #[test]
+    fn empty_stack_lki_still_copies_chosen_x() {
+        let mut state = GameState::new_two_player(42);
+        let original = ObjectId(10);
+        let mut ability = draw_ability(original);
+        ability.chosen_x = Some(4);
+        push_spell(
+            &mut state,
+            original,
+            CardId(1),
+            PlayerId(0),
+            "Draw Spell",
+            ability,
+            CastingVariant::Normal,
+        );
+        let pin = state.objects[&original].incarnation;
+        bounce_spell_to_hand(&mut state, original);
+        assert!(state.stack.is_empty());
+        state.current_trigger_event = Some(spell_cast_event(original, Some(pin)));
+        let events = copy_triggering_source(&mut state);
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(
+            state.stack[0]
+                .ability()
+                .and_then(|ability| ability.chosen_x),
+            Some(4)
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::SpellCopied { .. })));
+    }
+
+    /// SpellCast TriggeringSource miss (no LKI) is EffectResolved, not
+    /// MissingParam.
+    #[test]
+    fn spellcast_triggering_source_miss_is_effect_resolved() {
+        let mut state = GameState::new_two_player(42);
+        let original = ObjectId(10);
+        push_spell(
+            &mut state,
+            original,
+            CardId(1),
+            PlayerId(0),
+            "Shock",
+            draw_ability(original),
+            CastingVariant::Normal,
+        );
+        state.stack.clear();
+        state.objects.get_mut(&original).unwrap().zone = Zone::Hand;
+        state.current_trigger_event = Some(spell_cast_event(original, Some(0)));
+        let events = copy_triggering_source(&mut state);
+        assert!(state.stack.is_empty());
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::EffectResolved { .. })));
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, GameEvent::SpellCopied { .. })));
+    }
+
+    /// CR 608.2h: a departed object that later ceases to exist is still copied
+    /// from stack-object LKI.
+    #[test]
+    fn copy_from_lki_after_object_ceases_to_exist() {
+        let mut state = GameState::new_two_player(42);
+        let original = ObjectId(10);
+        let mut ability = draw_ability(original);
+        ability.chosen_x = Some(7);
+        push_spell(
+            &mut state,
+            original,
+            CardId(1),
+            PlayerId(0),
+            "Draw Spell",
+            ability,
+            CastingVariant::Normal,
+        );
+        let pin = state.objects[&original].incarnation;
+        bounce_spell_to_hand(&mut state, original);
+        state.objects.remove(&original);
+        state.current_trigger_event = Some(spell_cast_event(original, Some(pin)));
+        let events = copy_triggering_source(&mut state);
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(
+            state.stack[0]
+                .ability()
+                .and_then(|ability| ability.chosen_x),
+            Some(7)
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::SpellCopied { .. })));
+    }
+
+    /// Double-bounce: first-cast LKI survives a later recast+bounce.
+    #[test]
+    fn first_cast_lki_survives_double_bounce() {
+        let mut state = GameState::new_two_player(42);
+        let original = ObjectId(10);
+        let mut first = draw_ability(original);
+        first.chosen_x = Some(1);
+        push_spell(
+            &mut state,
+            original,
+            CardId(1),
+            PlayerId(0),
+            "Draw Spell",
+            first,
+            CastingVariant::Normal,
+        );
+        let first_pin = state.objects[&original].incarnation;
+        bounce_spell_to_hand(&mut state, original);
+
+        let mut recast = draw_ability(original);
+        recast.chosen_x = Some(5);
+        state.objects.get_mut(&original).unwrap().zone = Zone::Stack;
+        state.stack.push_back(StackEntry {
+            id: original,
+            source_id: original,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(Box::new(recast)),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        bounce_spell_to_hand(&mut state, original);
+
+        state.current_trigger_event = Some(spell_cast_event(original, Some(first_pin)));
+        copy_triggering_source(&mut state);
+        assert_eq!(
+            state.stack[0]
+                .ability()
+                .and_then(|ability| ability.chosen_x),
+            Some(1),
+            "first-cast trigger still copies first-cast LKI after a later bounce"
         );
     }
 }
