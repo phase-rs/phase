@@ -469,12 +469,13 @@ fn merged_ability_sets(
                 let mut combined = trigger.clone();
                 combined.execute = Some(Box::new(body));
                 triggers.push(combined);
-                trigger_printed_origins.push(augment_origins[printed_occurrence].clone());
+                trigger_printed_origins
+                    .push(augment_origins.get(printed_occurrence).cloned().flatten());
             }
             continue;
         }
         triggers.push(trigger.clone());
-        trigger_printed_origins.push(augment_origins[printed_occurrence].clone());
+        trigger_printed_origins.push(augment_origins.get(printed_occurrence).cloned().flatten());
     }
 
     let statics = augment.base_static_definitions.iter().cloned().collect();
