@@ -5544,7 +5544,7 @@ mod replay_bridge_tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: true,
-            is_token: true,
+            is_token: false,
         })
         .expect("debug create-card should succeed in this fixture");
         assert_eq!(

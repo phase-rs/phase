@@ -37065,13 +37065,13 @@ mod tests {
         state.objects.insert(ObjectId(12), layer_copy);
         let recipient = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(12)]);
         let copy_source = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(10)]);
-        state.add_transient_continuous_effect_with_bindings(
+        let copy_effect_id = state.add_transient_continuous_effect_with_bindings(
             ObjectId(12),
             PlayerId(0),
             Duration::Permanent,
             TargetFilter::SpecificObject { id: ObjectId(12) },
             vec![ContinuousModification::CopyValues {
-                values: Box::new(copied_values),
+                values: Box::new(copied_values.clone()),
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: Some(printed_ref.clone()),
                 token_image_ref: None,
@@ -37082,7 +37082,17 @@ mod tests {
                 duration_subject: Some(copy_source),
             },
         );
-        crate::game::layers::flush_layers(&mut state);
+        crate::game::printed_cards::apply_copiable_values(
+            state
+                .objects
+                .get_mut(&ObjectId(12))
+                .expect("layer-copy recipient exists"),
+            &copied_values,
+            crate::types::ability::CopyEffectInstanceRef {
+                continuous_effect_id: copy_effect_id,
+                modification_index: 0,
+            },
+        );
         let layer_copy = &state.objects[&ObjectId(12)];
         let layer_ref_key = layer_copy.trigger_definition_ref(&layer_copy.trigger_definitions[0]);
 
