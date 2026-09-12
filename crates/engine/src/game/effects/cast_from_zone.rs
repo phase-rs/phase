@@ -1315,6 +1315,7 @@ fn cast_stack_spell_copy_during_resolution(
         controller: ability.controller,
         object_id: copy_id,
         cast_mana_value: Some(obj.spell_mana_value()),
+        incarnation: Some(obj.incarnation),
     });
     let occurrence = crate::game::restrictions::record_spell_cast_from_zone(
         state,

@@ -15900,6 +15900,7 @@ mod tests {
             controller: PlayerId(0),
             object_id: triggering_spell,
             cast_mana_value: None,
+            incarnation: None,
         });
 
         let expr = QuantityExpr::Ref {
@@ -16334,6 +16335,7 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell_id,
             cast_mana_value: Some(6),
+            incarnation: None,
         });
         assert_eq!(
             resolve_quantity_with_targets(&state, &expr, &ability),
@@ -16346,6 +16348,7 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell_id,
             cast_mana_value: None,
+            incarnation: None,
         });
         assert_eq!(
             resolve_quantity_with_targets(&state, &expr, &ability),
@@ -16902,6 +16905,7 @@ mod tests {
             controller: PlayerId(0),
             object_id: target,
             cast_mana_value: None,
+            incarnation: None,
         });
         let event_source_expr = QuantityExpr::Ref {
             qty: QuantityRef::ObjectColorCount {

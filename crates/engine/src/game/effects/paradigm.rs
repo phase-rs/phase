@@ -247,6 +247,7 @@ pub fn cast_paradigm_copy(
         controller,
         object_id: copy_id,
         cast_mana_value: Some(state.objects[&copy_id].spell_mana_value()),
+        incarnation: Some(state.objects[&copy_id].incarnation),
     });
 
     Ok(copy_id)

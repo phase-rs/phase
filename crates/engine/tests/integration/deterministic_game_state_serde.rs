@@ -15,11 +15,11 @@ use engine::types::card_type::CardType;
 use engine::types::definitions::Definitions;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    AutoPassMode, LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileSnapshot,
-    PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry,
-    StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
-    StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TokenProjection,
-    WaitingFor,
+    AutoPassMode, CastingVariant, LandPlayRecord, LiminalEntrant, LiminalEntry,
+    LinkedExileSnapshot, PendingConniveReentry, PersistedGameState, PriorityPassingMode,
+    SpellCastRecord, StackEntry, StackEntryKind, StackObjectLki, StackPaidSnapshot,
+    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
+    StackResolutionPolicy, StackResolutionSession, TokenProjection, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use engine::types::keywords::ProtectionTarget;
@@ -127,6 +127,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_cache", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_copiable_values", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_by_incarnation", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_stack_objects", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::linked_exile_lki", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::ring_level", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::ring_bearer", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -365,6 +366,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "GameState",
         None,
         "lki_by_incarnation",
+        "im::HashMap<im::HashMap>",
+        Classification::Canonical(IM_HASH_MAP_OF_IM_HASH_MAP),
+    );
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "lki_stack_objects",
         "im::HashMap<im::HashMap>",
         Classification::Canonical(IM_HASH_MAP_OF_IM_HASH_MAP),
     );
@@ -1160,7 +1170,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        52,
+        53,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -1674,6 +1684,68 @@ fn build_all_direct_numeric_maps_state() -> GameState {
             im::HashMap::from_iter([(1, second_lki.clone()), (2, first_lki.clone())]),
         ),
     ]);
+    let first_stack_entry = StackEntry {
+        id: ObjectId(1),
+        source_id: ObjectId(1),
+        controller: PlayerId(0),
+        kind: StackEntryKind::Spell {
+            card_id: CardId(1),
+            ability: None,
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 0,
+        },
+    };
+    let second_stack_entry = StackEntry {
+        id: ObjectId(2),
+        source_id: ObjectId(2),
+        controller: PlayerId(1),
+        kind: StackEntryKind::Spell {
+            card_id: CardId(2),
+            ability: None,
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 0,
+        },
+    };
+    state.lki_stack_objects = im::HashMap::from_iter([
+        (
+            ObjectId(1),
+            im::HashMap::from_iter([
+                (
+                    1,
+                    StackObjectLki {
+                        entry: Some(first_stack_entry.clone()),
+                        object: Some(first.clone()),
+                    },
+                ),
+                (
+                    2,
+                    StackObjectLki {
+                        entry: Some(second_stack_entry.clone()),
+                        object: Some(second.clone()),
+                    },
+                ),
+            ]),
+        ),
+        (
+            ObjectId(2),
+            im::HashMap::from_iter([
+                (
+                    1,
+                    StackObjectLki {
+                        entry: Some(second_stack_entry),
+                        object: Some(second.clone()),
+                    },
+                ),
+                (
+                    2,
+                    StackObjectLki {
+                        entry: Some(first_stack_entry),
+                        object: Some(first.clone()),
+                    },
+                ),
+            ]),
+        ),
+    ]);
     state.linked_exile_lki = HashMap::from([
         (
             ObjectId(1),
@@ -1765,6 +1837,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "lki_cache",
         "lki_copiable_values",
         "lki_by_incarnation",
+        "lki_stack_objects",
         "linked_exile_lki",
         "ring_level",
         "ring_bearer",
@@ -1773,7 +1846,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     ];
     assert_eq!(
         direct_fields.len(),
-        41,
+        42,
         "private stack_trigger_firings is covered by its unit test"
     );
     for field in direct_fields {
@@ -1788,7 +1861,11 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
             "{field}: exact key/value membership changed"
         );
     }
-    for field in ["tracked_set_member_causes", "lki_by_incarnation"] {
+    for field in [
+        "tracked_set_member_causes",
+        "lki_by_incarnation",
+        "lki_stack_objects",
+    ] {
         for (outer_key, inner) in before[field].as_object().unwrap() {
             assert_eq!(
                 inner.as_object().map(serde_json::Map::len),

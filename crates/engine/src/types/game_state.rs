@@ -366,6 +366,44 @@ pub struct CombatPhaseSkipState {
     pub active: bool,
 }
 
+/// CR 608.2h + CR 707.2 + CR 707.10 + CR 400.7: last-known stack object for copy
+/// effects, keyed by incarnation so a recast cannot overwrite or be mistaken for
+/// the triggering spell. Both halves are optional because bounce writes the
+/// object then the entry, while a resolution pop writes the entry then the object.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StackObjectLki {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<StackEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<GameObject>,
+}
+
+impl PartialEq for StackObjectLki {
+    fn eq(&self, other: &Self) -> bool {
+        self.entry == other.entry
+            && match (&self.object, &other.object) {
+                (None, None) => true,
+                (Some(left), Some(right)) => {
+                    left.id == right.id
+                        && left.incarnation == right.incarnation
+                        && left.card_id == right.card_id
+                        && left.name == right.name
+                        && left.zone == right.zone
+                        && left.controller == right.controller
+                        && left.owner == right.owner
+                        && left.modal_back_face == right.modal_back_face
+                        && left.transformed == right.transformed
+                        && left.face_down == right.face_down
+                        && left.power == right.power
+                        && left.toughness == right.toughness
+                }
+                _ => false,
+            }
+    }
+}
+
+impl Eq for StackObjectLki {}
+
 /// CR 400.7: Snapshot of an object's characteristics at the time it left a public zone.
 /// Used for event-context resolution when the object is no longer in its original zone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19857,6 +19895,15 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
     pub lki_by_incarnation: im::HashMap<ObjectId, im::HashMap<u64, LKISnapshot>>,
 
+    /// CR 608.2h + CR 707.2 + CR 707.10 + CR 400.7: last-known stack object for
+    /// copy effects, keyed by incarnation so a recast cannot overwrite or be
+    /// mistaken for the triggering spell. Populated at zone-exit cleanup
+    /// (characteristics) and stack-entry removal (choices); cleared with other
+    /// LKI on step transition.
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
+    pub lki_stack_objects: im::HashMap<ObjectId, im::HashMap<u64, StackObjectLki>>,
+
     /// CR 607.2b + CR 603.10e: Last-known "cards exiled with [source]" linkage,
     /// captured when a source with `TrackedBySource` exile links leaves the
     /// battlefield. The live `exile_links` are pruned on battlefield exit
@@ -24641,6 +24688,7 @@ impl GameState {
             lki_cache: im::HashMap::new(),
             lki_copiable_values: HashMap::new(),
             lki_by_incarnation: im::HashMap::new(),
+            lki_stack_objects: im::HashMap::new(),
             linked_exile_lki: HashMap::new(),
             cost_payment_failed_flag: false,
             pending_taps_for_mana_overrides: std::collections::HashMap::new(),
@@ -25699,15 +25747,22 @@ impl GameState {
         // trigger-event-bearing prompt has one of those pending/continuation
         // carriers, and loop samples are taken at the post-pipeline Priority frame.
         let mut referenced_lki = HashSet::new();
-        let mut record_event = |event: &GameEvent| {
-            if let GameEvent::ZoneChanged {
+        let mut record_event = |event: &GameEvent| match event {
+            GameEvent::ZoneChanged {
                 object_id, record, ..
-            } = event
-            {
+            } => {
                 if let Some(incarnation) = record.entered_incarnation {
                     referenced_lki.insert(ObjectIncarnationRef::of(*object_id, incarnation));
                 }
             }
+            GameEvent::SpellCast {
+                object_id,
+                incarnation: Some(incarnation),
+                ..
+            } => {
+                referenced_lki.insert(ObjectIncarnationRef::of(*object_id, *incarnation));
+            }
+            _ => {}
         };
 
         for entry in &clone.stack {
@@ -25795,6 +25850,15 @@ impl GameState {
         }
 
         clone.lki_by_incarnation = std::mem::take(&mut clone.lki_by_incarnation)
+            .into_iter()
+            .filter_map(|(object_id, mut history)| {
+                history.retain(|incarnation, _| {
+                    referenced_lki.contains(&ObjectIncarnationRef::of(object_id, *incarnation))
+                });
+                (!history.is_empty()).then_some((object_id, history))
+            })
+            .collect();
+        clone.lki_stack_objects = std::mem::take(&mut clone.lki_stack_objects)
             .into_iter()
             .filter_map(|(object_id, mut history)| {
                 history.retain(|incarnation, _| {
@@ -26859,6 +26923,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         lki_cache: _,
         lki_copiable_values: _,
         lki_by_incarnation: _,
+        lki_stack_objects: _,
         linked_exile_lki: _,
         cost_payment_failed_flag: _,
         pending_taps_for_mana_overrides: _,
@@ -27180,6 +27245,7 @@ impl PartialEq for GameState {
             && self.lki_cache == other.lki_cache
             && self.lki_copiable_values == other.lki_copiable_values
             && self.lki_by_incarnation == other.lki_by_incarnation
+            && self.lki_stack_objects == other.lki_stack_objects
             && self.city_blessing == other.city_blessing
             && self.enduring_story == other.enduring_story
             && self.planar_deck == other.planar_deck

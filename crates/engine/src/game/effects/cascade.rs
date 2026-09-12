@@ -615,6 +615,7 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell_id,
             cast_mana_value: None,
+            incarnation: None,
         }];
 
         let ts_before = state.next_timestamp;

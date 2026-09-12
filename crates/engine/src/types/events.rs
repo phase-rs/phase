@@ -789,6 +789,11 @@ pub enum GameEvent {
         /// synthetic events that do not carry cast-time characteristics.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cast_mana_value: Option<u32>,
+        /// CR 400.7 + CR 601.2i: incarnation of the spell object at cast/fire.
+        /// `object_id` is storage identity; a bounce+recast reuses the id with a
+        /// new incarnation. `None` is legacy and fail-closed at live-hit sites.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        incarnation: Option<u64>,
     },
     /// CR 702.140c + CR 730.2: A mutating creature spell merged with a target
     /// creature, forming a mutated permanent. Emitted by

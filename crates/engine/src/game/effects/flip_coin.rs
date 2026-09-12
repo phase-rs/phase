@@ -1240,6 +1240,7 @@ mod tests {
             object_id: spell_id,
             card_id: CardId(2),
             cast_mana_value: None,
+            incarnation: None,
         });
 
         let ability = build_resolved_from_def(execute, krark_id, PlayerId(0));
@@ -1324,6 +1325,7 @@ mod tests {
             object_id: spell_id,
             card_id: CardId(2),
             cast_mana_value: None,
+            incarnation: None,
         });
 
         let ability = build_resolved_from_def(execute, krark_id, PlayerId(0));
@@ -1450,6 +1452,7 @@ mod tests {
             object_id: ObjectId(999),
             card_id: CardId(2),
             cast_mana_value: None,
+            incarnation: None,
         });
 
         let ability =
@@ -1490,6 +1493,7 @@ mod tests {
             object_id: ObjectId(999),
             card_id: CardId(2),
             cast_mana_value: None,
+            incarnation: None,
         });
 
         // Lose branch: "that player loses 3 life" — bound to TriggeringPlayer so

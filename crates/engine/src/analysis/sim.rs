@@ -312,6 +312,7 @@ mod tests {
                 controller: PlayerId(0),
                 object_id: ObjectId(22),
                 cast_mana_value: None,
+                incarnation: None,
             },
             GameEvent::PhaseChanged {
                 phase: Phase::BeginCombat,

@@ -3,7 +3,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind, TriggerSourceContext};
-use crate::types::identifiers::{ObjectId, TrackedSetId};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId, LEGACY_INCARNATION};
 use crate::types::keywords::{HexproofFilter, Keyword};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -1773,6 +1773,38 @@ pub fn resolve_effect_player_ref(
     }
 }
 
+/// CR 400.7 + CR 601.2i: pin the spell object that caused a `SpellCast` event.
+/// `None` on the event maps to [`LEGACY_INCARNATION`] so a missing pin never
+/// live-hits incarnation `0`. Non-SpellCast events (including `AbilityActivated`)
+/// return `None`.
+pub(crate) fn spell_cast_pin(event: &GameEvent) -> Option<ObjectIncarnationRef> {
+    match event {
+        GameEvent::SpellCast {
+            object_id,
+            incarnation: Some(incarnation),
+            ..
+        } => Some(ObjectIncarnationRef::of(*object_id, *incarnation)),
+        GameEvent::SpellCast {
+            object_id,
+            incarnation: None,
+            ..
+        } => Some(ObjectIncarnationRef::of(*object_id, LEGACY_INCARNATION)),
+        _ => None,
+    }
+}
+
+/// CR 112.1 + CR 400.7: true only while `pin` still names the live spell object
+/// on the stack. Looks up `pin.object_id`, not an arbitrary object being moved —
+/// do not use this as an event-only gate in `process_one_zone_move`.
+pub(crate) fn spell_cast_anaphor_is_live_on_stack(
+    state: &GameState,
+    pin: ObjectIncarnationRef,
+) -> bool {
+    state.objects.get(&pin.object_id).is_some_and(|live| {
+        live.zone == Zone::Stack && ObjectIncarnationRef::from_object(live) == pin
+    })
+}
+
 /// Extract the source object ID from a trigger event.
 pub(crate) fn extract_source_from_event(
     event: &crate::types::events::GameEvent,
@@ -3474,6 +3506,7 @@ mod tests {
             object_id: spell_id,
             controller: PlayerId(0),
             cast_mana_value: None,
+            incarnation: None,
         });
         assert_eq!(
             resolve_event_context_target(&state, &TargetFilter::StackSpell, ObjectId(20)),

@@ -12,7 +12,8 @@ use crate::types::game_state::MayTriggerOrigin;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, CastingVariant, ExileLink, ExileLinkKind, GameState,
     MayTriggerAutoChoiceKey, PendingCounterPostAction, PendingSpellResolution, StackEntry,
-    StackEntryKind, StackPaidSnapshot, StackResolutionPolicy, TriggerSourceContext, WaitingFor,
+    StackEntryKind, StackObjectLki, StackPaidSnapshot, StackResolutionPolicy, TriggerSourceContext,
+    WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TriggerFiring};
 use crate::types::player::PlayerId;
@@ -532,6 +533,19 @@ fn remove_stack_entry_at_unobserved(
             cause,
         })
         .expect("resolved stack removal must have a live journal cause");
+
+    // CR 405.2 + CR 608.2h + CR 707.2: capture the choices half before the
+    // entry is gone. Do not clone the live GameObject here — on bounce that
+    // object is already post-cleanup. Incarnation is still pre-bump.
+    if let Some(incarnation) = state.objects.get(&entry.id).map(|obj| obj.incarnation) {
+        let history = state.lki_stack_objects.entry(entry.id).or_default();
+        let mut row = history
+            .get(&incarnation)
+            .cloned()
+            .unwrap_or(StackObjectLki::default());
+        row.entry = Some(entry.clone());
+        history.insert(incarnation, row);
+    }
 
     Some(PoppedStackEntry {
         entry,
