@@ -1293,8 +1293,14 @@ mod tests {
         preflight_debug_action(&state, PlayerId(0), &hand_create)
             .expect("off-battlefield creation is synchronous off Priority");
         let token_in_hand = DebugAction::CreateCard {
+            card_name: "Debug Creature".into(),
+            owner: PlayerId(0),
+            zone: Zone::Hand,
+            count: 1,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
             is_token: true,
-            ..hand_create
         };
         let token_zone_error = preflight_debug_action(&state, PlayerId(0), &token_in_hand)
             .expect_err("a debug card-token cannot be created outside the battlefield");
