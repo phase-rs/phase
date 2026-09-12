@@ -46,6 +46,20 @@ pub fn drive_with_response(
     runner: &mut GameRunner,
     action: GameAction,
     targets: &[ObjectId],
+    response: Option<PriorityResponse>,
+) -> Vec<GameEvent> {
+    drive_modal_with_response(runner, action, &[], targets, response)
+}
+
+/// [`drive_with_response`] for a modal spell (CR 700.2): `modes` answers the
+/// `WaitingFor::ModeChoice` window that precedes target selection, as printed
+/// indices. The two share one loop so a driven modal cast reaches the same
+/// windows, in the same order, as every other driven cast.
+pub fn drive_modal_with_response(
+    runner: &mut GameRunner,
+    action: GameAction,
+    modes: &[usize],
+    targets: &[ObjectId],
     mut response: Option<PriorityResponse>,
 ) -> Vec<GameEvent> {
     let mut events = runner.act(action).expect("submit the driven action").events;
@@ -54,6 +68,9 @@ pub fn drive_with_response(
     let mut pending = targets.to_vec();
     for _ in 0..60 {
         let action = match &runner.state().waiting_for {
+            WaitingFor::ModeChoice { .. } => GameAction::SelectModes {
+                indices: modes.to_vec(),
+            },
             WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
             WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(pending.remove(0))),
