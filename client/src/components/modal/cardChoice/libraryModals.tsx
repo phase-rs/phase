@@ -23,6 +23,7 @@ type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
 type RippleBottomOrder = Extract<WaitingFor, { type: "RippleBottomOrder" }>;
+type DigBottomOrder = Extract<WaitingFor, { type: "DigBottomOrder" }>;
 
 export function ReorderableTopChoice({
   cards,
@@ -203,30 +204,29 @@ export function SurveilModal({ data }: { data: SurveilChoice["data"] }) {
   );
 }
 
-/**
- * CR 702.60a + CR 608.2d: Ripple — "put all revealed cards not cast this way on
- * the bottom of your library in any order." The controller drags the uncast
- * pile into their chosen bottom order and confirms; every card goes to the
- * bottom in that sequence (`SelectCards` carrying the full permutation).
- */
-export function RippleBottomOrderModal({
-  data,
+function LibraryBottomOrderModal({
+  cards,
+  title,
+  subtitle,
+  hint,
 }: {
-  data: RippleBottomOrder["data"];
+  cards: ObjectId[];
+  title: string;
+  subtitle: string;
+  hint: string;
 }) {
-  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const scrollRef = useHorizontalScroll<HTMLDivElement>({ drag: false });
-  const [order, setOrder] = useState<ObjectId[]>(data.cards);
+  const [order, setOrder] = useState<ObjectId[]>(cards);
 
   if (!objects) return null;
 
   return (
     <ChoiceOverlay
-      title={t("cardChoice.rippleBottom.title")}
-      subtitle={t("cardChoice.rippleBottom.subtitle", { count: data.cards.length })}
+      title={title}
+      subtitle={subtitle}
       maxWidthClassName="max-w-[38rem] sm:max-w-[48rem] lg:max-w-[58rem]"
       footer={
         <ConfirmButton
@@ -274,10 +274,50 @@ export function RippleBottomOrderModal({
           })}
         </Reorder.Group>
       </div>
-      <p className="mt-1 shrink-0 text-center text-xs text-slate-400">
-        {t("cardChoice.rippleBottom.hint")}
-      </p>
+      <p className="mt-1 shrink-0 text-center text-xs text-slate-400">{hint}</p>
     </ChoiceOverlay>
+  );
+}
+
+/**
+ * CR 702.60a + CR 608.2d: Ripple — "put all revealed cards not cast this way on
+ * the bottom of your library in any order." The controller drags the uncast
+ * pile into their chosen bottom order and confirms; every card goes to the
+ * bottom in that sequence (`SelectCards` carrying the full permutation).
+ */
+export function RippleBottomOrderModal({
+  data,
+}: {
+  data: RippleBottomOrder["data"];
+}) {
+  const { t } = useTranslation("game");
+  return (
+    <LibraryBottomOrderModal
+      cards={data.cards}
+      title={t("cardChoice.rippleBottom.title")}
+      subtitle={t("cardChoice.rippleBottom.subtitle", { count: data.cards.length })}
+      hint={t("cardChoice.rippleBottom.hint")}
+    />
+  );
+}
+
+/**
+ * CR 401.4 + CR 608.2d: Dig rest "in any order" — the controller drags the
+ * unkept looked-at pile into their chosen library-bottom order.
+ */
+export function DigBottomOrderModal({
+  data,
+}: {
+  data: DigBottomOrder["data"];
+}) {
+  const { t } = useTranslation("game");
+  return (
+    <LibraryBottomOrderModal
+      cards={data.cards}
+      title={t("cardChoice.digBottom.title")}
+      subtitle={t("cardChoice.digBottom.subtitle", { count: data.cards.length })}
+      hint={t("cardChoice.digBottom.hint")}
+    />
   );
 }
 

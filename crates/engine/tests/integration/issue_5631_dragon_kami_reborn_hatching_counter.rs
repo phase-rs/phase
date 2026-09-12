@@ -33,7 +33,8 @@
 
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zones;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter};
@@ -194,55 +195,108 @@ fn hatching_counter_lands_on_chosen_exiled_card_not_the_saga() {
         })
         .expect("SelectCards (dig keep) accepted");
 
-    let state = runner.state();
-    let chosen_obj = &state.objects[&chosen];
-    let saga_obj = &state.objects[&saga];
-
-    // DISCRIMINATOR, part 1: the player-selected card is exiled face down with
-    // exactly one hatching counter (CR 122.1 + CR 406.3).
+    // Keep-side HideawayConceal + PutCounter finish BEFORE DigBottomOrder
+    // (CR 608.2c + CR 406.3 + CR 122.1). Face-down + counter 1 must already
+    // be true *during* the rest-order prompt.
+    let rest = match runner.state().waiting_for.clone() {
+        WaitingFor::DigBottomOrder { cards, .. } => cards,
+        other => panic!("expected DigBottomOrder after keep-side conceal/counter, got {other:?}"),
+    };
+    let rest_set: std::collections::HashSet<_> = rest.iter().copied().collect();
+    let expected_rest: std::collections::HashSet<_> = [lib2, lib3].into_iter().collect();
     assert_eq!(
-        chosen_obj.zone,
-        Zone::Exile,
-        "the chosen dug card must be exiled"
+        rest_set, expected_rest,
+        "DigBottomOrder cards are the two unkept looked-at ids"
     );
-    assert!(
-        chosen_obj.face_down,
-        "the exiled dug card must be face down (CR 406.3)"
-    );
-    assert_eq!(
-        chosen_obj.counters.get(&hatching).copied().unwrap_or(0),
-        1,
-        "the chosen exiled card must carry exactly one hatching counter (CR 122.1)"
-    );
-
-    // DISCRIMINATOR, part 2 — the regression direction: the Saga stays on the
-    // battlefield and does NOT catch the hatching counter. Pre-fix the discarded
-    // sibling `ChangeZone { ParentTarget }` / `PutCounter { ParentTarget }` rode
-    // the trigger source, so the counter (and the exile) landed on the Saga.
-    assert_eq!(
-        saga_obj.zone,
-        Zone::Battlefield,
-        "the Saga must remain on the battlefield — the dug card is exiled, not the Saga"
-    );
-    assert!(
-        !saga_obj.face_down,
-        "the Saga must not be turned face down (CR 406.3)"
-    );
-    assert_eq!(
-        saga_obj.counters.get(&hatching).copied().unwrap_or(0),
-        0,
-        "the hatching counter must NOT ride the Saga (the #5631 regression)"
-    );
-
-    // The other two looked-at cards are not exiled (they go to the bottom of the
-    // library) and carry no hatching counter.
-    for &id in &[lib2, lib3] {
-        let obj = &state.objects[&id];
-        assert_ne!(obj.zone, Zone::Exile, "only the chosen card is exiled");
+    {
+        let state = runner.state();
+        let chosen_obj = &state.objects[&chosen];
+        let saga_obj = &state.objects[&saga];
         assert_eq!(
-            obj.counters.get(&hatching).copied().unwrap_or(0),
+            chosen_obj.zone,
+            Zone::Exile,
+            "the chosen dug card must be exiled before the rest-order prompt"
+        );
+        assert!(
+            chosen_obj.face_down,
+            "the exiled dug card must already be face down during DigBottomOrder (CR 406.3)"
+        );
+        assert_eq!(
+            chosen_obj.counters.get(&hatching).copied().unwrap_or(0),
+            1,
+            "the hatching counter must already be on the chosen card during DigBottomOrder (CR 122.1)"
+        );
+        assert_eq!(
+            saga_obj.zone,
+            Zone::Battlefield,
+            "the Saga must remain on the battlefield — the dug card is exiled, not the Saga"
+        );
+        assert!(
+            !saga_obj.face_down,
+            "the Saga must not be turned face down (CR 406.3)"
+        );
+        assert_eq!(
+            saga_obj.counters.get(&hatching).copied().unwrap_or(0),
             0,
-            "an unchosen looked-at card must not receive the counter"
+            "the hatching counter must NOT ride the Saga (the #5631 regression)"
+        );
+        for &id in &[lib2, lib3] {
+            let obj = &state.objects[&id];
+            assert_eq!(
+                obj.zone,
+                Zone::Library,
+                "rest cards stay in the library during DigBottomOrder"
+            );
+            assert!(
+                state.players[0].library.iter().any(|&member| member == id),
+                "{id:?} must still be in P0's library vec during DigBottomOrder"
+            );
+            assert_eq!(
+                obj.counters.get(&hatching).copied().unwrap_or(0),
+                0,
+                "an unchosen looked-at card must not receive the counter"
+            );
+        }
+        // CR 406.3: opponent must not see the exiled face during the prompt.
+        let opponent = filter_state_for_viewer(state, P1);
+        assert_eq!(
+            opponent.objects[&chosen].name, "Hidden Card",
+            "opponent must not see the face-down exiled card's identity during DigBottomOrder"
         );
     }
+
+    // Identity permutation is the discriminator that the conceal/counter
+    // survived the prompt; rest become the library suffix.
+    runner
+        .act(GameAction::SelectCards {
+            cards: rest.clone(),
+        })
+        .expect("identity rest-order permutation");
+
+    let state = runner.state();
+    let library: Vec<_> = state.players[0].library.iter().copied().collect();
+    assert_eq!(
+        &library[library.len() - 2..],
+        rest.as_slice(),
+        "submitted rest order is the library suffix; library = {library:?}"
+    );
+    assert_eq!(state.objects[&chosen].zone, Zone::Exile);
+    assert!(state.objects[&chosen].face_down);
+    assert_eq!(
+        state.objects[&chosen]
+            .counters
+            .get(&hatching)
+            .copied()
+            .unwrap_or(0),
+        1
+    );
+    assert_eq!(
+        state.objects[&saga]
+            .counters
+            .get(&hatching)
+            .copied()
+            .unwrap_or(0),
+        0,
+        "Saga still has no hatching counter after the rest-order submit"
+    );
 }

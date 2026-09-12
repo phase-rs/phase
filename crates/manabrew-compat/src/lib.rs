@@ -1624,6 +1624,9 @@ fn build_prompt_input(
             }))
         }
         WaitingFor::DigChoice { .. } => unsupported_prompt(waiting_for, "local.dig-unsupported"),
+        WaitingFor::DigBottomOrder { .. } => {
+            unsupported_prompt(waiting_for, "local.dig-unsupported")
+        }
         // CR 701.9a: Discard N cards from hand — a bounded selection over a
         // known card set, which is exactly `ChooseCardsInput`. `up_to` (CR
         // 701.9b "discard up to N") lowers the floor to zero rather than

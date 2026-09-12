@@ -12914,6 +12914,29 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         final_cast: Option<ObjectId>,
     },
+    /// CR 608.2d + CR 401.4: Dig rest "in any order" — the ability controller
+    /// announces the permutation of unkept looked-at cards before they are
+    /// placed on the library bottom. The response is `GameAction::SelectCards`
+    /// carrying a permutation of `cards`. Raised only when 2+ rest cards remain
+    /// (`open_dig_library_bottom_order_or_place`). Cards stay in `Zone::Library`
+    /// and in `library_owner`'s library vec until the handler places them
+    /// (CR 701.20b/e).
+    DigBottomOrder {
+        /// CR 608.2d: the ability controller, who announces the order. Never
+        /// `library_owner` (Visions-class Digs look at another player's library).
+        player: PlayerId,
+        /// Owner of the library the rest pile will enter.
+        library_owner: PlayerId,
+        /// Unkept looked-at cards awaiting bottom-placement order. Still in
+        /// `library_owner`'s library until the handler places them.
+        cards: Vec<ObjectId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_id: Option<ObjectId>,
+        /// Threaded Rest-stage / PriorLook / mass-put-all drain. Runs after the
+        /// permutation is placed, not while the prompt is live.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion: Option<BatchCompletion>,
+    },
     /// CR 901.15 + CR 701.22a analogue: Arrange the top N cards of the planar
     /// deck — put exactly `keep_on_top` on top in the submitted order and the
     /// rest on the bottom in any order (Susan Foreman).
@@ -15148,6 +15171,7 @@ impl WaitingFor {
             WaitingFor::ScryChoice { .. } => "ScryChoice",
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
             WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
+            WaitingFor::DigBottomOrder { .. } => "DigBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -15308,6 +15332,7 @@ impl WaitingFor {
             | WaitingFor::ScryChoice { player, .. }
             | WaitingFor::RippleRevealChoice { player, .. }
             | WaitingFor::RippleBottomOrder { player, .. }
+            | WaitingFor::DigBottomOrder { player, .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { player, .. }
             | WaitingFor::RedistributeLifeTotals { player, .. }
             | WaitingFor::CoinFlipKeepChoice { player, .. }
@@ -15763,6 +15788,8 @@ impl WaitingFor {
                 // permutation of the offered pile — the candidate enumerator
                 // only lists {identity}, so `apply()` is the real validator.
                 | WaitingFor::RippleBottomOrder { .. }
+                // CR 401.4 + CR 608.2d: Dig rest permutation of the offered pile.
+                | WaitingFor::DigBottomOrder { .. }
         )
     }
 
@@ -35563,6 +35590,13 @@ mod tests {
             enter_tapped: false,
             enters_attacking: false,
         }));
+        variants.push(Box::new(WaitingFor::DigBottomOrder {
+            player: PlayerId(0),
+            library_owner: PlayerId(0),
+            cards: vec![ObjectId(1), ObjectId(2)],
+            source_id: None,
+            completion: None,
+        }));
         variants.push(Box::new(WaitingFor::SurveilChoice {
             player: PlayerId(0),
             cards: vec![ObjectId(1)],
@@ -35786,7 +35820,7 @@ mod tests {
             mana_reduction: ManaCost::zero(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 39);
+        assert_eq!(variants.len(), 40);
     }
 
     #[test]

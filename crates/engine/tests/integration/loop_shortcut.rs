@@ -5111,8 +5111,8 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // ── the classifier's own reach-guard: the enum was actually found ──
     let total = enum_variants(&enum_src, "WaitingFor").len();
     assert_eq!(
-        total, 136,
-        "`WaitingFor` has 136 variants at this tip, read off the `syn` parse. This number is \
+        total, 137,
+        "`WaitingFor` has 137 variants at this tip, read off the `syn` parse. This number is \
          pinned so a variant REMOVED is as visible as one added; if you added a variant and it \
          carries no `DecisionTemplate`, update this number. A wildly different count means the \
          reader lost its anchor, and every assertion below would then be measuring an empty enum"
@@ -5144,6 +5144,11 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // resolution-choice prompts handled in `engine_resolution_choices`, not shortcut-style
     // templates — so the carrier vec and the `filter_state_for_viewer` redaction loop below are
     // unchanged.
+    // 136 ⇒ 137 is ADJUDICATED: Dig rest "in any order" added `DigBottomOrder { player,
+    // library_owner, cards, source_id, completion }` (CR 608.2d + CR 401.4). Measured, not
+    // inferred: that body holds NO `DecisionTemplate` — it is a resolution-choice permutation
+    // handled in `engine_resolution_choices`, same as `RippleBottomOrder` — so the carrier vec
+    // and the `filter_state_for_viewer` redaction loop below are unchanged.
     // 135 ⇒ 136 is ADJUDICATED: the CR 706.6 die-roll ignore model (Barbarian Class, Pixie
     // Guide, Wyll) added `DieKeepChoice { player, results, ignorable_indices, ignore_count }`.
     // Measured, not inferred from the diff: that body holds NO `DecisionTemplate` (zero matches),

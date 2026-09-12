@@ -14520,16 +14520,20 @@ pub enum PerpetualModification {
     },
 }
 
-/// CR 400.5 + CR 608.2c: The required placement order for a Dig's unkept
-/// cards when its rest destination is a library. `Preserve` retains the
-/// pre-existing encounter order; `Random` consumes engine RNG immediately
-/// before placing the rest pile on the library bottom.
+/// CR 400.5 + CR 608.2c + CR 401.4: The required placement order for a Dig's
+/// unkept cards when its rest destination is a library. `Preserve` retains
+/// encounter order with no prompt; `Random` shuffles the rest pile immediately
+/// before placing it; `PlayerChosen` raises a controller permutation prompt
+/// when two or more cards go to a library position at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DigRestOrder {
     #[default]
     Preserve,
     Random,
+    /// CR 401.4 + CR 608.2d: printed "in any order" — the controller announces
+    /// the rest-pile permutation when 2+ cards are placed into a library.
+    PlayerChosen,
 }
 
 impl DigRestOrder {
