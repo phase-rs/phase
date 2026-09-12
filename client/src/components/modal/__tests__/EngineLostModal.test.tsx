@@ -20,6 +20,9 @@ import { EngineLostModal } from "../EngineLostModal";
 const { exportGameStateDebugZip } = vi.hoisted(() => ({ exportGameStateDebugZip: vi.fn() }));
 vi.mock("../../../services/gameStateExport", () => ({ exportGameStateDebugZip }));
 
+const { copyText } = vi.hoisted(() => ({ copyText: vi.fn() }));
+vi.mock("../../../services/copyText", () => ({ copyText }));
+
 const GAME_ID = "resumable-engine-loss";
 const activeGame = {
   id: GAME_ID,
@@ -40,6 +43,7 @@ function renderModal() {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   cleanup();
   useGameStore.setState({ gameId: null, gameMode: null, gameState: null });
   await clearGame(GAME_ID);
@@ -144,5 +148,79 @@ describe("EngineLostModal", () => {
 
     settle({ kind: "requested", filename: "game-state.zip" });
     expect(await screen.findByRole("button", { name: "Export unconfirmed" })).toBeEnabled();
+  });
+
+  // Fake timers only here: the point is what happens when the earlier export's
+  // reset comes due, which real timers would buy at two seconds of wall clock.
+  it("keeps a later export's result when the earlier export's reset comes due", async () => {
+    vi.useFakeTimers();
+    setGameStoreForTest({ gameId: GAME_ID, gameMode: "ai" });
+    renderModal();
+
+    act(() => notifyEngineLost("submitAction"));
+    const exportButton = screen.getByRole("button", { name: "Export client snapshot" });
+    const exportOnce = async (result: DownloadResult) => {
+      const settled = Promise.resolve(result);
+      exportGameStateDebugZip.mockReturnValueOnce(settled);
+      fireEvent.click(exportButton);
+      // Gate on the commit, not on the mock: the result lands in a promise
+      // continuation React has not rendered yet.
+      await act(async () => {
+        await settled;
+      });
+    };
+
+    await exportOnce({
+      kind: "saved",
+      filename: "game-state.zip",
+      path: "~/Downloads/game-state.zip",
+    });
+    expect(screen.getByRole("button", { name: "Exported" })).toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(1_500));
+    await exportOnce({ kind: "failed", filename: "game-state.zip" });
+    expect(screen.getByRole("button", { name: "Export failed" })).toBeInTheDocument();
+
+    // The first export's reset is due here and has no claim on this result.
+    act(() => vi.advanceTimersByTime(600));
+    expect(screen.getByRole("button", { name: "Export failed" })).toBeInTheDocument();
+
+    // The later export's own reset still clears it.
+    act(() => vi.advanceTimersByTime(1_500));
+    expect(
+      screen.getByRole("button", { name: "Export client snapshot" }),
+    ).toBeInTheDocument();
+  });
+
+  // Same class, same idiom: the copy confirmation shares the two-second reset.
+  it("keeps a later copy's confirmation when the earlier copy's reset comes due", async () => {
+    vi.useFakeTimers();
+    copyText.mockResolvedValue(true);
+    renderModal();
+
+    act(() => notifyEngineLost("submitAction-retry-panic", "panicked at engine.rs:1: broken"));
+    const copyButton = screen.getByRole("button", { name: "Copy diagnostic" });
+    const copyOnce = async () => {
+      const settled = Promise.resolve(true);
+      copyText.mockReturnValueOnce(settled);
+      fireEvent.click(copyButton);
+      await act(async () => {
+        await settled;
+      });
+    };
+
+    await copyOnce();
+    expect(screen.getByRole("button", { name: "Copied!" })).toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(1_500));
+    await copyOnce();
+
+    // The first copy's reset is due here and has no claim on this confirmation.
+    act(() => vi.advanceTimersByTime(600));
+    expect(screen.getByRole("button", { name: "Copied!" })).toBeInTheDocument();
+
+    // The later copy's own reset still clears it.
+    act(() => vi.advanceTimersByTime(1_500));
+    expect(screen.getByRole("button", { name: "Copy diagnostic" })).toBeInTheDocument();
   });
 });

@@ -46,6 +46,47 @@ fn finished_download_report(
     }
 }
 
+/// The downloads wry has requested for one URL and not yet finished. A second
+/// request for the same URL while the first is in flight leaves both
+/// destinations unattributable — wry uniquifies a destination before this
+/// handler sees it, so they name different files, and nothing in a `Finished`
+/// event says which request it belongs to. Only the count survives that, and
+/// no completion gets a fallback destination until the URL is idle again.
+#[cfg(desktop)]
+#[derive(Default)]
+struct OutstandingDownloads {
+    requests: usize,
+    destination: Option<PathBuf>,
+}
+
+#[cfg(desktop)]
+fn stash_download_destination(
+    outstanding: &mut HashMap<String, OutstandingDownloads>,
+    url: String,
+    destination: PathBuf,
+) {
+    let entry = outstanding.entry(url).or_default();
+    entry.requests += 1;
+    entry.destination = (entry.requests == 1).then_some(destination);
+}
+
+/// Consume one outstanding request for `url`, yielding its destination only
+/// when that request was the only one in flight. The last completion drops the
+/// URL, so the map holds live downloads and nothing else.
+#[cfg(desktop)]
+fn take_download_destination(
+    outstanding: &mut HashMap<String, OutstandingDownloads>,
+    url: &str,
+) -> Option<PathBuf> {
+    let entry = outstanding.get_mut(url)?;
+    entry.requests -= 1;
+    let destination = entry.destination.take();
+    if entry.requests == 0 {
+        outstanding.remove(url);
+    }
+    destination
+}
+
 /// Compress a leading home directory to `~`, or report nothing. The page is
 /// remotely served, so an absolute path hands that origin the user's account
 /// name and filesystem layout; home-relative still finds the file. A path
@@ -188,7 +229,8 @@ pub fn run() {
                 // Kick off the audio-device probe before the webview exists so the
                 // verdict is usually cached by the time the page asks for it.
                 audio_probe::prewarm();
-                let download_destinations: Mutex<HashMap<String, PathBuf>> = Mutex::default();
+                let download_destinations: Mutex<HashMap<String, OutstandingDownloads>> =
+                    Mutex::default();
                 // `create: false` on the "main" window in tauri.conf.json defers
                 // window creation to here so we can pin an explicit, always-writable
                 // `data_directory` on Windows. WebView2 otherwise derives its
@@ -237,14 +279,19 @@ pub fn run() {
                                     destination.display()
                                 );
                                 if let Ok(mut destinations) = download_destinations.lock() {
-                                    destinations.insert(url.to_string(), destination.clone());
+                                    stash_download_destination(
+                                        &mut destinations,
+                                        url.to_string(),
+                                        destination.clone(),
+                                    );
                                 }
                             }
                             DownloadEvent::Finished { url, path, success } => {
-                                let stashed = download_destinations
-                                    .lock()
-                                    .ok()
-                                    .and_then(|mut destinations| destinations.remove(url.as_str()));
+                                let stashed = download_destinations.lock().ok().and_then(
+                                    |mut destinations| {
+                                        take_download_destination(&mut destinations, url.as_str())
+                                    },
+                                );
                                 let (path, outcome) =
                                     finished_download_report(path, success, stashed);
                                 eprintln!(
@@ -498,6 +545,81 @@ mod tests {
         );
 
         fs::remove_file(&written).unwrap();
+    }
+
+    /// Two downloads of one URL get different destinations from wry and arrive
+    /// here as two indistinguishable completions. Lending either completion the
+    /// other's destination would report a file the page never asked about, so
+    /// an ambiguous completion carries no destination at all.
+    #[cfg(desktop)]
+    #[test]
+    fn a_repeated_download_url_lends_no_completion_another_requests_destination() {
+        use std::{collections::HashMap, path::PathBuf};
+
+        let url = "blob:https://phase-rs.dev/a";
+        let other = "blob:https://phase-rs.dev/b";
+        let first = PathBuf::from("/downloads/game-state.zip");
+        let second = PathBuf::from("/downloads/game-state (1).zip");
+        let mut outstanding = HashMap::new();
+
+        // One in flight: the destination is this completion's, unambiguously.
+        super::stash_download_destination(&mut outstanding, url.to_owned(), first.clone());
+        assert_eq!(
+            super::take_download_destination(&mut outstanding, url),
+            Some(first.clone())
+        );
+        assert!(outstanding.is_empty(), "a finished url must not be kept");
+
+        // Two in flight for one url: neither completion may claim a destination.
+        super::stash_download_destination(&mut outstanding, url.to_owned(), first.clone());
+        super::stash_download_destination(&mut outstanding, url.to_owned(), second.clone());
+        assert_eq!(
+            super::take_download_destination(&mut outstanding, url),
+            None
+        );
+        assert_eq!(
+            super::take_download_destination(&mut outstanding, url),
+            None
+        );
+        assert!(
+            outstanding.is_empty(),
+            "the last completion must drop the url"
+        );
+
+        // A third request arriving while those two are unresolved is ambiguous
+        // with them, and the url only becomes attributable again once idle.
+        super::stash_download_destination(&mut outstanding, url.to_owned(), first.clone());
+        super::stash_download_destination(&mut outstanding, url.to_owned(), second.clone());
+        super::take_download_destination(&mut outstanding, url);
+        super::stash_download_destination(&mut outstanding, url.to_owned(), first.clone());
+        assert_eq!(
+            super::take_download_destination(&mut outstanding, url),
+            None
+        );
+        assert_eq!(
+            super::take_download_destination(&mut outstanding, url),
+            None
+        );
+        assert!(outstanding.is_empty());
+
+        // Distinct urls never borrow from each other.
+        super::stash_download_destination(&mut outstanding, url.to_owned(), first.clone());
+        super::stash_download_destination(&mut outstanding, other.to_owned(), second.clone());
+        assert_eq!(
+            super::take_download_destination(&mut outstanding, other),
+            Some(second)
+        );
+        assert_eq!(
+            super::take_download_destination(&mut outstanding, url),
+            Some(first)
+        );
+        assert!(outstanding.is_empty());
+
+        // A completion with nothing outstanding has nothing to lend.
+        assert_eq!(
+            super::take_download_destination(&mut outstanding, url),
+            None
+        );
     }
 
     /// The page is remotely served, so the destination it is handed must name

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { TFunction } from "i18next";
 import { Trans, useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
@@ -54,8 +54,12 @@ export function EngineLostModal() {
   const [showDetails, setShowDetails] = useState(false);
   const [copied, setCopied] = useState(false);
   const [exportOutcome, setExportOutcome] = useState<DownloadResult["kind"] | null>(null);
-  // One export at a time: an earlier click's 2s clear timer wipes a later export's result.
+  // One export at a time: two in flight would resolve in either order.
   const [isExporting, setIsExporting] = useState(false);
+  // A later click lands inside the previous one's clear window, so each label
+  // timer has to be cancelled rather than left to wipe the newer result.
+  const copyResetRef = useRef<number | null>(null);
+  const exportResetRef = useRef<number | null>(null);
 
   useEffect(() => {
     // External latch instead of a setState updater with a side effect.
@@ -92,6 +96,14 @@ export function EngineLostModal() {
     };
   }, []);
 
+  useEffect(
+    () => () => {
+      if (copyResetRef.current !== null) window.clearTimeout(copyResetRef.current);
+      if (exportResetRef.current !== null) window.clearTimeout(exportResetRef.current);
+    },
+    [],
+  );
+
   if (!snapshot) return null;
 
   const { reason, panic } = snapshot;
@@ -122,7 +134,8 @@ export function EngineLostModal() {
       return;
     }
     setCopied(true);
-    window.setTimeout(() => setCopied(false), 2000);
+    if (copyResetRef.current !== null) window.clearTimeout(copyResetRef.current);
+    copyResetRef.current = window.setTimeout(() => setCopied(false), 2000);
   };
 
   const handleExport = async () => {
@@ -131,7 +144,8 @@ export function EngineLostModal() {
     // nothing has confirmed must not read as one the player can go find.
     const show = (kind: DownloadResult["kind"]) => {
       setExportOutcome(kind);
-      window.setTimeout(() => setExportOutcome(null), 2000);
+      if (exportResetRef.current !== null) window.clearTimeout(exportResetRef.current);
+      exportResetRef.current = window.setTimeout(() => setExportOutcome(null), 2000);
     };
     setIsExporting(true);
     setExportOutcome(null);
