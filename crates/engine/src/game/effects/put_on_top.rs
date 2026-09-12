@@ -218,6 +218,10 @@ pub fn resolve(
     // ..." it is only the lowering default. So it must neither truncate the
     // placement nor gate a further "choose `count` of them" prompt over the
     // already-chosen targets (which would loop forever and place at most one).
+    // Each chosen target is placed into its OWN owner's library, not the
+    // controller's (CR 400.3: an object that would go to a library other than
+    // its owner's goes to its owner's corresponding zone instead). That routing
+    // is performed by the zone move below, not decided here.
     // Zero chosen targets (CR 107.1c + CR 115.6) falls into the `expected == 0`
     // no-op below.
     //
@@ -229,7 +233,7 @@ pub fn resolve(
     // preserved rather than changed. That helper is left in place for its other
     // callers (`grep -rn is_per_opponent_target_fanout crates/engine/src/`).
     let expected = if ability.multi_target.is_some()
-        && matches!(ability.target_choice_timing, TargetChoiceTiming::Stack)
+        && ability.target_choice_timing == TargetChoiceTiming::Stack
     {
         collected_targets.len()
     } else {

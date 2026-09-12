@@ -10,11 +10,21 @@
 //!
 //! Every card here is staged from its verbatim Oracle text, checked against
 //! `cargo export-cards` at this phase's base commit.
+//!
+//! GREEN-AT-BASE LABELLING (charter standard, `charter-frozen.md`): every row
+//! here that is green at this phase's base says so and names what makes it
+//! non-vacuous. The standard allows three pairings — a paired red-at-base
+//! positive, a mutation probe, or the phase's snapshot gate. THE SNAPSHOT GATE
+//! IS NOT AVAILABLE TO THIS PHASE and is never cited below: it is empty for
+//! this population (none of the 21 census card names appears in any of the 303
+//! `.snap` files), so green there could not witness a regression here. Every
+//! label in this file therefore names a paired red-at-base positive.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -285,6 +295,38 @@ fn swiftgear_drake_places_its_declared_target_on_the_bottom() {
 /// every graveyard empty, the ETB trigger resolves as a no-op and the run
 /// reaches priority without the test answering a target prompt.
 ///
+/// MEASURED BASE OUTCOME (plan matrix row 7 requires this verbatim) AND ITS
+/// MECHANISM. The state half of this row was green at base. That is what the
+/// resolver's branch order says should be impossible, so the mechanism was
+/// determined by running base's `put_on_top.rs` under additive instrumentation.
+/// Verbatim output at base:
+///
+/// ```text
+/// BASEPROBE reached-resolver collected=0 source=ObjectId(5)
+/// BASEPROBE returning-Err expected=1
+/// ```
+///
+/// So at base the trigger DOES reach `put_on_top::resolve`, and the resolver
+/// DOES return `Err(EffectError::InvalidParam("PutAtLibraryPosition requires a
+/// target"))`. Every earlier exit is skipped exactly as a static read predicts:
+/// `collected_targets` is empty; `expected` is `count: Fixed(1)` so the
+/// `expected == 0` arm is skipped; `extract_in_zone()` answers `Some(Graveyard)`
+/// so the `Hand | Library` prompt branch is skipped; and the filter is not
+/// `TargetFilter::Any` so the tutor no-op branch is skipped. The trigger
+/// machinery then SWALLOWS that `EffectError` with no state-observable effect,
+/// which is the only reason the state assertions were green at base.
+///
+/// Base and candidate therefore pass this row for STRUCTURALLY DIFFERENT
+/// REASONS — a swallowed `EffectError` at base, a genuine `expected == 0` no-op
+/// at candidate — so this phase silently repaired a swallowed engine error on
+/// this path.
+///
+/// The `EffectResolved` assertion below is what witnesses that repair, and it
+/// makes this row RED AT BASE rather than green: base returns `Err` before
+/// pushing any event, so no `EffectResolved { PutAtLibraryPosition }` exists in
+/// the stream there. A state-only reading of this row cannot tell the two
+/// apart, which is why it is read through `Outcome::events()`.
+///
 /// Paired positive reach guard:
 /// `swiftgear_drake_places_its_declared_target_on_the_bottom` — "nothing moved
 /// and the run reached Priority" is equally what a fixture whose Drake never
@@ -297,14 +339,34 @@ fn swiftgear_drake_declined_target_resolves_as_noop() {
     let p0_library_before = library(&runner, P0);
     let p1_library_before = library(&runner, P1);
 
-    cast_drake_to_battlefield(&mut runner, drake);
+    // Routed through the fluent driver rather than `cast_drake_to_battlefield`
+    // + `advance_until_stack_empty` because `GameRunner` exposes no event
+    // stream; only `Outcome` does, and the event is this row's discriminator.
+    let outcome = runner.cast(drake).resolve();
+
+    // REACH GUARD: the Drake really entered the battlefield, so its ETB
+    // trigger really was put on the stack.
     assert_eq!(
-        runner.state().objects[&drake].zone,
+        outcome.zone_of(drake),
         Zone::Battlefield,
         "reach guard: the Drake must have entered the battlefield"
     );
-    runner.advance_until_stack_empty();
-
+    // RED AT BASE: base returns `Err(InvalidParam)` from `put_on_top::resolve`
+    // before any event is pushed, and the trigger machinery swallows it. Only
+    // the post-change `expected == 0` arm emits this event.
+    assert!(
+        outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::PutAtLibraryPosition,
+                ..
+            }
+        )),
+        "the declined placement must resolve as a REAL no-op and emit \
+         EffectResolved{{PutAtLibraryPosition}} — base swallows an \
+         InvalidParam here instead; events={:?}",
+        outcome.events()
+    );
     assert_eq!(
         library(&runner, P0),
         p0_library_before,
@@ -316,9 +378,9 @@ fn swiftgear_drake_declined_target_resolves_as_noop() {
         "an empty announced target set must place nothing in P1's library"
     );
     assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
         "the run must reach priority, got {:?}",
-        runner.state().waiting_for
+        outcome.final_waiting_for()
     );
 }
 
@@ -718,6 +780,15 @@ fn bow_of_nylea_mode_four_places_every_chosen_target() {
 /// counter and no graveyard card moves. The counter assertion is the reach
 /// guard for the no-move assertion; together they prove the CHOSEN mode's spec
 /// sizes the slots, rather than a union over every mode.
+///
+/// GREEN AT THIS PHASE'S BASE. Its non-vacuity comes from a PAIRED
+/// RED-AT-BASE POSITIVE on the same modal ability,
+/// `bow_of_nylea_mode_four_places_every_chosen_target`, whose
+/// `library == [lib_pre, g1, g2]` cannot pass at base. That pairing proves the
+/// mode-addressing instrument is live, so "mode 4 placed nothing" here is a
+/// real negative rather than a mode that never resolved. The in-row
+/// `counters(creature, Plus1Plus1) == 1` reach guard is the local support for
+/// that, not the pairing itself.
 #[test]
 fn bow_of_nylea_mode_one_does_not_place_any_card() {
     let (mut runner, bow, graveyard, lib_pre, creature) = bow_board();
@@ -763,6 +834,17 @@ const SCROLL_RACK_ORACLE: &str = "{1}, {T}: Exile any number of cards from your 
 ///
 /// The board exiles TWO cards on purpose: "places exactly the cards it exiled"
 /// is satisfied vacuously by a smoke that exiles none.
+///
+/// GREEN AT THIS PHASE'S BASE. Its non-vacuity comes from a PAIRED
+/// RED-AT-BASE POSITIVE on the same seam — a clause-level spec attached
+/// BENEATH a parent ability — namely
+/// `bow_of_nylea_mode_four_gains_up_to_four_target_set_shape`, whose
+/// `multi_target == Some(up_to(Fixed 4))` reads `null` in the pre-phase corpus.
+/// That row proves a spec minted inside a sub-ability DOES reach
+/// `ResolvedAbility.multi_target`, which is what makes this row's contrary
+/// claim — that Scroll Rack's descendant placement does NOT inherit its
+/// ancestor's spec — a real containment assertion. The in-row `hand contains
+/// l1 && l2` reach guard is the local support, not the pairing itself.
 #[test]
 fn scroll_rack_places_exactly_the_cards_it_exiled() {
     let mut scenario = GameScenario::new();
@@ -800,11 +882,16 @@ fn scroll_rack_places_exactly_the_cards_it_exiled() {
     for _ in 0..64 {
         match runner.state().waiting_for.clone() {
             WaitingFor::EffectZoneChoice { cards, count, .. } => {
-                let chosen: Vec<ObjectId> = if declared.iter().all(|d| cards.contains(d)) {
-                    std::mem::take(&mut declared)
-                } else {
-                    cards.iter().copied().take(count).collect()
-                };
+                // `!declared.is_empty()` FIRST: once the first prompt has
+                // taken `declared`, `[].iter().all(..)` is vacuously TRUE, so
+                // without this guard a later prompt would select the empty vec
+                // instead of falling through to `cards.take(count)`.
+                let chosen: Vec<ObjectId> =
+                    if !declared.is_empty() && declared.iter().all(|d| cards.contains(d)) {
+                        std::mem::take(&mut declared)
+                    } else {
+                        cards.iter().copied().take(count).collect()
+                    };
                 runner
                     .act(GameAction::SelectCards { cards: chosen })
                     .expect("EffectZoneChoice selection must be accepted");
@@ -858,11 +945,23 @@ const DRAFNAS_RESTORATION_ORACLE: &str = "Put any number of target artifact card
 /// records whether that reference is bound to the declared player at
 /// slot-enumeration time.
 ///
-/// The recorded observation is asserted so the tree carries it: with P1 chosen
-/// as the target player, the object slots offer P1's artifact cards. If a later
-/// change moves this, the assertion below is where it surfaces.
+/// Records the observation at the INITIAL target prompt: both graveyards'
+/// artifact cards are offered, so the `Owned { TargetPlayer }` reference is NOT
+/// narrowed to a declared player at slot enumeration. No target player is
+/// chosen by this row — it inspects the prompt and never submits a
+/// `SelectTargets`. Update it when that binding is fixed (residue R-1).
+///
+/// GREEN AT THIS PHASE'S BASE. Its non-vacuity comes from a PAIRED
+/// RED-AT-BASE POSITIVE in the same class — placement into a NON-controller's
+/// library out of a targeted graveyard — namely
+/// `misinformation_places_all_chosen_cards_into_that_opponents_library`, whose
+/// `library(P1) == [o1, o2, o3, p1_lib]` cannot pass at base. That pairing
+/// proves the cross-player placement instrument is live. The three in-row reach
+/// guards (non-empty `target_slots`, an offered `TargetRef::Player(P1)` slot,
+/// and a non-empty set of object slots) are the local support, not the pairing
+/// itself.
 #[test]
-fn drafnas_restoration_binds_the_declared_target_player_at_slot_enumeration() {
+fn drafnas_restoration_known_bad_target_player_owner_unbound_at_slot_enumeration() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(
@@ -960,5 +1059,222 @@ fn drafnas_restoration_binds_the_declared_target_player_at_slot_enumeration() {
         "RECORDED: the caster's own artifact card is offered too, so the \
          `Owned {{ TargetPlayer }}` reference is unbound at slot enumeration. \
          object_slots={object_slots:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// MED-2 follow-up — Once and Future (RECORDED, NOT GATES).
+// ---------------------------------------------------------------------------
+
+const ONCE_AND_FUTURE_ORACLE: &str = "Return target card from your graveyard to your hand. Put up \
+     to one other target card from your graveyard on top of your library. Exile Once and Future.\n\
+     Adamant — If at least three green mana was spent to cast this spell, instead return those \
+     cards to your hand and exile Once and Future.";
+
+/// Once and Future in P0's hand, two cards in P0's graveyard, one pre-existing
+/// library card so a top placement is observable, and a mana pool of THREE
+/// COLORLESS plus ONE GREEN.
+///
+/// The pool's colours are load-bearing: the card's Adamant rider replaces the
+/// whole effect when at least three GREEN mana was spent, so paying `{3}` with
+/// green would silently exercise the replacement branch instead of the
+/// placement branch these rows are about.
+///
+/// Returns `(runner, once_and_future, g1, g2, lib_pre)`.
+fn once_and_future_board() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut pool = colorless(3);
+    pool.push(ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]));
+    scenario.with_mana_pool(P0, pool);
+    let g1 = scenario
+        .add_creature_to_graveyard(P0, "Grave Bear A", 2, 2)
+        .id();
+    let g2 = scenario
+        .add_creature_to_graveyard(P0, "Grave Bear B", 2, 2)
+        .id();
+    let lib_pre = scenario.add_card_to_library_top(P0, "Library Pre-existing");
+    let once_and_future = scenario
+        .add_spell_to_hand_from_oracle(P0, "Once and Future", false, ONCE_AND_FUTURE_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Green],
+        })
+        .id();
+    let mut runner = scenario.build();
+    grant_priority(&mut runner, P0);
+    (runner, once_and_future, g1, g2, lib_pre)
+}
+
+/// KNOWN-BAD STRUCTURAL RECORD — Once and Future's placement clause is not
+/// reachable from slot enumeration, so this phase cannot resize it.
+///
+/// CR 601.2c's multi-instance paragraph ("if the spell uses the word 'target'
+/// in multiple places, the same object or player can be chosen once for each
+/// instance") plus CR 115.1 would have this card announce TWO target sets: one
+/// required for "return target card", one `0..=1` for "put up to one OTHER
+/// target card". The engine announces ONE.
+///
+/// WHY. The parser lowers the card around its Adamant rider: the root is the
+/// "return target card" `ChangeZone`, the root's `sub_ability` is the Adamant
+/// `ConditionInstead` node, and the placement clause is that node's
+/// `else_ability`. `collect_target_slots_inner` (`game/ability_utils.rs`)
+/// recurses into `sub_ability` only — it never visits `else_ability` — so the
+/// placement's slot is never minted.
+///
+/// WHAT THIS PHASE DOES TO THE CARD. The parser change DOES attach
+/// `multi_target = up_to(Fixed(1))` to that `else_ability` node. Nothing reads
+/// it: with no slot, `ability.targets` stays empty and the node falls back to
+/// its parent's single target, so `put_on_top::resolve` computes
+/// `expected == 1` both ways — `collected_targets.len()` post-change,
+/// `count: Fixed(1)` at base. The phase is OBSERVATIONALLY INERT on this card,
+/// which is why it is owed no behavioural row.
+///
+/// GREEN AT THIS PHASE'S BASE, and base-independently so: this phase does not
+/// touch `collect_target_slots_inner`, so the slot count is one on both sides.
+/// Its non-vacuity comes from the reach guard that the cast reached a target
+/// prompt at all, paired with the positive assertion that the single offered
+/// slot is the RETURN clause's — it offers BOTH graveyard cards, which the
+/// placement's `Another` filter could not.
+///
+/// Update this row when `else_ability` target slots are minted; the slot count
+/// is then 2 and the sibling row below stops recording a defect.
+#[test]
+fn once_and_future_known_bad_else_ability_placement_gets_no_target_slot() {
+    let (mut runner, once_and_future, g1, g2, _lib_pre) = once_and_future_board();
+    let card_id = runner.state().objects[&once_and_future].card_id;
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: once_and_future,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("begin Once and Future cast");
+
+    let target_slots = match runner.state().waiting_for.clone() {
+        WaitingFor::TargetSelection { target_slots, .. } => target_slots,
+        other => panic!("Once and Future must stop at its target prompt, got {other:?}"),
+    };
+    // REACH GUARD: a prompt with slots exists at all, so the count below is not
+    // read off a cast that never announced anything.
+    assert!(
+        !target_slots.is_empty(),
+        "reach guard: the cast must offer at least one target slot"
+    );
+    // POSITIVE / DISCRIMINATOR: the one slot that IS minted belongs to the
+    // RETURN clause, identified by the slot's own `effect_kind`. A slot minted
+    // for the placement clause would carry
+    // `EffectKind::PutAtLibraryPosition`; this one carries
+    // `EffectKind::ChangeZone` (destination Hand). This is what proves the
+    // instrument read the right prompt.
+    //
+    // NOTE for a later reader: the placement filter's `Another` property does
+    // NOT distinguish the two graveyard cards and must not be used here.
+    // `FilterProp::Another` (`game/filter.rs`) has TWO branches: it is
+    // recipient-relative when the evaluation carries a `recipient_id` (CR
+    // 613.4c, per-recipient layer contexts), and source-relative otherwise.
+    // Target-slot enumeration during a cast carries no `recipient_id`, so the
+    // source-relative branch is the one that applies here — and neither
+    // graveyard card is the source, so a placement slot would offer BOTH.
+    // Either way it is never relative to the SIBLING clause's declared target,
+    // which is what the Oracle's "one OTHER target card" means. That
+    // distinctness constraint is not expressed by this lowering.
+    assert_eq!(
+        target_slots[0].effect_kind,
+        EffectKind::ChangeZone,
+        "the minted slot must be the RETURN clause's, got {:?}",
+        target_slots[0]
+    );
+    assert!(
+        !target_slots
+            .iter()
+            .any(|slot| slot.effect_kind == EffectKind::PutAtLibraryPosition),
+        "no slot may belong to the placement clause, got {target_slots:?}"
+    );
+    // The return clause's filter admits both graveyard cards, so the fixture is
+    // not degenerate: the prompt really had a choice to make.
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(g1))
+            && target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(g2)),
+        "the return slot must offer both graveyard cards, got {:?}",
+        target_slots[0].legal_targets
+    );
+    // RECORDED: one slot, not two. CR 601.2c would announce a second,
+    // `0..=1`-sized set for "put up to one other target card".
+    assert_eq!(
+        target_slots.len(),
+        1,
+        "RECORDED: the `else_ability` placement clause mints no target slot, so only \
+         the return clause's slot is announced, got {target_slots:?}"
+    );
+}
+
+/// KNOWN-BAD RUNTIME RECORD, PRE-EXISTING and NOT caused by this phase — the
+/// card's declared return target ends on top of the library instead of in hand.
+///
+/// With one target declared, Once and Future should put that card in P0's hand
+/// (CR 115.1: the declared target is what the effect affects) and place nothing,
+/// because no second target was announced for "up to one other target card".
+/// Instead the slot-less placement clause falls back to the parent's target and
+/// places it, so the card never reaches hand.
+///
+/// This is the runtime face of the structural defect recorded by
+/// `once_and_future_known_bad_else_ability_placement_gets_no_target_slot`, and
+/// it is GREEN AT THIS PHASE'S BASE — DERIVED, not measured on a base build,
+/// so it is stated with its derivation. `put_on_top::resolve` finishes
+/// computing `collected_targets` before it first reads `multi_target`, and
+/// `targeting::resolved_targets` never consults `multi_target` at all, so
+/// `collected_targets` is identical on both sides. The sides therefore differ
+/// only in where `expected` comes from: `collected_targets.len()` post-change
+/// versus `count: Fixed(1)` at base. Exactly one card is placed here
+/// post-change, so `collected_targets.len() == 1 == count` and the two
+/// outcomes coincide.
+///
+/// REACH GUARDS. `zone_of(once_and_future) == Exile` proves the spell resolved
+/// rather than fizzling, and `library[0] == g1` proves the ADAMANT branch did
+/// NOT apply — that branch is a `Bounce` to hand and cannot place anything in a
+/// library, so a library placement witnesses the `else_ability` running.
+///
+/// Update this row when the return clause keeps its own target.
+#[test]
+fn once_and_future_known_bad_declared_return_target_is_placed_instead_of_returned() {
+    let (mut runner, once_and_future, g1, g2, lib_pre) = once_and_future_board();
+
+    let outcome = runner.cast(once_and_future).target_objects(&[g1]).resolve();
+
+    // REACH GUARD: the spell resolved.
+    assert_eq!(
+        outcome.zone_of(once_and_future),
+        Zone::Exile,
+        "reach guard: Once and Future exiles itself on resolution"
+    );
+    // REACH GUARD + RECORDED: a library placement can only come from the
+    // `else_ability`, so this also proves Adamant was correctly not applied.
+    assert_eq!(
+        library(&runner, P0),
+        vec![g1, lib_pre],
+        "RECORDED: the declared RETURN target is placed on top of the library by the \
+         slot-less placement clause"
+    );
+    // RECORDED: the defect proper — "return target card ... to your hand" put
+    // nothing in hand.
+    assert!(
+        runner.state().players[P0.0 as usize].hand.is_empty(),
+        "RECORDED: nothing reaches hand, though the return clause declared a target; \
+         hand={:?}",
+        runner.state().players[P0.0 as usize].hand
+    );
+    // HOSTILE: the undeclared second graveyard card must not be swept in. This
+    // half is a genuine pass, not a record.
+    assert_eq!(
+        outcome.zone_of(g2),
+        Zone::Graveyard,
+        "the second graveyard card was never announced and must not move"
     );
 }

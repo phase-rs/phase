@@ -17487,7 +17487,7 @@ fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
 ///     …": an ANNOUNCED target set (CR 601.2c). The number of targets is fixed
 ///     at announcement, so the placement set is the chosen targets and `count`
 ///     is deliberately left alone.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 enum LibraryPlacementCardinality {
     Unstated,
     Exact(QuantityExpr),
@@ -17689,8 +17689,15 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
             // per-opponent fanout spec — then this one), so an outer authority wins
             // without this seam having to know about it.
             //
-            // The `is_none()` check is defensive: `lower_imperative_clause` above
-            // runs the post-parse multi-target fixups, but each of them gates on
+            // The `is_none()` check ENCODES THAT PRECEDENCE — it is not input
+            // validation, so do not delete it as unreachable-therefore-dead. It
+            // is the rule itself: a clause-level spec must never overwrite a
+            // spec an outer authority already set.
+            //
+            // It is also unreachable TODAY, and that is a separate fact about
+            // the current call graph rather than a reason to drop the rule:
+            // `lower_imperative_clause` above runs the post-parse multi-target
+            // fixups, but each of them gates on
             // `MULTI_TARGET_VERBS` — three (`extract_exact_target_multi_target`,
             // `extract_bounded_target_multi_target`,
             // `extract_optional_target_multi_target`) directly, and
