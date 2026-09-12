@@ -353,6 +353,31 @@ fn quantity_marker(input: &str) -> OracleResult<'_, QuantityMarker> {
 /// shapes an amount is actually written with — not a blocklist of the words above — so
 /// it covers the class rather than the cards that exhibit it today. It is used under
 /// `peek`, so it identifies the multiplicand without consuming it.
+///
+/// Three genuinely arithmetic senses the allowlist refuses today, recorded so they are
+/// not re-derived. None is a gap node, so nothing is lost yet:
+///
+/// * a bare "instead" — "copy that spell twice instead" (Increasing Vengeance, Sea Gate
+///   Stormcaller, Tomb of Horrors Adventurer), "investigate twice instead" (Secrets of
+///   the Key), "proliferate twice instead" (Tekuthal, Inquiry Dominus): 5 corpus sites,
+///   numeric but naming no multiplicand;
+/// * "of" — "exiles the top half of their library" (Ulamog, the Defiler): 1 site, where
+///   `half` HEADS a noun phrase instead of operating on one;
+/// * "for" — "investigate twice for each card discarded this way" (Tamiyo Meets the
+///   Story Circle): 1 site, where the multiplicand is reached through a `for each`
+///   clause rather than through a determiner.
+///
+/// "one and one-half mana" (City of Ass) is deliberately NOT in that list, and the
+/// reason is a BOUNDARY rule rather than a sense rule — the two notions of "word
+/// boundary" differ. A regex `\b` fires after the hyphen in "one-half", but
+/// `scan_preceded` retries only at WHITESPACE-delimited boundaries, so "half" never
+/// starts a token there and no marker fires at all.
+///
+/// KNOWN ASYMMETRY, not an oversight: `this`/`each` dispatch on the following noun via
+/// [`this_or_each_on_an_amount`], so "twice this turn" / "twice each turn" are refused
+/// as adverbial frequencies, but `tag("that ")` admits "that turn" unconditionally. It
+/// is latent rather than wrong — no card's Oracle text contains "<multiplier> that turn"
+/// today; the raw corpus hits for that phrase are all in `rulings`.
 fn multiplicand_head(input: &str) -> OracleResult<'_, ()> {
     alt((
         // Definite and anaphoric determiners: "double THAT damage", "twice THE number
@@ -378,9 +403,19 @@ fn multiplicand_head(input: &str) -> OracleResult<'_, ()> {
 }
 
 /// Nom combinator: a possessive determiner formed with the possessive clitic —
-/// "double ~'S power", "half OKAUN'S life total". The owner token is open-class (a
-/// card name or the self-reference), so it is taken up to the clitic rather than
-/// enumerated; [`multiplicand_head`] lists the clitic-less possessives separately.
+/// "double ~'S power". The owner is open-class, so it is taken rather than enumerated;
+/// [`multiplicand_head`] lists the clitic-less possessives separately.
+///
+/// The owner is bounded to ONE whitespace-delimited token: `take_till1` stops at the
+/// first whitespace *or* clitic, whichever comes first, so a multi-word owner is
+/// refused. That bound is sufficient because `oracle_util::normalize_card_name_refs`
+/// rewrites a card's reference to itself — full name, comma-form short name, and the
+/// `SELF_REF_TYPE_PHRASES` ("this creature", "this artifact") — to `~` before the
+/// diagnoser ever sees the clause. Casey Jones, Asphalt Hooligan ("Double Casey Jones's
+/// power"), Targ Nar, Demon-Fang Gnoll and Tifa Lockhart each print a multi-word owner
+/// and each reach this arm as "double ~'s power". Measured over the corpus: all 7 sites
+/// this arm accepts are `~'s` and none presents a multi-word owner, so the single-token
+/// bound is LATENT — reachable only by a clitic owner that is not the card itself.
 fn possessive_clitic_determiner(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
