@@ -17610,6 +17610,7 @@ fn resolve_add_pending_enters_modifications(
 mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
+    use crate::types::events::{TapCause, TapCostKind};
 
     /// Issue #8762: the counter rider branch's tail allowlist is a POLICY pin —
     /// it admits only the families `counter_rider_tail_8762` drives end to end
@@ -18859,7 +18860,7 @@ mod tests {
         }
         let events = vec![GameEvent::PermanentTapped {
             object_id: creature,
-            caused_by: None,
+            cause: TapCause::CostPayment(TapCostKind::TapSymbol),
         }];
         let referent = parent_referent_context_from_events(&state, &events)
             .expect("a single tapped creature must be captured as the anaphoric referent");
@@ -18902,11 +18903,11 @@ mod tests {
         let events = vec![
             GameEvent::PermanentTapped {
                 object_id: a,
-                caused_by: None,
+                cause: TapCause::CostPayment(TapCostKind::TapSymbol),
             },
             GameEvent::PermanentTapped {
                 object_id: b,
-                caused_by: None,
+                cause: TapCause::CostPayment(TapCostKind::TapSymbol),
             },
         ];
         assert!(
@@ -19040,11 +19041,11 @@ mod tests {
         let events = vec![
             GameEvent::PermanentTapped {
                 object_id: creature,
-                caused_by: None,
+                cause: TapCause::CostPayment(TapCostKind::TapSymbol),
             },
             GameEvent::PermanentTapped {
                 object_id: creature,
-                caused_by: None,
+                cause: TapCause::CostPayment(TapCostKind::TapSymbol),
             },
         ];
         let referent = parent_referent_context_from_events(&state, &events)

@@ -5,18 +5,19 @@ use serde::{Deserialize, Serialize};
 use super::counter::CounterType;
 
 use super::ability::{
-    AbilityTag, AttachmentKind, CostPaidObjectSnapshot, EffectKind, FilterProp, TargetFilter,
-    TargetRef, ThisWayCause, TypeFilter, TypedFilter,
+    AbilityTag, AdditionalCostOrigin, AttachmentKind, CostPaidObjectSnapshot, EffectKind,
+    FilterProp, TargetFilter, TargetRef, ThisWayCause, TypeFilter, TypedFilter,
 };
 use super::card::PrintedCardRef;
 use super::card_type::{CardType, CoreType, Supertype};
-use super::game_state::{TriggerSourceContext, ZoneChangeRecord};
+use super::game_state::{ConvokeMode, TriggerSourceContext, ZoneChangeRecord};
 use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use super::keywords::Keyword;
 use super::mana::ManaCost;
 use super::mana::{ManaColor, ManaType};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
+use super::statics::CrewAction;
 use super::stickers::StickerKind;
 use super::zones::Zone;
 
@@ -751,6 +752,40 @@ impl EventObjectSnapshot {
     }
 }
 
+/// CR 701.26 + CR 603.2e: why a permanent became tapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum TapCause {
+    /// CR 508.1f: tapping as part of declaring attackers is not a cost.
+    AttackDeclaration,
+    /// CR 601.2h + keyword 702.x / CR 118.3: tapped to pay a cost.
+    CostPayment(TapCostKind),
+    /// CR 701.26: an effect instructed the tap. `source` is the effect source.
+    Effect { source: ObjectId },
+}
+
+/// Nested cost kind for [`TapCause::CostPayment`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum TapCostKind {
+    /// `{T}` / intrinsic land tap / auto-tap mana fallback.
+    TapSymbol,
+    /// CR 601.2b TapCreatures additional/activation/mana cost.
+    /// `origin: Some(Teamwork)` is Hill's identity (consumed in Phase 2).
+    TapCreatures {
+        origin: Option<AdditionalCostOrigin>,
+    },
+    /// CR 702.51a Convoke / CR 701.67a Waterbend / CR 702.126a Improvise.
+    /// `ConvokeMode::Delve` (CR 702.66a) is unreachable at any tap site.
+    ManaShard(ConvokeMode),
+    /// CR 702.122b Crew / CR 702.171c Saddle / CR 702.184a Station.
+    CrewFamily(CrewAction),
+    /// CR 702.154a Enlist.
+    Enlist,
+    /// CR 702.180a Harmonize.
+    Harmonize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
@@ -953,10 +988,9 @@ pub enum GameEvent {
     },
     PermanentTapped {
         object_id: ObjectId,
-        /// The source that caused the tap, if tapped by an external effect.
-        /// `None` for self-initiated taps (mana abilities, attacking, crew, costs).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        caused_by: Option<ObjectId>,
+        /// CR 701.26 + CR 603.2e: why this permanent became tapped.
+        /// Bound at tap time; never re-derived at trigger matching.
+        cause: TapCause,
     },
     /// CR 701.43a + CR 701.43d: A creature was exerted as it attacked. Fires the
     /// linked `TriggerMode::Exerted` "when you do" trigger (Combat Celebrant,

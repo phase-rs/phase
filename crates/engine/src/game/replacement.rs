@@ -12252,6 +12252,7 @@ mod tests {
             (
                 ProposedEvent::Tap {
                     object_id: ObjectId(1),
+                    source_id: ObjectId(2),
                     applied: HashSet::new(),
                 },
                 vec![ReplacementEvent::Tap],

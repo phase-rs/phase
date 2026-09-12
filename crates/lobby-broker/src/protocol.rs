@@ -56,6 +56,12 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 71 — `GameEvent::PermanentTapped` retyped `caused_by: Option<ObjectId>` to
+///      `cause: TapCause`, and `ProposedEvent::Tap` gained required `source_id`
+///      so a replacement-paused tap can stamp `TapCause::Effect`. Neither field
+///      carries `#[serde(default)]` / an alias; a v70 peer cannot decode a v71
+///      `GameEvent` or `PendingReplacement.proposed` payload. P2P moves in
+///      lockstep; lobby messages are unchanged.
 /// 70 — `OutsideGameChoiceSource::BoosterPack` replaced its `set_code: String`
 ///      with a required `origin: PackOrigin` (`Set(code)` or `Cube`), so a
 ///      `WaitingFor::OutsideGameChoice` for an opened pack no longer decodes
@@ -432,7 +438,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 70;
+pub const PROTOCOL_VERSION: u32 = 71;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1508,12 +1514,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 70);
+        assert_eq!(PROTOCOL_VERSION, 71);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 69);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 70);
     }
 
     #[test]

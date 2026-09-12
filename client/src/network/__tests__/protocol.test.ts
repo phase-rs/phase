@@ -71,8 +71,8 @@ const PREVIEW_ANSWER = {
 } as never;
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v53", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(53);
+  it("pins the P2P wire protocol to v54", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(54);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {

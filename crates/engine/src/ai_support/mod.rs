@@ -29,7 +29,7 @@ use crate::types::ability::{
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
-use crate::types::events::{GameEvent, ManaTapState};
+use crate::types::events::{GameEvent, ManaTapState, TapCause, TapCostKind};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, GameState, MulliganDecisionPhase, PayCostKind,
     PendingMulliganAction, PriorityPassingMode, WaitingFor,
@@ -1062,7 +1062,7 @@ fn resolve_mana_option_for_trigger_probe(
                 obj.tapped = true;
                 events.push(GameEvent::PermanentTapped {
                     object_id: option.object_id,
-                    caused_by: None,
+                    cause: TapCause::CostPayment(TapCostKind::TapSymbol),
                 });
             }
         }

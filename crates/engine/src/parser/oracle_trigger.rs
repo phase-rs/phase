@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{alpha1, one_of, space1};
+use nom::character::complete::{alpha1, one_of, space0, space1};
 use nom::combinator::{all_consuming, consumed, eof, map, not, opt, peek, recognize, rest, value};
 use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
@@ -65,7 +65,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
-use crate::types::events::{ClashResult, PlayerActionKind};
+use crate::types::events::{ClashResult, PlayerActionKind, TapCause, TapCostKind};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
@@ -13668,6 +13668,30 @@ fn try_parse_event(
             SimpleEvent::BecomesTapped => {
                 def.mode = TriggerMode::Taps;
                 def.valid_card = Some(subject.clone());
+                // remaining is the suffix after tag("becomes tapped"|"become tapped")
+                // on already-lowercased `rest`. Modelled "to pay" BEFORE the turn
+                // peel so a Teamwork qualifier is not dropped as unused remainder.
+                let remaining_after_pay =
+                    match preceded(space0, parse_modelled_to_pay_cause).parse(remaining) {
+                        Ok((after, cause)) => {
+                            // CR 702.194a + CR 603.2: bind a modelled "to pay a
+                            // teamwork cost" qualifier onto the required cause.
+                            def.tap_cause = Some(cause);
+                            after
+                        }
+                        Err(_) => {
+                            if preceded(space0, tag::<_, _, OracleError<'_>>("to pay "))
+                                .parse(remaining)
+                                .is_ok()
+                            {
+                                // Unmodelled "to pay …" — refuse this event family.
+                                // CR 603.2: do not emit a different (unqualified)
+                                // trigger event.
+                                return None;
+                            }
+                            remaining
+                        }
+                    };
                 // CR 603.2e: a "becomes tapped" trigger event may carry a "during
                 // your turn" turn restriction (Captain America, Living Legend —
                 // "Whenever a creature you control becomes tapped during your turn,
@@ -13681,7 +13705,7 @@ fn try_parse_event(
                 // LEADING prefix (boundary-checked), not an all-consuming peel.
                 // Builds for the class — any "<subject> becomes tapped during
                 // your/opponent's turn" trigger.
-                if let Some(constraint) = parse_leading_turn_constraint(remaining) {
+                if let Some(constraint) = parse_leading_turn_constraint(remaining_after_pay) {
                     def.constraint = Some(constraint);
                 }
             }
@@ -20137,6 +20161,25 @@ fn parse_during_turn_spec(input: &str) -> OracleResult<'_, TriggerConstraint> {
         ),
     ))
     .parse(input)
+}
+
+/// CR 702.194a + CR 603.2: modelled "to pay [a/an] <origin> cost(s)" tail.
+/// Only Teamwork is modelled today (the printed class). Unlisted origin names
+/// must fail this combinator so the caller can refuse the `to pay` prefix.
+fn parse_modelled_to_pay_cause(input: &str) -> OracleResult<'_, TapCause> {
+    let (input, _) = tag("to pay ").parse(input)?;
+    let (input, _) = opt(alt((tag("a "), tag("an ")))).parse(input)?;
+    // Origin axis: only Teamwork is modelled. A 1-tuple `alt` is not a nom
+    // Alt impl; `value` is the same axis and stays the insertion point for
+    // a future modelled origin (do not bind Bargain/Kicker without print).
+    let (input, origin) = value(AdditionalCostOrigin::Teamwork, tag("teamwork")).parse(input)?;
+    let (input, _) = alt((tag(" cost"), tag(" costs"))).parse(input)?;
+    Ok((
+        input,
+        TapCause::CostPayment(TapCostKind::TapCreatures {
+            origin: Some(origin),
+        }),
+    ))
 }
 
 /// CR 603.1: match a "during `<your/opponent's>` turn" restriction at the START of

@@ -8,7 +8,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::static_kind_present;
 use crate::types::ability::{StaticDefinition, TargetFilter, TargetRef};
 use crate::types::card_type::{CoreType, Supertype};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, TapCause};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
@@ -5603,7 +5603,8 @@ pub(super) fn commit_attack_declaration(
                 obj.tapped = true;
                 events.push(GameEvent::PermanentTapped {
                     object_id: id,
-                    caused_by: None,
+                    // CR 508.1f: tapping a creature when declared as an attacker isn't a cost.
+                    cause: TapCause::AttackDeclaration,
                 });
             }
         }

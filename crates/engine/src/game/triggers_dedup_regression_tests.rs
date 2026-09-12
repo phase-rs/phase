@@ -6,7 +6,7 @@ use crate::types::ability::{
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::{CoreType, Supertype};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, TapCause, TapCostKind};
 use crate::types::game_state::{
     AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, WaitingFor,
     ZoneChangeRecord,
@@ -3381,7 +3381,7 @@ fn order_triggers_event_context_ability_still_prompts_on_distinct_events() {
             distribute: None,
             trigger_event: Some(GameEvent::PermanentTapped {
                 object_id: event_object,
-                caused_by: None,
+                cause: TapCause::CostPayment(TapCostKind::TapSymbol),
             }),
             modal: None,
             mode_abilities: Vec::new(),

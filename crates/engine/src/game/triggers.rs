@@ -16244,7 +16244,7 @@ pub mod tests {
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
-    use crate::types::events::{GameEvent, ManaTapState};
+    use crate::types::events::{GameEvent, ManaTapState, TapCause, TapCostKind};
     use crate::types::game_state::{
         DamageRecord, DeferredLifeCostResume, DelayedTrigger, DistributionUnit, GameState,
         LayersDirty, LoopDetectionMode, NamedChoiceSourceBinding, PendingCast,
@@ -17428,7 +17428,7 @@ pub mod tests {
             &mut untouched,
             Some(&GameEvent::PermanentTapped {
                 object_id: milled,
-                caused_by: None,
+                cause: TapCause::CostPayment(TapCostKind::TapSymbol),
             }),
             EventContextSeedTiming::StackPush,
         );
@@ -28504,14 +28504,14 @@ pub mod tests {
             &state,
             &[GameEvent::PermanentTapped {
                 object_id: tapped,
-                caused_by: None,
+                cause: TapCause::CostPayment(TapCostKind::TapSymbol),
             }],
         );
         pending.collect(
             &state,
             &[GameEvent::PermanentTapped {
                 object_id: tapped,
-                caused_by: None,
+                cause: TapCause::CostPayment(TapCostKind::TapSymbol),
             }],
         );
 
@@ -28542,7 +28542,7 @@ pub mod tests {
             &state,
             &[GameEvent::PermanentTapped {
                 object_id: cancelled_tap,
-                caused_by: None,
+                cause: TapCause::CostPayment(TapCostKind::TapSymbol),
             }],
         );
         drop(cancelled);
@@ -29116,7 +29116,7 @@ pub mod tests {
         let condition = TriggerCondition::FirstTimeObjectTappedThisTurn;
         let event = GameEvent::PermanentTapped {
             object_id: tapped,
-            caused_by: None,
+            cause: TapCause::CostPayment(TapCostKind::TapSymbol),
         };
 
         // No taps recorded yet → false.
@@ -29152,7 +29152,7 @@ pub mod tests {
         state.object_tap_count_this_turn.insert(tapped, 1);
         let other_event = GameEvent::PermanentTapped {
             object_id: ObjectId(99),
-            caused_by: None,
+            cause: TapCause::CostPayment(TapCostKind::TapSymbol),
         };
         assert!(!check_trigger_condition(
             &state,
@@ -29193,15 +29193,15 @@ pub mod tests {
         let events = vec![
             GameEvent::PermanentTapped {
                 object_id: a,
-                caused_by: None,
+                cause: TapCause::CostPayment(TapCostKind::TapSymbol),
             },
             GameEvent::PermanentTapped {
                 object_id: b,
-                caused_by: None,
+                cause: TapCause::CostPayment(TapCostKind::TapSymbol),
             },
             GameEvent::PermanentTapped {
                 object_id: a,
-                caused_by: None,
+                cause: TapCause::CostPayment(TapCostKind::TapSymbol),
             },
         ];
         observe_object_taps(&mut state, &events);
@@ -29221,11 +29221,11 @@ pub mod tests {
         let events = vec![
             GameEvent::PermanentTapped {
                 object_id: tapped,
-                caused_by: None,
+                cause: TapCause::CostPayment(TapCostKind::TapSymbol),
             },
             GameEvent::PermanentTapped {
                 object_id: tapped,
-                caused_by: None,
+                cause: TapCause::CostPayment(TapCostKind::TapSymbol),
             },
             GameEvent::CounterAdded {
                 object_id: countered,
@@ -30738,7 +30738,7 @@ pub mod tests {
         move_to_zone(&mut state, subject, Zone::Graveyard, &mut Vec::new());
         let event = GameEvent::PermanentTapped {
             object_id: subject,
-            caused_by: None,
+            cause: TapCause::CostPayment(TapCostKind::TapSymbol),
         };
 
         assert!(check_trigger_condition_with_source(
@@ -39171,7 +39171,7 @@ pub mod tests {
         let victim = make_creature(&mut state, PlayerId(1), "Tapped victim", 2, 2);
         let events = vec![GameEvent::PermanentTapped {
             object_id: victim,
-            caused_by: Some(tapper),
+            cause: TapCause::Effect { source: tapper },
         }];
 
         state.waiting_for = if settled {

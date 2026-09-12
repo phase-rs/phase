@@ -45,7 +45,7 @@ use std::collections::HashSet;
 use crate::types::ability::{
     AbilityCost, EffectKind, TargetFilter, TypedFilter, REMOVE_COUNTER_COST_ALL,
 };
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, TapCause, TapCostKind};
 use crate::types::game_state::{
     CostResume, GameState, ManaAbilityResume, PayCostKind, PendingCostMoveCompletion,
     PendingCostMoveResume, WaitingFor,
@@ -753,7 +753,13 @@ fn pay_ability_cost_inner(
             // CR 701.26a + CR 508.1f: route the {T}-cost tap through the single
             // authority so a "can't become tapped" source is refused (the primary
             // gate is `check_summoning_sickness_for_cost`; this is the backstop).
-            crate::game::restrictions::tap_permanent_for_cost(state, source_id, events)?;
+            crate::game::restrictions::tap_permanent_for_cost(
+                state,
+                source_id,
+                events,
+                // CR 118.3 + CR 701.26a: `{T}` as an ability cost.
+                TapCause::CostPayment(TapCostKind::TapSymbol),
+            )?;
         }
         // CR 107.6: The untap symbol in a cost means "Untap this permanent. A
         // permanent that's already untapped can't be untapped again to pay the
@@ -3944,6 +3950,7 @@ mod tests {
             &choices,
             &partial,
             &mut Vec::new(),
+            None,
         )
         .expect_err("CR 601.2h: tapping 1 of a required 2 creatures is a partial payment");
         assert!(
@@ -3994,6 +4001,7 @@ mod tests {
             &choices,
             &choices,
             &mut Vec::new(),
+            None,
         )
         .expect("CR 601.2h: tapping exactly the required 2 creatures is a legal full payment");
         assert!(
@@ -4038,6 +4046,7 @@ mod tests {
             &choices,
             &[],
             &mut Vec::new(),
+            None,
         )
         .expect_err(
             "CR 601.2h: paying a `count: 1` tap cost with zero creatures is a partial payment",
@@ -4067,6 +4076,7 @@ mod tests {
             &choices,
             &choices[..1],
             &mut Vec::new(),
+            None,
         )
         .expect("tapping exactly 1 creature satisfies a `count: 1` cost");
         assert!(
@@ -4187,6 +4197,7 @@ mod tests {
             &choices,
             &duplicated,
             &mut Vec::new(),
+            None,
         )
         .expect_err("CR 601.2h: one creature cannot pay an aggregate tap cost twice");
         let EngineError::InvalidAction(message) = &err else {

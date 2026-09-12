@@ -33,7 +33,7 @@ use super::stickers::{AppliedSticker, StickerKind};
 use super::triggers::TriggerMode;
 use super::zones::{EtbTapState, Zone};
 use crate::game::game_object::DisplaySource;
-use crate::types::events::{ClashResult, PlayerActionKind};
+use crate::types::events::{ClashResult, PlayerActionKind, TapCause};
 
 // ---------------------------------------------------------------------------
 // Supporting types
@@ -13124,6 +13124,48 @@ impl AbilityCost {
             // CR 118.9: borrowed mana cost — pays mana, never destroys the source.
             | AbilityCost::KeywordCostOfCastSpell { .. }
             // CR 702.21a: gives the payer counters — never destroys the source.
+            | AbilityCost::GetPlayerCounters { .. }
+            | AbilityCost::Unimplemented { .. } => false,
+        }
+    }
+
+    /// CR 601.2b: Whether this cost tree contains a TapCreatures component.
+    /// Recurses `Composite` / `OneOf` / `PerCounter { base }` the same way
+    /// [`Self::consumes_source`] walks the tree.
+    pub fn contains_tap_creatures(&self) -> bool {
+        match self {
+            AbilityCost::TapCreatures { .. } => true,
+            AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                costs.iter().any(AbilityCost::contains_tap_creatures)
+            }
+            AbilityCost::PerCounter { base, .. } => base.contains_tap_creatures(),
+            AbilityCost::Mana { .. }
+            | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::Sacrifice(_)
+            | AbilityCost::PayLife { .. }
+            | AbilityCost::Discard { .. }
+            | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::ExileWithAggregate { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::PayEnergy { .. }
+            | AbilityCost::PaySpeed { .. }
+            | AbilityCost::ReturnToHand { .. }
+            | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Blight { .. }
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Behold { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::EffectCost { .. }
+            | AbilityCost::KeywordCostOfCastSpell { .. }
             | AbilityCost::GetPlayerCounters { .. }
             | AbilityCost::Unimplemented { .. } => false,
         }
@@ -27057,6 +27099,14 @@ pub struct TriggerDefinition {
     /// every non-Room trigger: no door gating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_door: Option<crate::game::game_object::RoomDoor>,
+    /// CR 603.2 + CR 603.2e: optional required [`TapCause`] for `TriggerMode::Taps`.
+    /// `None` is the unqualified "becomes tapped" class and is cause-blind at
+    /// match time. `Some(x)` fires only when `PermanentTapped.cause == x`.
+    /// Agent Maria Hill: `Some(CostPayment(TapCreatures { origin: Some(Teamwork) }))`
+    /// (CR 702.194a + CR 601.2h). Bound from Oracle at parse time; compared to the
+    /// event stamp, never re-derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_cause: Option<TapCause>,
 }
 
 /// CR 605.1b: Which aggregate mana output a mana-ability trigger requires.
@@ -27598,6 +27648,7 @@ impl TriggerDefinition {
             mana_ability_produced: None,
             clash_result: None,
             room_door: None,
+            tap_cause: None,
         }
     }
 
@@ -34198,6 +34249,7 @@ mod tests {
             mana_ability_produced: None,
             clash_result: None,
             room_door: Some(crate::game::game_object::RoomDoor::Left),
+            tap_cause: Some(crate::types::events::TapCause::AttackDeclaration),
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();

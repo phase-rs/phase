@@ -10,7 +10,9 @@ use crate::types::actions::{
     DebugAction, DebugCardCreationKind, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp,
     ResolveAllConsentDecision, ResolveAllScope, TriggerOrderTemplateOp,
 };
-use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
+use crate::types::events::{
+    BendingType, ContestRound, GameEvent, ManaTapState, TapCause, TapCostKind,
+};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
     CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
@@ -11803,6 +11805,7 @@ fn apply_non_priority_pass_action(
                         choices,
                         &chosen,
                         &mut events,
+                        None,
                     )?;
                     state.last_effect_count = Some(chosen.len() as i32);
                     if matches!(state.waiting_for, WaitingFor::PayCost { .. }) {
@@ -13131,7 +13134,15 @@ fn apply_non_priority_pass_action(
             // CR 701.26a + CR 508.1f: route the convoke tap through the single
             // authority so a "can't become tapped" creature is refused (no
             // summoning sickness check — CR 702.51a + CR 302.6).
-            crate::game::restrictions::tap_permanent_for_cost(state, object_id, &mut events)?;
+            // CR 702.66a: `ConvokeMode::Delve` is unreachable at any tap site
+            // (exile from graveyard, not a tap) — the match above already
+            // `unreachable!`s that arm.
+            crate::game::restrictions::tap_permanent_for_cost(
+                state,
+                object_id,
+                &mut events,
+                TapCause::CostPayment(TapCostKind::ManaShard(mode)),
+            )?;
             let unit = match mode {
                 ConvokeMode::Convoke => {
                     crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id)
@@ -17249,7 +17260,15 @@ fn handle_crew_announcement(
     // creature "crews" the Vehicle. Routed through the single authority so a
     // "can't become tapped" creature is refused.
     for &cid in creature_ids {
-        crate::game::restrictions::tap_permanent_for_cost(state, cid, events)?;
+        crate::game::restrictions::tap_permanent_for_cost(
+            state,
+            cid,
+            events,
+            // CR 702.122b: a creature crews a Vehicle when tapped to pay the cost.
+            TapCause::CostPayment(TapCostKind::CrewFamily(
+                crate::types::statics::CrewAction::Crew,
+            )),
+        )?;
     }
 
     // CR 602.5b: Record this crew activation so an "Activate only once each turn"
@@ -17401,7 +17420,15 @@ fn handle_station_announcement(
     // CR 701.26a: Tap the creature as cost payment. Routed through the single
     // authority (CR 508.1f exempts attacker declaration) so a "can't become
     // tapped" creature is refused.
-    crate::game::restrictions::tap_permanent_for_cost(state, creature_id, events)?;
+    crate::game::restrictions::tap_permanent_for_cost(
+        state,
+        creature_id,
+        events,
+        // CR 702.184a: Station taps another creature as the activation cost.
+        TapCause::CostPayment(TapCostKind::CrewFamily(
+            crate::types::statics::CrewAction::Station,
+        )),
+    )?;
 
     Ok(push_keyword_action(
         state,
@@ -17572,7 +17599,15 @@ fn handle_saddle_announcement(
     // creature "saddles" the Mount. Routed through the single authority so a
     // "can't become tapped" creature is refused.
     for &cid in creature_ids {
-        crate::game::restrictions::tap_permanent_for_cost(state, cid, events)?;
+        crate::game::restrictions::tap_permanent_for_cost(
+            state,
+            cid,
+            events,
+            // CR 702.171c: a creature saddles as it's tapped to pay the cost.
+            TapCause::CostPayment(TapCostKind::CrewFamily(
+                crate::types::statics::CrewAction::Saddle,
+            )),
+        )?;
     }
 
     Ok(push_keyword_action(

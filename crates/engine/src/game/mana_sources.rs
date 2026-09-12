@@ -22,7 +22,7 @@ use crate::types::ability::{
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::card_type::Supertype;
-use crate::types::events::{GameEvent, ManaTapState};
+use crate::types::events::{GameEvent, ManaTapState, TapCause, TapCostKind};
 use crate::types::game_state::{GameState, ManaAbilityResume, ProductionOverride, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{
@@ -958,7 +958,7 @@ pub(crate) fn activate_mana_source_option_with_output(
         debug_assert!(tapped, "preflighted land tap must transition status");
         events.push(GameEvent::PermanentTapped {
             object_id: option.object_id,
-            caused_by: None,
+            cause: TapCause::CostPayment(TapCostKind::TapSymbol),
         });
         // The atomic combination is planning metadata: Aura-trigger bonuses are
         // produced by their own TapsForMana abilities after this single source

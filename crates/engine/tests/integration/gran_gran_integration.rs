@@ -28,7 +28,7 @@ use engine::types::ability::{
     SpellContext, TargetFilter, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, TapCause, TapCostKind};
 use engine::types::game_state::{PendingContinuation, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
@@ -193,7 +193,7 @@ fn gran_gran_taps_trigger_draws_before_discard_choice() {
         state,
         &[GameEvent::PermanentTapped {
             object_id: gran_gran,
-            caused_by: None,
+            cause: TapCause::CostPayment(TapCostKind::TapSymbol),
         }],
     );
     assert_eq!(state.stack.len(), 1);

@@ -1240,6 +1240,7 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
         mana_ability_produced: _,
         clash_result: _,
         room_door: _,
+        tap_cause: _,
     } = definition
     else {
         return false;
