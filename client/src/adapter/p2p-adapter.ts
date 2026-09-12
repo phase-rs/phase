@@ -616,9 +616,8 @@ const RECONNECT_STEADY_STATE_MS = 60_000;
  *
  * Reachability precondition: tab A's PeerJS SIGNALING socket must have dropped
  * (freeing the peer id) while its WebRTC DataConnections stay up. That state is
- * durable — no `peer.on("disconnected")` handler and no `.reconnect()` call
- * exists repo-wide — and is produced by sleep, a network change, or mobile
- * backgrounding. Opening a second tab does NOT reach it on its own: `hostRoom`
+ * possible while signaling recovery retries after sleep, a network change,
+ * or mobile backgrounding. Opening a second tab does NOT reach it on its own: `hostRoom`
  * opens the peer before the adapter is constructed, so tab B fails
  * `unavailable-id` and never reaches `claimP2PHostLease`. The lease flip must
  * land inside the `submitAction` → `broadcastStateUpdateInner` window, so
