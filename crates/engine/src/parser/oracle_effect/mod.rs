@@ -17475,45 +17475,60 @@ fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
     }
 }
 
-/// Peel an optional cardinality prefix from the noun phrase that precedes a
-/// positional placement terminator ("on top of" / "on the bottom of" / "into").
-///
-/// Returns `Some((Some(count), remainder))` when an explicit cardinality is
-/// recognized (e.g. "two cards from your hand" → `Fixed(2)` + "cards from your
-/// hand"), or `Some((None, input))` when the noun phrase has no leading
-/// quantity (the patcher leaves the existing `count: Fixed(1)` untouched).
-///
-/// Recognized prefixes for positional library placement:
-///   - `"x "` (with X-cost)     → `QuantityExpr::Ref { Variable("X") }`
-///   - numeric word/digit + " " → `QuantityExpr::Fixed { value: N }`
-///
-/// Cards like "put it on top" / "put that card on top" / "put target X on top"
-/// have no leading numeral and fall through to the `None` arm — the existing
-/// `count: Fixed(1)` is preserved. "Any number of …" forms are out of scope
-/// here; they involve a player-choice cardinality that is paired with a
-/// matching `MultiTargetSpec` and currently route through other effect
-/// paths (Brainstorm-class effects are handled at the trigger / sub-clause
-/// level, not by this patcher).
-fn peel_put_at_library_count(input: &str) -> Option<(Option<QuantityExpr>, &str)> {
+/// CR 115.1 (+ CR 115.1d for the trigger cohort) + CR 601.2c: the cardinality of
+/// the noun phrase in a positional library placement ("put <noun phrase> on top
+/// of / on the bottom of / into <library>"). Each shape routes to a DIFFERENT
+/// field, which is why this is a typed enum rather than a pair of `Option`s —
+/// a tuple would admit combinations the grammar cannot produce:
+///   * `Unstated`  — "target X" / "it" / "that card": no leading cardinality,
+///     so the lowering default of `count: Fixed(1)` stands.
+///   * `Exact`     — "two cards", "x cards": a concrete count on the effect.
+///   * `TargetSet` — "any number of [other|another] target …" / "up to N target
+///     …": an ANNOUNCED target set (CR 601.2c). The number of targets is fixed
+///     at announcement, so the placement set is the chosen targets and `count`
+///     is deliberately left alone.
+#[derive(Debug, Clone, PartialEq)]
+enum LibraryPlacementCardinality {
+    Unstated,
+    Exact(QuantityExpr),
+    TargetSet(MultiTargetSpec),
+}
+
+/// Peel the cardinality prefix from the noun phrase that precedes a positional
+/// placement terminator ("on top of" / "on the bottom of" / "into"), returning
+/// it alongside the remainder to hand to `parse_target`.
+fn peel_library_placement_cardinality(input: &str) -> (LibraryPlacementCardinality, &str) {
+    // CR 115.1 (+ CR 115.1d for the trigger cohort): `strip_optional_target_prefix`
+    // is the SINGLE authority for the announced target-set quantifiers, article
+    // guard included — it declines "any number of cards" and "up to one of them"
+    // without consuming. Tried FIRST because that is the precedence the grammar
+    // has; the numeral arms below could never see these inputs anyway, since
+    // they start with a word rather than a numeral.
+    if let (rest, Some(spec)) = strip_optional_target_prefix(input) {
+        return (LibraryPlacementCardinality::TargetSet(spec), rest);
+    }
     // "x " — variable quantity bound to the spell's chosen X.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("x ").parse(input) {
-        return Some((
-            Some(QuantityExpr::Ref {
+        return (
+            LibraryPlacementCardinality::Exact(QuantityExpr::Ref {
                 qty: QuantityRef::Variable {
                     name: "X".to_string(),
                 },
             }),
             rest,
-        ));
+        );
     }
     // Numeric ("two ", "three ", "1 ", …). `parse_number` accepts both English
     // number words and digits per the oracle-parser SKILL.
     if let Ok((after_num, n)) = nom_primitives::parse_number.parse(input) {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" ").parse(after_num) {
-            return Some((Some(QuantityExpr::Fixed { value: n as i32 }), rest));
+            return (
+                LibraryPlacementCardinality::Exact(QuantityExpr::Fixed { value: n as i32 }),
+                rest,
+            );
         }
     }
-    Some((None, input))
+    (LibraryPlacementCardinality::Unstated, input)
 }
 
 fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
@@ -17579,6 +17594,9 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
             //   - "put target X into Y's library Nth from top"   (count = 1)
             //   - "put two cards from your hand on top of your library in any order"
             //     (Cavalier of Gales / Brainstorm class — count = N, filter = Card+InZone:Hand)
+            // CR 115.1: an announced target set is a CLAUSE-level property, so it
+            // is carried out of the effect-shaped block below and attached after it.
+            let mut placement_target_set: Option<MultiTargetSpec> = None;
             if let Effect::PutAtLibraryPosition {
                 ref mut target,
                 ref mut count,
@@ -17603,53 +17621,85 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
                         };
                     }
                 }
-                let extracted = (|| -> Option<(Option<TargetFilter>, Option<QuantityExpr>)> {
-                    let lower = text.to_lowercase();
-                    let (after_put, _) = tag::<_, _, OracleError<'_>>("put ")
-                        .parse(lower.as_str())
-                        .ok()?;
-                    // Isolate the noun phrase before the first positional terminator.
-                    let before = [" on top of", " on the bottom of", " into "]
-                        .iter()
-                        .find_map(|term| {
-                            take_until::<_, _, OracleError<'_>>(*term)
-                                .parse(after_put)
-                                .ok()
-                                .map(|(_, before)| before)
-                        })?;
-                    // Peel a leading cardinality, if present. Recognized forms:
-                    //   - "two cards ..."          → Fixed(2)
-                    //   - "x cards ..."            → Variable("X")
-                    //   - "any number of cards"   → AnyNumberOf
-                    // The remainder (e.g. "cards from your hand") is then handed to
-                    // `parse_target` for filter extraction. If no quantity prefix
-                    // matches, the noun phrase is fed to `parse_target` unchanged
-                    // (covers "target X" / "it" / "that card" — count stays 1).
-                    let (count_expr, after_count) =
-                        peel_put_at_library_count(before).unwrap_or((None, before));
-                    // CR 608.2k: thread the real trigger context so a bare object
-                    // pronoun ("put it on the bottom …") binds to the trigger's
-                    // `object_pronoun_ref` (the cast spell for spell-cast triggers)
-                    // rather than defaulting to `ParentTarget`. `parse_target`
-                    // spins up a fresh empty context, which loses that antecedent.
-                    let (filter, _) = parse_target_with_ctx(after_count, ctx);
-                    let new_target = if matches!(filter, TargetFilter::Any) {
-                        None
-                    } else {
-                        Some(filter)
-                    };
-                    Some((new_target, count_expr))
-                })();
-                if let Some((maybe_filter, maybe_count)) = extracted {
+                let extracted =
+                    (|| -> Option<(Option<TargetFilter>, LibraryPlacementCardinality)> {
+                        let lower = text.to_lowercase();
+                        let (after_put, _) = tag::<_, _, OracleError<'_>>("put ")
+                            .parse(lower.as_str())
+                            .ok()?;
+                        // Isolate the noun phrase before the first positional terminator.
+                        let before = [" on top of", " on the bottom of", " into "]
+                            .iter()
+                            .find_map(|term| {
+                                take_until::<_, _, OracleError<'_>>(*term)
+                                    .parse(after_put)
+                                    .ok()
+                                    .map(|(_, before)| before)
+                            })?;
+                        // Peel the leading cardinality. Recognized forms:
+                        //   - "two cards ..."            → Exact(Fixed(2))
+                        //   - "x cards ..."              → Exact(Variable("X"))
+                        //   - "any number of target ..." → TargetSet(unlimited(0))
+                        //   - "up to N target ..."       → TargetSet(up_to(N))
+                        // The remainder (e.g. "cards from your hand", "target creature
+                        // card from your graveyard" — the article is deliberately left
+                        // in place) is then handed to `parse_target` for filter
+                        // extraction. With no cardinality prefix the noun phrase is fed
+                        // to `parse_target` unchanged (covers "target X" / "it" / "that
+                        // card" — count stays 1).
+                        let (cardinality, after_count) = peel_library_placement_cardinality(before);
+                        // CR 608.2k: thread the real trigger context so a bare object
+                        // pronoun ("put it on the bottom …") binds to the trigger's
+                        // `object_pronoun_ref` (the cast spell for spell-cast triggers)
+                        // rather than defaulting to `ParentTarget`. `parse_target`
+                        // spins up a fresh empty context, which loses that antecedent.
+                        let (filter, _) = parse_target_with_ctx(after_count, ctx);
+                        let new_target = if matches!(filter, TargetFilter::Any) {
+                            None
+                        } else {
+                            Some(filter)
+                        };
+                        Some((new_target, cardinality))
+                    })();
+                if let Some((maybe_filter, cardinality)) = extracted {
                     if *target == TargetFilter::Any {
                         if let Some(filter) = maybe_filter {
                             *target = filter;
                         }
                     }
-                    if let Some(c) = maybe_count {
-                        *count = c;
+                    match cardinality {
+                        LibraryPlacementCardinality::Unstated => {}
+                        LibraryPlacementCardinality::Exact(c) => *count = c,
+                        // CR 601.2c + CR 115.1 (CR 115.1a spells / CR 115.1d
+                        // triggers; activated abilities via CR 602.2b): the
+                        // announced target set owns the cardinality. `count` stays
+                        // at the lowering default and is deliberately NOT consulted
+                        // by `put_on_top::resolve` for such an ability (see its
+                        // `multi_target` rule).
+                        LibraryPlacementCardinality::TargetSet(spec) => {
+                            placement_target_set = Some(spec)
+                        }
                     }
                 }
+            }
+            // CR 115.1 (+ CR 115.1d for the trigger cohort): attach the announced
+            // target-set spec. This is a CLAUSE-level spec, consulted LAST in
+            // `assembly`'s six-arm precedence chain (four `MULTI_TARGET_VERBS`-gated
+            // text extractors, then the CHUNK-level `clause_ir.multi_target` — the
+            // per-opponent fanout spec — then this one), so an outer authority wins
+            // without this seam having to know about it.
+            //
+            // The `is_none()` check is defensive: `lower_imperative_clause` above
+            // runs the post-parse multi-target fixups, but each of them gates on
+            // `MULTI_TARGET_VERBS` — three (`extract_exact_target_multi_target`,
+            // `extract_bounded_target_multi_target`,
+            // `extract_optional_target_multi_target`) directly, and
+            // `extract_verb_up_to_multi_target` indirectly through
+            // `strip_any_number_quantifier`'s first-word check — and that list (in
+            // `lower.rs`) contains no `put`, so a placement clause reaches here with
+            // the field unset.
+            if clause.multi_target.is_none() {
+                clause.multi_target = placement_target_set;
             }
             clause
         }

@@ -34,6 +34,7 @@ mod ancient_copper_dragon_roll_d20;
 mod angels_grace;
 mod angels_grace_2hg;
 mod announce_locked_x_runtime;
+mod announced_target_set_placement;
 mod another_round_repeat;
 mod anya_merciless_angel_5920;
 mod april_oneil_card_types_among_spells_cast;

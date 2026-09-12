@@ -65008,3 +65008,292 @@ fn counter_gate_guard_is_claimed_upstream_of_the_guard_ownership_seam() {
          regression here surfaces as a dropped guard rather than an honest gap"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Announced target-set cardinality for positional library placement.
+// CR 115.1 + CR 601.2c: "put any number of target …" / "put up to N target …"
+// announce a variable-size target set whose size is fixed at announcement.
+// ---------------------------------------------------------------------------
+
+/// A-6 — the cardinality peel discriminates every placement noun-phrase shape,
+/// routing announced target sets to a `MultiTargetSpec` and concrete numerals
+/// to the effect's own count. Non-vacuous by construction: the helper does not
+/// exist at this phase's base commit, so this test cannot compile there.
+#[test]
+fn peel_library_placement_cardinality_discriminates_placement_shapes() {
+    // CR 107.1c: "any number of … target" includes zero.
+    let (got, rest) = peel_library_placement_cardinality(
+        "any number of target creature cards from your graveyard",
+    );
+    assert_eq!(
+        got,
+        LibraryPlacementCardinality::TargetSet(MultiTargetSpec::unlimited(0))
+    );
+    assert_eq!(
+        rest, "target creature cards from your graveyard",
+        "the quantifier is consumed but the article is left for `parse_target`"
+    );
+
+    // CR 115.6: "up to N target" allows zero through N.
+    let (got, rest) =
+        peel_library_placement_cardinality("up to three target creature cards from your graveyard");
+    assert_eq!(
+        got,
+        LibraryPlacementCardinality::TargetSet(MultiTargetSpec::up_to(QuantityExpr::Fixed {
+            value: 3
+        }))
+    );
+    assert_eq!(rest, "target creature cards from your graveyard");
+
+    let (got, rest) =
+        peel_library_placement_cardinality("up to four target cards from your graveyard");
+    assert_eq!(
+        got,
+        LibraryPlacementCardinality::TargetSet(MultiTargetSpec::up_to(QuantityExpr::Fixed {
+            value: 4
+        }))
+    );
+    assert_eq!(rest, "target cards from your graveyard");
+
+    // A concrete numeral is a count on the effect, never a target set
+    // (Brainstorm / Cavalier of Gales class).
+    let (got, rest) = peel_library_placement_cardinality("two cards from your hand");
+    assert_eq!(
+        got,
+        LibraryPlacementCardinality::Exact(QuantityExpr::Fixed { value: 2 })
+    );
+    assert_eq!(rest, "cards from your hand");
+
+    // No leading cardinality at all — the lowering default of `Fixed(1)` stands.
+    let (got, rest) =
+        peel_library_placement_cardinality("target creature card from your graveyard");
+    assert_eq!(got, LibraryPlacementCardinality::Unstated);
+    assert_eq!(rest, "target creature card from your graveyard");
+
+    // NEGATIVE: without the target article this is not an announced target set.
+    // Phrased as "is not a TargetSet" rather than as an equality against this
+    // phase's enum shape, and the remainder is deliberately NOT asserted — an
+    // untargeted "any number of" cardinality is a separate, later concern.
+    // Its paired positive is the `TargetSet` rows above, which exercise the same
+    // authority's article guard from the other side.
+    let (got, _) = peel_library_placement_cardinality("any number of cards from your hand");
+    assert!(
+        !matches!(got, LibraryPlacementCardinality::TargetSet(_)),
+        "an article-less \"any number of\" is not a target set"
+    );
+}
+
+/// A-13 — exact-count placement must not move. Brainstorm's placement clause
+/// carries a concrete numeral, not an announced target set, so it keeps
+/// `count: Fixed(2)` and gains no `multi_target`.
+///
+/// GREEN AT THIS PHASE'S BASE by construction. Its non-vacuousness comes from
+/// the refactor it guards: it is the only row that would catch the `Exact` arm
+/// of `peel_library_placement_cardinality` regressing while the `TargetSet` arm
+/// was added. The snapshot gate is NOT its pairing — no snapshot file covers
+/// this card, so green there would witness nothing. The positive half (the full
+/// `Fixed(2)` / filter / position shape asserted by value) is what keeps the
+/// `multi_target.is_none()` half from passing over a node the locator missed.
+#[test]
+fn brainstorm_exact_count_placement_shape_unchanged() {
+    let parsed = parse_oracle_text(
+        "Draw three cards, then put two cards from your hand on top of your library in any order.",
+        "Brainstorm",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let root = parsed
+        .abilities
+        .first()
+        .expect("Brainstorm parses one ability");
+    // The placement node is the SUB-ability; the top-level effect is the draw.
+    assert!(
+        matches!(root.effect.as_ref(), Effect::Draw { .. }),
+        "reach guard: Brainstorm's top-level effect is the draw, got {:?}",
+        root.effect
+    );
+    let placement = root
+        .sub_ability
+        .as_deref()
+        .expect("the placement is Brainstorm's chained sub-ability");
+
+    match placement.effect.as_ref() {
+        Effect::PutAtLibraryPosition {
+            target,
+            count,
+            position,
+        } => {
+            assert_eq!(
+                *count,
+                QuantityExpr::Fixed { value: 2 },
+                "an exact numeral stays on the effect's own count"
+            );
+            assert_eq!(*position, LibraryPosition::Top);
+            assert_eq!(
+                *target,
+                TargetFilter::Typed(
+                    TypedFilter::card()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone { zone: Zone::Hand }])
+                )
+            );
+        }
+        other => panic!("expected PutAtLibraryPosition, got {other:?}"),
+    }
+    assert!(
+        placement.multi_target.is_none(),
+        "an exact count is not an announced target set, got {:?}",
+        placement.multi_target
+    );
+}
+
+/// A-8 SHAPE — a clause-level spec minted inside a modal sub-ability lands on
+/// that mode's node and on no sibling mode (CR 601.2b announces the mode before
+/// CR 601.2c announces the targets, so only the chosen mode's spec is ever
+/// consulted).
+#[test]
+fn bow_of_nylea_mode_four_gains_up_to_four_target_set_shape() {
+    let parsed = parse_oracle_text(
+        "Attacking creatures you control have deathtouch.\n{1}{G}, {T}: Choose one —\n\
+         • Put a +1/+1 counter on target creature.\n\
+         • Bow of Nylea deals 2 damage to target creature with flying.\n\
+         • You gain 3 life.\n\
+         • Put up to four target cards from your graveyard on the bottom of your library in any order.",
+        "Bow of Nylea",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let modal = parsed
+        .abilities
+        .first()
+        .expect("Bow of Nylea parses its modal activated ability");
+    // Read the arity FIRST: the sibling assertions below are vacuous over a
+    // short or empty array.
+    assert_eq!(
+        modal.mode_abilities.len(),
+        4,
+        "Bow of Nylea has four modes, got {:?}",
+        modal.mode_abilities.len()
+    );
+
+    let mode_four = &modal.mode_abilities[3];
+    assert_eq!(
+        mode_four.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 4 })),
+        "the chosen mode's announced target set sizes its own slots"
+    );
+    match mode_four.effect.as_ref() {
+        Effect::PutAtLibraryPosition {
+            target,
+            count,
+            position,
+        } => {
+            // PAIRED NEGATIVE: the quantifier must route to the spec, never to
+            // the effect's count.
+            assert_eq!(
+                *count,
+                QuantityExpr::Fixed { value: 1 },
+                "the announced target set must not be written to `count`"
+            );
+            assert_eq!(*position, LibraryPosition::Bottom);
+            assert_eq!(
+                *target,
+                TargetFilter::Typed(
+                    TypedFilter::card()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Graveyard
+                        }])
+                )
+            );
+        }
+        other => panic!("expected PutAtLibraryPosition on mode 4, got {other:?}"),
+    }
+
+    // SIBLING-MODE CONTAMINATION: no other mode, and not the modal wrapper,
+    // may gain a spec.
+    for (index, mode) in modal.mode_abilities.iter().enumerate().take(3) {
+        assert!(
+            mode.multi_target.is_none(),
+            "mode {index} must not inherit mode 4's announced target set, got {:?}",
+            mode.multi_target
+        );
+    }
+    assert!(
+        modal.multi_target.is_none(),
+        "the modal wrapper must not gain a spec, got {:?}",
+        modal.multi_target
+    );
+}
+
+/// A-10 — KNOWN-BAD LOCK. Lodestone Bauble's "from a player's graveyard" zone
+/// and owner qualifiers are NOT extracted by the parser at all: the filter is
+/// bare `Land + HasSupertype(Basic)`, with no `InZone` and no `Owned`. This
+/// phase widens the clause's cardinality from one object to four, which
+/// AMPLIFIES that pre-existing misparse rather than causing it.
+///
+/// This test exists to make the amplification visible in the tree instead of
+/// latent. The follow-up that extracts "from a player's X" must cite this test
+/// by name and DELETE it as part of the real fix.
+///
+/// The `multi_target` half is the reach guard for the "no `InZone` / no `Owned`"
+/// half, which is vacuous over a filter the locator failed to reach. Paired
+/// positive: `misinformation` is the same "up to N target … from an opponent's
+/// graveyard" family WITH the owner binding present, proving the extractor can
+/// produce one.
+#[test]
+fn lodestone_bauble_known_bad_missing_zone_qualifier_lock() {
+    let parsed = parse_oracle_text(
+        "{1}, {T}, Sacrifice this artifact: Put up to four target basic land cards from a \
+         player's graveyard on top of their library in any order. That player draws a card at \
+         the beginning of the next turn's upkeep.",
+        "Lodestone Bauble",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Lodestone Bauble parses its activated ability");
+
+    // REACH GUARD: the phase fired on this card at all.
+    assert_eq!(
+        ability.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 4 })),
+        "reach guard: the announced target set must be present, or the filter \
+         assertions below prove nothing"
+    );
+
+    let Effect::PutAtLibraryPosition { target, .. } = ability.effect.as_ref() else {
+        panic!("expected PutAtLibraryPosition, got {:?}", ability.effect);
+    };
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected a Typed filter, got {target:?}");
+    };
+    assert_eq!(filter.type_filters, vec![TypeFilter::Land]);
+    assert_eq!(
+        filter.controller, None,
+        "KNOWN BAD: no controller/owner is bound"
+    );
+    assert!(
+        filter.properties.contains(&FilterProp::HasSupertype {
+            value: Supertype::Basic
+        }),
+        "the basic-land supertype IS extracted, got {:?}",
+        filter.properties
+    );
+    assert!(
+        !filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::InZone { .. } | FilterProp::Owned { .. }
+        )),
+        "KNOWN BAD: \"from a player's graveyard\" contributes neither an InZone nor an \
+         Owned property, so this clause targets basic lands anywhere — a pre-existing \
+         misparse this phase amplifies from one object to four. Delete this test when \
+         that extraction is fixed. Got {:?}",
+        filter.properties
+    );
+}

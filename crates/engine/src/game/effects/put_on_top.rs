@@ -4,7 +4,7 @@ use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
-    ResolvedAbility, TargetFilter,
+    ResolvedAbility, TargetChoiceTiming, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -207,16 +207,30 @@ pub fn resolve(
         expected
     };
 
-    // CR 601.2c + CR 401.4 (issue #6565 / #6836): A per-opponent target fanout
-    // ("for each opponent, put up to one target ... that player controls ...")
-    // pre-selects one target PER opponent at stack time — `multi_target.max =
-    // PlayerCount { Opponent }`, so `collected_targets` already holds every
-    // chosen permanent (one per opponent). The effect's `count` (`Fixed(1)`) is
-    // the PER-OPPONENT cap, NOT the total, so it must never gate a further
-    // "choose `count` of them" prompt over the already-targeted permanents
-    // (which would loop forever and place at most one). Each pre-chosen target
-    // is placed into its own owner's library (CR 400.7, routed by the move).
-    let expected = if crate::game::ability_utils::is_per_opponent_target_fanout(ability) {
+    // CR 601.2c + CR 115.1 (CR 115.1a spells / CR 115.1d triggers; activated
+    // abilities via CR 602.2b) + CR 401.4 (issue #6565 / #6836): an ability that
+    // announced a VARIABLE-SIZE target set places exactly the targets chosen at
+    // announcement — the number of targets is fixed at announcement and does not
+    // change afterwards. The effect's `count` is NEVER that set's total: for a
+    // per-opponent fanout ("for each opponent, put up to one target ... that
+    // player controls ...", `multi_target.max = PlayerCount { Opponent }`) it is
+    // the PER-OPPONENT cap, and for "any number of target ..." / "up to N target
+    // ..." it is only the lowering default. So it must neither truncate the
+    // placement nor gate a further "choose `count` of them" prompt over the
+    // already-chosen targets (which would loop forever and place at most one).
+    // Zero chosen targets (CR 107.1c + CR 115.6) falls into the `expected == 0`
+    // no-op below.
+    //
+    // `Resolution` timing is excluded because those targets are empty by design
+    // until the resolution-time choice is made.
+    //
+    // This SUBSUMES `ability_utils::is_per_opponent_target_fanout`, whose three
+    // conjuncts are a strict superset of these two, so the fanout behaviour is
+    // preserved rather than changed. That helper is left in place for its other
+    // callers (`grep -rn is_per_opponent_target_fanout crates/engine/src/`).
+    let expected = if ability.multi_target.is_some()
+        && matches!(ability.target_choice_timing, TargetChoiceTiming::Stack)
+    {
         collected_targets.len()
     } else {
         expected
