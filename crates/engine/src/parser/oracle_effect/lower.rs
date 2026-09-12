@@ -1516,7 +1516,11 @@ fn rewrite_other_revealed_card_to_unimplemented(def: &mut AbilityDefinition) {
         let fragment = def.description.clone().unwrap_or_else(|| {
             "lose life equal to the mana value of the card revealed by the other player".to_string()
         });
-        *def.effect = Effect::unimplemented("lose", fragment);
+        // The old key was `"lose"` — the clause's first word, deliberately imitating the
+        // imperative fallback's naming, which is exactly what this phase abolishes. This
+        // is a stable snake_case CATEGORY key (a named producer's, not a clause-gap
+        // verdict), so `ClauseGapKind::from_unimplemented_name` must NOT decode it.
+        *def.effect = Effect::unimplemented("other_revealed_card_quantity", fragment);
     }
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_other_revealed_card_to_unimplemented(sub);
@@ -3102,13 +3106,10 @@ pub(super) fn rewrite_counter_instead_target_from_antecedent(
 /// "create <N> of those tokens" (optionally with a trailing modifier like
 /// "that are tapped and attacking" or "instead"). Returns the parsed count.
 fn match_create_of_those_tokens(effect: &Effect) -> Option<QuantityExpr> {
-    let Effect::Unimplemented { name, description } = effect else {
-        return None;
-    };
-    if name != "create" {
-        return None;
-    }
-    let text = description.as_deref()?;
+    // The discriminator is the `tag("create ")` + count/anaphor parse below, read off the
+    // recorded description; the gap's name is the parser's verdict on which sub-grammar
+    // refused the clause and is not a stable key for this rewrite.
+    let text = effect.unimplemented_description()?;
     let lower = text.to_lowercase();
     let (_, rest) = nom_on_lower(text, &lower, |i| value((), tag("create ")).parse(i))?;
     let rest_lower = rest.to_lowercase();
@@ -12343,14 +12344,15 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
 #[cfg(test)]
 mod tests {
     use super::{
-        match_create_of_those_tokens, nest_whenever_this_turn_token_cleanup_delayed_trigger,
-        parse_enter_counters_clause_body, parse_where_x_quantity_expression,
-        patch_choose_from_zone_counter_continuation_target, relink_gated_token_referent_consumers,
-        strip_redundant_flip_win_quantifier, strip_return_destination_ext_with_remainder,
-        strip_temporal_prefix, strip_temporal_suffix, strip_trailing_duration,
-        strip_trailing_where_x, value_quantity_clause_owns_this_turn_suffix,
-        ControlClausePossessor,
+        gate_other_revealed_card_on_multiplayer_reveal, match_create_of_those_tokens,
+        nest_whenever_this_turn_token_cleanup_delayed_trigger, parse_enter_counters_clause_body,
+        parse_where_x_quantity_expression, patch_choose_from_zone_counter_continuation_target,
+        relink_gated_token_referent_consumers, strip_redundant_flip_win_quantifier,
+        strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
+        strip_trailing_duration, strip_trailing_where_x,
+        value_quantity_clause_owns_this_turn_suffix, ControlClausePossessor,
     };
+    use crate::parser::oracle_ir::diagnostic::ClauseGapKind;
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction,
@@ -12584,7 +12586,7 @@ mod tests {
             !parsed
                 .abilities
                 .iter()
-                .any(ability_chain_has_unimplemented_the),
+                .any(ability_chain_has_unimplemented_copy_grant),
             "the 'the copy gains...' clause must no longer be Unimplemented"
         );
     }
@@ -12617,7 +12619,7 @@ mod tests {
                 .triggers
                 .iter()
                 .filter_map(|t| t.execute.as_deref())
-                .any(ability_chain_has_unimplemented_the),
+                .any(ability_chain_has_unimplemented_copy_grant),
             "the 'the copy gains...' clause must no longer be Unimplemented"
         );
     }
@@ -12640,10 +12642,19 @@ mod tests {
         None
     }
 
-    fn ability_chain_has_unimplemented_the(def: &AbilityDefinition) -> bool {
+    /// The clause the two negatives below guard. Rename-proof: key on the CLAUSE a gap
+    /// would record, not on the gap's name — once gaps are named by verdict rather than
+    /// by the clause's first word, a `name == "the"` compare can never be true and the
+    /// guard stops guarding silently.
+    const COPY_GRANT_PHRASE: &str = "the copy gains haste";
+
+    fn ability_chain_has_unimplemented_copy_grant(def: &AbilityDefinition) -> bool {
         let mut cur = Some(def);
         while let Some(d) = cur {
-            if matches!(d.effect.as_ref(), Effect::Unimplemented { name, .. } if name == "the") {
+            if d.effect
+                .unimplemented_description()
+                .is_some_and(|desc| desc.to_lowercase().contains(COPY_GRANT_PHRASE))
+            {
                 return true;
             }
             cur = d.sub_ability.as_deref();
@@ -13699,6 +13710,56 @@ mod tests {
             other => panic!("expected ClampMin, got {other:?}"),
         }
         assert_eq!(remainder, "");
+    }
+
+    /// V14 — CR 608.2c: the `OtherRevealedCard` honesty gate mints a stable
+    /// snake_case CATEGORY key belonging to a named producer, not a clause-gap
+    /// verdict and not the clause's first word.
+    ///
+    /// This producer has no corpus witness at the phase base (Parker Luck keeps its
+    /// lowered `LoseLife` because `multi_target` is present; Keen Duelist fails
+    /// closed further upstream), so the gate is driven directly here — the only
+    /// venue where the rewritten node is observable at all.
+    #[test]
+    fn other_revealed_card_gap_uses_a_category_key_not_a_clause_gap_verdict() {
+        const CLASS_FRAGMENT: &str =
+            "lose life equal to the mana value of the card revealed by the other player";
+
+        // A `LoseLife` whose amount reads the `OtherRevealedCard` anaphor in a chain
+        // with NO multiplayer `RevealTop`, so the gate must fire.
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::OtherRevealedCard,
+                    },
+                },
+                target: None,
+            },
+        );
+        def.description = Some(CLASS_FRAGMENT.to_string());
+
+        gate_other_revealed_card_on_multiplayer_reveal(&mut def);
+
+        // Reach-guard: the gate demonstrably fired rather than returning early.
+        let Effect::Unimplemented { name, .. } = def.effect.as_ref() else {
+            panic!(
+                "the unanchored anaphor must be rewritten to a gap; got {:?}",
+                def.effect
+            );
+        };
+        assert_eq!(name, "other_revealed_card_quantity");
+        assert_eq!(
+            def.effect.unimplemented_description(),
+            Some(CLASS_FRAGMENT),
+            "the class fragment is recorded unchanged"
+        );
+        assert_eq!(
+            ClauseGapKind::from_unimplemented_name(name),
+            None,
+            "a named producer's category key must NOT decode as a clause-gap verdict"
+        );
     }
 }
 #[cfg(test)]

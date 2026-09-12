@@ -66,13 +66,18 @@ fn assert_remove_all_then_transform(effects: &[Effect]) {
             .any(|e| matches!(e, Effect::Transform { .. })),
         "expected Transform; got {effects:#?}"
     );
-    // The anaphoric remove clause must no longer surface as Unimplemented.
+    // The anaphoric remove clause must no longer surface as a gap. Paired positive
+    // reach-guard: the `RemoveCounter` remove-all sentinel and the `Transform`
+    // assertions immediately above prove the clause produced its real typed effects.
+    // Keyed on the CLAUSE a gap would record, not on the gap's name — a name compare
+    // against the clause's old first word can never be true once gaps are named by
+    // verdict, and the guard would stop guarding silently.
+    const REMOVE_PHRASE: &str = "remove";
     assert!(
-        !effects.iter().any(|e| matches!(
-            e,
-            Effect::Unimplemented { name, .. } if name == "remove"
-        )),
-        "remove clause should not be Unimplemented; got {effects:#?}"
+        !effects.iter().any(|e| e
+            .unimplemented_description()
+            .is_some_and(|d| d.to_lowercase().contains(REMOVE_PHRASE))),
+        "remove clause should not be a gap node; got {effects:#?}"
     );
 }
 

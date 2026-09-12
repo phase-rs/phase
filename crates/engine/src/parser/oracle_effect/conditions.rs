@@ -150,7 +150,10 @@ pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> 
     None
 }
 
-fn parse_leading_conditional_prefix(lower: &str) -> Option<&str> {
+/// The single leading-guard prefix authority. Also the diagnoser's:
+/// `gap_diagnosis::diagnose_clause_gap` strips a split-off guard's prefix through this
+/// function, so both callers see the same vocabulary.
+pub(super) fn parse_leading_conditional_prefix(lower: &str) -> Option<&str> {
     alt((
         tag::<_, _, OracleError<'_>>("then, if "),
         tag("then if "),
@@ -4401,7 +4404,11 @@ fn split_inverted_instead_clause(text: &str) -> Option<(String, String)> {
 ///
 /// The scan is word-boundary anchored (`scan_contains`), so "would" is matched
 /// as a word and never as a fragment of a longer token.
-fn condition_names_an_event(cond_text: &str) -> bool {
+///
+/// Also the diagnoser's event-reading authority: `gap_diagnosis::diagnose_clause_gap`
+/// asks this same predicate to decide whether an unlowerable guard names an EVENT
+/// (CR 614.1a) or a STATE (CR 608.2c), so a change here moves both callers together.
+pub(super) fn condition_names_an_event(cond_text: &str) -> bool {
     nom_primitives::scan_contains(&cond_text.to_lowercase(), "would")
 }
 

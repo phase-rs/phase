@@ -1,8 +1,10 @@
+use super::gap_diagnosis::diagnose_clause_gap;
 use super::lower::{
     rewrite_parent_target_to_last_created, target_filter_is_explicit_target_player_graveyard_card,
 };
 use super::*;
 use crate::parser::oracle_ir::ast::EntersUnderSpec;
+use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind};
 use crate::parser::oracle_nom::enters_under::{
     bind_control_clause, ControlAnaphorAntecedent, ControlClausePossessor,
 };
@@ -47848,10 +47850,19 @@ fn target_opponent_chooses_in_your_graveyard_keeps_honest_fall_through() {
         "target opponent chooses a card in your graveyard.",
         AbilityKind::Spell,
     );
+    // Multi-authority: `"choose"` here is a CATEGORY key minted by this honesty gate,
+    // not a clause-gap verdict the imperative fallback derived from a first word. It is
+    // untouched by the clause-gap naming change, and `from_unimplemented_name` must not
+    // decode it — otherwise a later consumer would read the gate's key as a verdict.
     assert!(
         matches!(*def.effect, Effect::Unimplemented { ref name, .. } if name == "choose"),
         "the targeted chooser form must stay on the honesty gate, got {:?}",
         def.effect
+    );
+    assert_eq!(
+        ClauseGapKind::from_unimplemented_name("choose"),
+        None,
+        "the honesty gate's category key is not a clause-gap verdict"
     );
 }
 
@@ -52217,19 +52228,24 @@ fn alt_cost_rider_folds_onto_prior_cast_from_zone() {
         ),
         "expected PayLife {{ SelfManaValue }}, got {alt:?}",
     );
-    // Verify the rider didn't leak a sibling Unimplemented{name:"pay"} effect.
-    fn has_pay_unimpl(d: &AbilityDefinition) -> bool {
-        if matches!(
-            &*d.effect,
-            Effect::Unimplemented { name, .. } if name == "pay"
-        ) {
+    // Verify the rider didn't leak a sibling gap node. Rename-proof: key on the recorded
+    // CLAUSE, not on the gap's name — a name compare against the old first word can never
+    // be true once gaps are named by verdict. The paired positive reach-guard is the
+    // `PayLife { SelfManaValue }` assertion immediately above: it proves the rider was
+    // absorbed into the alternative cost rather than the sentence failing earlier.
+    const PAY_PHRASE: &str = "pay life equal to its mana value";
+    fn has_pay_gap(d: &AbilityDefinition) -> bool {
+        if d.effect
+            .unimplemented_description()
+            .is_some_and(|desc| desc.to_lowercase().contains(PAY_PHRASE))
+        {
             return true;
         }
-        d.sub_ability.as_ref().is_some_and(|s| has_pay_unimpl(s))
+        d.sub_ability.as_ref().is_some_and(|s| has_pay_gap(s))
     }
     assert!(
-        !has_pay_unimpl(&def),
-        "rider must NOT leak as Unimplemented{{name:'pay'}} sibling"
+        !has_pay_gap(&def),
+        "the life-payment rider must NOT leak as a sibling gap node"
     );
 }
 
@@ -59859,21 +59875,39 @@ fn borg_queen_assimilate_lowers_to_reanimate_then_retype_chain() {
 /// Parser fail-closed: an `assimilate` phrasing whose target is NOT a
 /// graveyard card is a shape this production does not model, so it must keep
 /// producing `Effect::Unimplemented` and coverage must stay honestly RED rather
-/// than be silently lowered into a reanimation. `name` is `"assimilate"` because
-/// the imperative fallback derives it from the clause's first word.
+/// than be silently lowered into a reanimation. The gap's name is the parser's
+/// VERDICT on which sub-grammar refused the clause — `unparsed_verb_arguments`,
+/// because `assimilate` is a clause head the imperative dispatcher knows and what
+/// failed is its argument grammar. (It was `"assimilate"` while the fallback named
+/// gaps by the clause's first word, which reported only where the leftover text
+/// started.)
 ///
 /// Paired positive: the real card's phrasing in the same test produces a
 /// `ChangeZone`, so the negative is about the graveyard guard and not about a
 /// production that never fires.
 #[test]
 fn assimilate_without_a_graveyard_target_stays_unimplemented() {
-    let non_graveyard = parse_effect("assimilate target creature you control");
+    const CLAUSE: &str = "assimilate target creature you control";
+    let non_graveyard = parse_effect(CLAUSE);
+    let Effect::Unimplemented {
+        name,
+        description: Some(fragment),
+    } = &non_graveyard
+    else {
+        panic!("a non-graveyard assimilate phrasing must stay honestly unsupported, got {non_graveyard:?}");
+    };
+    assert_eq!(
+        ClauseGapKind::from_unimplemented_name(name),
+        Some(ClauseGapKind::VerbArguments),
+        "the recorded name must decode to the verdict this clause earns, got {name}"
+    );
+    assert_eq!(fragment, CLAUSE, "the recorded fragment is byte-stable");
     assert!(
         matches!(
-            &non_graveyard,
-            Effect::Unimplemented { name, .. } if name == "assimilate"
+            diagnose_clause_gap(fragment),
+            ClauseGap::VerbArguments { ref verb, .. } if verb == "assimilate"
         ),
-        "a non-graveyard assimilate phrasing must stay honestly unsupported, got {non_graveyard:?}"
+        "the refused clause head is still `assimilate` — the fact the old literal carried"
     );
 
     let real = parse_effect("assimilate target creature card from an opponent's graveyard");
@@ -63411,5 +63445,59 @@ fn a_cast_this_way_gate_defers_a_consequence_but_never_a_casting_property() {
         !wraps_a_spell_cast_delayed_trigger(&property),
         "\"you cast it without paying its mana cost\" describes HOW the cast happens \
          (CR 601.2) and must not be deferred past it"
+    );
+}
+
+/// V7 — the imperative last-resort fallback names the gap by the sub-grammar that
+/// REJECTED the clause, and leaves the recorded fragment byte-identical.
+///
+/// This is the fallback's own production entry: `parse_effect_chain` over a clause whose
+/// quantity operand ("the excess", Toralf's shape) every quantity authority refuses. The
+/// name is the verdict (`unparsed_quantity`), never the clause's first word — `deal`
+/// reported only where the leftover text started.
+///
+/// The byte-identical fragment is the load-bearing half: five production consumers and
+/// two name-blind post-passes (`strip_mana_spend_trigger_node`,
+/// `strip_orphaned_copy_retarget_node`) re-parse it. Their standing coverage is
+/// `oracle_tests.rs::lapis_orb_mana_spend_trigger_folds_into_grant` /
+/// `::jade_orb_spell_referencing_mana_spend_trigger_stays_a_gap` for the first, and the
+/// `orphaned == 0` assertions in this file's Pyromancer's-Goggles-class tests for the
+/// second.
+#[test]
+fn the_imperative_fallback_names_the_gap_by_verdict_and_keeps_the_fragment() {
+    const SENTENCE: &str = "Deal damage equal to the excess to any target.";
+    // The clause splitter hands the fallback the sentence WITHOUT its terminator, so the
+    // recorded fragment is the clause, measured — not the input sentence.
+    const CLAUSE: &str = "Deal damage equal to the excess to any target";
+    let def = super::parse_effect_chain(SENTENCE, AbilityKind::Spell);
+
+    // Reach-guard: the clause really did reach the fallback. Without this a routing
+    // change could satisfy the name assertion vacuously.
+    let Effect::Unimplemented { name, .. } = def.effect.as_ref() else {
+        panic!("the clause must still reach the last-resort fallback, got {def:?}");
+    };
+
+    assert_eq!(
+        name, "unparsed_quantity",
+        "the wire name is the verdict kind's, produced through ClauseGapKind"
+    );
+    assert_eq!(
+        ClauseGapKind::from_unimplemented_name(name),
+        Some(ClauseGapKind::Quantity)
+    );
+    let recorded = def.effect.unimplemented_description();
+    assert_eq!(
+        recorded,
+        Some(CLAUSE),
+        "the recorded fragment must be byte-identical to the clause the parser refused"
+    );
+    // The contract that makes the name decodable downstream: re-running the diagnoser
+    // over the RECORDED fragment reproduces the verdict, phrase and all.
+    assert!(
+        matches!(
+            diagnose_clause_gap(recorded.expect("recorded above")),
+            ClauseGap::Quantity { ref operand } if operand == "the excess"
+        ),
+        "and the phrase re-derives from that same fragment"
     );
 }

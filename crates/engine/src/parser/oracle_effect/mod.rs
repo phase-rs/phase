@@ -3,6 +3,7 @@ pub(super) mod assembly;
 pub(crate) mod become_copy_except;
 pub(crate) mod conditions;
 pub(crate) mod counter;
+pub(crate) mod gap_diagnosis;
 pub(crate) mod imperative;
 pub(super) mod lower;
 pub(crate) mod mana;
@@ -28212,16 +28213,10 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
     }
 
     // --- Fallback ---
-    let verb = tp.lower.split_whitespace().next().unwrap_or("unknown");
-    tracing::debug!(
-        verb,
-        oracle_text = tp.original,
-        "imperative fallback to Unimplemented"
-    );
-    parsed_clause(Effect::Unimplemented {
-        name: verb.to_string(),
-        description: Some(tp.original.to_string()),
-    })
+    // CR 608.2c: the clause could not be read end to end. Name the gap by the
+    // sub-grammar that rejected it, not by the clause's first word — the first word
+    // reports only where the leftover text starts, not what failed.
+    parsed_clause(gap_diagnosis::clause_gap_unimplemented(tp.original))
 }
 
 /// Determines if text after "choose " is a targeting synonym rather than
@@ -32500,21 +32495,24 @@ fn rewrite_that_type_mana_instead(def: &mut AbilityDefinition) {
                 target,
             },
             Some(sub),
-        ) => match sub.effect.as_ref() {
-            Effect::Unimplemented {
-                name,
-                description: Some(description),
-            } if name == "add" => parse_that_type_mana_count(description).and_then(|count| {
-                Some(Effect::Mana {
-                    produced: mana_production_with_count(produced, count)?,
-                    restrictions: restrictions.clone(),
-                    grants: grants.clone(),
-                    expiry: *expiry,
-                    target: target.clone(),
+        ) => {
+            // The discriminator is `parse_that_type_mana_count`'s own `tag("add ") … eof`
+            // grammar over the recorded description, not the gap's name: an
+            // `all_consuming` match on the fragment is strictly more precise than a
+            // first-word compare ever was.
+            sub.effect
+                .unimplemented_description()
+                .and_then(parse_that_type_mana_count)
+                .and_then(|count| {
+                    Some(Effect::Mana {
+                        produced: mana_production_with_count(produced, count)?,
+                        restrictions: restrictions.clone(),
+                        grants: grants.clone(),
+                        expiry: *expiry,
+                        target: target.clone(),
+                    })
                 })
-            }),
-            _ => None,
-        },
+        }
         _ => None,
     };
 
@@ -33019,11 +33017,11 @@ fn rewrite_choose_tracked_set_exclusion(def: &mut AbilityDefinition) {
 /// three cards in each graveyard" (a zone selection) — so those honest
 /// `Unimplemented` heads are left untouched rather than mis-converted.
 fn maybe_convert_choose_head_into_tracked_set(def: &mut AbilityDefinition) {
-    let description = match &*def.effect {
-        Effect::Unimplemented { name, description } if name == "choose" => description.clone(),
-        _ => return,
-    };
-    let Some(description) = description else {
+    // The discriminators are the gates below — `tag("choose ")`,
+    // `parse_choose_object_selection_filter`, the lifted `multi_target` and the
+    // sub-chain's `Another` mass move — all read off the recorded description, never off
+    // the gap's name.
+    let Some(description) = def.effect.unimplemented_description().map(str::to_owned) else {
         return;
     };
     let Some(spec) = def.multi_target.clone() else {

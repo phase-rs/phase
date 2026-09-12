@@ -6500,11 +6500,19 @@ fn vazal_megalegendary_line_consumed_and_limit_extracted() {
         &["Creature"],
         &["Phyrexian", "Praetor"],
     );
+    // Rename-proof negative. The old form compared the gap's NAME against
+    // "megalegendary" — the clause's first word, which only the imperative fallback
+    // ever produced and which can never appear once gaps are named by verdict. Key on
+    // the recorded CLAUSE instead: this is strictly stronger, because it catches EVERY
+    // `Unimplemented`-minting route for a regressed copy-limit line (the fallback, the
+    // static producer, the whole-line marker), not just the fallback's spelling.
+    // Form (i) — "no `Unimplemented` at all" — is unavailable: Vazal's third line
+    // legitimately carries one.
+    const MEGALEGENDARY: &str = "megalegendary";
     let megalegendary_unimplemented = r.abilities.iter().any(|a| {
-        matches!(
-            &*a.effect,
-            Effect::Unimplemented { name, .. } if name.eq_ignore_ascii_case("megalegendary")
-        )
+        a.effect
+            .unimplemented_description()
+            .is_some_and(|d| d.to_lowercase().contains(MEGALEGENDARY))
     });
     assert!(
         !megalegendary_unimplemented,
@@ -7978,11 +7986,22 @@ fn activated_as_sorcery_constraint_sets_sorcery_speed() {
             ..
         }
     ));
-    let no_activate_tail = draw
-            .sub_ability
-            .as_ref()
-            .is_none_or(|tail| !matches!(*tail.effect, Effect::Unimplemented { ref name, .. } if name == "activate"));
-    assert!(no_activate_tail);
+    // Rename-proof negative: key on the CLAUSE the gap would record, not on the gap's
+    // name. A name compare against the old first word can never be true once gaps are
+    // named by verdict, so the guard would stop guarding silently. The paired positive
+    // reach-guard is the `Effect::Draw` assertion immediately above: it proves the
+    // activation restriction was absorbed rather than the sentence failing earlier.
+    const ACTIVATE_PHRASE: &str = "activate only as a sorcery";
+    let no_activate_tail = draw.sub_ability.as_ref().is_none_or(|tail| {
+        !tail
+            .effect
+            .unimplemented_description()
+            .is_some_and(|d| d.to_lowercase().contains(ACTIVATE_PHRASE))
+    });
+    assert!(
+        no_activate_tail,
+        "the {ACTIVATE_PHRASE} restriction must be absorbed, not left as a gap node"
+    );
 }
 
 #[test]
@@ -8091,10 +8110,17 @@ fn spell_cast_restrictions_parse_into_top_level_metadata() {
             CastingRestriction::DuringOpponentsTurn,
         ]
     );
-    assert!(!matches!(
-        *r.abilities[0].effect,
-        Effect::Unimplemented { ref name, .. } if name == "cast"
-    ));
+    // Rename-proof negative, keyed on the recorded CLAUSE rather than the gap's name.
+    // Paired positive reach-guard: the `casting_restrictions` assertion immediately
+    // above proves the restriction line was consumed into top-level metadata.
+    const CAST_PHRASE: &str = "cast this spell only during combat";
+    assert!(
+        !r.abilities[0]
+            .effect
+            .unimplemented_description()
+            .is_some_and(|d| d.to_lowercase().contains(CAST_PHRASE)),
+        "the {CAST_PHRASE} restriction must not leak back as a gap node"
+    );
 }
 
 // CR 118.9 + CR 701.59a: Conspiracy Unraveler — "You may collect evidence N
@@ -8454,10 +8480,17 @@ fn spell_casting_option_parses_trap_alternative_cost() {
         })
     );
     assert_eq!(r.abilities.len(), 1);
-    assert!(!matches!(
-        *r.abilities[0].effect,
-        Effect::Unimplemented { ref name, .. } if name == "pay"
-    ));
+    // Rename-proof negative, keyed on the recorded CLAUSE. Paired positive reach-guard:
+    // the `alternative_cost` assertion above proves the "you may pay {0} rather than
+    // ..." sentence was absorbed as an alternative cost.
+    const PAY_PHRASE: &str = "rather than pay this spell's mana cost";
+    assert!(
+        !r.abilities[0]
+            .effect
+            .unimplemented_description()
+            .is_some_and(|d| d.to_lowercase().contains(PAY_PHRASE)),
+        "the alternative-cost sentence must not leak back as a gap node"
+    );
 }
 
 // CR 118.9 + CR 601.2b + CR 404.1 + CR 109.5: Ravenous Trap — the leading
@@ -8525,12 +8558,16 @@ fn spell_casting_option_parses_ravenous_trap_alternative_cost() {
         "alt-cost must not leak into abilities as a PayCost effect, got {:?}",
         r.abilities[0].effect
     );
+    // Rename-proof negative, keyed on the recorded CLAUSE. Paired positive reach-guard:
+    // the opponent-graveyard `QuantityComparison` match above proves the alternative-cost
+    // sentence was decomposed rather than failing earlier.
+    const PAY_PHRASE: &str = "rather than pay this spell's mana cost";
     assert!(
-        !matches!(
-            *r.abilities[0].effect,
-            Effect::Unimplemented { ref name, .. } if name == "pay"
-        ),
-        "alt-cost must not leak into abilities as an unimplemented pay effect, got {:?}",
+        !r.abilities[0]
+            .effect
+            .unimplemented_description()
+            .is_some_and(|d| d.to_lowercase().contains(PAY_PHRASE)),
+        "alt-cost must not leak into abilities as an unimplemented pay gap, got {:?}",
         r.abilities[0].effect
     );
 }

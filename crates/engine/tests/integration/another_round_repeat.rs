@@ -198,19 +198,22 @@ fn another_round_x_zero_runs_process_exactly_once() {
 #[test]
 fn another_round_parses_to_root_repeat_for_offset_no_unimplemented() {
     let def = another_round_def();
-    // The consumed directive must NOT leak an Unimplemented{name:"repeat"} sub.
-    fn has_repeat_unimplemented(def: &engine::types::ability::AbilityDefinition) -> bool {
-        let here = matches!(
-            &*def.effect,
-            engine::types::ability::Effect::Unimplemented { name, .. } if name == "repeat"
-        );
-        here || def
-            .sub_ability
-            .as_deref()
-            .is_some_and(has_repeat_unimplemented)
+    // Paired positive reach-guard: `another_round_def()` itself asserts
+    // `def.repeat_for == Some(Offset(Variable X, +1))`, so the directive is proven
+    // consumed into a real typed field rather than the sentence failing earlier. The
+    // negative below is then keyed on the CLAUSE a gap would record, not on the gap's
+    // name — a name compare against the clause's old first word can never be true once
+    // gaps are named by verdict, and the guard would stop guarding silently.
+    const REPEAT_PHRASE: &str = "repeat this process";
+    fn has_repeat_gap(def: &engine::types::ability::AbilityDefinition) -> bool {
+        let here = def
+            .effect
+            .unimplemented_description()
+            .is_some_and(|desc| desc.to_lowercase().contains(REPEAT_PHRASE));
+        here || def.sub_ability.as_deref().is_some_and(has_repeat_gap)
     }
     assert!(
-        !has_repeat_unimplemented(&def),
-        "the 'repeat this process X more times' directive must be consumed, not left as Unimplemented"
+        !has_repeat_gap(&def),
+        "the 'repeat this process X more times' directive must be consumed, not left as a gap node"
     );
 }

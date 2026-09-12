@@ -25,7 +25,7 @@ expression: "&lowered"
       "kind": "Activated",
       "effect": {
         "type": "Unimplemented",
-        "name": "change",
+        "name": "unrecognized_clause_head",
         "description": "change Arni's base power to 1 plus the greatest power among other creatures you control"
       },
       "cost": {
