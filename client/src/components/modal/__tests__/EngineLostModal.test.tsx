@@ -95,12 +95,18 @@ describe("EngineLostModal", () => {
       "Exported",
     ],
     [
-      // The button has two states, so a download still running under the shell
-      // reads as exported; only an outright failure must not.
-      "a shell that never reported still reads as exported",
+      // This is the recovery path: a snapshot nothing confirmed must not send
+      // the player looking for a file that may not exist.
+      "a shell that never confirmed the export does not read as exported",
       { kind: "requested", filename: "game-state.zip" },
+      "Export unconfirmed",
       "Exported",
-      "Export failed",
+    ],
+    [
+      "a confirmed download reads as exported",
+      { kind: "saved", filename: "game-state.zip", path: "~/Downloads/game-state.zip" },
+      "Exported",
+      "Export unconfirmed",
     ],
   ])("%s", async (_name, result, shown, hidden) => {
     exportGameStateDebugZip.mockResolvedValue(result);
@@ -137,6 +143,6 @@ describe("EngineLostModal", () => {
     expect(exportGameStateDebugZip).toHaveBeenCalledTimes(1);
 
     settle({ kind: "requested", filename: "game-state.zip" });
-    expect(await screen.findByRole("button", { name: "Exported" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "Export unconfirmed" })).toBeEnabled();
   });
 });

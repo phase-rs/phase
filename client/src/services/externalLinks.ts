@@ -2,10 +2,9 @@
 // handler covers nested content in every current and future anchor without
 // per-callsite handlers. Modifier clicks intentionally follow the same path:
 // "open in new tab" has no useful meaning inside a webview. Relative app links
-// remain with the router; a blob: href is the page's own bytes -- it exists
-// only because this page registered it with createObjectURL -- and keeps the
-// browser's default action, while other non-HTTP(S) schemes and
-// protocol-relative URLs are denied before they can reach the shell.
+// remain with the router; a blob: download keeps the browser's default action,
+// while other non-HTTP(S) schemes and protocol-relative URLs are denied before
+// they can reach the shell.
 
 import { isOpenableExternalUrl } from "./openExternal";
 import { isBundledTauriOrigin, isTauri } from "./platform";
@@ -64,13 +63,15 @@ export function installTauriExternalLinkHandler(): void {
       ) {
         return;
       }
-      // A blob: href is the page's own bytes: it exists only because this page
-      // registered it with createObjectURL, so it is a file save, never a link
-      // the shell could open. Leave it to the browser's default action. Other
-      // non-HTTP(S) schemes stay denied, data: among them -- the shell's
+      // A blob: href with a download attribute is a file save of the page's own
+      // bytes, never a link the shell could open, so leave it to the browser's
+      // default action. Both halves are required: the attribute alone would
+      // admit javascript:, which browsers run rather than download, and the
+      // scheme alone would admit a blob: document the deny path should handle.
+      if (destination.protocol === "blob:" && anchor.hasAttribute("download")) return;
+      // Other non-HTTP(S) schemes stay denied, data: among them -- the shell's
       // navigation guard spares only blob:, so admitting data: here would let a
       // download click abort the native-engine and LAN bridges.
-      if (destination.protocol === "blob:") return;
       if (!isOpenableExternalUrl(destination.href)) {
         event.preventDefault();
         return;

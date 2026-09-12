@@ -117,6 +117,18 @@ describe("Tauri document external-link routing", () => {
     expect(mocks.openUrl).not.toHaveBeenCalled();
   });
 
+  it("denies a blob: document link that is not a download", () => {
+    // Only a file save is exempt; a blob: document belongs to the deny path,
+    // which is reachable only from an HTTP(S) page: the router branch admits any
+    // blob: href once the document itself sits at one.
+    expect(window.location.protocol).toMatch(/^https?:$/);
+
+    const event = click("blob:https://phase-rs.dev/0f8a4c21-document");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(mocks.openUrl).not.toHaveBeenCalled();
+  });
+
   // A blob: href is the page's own bytes -- a file save -- not a link the shell
   // could open. Cancelling it cancels the download itself, which is what
   // silently ate every desktop export.
@@ -140,9 +152,10 @@ describe("Tauri document external-link routing", () => {
     "denies %s despite its download attribute, which a download-attribute predicate would admit",
     (href) => {
       // Browsers ignore `download` on a javascript: URL and run the script, so
-      // the admitted set is keyed on the scheme, never on the attribute. data:
-      // stays out of it because the shell's navigation guard spares only blob:,
-      // so admitting it would let a data: click abort the running game.
+      // the attribute never admits anything on its own -- the scheme has to
+      // match too. data: stays out of it because the shell's navigation guard
+      // spares only blob:, so admitting it would let a data: click abort the
+      // running game.
       const event = click(href, false, {}, { download: "notes.txt" });
 
       expect(event.defaultPrevented).toBe(true);

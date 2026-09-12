@@ -27,9 +27,23 @@ pub struct NativeEngineReady {
     pub port: u16,
 }
 
-/// Where a browser-style download from the shell actually landed. The page only
-/// ever knows the file name it asked for, so the absolute path has to come from
-/// the shell side.
+/// What became of a finished download. `Unknown` is an answer, not a hedge: a
+/// file sitting at the destination after wry reported failure is equally a
+/// stale failure flag and a write that died mid-file, and reporting either as
+/// saved would hand the user a corrupt snapshot.
+#[cfg(desktop)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellDownloadOutcome {
+    Saved,
+    Unknown,
+    Failed,
+}
+
+/// Where a browser-style download from the shell landed, and whether it did.
+/// The page only ever knows the file name it asked for, so the destination has
+/// to come from the shell side; it arrives home-relative because the page is
+/// remotely served content.
 // Unlike the wire-contract types below, mobile has no consumer for this at
 // all, so it is compiled out there rather than allow(dead_code)'d.
 #[cfg(desktop)]
@@ -37,7 +51,7 @@ pub struct NativeEngineReady {
 pub struct ShellDownload {
     pub url: String,
     pub path: Option<String>,
-    pub success: bool,
+    pub outcome: ShellDownloadOutcome,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -225,20 +239,29 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ShellDownload {
                 url: "blob:http://127.0.0.1:8731/27fbd3e5".to_owned(),
-                path: Some("/home/u/Downloads/replay.json".to_owned()),
-                success: true,
+                path: Some("~/Downloads/replay.json".to_owned()),
+                outcome: ShellDownloadOutcome::Saved,
             })
             .unwrap(),
-            r#"{"url":"blob:http://127.0.0.1:8731/27fbd3e5","path":"/home/u/Downloads/replay.json","success":true}"#
+            r#"{"url":"blob:http://127.0.0.1:8731/27fbd3e5","path":"~/Downloads/replay.json","outcome":"saved"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ShellDownload {
+                url: "blob:http://127.0.0.1:8731/27fbd3e5".to_owned(),
+                path: Some("~/Downloads/replay.json".to_owned()),
+                outcome: ShellDownloadOutcome::Unknown,
+            })
+            .unwrap(),
+            r#"{"url":"blob:http://127.0.0.1:8731/27fbd3e5","path":"~/Downloads/replay.json","outcome":"unknown"}"#
         );
         assert_eq!(
             serde_json::to_string(&ShellDownload {
                 url: "blob:http://127.0.0.1:8731/27fbd3e5".to_owned(),
                 path: None,
-                success: false,
+                outcome: ShellDownloadOutcome::Failed,
             })
             .unwrap(),
-            r#"{"url":"blob:http://127.0.0.1:8731/27fbd3e5","path":null,"success":false}"#
+            r#"{"url":"blob:http://127.0.0.1:8731/27fbd3e5","path":null,"outcome":"failed"}"#
         );
     }
 

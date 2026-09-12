@@ -23,7 +23,8 @@ type WindowWithSaveFilePicker = Window & {
 
 /**
  * What became of a download. Only the desktop shell learns where a
- * browser-style download actually landed, so `path` appears only there. On
+ * browser-style download actually landed, so `path` appears only there, and it
+ * arrives home-relative so the page is never told the user's home path. On
  * Windows WebView2 offers `showSaveFilePicker`, so the picker branch runs
  * and the shell wait is never reached.
  */
@@ -36,7 +37,7 @@ export type DownloadResult =
 interface ShellDownload {
   url: string;
   path: string | null;
-  success: boolean;
+  outcome: "saved" | "unknown" | "failed";
 }
 
 const SHELL_DOWNLOAD_EVENT = "shell-download";
@@ -75,11 +76,14 @@ async function clickThroughShell(
         // finishing inside this wait would otherwise hand us its path. The
         // timeout stays the fallback for a report that never arrives.
         if (payload.url !== url) return;
-        settle({
-          kind: payload.success ? "saved" : "failed",
-          filename,
-          path: payload.path ?? undefined,
-        });
+        settle(
+          // The shell reports "unknown" when it cannot tell a written file from
+          // a truncated one, which is the same thing we know after the wait runs
+          // out: the download was requested and nothing confirmed it.
+          payload.outcome === "unknown"
+            ? { kind: "requested", filename }
+            : { kind: payload.outcome, filename, path: payload.path ?? undefined },
+        );
       }),
     )
     .catch(() => null);

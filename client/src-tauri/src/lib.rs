@@ -1,13 +1,20 @@
 #[cfg(desktop)]
-use std::{collections::HashMap, path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf, MAIN_SEPARATOR},
+    sync::Mutex,
+};
 
 #[cfg(desktop)]
-use tauri::{webview::DownloadEvent, Emitter, Manager, WebviewWindowBuilder};
+use tauri::{
+    webview::{DownloadEvent, PageLoadEvent},
+    Emitter, Manager, Url, WebviewWindowBuilder,
+};
 
 #[cfg(desktop)]
-use crate::native_engine_contract::ShellDownload;
+use crate::native_engine_contract::{ShellDownload, ShellDownloadOutcome};
 
-/// Carries a finished download's absolute path to the page.
+/// Carries a finished download's outcome and destination to the page.
 #[cfg(desktop)]
 const DOWNLOAD_EVENT: &str = "shell-download";
 
@@ -15,27 +22,49 @@ const DOWNLOAD_EVENT: &str = "shell-download";
 /// worked. wry's failure flag lives on the `WebContext` — one per process — and
 /// is only ever set, never cleared, so every download after a single failure
 /// arrives here with `success = false` and no path even though the file was
-/// written. The destination wry named when it requested the download lets the
-/// filesystem settle that instead of the flag.
-///
-/// The trade: a download that fails mid-write (ENOSPC, EIO) leaves a truncated
-/// file that `exists()`, so this reports success where trusting the flag would
-/// not. It is accepted because the flag is wrong for every download after the
-/// first failure, and because wry uniquifies the destination before requesting
-/// it, so a file found there is always this download's.
+/// written. The destination wry named when it requested the download narrows
+/// that, but it cannot settle it: a write that dies mid-file (ENOSPC, EIO)
+/// leaves a truncated file at that same destination. Nothing here can tell the
+/// two apart, so they report `Unknown` rather than claim a corrupt file.
 #[cfg(desktop)]
 fn finished_download_report(
     wry_path: Option<PathBuf>,
     wry_success: bool,
     stashed_destination: Option<PathBuf>,
-) -> (Option<PathBuf>, bool) {
-    if wry_success && wry_path.is_some() {
-        return (wry_path, true);
+) -> (Option<PathBuf>, ShellDownloadOutcome) {
+    if wry_success {
+        // wry's macOS handler reports no path, so the destination it named when
+        // it asked for the download is the only one there is.
+        return (
+            wry_path.or(stashed_destination),
+            ShellDownloadOutcome::Saved,
+        );
     }
     match stashed_destination.filter(|destination| destination.exists()) {
-        Some(destination) => (Some(destination), true),
-        None => (wry_path, wry_success),
+        Some(destination) => (Some(destination), ShellDownloadOutcome::Unknown),
+        None => (wry_path, ShellDownloadOutcome::Failed),
     }
+}
+
+/// Compress a leading home directory to `~`. The page is remotely served, so an
+/// absolute path hands that origin the user's account name and filesystem
+/// layout; home-relative still finds the file.
+#[cfg(desktop)]
+fn home_relative_path(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(relative) if relative.as_os_str().is_empty() => "~".to_owned(),
+        Some(relative) => format!("~{MAIN_SEPARATOR}{}", relative.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// Whether a page load means the webview really left the page. The navigation
+/// guard has to spare `blob:`, since a file download arrives as a navigation to
+/// one; a committed load — wry's `Started` on every backend — is the proof a
+/// download never produces.
+#[cfg(desktop)]
+fn page_load_leaves_the_page(url: &Url, event: PageLoadEvent) -> bool {
+    url.scheme() == "blob" && event == PageLoadEvent::Started
 }
 
 mod audio_probe;
@@ -177,18 +206,25 @@ pub fn run() {
                 let builder = WebviewWindowBuilder::from_config(app, main_config)?
                     .on_navigation(|url| {
                         // An `<a download>` click arrives here as a navigation to its
-                        // `blob:` URL; the page is not going anywhere, so the live
-                        // game's bridges must survive it.
+                        // `blob:` URL, and nothing at this point distinguishes it from
+                        // a real `blob:` page, so the live game's bridges have to
+                        // survive it and `on_page_load` settles the other case.
                         if url.scheme() != "blob" {
                             native_engine::abort_native_engine_bridges_on_navigation();
                             native_bridge::abort_lan_bridges();
                         }
                         true
                     })
+                    .on_page_load(|_window, payload| {
+                        if page_load_leaves_the_page(payload.url(), payload.event()) {
+                            native_engine::abort_native_engine_bridges_on_navigation();
+                            native_bridge::abort_lan_bridges();
+                        }
+                    })
                     // wry already accepts downloads on its own; what it does not do is
                     // tell anyone where the file went. The page only knows the name it
-                    // asked for, so report the real destination to the log and to the
-                    // page from here, where it is known.
+                    // asked for, so report the destination from here, where it is
+                    // known: in full to the log, home-relative to the page.
                     .on_download(move |webview, event| {
                         match event {
                             DownloadEvent::Requested { url, destination } => {
@@ -205,17 +241,22 @@ pub fn run() {
                                     .lock()
                                     .ok()
                                     .and_then(|mut destinations| destinations.remove(url.as_str()));
-                                let (path, success) =
+                                let (path, outcome) =
                                     finished_download_report(path, success, stashed);
                                 eprintln!(
-                                    "shell download finished: {url} -> {path:?} success={success}"
+                                    "shell download finished: {url} -> {path:?} outcome={outcome:?}"
                                 );
                                 let _ = webview.emit(
                                     DOWNLOAD_EVENT,
                                     ShellDownload {
                                         url: url.to_string(),
-                                        path: path.as_ref().map(|p| p.display().to_string()),
-                                        success,
+                                        path: path.as_deref().map(|path| {
+                                            home_relative_path(
+                                                path,
+                                                std::env::home_dir().as_deref(),
+                                            )
+                                        }),
+                                        outcome,
                                     },
                                 );
                             }
@@ -411,13 +452,15 @@ mod tests {
         }
     }
 
-    /// The one arm with no other witness: wry latches its per-`WebContext`
-    /// failure flag on the first failed download, so from then on a written
-    /// file arrives as `(None, false)` and only the destination on disk can
-    /// tell that apart from a real failure.
+    /// wry latches its per-`WebContext` failure flag on the first failed
+    /// download, so from then on a written file arrives as `(None, false)` —
+    /// and a write that died mid-file leaves a truncated file at that same
+    /// destination. Neither may be reported as saved.
     #[cfg(desktop)]
     #[test]
-    fn finished_download_report_trusts_the_filesystem_over_a_latched_failure_flag() {
+    fn finished_download_report_never_calls_a_reported_failure_saved() {
+        use super::ShellDownloadOutcome::{Failed, Saved, Unknown};
+
         let written = std::env::temp_dir().join(format!(
             "phase-rs-finished-download-{}.tmp",
             std::process::id()
@@ -427,25 +470,76 @@ mod tests {
 
         assert_eq!(
             super::finished_download_report(Some(written.clone()), true, None),
-            (Some(written.clone()), true)
+            (Some(written.clone()), Saved)
         );
-        // Latched flag, file present.
+        // wry's macOS handler reports success with no path at all.
+        assert_eq!(
+            super::finished_download_report(None, true, Some(written.clone())),
+            (Some(written.clone()), Saved)
+        );
+        // Latched flag or truncated file: indistinguishable from here.
         assert_eq!(
             super::finished_download_report(None, false, Some(written.clone())),
-            (Some(written.clone()), true)
+            (Some(written.clone()), Unknown)
         );
         // Genuine failure: nothing was written to the destination.
         assert_eq!(
             super::finished_download_report(None, false, Some(missing)),
-            (None, false)
+            (None, Failed)
         );
         // A `Finished` with no matching `Requested` has nothing to check.
         assert_eq!(
             super::finished_download_report(None, false, None),
-            (None, false)
+            (None, Failed)
         );
 
         fs::remove_file(&written).unwrap();
+    }
+
+    /// The page is remotely served, so the destination it is handed must not
+    /// spell out the user's home directory.
+    #[cfg(desktop)]
+    #[test]
+    fn emitted_download_path_hides_the_home_directory() {
+        let home = Path::new("/home/alice");
+        let inside = home.join("Downloads").join("game-state.zip");
+        assert_eq!(
+            super::home_relative_path(&inside, Some(home)),
+            format!(
+                "~{sep}Downloads{sep}game-state.zip",
+                sep = std::path::MAIN_SEPARATOR
+            )
+        );
+        assert_eq!(super::home_relative_path(home, Some(home)), "~");
+        // A neighbour whose name merely starts with the home path stays whole.
+        let outside = Path::new("/home/alice-backup/game-state.zip");
+        assert_eq!(
+            super::home_relative_path(outside, Some(home)),
+            outside.display().to_string()
+        );
+        assert_eq!(
+            super::home_relative_path(&inside, None),
+            inside.display().to_string()
+        );
+    }
+
+    /// The navigation guard cannot see an `<a download>`, so it spares every
+    /// `blob:` navigation. A committed page load is the one signal that says
+    /// the webview left the page instead of saving a file.
+    #[cfg(desktop)]
+    #[test]
+    fn only_a_committed_blob_page_load_ends_the_session() {
+        use super::PageLoadEvent::{Finished, Started};
+        use tauri::Url;
+
+        let blob = Url::parse("blob:https://phase-rs.dev/0f8a4c21").unwrap();
+        let page = Url::parse("https://phase-rs.dev/play").unwrap();
+
+        assert!(super::page_load_leaves_the_page(&blob, Started));
+        // The navigation guard tore these down before the load began.
+        assert!(!super::page_load_leaves_the_page(&page, Started));
+        // `Started` is the commit, so `Finished` would only repeat it.
+        assert!(!super::page_load_leaves_the_page(&blob, Finished));
     }
 
     /// Nothing automated catches this grant going missing: no CI job builds the

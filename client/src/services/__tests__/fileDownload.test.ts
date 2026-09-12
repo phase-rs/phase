@@ -26,7 +26,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 interface ShellDownload {
   url: string;
   path: string | null;
-  success: boolean;
+  outcome: "saved" | "unknown" | "failed";
 }
 
 describe("downloadBlob", () => {
@@ -157,7 +157,7 @@ describe("downloadBlob", () => {
     // A small download can finish before a listener registered after the click
     // would exist, so the order here is the whole mechanism.
     isDesktopTauriMock.mockReturnValue(true);
-    stubAnchorDownload(shellFinishes({ path: "/home/u/Downloads/notes.txt", success: true }));
+    stubAnchorDownload(shellFinishes({ path: "~/Downloads/notes.txt", outcome: "saved" }));
     const { downloadBlob } = await fileDownload();
 
     await downloadBlob("notes.txt", new Blob(["data"]));
@@ -167,9 +167,9 @@ describe("downloadBlob", () => {
     expect(eventModule.reads).toBe(1);
   });
 
-  it("reports the shell's absolute path when the download succeeds", async () => {
+  it("reports the path the shell gives when the download succeeds", async () => {
     isDesktopTauriMock.mockReturnValue(true);
-    stubAnchorDownload(shellFinishes({ path: "/home/u/Downloads/notes.txt", success: true }));
+    stubAnchorDownload(shellFinishes({ path: "~/Downloads/notes.txt", outcome: "saved" }));
     const { downloadBlob } = await fileDownload();
 
     const result = await downloadBlob("notes.txt", new Blob(["data"]));
@@ -177,14 +177,14 @@ describe("downloadBlob", () => {
     expect(result).toStrictEqual({
       kind: "saved",
       filename: "notes.txt",
-      path: "/home/u/Downloads/notes.txt",
+      path: "~/Downloads/notes.txt",
     });
     expect(unlisten).toHaveBeenCalledOnce();
   });
 
   it("reports a failure when the shell says the download failed", async () => {
     isDesktopTauriMock.mockReturnValue(true);
-    stubAnchorDownload(shellFinishes({ path: "/home/u/Downloads/notes.txt", success: false }));
+    stubAnchorDownload(shellFinishes({ path: "~/Downloads/notes.txt", outcome: "failed" }));
     const { downloadBlob } = await fileDownload();
 
     const result = await downloadBlob("notes.txt", new Blob(["data"]));
@@ -192,8 +192,22 @@ describe("downloadBlob", () => {
     expect(result).toStrictEqual({
       kind: "failed",
       filename: "notes.txt",
-      path: "/home/u/Downloads/notes.txt",
+      path: "~/Downloads/notes.txt",
     });
+    expect(unlisten).toHaveBeenCalledOnce();
+  });
+
+  it("does not claim a save the shell could not confirm", async () => {
+    // A file at the destination after a reported failure is equally a stale
+    // latched failure flag and a write that died mid-file, so the shell says
+    // "unknown" and the page must not turn that into a saved file.
+    isDesktopTauriMock.mockReturnValue(true);
+    stubAnchorDownload(shellFinishes({ path: "~/Downloads/notes.txt", outcome: "unknown" }));
+    const { downloadBlob } = await fileDownload();
+
+    const result = await downloadBlob("notes.txt", new Blob(["data"]));
+
+    expect(result).toStrictEqual({ kind: "requested", filename: "notes.txt" });
     expect(unlisten).toHaveBeenCalledOnce();
   });
 
@@ -204,8 +218,8 @@ describe("downloadBlob", () => {
     isDesktopTauriMock.mockReturnValue(true);
     stubAnchorDownload(() => {
       if (!emit) throw new Error("clicked before subscribing to shell-download");
-      emit({ url: "blob:another-export", path: "/home/u/Downloads/other.zip", success: false });
-      emit({ url: "blob:mock-url", path: "/home/u/Downloads/notes.txt", success: true });
+      emit({ url: "blob:another-export", path: "~/Downloads/other.zip", outcome: "failed" });
+      emit({ url: "blob:mock-url", path: "~/Downloads/notes.txt", outcome: "saved" });
     });
     const { downloadBlob } = await fileDownload();
 
@@ -214,13 +228,13 @@ describe("downloadBlob", () => {
     expect(result).toStrictEqual({
       kind: "saved",
       filename: "notes.txt",
-      path: "/home/u/Downloads/notes.txt",
+      path: "~/Downloads/notes.txt",
     });
   });
 
   it("keeps a pathless shell report honest", async () => {
     isDesktopTauriMock.mockReturnValue(true);
-    stubAnchorDownload(shellFinishes({ path: null, success: true }));
+    stubAnchorDownload(shellFinishes({ path: null, outcome: "saved" }));
     const { downloadBlob } = await fileDownload();
 
     const result = await downloadBlob("notes.txt", new Blob(["data"]));

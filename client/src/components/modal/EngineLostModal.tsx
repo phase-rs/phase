@@ -4,6 +4,7 @@ import { Trans, useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 
 import { onEngineLost, onEngineSlow } from "../../game/engineRecovery";
+import type { DownloadResult } from "../../services/fileDownload";
 import { exportGameStateDebugZip } from "../../services/gameStateExport";
 import { useGameStore } from "../../stores/gameStore";
 import type { GameState } from "../../adapter/types";
@@ -52,8 +53,7 @@ export function EngineLostModal() {
   const [snapshot, setSnapshot] = useState<EngineLostSnapshot | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [exported, setExported] = useState(false);
-  const [exportFailed, setExportFailed] = useState(false);
+  const [exportOutcome, setExportOutcome] = useState<DownloadResult["kind"] | null>(null);
   // One export at a time: an earlier click's 2s clear timer wipes a later export's result.
   const [isExporting, setIsExporting] = useState(false);
 
@@ -127,21 +127,20 @@ export function EngineLostModal() {
 
   const handleExport = async () => {
     if (!snapshot.gameState) return;
+    // "requested" keeps its own label: this is the recovery path, so a snapshot
+    // nothing has confirmed must not read as one the player can go find.
+    const show = (kind: DownloadResult["kind"]) => {
+      setExportOutcome(kind);
+      window.setTimeout(() => setExportOutcome(null), 2000);
+    };
     setIsExporting(true);
-    setExported(false);
-    setExportFailed(false);
+    setExportOutcome(null);
     try {
       const result = await exportGameStateDebugZip(snapshot.gameState);
-      // This button has two states, so "requested" -- the shell not reporting
-      // inside the wait, with the download still running -- reads as exported;
-      // only an outright failure must not.
-      const flag = result.kind === "failed" ? setExportFailed : setExported;
-      flag(true);
-      window.setTimeout(() => flag(false), 2000);
+      show(result.kind);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      setExportFailed(true);
-      window.setTimeout(() => setExportFailed(false), 2000);
+      show("failed");
     } finally {
       setIsExporting(false);
     }
@@ -211,11 +210,13 @@ export function EngineLostModal() {
             disabled={isExporting || !snapshot.gameState}
             className="rounded-lg bg-gray-700 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {exportFailed
+            {exportOutcome === "failed"
               ? t("engineLost.exportFailed")
-              : exported
-                ? t("engineLost.exported")
-                : t("engineLost.exportClientSnapshot")}
+              : exportOutcome === "requested"
+                ? t("engineLost.exportRequested")
+                : exportOutcome === "saved"
+                  ? t("engineLost.exported")
+                  : t("engineLost.exportClientSnapshot")}
           </button>
           {isPanic && (
             <>
