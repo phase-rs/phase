@@ -116,6 +116,16 @@ describe("waitingForFactory", () => {
       },
     });
   });
+
+  it("switches to ManaSourceSelection without leaking Priority-only keys", () => {
+    const waitingFor = waitingForFactory.manaSourceSelection().build();
+
+    expect(waitingFor.type).toBe("ManaSourceSelection");
+    expect(waitingFor).toEqual({
+      type: "ManaSourceSelection",
+      data: { player: 0, options: [] },
+    });
+  });
 });
 
 describe("gameStateFactory convenience methods", () => {
