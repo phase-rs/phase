@@ -5212,11 +5212,19 @@ fn object_matches_trigger_source(
     source_id: ObjectId,
     trigger_source: Option<&TriggerSourceContext>,
 ) -> bool {
+    // CR 608.2h + CR 603.4: a dies intervening-if that names the source
+    // ("damage was dealt to it this turn") is checked after the source has
+    // left the battlefield. `ExactLive` is gone; the latched identity is the
+    // same object the damage record targeted.
     trigger_source.map_or(object_id == source_id, |context| {
-        matches!(
-            context.source_read(state),
-            crate::types::game_state::TriggerSourceRead::ExactLive(object) if object.id == object_id
-        )
+        match context.source_read(state) {
+            crate::types::game_state::TriggerSourceRead::ExactLive(object) => {
+                object.id == object_id
+            }
+            crate::types::game_state::TriggerSourceRead::Latched(latched) => {
+                latched.identity.reference.object_id == object_id
+            }
+        }
     })
 }
 

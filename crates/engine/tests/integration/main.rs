@@ -95,6 +95,7 @@ mod brigid_mana_ability;
 mod bring_the_ending_corrupted_instead_branch_5683;
 mod bring_to_light_free_cast_2880;
 mod broken_bond_land_prompt;
+mod burning_eye_zubera_damage_threshold;
 mod calamity_of_the_titans_reveal_cost;
 mod call_damage_control_modal_return;
 mod call_forth_tempest_and_rootha;

@@ -1613,6 +1613,59 @@ fn while_saddled_fold_refused_for_non_attacks_trigger_is_strictly_unsupported() 
 }
 
 #[test]
+fn intervening_if_n_or_more_damage_was_dealt_to_it_this_turn() {
+    // CR 107.1 + CR 120.1 + CR 603.4: quantity-first "if N or more damage was
+    // dealt to it this turn" on a dies trigger (Burning-Eye Zubera).
+    let def = parse_trigger_line(
+        "When this creature dies, if 4 or more damage was dealt to it this turn, \
+         this creature deals 3 damage to any target.",
+        "Burning-Eye Zubera",
+    );
+    match &def.condition {
+        Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DamageDealtThisTurn {
+                            target, channel, ..
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 4 },
+        }) => {
+            assert_eq!(target.as_ref(), &TargetFilter::SelfRef);
+            assert_eq!(*channel, DamageChannel::Total);
+        }
+        other => panic!("expected DamageDealtThisTurn GE 4, got {other:?}"),
+    }
+    let exec = def.execute.as_deref().expect("execute");
+    assert!(matches!(exec.effect.as_ref(), Effect::DealDamage { .. }));
+    assert!(exec.condition.is_none());
+    assert_no_unimplemented(exec);
+
+    let tide = parse_trigger_line(
+        "When this creature dies, if 4 or more damage was dealt to it this turn, draw three cards.",
+        "Rushing-Tide Zubera",
+    );
+    match &tide.condition {
+        Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::DamageDealtThisTurn { target, .. },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 4 },
+        }) => {
+            assert_eq!(target.as_ref(), &TargetFilter::SelfRef);
+        }
+        other => panic!("expected DamageDealtThisTurn GE 4, got {other:?}"),
+    }
+    let tide_exec = tide.execute.as_deref().expect("execute");
+    assert!(matches!(tide_exec.effect.as_ref(), Effect::Draw { .. }));
+    assert_no_unimplemented(tide_exec);
+}
+
+#[test]
 fn intervening_if_source_has_counters_on_it_populates_condition() {
     // CR 603.4 + CR 122: source-scoped "if ~ has counters on it" gates the
     // trigger on the source permanent currently having at least one counter of

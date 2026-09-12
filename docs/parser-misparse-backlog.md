@@ -900,7 +900,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Bronze Horse
 - Bull-Rush Bruiser
 - Bulwark Ox
-- Burning-Eye Zubera
 - Cache Grab
 - Calamity of the Titans
 - Call to Arms
@@ -1263,7 +1262,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Rowdy Crew
 - Rubblebelt Braggart
 - Runaway Steam-Kin
-- Rushing-Tide Zubera
 - Rushwood Legate
 - Saffi Eriksdotter
 - Sahagin
