@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type {
+  ManaSourceSelection,
   ManaType,
   PhyrexianShard,
   ShardChoice,
@@ -621,6 +622,30 @@ export function ManaPaymentUI() {
   );
 }
 
+// Color → shard symbol code for `ManaSymbol` (White→"W", …, Colorless→"C").
+const COLOR_SHARD: Record<ManaType, string> = {
+  White: "W",
+  Blue: "U",
+  Black: "B",
+  Red: "R",
+  Green: "G",
+  Colorless: "C",
+};
+
+function manaSourceOutputDisplay(selection: ManaSourceSelection): string[] {
+  // CR 605.3b: this overlay only echoes engine-enumerated options.
+  // CR 106.1a/b: pips only when the engine serialized Concrete types or atomic_combination.
+  // DeferredColorChoice carries neither a color nor a type set (restricted AnyOneColor is still Deferred).
+  if (selection.output.type === "DeferredColorChoice") return [];
+  if (selection.atomic_combination && selection.atomic_combination.length > 0) {
+    return selection.atomic_combination.map((manaType) => COLOR_SHARD[manaType]);
+  }
+  if (selection.output.type === "Concrete") {
+    return [COLOR_SHARD[selection.output.data]];
+  }
+  return [];
+}
+
 /** CR 605.3b: The engine has reached a mana ability that sacrifices a
  * permanent. It supplies every legal capability; this display layer only
  * renders those rows and returns the selected opaque action. */
@@ -629,8 +654,9 @@ export function ManaSourceSelectionUI() {
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameState = useGameStore((s) => s.gameState);
   const dispatch = useGameStore((s) => s.dispatch);
+  const canAct = useCanActForWaitingState();
 
-  if (waitingFor?.type !== "ManaSourceSelection") return null;
+  if (waitingFor?.type !== "ManaSourceSelection" || !canAct) return null;
 
   return (
     <AnimatePresence>
@@ -654,6 +680,7 @@ export function ManaSourceSelectionUI() {
           <div className="mt-4 space-y-2">
             {waitingFor.data.options.map((selection, index) => {
               const source = gameState?.objects[selection.source.object_id];
+              const shards = manaSourceOutputDisplay(selection);
               return (
                 <button
                   key={`${selection.source.object_id}-${selection.ability_index ?? "basic"}-${index}`}
@@ -661,8 +688,19 @@ export function ManaSourceSelectionUI() {
                   className="flex min-h-11 w-full items-center justify-between rounded-lg bg-amber-500/10 px-3 text-left text-sm text-white ring-1 ring-amber-300/30 transition hover:bg-amber-500/20"
                   onClick={() => dispatch({ type: "ActivateManaSource", data: { selection } })}
                 >
-                  <span>{source?.name ?? t("manaSourceSelection.unknownSource")}</span>
-                  <span className="text-xs text-amber-200">{t("manaSourceSelection.sacrifice")}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span>{source?.name ?? t("manaSourceSelection.unknownSource")}</span>
+                    {shards.length > 0
+                      ? shards.map((shard, shardIndex) => (
+                          <ManaSymbol key={shardIndex} shard={shard} size="sm" />
+                        ))
+                      : null}
+                  </span>
+                  {selection.penalty === "Sacrifices" ? (
+                    <span className="text-xs text-amber-200">
+                      {t("manaSourceSelection.sacrifice")}
+                    </span>
+                  ) : null}
                 </button>
               );
             })}
@@ -683,16 +721,6 @@ export function ManaSourceSelectionUI() {
     </AnimatePresence>
   );
 }
-
-// Color → shard symbol code for `ManaSymbol` (White→"W", …, Colorless→"C").
-const COLOR_SHARD: Record<ManaType, string> = {
-  White: "W",
-  Blue: "U",
-  Black: "B",
-  Red: "R",
-  Green: "G",
-  Colorless: "C",
-};
 
 /**
  * A run of fungible pool units the payment panel renders as one chip — same
