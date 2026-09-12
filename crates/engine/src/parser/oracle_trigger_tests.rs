@@ -1798,8 +1798,8 @@ fn intervening_if_fewer_than_three_plus1_steam_kin() {
     );
 }
 
-/// Adaptive Training Post: charge counters, N=3, SpellCast. Execute `it` is
-/// `TriggeringSource` (existing SpellCast anaphor) — pin, do not retarget.
+/// Adaptive Training Post: charge counters, N=3, SpellCast. The source-counter
+/// intervening-if makes the body pronoun refer to the artifact, not the spell.
 #[test]
 fn intervening_if_fewer_than_three_charge_adaptive_training_post() {
     let def = parse_trigger_line(
@@ -1818,7 +1818,7 @@ fn intervening_if_fewer_than_three_charge_adaptive_training_post() {
     assert_fewer_than_put_counter(
         &def,
         CounterType::Generic("charge".to_string()),
-        TargetFilter::TriggeringSource,
+        TargetFilter::SelfRef,
     );
 }
 
