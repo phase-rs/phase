@@ -164,7 +164,7 @@ fn cards_exiled_this_turn_for_context(state: &GameState, ctx: &QuantityContext) 
 enum CharacteristicView<'a> {
     Object(&'a crate::game::game_object::GameObject),
     Lki(&'a crate::types::game_state::LKISnapshot),
-    AttackDeclaration(crate::types::game_state::AttackDeclarationRecord),
+    AttackDeclaration(Box<crate::types::game_state::AttackDeclarationRecord>),
     SpellRecord(&'a crate::types::game_state::SpellCastRecord),
 }
 
@@ -408,7 +408,7 @@ fn visit_characteristic_leaf<'s>(
                                     event_index,
                                     record_index,
                                 },
-                                CharacteristicView::AttackDeclaration(record.clone()),
+                                CharacteristicView::AttackDeclaration(Box::new(record.clone())),
                                 false,
                             );
                         }
