@@ -223,4 +223,34 @@ describe("EngineLostModal", () => {
     act(() => vi.advanceTimersByTime(1_500));
     expect(screen.getByRole("button", { name: "Copy diagnostic" })).toBeInTheDocument();
   });
+
+  // The export outlives the modal easily — under the shell it waits up to ten
+  // seconds — and the unmount cleanup has already run by the time it settles,
+  // so a reset timer armed after it has nothing left to clear it.
+  it("arms no reset timer when the modal unmounts mid-export", async () => {
+    vi.useFakeTimers();
+    let settle!: (result: DownloadResult) => void;
+    const pending = new Promise<DownloadResult>((resolve) => {
+      settle = resolve;
+    });
+    exportGameStateDebugZip.mockReturnValueOnce(pending);
+    setGameStoreForTest({ gameId: GAME_ID, gameMode: "ai" });
+    renderModal();
+
+    act(() => notifyEngineLost("submitAction"));
+    const exportButton = screen.getByRole("button", { name: "Export client snapshot" });
+    fireEvent.click(exportButton);
+    // Gate on the committed disabled state: the export is only actually in
+    // flight once React has rendered the click's state update.
+    await act(async () => {});
+    expect(exportButton).toBeDisabled();
+
+    cleanup();
+    settle({ kind: "saved", filename: "game-state.zip", path: "~/Downloads/game-state.zip" });
+    await act(async () => {
+      await pending;
+    });
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });

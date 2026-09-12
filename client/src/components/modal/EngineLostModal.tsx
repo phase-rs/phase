@@ -60,6 +60,8 @@ export function EngineLostModal() {
   // timer has to be cancelled rather than left to wipe the newer result.
   const copyResetRef = useRef<number | null>(null);
   const exportResetRef = useRef<number | null>(null);
+  // Invariant: nothing after an await touches state once unmounted.
+  const mountedRef = useRef(false);
 
   useEffect(() => {
     // External latch instead of a setState updater with a side effect.
@@ -96,13 +98,14 @@ export function EngineLostModal() {
     };
   }, []);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
       if (copyResetRef.current !== null) window.clearTimeout(copyResetRef.current);
       if (exportResetRef.current !== null) window.clearTimeout(exportResetRef.current);
-    },
-    [],
-  );
+    };
+  }, []);
 
   if (!snapshot) return null;
 
@@ -133,6 +136,7 @@ export function EngineLostModal() {
       window.prompt(t("engineLost.copyPrompt"), diagnostic);
       return;
     }
+    if (!mountedRef.current) return;
     setCopied(true);
     if (copyResetRef.current !== null) window.clearTimeout(copyResetRef.current);
     copyResetRef.current = window.setTimeout(() => setCopied(false), 2000);
@@ -143,6 +147,9 @@ export function EngineLostModal() {
     // "requested" keeps its own label: this is the recovery path, so a snapshot
     // nothing has confirmed must not read as one the player can go find.
     const show = (kind: DownloadResult["kind"]) => {
+      // The reachable case: under the shell the export waits up to ten seconds,
+      // so this can arm a timer past the cleanup that would have cleared it.
+      if (!mountedRef.current) return;
       setExportOutcome(kind);
       if (exportResetRef.current !== null) window.clearTimeout(exportResetRef.current);
       exportResetRef.current = window.setTimeout(() => setExportOutcome(null), 2000);
@@ -156,7 +163,7 @@ export function EngineLostModal() {
       if (err instanceof DOMException && err.name === "AbortError") return;
       show("failed");
     } finally {
-      setIsExporting(false);
+      if (mountedRef.current) setIsExporting(false);
     }
   };
 
