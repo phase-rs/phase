@@ -1312,6 +1312,7 @@ fn real_4p_mana_and_token_boundary_drains_mana_and_still_collapses() {
         keywords: vec![],
         abilities: std::sync::Arc::default(),
         trigger_definitions: std::sync::Arc::default(),
+        trigger_printed_origins: std::sync::Arc::default(),
         replacement_definitions: std::sync::Arc::default(),
         static_definitions: std::sync::Arc::default(),
         room_halves: None,

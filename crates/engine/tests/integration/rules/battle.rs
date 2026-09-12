@@ -82,6 +82,7 @@ fn siege_victory_cast_during_resolution_enters_transformed() {
         let obj = runner.state_mut().objects.get_mut(&battle).unwrap();
         obj.back_face = Some(BackFaceData {
             is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Test Back Face".to_string(),
             power: Some(4),
             toughness: Some(4),

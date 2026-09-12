@@ -413,16 +413,18 @@ fn merged_copiable_values(
     ))
 }
 
-fn merged_ability_sets(
-    augment: &crate::game::game_object::GameObject,
-    host_values: &CopiableValues,
-) -> (
+type MergedAbilitySets = (
     Vec<AbilityDefinition>,
     Vec<TriggerDefinition>,
     Vec<Option<crate::types::ability::TriggerPrintedOrigin>>,
     Vec<crate::types::ability::StaticDefinition>,
     Vec<crate::types::ability::ReplacementDefinition>,
-) {
+);
+
+fn merged_ability_sets(
+    augment: &crate::game::game_object::GameObject,
+    host_values: &CopiableValues,
+) -> MergedAbilitySets {
     let host_body = host_values
         .trigger_definitions
         .iter()
