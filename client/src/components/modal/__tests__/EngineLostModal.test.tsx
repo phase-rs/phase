@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
 
@@ -114,5 +114,29 @@ describe("EngineLostModal", () => {
     // DOM the promise continuation has not updated yet, and pass either way.
     expect(await screen.findByRole("button", { name: shown })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
+  });
+
+  it("refuses a second export while the first is still in flight", async () => {
+    let settle!: (result: DownloadResult) => void;
+    exportGameStateDebugZip.mockReturnValue(
+      new Promise<DownloadResult>((resolve) => {
+        settle = resolve;
+      }),
+    );
+    exportGameStateDebugZip.mockClear();
+    setGameStoreForTest({ gameId: GAME_ID, gameMode: "ai" });
+    renderModal();
+
+    act(() => notifyEngineLost("submitAction"));
+    const exportButton = screen.getByRole("button", { name: "Export client snapshot" });
+    fireEvent.click(exportButton);
+
+    // Gate on the committed disabled state, not on the mock having been called.
+    await waitFor(() => expect(exportButton).toBeDisabled());
+    fireEvent.click(exportButton);
+    expect(exportGameStateDebugZip).toHaveBeenCalledTimes(1);
+
+    settle({ kind: "requested", filename: "game-state.zip" });
+    expect(await screen.findByRole("button", { name: "Exported" })).toBeEnabled();
   });
 });

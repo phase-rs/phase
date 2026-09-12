@@ -54,6 +54,8 @@ export function EngineLostModal() {
   const [copied, setCopied] = useState(false);
   const [exported, setExported] = useState(false);
   const [exportFailed, setExportFailed] = useState(false);
+  // One export at a time: an earlier click's 2s clear timer wipes a later export's result.
+  const [isExporting, setIsExporting] = useState(false);
 
   useEffect(() => {
     // External latch instead of a setState updater with a side effect.
@@ -125,6 +127,7 @@ export function EngineLostModal() {
 
   const handleExport = async () => {
     if (!snapshot.gameState) return;
+    setIsExporting(true);
     setExported(false);
     setExportFailed(false);
     try {
@@ -139,6 +142,8 @@ export function EngineLostModal() {
       if (err instanceof DOMException && err.name === "AbortError") return;
       setExportFailed(true);
       window.setTimeout(() => setExportFailed(false), 2000);
+    } finally {
+      setIsExporting(false);
     }
   };
 
@@ -203,7 +208,7 @@ export function EngineLostModal() {
           <button
             type="button"
             onClick={handleExport}
-            disabled={!snapshot.gameState}
+            disabled={isExporting || !snapshot.gameState}
             className="rounded-lg bg-gray-700 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {exportFailed
