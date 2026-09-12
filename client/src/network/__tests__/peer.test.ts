@@ -350,7 +350,7 @@ describe("PeerSession keep-alive", () => {
     }
   });
 
-  it("still disconnects a silent peer during a slow game handler", async () => {
+  it("keeps a silent peer connected during a slow game handler", async () => {
     vi.useFakeTimers();
     const conn = new SilentPeerConnection();
     const session = createPeerSession(conn as never);
@@ -368,11 +368,11 @@ describe("PeerSession keep-alive", () => {
       await vi.advanceTimersByTimeAsync(0);
       const second = conn.simulateData({ type: "concede" });
       await vi.advanceTimersByTimeAsync(10_000);
-      expect(onDisconnect).toHaveBeenCalledExactlyOnceWith("Ping timeout");
+      expect(onDisconnect).not.toHaveBeenCalled();
 
       release();
       await Promise.all([first, second]);
-      expect(received).toEqual(["concede"]);
+      expect(received).toEqual(["concede", "concede"]);
     } finally {
       release();
       session.close();
@@ -380,31 +380,29 @@ describe("PeerSession keep-alive", () => {
     }
   });
 
-  it("disconnects a peer that stops answering pings", async () => {
+  it("marks latency stale without closing a channel that stops answering pings", async () => {
     vi.useFakeTimers();
+    const conn = new SilentPeerConnection();
+    const onLatency = vi.fn();
+    const session = createPeerSession(conn as never, { onLatency });
     try {
-      const conn = new SilentPeerConnection();
-      const session = createPeerSession(conn as never);
       const onDisconnect = vi.fn();
       session.onDisconnect(onDisconnect);
-
-      // First tick: a ping goes out, but only 5s of silence has accrued.
-      await vi.advanceTimersByTimeAsync(5_000);
+      await conn.simulateData({ type: "pong", timestamp: Date.now() - 42 });
+      expect(onLatency).toHaveBeenLastCalledWith(42);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(onLatency).toHaveBeenLastCalledWith(null);
+      await conn.simulateData({ type: "emote", emote: "still here" });
+      await vi.advanceTimersByTimeAsync(45_000);
       expect(onDisconnect).not.toHaveBeenCalled();
-
-      // Second tick: 10s with no pong, and the inter-tick gap is a healthy 5s,
-      // so the silence is real evidence.
-      await vi.advanceTimersByTimeAsync(5_000);
-      expect(onDisconnect).toHaveBeenCalledWith("Ping timeout");
-      expect(trackEvent).toHaveBeenCalledExactlyOnceWith("p2p_disconnect", expect.objectContaining({
-        reason: "ping-timeout",
-        pong_age_ms: 10_000,
-        receive_age_ms: -1,
-        pending_sends: 0,
-        pending_decodes: 0,
-        channel_open: true,
-      }));
+      expect(conn.open).toBe(true);
+      expect(trackEvent).not.toHaveBeenCalled();
+      await conn.simulateData({ type: "pong", timestamp: Date.now() - 21 });
+      expect(onLatency).toHaveBeenLastCalledWith(21);
+      conn.close();
+      expect(onDisconnect).toHaveBeenCalledExactlyOnceWith("Connection closed");
     } finally {
+      session.close();
       vi.useRealTimers();
     }
   });
@@ -448,10 +446,7 @@ describe("PeerSession keep-alive", () => {
       // observe a healthy 5s gap, and would pass against any implementation.
       vi.setSystemTime(Date.now() + 300_000);
 
-      // Resume: the next tick observes a 305s gap since its predecessor. A
-      // bare `now - lastPongAt` check cannot tell that from 305s of real
-      // silence and would disconnect here; the inter-tick gap can, and
-      // re-baselines instead.
+      // Resume: elapsed wall time must never tear down the channel.
       await vi.advanceTimersByTimeAsync(5_000);
 
       expect(onDisconnect).not.toHaveBeenCalled();
@@ -461,7 +456,7 @@ describe("PeerSession keep-alive", () => {
     }
   });
 
-  it("re-baselines after the wall clock moves backward", async () => {
+  it("does not disconnect when the wall clock moves backward", async () => {
     vi.useFakeTimers();
     try {
       const conn = new SilentPeerConnection();
@@ -478,13 +473,11 @@ describe("PeerSession keep-alive", () => {
       // so ticks keep their 5s spacing — only `Date.now()` jumps.
       vi.setSystemTime(Date.now() - 60_000);
 
-      // The peer has never ponged, so it must still be declared dead. Without
-      // the negative-gap re-baseline, `lastPongAt` is stranded a minute in the
-      // future and `now - lastPongAt` stays negative, so this detector would
-      // stay disabled until the clock caught up — the failure this guards.
+      // Missing pongs and clock adjustments affect measurement only.
       await vi.advanceTimersByTimeAsync(20_000);
 
-      expect(onDisconnect).toHaveBeenCalledWith("Ping timeout");
+      expect(onDisconnect).not.toHaveBeenCalled();
+      session.close();
     } finally {
       vi.useRealTimers();
     }

@@ -1,4 +1,5 @@
 {
+  "playerLatency": {"host":"Anfitrión","waiting":"Esperando","value":"{{ms}} ms","description":"Latencia de ida y vuelta al anfitrión. La falta de respuesta no desconecta la partida."},
   "abilityBlock": {
     "badge": "Bloqueada",
     "cantBeActivated": "Esta habilidad no puede activarse",

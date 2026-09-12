@@ -34,9 +34,11 @@ export interface PeerSessionOptions {
    * adapter that created the `Peer`.
    */
   onSessionEnd?: () => void;
+  /** Round-trip latency, or null when the last measurement is stale. */
+  onLatency?: (latencyMs: number | null) => void;
 }
 
-type DisconnectCause = "ping-timeout" | "send-error" | "connection-close"
+type DisconnectCause = "send-error" | "connection-close"
   | "connection-error" | "remote-disconnect" | "local-close";
 
 export function createPeerSession(
@@ -52,23 +54,13 @@ export function createPeerSession(
 
   const pendingMessages: P2PMessage[] = [];
 
-  // Ping/pong keep-alive. We probe every `PING_INTERVAL_MS`; a channel that
-  // has produced no pong for `PONG_TIMEOUT_MS` is declared dead. This is the
-  // only detector for a HALF-OPEN channel — one where `conn.open` is still
-  // true and `conn.on("close")` will never fire because nothing ever formally
-  // closed.
+  // Probes measure latency only. A delayed pong is not evidence that a live
+  // WebRTC channel should be destroyed (state traffic can still be arriving).
   const PING_INTERVAL_MS = 5_000;
-  const PONG_TIMEOUT_MS = 10_000;
-
+  const LATENCY_STALE_MS = 15_000;
   let pingInterval: ReturnType<typeof setInterval> | null = null;
-  // `Date.now()` of the most recent pong, and of the previous interval tick.
-  // Wall clock specifically because it is the clock a test can move
-  // independently of the timer queue (`vi.setSystemTime`), which is what makes
-  // the suspend discriminator below observable at all. Whether
-  // `performance.now()` also advances across a suspend is browser-dependent and
-  // is deliberately NOT the reason stated here.
-  let lastPongAt = 0;
-  let lastTickAt = 0;
+  let lastPongAt = Date.now();
+  let latencyStale = false;
   let lastReceivedAt: number | null = null;
   let lastReceivedType: P2PMessage["type"] | "" = "";
   let pendingSends = 0;
@@ -128,61 +120,13 @@ export function createPeerSession(
   };
 
   const startKeepAlive = () => {
-    lastPongAt = lastTickAt = Date.now();
     pingInterval = setInterval(() => {
       if (!conn.open) return;
-
       const now = Date.now();
-      const sinceLastTick = now - lastTickAt;
-      lastTickAt = now;
-
-      // Suspend discriminator. A bare `now - lastPongAt` is NOT enough: a tab
-      // frozen for five minutes and a channel silent for five minutes produce
-      // the identical gap, and disconnecting every resumed tab (routine on
-      // mobile) is worse than missing a dead channel. The gap since the
-      // PREVIOUS TICK is what tells them apart — a tick that arrives a whole
-      // silence budget after its predecessor did not observe the interval it
-      // was scheduled for, so the elapsed time is no evidence about the peer.
-      // Re-baseline and start measuring again.
-      //
-      // ACCEPTED CONSEQUENCE: re-baselining disables this detector for as long
-      // as ticks keep arriving a full budget apart, and it does NOT distinguish
-      // WHY they do. Any cause counts — a frozen tab, Chrome's intensive
-      // throttling tier (hidden >= 5 min, ~1 tick/minute), or a long
-      // synchronous WASM engine call blocking a FOREGROUNDED main thread. Note
-      // ordinary hidden-tab throttling (~1/sec) does not delay a 5s interval at
-      // all, so a merely-backgrounded tab usually keeps detecting normally.
-      // Detection resumes two ticks after normal 5s pacing returns.
-      //
-      // The symmetric case is the PEER's, and this change newly reaches it: a
-      // foregrounded tab sees healthy 5s gaps, so it never re-baselines, and it
-      // will drop a peer whose page the browser has frozen for a whole budget.
-      // Two things bound the damage. Pong replies ride `conn.on("data")`
-      // rather than a timer, so ordinary hidden-tab throttling never silences a
-      // peer; and a dropped peer auto-reconnects inside the host's 30s
-      // `DEFAULT_GRACE_PERIOD_MS` (p2p-adapter.ts). A device locked past that
-      // grace now loses the seat where it previously survived until ICE failed.
-      //
-      // That is the intended trade. The alternative — concluding silence from a
-      // gap the tick cannot explain — false-disconnects a healthy peer, which
-      // is the harm this whole branch exists to prevent.
-      // `Date.now()` is wall-clock, so it can also move BACKWARD (an NTP step,
-      // a manual clock change, a VM restore). That strands `lastPongAt` in the
-      // future, and every later comparison then reads as "answered recently"
-      // until the clock catches up — the detector silently disables itself for
-      // the width of the jump. A negative gap is a discontinuity for the same
-      // reason an oversized one is: the tick observed no interval it can vouch
-      // for, so the elapsed time is no evidence about the peer. Re-baseline.
-      if (sinceLastTick >= PONG_TIMEOUT_MS || sinceLastTick < 0) {
-        lastPongAt = now;
-      } else if (now - lastPongAt >= PONG_TIMEOUT_MS) {
-        handleDisconnect("Ping timeout", "ping-timeout");
-        return;
+      if (!latencyStale && (now - lastPongAt >= LATENCY_STALE_MS || now < lastPongAt)) {
+        latencyStale = true;
+        options.onLatency?.(null);
       }
-
-      // Fire-and-forget: real `conn.send` failures fire `handleDisconnect`
-      // from inside the queue's catch; the silence check above bounds
-      // detection latency for everything else.
       void trySend({ type: "ping", timestamp: now });
     }, PING_INTERVAL_MS);
   };
@@ -190,9 +134,7 @@ export function createPeerSession(
   const beforeUnloadHandler = () => {
     // Best-effort farewell over the queued path. Compression is async, so the
     // message may not flush before the tab is torn down. If it doesn't, the
-    // remote side falls back to its own keep-alive silence check (~10s), which
-    // covers a foregrounded peer but is deliberately inert while that peer's
-    // tab is backgrounded — see `startKeepAlive`.
+    // remote side relies on WebRTC channel closure/error detection.
     if (!closed && conn.open) void trySend({ type: "disconnect", reason: "Page closed" });
   };
   window.addEventListener("beforeunload", beforeUnloadHandler);
@@ -292,8 +234,11 @@ export function createPeerSession(
       }
 
       if (msg.type === "pong") {
-        // Sole liveness evidence the keep-alive tick reads.
+        const elapsed = Date.now() - msg.timestamp;
+        if (!Number.isFinite(elapsed) || elapsed < 0) return;
         lastPongAt = Date.now();
+        latencyStale = false;
+        options.onLatency?.(Math.round(elapsed));
         return;
       }
 

@@ -1,4 +1,5 @@
 {
+  "playerLatency": {"host":"Hôte","waiting":"En attente","value":"{{ms}} ms","description":"Latence aller-retour vers l’hôte. Une réponse manquante ne déconnecte pas la partie."},
   "abilityBlock": {
     "badge": "Bloquée",
     "cantBeActivated": "Cette capacité ne peut pas être activée",
