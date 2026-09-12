@@ -37158,7 +37158,7 @@ mod tests {
         state.objects.insert(ObjectId(12), recipient);
         let recipient_ref = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(12)]);
         let source_ref = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(10)]);
-        state.add_transient_continuous_effect_with_bindings(
+        let copy_effect_id = state.add_transient_continuous_effect_with_bindings(
             ObjectId(12),
             PlayerId(0),
             Duration::Permanent,
@@ -37175,7 +37175,17 @@ mod tests {
                 duration_subject: Some(source_ref),
             },
         );
-        crate::game::layers::flush_layers(&mut state);
+        crate::game::printed_cards::apply_copiable_values(
+            state
+                .objects
+                .get_mut(&ObjectId(12))
+                .expect("layer-copy recipient exists"),
+            &materialized_values,
+            crate::types::ability::CopyEffectInstanceRef {
+                continuous_effect_id: copy_effect_id,
+                modification_index: 0,
+            },
+        );
         let copied = &state.objects[&ObjectId(12)];
         let definition_ref = copied.trigger_definition_ref(&copied.trigger_definitions[0]);
 

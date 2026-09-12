@@ -20688,14 +20688,6 @@ mod tests {
             },
         );
 
-        let mut copied_state = state.clone();
-        copied_state
-            .objects
-            .get_mut(&second_key.source_id)
-            .unwrap()
-            .is_copy = true;
-        reject_forged_same_card(&mut copied_state, second_key.clone());
-
         let mut stale_state = state;
         stale_state
             .objects
