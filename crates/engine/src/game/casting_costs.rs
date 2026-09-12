@@ -1198,12 +1198,13 @@ pub(crate) fn finish_pending_cost_or_cast(
 ) -> Result<WaitingFor, EngineError> {
     if let Some(instance) = pending.additional_cost_queue.first().cloned() {
         match instance.cost {
-            AdditionalCost::Required(cost) => {
+            AdditionalCost::Required(ref cost) => {
+                record_required_tap_creatures_origin(&mut pending, cost, Some(&instance));
                 pending.additional_cost_queue.remove(0);
                 return pay_additional_cost_with_source(
                     state,
                     player,
-                    cost,
+                    cost.clone(),
                     SpellCostSource::Other,
                     pending,
                     events,
@@ -1261,6 +1262,7 @@ pub(crate) fn finish_pending_cost_or_cast(
         Some(AdditionalCost::Required(_))
     ) {
         if let Some(AdditionalCost::Required(cost)) = pending.additional_cost_flow.take() {
+            record_required_tap_creatures_origin(&mut pending, &cost, None);
             let cost_source = pending.additional_cost_source;
             pending.additional_cost_source = SpellCostSource::Other;
             return pay_additional_cost_with_source(
@@ -1356,6 +1358,7 @@ pub(crate) fn finish_pending_cost_or_cast(
                     "Cannot pay required additional cost".to_string(),
                 ));
             }
+            record_required_tap_creatures_origin(&mut pending, &req_cost, None);
             let cost_source = pending.additional_cost_source;
             pending.additional_cost_source = SpellCostSource::Other;
             return pay_additional_cost_with_source(
@@ -1453,6 +1456,7 @@ pub(crate) fn finish_pending_cost_or_cast(
                 "Cannot pay required additional cost".to_string(),
             ));
         }
+        record_required_tap_creatures_origin(&mut pending, &req_cost, None);
         let cost_source = pending.additional_cost_source;
         pending.additional_cost_source = SpellCostSource::Other;
         return pay_additional_cost_with_source(
@@ -4440,6 +4444,31 @@ fn origin_is_tap_creatures_shaped(
     }
 }
 
+/// CR 601.2b: Record the in-flight additional-cost origin before paying a
+/// Required TapCreatures opener so [`in_flight_tap_creatures_origin`] arm 2
+/// sees this window rather than a stale earlier Teamwork payment (C1.5(e)).
+/// Uses the queue instance origin when that instance was in hand before pop;
+/// otherwise `Other`. Not a `PendingCast` field.
+fn record_required_tap_creatures_origin(
+    pending: &mut PendingCast,
+    cost: &AbilityCost,
+    instance: Option<&AdditionalCostInstance>,
+) {
+    if !cost.contains_tap_creatures() {
+        return;
+    }
+    match instance {
+        Some(instance) => pending
+            .ability
+            .context
+            .record_additional_cost_instance_payment(instance.origin, instance.origin_ordinal, 1),
+        None => pending
+            .ability
+            .context
+            .record_additional_cost_payment(AdditionalCostOrigin::Other, 1),
+    }
+}
+
 /// CR 601.2b: Derive the in-flight additional-cost origin at the spell/activation
 /// tap-creatures payment site from the payment already recorded on the ability
 /// context. No new `PendingCast` field. Called only from
@@ -7147,6 +7176,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                         "Cannot pay required additional cost".to_string(),
                     ));
                 }
+                record_required_tap_creatures_origin(&mut pending, req_cost, None);
                 return pay_additional_cost_with_source(
                     state,
                     player,
@@ -25913,6 +25943,93 @@ its replicate cost was paid.)\nDraw a card.";
             in_flight_tap_creatures_origin(&state, &pending),
             Some(AdditionalCostOrigin::Other),
             "cleared payments still take arm 4 for a printed-mana required window"
+        );
+
+        // C1.5(e): Teamwork recorded, then a Required tap opener records Other.
+        // Arm 2 must return that origin, not the stale Teamwork payment.
+        let mut pending = pending_for_origin(
+            &mut state,
+            ManaCost::generic(1),
+            &[AdditionalCostOrigin::Teamwork],
+        );
+        state
+            .objects
+            .get_mut(&pending.object_id)
+            .expect("pending object")
+            .additional_cost = Some(AdditionalCost::Required(tap_creatures_cost()));
+        record_required_tap_creatures_origin(&mut pending, &tap_creatures_cost(), None);
+        assert_eq!(
+            in_flight_tap_creatures_origin(&state, &pending),
+            Some(AdditionalCostOrigin::Other),
+            "Required opener recording Other must beat stale Teamwork"
+        );
+
+        // Same window via the queue-instance origin that was in hand before pop.
+        let mut pending = pending_for_origin(
+            &mut state,
+            ManaCost::generic(1),
+            &[AdditionalCostOrigin::Teamwork],
+        );
+        state
+            .objects
+            .get_mut(&pending.object_id)
+            .expect("pending object")
+            .additional_cost = Some(AdditionalCost::Required(tap_creatures_cost()));
+        let instance = AdditionalCostInstance::new(
+            AdditionalCostOrigin::Other,
+            AdditionalCost::Required(tap_creatures_cost()),
+        );
+        record_required_tap_creatures_origin(&mut pending, &tap_creatures_cost(), Some(&instance));
+        assert_eq!(
+            in_flight_tap_creatures_origin(&state, &pending),
+            Some(AdditionalCostOrigin::Other),
+            "Required queue-instance origin must beat stale Teamwork"
+        );
+    }
+
+    /// C1.5 production reach-guard: a real Teamwork payment through
+    /// `handle_tap_creatures_for_spell_cost` stamps
+    /// `PermanentTapped.cause == CostPayment(TapCreatures { origin: Some(Teamwork) })`.
+    /// Reverting the origin derivation (or routing `origin: None`) flips this.
+    /// CR 601.2b + CR 702.194a + CR 701.26a.
+    #[test]
+    fn teamwork_tap_emits_cost_payment_cause_with_teamwork_origin() {
+        const TEAMWORK_ORACLE: &str = "Teamwork 1 (As an additional cost to cast this spell, you may tap any number of creatures you control with total power 1 or more.)\nYou gain 1 life.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+        let tapper = scenario.add_creature(PlayerId(0), "Tapper", 2, 2).id();
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Teamwork Origin Probe",
+            true,
+            TEAMWORK_ORACLE,
+        );
+        builder.from_oracle_text_with_keywords(&["teamwork:1"], TEAMWORK_ORACLE);
+        builder.with_mana_cost(ManaCost::generic(0));
+        let spell = builder.id();
+        let mut runner = scenario.build();
+
+        let outcome = runner
+            .cast(spell)
+            .accept_optional()
+            .pay_cost_with(&[tapper])
+            .resolve();
+
+        assert!(
+            outcome.state().objects[&tapper].tapped,
+            "reach-guard: the teamwork tap creature must actually be tapped"
+        );
+        let teamwork_tap = outcome.events().iter().find_map(|event| match event {
+            GameEvent::PermanentTapped { object_id, cause } if *object_id == tapper => Some(*cause),
+            _ => None,
+        });
+        assert_eq!(
+            teamwork_tap,
+            Some(TapCause::CostPayment(TapCostKind::TapCreatures {
+                origin: Some(AdditionalCostOrigin::Teamwork),
+            })),
+            "Teamwork payment must stamp PermanentTapped.cause with origin Teamwork"
         );
     }
 }
