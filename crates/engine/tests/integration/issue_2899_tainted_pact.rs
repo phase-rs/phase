@@ -30,8 +30,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::move_to_library_position;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, EffectKind, LibraryPosition, QuantityExpr, QuantityRef,
-    RepeatContinuation, ResolvedAbility, TargetFilter,
+    AbilityDefinition, AbilityKind, ControllerRef, Effect, EffectKind, LibraryPosition,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, TargetFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -40,7 +40,9 @@ use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::{EtbTapState, Zone};
+use engine::types::PlayerId;
 
 use super::rules::run_combat;
 
@@ -219,6 +221,78 @@ fn assert_tainted_pact_parses_to_until_stop_conditions() {
     );
 }
 
+/// Positive reach-guard for the two post-draw trigger rows (card-test
+/// anti-pattern 6): `source` really carries the parsed "whenever a card is put
+/// into an opponent's graveyard from anywhere" trigger (CR 603.2) that those
+/// rows assume, its execute chain is real (no `Effect::Unimplemented` anywhere
+/// in it), and `controller` controls it.
+///
+/// Without this the negative assertions downstream pass for the wrong reason on
+/// a board where the oracle line silently stopped producing a trigger: there is
+/// then nothing for CR 603.3b to order, nothing to put on the stack, and
+/// nothing that could have placed a counter. The three pre-existing guards on
+/// those rows all prove the *Pact* side only.
+///
+/// Returns the number of matching triggers on `source`, so a caller can pin
+/// that CR 603.3b had two of them to ORDER rather than one to place unordered.
+#[must_use]
+fn assert_parses_to_opponent_graveyard_trigger(
+    state: &GameState,
+    source: ObjectId,
+    controller: PlayerId,
+) -> usize {
+    let object = state.objects.get(&source).expect("guarded source object");
+    assert_eq!(
+        object.controller, controller,
+        "reach-guard: {} must be controlled by the player whose triggers are \
+         under test (CR 603.3b orders one player's triggers at a time)",
+        object.name
+    );
+    let matching: Vec<_> = object
+        .trigger_definitions
+        .iter_unchecked()
+        .map(|entry| entry.definition())
+        .filter(|def| {
+            matches!(def.mode, TriggerMode::ChangesZone)
+                && def.destination == Some(Zone::Graveyard)
+                && matches!(
+                    def.valid_card,
+                    Some(TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::Opponent),
+                        ..
+                    }))
+                )
+        })
+        .collect();
+    assert!(
+        !matching.is_empty(),
+        "reach-guard: {}'s \"whenever a card is put into an opponent's \
+         graveyard from anywhere\" line must parse to an opponent-scoped \
+         ChangesZone-to-graveyard trigger, got modes {:?}",
+        object.name,
+        object
+            .trigger_definitions
+            .iter_unchecked()
+            .map(|entry| &entry.definition().mode)
+            .collect::<Vec<_>>()
+    );
+    for def in &matching {
+        let execute = def.execute.as_deref().unwrap_or_else(|| {
+            panic!(
+                "reach-guard: {}'s graveyard trigger must carry an execute chain",
+                object.name
+            )
+        });
+        assert!(
+            !chain_contains_unimplemented(execute),
+            "reach-guard: {}'s graveyard trigger must parse with no \
+             Effect::Unimplemented, got {execute:?}",
+            object.name
+        );
+    }
+    matching.len()
+}
+
 /// Positive reach-guard: the repeat's producer actually ran, so "the loop
 /// ended" is not the trivially-true statement that it never started.
 fn assert_exile_top_resolved(events: &[GameEvent]) {
@@ -388,9 +462,10 @@ fn tainted_pact_draw_opens_no_trigger_ordering_prompt() {
         .with_mana_cost(tainted_pact_cost())
         .id();
     scenario.with_mana_pool(P0, tainted_pact_mana());
-    scenario
+    let haunt = scenario
         .add_creature(P1, "The Haunt of Hightower", 3, 3)
-        .from_oracle_text_with_keywords(&["Flying", "Lifelink"], HAUNT_OF_HIGHTOWER_ORACLE);
+        .from_oracle_text_with_keywords(&["Flying", "Lifelink"], HAUNT_OF_HIGHTOWER_ORACLE)
+        .id();
     let ascension = scenario
         .add_enchantment_from_oracle(P1, "Bloodchief Ascension", BLOODCHIEF_ASCENSION_ORACLE)
         .id();
@@ -402,6 +477,17 @@ fn tainted_pact_draw_opens_no_trigger_ordering_prompt() {
     assert!(
         runner.state().players[P0.0 as usize].library.is_empty(),
         "precondition: this regression is about a starved producer"
+    );
+    // Reach-guard: BOTH of P1's oracle lines really parsed into the
+    // opponent-graveyard trigger this row assumes, so CR 603.3b genuinely had
+    // two triggers to order. Without it `pending_trigger_order.is_none()` and
+    // `stack.is_empty()` below would pass on a board with nothing orderable.
+    let orderable = assert_parses_to_opponent_graveyard_trigger(runner.state(), haunt, P1)
+        + assert_parses_to_opponent_graveyard_trigger(runner.state(), ascension, P1);
+    assert_eq!(
+        orderable, 2,
+        "reach-guard: CR 603.3b raises an ORDERING prompt only when one player \
+         controls two or more triggers on the same event"
     );
 
     let outcome = runner.cast(pact).resolve();
@@ -457,6 +543,40 @@ fn tainted_pact_draw_puts_no_trigger_on_the_stack() {
         runner.state().players[P0.0 as usize].library.is_empty(),
         "precondition: this regression is about a starved producer"
     );
+    // Reach-guard: the Haunt's oracle line really parsed into the
+    // opponent-graveyard trigger this row assumes, and that trigger really
+    // places a +1/+1 counter on itself. Without it both `stack.is_empty()` and
+    // the `Plus1Plus1` check below would pass on a board where the line stopped
+    // producing a trigger, or produced one that never could have placed that
+    // counter.
+    {
+        assert_eq!(
+            assert_parses_to_opponent_graveyard_trigger(runner.state(), haunt, P1),
+            1,
+            "reach-guard: exactly one graveyard trigger, so no CR 603.3b \
+             ordering choice stands between the event and the stack"
+        );
+        let execute = runner.state().objects[&haunt]
+            .trigger_definitions
+            .iter_unchecked()
+            .map(|entry| entry.definition())
+            .find(|def| matches!(def.mode, TriggerMode::ChangesZone))
+            .and_then(|def| def.execute.as_deref())
+            .expect("reach-guard: the Haunt's graveyard trigger must have an execute chain");
+        assert!(
+            matches!(
+                *execute.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "reach-guard: the Haunt's graveyard trigger must parse to a +1/+1 \
+             counter on itself — the exact counter the assertion below pins as \
+             ABSENT, got {execute:?}"
+        );
+    }
 
     let outcome = runner.cast(pact).resolve();
 
@@ -1261,6 +1381,47 @@ fn fishing_gear_on_an_empty_library_declines_the_put_and_makes_a_fish() {
         runner.state().players[P1.0 as usize].library.is_empty(),
         "precondition: the damaged player's library is empty"
     );
+    // Reach-guard: the trigger really parsed with the OPTIONAL
+    // `ChangeZone { ParentTarget -> Battlefield }` arm. The absent
+    // `EffectResolved { kind: ChangeZone }` assertion at the bottom of this row
+    // exists to pin that arm as DECLINED and therefore not performed at all
+    // (CR 608.2d) — it would pass for the wrong reason if the arm never parsed,
+    // and the `fish == 1` check gives only partial reach because "If you don't"
+    // also fires when the put resolves as a no-op.
+    {
+        let execute = runner.state().objects[&gear]
+            .trigger_definitions
+            .iter_unchecked()
+            .map(|entry| entry.definition())
+            .find(|def| matches!(def.mode, TriggerMode::DamageDone))
+            .and_then(|def| def.execute.as_deref())
+            .expect(
+                "reach-guard: Fishing Gear's combat-damage line must parse to a \
+                 DamageDone trigger with an execute chain",
+            );
+        assert!(
+            !chain_contains_unimplemented(execute),
+            "reach-guard: Fishing Gear's trigger must parse with no \
+             Effect::Unimplemented, got {execute:?}"
+        );
+        let put = execute
+            .sub_ability
+            .as_deref()
+            .expect("reach-guard: the \"you may put it\" rider must parse as a sub-ability");
+        assert!(
+            matches!(
+                *put.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ) && put.optional,
+            "reach-guard: Fishing Gear's trigger must carry the OPTIONAL \
+             ChangeZone {{ ParentTarget -> Battlefield }} arm that the \
+             declined-not-resolved assertion below pins (CR 608.2d), got {put:?}"
+        );
+    }
 
     run_combat(&mut runner, vec![bearer], vec![]);
     assert!(
