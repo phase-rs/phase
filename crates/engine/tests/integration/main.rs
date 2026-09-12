@@ -324,6 +324,7 @@ mod gaeas_anthem_team_pump;
 mod gain_control_multi_target_6205;
 mod galactus_forced_attack_most_life;
 mod galion_elvenkings_butler_attack_pt_set;
+mod game_end_blocks_exile_returns;
 mod game_state_boxed_ability_serde;
 mod game_state_stack_budget;
 mod game_state_stack_high_water;
