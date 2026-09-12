@@ -1963,6 +1963,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         if starts_clause_text_or_conjugated(after_then)
             || starts_you_control_subject_predicate(after_then_lower)
             || starts_with_damage_clause(after_then_lower)
+            || starts_with_fight_clause(after_then_lower)
             || starts_target_players_subject_clause(after_then_lower)
         {
             return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
@@ -1991,7 +1992,10 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     if starts_have_base_power_toughness(trimmed) {
         return None;
     }
-    if starts_clause_text_or_conjugated(trimmed) || starts_with_damage_clause(&trimmed_lower) {
+    if starts_clause_text_or_conjugated(trimmed)
+        || starts_with_damage_clause(&trimmed_lower)
+        || starts_with_fight_clause(&trimmed_lower)
+    {
         return Some((ClauseBoundary::Comma, whitespace_len));
     }
 
@@ -2012,7 +2016,10 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         if starts_have_base_power_toughness(after_and) {
             return None;
         }
-        if starts_clause_text_or_conjugated(after_and) || starts_with_damage_clause(after_and) {
+        if starts_clause_text_or_conjugated(after_and)
+            || starts_with_damage_clause(after_and)
+            || starts_with_fight_clause(after_and)
+        {
             return Some((ClauseBoundary::Comma, whitespace_len));
         }
     }
@@ -3361,7 +3368,7 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
             return true;
         }
     }
-    starts_with_damage_clause(s)
+    starts_with_damage_clause(s) || starts_with_fight_clause(s)
 }
 
 /// CR 508.1d / CR 509.1c: For a bare-`" and "` boundary, decide whether the
@@ -3642,6 +3649,29 @@ fn starts_with_damage_clause(lower: &str) -> bool {
     } else {
         false
     }
+}
+
+/// CR 701.14 + CR 608.2c: a subject-prefixed fight keyword action is its own
+/// instruction, not a noun-phrase continuation of the prior conjunct.
+/// Matches optional anaphor (`it` / `~` / `this|that creature|permanent|token`)
+/// then `fights`/`fight`. Sibling of [`starts_with_damage_clause`].
+fn starts_with_fight_clause(lower: &str) -> bool {
+    value(
+        (),
+        (
+            opt(alt((
+                tag::<_, _, OracleError<'_>>("it "),
+                tag("~ "),
+                preceded(
+                    alt((tag("this "), tag("that "))),
+                    alt((tag("creature "), tag("permanent "), tag("token "))),
+                ),
+            ))),
+            alt((tag("fights "), tag("fight "))),
+        ),
+    )
+    .parse(lower)
+    .is_ok()
 }
 
 /// CR 111.3 (issue #4605): true when the text accumulated right before an
@@ -10773,6 +10803,73 @@ mod tests {
         assert!(!starts_with_damage_clause("all creatures deal"));
         assert!(!starts_with_damage_clause("each player deals"));
         assert!(!starts_with_damage_clause("you lose 3 life"));
+    }
+
+    #[test]
+    fn starts_with_fight_clause_positive() {
+        assert!(starts_with_fight_clause(
+            "that creature fights up to one target creature you don't control"
+        ));
+        assert!(starts_with_fight_clause("it fights target creature"));
+        assert!(starts_with_fight_clause("~ fights target creature"));
+        assert!(starts_with_fight_clause(
+            "this creature fights target creature"
+        ));
+        assert!(starts_with_fight_clause(
+            "that permanent fights target creature"
+        ));
+        assert!(starts_with_fight_clause(
+            "that token fights target creature"
+        ));
+        assert!(starts_with_fight_clause("fights up to one target creature"));
+        assert!(starts_with_fight_clause("fight up to one target creature"));
+    }
+
+    #[test]
+    fn starts_with_fight_clause_negative() {
+        assert!(!starts_with_fight_clause("all other creatures"));
+        assert!(!starts_with_fight_clause("that creature has lifelink"));
+        assert!(!starts_with_fight_clause("it and each other creature"));
+        assert!(!starts_with_fight_clause("you gain 3 life"));
+    }
+
+    /// CR 701.14 + CR 608.2c: "you gain 3 life and that creature fights …" is
+    /// two instructions. Revert of `starts_with_fight_clause` → one chunk.
+    #[test]
+    fn bare_and_splits_that_creature_fights() {
+        assert!(starts_bare_and_clause(
+            "that creature fights up to one target creature you don't control"
+        ));
+        let chunks = clause_texts(
+            "you gain 3 life and that creature fights up to one target creature you don't control",
+        );
+        assert_eq!(chunks.len(), 2, "expected two chunks, got {chunks:?}");
+        assert_eq!(chunks[0], "you gain 3 life");
+        assert!(
+            chunks[1]
+                .trim_start()
+                .strip_prefix("that creature fights")
+                .is_some(),
+            "fight conjunct must be its own chunk, got {:?}",
+            chunks[1]
+        );
+
+        // Positive siblings: existing damage / draw splits still fire.
+        assert_eq!(
+            clause_texts("you gain 1 life and ~ deals 1 damage to target player").len(),
+            2
+        );
+        assert_eq!(clause_texts("you gain 1 life and draw a card").len(), 2);
+        assert!(starts_bare_and_clause("that creature has lifelink"));
+
+        // Negative: noun-phrase "and all other creatures" stays unsplit.
+        assert!(!starts_bare_and_clause("all other creatures"));
+        let unsplit = clause_texts("destroy target creature and all other creatures");
+        assert_eq!(
+            unsplit.len(),
+            1,
+            "noun-phrase conjunct must stay unsplit: {unsplit:?}"
+        );
     }
 
     // --- CR 707.10c: copy-retarget clause recognition ---
