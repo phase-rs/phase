@@ -77,13 +77,27 @@ fn read_page(body: &[u8], query: &str, page: u32) -> Result<Page, String> {
     let json: serde_json::Value = serde_json::from_slice(body)
         .map_err(|e| format!("Scryfall returned non-JSON for {query:?} (page {page}): {e}"))?;
 
-    if json.get("object").and_then(|o| o.as_str()) == Some("error") {
+    let object = json.get("object").and_then(|o| o.as_str());
+
+    if object == Some("error") {
         if json.get("code").and_then(|c| c.as_str()) == Some("not_found") {
             return Ok(Page::NoMatch);
         }
         return Err(format!(
             "Scryfall error for {query:?}: {}",
             json.get("details").and_then(|d| d.as_str()).unwrap_or("?")
+        ));
+    }
+
+    // Scryfall's search endpoint answers with a `list` object. Anything else
+    // that happens to carry `data` and `has_more` is a shape this function was
+    // not written to read, and consuming it would produce a confident, wrong
+    // verdict about the PRESET when the truth is that the audit could not read
+    // the answer.
+    if object != Some("list") {
+        return Err(format!(
+            "Scryfall response for {query:?} has `object` {:?}, not \"list\" (page {page})",
+            object.unwrap_or("<missing>")
         ));
     }
 
@@ -117,6 +131,55 @@ fn read_page(body: &[u8], query: &str, page: u32) -> Result<Page, String> {
     }
 }
 
+/// Hard bound on the number of pages one query may consume.
+///
+/// Every individual request is already bounded by curl's timeouts, but
+/// `has_more` is the SERVER's claim that another page exists. A server that
+/// keeps answering `true` would keep [`paginate`] running forever, so the
+/// audit — which a human runs and waits on — needs a terminating bound as well
+/// as a per-request one. Scryfall pages are 175 cards, so this admits ~35,000
+/// names: far above any preset carve-out this tool audits, and above the whole
+/// Vintage-legal pool, while still terminating.
+const MAX_PAGES: u32 = 200;
+
+/// Follow `has_more` across pages, up to [`MAX_PAGES`], collecting every name.
+///
+/// Split from the transport for the same reason [`read_page`] is: the awkward
+/// cases — here, a server that never stops claiming another page — are then
+/// testable without a network. `fetch` performs one request and interprets it.
+fn paginate(
+    query: &str,
+    mut fetch: impl FnMut(u32) -> Result<Page, String>,
+) -> Result<BTreeSet<String>, String> {
+    let mut names = BTreeSet::new();
+    for page in 1..=MAX_PAGES {
+        match fetch(page)? {
+            Page::NoMatch if page == 1 => return Ok(names),
+            // After a page that reported `has_more`, "nothing matched"
+            // contradicts it, and stopping here would silently truncate the
+            // authority's list.
+            Page::NoMatch => {
+                return Err(format!(
+                    "Scryfall said {query:?} matched nothing on page {page}, after a page \
+                     reporting `has_more`"
+                ))
+            }
+            Page::Last(found) => {
+                names.extend(found);
+                return Ok(names);
+            }
+            Page::More(found) => names.extend(found),
+        }
+    }
+    // Fail closed, exactly as an unreadable page does: a bounded audit that
+    // reports it could not finish is right, and a short list that would read as
+    // preset DRIFT is wrong.
+    Err(format!(
+        "Scryfall still reported `has_more` for {query:?} after {MAX_PAGES} pages; \
+         refusing to paginate further"
+    ))
+}
+
 /// Card names returned by one Scryfall query, following pagination.
 ///
 /// Shells out to `curl` rather than taking an HTTP dependency: this is a
@@ -124,8 +187,6 @@ fn read_page(body: &[u8], query: &str, page: u32) -> Result<Page, String> {
 /// uses (`scripts/lib/scryfall-fetch.sh`), and the engine crate has no business
 /// gaining a network client for a tool that never runs in a build.
 fn scryfall_names(query: &str) -> Result<BTreeSet<String>, String> {
-    let mut names = BTreeSet::new();
-    let mut page = 1;
     // Unique per run (pid + clock), and created fresh with `create_new`
     // (O_CREAT|O_EXCL) before each request: an existing path, a planted symlink
     // included, is refused rather than followed, so curl only ever writes a
@@ -138,7 +199,7 @@ fn scryfall_names(query: &str) -> Result<BTreeSet<String>, String> {
         "phase-preset-audit-{}-{run_nanos}.json",
         std::process::id()
     ));
-    loop {
+    paginate(query, |page| {
         OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -209,27 +270,8 @@ fn scryfall_names(query: &str) -> Result<BTreeSet<String>, String> {
             ));
         }
 
-        match read_page(&body, query, page)? {
-            Page::NoMatch if page == 1 => return Ok(names),
-            // After a page that reported `has_more`, "nothing matched"
-            // contradicts it, and stopping here would silently truncate the
-            // authority's list.
-            Page::NoMatch => {
-                return Err(format!(
-                    "Scryfall said {query:?} matched nothing on page {page}, after a page \
-                     reporting `has_more`"
-                ))
-            }
-            Page::Last(found) => {
-                names.extend(found);
-                return Ok(names);
-            }
-            Page::More(found) => {
-                names.extend(found);
-                page += 1;
-            }
-        }
-    }
+        read_page(&body, query, page)
+    })
 }
 
 /// One list compared. Returns a human-readable drift report, or `None` when the
@@ -415,5 +457,55 @@ mod tests {
                 .expect_err("an unreadable page must not report names");
             assert!(err.contains(expected), "expected {expected:?} in: {err}");
         }
+    }
+
+    /// A payload that is shaped like a page but is not one. Every field
+    /// `read_page` consumes is present and well-formed — only `object` says this
+    /// is a different kind of document — so reading it would report ONE name as
+    /// the authority's entire list, and the preset's real entries as drift.
+    #[test]
+    fn a_plausible_non_list_payload_is_refused() {
+        let a_single_card = br#"{"object":"card","name":"Black Lotus","has_more":false,
+          "data":[{"name":"Black Lotus"}]}"#;
+        let err = read_page(a_single_card, "banned:oldschool", 1)
+            .expect_err("a non-list object must not be read as a page of results");
+        assert!(err.contains("\"card\""), "{err}");
+        assert!(err.contains("list"), "{err}");
+    }
+
+    /// A server that never stops claiming another page must end the audit, not
+    /// run it forever. The closure is deterministic and always `More`, so this
+    /// pins both halves: the call count stops at the bound, and the verdict is
+    /// an error rather than the names collected so far.
+    #[test]
+    fn endless_has_more_stops_at_the_bound() {
+        let mut calls = 0;
+        let result = paginate("banned:oldschool", |page| {
+            calls += 1;
+            Ok(Page::More(vec![format!("Card {page}")]))
+        });
+        let err = result.expect_err("an unbounded server must not produce a verdict");
+        assert!(err.contains("refusing to paginate"), "{err}");
+        assert_eq!(calls, MAX_PAGES, "the bound must be what stopped it");
+    }
+
+    /// The paired control: a server that DOES finish is unaffected by the bound,
+    /// and every page's names survive into the union.
+    #[test]
+    fn a_terminating_server_collects_every_page() {
+        let mut calls = 0;
+        let names = paginate("banned:oldschool", |page| {
+            calls += 1;
+            Ok(match page {
+                1 => Page::More(vec!["Black Lotus".to_string()]),
+                _ => Page::Last(vec!["Timetwister".to_string()]),
+            })
+        })
+        .expect("a well-behaved server must produce a verdict");
+        assert_eq!(calls, 2);
+        assert_eq!(
+            names.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["Black Lotus", "Timetwister"]
+        );
     }
 }
