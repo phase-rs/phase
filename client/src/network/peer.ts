@@ -1,5 +1,6 @@
 import type { DataConnection } from "peerjs";
 
+import { trackEvent } from "../services/telemetry";
 import type { P2PMessage } from "./protocol";
 import { decodeWireMessage, encodeWireMessage } from "./protocol";
 
@@ -35,6 +36,9 @@ export interface PeerSessionOptions {
   onSessionEnd?: () => void;
 }
 
+type DisconnectCause = "ping-timeout" | "send-error" | "connection-close"
+  | "connection-error" | "remote-disconnect" | "local-close";
+
 export function createPeerSession(
   conn: DataConnection,
   options: PeerSessionOptions = {},
@@ -65,6 +69,10 @@ export function createPeerSession(
   // is deliberately NOT the reason stated here.
   let lastPongAt = 0;
   let lastTickAt = 0;
+  let lastReceivedAt: number | null = null;
+  let lastReceivedType: P2PMessage["type"] | "" = "";
+  let pendingSends = 0;
+  let pendingDecodes = 0;
 
   const clearKeepAlive = () => {
     if (pingInterval !== null) { clearInterval(pingInterval); pingInterval = null; }
@@ -81,6 +89,7 @@ export function createPeerSession(
   // `handleDisconnect` from inside the queue.
   const trySend = (msg: P2PMessage): Promise<boolean> => {
     if (closed || !conn.open) return Promise.resolve(false);
+    pendingSends += 1;
     const entry = sendQueue.then(async () => {
       // Only gate on `conn.open` here, NOT `closed`. `close()` flips `closed`
       // to true synchronously so subsequent NEW `trySend` calls bail (the
@@ -110,11 +119,11 @@ export function createPeerSession(
         return true;
       } catch (err) {
         console.warn("[PeerSession] send failed:", err);
-        handleDisconnect("Channel send failed");
+        handleDisconnect("Channel send failed", "send-error");
         return false;
       }
     });
-    sendQueue = entry.then(() => undefined);
+    sendQueue = entry.then(() => { pendingSends -= 1; });
     return entry;
   };
 
@@ -167,7 +176,7 @@ export function createPeerSession(
       if (sinceLastTick >= PONG_TIMEOUT_MS || sinceLastTick < 0) {
         lastPongAt = now;
       } else if (now - lastPongAt >= PONG_TIMEOUT_MS) {
-        handleDisconnect("Ping timeout");
+        handleDisconnect("Ping timeout", "ping-timeout");
         return;
       }
 
@@ -196,12 +205,28 @@ export function createPeerSession(
   //   disposeChannel — closes the RTCDataChannel. Called either directly
   //     (from `conn.on("close"/"error")` paths where there are no queued
   //     sends to flush) or chained off `sendQueue` (from `close()`).
-  const markDisconnected = (reason: string) => {
+  const markDisconnected = (reason: string, cause: DisconnectCause) => {
     if (closed) return;
     closed = true;
     disconnectReason = reason;
     tracePeerSession("disconnect", { reason, connOpen: conn.open });
     console.warn("[PeerSession] disconnected:", reason);
+    // Only bounded transport metadata: never upload peer IDs, room codes,
+    // message payloads, or the free-form reason supplied by a remote peer.
+    const now = Date.now();
+    trackEvent("p2p_disconnect", {
+      reason: cause,
+      connection_state: conn.peerConnection?.connectionState ?? "",
+      ice_state: conn.peerConnection?.iceConnectionState ?? "",
+      visibility: document.visibilityState,
+      last_message_type: lastReceivedType,
+      pong_age_ms: Math.max(0, now - lastPongAt),
+      receive_age_ms: lastReceivedAt === null ? -1 : Math.max(0, now - lastReceivedAt),
+      pending_sends: pendingSends,
+      pending_decodes: pendingDecodes,
+      buffered_bytes: conn.dataChannel?.bufferedAmount ?? 0,
+      channel_open: conn.open,
+    });
     clearKeepAlive();
     window.removeEventListener("beforeunload", beforeUnloadHandler);
     for (const handler of disconnectHandlers) {
@@ -224,9 +249,9 @@ export function createPeerSession(
 
   // Backwards-compatible bundled handler used by remote-close / error paths
   // where there is no queued-send-flush to await.
-  const handleDisconnect = (reason: string) => {
+  const handleDisconnect = (reason: string, cause: DisconnectCause) => {
     if (closed) return;
-    markDisconnected(reason);
+    markDisconnected(reason, cause);
     disposeChannel();
   };
 
@@ -241,6 +266,7 @@ export function createPeerSession(
   // full inbound chain.
   const onData = (data: unknown): Promise<void> => {
     let delivery: Promise<void> | undefined;
+    pendingDecodes += 1;
     recvQueue = recvQueue.then(async () => {
       if (closed) return;
       if (!(data instanceof Uint8Array || data instanceof ArrayBuffer)) {
@@ -258,6 +284,8 @@ export function createPeerSession(
         console.warn("Failed to decode message from peer:", e);
         return;
       }
+      lastReceivedAt = Date.now();
+      lastReceivedType = msg.type;
       // Skip ping/pong — they fire every 5s and drown the rest of the trace.
       if (msg.type !== "ping" && msg.type !== "pong") {
         tracePeerSession("data", { type: msg.type, queued: messageHandlers.size === 0 });
@@ -277,7 +305,7 @@ export function createPeerSession(
       delivery = dispatchQueue.then(async () => {
         if (closed) return;
         if (msg.type === "disconnect") {
-          handleDisconnect(msg.reason);
+          handleDisconnect(msg.reason, "remote-disconnect");
           return;
         }
 
@@ -299,15 +327,15 @@ export function createPeerSession(
         }
       });
       dispatchQueue = delivery;
-    });
+    }).finally(() => { pendingDecodes -= 1; });
     // Tests can await this message's full delivery without making the decode
     // queue itself wait for game work.
     return recvQueue.then(() => delivery);
   };
 
   conn.on("data", onData);
-  conn.on("close", () => handleDisconnect("Connection closed"));
-  conn.on("error", (err) => handleDisconnect(`Connection error: ${err.message}`));
+  conn.on("close", () => handleDisconnect("Connection closed", "connection-close"));
+  conn.on("error", (err) => handleDisconnect(`Connection error: ${err.message}`, "connection-error"));
 
   startKeepAlive();
 
@@ -366,7 +394,7 @@ export function createPeerSession(
       // immediately as the API contract requires), THEN dispose the channel
       // after the queue drains so the queued bytes actually flush.
       if (conn.open) trySend({ type: "disconnect", reason });
-      markDisconnected(reason);
+      markDisconnected(reason, "local-close");
       sendQueue = sendQueue.then(() => { disposeChannel(); });
     },
   };

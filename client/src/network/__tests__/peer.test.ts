@@ -1,10 +1,14 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 
+import { trackEvent } from "../../services/telemetry";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import { createPeerSession } from "../peer";
 import { validateMessage } from "../protocol";
 import type { P2PMessage } from "../protocol";
 import { FakeDataConnection } from "./fakeDataConnection";
+
+vi.mock("../../services/telemetry", () => ({ trackEvent: vi.fn() }));
+beforeEach(() => { vi.mocked(trackEvent).mockClear(); });
 
 function createTestSession(opts?: { onSessionEnd?: () => void }) {
   const conn = new FakeDataConnection();
@@ -190,6 +194,18 @@ describe("PeerSession", () => {
     session.close("manual"); // additional close attempt
 
     expect(onSessionEnd).toHaveBeenCalledTimes(1);
+    expect(trackEvent).toHaveBeenCalledExactlyOnceWith("p2p_disconnect", expect.objectContaining({
+      reason: "connection-close", channel_open: false,
+    }));
+  });
+
+  it("reports remote closure without collecting the remote's free-form reason", async () => {
+    const { conn } = createTestSession();
+    await conn.simulateData({ type: "disconnect", reason: "private room information" });
+    expect(trackEvent).toHaveBeenCalledExactlyOnceWith("p2p_disconnect", expect.objectContaining({
+      reason: "remote-disconnect", last_message_type: "disconnect",
+    }));
+    expect(JSON.stringify(vi.mocked(trackEvent).mock.calls)).not.toContain("private room information");
   });
 
   // Regression: a thrown handler MUST NOT poison the recvQueue. `.then()`
@@ -246,7 +262,7 @@ describe("PeerSession", () => {
   });
 
   // A wire-version skew must TRAVERSE the transport, not die inside it. This
-  // file mocks nothing, so the REAL `encodeWireMessage`/`decodeWireMessage`
+  // file mocks only telemetry, so the REAL `encodeWireMessage`/`decodeWireMessage`
   // and the real binary framing run end to end — the one place in the suite
   // where that is true. A `game_setup` stamped with a stale version used to
   // throw inside `decodeWireMessage` and be swallowed by the decode `catch`
@@ -380,6 +396,14 @@ describe("PeerSession keep-alive", () => {
       // so the silence is real evidence.
       await vi.advanceTimersByTimeAsync(5_000);
       expect(onDisconnect).toHaveBeenCalledWith("Ping timeout");
+      expect(trackEvent).toHaveBeenCalledExactlyOnceWith("p2p_disconnect", expect.objectContaining({
+        reason: "ping-timeout",
+        pong_age_ms: 10_000,
+        receive_age_ms: -1,
+        pending_sends: 0,
+        pending_decodes: 0,
+        channel_open: true,
+      }));
     } finally {
       vi.useRealTimers();
     }
