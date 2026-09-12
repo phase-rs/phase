@@ -129,6 +129,26 @@ describe("Tauri document external-link routing", () => {
     expect(mocks.openUrl).not.toHaveBeenCalled();
   });
 
+  it("denies a foreign-origin blob: download anchor", () => {
+    // A blob: URL carries the origin that created it, so only a same-origin one
+    // is the page's own bytes. jsdom follows every anchor this file leaves
+    // uncancelled, so the document origin is whatever the last such test
+    // navigated to; pinned because from the blob: URL the download test below
+    // leaves behind, the router branch admits every blob: href before this
+    // check is reached.
+    expect(window.location.origin).toBe("https://preview.phase-rs.dev");
+
+    const event = click(
+      "blob:https://evil.example/0f8a4c21-download",
+      false,
+      {},
+      { download: "game-state.zip" },
+    );
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(mocks.openUrl).not.toHaveBeenCalled();
+  });
+
   // A blob: href is the page's own bytes -- a file save -- not a link the shell
   // could open. Cancelling it cancels the download itself, which is what
   // silently ate every desktop export.

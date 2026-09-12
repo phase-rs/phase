@@ -46,15 +46,18 @@ fn finished_download_report(
     }
 }
 
-/// Compress a leading home directory to `~`. The page is remotely served, so an
-/// absolute path hands that origin the user's account name and filesystem
-/// layout; home-relative still finds the file.
+/// Compress a leading home directory to `~`, or report nothing. The page is
+/// remotely served, so an absolute path hands that origin the user's account
+/// name and filesystem layout; home-relative still finds the file. A path
+/// outside home — `XDG_DOWNLOAD_DIR` elsewhere, wry's working-directory
+/// fallback — and an undeterminable home have nothing to compress, so the page
+/// is told no path at all, exactly as a browser download leaves it.
 #[cfg(desktop)]
-fn home_relative_path(path: &Path, home: Option<&Path>) -> String {
+fn reportable_download_path(path: &Path, home: Option<&Path>) -> Option<String> {
     match home.and_then(|home| path.strip_prefix(home).ok()) {
-        Some(relative) if relative.as_os_str().is_empty() => "~".to_owned(),
-        Some(relative) => format!("~{MAIN_SEPARATOR}{}", relative.display()),
-        None => path.display().to_string(),
+        Some(relative) if relative.as_os_str().is_empty() => Some("~".to_owned()),
+        Some(relative) => Some(format!("~{MAIN_SEPARATOR}{}", relative.display())),
+        None => None,
     }
 }
 
@@ -224,7 +227,8 @@ pub fn run() {
                     // wry already accepts downloads on its own; what it does not do is
                     // tell anyone where the file went. The page only knows the name it
                     // asked for, so report the destination from here, where it is
-                    // known: in full to the log, home-relative to the page.
+                    // known: in full to the log, home-relative or not at all to the
+                    // page.
                     .on_download(move |webview, event| {
                         match event {
                             DownloadEvent::Requested { url, destination } => {
@@ -250,8 +254,8 @@ pub fn run() {
                                     DOWNLOAD_EVENT,
                                     ShellDownload {
                                         url: url.to_string(),
-                                        path: path.as_deref().map(|path| {
-                                            home_relative_path(
+                                        path: path.as_deref().and_then(|path| {
+                                            reportable_download_path(
                                                 path,
                                                 std::env::home_dir().as_deref(),
                                             )
@@ -496,31 +500,34 @@ mod tests {
         fs::remove_file(&written).unwrap();
     }
 
-    /// The page is remotely served, so the destination it is handed must not
-    /// spell out the user's home directory.
+    /// The page is remotely served, so the destination it is handed must name
+    /// no part of the user's filesystem. Only a home-relative path qualifies;
+    /// anything else is withheld rather than handed over absolute.
     #[cfg(desktop)]
     #[test]
-    fn emitted_download_path_hides_the_home_directory() {
+    fn emitted_download_path_never_names_the_users_filesystem() {
         let home = Path::new("/home/alice");
         let inside = home.join("Downloads").join("game-state.zip");
         assert_eq!(
-            super::home_relative_path(&inside, Some(home)),
-            format!(
+            super::reportable_download_path(&inside, Some(home)),
+            Some(format!(
                 "~{sep}Downloads{sep}game-state.zip",
                 sep = std::path::MAIN_SEPARATOR
-            )
-        );
-        assert_eq!(super::home_relative_path(home, Some(home)), "~");
-        // A neighbour whose name merely starts with the home path stays whole.
-        let outside = Path::new("/home/alice-backup/game-state.zip");
-        assert_eq!(
-            super::home_relative_path(outside, Some(home)),
-            outside.display().to_string()
+            ))
         );
         assert_eq!(
-            super::home_relative_path(&inside, None),
-            inside.display().to_string()
+            super::reportable_download_path(home, Some(home)).as_deref(),
+            Some("~")
         );
+        // A neighbour whose name merely starts with the home path is outside it,
+        // as is any download directory pointed elsewhere.
+        for outside in [
+            Path::new("/home/alice-backup/game-state.zip"),
+            Path::new("/media/alice-usb/game-state.zip"),
+        ] {
+            assert_eq!(super::reportable_download_path(outside, Some(home)), None);
+        }
+        assert_eq!(super::reportable_download_path(&inside, None), None);
     }
 
     /// The navigation guard cannot see an `<a download>`, so it spares every
