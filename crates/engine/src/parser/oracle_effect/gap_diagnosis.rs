@@ -17,15 +17,16 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
-use nom::combinator::{opt, value};
-use nom::sequence::terminated;
+use nom::character::complete::{char, one_of};
+use nom::combinator::{eof, not, opt, peek, value};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::ClauseGap;
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use crate::parser::oracle_nom::primitives::{
-    scan_at_word_boundaries, scan_contains, scan_preceded,
+    parse_number_or_x, scan_at_word_boundaries, scan_contains, scan_preceded,
 };
 use crate::parser::oracle_quantity::{
     parse_cda_quantity, parse_event_context_quantity, parse_for_each_clause_expr,
@@ -87,8 +88,12 @@ pub(crate) fn diagnose_clause_gap(text: &str) -> ClauseGap {
         return ClauseGap::Quantity { operand };
     }
 
-    // 4. Trailing guard. CR 608.2c / CR 603.4: an "if"/"unless" gate the condition
-    //    ladder rejected, sitting after the clause's action rather than ahead of it.
+    // 4. Trailing guard. CR 608.2c: an "if"/"unless" gate the condition ladder
+    //    rejected, sitting after the clause's action rather than ahead of it. NOT
+    //    CR 603.4 — that rule is the intervening-"if" and it disclaims this position
+    //    outright ("this rule only applies to an 'if' that immediately follows a
+    //    trigger condition"); here the word carries its normal English meaning and
+    //    still gates the clause it trails.
     if let Some(guard) = first_rejected_guard(&lower, GuardWord::If)
         .or_else(|| first_rejected_guard(&lower, GuardWord::Unless))
     {
@@ -317,15 +322,104 @@ fn quantity_marker(input: &str) -> OracleResult<'_, QuantityMarker> {
         ),
         value(QuantityMarker::NumberOf, tag("a number of ")),
         // The trailing `tag(" ")` is the word-boundary guard, so "halfling" cannot
-        // match. It must NOT consume the anaphor: the operand starts at the marker word
-        // and keeps everything after it.
+        // match, and `peek(multiplicand_head)` is the word-SENSE guard. Neither
+        // consumes the anaphor: the operand starts at the marker word and keeps
+        // everything after it.
         value(
             QuantityMarker::Multiplier,
             terminated(
                 alt((tag("twice"), tag("double"), tag("triple"), tag("half"))),
-                tag(" "),
+                preceded(tag(" "), peek(multiplicand_head)),
             ),
         ),
+    ))
+    .parse(input)
+}
+
+/// Nom combinator: the head of a MULTIPLICAND — the noun phrase an arithmetic
+/// multiplier operates on.
+///
+/// A word boundary alone does not make `double`/`triple`/`twice`/`half` arithmetic.
+/// Without a multiplicand the same words are:
+///
+/// * a keyword ability's own name — double strike (CR 702.4), triple strike, double
+///   team ("the creature gains double strike");
+/// * an adverb of frequency on the action — "twice each turn", "twice this turn";
+/// * part of a card name or a saga chapter label — "conjure a card named Think Twice
+///   into your graveyard", "Double Deal deals 3 damage".
+///
+/// None of those is an amount, so the quantity authorities reject them and the clause
+/// is misreported as a quantity gap. This is an ALLOWLIST of the determiner and number
+/// shapes an amount is actually written with — not a blocklist of the words above — so
+/// it covers the class rather than the cards that exhibit it today. It is used under
+/// `peek`, so it identifies the multiplicand without consuming it.
+fn multiplicand_head(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        // Definite and anaphoric determiners: "double THAT damage", "twice THE number
+        // of times it was kicked".
+        value((), alt((tag("that "), tag("those "), tag("the ")))),
+        // Possessive determiners: the closed-class ones carry no clitic.
+        value((), alt((tag("its "), tag("their "), tag("your ")))),
+        possessive_clitic_determiner,
+        // Quantifier determiners: "Double ALL damage ...", "Double ANY effect ...".
+        value((), alt((tag("all "), tag("any ")))),
+        // Object-selector determiners: "double TARGET creature's power", "Double
+        // EQUIPPED creature's power", and its Aura sibling.
+        value(
+            (),
+            alt((tag("target "), tag("equipped "), tag("enchanted "))),
+        ),
+        // Comparative multiplicand: "it produces twice AS MUCH of that mana instead".
+        value((), alt((tag("as much"), tag("as many")))),
+        this_or_each_on_an_amount,
+        multiplicand_amount,
+    ))
+    .parse(input)
+}
+
+/// Nom combinator: a possessive determiner formed with the possessive clitic —
+/// "double ~'S power", "half OKAUN'S life total". The owner token is open-class (a
+/// card name or the self-reference), so it is taken up to the clitic rather than
+/// enumerated; [`multiplicand_head`] lists the clitic-less possessives separately.
+fn possessive_clitic_determiner(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            take_till1(|c: char| c.is_whitespace() || c == '\'' || c == '\u{2019}'),
+            alt((tag("'s"), tag("\u{2019}s"))),
+            alt((value((), tag(" ")), value((), eof))),
+        ),
+    )
+    .parse(input)
+}
+
+/// Nom combinator: "this"/"each" determining an AMOUNT rather than a turn window.
+///
+/// Nested prefix dispatch (the two determiners share a head and split on the noun):
+/// "Double THIS CREATURE's power" is arithmetic, while "twice THIS TURN" and "twice
+/// EACH TURN" are adverbial frequencies on the action — the same distinction
+/// `duration::parse_current_phase_duration` draws when it reads "this turn" / "this
+/// combat" as a window rather than a quantity.
+fn this_or_each_on_an_amount(input: &str) -> OracleResult<'_, ()> {
+    preceded(
+        alt((tag("this "), tag("each "))),
+        not(alt((tag("turn"), tag("combat"), tag("game")))),
+    )
+    .parse(input)
+}
+
+/// Nom combinator: an amount written as a literal or a variable — "3", "three", "X",
+/// "{X}", "-X/-X". Composed from the existing numeric primitive. The sign and the `/`
+/// tail are the P/T spelling ("get twice -X/-X"); the head alone identifies the
+/// multiplicand, so the pair itself is not re-parsed here.
+fn multiplicand_amount(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        // A mana amount ("counter target spell unless its controller pays twice {X}").
+        // `primitives::parse_mana_symbol` cannot be the authority here: its tags are
+        // the printed UPPERCASE spelling, and `diagnose_clause_gap` lowercases before
+        // it scans, so the symbol is only identifiable by its case-free delimiter.
+        value((), char('{')),
+        value((), preceded(opt(one_of("+-")), parse_number_or_x)),
     ))
     .parse(input)
 }
@@ -348,11 +442,17 @@ fn trailing_guard(input: &str) -> OracleResult<'_, TrailingMarker> {
 /// without re-parsing.
 fn clause_head_verb_token(input: &str) -> OracleResult<'_, (String, &str)> {
     let (rest, token) = take_till1::<_, _, OracleError<'_>>(char::is_whitespace).parse(input)?;
-    let verb = normalize_verb_token(token);
-    if !is_clause_head_verb(&verb) {
+    // `is_clause_head_verb` deconjugates its own argument, so it is asked about the RAW
+    // token. Deconjugating here first and asking about the result would normalize
+    // twice, and `normalize_verb_token` is not idempotent on a possessive: "roll's" →
+    // "roll'" → "roll". That second pass matches the vocabulary on a NOUN the clause
+    // never used as a verb ("target die roll's result"), and the verdict then reports
+    // the malformed intermediate "roll'" — a token the vocabulary was never asked
+    // about. One pass keeps the reported verb and the consulted verb the same string.
+    if !is_clause_head_verb(token) {
         return Err(oracle_err(input));
     }
-    Ok((rest, (verb, rest)))
+    Ok((rest, (normalize_verb_token(token), rest)))
 }
 
 /// The clause's first whitespace-delimited token, or `""` for an empty clause.
@@ -612,6 +712,138 @@ mod tests {
         );
     }
 
+    /// Combinator-level table for the Multiplier arm's word-SENSE guard: every
+    /// multiplicand head shape [`multiplicand_head`] admits must still let the marker
+    /// fire. Asserted on `quantity_marker` rather than on the verdict so an operand
+    /// that a quantity authority happens to ACCEPT cannot silently mask a head the
+    /// guard rejected.
+    #[test]
+    fn the_multiplier_sense_guard_admits_every_multiplicand_head_shape() {
+        for phrase in [
+            "double that damage",                      // anaphoric determiner
+            "double those counters",                   // plural anaphor
+            "twice the number of times it was kicked", // definite determiner
+            "double its power",                        // possessive determiner
+            "half their life total",
+            "half your life total",
+            "double ~'s power", // possessive clitic
+            "half Okaun's power",
+            "double all damage that creature would deal", // quantifier determiner
+            "double any effect that doubles",
+            "double target creature's power", // object-selector determiner
+            "double equipped creature's power",
+            "double enchanted creature's power",
+            "twice as much of that mana", // comparative multiplicand
+            "twice as many cards",
+            "double this creature's power", // `this`/`each` on an AMOUNT
+            "double each player's life total",
+            "twice X loyalty counters", // variable / literal amounts
+            "twice -X/-X",
+            "twice {X}",
+            "half 6 damage",
+            "double three counters",
+        ] {
+            // `diagnose_clause_gap` lowercases before it scans, so the combinator only
+            // ever sees lowercase text; feeding it the printed casing here would test a
+            // call shape production never makes (and "X" would miss `parse_number_or_x`).
+            let lower = phrase.to_lowercase();
+            assert!(
+                matches!(quantity_marker(&lower), Ok((_, QuantityMarker::Multiplier))),
+                "`{phrase}` heads a real multiplicand, so the Multiplier marker must fire"
+            );
+        }
+    }
+
+    /// The refused SENSES. CR 702.4 makes "double strike" a keyword ability's NAME,
+    /// not arithmetic; "twice each turn" / "twice this turn" are adverbs of frequency;
+    /// "Think Twice" is a card name. Each is paired with a reach-guard that differs
+    /// only in the multiplicand head, so the negative cannot pass because the clause
+    /// never reached the quantity rule.
+    #[test]
+    fn the_multiplier_sense_guard_refuses_keyword_names_and_frequency_adverbs() {
+        for (refused, reached) in [
+            // CR 702.4 Double Strike, and its triple-strike / double-team siblings.
+            (
+                "the creature that attacked gains double strike",
+                "the creature that attacked gains double that many counters",
+            ),
+            (
+                "the creature gains triple strike",
+                "the creature gains triple that many counters",
+            ),
+            (
+                "nontoken creatures you control perpetually gain double team",
+                "nontoken creatures you control perpetually gain double that many counters",
+            ),
+            // Adverbial frequency: the multiplier counts ACTIONS over a turn window.
+            (
+                "this ability triggers only twice each turn",
+                "this ability triggers only twice each player's counters",
+            ),
+            (
+                "activate loyalty abilities of ~ twice this turn rather than only once",
+                "activate loyalty abilities of ~ twice this creature's counters rather than only once",
+            ),
+            // A card name that merely contains a multiplier word.
+            (
+                "conjure a card named Think Twice into your graveyard",
+                "conjure a card named Think Twice its graveyard",
+            ),
+        ] {
+            assert!(
+                !matches!(
+                    scan_preceded(&refused.to_lowercase(), quantity_marker),
+                    Some((_, QuantityMarker::Multiplier, _))
+                ),
+                "`{refused}` uses the word in a non-arithmetic sense; the Multiplier \
+                 marker must not fire anywhere in it"
+            );
+            assert!(
+                matches!(
+                    scan_preceded(&reached.to_lowercase(), quantity_marker),
+                    Some((_, QuantityMarker::Multiplier, _))
+                ),
+                "reach-guard for `{refused}`: the minimal pair `{reached}` differs only \
+                 in the multiplicand head and MUST still reach the Multiplier marker"
+            );
+        }
+    }
+
+    /// Verdict-level discrimination on the real printed clauses the guard moves.
+    /// Reverting the `peek(multiplicand_head)` guard flips every `assert_ne!` here.
+    #[test]
+    fn keyword_and_frequency_clauses_are_not_quantity_gaps() {
+        // Aradesh, the Founder / Hat Trick / Sworn to the Legion — keyword grants.
+        assert_ne!(
+            kind("the creature that attacked gains double strike"),
+            ClauseGapKind::Quantity
+        );
+        assert_ne!(
+            kind("nontoken creatures you control perpetually gain double team"),
+            ClauseGapKind::Quantity
+        );
+        // Nadu, Winged Wisdom / Urza Assembles the Titans — frequency adverbs.
+        assert_ne!(
+            kind("This ability triggers only twice each turn"),
+            ClauseGapKind::Quantity
+        );
+        assert_ne!(
+            kind(
+                "activate the loyalty abilities of planeswalkers you control twice \
+                 this turn rather than only once"
+            ),
+            ClauseGapKind::Quantity
+        );
+        // Paired positives from the same corpus: genuine multipliers the guard keeps.
+        // Approach My Molten Realm, Nuclear Fallout, Unbound Flourishing.
+        assert_eq!(
+            kind("deal double that damage instead"),
+            ClauseGapKind::Quantity
+        );
+        assert_eq!(kind("get twice -X/-X"), ClauseGapKind::Quantity);
+        assert_eq!(kind("double the value of X"), ClauseGapKind::Quantity);
+    }
+
     #[test]
     fn every_quantity_marker_produces_a_quantity_gap_on_a_rejected_operand() {
         assert_eq!(
@@ -826,6 +1058,37 @@ mod tests {
             diagnose_clause_gap("move a +1/+1 counter from that creature onto another creature"),
             ClauseGap::UnrecognizedHead {
                 head: "move".to_string()
+            }
+        );
+    }
+
+    /// Scooch's shape. `normalize_verb_token` is not idempotent on a possessive —
+    /// "roll's" → "roll'" → "roll" — so consulting the vocabulary with an
+    /// already-normalized token deconjugates twice and matches a NOUN the clause never
+    /// used as a verb. `clause_head_verb_token` therefore normalizes exactly once, and
+    /// the token it reports is the token it asked about.
+    #[test]
+    fn a_possessive_noun_does_not_match_the_verb_vocabulary() {
+        // The non-idempotence, and the second pass that used to reach the vocabulary.
+        assert_eq!(normalize_verb_token("roll's"), "roll'");
+        assert!(is_clause_head_verb("roll'"));
+        // One pass does not match, so the possessive noun is not a clause head.
+        assert!(!is_clause_head_verb("roll's"));
+        // Reach-guard: the same vocabulary still recognises the real verb in the same
+        // scanning position, so the negative above is not a dead scan.
+        assert_eq!(
+            diagnose_clause_gap("target player rolls a die with unreadable faces"),
+            ClauseGap::VerbArguments {
+                verb: "roll".to_string(),
+                arguments: "a die with unreadable faces".to_string(),
+            }
+        );
+        // Scooch's clause: no longer reported as arguments to a verb named "roll'",
+        // a token the vocabulary was never asked about.
+        assert_eq!(
+            diagnose_clause_gap("target player's life total, or target die roll's result"),
+            ClauseGap::UnrecognizedHead {
+                head: "target".to_string()
             }
         );
     }

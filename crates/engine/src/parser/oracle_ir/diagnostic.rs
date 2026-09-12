@@ -48,9 +48,8 @@ pub enum CascadeSlot {
 #[derive(Debug, Clone, PartialEq, Eq, strum::EnumDiscriminants)]
 #[strum_discriminants(name(ClauseGapKind), derive(strum::EnumIter))]
 pub enum ClauseGap {
-    /// CR 614.1 + CR 614.1a (and CR 615.1a for "prevent"): an event antecedent
-    /// ("would …", with or without "instead") that no replacement or prevention
-    /// lowering owns.
+    /// CR 614.1 + CR 614.1a: an event antecedent ("would …", with or without
+    /// "instead") that no replacement lowering owns.
     Replacement { antecedent: String },
     /// CR 608.2c: a guard the single condition authority (`lower_instead_condition`)
     /// rejected. CR 603.4 names the trigger-side intervening-"if"; elsewhere the word

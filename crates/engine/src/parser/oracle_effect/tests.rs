@@ -59907,7 +59907,9 @@ fn assimilate_without_a_graveyard_target_stays_unimplemented() {
             diagnose_clause_gap(fragment),
             ClauseGap::VerbArguments { ref verb, .. } if verb == "assimilate"
         ),
-        "the refused clause head is still `assimilate` — the fact the old literal carried"
+        "the refused clause head is still `assimilate` — the fact the old literal carried \
+         that same spelling is a coincidence of this clause's first word, not what this \
+         assertion checks: the verdict must name the VERB the dispatcher recognised"
     );
 
     let real = parse_effect("assimilate target creature card from an opponent's graveyard");

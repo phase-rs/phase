@@ -1308,7 +1308,7 @@ fn ice_cauldron_note_type_and_amount_stays_unimplemented() {
     let mana_ability = result
         .abilities
         .iter()
-        .find(|a| matches!(&*a.effect, Effect::Unimplemented { .. }))
+        .find(|a| a.effect.unimplemented_description() == Some(ADD_CLAUSE))
         .unwrap_or_else(|| {
             panic!(
                 "Ice Cauldron's 'last noted type and amount of mana' must stay \
@@ -1317,14 +1317,13 @@ fn ice_cauldron_note_type_and_amount_stays_unimplemented() {
                 result.abilities
             )
         });
+    // `unimplemented_description` is `None` for every other effect shape, so matching
+    // `ADD_CLAUSE` above already established both the variant and the recorded
+    // fragment — the selector IS the "names the exact clause that gapped" assertion,
+    // and it is order-independent where a "first Unimplemented" scan was not.
     let Effect::Unimplemented { name, .. } = &*mana_ability.effect else {
-        unreachable!("selected by the Unimplemented match above")
+        unreachable!("only Effect::Unimplemented has an unimplemented_description")
     };
-    assert_eq!(
-        mana_ability.effect.unimplemented_description(),
-        Some(ADD_CLAUSE),
-        "the recorded fragment names the exact clause that gapped"
-    );
     assert_eq!(
         ClauseGapKind::from_unimplemented_name(name),
         Some(ClauseGapKind::VerbArguments),

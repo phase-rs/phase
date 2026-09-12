@@ -31743,7 +31743,9 @@ fn the_mysterious_sphere_sweep_binds_to_pool_and_create_stays_red() {
             diagnose_clause_gap(CREATE_CLAUSE),
             ClauseGap::VerbArguments { ref verb, .. } if verb == "create"
         ),
-        "the refused clause head is still `create` — the fact the old literal carried"
+        "the refused clause head is still `create` — the fact the old literal carried \
+         that same spelling is a coincidence of this clause's first word, not what this \
+         assertion checks: the verdict must name the VERB the dispatcher recognised"
     );
 }
 
