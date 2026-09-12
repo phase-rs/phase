@@ -347,6 +347,41 @@ describe("Discard cost modal", () => {
     });
   });
 
+  it("retains a zone-choice pick when the same prompt is refreshed", () => {
+    const prompt = buildEffectZoneChoiceWaitingFor({
+      player: 0,
+      cards: [10],
+      count: 1,
+      min_count: 0,
+      up_to: false,
+      source_id: 1,
+      effect_kind: "ChangeZone",
+      zone: "Graveyard",
+      destination: "Battlefield",
+    });
+    const objects: Record<string, GameObject> = {
+      10: { ...makeObject(10, "Midnight Reaper"), zone: "Graveyard" },
+    };
+
+    setWaitingFor(prompt, objects);
+    render(<CardChoiceModal />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Loading Midnight Reaper" }));
+
+    act(() => {
+      setWaitingFor({ ...prompt, data: { ...prompt.data } }, objects);
+    });
+
+    const confirm = screen.getByRole("button", { name: "Put (1/1)" });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [10] },
+    });
+  });
+
   it("allocates any-combination mana with color steppers", () => {
     setWaitingFor({
       type: "ChooseManaColor",

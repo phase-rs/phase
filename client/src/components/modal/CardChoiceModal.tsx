@@ -1137,6 +1137,16 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
     !isTapUntapChoice;
   const isUpTo = data.up_to === true;
   const minCount = data.min_count ?? 0;
+  const selectionPromptKey = [
+    data.source_id,
+    data.cards.join(","),
+    data.count,
+    minCount,
+    isUpTo,
+    data.effect_kind,
+    data.zone,
+    data.destination ?? "",
+  ].join("|");
 
   // A resolution can advance directly from one zone-choice prompt to another
   // (for example, a sacrifice into a graveyard-to-battlefield return). The
@@ -1144,7 +1154,7 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   // must not answer the next engine prompt.
   useEffect(() => {
     setSelected(new Set());
-  }, [data]);
+  }, [selectionPromptKey]);
 
   const toggleSelect = useCallback(
     (id: ObjectId) => {
