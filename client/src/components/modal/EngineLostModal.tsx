@@ -128,9 +128,13 @@ export function EngineLostModal() {
     setExported(false);
     setExportFailed(false);
     try {
-      await exportGameStateDebugZip(snapshot.gameState);
-      setExported(true);
-      window.setTimeout(() => setExported(false), 2000);
+      const result = await exportGameStateDebugZip(snapshot.gameState);
+      // This button has two states, so "requested" -- the shell not reporting
+      // inside the wait, with the download still running -- reads as exported;
+      // only an outright failure must not.
+      const flag = result.kind === "failed" ? setExportFailed : setExported;
+      flag(true);
+      window.setTimeout(() => flag(false), 2000);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       setExportFailed(true);

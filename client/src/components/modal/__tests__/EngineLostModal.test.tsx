@@ -1,10 +1,11 @@
 import "fake-indexeddb/auto";
 
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 import { notifyEngineLost, notifyEngineSlow } from "../../../game/engineRecovery";
+import type { DownloadResult } from "../../../services/fileDownload";
 import {
   clearGame,
   loadActiveGame,
@@ -15,6 +16,9 @@ import {
 } from "../../../stores/gameStore";
 import { setGameStoreForTest } from "../../../test/helpers/gameStoreHelpers";
 import { EngineLostModal } from "../EngineLostModal";
+
+const { exportGameStateDebugZip } = vi.hoisted(() => ({ exportGameStateDebugZip: vi.fn() }));
+vi.mock("../../../services/gameStateExport", () => ({ exportGameStateDebugZip }));
 
 const GAME_ID = "resumable-engine-loss";
 const activeGame = {
@@ -81,5 +85,34 @@ describe("EngineLostModal", () => {
       screen.getByRole("button", { name: "Continue waiting" }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Main Menu" })).not.toBeInTheDocument();
+  });
+
+  it.each<[string, DownloadResult, string, string]>([
+    [
+      "a failed download is not reported as an export",
+      { kind: "failed", filename: "game-state.zip" },
+      "Export failed",
+      "Exported",
+    ],
+    [
+      // The button has two states, so a download still running under the shell
+      // reads as exported; only an outright failure must not.
+      "a shell that never reported still reads as exported",
+      { kind: "requested", filename: "game-state.zip" },
+      "Exported",
+      "Export failed",
+    ],
+  ])("%s", async (_name, result, shown, hidden) => {
+    exportGameStateDebugZip.mockResolvedValue(result);
+    setGameStoreForTest({ gameId: GAME_ID, gameMode: "ai" });
+    renderModal();
+
+    act(() => notifyEngineLost("submitAction"));
+    fireEvent.click(screen.getByRole("button", { name: "Export client snapshot" }));
+
+    // Gate on the commit, not on the mock: awaiting the call alone would read a
+    // DOM the promise continuation has not updated yet, and pass either way.
+    expect(await screen.findByRole("button", { name: shown })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
   });
 });

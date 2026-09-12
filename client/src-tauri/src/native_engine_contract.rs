@@ -27,6 +27,19 @@ pub struct NativeEngineReady {
     pub port: u16,
 }
 
+/// Where a browser-style download from the shell actually landed. The page only
+/// ever knows the file name it asked for, so the absolute path has to come from
+/// the shell side.
+// Unlike the wire-contract types below, mobile has no consumer for this at
+// all, so it is compiled out there rather than allow(dead_code)'d.
+#[cfg(desktop)]
+#[derive(Clone, Debug, Serialize)]
+pub struct ShellDownload {
+    pub url: String,
+    pub path: Option<String>,
+    pub success: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct NativeEngineProgress {
     pub phase: NativeEngineProgressPhase,
@@ -204,6 +217,29 @@ mod tests {
                 format!(r#"{{"phase":"{expected}","detail":"12/34"}}"#)
             );
         }
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn shell_download_preserves_every_exact_json_shape() {
+        assert_eq!(
+            serde_json::to_string(&ShellDownload {
+                url: "blob:http://127.0.0.1:8731/27fbd3e5".to_owned(),
+                path: Some("/home/u/Downloads/replay.json".to_owned()),
+                success: true,
+            })
+            .unwrap(),
+            r#"{"url":"blob:http://127.0.0.1:8731/27fbd3e5","path":"/home/u/Downloads/replay.json","success":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ShellDownload {
+                url: "blob:http://127.0.0.1:8731/27fbd3e5".to_owned(),
+                path: None,
+                success: false,
+            })
+            .unwrap(),
+            r#"{"url":"blob:http://127.0.0.1:8731/27fbd3e5","path":null,"success":false}"#
+        );
     }
 
     #[test]

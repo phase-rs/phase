@@ -1,5 +1,42 @@
 #[cfg(desktop)]
-use tauri::{Manager, WebviewWindowBuilder};
+use std::{collections::HashMap, path::PathBuf, sync::Mutex};
+
+#[cfg(desktop)]
+use tauri::{webview::DownloadEvent, Emitter, Manager, WebviewWindowBuilder};
+
+#[cfg(desktop)]
+use crate::native_engine_contract::ShellDownload;
+
+/// Carries a finished download's absolute path to the page.
+#[cfg(desktop)]
+const DOWNLOAD_EVENT: &str = "shell-download";
+
+/// What a finished download should report: where it landed, and whether it
+/// worked. wry's failure flag lives on the `WebContext` — one per process — and
+/// is only ever set, never cleared, so every download after a single failure
+/// arrives here with `success = false` and no path even though the file was
+/// written. The destination wry named when it requested the download lets the
+/// filesystem settle that instead of the flag.
+///
+/// The trade: a download that fails mid-write (ENOSPC, EIO) leaves a truncated
+/// file that `exists()`, so this reports success where trusting the flag would
+/// not. It is accepted because the flag is wrong for every download after the
+/// first failure, and because wry uniquifies the destination before requesting
+/// it, so a file found there is always this download's.
+#[cfg(desktop)]
+fn finished_download_report(
+    wry_path: Option<PathBuf>,
+    wry_success: bool,
+    stashed_destination: Option<PathBuf>,
+) -> (Option<PathBuf>, bool) {
+    if wry_success && wry_path.is_some() {
+        return (wry_path, true);
+    }
+    match stashed_destination.filter(|destination| destination.exists()) {
+        Some(destination) => (Some(destination), true),
+        None => (wry_path, wry_success),
+    }
+}
 
 mod audio_probe;
 mod host_platform;
@@ -119,6 +156,7 @@ pub fn run() {
                 // Kick off the audio-device probe before the webview exists so the
                 // verdict is usually cached by the time the page asks for it.
                 audio_probe::prewarm();
+                let download_destinations: Mutex<HashMap<String, PathBuf>> = Mutex::default();
                 // `create: false` on the "main" window in tauri.conf.json defers
                 // window creation to here so we can pin an explicit, always-writable
                 // `data_directory` on Windows. WebView2 otherwise derives its
@@ -136,10 +174,55 @@ pub fn run() {
                 // and force a one-time re-login, so we leave those platforms on their
                 // defaults and just build the window straight from config.
                 let main_config = &app.config().app.windows[0];
-                let builder =
-                    WebviewWindowBuilder::from_config(app, main_config)?.on_navigation(|_| {
-                        native_engine::abort_native_engine_bridges_on_navigation();
-                        native_bridge::abort_lan_bridges();
+                let builder = WebviewWindowBuilder::from_config(app, main_config)?
+                    .on_navigation(|url| {
+                        // An `<a download>` click arrives here as a navigation to its
+                        // `blob:` URL; the page is not going anywhere, so the live
+                        // game's bridges must survive it.
+                        if url.scheme() != "blob" {
+                            native_engine::abort_native_engine_bridges_on_navigation();
+                            native_bridge::abort_lan_bridges();
+                        }
+                        true
+                    })
+                    // wry already accepts downloads on its own; what it does not do is
+                    // tell anyone where the file went. The page only knows the name it
+                    // asked for, so report the real destination to the log and to the
+                    // page from here, where it is known.
+                    .on_download(move |webview, event| {
+                        match event {
+                            DownloadEvent::Requested { url, destination } => {
+                                eprintln!(
+                                    "shell download requested: {url} -> {}",
+                                    destination.display()
+                                );
+                                if let Ok(mut destinations) = download_destinations.lock() {
+                                    destinations.insert(url.to_string(), destination.clone());
+                                }
+                            }
+                            DownloadEvent::Finished { url, path, success } => {
+                                let stashed = download_destinations
+                                    .lock()
+                                    .ok()
+                                    .and_then(|mut destinations| destinations.remove(url.as_str()));
+                                let (path, success) =
+                                    finished_download_report(path, success, stashed);
+                                eprintln!(
+                                    "shell download finished: {url} -> {path:?} success={success}"
+                                );
+                                let _ = webview.emit(
+                                    DOWNLOAD_EVENT,
+                                    ShellDownload {
+                                        url: url.to_string(),
+                                        path: path.as_ref().map(|p| p.display().to_string()),
+                                        success,
+                                    },
+                                );
+                            }
+                            // `DownloadEvent` is `#[non_exhaustive]`; a variant added
+                            // upstream needs no decision here.
+                            _ => {}
+                        }
                         true
                     });
                 #[cfg(target_os = "windows")]
@@ -326,6 +409,57 @@ mod tests {
                 "updater registration lost required invariant: {required}"
             );
         }
+    }
+
+    /// The one arm with no other witness: wry latches its per-`WebContext`
+    /// failure flag on the first failed download, so from then on a written
+    /// file arrives as `(None, false)` and only the destination on disk can
+    /// tell that apart from a real failure.
+    #[cfg(desktop)]
+    #[test]
+    fn finished_download_report_trusts_the_filesystem_over_a_latched_failure_flag() {
+        let written = std::env::temp_dir().join(format!(
+            "phase-rs-finished-download-{}.tmp",
+            std::process::id()
+        ));
+        fs::write(&written, b"x").unwrap();
+        let missing = written.with_extension("absent");
+
+        assert_eq!(
+            super::finished_download_report(Some(written.clone()), true, None),
+            (Some(written.clone()), true)
+        );
+        // Latched flag, file present.
+        assert_eq!(
+            super::finished_download_report(None, false, Some(written.clone())),
+            (Some(written.clone()), true)
+        );
+        // Genuine failure: nothing was written to the destination.
+        assert_eq!(
+            super::finished_download_report(None, false, Some(missing)),
+            (None, false)
+        );
+        // A `Finished` with no matching `Requested` has nothing to check.
+        assert_eq!(
+            super::finished_download_report(None, false, None),
+            (None, false)
+        );
+
+        fs::remove_file(&written).unwrap();
+    }
+
+    /// Nothing automated catches this grant going missing: no CI job builds the
+    /// Flatpak, and ci.yml's tauri-check job — the only runner of this crate's
+    /// tests — is disabled. This fires only under a local cargo test.
+    #[test]
+    fn flatpak_manifest_grants_the_download_directory() {
+        let manifest = include_str!("../../../packaging/flatpak/rs.phase.app.yml");
+        assert!(
+            manifest
+                .lines()
+                .any(|line| line.trim() == "- --filesystem=xdg-download:create"),
+            "packaging/flatpak/rs.phase.app.yml must grant --filesystem=xdg-download:create"
+        );
     }
 
     /// Flatpak keys the desktop entry, the icons and the AppStream component on

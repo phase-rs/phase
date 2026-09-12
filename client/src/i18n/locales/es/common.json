@@ -175,6 +175,8 @@
       "copied": "Estado de la partida copiado al portapapeles.",
       "copyFailed": "No se pudo copiar el estado de la partida.",
       "exported": "Se exportó {{filename}}.",
+      "exportedTo": "Se exportó a {{path}}.",
+      "exportRequested": "Exportación solicitada: {{filename}}.",
       "exportFailed": "No se pudo exportar el estado de la partida.",
       "replayExported": "Repetición guardada como {{filename}}.",
       "replayExportUnavailable": "No hay ninguna grabación de repetición disponible para esta partida.",
