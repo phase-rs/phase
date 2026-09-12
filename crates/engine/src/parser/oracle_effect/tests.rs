@@ -5685,7 +5685,7 @@ fn effect_damage_compound_each_creature_and_each_player() {
     }
 }
 
-/// CR 120.6 + CR 120.9: Inflame — "each creature dealt damage this turn" is a
+/// Inflame — "each creature dealt damage this turn" is a
 /// REDUCED passive relative clause (no "that was"). Regression for a bug where
 /// the missing relative pronoun caused the "dealt damage this turn" restriction
 /// to be dropped entirely, producing an unrestricted `DamageAll{Creature}` that
@@ -7165,7 +7165,7 @@ fn destroy_target_was_dealt_damage_preserves_relative_clause() {
     );
 }
 
-/// CR 120.6 + CR 120.9: number-agreement sibling of the test above — a plural
+/// Number-agreement sibling of the test above — a plural
 /// head noun takes "were" instead of "was" ("all other creatures that WERE
 /// dealt damage this turn", Death-Rattle Oni). Regression: the "was"-only
 /// `VERB_PHRASES` row left "that were dealt damage this turn" unrecognized,

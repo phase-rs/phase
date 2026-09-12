@@ -6652,7 +6652,7 @@ fn target_relative_clause_owns_suffix(input: &str) -> bool {
         .is_ok()
 }
 
-/// CR 120.6 + CR 120.9: Bare-participle sibling of
+/// Bare-participle sibling of
 /// `target_relative_clause_owns_suffix`, for the REDUCED relative clause that
 /// carries no relative pronoun at all — "each creature dealt damage this turn"
 /// (Inflame). `target_relative_clause_owns_suffix` anchors on a literal
@@ -6665,7 +6665,7 @@ fn target_relative_clause_owns_suffix(input: &str) -> bool {
 /// on the bare participle phrase `parse_bare_was_dealt_damage_suffix` (the
 /// single authority for this reduced clause) recognizes instead of "that ".
 fn bare_dealt_damage_relative_clause_owns_suffix(input: &str) -> bool {
-    // CR 120.6 + CR 120.9: exclude the WITH-copula forms ("that was"/"that were
+    // Exclude the WITH-copula forms ("that was"/"that were
     // dealt damage this turn") up front — those already carry a relative
     // pronoun and are owned by `target_relative_clause_owns_suffix` (paired
     // with the "was"/"were dealt damage this turn" `VERB_PHRASES` rows). This

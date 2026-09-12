@@ -2820,10 +2820,10 @@ mod tests {
         // drops both the rider and the real count. The rider here is a
         // deliberately fabricated adjective (mirroring the "frobnicating"
         // pattern above) rather than a real card phrase: "that were dealt
-        // damage this turn" used to serve this purpose, but CR 120.6 + CR 120.9
-        // number-agreement support (the `were` sibling of `WasDealtDamageThisTurn`'s
-        // "was" row) now models it, which is the coverage gain that made this
-        // test's old example stop being an unmodeled rider.
+        // damage this turn" used to serve this purpose, but the parser now
+        // models the `were` number-agreement sibling of `WasDealtDamageThisTurn`'s
+        // "was" row, which is the coverage gain that made this test's old
+        // example stop being an unmodeled rider.
         match parse_oracle_cost(
             "Sacrifice a creature and two artifacts that are quantically entangled",
         ) {
