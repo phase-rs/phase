@@ -410,9 +410,9 @@ async fn bootstrap_missing_data_with_key(
 /// the file is loaded and never replaced.
 ///
 /// A replacement is attempted only when a manifest resolves, and an attempt that
-/// does not end in a usable file leaves this file exactly as it found it: the
-/// copy it moved aside goes back over anything the refill installed, and is kept
-/// as `<name>.unusable` only once a usable file is in place.
+/// does not end in a usable file puts the held copy back over anything the
+/// refill installed — this start's copy, or one left by an earlier start —
+/// and it is kept as `<name>.unusable` only once a usable file is in place.
 pub async fn load_data_file<T, E: fmt::Display>(
     data_dir: &Path,
     name: &str,
@@ -668,8 +668,10 @@ fn write_verified_data_file_blocking(
 }
 
 /// Moves a data file this binary cannot use out of the way so the bootstrap can
-/// install a replacement, and reports where it went. Returns `None` when there
-/// was nothing to move, which is how an absent file reaches the same refill.
+/// install a replacement, and reports the copy the refill must not lose, which an
+/// earlier interrupted start may already have moved aside. Returns `None` only
+/// when there is no such copy, which is how an absent file reaches the same
+/// refill.
 /// The error is the detail clause for the caller's message, not a full message.
 fn hold_unusable_file(
     data_dir: &Path,
@@ -679,6 +681,11 @@ fn hold_unusable_file(
     let path = data_dir.join(name);
     let held = data_dir.join(format!("{name}{HELD_SUFFIX}"));
     match held.try_exists() {
+        // A held copy with nothing at the live path is a replacement interrupted
+        // between the two, and the refill is what finishes it. The held copy is
+        // this attempt's rollback, so a failed refill puts it back at the live
+        // path rather than leaving the directory half-open.
+        Ok(true) if matches!(path.try_exists(), Ok(false)) => return Ok(Some(held)),
         Ok(true) => {
             return Err(format!(
                 "; an interrupted replacement left the previous copy at {}, which is not overwritten. Move it back to {} or remove it to allow another automatic replacement.",
@@ -770,10 +777,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        bootstrap_missing_data_with_key, identity_from_markers, load_data_file_with_key,
-        parse_manifest_data, resolve_manifest, restore_held_copy, retire_held_copy,
-        verify_manifest_signature, verify_sha256, write_verified_data_file, BootstrapOptions,
-        ChannelIdentity, CARD_DATA_FILE, DRAFT_POOLS_FILE,
+        bootstrap_missing_data_with_key, hold_unusable_file, identity_from_markers,
+        load_data_file_with_key, parse_manifest_data, resolve_manifest, restore_held_copy,
+        retire_held_copy, verify_manifest_signature, verify_sha256, write_verified_data_file,
+        BootstrapOptions, ChannelIdentity, CARD_DATA_FILE, DRAFT_POOLS_FILE,
     };
     use sha2::{Digest, Sha256};
     use url::Url;
@@ -1403,7 +1410,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_interrupted_replacement_is_not_overwritten() {
+    async fn an_interrupted_replacement_with_a_live_file_is_not_overwritten() {
         let temp = tempfile::tempdir().expect("temp dir");
         std::fs::write(temp.path().join(DRAFT_POOLS_FILE), "REFILLED").expect("write live");
         std::fs::write(held(temp.path(), DRAFT_POOLS_FILE), "ORIGINAL").expect("write held");
@@ -1441,6 +1448,78 @@ mod tests {
         assert_eq!(read(&held(temp.path(), DRAFT_POOLS_FILE)), "ORIGINAL");
         assert_eq!(read(&temp.path().join(DRAFT_POOLS_FILE)), "REFILLED");
         assert_eq!(calls.get(), 1);
+    }
+
+    /// A name outside the manifest-managed set is what makes the refill a no-op
+    /// success: it reports `Ok` only when no managed file is missing, which for
+    /// a managed name would require the live path this case needs absent.
+    #[tokio::test]
+    async fn a_resumed_replacement_retires_the_held_copy_when_the_second_load_succeeds() {
+        let name = "other-data.json";
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join(CARD_DATA_FILE), "CARDS").expect("write card data");
+        std::fs::write(temp.path().join(DRAFT_POOLS_FILE), "POOLS").expect("write pools");
+        std::fs::write(held(temp.path(), name), "ORIGINAL").expect("write held");
+        let options = BootstrapOptions {
+            manifest_url_override: Some(
+                Url::parse("https://127.0.0.1:1/manifest.json").expect("URL"),
+            ),
+            no_data_download: false,
+        };
+        let calls = Cell::new(0u32);
+
+        load_data_file_with_key(
+            temp.path(),
+            name,
+            Some(&options),
+            None,
+            TEST_PUBLIC_KEY,
+            |_: &Path| -> Result<(), String> {
+                calls.set(calls.get() + 1);
+                match calls.get() {
+                    1 => Err("stale shape".to_string()),
+                    _ => Ok(()),
+                }
+            },
+        )
+        .await
+        .expect("the refill finishes the interrupted replacement");
+
+        assert_eq!(calls.get(), 2);
+        assert_eq!(read(&retired(temp.path(), name)), "ORIGINAL");
+        assert!(!held(temp.path(), name).exists());
+        assert!(!temp.path().join(name).exists());
+    }
+
+    #[tokio::test]
+    async fn a_failed_refill_puts_an_interrupted_replacement_back_at_the_live_path() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join(CARD_DATA_FILE), "CARDS").expect("write card data");
+        std::fs::write(held(temp.path(), DRAFT_POOLS_FILE), "ORIGINAL").expect("write held");
+        let options = BootstrapOptions {
+            manifest_url_override: Some(
+                Url::parse("https://127.0.0.1:1/manifest.json").expect("URL"),
+            ),
+            no_data_download: false,
+        };
+
+        let message = load_data_file_with_key(
+            temp.path(),
+            DRAFT_POOLS_FILE,
+            Some(&options),
+            None,
+            TEST_PUBLIC_KEY,
+            |_: &Path| -> Result<(), String> { Err("pool file is absent".to_string()) },
+        )
+        .await
+        .expect_err("an unreachable manifest must fail")
+        .to_string();
+
+        assert!(message.contains("replacing it from"), "{message}");
+        assert!(!message.contains("interrupted replacement"), "{message}");
+        assert!(message.contains("was put back"), "{message}");
+        assert_eq!(read(&temp.path().join(DRAFT_POOLS_FILE)), "ORIGINAL");
+        assert!(!held(temp.path(), DRAFT_POOLS_FILE).exists());
     }
 
     #[tokio::test]
@@ -1516,6 +1595,22 @@ mod tests {
             "{message}"
         );
         assert_eq!(read(&path), "POOLS");
+    }
+
+    /// The required file, where leaving a file absent is not an option: the held
+    /// copy must reach the caller so a failed refill can put it back.
+    #[test]
+    fn hold_unusable_file_hands_back_an_interrupted_replacement_it_did_not_make() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let held_path = held(temp.path(), CARD_DATA_FILE);
+        std::fs::write(&held_path, "ORIGINAL").expect("write held");
+
+        let carried = hold_unusable_file(temp.path(), CARD_DATA_FILE, "card data is absent")
+            .expect("an interrupted replacement is resumed, not refused");
+
+        assert_eq!(carried.as_deref(), Some(held_path.as_path()));
+        assert_eq!(read(&held_path), "ORIGINAL");
+        assert!(!temp.path().join(CARD_DATA_FILE).exists());
     }
 
     #[test]
