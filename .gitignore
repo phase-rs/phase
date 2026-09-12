@@ -17,6 +17,9 @@ docs/superpowers/
 # Run ./scripts/fetch-comp-rules.sh to download a local copy for dev reference.
 docs/MagicCompRules.txt
 
+# Commander bracket sources — © Wizards of the Coast, not redistributed here.
+docs/bracket-sources/
+
 # WASM output (generated — keep .d.ts for CI type-checking)
 client/src/wasm/*.js
 client/src/wasm/*.wasm
@@ -88,6 +91,7 @@ data/mtgjson/allsets/
 !data/precons/
 !data/learned-weights.json
 !data/bracket_lists.json
+!data/bracket_sources.json
 
 # Tauri build output
 client/src-tauri/binaries/
