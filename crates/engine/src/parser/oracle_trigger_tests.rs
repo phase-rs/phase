@@ -27703,6 +27703,62 @@ fn attack_trigger_fight_up_to_one_or_target_defending_player_controls() {
     }
 }
 
+/// SHAPE: Tolsimir's Wolf-enter sentence is GainLife then Fight, not a swallowed
+/// remainder. Verbatim second sentence. Revert of the bare-and fight splitter →
+/// `sub_ability: None` and GainLife-only execute.
+#[test]
+fn wolf_enter_gain_life_and_that_creature_fights_up_to_one_shape() {
+    use crate::types::ability::{Effect, MultiTargetSpec};
+
+    let def = parse_trigger_line(
+        "Whenever a Wolf you control enters, you gain 3 life and that creature fights up to one target creature you don't control.",
+        "Tolsimir, Friend to Wolves",
+    );
+    let execute = def.execute.as_deref().expect("execute ability");
+    assert_no_unimplemented(execute);
+    match execute.effect.as_ref() {
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            ..
+        } => {}
+        other => panic!("expected GainLife{{3}} head, got {other:?}"),
+    }
+    let fight = walk_to_fight_sub_ability(execute);
+    assert_eq!(
+        fight.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+        "fight leg must carry up-to-one multi_target (min=0)",
+    );
+    match fight.effect.as_ref() {
+        Effect::Fight { subject, target } => {
+            assert_eq!(
+                *subject,
+                TargetFilter::TriggeringSource,
+                "that creature must be the triggering Wolf, not the ability source"
+            );
+            match target {
+                TargetFilter::Typed(t) => {
+                    assert!(
+                        t.type_filters.contains(&TypeFilter::Creature),
+                        "fight target must be a creature, got {t:?}"
+                    );
+                    assert_ne!(
+                        t.controller,
+                        Some(ControllerRef::You),
+                        "you don't control must not scope to You"
+                    );
+                    assert!(
+                        t.controller.is_some(),
+                        "opponent-scoped creature target must carry a controller"
+                    );
+                }
+                other => panic!("expected Typed target, got {other:?}"),
+            }
+        }
+        other => panic!("expected Fight effect, got {other:?}"),
+    }
+}
+
 /// Walk a `then`-sequence sub-ability chain to the `Effect::Fight` link.
 fn walk_to_fight_sub_ability(
     execute: &crate::types::ability::AbilityDefinition,

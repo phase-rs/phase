@@ -809,6 +809,7 @@ mod issue_6769_serras_emissary_reanimation;
 mod issue_680_shalai_and_hallar_forgotten_ancient;
 mod issue_680_shalai_upkeep_move;
 mod issue_6858_draw_that_many_discard;
+mod issue_6889_wolf_enter_conjunctive_fight;
 mod issue_688_mind_into_matter;
 mod issue_689_resonating_lute_hand_size;
 mod issue_6908_kozilek_discard_mana_value;

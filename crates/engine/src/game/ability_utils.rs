@@ -3309,12 +3309,14 @@ fn collect_target_slots_inner(
             }
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
-            if legal_targets.is_empty() && !ability.optional_targeting {
+            // CR 115.6: "up to one" is optional even when `optional_targeting` is
+            // false (`targeting_is_optional` also reads `multi_target.min == 0`).
+            if legal_targets.is_empty() && !ability.targeting_is_optional() {
                 return Err(no_legal_target_slots());
             }
             acc.push(TargetSelectionSlot {
                 legal_targets,
-                optional: ability.optional_targeting,
+                optional: ability.targeting_is_optional(),
                 chooser: None,
                 effect_kind: acc.current_effect_kind,
                 effect_detail: acc.current_effect_detail,
@@ -5736,7 +5738,7 @@ fn collect_target_slot_specs(
             *next_instance += 1;
             specs.push(TargetSlotSpec {
                 filter: filter.clone(),
-                optional: ability.optional_targeting,
+                optional: ability.targeting_is_optional(),
                 instance: id,
             });
         }
@@ -7934,7 +7936,7 @@ fn assign_targets_recursive(
             if let Some(chosen) = targets.get(*next_target) {
                 ability.targets.push(chosen.clone());
                 *next_target += 1;
-            } else if !ability.optional_targeting {
+            } else if !ability.targeting_is_optional() {
                 return Err(EngineError::InvalidAction(
                     "Missing required target".to_string(),
                 ));
@@ -8408,7 +8410,7 @@ fn assign_selected_slots_recursive(
             };
             match selected_slot {
                 Some(chosen) => ability.targets.push(chosen.clone()),
-                None if ability.optional_targeting => {}
+                None if ability.targeting_is_optional() => {}
                 None => {
                     return Err(EngineError::InvalidAction(
                         "Missing required target".to_string(),
