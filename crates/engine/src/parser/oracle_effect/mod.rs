@@ -17477,9 +17477,10 @@ fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
 
 /// CR 115.1 (+ CR 115.1d for the trigger cohort) + CR 601.2c: the cardinality of
 /// the noun phrase in a positional library placement ("put <noun phrase> on top
-/// of / on the bottom of / into <library>"). Each shape routes to a DIFFERENT
-/// field, which is why this is a typed enum rather than a pair of `Option`s —
-/// a tuple would admit combinations the grammar cannot produce:
+/// of / on the bottom of / into <library>"). Each shape names a DISTINCT rules
+/// concept, which is why this is a typed enum rather than a pair of `Option`s —
+/// a tuple would admit combinations the grammar cannot produce. `Exact` and
+/// `AnyNumber` both write the effect's own count, but with different semantics:
 ///   * `Unstated`  — "target X" / "it" / "that card": no leading cardinality,
 ///     so the lowering default of `count: Fixed(1)` stands.
 ///   * `Exact`     — "two cards", "x cards": a concrete count on the effect.
@@ -17492,6 +17493,11 @@ enum LibraryPlacementCardinality {
     Unstated,
     Exact(QuantityExpr),
     TargetSet(MultiTargetSpec),
+    /// `AnyNumber` — "any number of <population>" with NO `target` word
+    /// (CR 115.10 + CR 115.10a: untargeted). A resolution-time choice of zero
+    /// through all eligible objects (CR 107.1c + CR 608.2d), written to the
+    /// effect's own `count` as the same `UpTo` wrapper the sacrifice class uses.
+    AnyNumber,
 }
 
 /// Peel the cardinality prefix from the noun phrase that precedes a positional
@@ -17506,6 +17512,14 @@ fn peel_library_placement_cardinality(input: &str) -> (LibraryPlacementCardinali
     // they start with a word rather than a numeral.
     if let (rest, Some(spec)) = strip_optional_target_prefix(input) {
         return (LibraryPlacementCardinality::TargetSet(spec), rest);
+    }
+    // CR 107.1c + CR 115.10: untargeted "any number of <noun phrase>". Tried only
+    // AFTER the target-set authority above has declined, so "any number of target
+    // …" can never reach this arm. The pronoun form ("any number of them") is
+    // peeled here too; it is refused at the routing site, where the parsed
+    // recipient is known.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("any number of ").parse(input) {
+        return (LibraryPlacementCardinality::AnyNumber, rest);
     }
     // "x " — variable quantity bound to the spell's chosen X.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("x ").parse(input) {
@@ -17641,6 +17655,7 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
                         //   - "x cards ..."              → Exact(Variable("X"))
                         //   - "any number of target ..." → TargetSet(unlimited(0))
                         //   - "up to N target ..."       → TargetSet(up_to(N))
+                        //   - "any number of cards ..."  → AnyNumber (count = UpTo(ObjectCount))
                         // The remainder (e.g. "cards from your hand", "target creature
                         // card from your graveyard" — the article is deliberately left
                         // in place) is then handed to `parse_target` for filter
@@ -17678,6 +17693,25 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
                         // `multi_target` rule).
                         LibraryPlacementCardinality::TargetSet(spec) => {
                             placement_target_set = Some(spec)
+                        }
+                        // CR 107.1c + CR 115.10a + CR 608.2d: an untargeted "any
+                        // number of <population>" is a resolution-time choice of
+                        // zero through every eligible object — the same `UpTo`
+                        // encoding as "sacrifice any number of …". The recipient
+                        // must NAME a population: a deterministic anaphor ("any
+                        // number of them" → `ParentTarget`, the Dig-tail partition
+                        // owned by the Dig continuation grammar) or an unclassified
+                        // recipient (`Any` / a contentless `Typed`) keeps its base
+                        // shape. `names_enumerable_population` is the authored
+                        // population predicate for exactly that question.
+                        LibraryPlacementCardinality::AnyNumber => {
+                            if target.names_enumerable_population() {
+                                *count = QuantityExpr::up_to(QuantityExpr::Ref {
+                                    qty: QuantityRef::ObjectCount {
+                                        filter: target.clone(),
+                                    },
+                                });
+                            }
                         }
                     }
                 }

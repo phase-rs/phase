@@ -65297,3 +65297,405 @@ fn lodestone_bauble_known_bad_missing_zone_qualifier_lock() {
         filter.properties
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2 — resolution-time "any number of <population>" on positional library
+// placement. CR 107.1c + CR 115.10a + CR 608.2d: with no `target` word the
+// objects are chosen while the effect is applied, so the cardinality is the
+// effect's own `count` (`UpTo(ObjectCount)`), never an announced target set.
+// ---------------------------------------------------------------------------
+
+/// Every `PutAtLibraryPosition` node reachable from `abilities` through
+/// `sub_ability` AND `else_ability` chains. An else-branch clause is not under
+/// `sub_ability`, so a walk of `sub_ability` alone can miss a placement node.
+fn collect_library_placement_nodes(abilities: &[AbilityDefinition]) -> Vec<&AbilityDefinition> {
+    fn walk<'a>(definition: &'a AbilityDefinition, nodes: &mut Vec<&'a AbilityDefinition>) {
+        if matches!(
+            definition.effect.as_ref(),
+            Effect::PutAtLibraryPosition { .. }
+        ) {
+            nodes.push(definition);
+        }
+        for child in [
+            definition.sub_ability.as_deref(),
+            definition.else_ability.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            walk(child, nodes);
+        }
+    }
+    let mut nodes = Vec::new();
+    for definition in abilities {
+        walk(definition, &mut nodes);
+    }
+    nodes
+}
+
+/// `Typed{[Card], You, [InZone Hand]}` — "cards from your hand".
+fn your_hand_cards_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::card()
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+    )
+}
+
+/// The B-4 shape assertions shared by rows 2 and 3, on one placement node.
+fn assert_untargeted_any_number_placement_shape(placement: &AbilityDefinition) {
+    let Effect::PutAtLibraryPosition {
+        target,
+        count,
+        position,
+    } = placement.effect.as_ref()
+    else {
+        panic!(
+            "reach guard: expected PutAtLibraryPosition, got {:?}",
+            placement.effect
+        );
+    };
+    // REVERT-FAILING: base keeps the lowering default `Fixed(1)`.
+    assert_eq!(
+        *count,
+        QuantityExpr::up_to(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: target.clone(),
+            },
+        }),
+        "CR 107.1c + CR 608.2d: \"any number of\" is a resolution-time choice of zero \
+         through every eligible object, written to the effect's own count"
+    );
+    // REACH GUARDS: the node's own recipient and position.
+    assert_eq!(*target, your_hand_cards_filter());
+    assert_eq!(*position, LibraryPosition::Bottom);
+    // GREEN AT BASE; its pairing is mutation MP-SPEC (see the row's doc comment).
+    assert!(
+        placement.multi_target.is_none(),
+        "CR 115.10a: no `target` word, so no announced target set, got {:?}",
+        placement.multi_target
+    );
+    // REACH GUARD: the chained "draw that many cards plus one" is unchanged.
+    let draw = placement
+        .sub_ability
+        .as_deref()
+        .expect("the draw is the placement's chained sub-ability");
+    let Effect::Draw {
+        count: draw_count,
+        target: draw_target,
+    } = draw.effect.as_ref()
+    else {
+        panic!("expected the chained Draw, got {:?}", draw.effect);
+    };
+    assert_eq!(
+        *draw_count,
+        QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }),
+            offset: 1,
+        }
+    );
+    assert_eq!(*draw_target, TargetFilter::Controller);
+}
+
+/// The B-5 shape assertions shared by rows 4 and 5: a pronoun partition keeps
+/// its base placement shape.
+fn assert_pronoun_partition_keeps_base_shape(
+    placement: &AbilityDefinition,
+    expected_position: LibraryPosition,
+) {
+    let Effect::PutAtLibraryPosition {
+        target,
+        count,
+        position,
+    } = placement.effect.as_ref()
+    else {
+        panic!(
+            "reach guard: expected PutAtLibraryPosition, got {:?}",
+            placement.effect
+        );
+    };
+    assert_eq!(
+        *count,
+        QuantityExpr::Fixed { value: 1 },
+        "\"any number of them\" is a deterministic anaphor, not a population, so the \
+         untargeted any-number arm must not rewrite its count"
+    );
+    assert_eq!(*target, TargetFilter::ParentTarget);
+    assert_eq!(*position, expected_position);
+    assert!(
+        placement.multi_target.is_none(),
+        "reach guard: no announced target set, got {:?}",
+        placement.multi_target
+    );
+}
+
+/// B-4 helper half and precedence. The helper recognizes an untargeted
+/// "any number of" as `AnyNumber`, but only AFTER the target-set authority
+/// (`strip_optional_target_prefix`) has declined, so "any number of target …"
+/// stays an announced target set. The helper is recipient-blind: "any number of
+/// them" also peels to `AnyNumber`, and the pronoun is refused at the routing
+/// site (rows 4–6), where the parsed recipient is known.
+///
+/// Non-vacuous by construction: the `AnyNumber` variant does not exist at this
+/// phase's base commit, so this test cannot compile there.
+#[test]
+fn peel_library_placement_cardinality_recognizes_untargeted_any_number() {
+    let (got, rest) = peel_library_placement_cardinality("any number of cards from your hand");
+    assert_eq!(got, LibraryPlacementCardinality::AnyNumber);
+    assert_eq!(rest, "cards from your hand");
+
+    // PRECEDENCE: the target article keeps the announced target set.
+    let (got, _) = peel_library_placement_cardinality(
+        "any number of target creature cards from your graveyard",
+    );
+    assert_eq!(
+        got,
+        LibraryPlacementCardinality::TargetSet(MultiTargetSpec::unlimited(0)),
+        "the target-set authority is consulted first and must win"
+    );
+
+    // Recipient-blind: the pronoun is refused later, at routing.
+    let (got, rest) = peel_library_placement_cardinality("any number of them");
+    assert_eq!(got, LibraryPlacementCardinality::AnyNumber);
+    assert_eq!(rest, "them");
+
+    // NEGATIVE, phrased as not-a-match so a later variant cannot force a rewrite.
+    let (got, _) = peel_library_placement_cardinality("up to two cards from your hand");
+    assert!(
+        !matches!(
+            got,
+            LibraryPlacementCardinality::AnyNumber | LibraryPlacementCardinality::TargetSet(_)
+        ),
+        "an untargeted \"up to two\" is neither an any-number choice nor a target set, got {got:?}"
+    );
+}
+
+/// B-4 — Valakut Awakening's untargeted "any number of cards from your hand"
+/// takes the COUNT encoding, `count = UpTo(ObjectCount(<the node's own
+/// target>))`, the same wrapper "sacrifice any number of …" mints. RED AT BASE
+/// on the count: base keeps the lowering default `Fixed(1)`.
+///
+/// The `multi_target.is_none()` half is GREEN AT BASE (CR 115.10a: no `target`
+/// word, so no announced target set). Its pairing is mutation MP-SPEC, which
+/// mints `MultiTargetSpec::unlimited(0)` in the routing arm and must turn it
+/// red. The `Draw` sub-ability equality is a REACH GUARD for the chained node,
+/// not a phase-2 claim.
+#[test]
+fn valakut_awakening_any_number_placement_takes_up_to_count_shape() {
+    let parsed = parse_oracle_text(
+        "Put any number of cards from your hand on the bottom of your library, then draw \
+         that many cards plus one.",
+        "Valakut Awakening",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "reach guard: Valakut Awakening parses one spell ability"
+    );
+    assert_untargeted_any_number_placement_shape(&parsed.abilities[0]);
+}
+
+/// B-4, the modal member. Into the Fire's modes lower to two TOP-LEVEL
+/// `abilities` entries (not `mode_abilities`), and mode 2's placement is
+/// `abilities[1]`. It takes the same count encoding as Valakut Awakening. RED AT
+/// BASE on the count.
+///
+/// The `multi_target.is_none()` half is GREEN AT BASE, with mutation MP-SPEC as
+/// its pairing. `abilities.len()`, the modal mode count and the `DamageAll`
+/// sibling are REACH GUARDS that locate the nodes; they claim no phase-2
+/// behaviour.
+#[test]
+fn into_the_fire_mode_two_any_number_placement_takes_up_to_count_shape() {
+    let parsed = parse_oracle_text(
+        "Choose one —\n\
+         • Into the Fire deals 2 damage to each creature, planeswalker, and battle.\n\
+         • Put any number of cards from your hand on the bottom of your library, then draw \
+         that many cards plus one.",
+        "Into the Fire",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.abilities.len(),
+        2,
+        "reach guard: the two modes lower to two top-level abilities"
+    );
+    assert_eq!(
+        parsed.modal.as_ref().map(|modal| modal.mode_count),
+        Some(2),
+        "reach guard: Into the Fire is a two-mode modal spell"
+    );
+    assert_untargeted_any_number_placement_shape(&parsed.abilities[1]);
+
+    // SIBLING reach guard: mode 1's damage amount is untouched.
+    let Effect::DamageAll { amount, .. } = parsed.abilities[0].effect.as_ref() else {
+        panic!(
+            "expected mode 1 to be DamageAll, got {:?}",
+            parsed.abilities[0].effect
+        );
+    };
+    assert_eq!(*amount, QuantityExpr::Fixed { value: 2 });
+    assert!(
+        !amount.is_up_to(),
+        "mode 1's damage amount must not take the any-number wrapper"
+    );
+}
+
+/// B-5 — Ransack's "put any number of THEM on the bottom" is a pronoun
+/// partition of the Dig continuation: its recipient is the deterministic
+/// anaphor `ParentTarget`, not a population, so the untargeted any-number arm
+/// must leave its base shape alone.
+///
+/// GREEN AT BASE. Its pairing is mutation MP-GUARD (the arm's guard forced to
+/// `true`), which must turn it red.
+#[test]
+fn ransack_pronoun_partition_placement_keeps_base_shape() {
+    let parsed = parse_oracle_text(
+        "Look at the top five cards of target player's library. Put any number of them on the \
+         bottom of that library in any order and the rest on top of the library in any order.",
+        "Ransack",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let nodes = collect_library_placement_nodes(&parsed.abilities);
+    assert_eq!(
+        nodes.len(),
+        1,
+        "reach guard: Ransack lowers to exactly one placement node, got {nodes:?}"
+    );
+    assert_pronoun_partition_keeps_base_shape(nodes[0], LibraryPosition::Top);
+}
+
+/// B-5 — Inzerva, Master of Insights's −2 "put any number of THEM on the bottom"
+/// is the same pronoun partition as Ransack, and keeps its base shape.
+///
+/// GREEN AT BASE. Its pairing is mutation MP-GUARD, which must turn it red.
+#[test]
+fn inzerva_pronoun_partition_placement_keeps_base_shape() {
+    let parsed = parse_oracle_text(
+        "[+2]: Draw two cards, then discard a card.\n\
+         [−2]: Look at the top two cards of each other player's library, then put any number of \
+         them on the bottom of that library and the rest on top in any order. Scry 2.\n\
+         [−4]: You get an emblem with \"Your opponents play with their hands revealed\" and \
+         \"Whenever an opponent draws a card, this emblem deals 1 damage to them.\"",
+        "Inzerva, Master of Insights",
+        &[],
+        &["Legendary".to_string(), "Planeswalker".to_string()],
+        &[],
+    );
+    let nodes = collect_library_placement_nodes(&parsed.abilities);
+    assert_eq!(
+        nodes.len(),
+        1,
+        "reach guard: Inzerva lowers to exactly one placement node, got {nodes:?}"
+    );
+    assert_pronoun_partition_keeps_base_shape(nodes[0], LibraryPosition::Bottom);
+    assert!(
+        matches!(
+            nodes[0]
+                .sub_ability
+                .as_deref()
+                .map(|sub| sub.effect.as_ref()),
+            Some(Effect::Scry { .. })
+        ),
+        "reach guard: the placement chains into Scry 2, got {:?}",
+        nodes[0].sub_ability
+    );
+}
+
+/// B-5 carrier — the bare pronoun clause "put any number of them on the bottom of
+/// your library", free of any Dig context. Its recipient reaches
+/// `parse_target_with_ctx` as `ParentTarget`, which is not a population, so the
+/// count stays `Fixed(1)`.
+///
+/// Measured parse, at base and after the phase-2 edit: one node,
+/// `target: ParentTarget`, `count: Fixed(1)`, `position: Bottom`,
+/// `multi_target: None`.
+///
+/// GREEN AT BASE. Its pairing is mutation MP-GUARD, which must turn it red.
+#[test]
+fn bare_pronoun_any_number_placement_clause_keeps_fixed_count() {
+    let parsed = parse_oracle_text(
+        "Put any number of them on the bottom of your library.",
+        "Bare Pronoun Placement",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let nodes = collect_library_placement_nodes(&parsed.abilities);
+    assert_eq!(
+        nodes.len(),
+        1,
+        "reach guard: the clause lowers to exactly one placement node, got {nodes:?}"
+    );
+    let Effect::PutAtLibraryPosition { target, count, .. } = nodes[0].effect.as_ref() else {
+        panic!("expected PutAtLibraryPosition, got {:?}", nodes[0].effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::ParentTarget,
+        "reach guard: the pronoun reached the target parser as a deterministic anaphor"
+    );
+    assert_eq!(
+        *count,
+        QuantityExpr::Fixed { value: 1 },
+        "a pronoun is not a population, so the count must not take the any-number wrapper"
+    );
+}
+
+/// N-3 contract refinement — an "any number of" clause whose recipient does not
+/// name a population keeps its base count. "Widgets" is not a card type, so the
+/// recipient parses to the unclassified `TargetFilter::Any`, which is not a
+/// context reference; `names_enumerable_population()` refuses it, where the
+/// weaker `!is_context_ref()` guard would admit it.
+///
+/// Candidate selection, measured post-edit (plan row 6b), in order:
+///   * "Put any number of widgets on the bottom of your library." → target `Any`,
+///     `is_context_ref() == false` → qualifies (kept, first);
+///   * "Put any number of those on the bottom of your library." → target `Any`,
+///     `is_context_ref() == false` → also qualifies (not used).
+///
+/// Written post-edit only. Its pairing is mutation MP-GUARD-CTX (the guard
+/// replaced by `!target.is_context_ref()`), which must turn it red.
+#[test]
+fn unclassified_any_number_placement_recipient_keeps_fixed_count() {
+    let parsed = parse_oracle_text(
+        "Put any number of widgets on the bottom of your library.",
+        "Unclassified Placement",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let nodes = collect_library_placement_nodes(&parsed.abilities);
+    assert_eq!(
+        nodes.len(),
+        1,
+        "reach guard: the clause lowers to exactly one placement node, got {nodes:?}"
+    );
+    let Effect::PutAtLibraryPosition { target, count, .. } = nodes[0].effect.as_ref() else {
+        panic!("expected PutAtLibraryPosition, got {:?}", nodes[0].effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::Any,
+        "reach guard: the unclassified recipient is the measured `Any`"
+    );
+    assert_eq!(
+        *count,
+        QuantityExpr::Fixed { value: 1 },
+        "an unclassified recipient names no population, so the count must not take the \
+         any-number wrapper"
+    );
+    assert!(
+        nodes[0].multi_target.is_none(),
+        "an untargeted clause mints no announced target set, got {:?}",
+        nodes[0].multi_target
+    );
+}

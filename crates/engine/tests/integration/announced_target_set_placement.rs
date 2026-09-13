@@ -26,7 +26,7 @@
 //! runtime) and the two Once and Future records (an in-row reach guard plus a
 //! discriminating positive, which is not one of the three named pairings).
 
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -417,6 +417,12 @@ const MISINFORMATION_ORACLE: &str = "Put up to three target cards from an oppone
 fn black_mana(n: usize) -> Vec<ManaUnit> {
     (0..n)
         .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+        .collect()
+}
+
+fn red_mana(n: usize) -> Vec<ManaUnit> {
+    (0..n)
+        .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
         .collect()
 }
 
@@ -1295,5 +1301,564 @@ fn once_and_future_known_bad_declared_return_target_is_placed_instead_of_returne
         outcome.zone_of(g2),
         Zone::Graveyard,
         "the second graveyard card was never announced and must not move"
+    );
+}
+
+// ── Phase 2 — resolution-time "any number of <population>" ─────────────────
+//
+// CR 107.1c + CR 115.10a + CR 608.2d: "put any number of cards from your hand on
+// the bottom of your library" uses no `target` word, so the cards are not
+// targets. They are chosen while the effect is applied, and "any number"
+// includes zero. The placement is therefore a resolution-time choice of zero
+// through every eligible card, and the chained "draw that many cards plus one"
+// reads how many were actually put.
+//
+// GREEN-AT-BASE LABELLING (charter standard) for this section: every row here
+// that is green at this phase's base says so in its own doc comment and names
+// what makes it non-vacuous, which is a mutation probe run against this phase's
+// candidate or a paired red-at-base positive. The snapshot gate is never cited,
+// for the reason the module doc gives.
+
+const VALAKUT_AWAKENING_ORACLE: &str = "Put any number of cards from your hand on the bottom of \
+     your library, then draw that many cards plus one.";
+
+const INTO_THE_FIRE_ORACLE: &str = "Choose one —\n\
+     • Into the Fire deals 2 damage to each creature, planeswalker, and battle.\n\
+     • Put any number of cards from your hand on the bottom of your library, then draw that many \
+     cards plus one.";
+
+const BRAINSTORM_ORACLE: &str =
+    "Draw three cards, then put two cards from your hand on top of your library in any order.";
+
+/// The eligible hand for the proper-subset, stall and choose-zero boards.
+const FOUR_HAND_CARDS: [&str; 4] = ["Hand Card 1", "Hand Card 2", "Hand Card 3", "Hand Card 4"];
+
+/// Library card names, index 0 = top. Each row takes the prefix it needs.
+const LIBRARY_CARDS: [&str; 6] = [
+    "Library 1",
+    "Library 2",
+    "Library 3",
+    "Library 4",
+    "Library 5",
+    "Library 6",
+];
+
+/// Stage `names` as P0's library with `names[0]` on top, returning the ids in
+/// the same top-first order.
+fn stage_library_top_first(scenario: &mut GameScenario, names: &[&str]) -> Vec<ObjectId> {
+    let mut ids: Vec<ObjectId> = names
+        .iter()
+        .rev()
+        .map(|name| scenario.add_card_to_library_top(P0, name))
+        .collect();
+    ids.reverse();
+    ids
+}
+
+/// P0: `hand_names` cards in hand plus the spell; a library of `library_names`
+/// (index 0 = top) so "draw that many plus one" is observable; `{2}{R}` floating.
+/// P1: one 2/2 creature on the battlefield (Into the Fire's mode-1 hostile).
+/// Returns (runner, spell, hand_ids, library_ids, p1_creature).
+fn any_number_placement_board(
+    spell_name: &str,
+    oracle: &str,
+    is_instant: bool,
+    hand_names: &[&str],
+    library_names: &[&str],
+) -> (GameRunner, ObjectId, Vec<ObjectId>, Vec<ObjectId>, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, red_mana(3));
+    let hand_ids: Vec<ObjectId> = hand_names
+        .iter()
+        .map(|name| scenario.add_card_to_hand(P0, name))
+        .collect();
+    let library_ids = stage_library_top_first(&mut scenario, library_names);
+    let p1_creature = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, spell_name, is_instant, oracle)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    let mut runner = scenario.build();
+    grant_priority(&mut runner, P0);
+    (runner, spell, hand_ids, library_ids, p1_creature)
+}
+
+/// True when the stream carries `EffectResolved { PutAtLibraryPosition }`: the
+/// placement effect actually ran, rather than returning an `Err` that the
+/// engine swallows with no observable effect.
+fn emitted_placement_resolved(events: &[GameEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::PutAtLibraryPosition,
+                ..
+            }
+        )
+    })
+}
+
+/// Where the spell and P0's cards ended up, for reach-guard failure messages.
+fn board_state(runner: &GameRunner, spell: ObjectId, events: &[GameEvent]) -> String {
+    let state = runner.state();
+    format!(
+        "spell zone={:?}, stack={:?}, P0 hand={:?}, P0 library={:?}, waiting_for={:?}, events={events:?}",
+        state.objects[&spell].zone,
+        state.stack,
+        state.players[P0.0 as usize].hand,
+        state.players[P0.0 as usize].library,
+        state.waiting_for,
+    )
+}
+
+/// The assertions rows 7 and 8 share, over one board derivation: hand
+/// `{h1..h4}`, library `L1..L6`, and `h1`, `h2` declared.
+fn assert_proper_subset_placed_and_drew_three(
+    runner: &GameRunner,
+    outcome: &CastOutcome,
+    spell: ObjectId,
+    hand: &[ObjectId],
+    library_ids: &[ObjectId],
+) {
+    let (h1, h2, h3, h4) = (hand[0], hand[1], hand[2], hand[3]);
+    // REVERT-FAILING: at base the prompt demands exactly one card, so the
+    // harness places `h1` only and `h2` stays in hand.
+    assert_eq!(
+        outcome.zone_of(h1),
+        Zone::Library,
+        "h1 was declared and must be placed; {}",
+        board_state(runner, spell, outcome.events())
+    );
+    assert_eq!(
+        outcome.zone_of(h2),
+        Zone::Library,
+        "h2 was declared and must be placed; a one-card prompt places only h1"
+    );
+    let library_after = library(runner, P0);
+    let bottom_two = &library_after[library_after.len().saturating_sub(2)..];
+    assert!(
+        bottom_two.len() == 2 && bottom_two.contains(&h1) && bottom_two.contains(&h2),
+        "CR 401.4: the two placed cards are the bottom two library cards, in either \
+         order; library={library_after:?}"
+    );
+    // PROPER SUBSET: legal but undeclared cards stay in hand.
+    assert_eq!(
+        outcome.zone_of(h3),
+        Zone::Hand,
+        "h3 was not declared and must stay in hand"
+    );
+    assert_eq!(
+        outcome.zone_of(h4),
+        Zone::Hand,
+        "h4 was not declared and must stay in hand"
+    );
+    // "That many plus one" = 2 + 1: L1..L3 are drawn and L4 stays.
+    for (index, card) in library_ids.iter().take(3).enumerate() {
+        assert_eq!(
+            outcome.zone_of(*card),
+            Zone::Hand,
+            "L{} must be drawn: that many (2) plus one is 3",
+            index + 1
+        );
+    }
+    assert_eq!(
+        outcome.zone_of(library_ids[3]),
+        Zone::Library,
+        "L4 must stay in the library: exactly 3 cards are drawn"
+    );
+    assert!(
+        emitted_placement_resolved(outcome.events()),
+        "the placement must resolve; events={:?}",
+        outcome.events()
+    );
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the run must end at priority, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(
+        outcome.zone_of(spell),
+        Zone::Graveyard,
+        "the spell must have resolved into the graveyard"
+    );
+}
+
+/// Matrix row 7 — B-2, Valakut Awakening. CR 107.1c + CR 608.2d: while the
+/// effect is applied, the player puts a PROPER SUBSET of the hand on the bottom
+/// (two of four eligible cards), and the chained "draw that many cards plus
+/// one" reads the number actually put: 2 + 1 = 3.
+///
+/// RED AT BASE: the prompt demands exactly one card (`count 1, up_to false`),
+/// so the harness places only `h1` and the draw is 1 + 1 = 2. Also red against
+/// a prompt that demands exactly the maximum (mutation MP-FLAG-A), the other
+/// half B-2 requires.
+///
+/// HOSTILE: `h3` and `h4` are legal but undeclared and must stay in hand.
+///
+/// CR 401.4: the owner may arrange cards put into the same library position;
+/// the engine uses selection order (phase-1 residue R-3), so the bottom two
+/// cards are asserted as a set, not as an order. Observed order after the
+/// phase-2 edit, declaring `[h1, h2]`: `h1` second from the bottom, `h2` at the
+/// very bottom.
+#[test]
+fn valakut_awakening_places_a_proper_subset_and_draws_that_many_plus_one() {
+    let (mut runner, valakut, hand, library_ids, _p1_creature) = any_number_placement_board(
+        "Valakut Awakening",
+        VALAKUT_AWAKENING_ORACLE,
+        true,
+        &FOUR_HAND_CARDS,
+        &LIBRARY_CARDS,
+    );
+
+    let outcome = runner
+        .cast(valakut)
+        .effect_zone(&[hand[0], hand[1]])
+        .resolve();
+
+    assert_proper_subset_placed_and_drew_three(&runner, &outcome, valakut, &hand, &library_ids);
+}
+
+/// Matrix row 8 — B-2, Into the Fire, the modal member of the promised set.
+/// CR 601.2b + CR 700.2a: mode 2 is announced at cast, and its placement then
+/// behaves exactly as Valakut Awakening's (row 7): a proper subset is put on
+/// the bottom and "that many plus one" is drawn.
+///
+/// RED AT BASE (the same one-card truncation as row 7), and red under mutation
+/// MP-FLAG-A.
+///
+/// REACH / HOSTILE GUARD (no phase-2 claim): P1's creature is still on the
+/// battlefield with no damage marked, so mode 1 did not run.
+///
+/// CR 401.4: the bottom two cards are asserted as a set (phase-1 residue R-3).
+/// Observed order after the phase-2 edit, declaring `[h1, h2]`: `h1` second
+/// from the bottom, `h2` at the very bottom.
+#[test]
+fn into_the_fire_mode_two_places_a_proper_subset_and_draws_that_many_plus_one() {
+    let (mut runner, into_the_fire, hand, library_ids, p1_creature) = any_number_placement_board(
+        "Into the Fire",
+        INTO_THE_FIRE_ORACLE,
+        false,
+        &FOUR_HAND_CARDS,
+        &LIBRARY_CARDS,
+    );
+
+    let outcome = runner
+        .cast(into_the_fire)
+        .modes(&[1])
+        .effect_zone(&[hand[0], hand[1]])
+        .resolve();
+
+    assert_eq!(
+        outcome.zone_of(p1_creature),
+        Zone::Battlefield,
+        "reach guard: mode 1 (2 damage to each creature) must not have run"
+    );
+    assert_eq!(
+        outcome.damage_marked(p1_creature),
+        0,
+        "reach guard: mode 1 must not have dealt damage"
+    );
+    assert_proper_subset_placed_and_drew_three(
+        &runner,
+        &outcome,
+        into_the_fire,
+        &hand,
+        &library_ids,
+    );
+}
+
+/// Matrix row 9 — B-3 / P2-C5, the EMPTY POOL. With no card left in hand the
+/// placement puts nothing, the chained draw still resolves, and "that many" is
+/// zero, so exactly one card is drawn.
+///
+/// GREEN AT BASE. Base and the candidate take different early returns in
+/// `put_on_top::resolve`, and neither stamps "that many". Its pairings are two
+/// mutation probes on the candidate's empty-pool branch: MP-EMPTY (the branch
+/// returns an `Err`, so the `EffectResolved` reach guard goes red) and
+/// MP-EMPTY-COUNT (the branch stamps a non-zero "that many", so the draw count
+/// goes red while `EffectResolved` stays present). Row 7, on the same board
+/// helper, is its paired red-at-base positive.
+#[test]
+fn valakut_awakening_with_empty_hand_places_nothing_and_draws_one() {
+    let (mut runner, valakut, hand, library_ids, _p1_creature) = any_number_placement_board(
+        "Valakut Awakening",
+        VALAKUT_AWAKENING_ORACLE,
+        true,
+        &[],
+        &LIBRARY_CARDS[..3],
+    );
+    assert!(
+        hand.is_empty(),
+        "this row stages a hand holding only the spell"
+    );
+
+    let outcome = runner.cast(valakut).resolve();
+
+    // REACH GUARDS, read before the no-op assertions.
+    assert!(
+        emitted_placement_resolved(outcome.events()),
+        "reach guard: the empty-pool placement must resolve as a real no-op; events={:?}",
+        outcome.events()
+    );
+    assert_eq!(
+        outcome.zone_of(valakut),
+        Zone::Graveyard,
+        "reach guard: the spell must have resolved"
+    );
+    assert_eq!(
+        outcome.zone_of(library_ids[0]),
+        Zone::Hand,
+        "the chained draw takes the top card"
+    );
+    assert_eq!(
+        library(&runner, P0),
+        vec![library_ids[1], library_ids[2]],
+        "nothing is placed, and exactly one card is drawn from the top"
+    );
+    assert_eq!(
+        outcome.hand_drawn(P0),
+        1,
+        "that many (0) plus one is exactly one card"
+    );
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the run must end at priority, got {:?}",
+        outcome.final_waiting_for()
+    );
+}
+
+/// Matrix row 10 — P2-C6 / B-7, the harness consequence of the any-number
+/// prompt. This is the measured consequence cited by the TEST-HARNESS note in
+/// `put_on_top::resolve`.
+///
+/// (a) `SpellCast::resolve` with no `.effect_zone(..)` intent stops at the
+/// placement prompt, which offers every card in hand with `up_to: true`,
+/// `min_count: 0` and `count: 4`. (b) `GameRunner::advance_until_stack_empty`
+/// then leaves that `up_to` prompt pending and places nothing.
+///
+/// RED AT BASE: the base prompt is `count 1, up_to false`, and at base
+/// `advance_until_stack_empty` auto-answers it. (b) is observed before (a) is
+/// asserted, so a red (a) still reports (b). Red under mutation MP-FLAG-A.
+#[test]
+fn valakut_awakening_stalls_at_any_number_prompt_without_declared_cards() {
+    let (mut runner, valakut, hand, _library_ids, _p1_creature) = any_number_placement_board(
+        "Valakut Awakening",
+        VALAKUT_AWAKENING_ORACLE,
+        true,
+        &FOUR_HAND_CARDS,
+        &LIBRARY_CARDS[..3],
+    );
+
+    // (a) `drive_resolution` with no declared cards.
+    let outcome = runner.cast(valakut).resolve();
+    let prompt_a = outcome.final_waiting_for().clone();
+
+    // (b) The auto-answering driver, run over whatever (a) left pending.
+    runner.advance_until_stack_empty();
+    let waiting_b = runner.state().waiting_for.clone();
+    let hand_zones_b: Vec<Zone> = hand
+        .iter()
+        .map(|id| runner.state().objects[id].zone)
+        .collect();
+    let observed_b = format!(
+        "(b) observed: waiting_for={waiting_b:?}, hand zones={hand_zones_b:?}; after (b): {}",
+        board_state(&runner, valakut, outcome.events())
+    );
+
+    let WaitingFor::EffectZoneChoice {
+        effect_kind,
+        zone,
+        cards,
+        up_to,
+        min_count,
+        count,
+        ..
+    } = &prompt_a
+    else {
+        panic!(
+            "(a) resolve() without declared cards must stop at the placement prompt, \
+             got {prompt_a:?}; {observed_b}"
+        );
+    };
+    // REACH GUARD for (a): it is the placement's own prompt over the hand.
+    assert_eq!(
+        *effect_kind,
+        EffectKind::PutAtLibraryPosition,
+        "(a) reach guard; {observed_b}"
+    );
+    assert_eq!(*zone, Zone::Hand, "(a) reach guard; {observed_b}");
+    assert!(
+        cards.len() == 4 && hand.iter().all(|card| cards.contains(card)),
+        "(a) the prompt must offer exactly the four hand cards, got {cards:?}; {observed_b}"
+    );
+    assert!(
+        *up_to,
+        "(a) CR 107.1c: an any-number prompt must accept fewer than its count; {observed_b}"
+    );
+    assert_eq!(*min_count, 0, "(a) zero is a legal choice; {observed_b}");
+    assert_eq!(
+        *count, 4,
+        "(a) the maximum is every card in hand; {observed_b}"
+    );
+
+    // (b) The any-number prompt stays pending, and nothing was placed.
+    assert!(
+        matches!(
+            waiting_b,
+            WaitingFor::EffectZoneChoice {
+                effect_kind: EffectKind::PutAtLibraryPosition,
+                up_to: true,
+                ..
+            }
+        ),
+        "(b) advance_until_stack_empty must leave the any-number prompt pending, \
+         got {waiting_b:?}"
+    );
+    assert!(
+        hand_zones_b.iter().all(|zone| *zone == Zone::Hand),
+        "(b) no hand card may be placed while the prompt is pending, got {hand_zones_b:?}"
+    );
+}
+
+/// Matrix row 11 — CR 107.1c: "any number" includes zero, so choosing no card
+/// from a NON-EMPTY hand is legal. Nothing is placed, "that many" is zero, and
+/// exactly one card is drawn.
+///
+/// "Choose zero" cannot be declared through `.effect_zone(&[])` (an empty
+/// intent is no intent), so the row submits `SelectCards { cards: [] }` itself.
+///
+/// RED AT BASE: the base validator rejects an empty selection against its
+/// exactly-one prompt. Red under mutation MP-FLAG-A. Its paired positive is
+/// row 7 on the same board helper.
+#[test]
+fn valakut_awakening_choosing_zero_cards_from_a_nonempty_hand_draws_one() {
+    let (mut runner, valakut, hand, library_ids, _p1_creature) = any_number_placement_board(
+        "Valakut Awakening",
+        VALAKUT_AWAKENING_ORACLE,
+        true,
+        &FOUR_HAND_CARDS,
+        &LIBRARY_CARDS[..3],
+    );
+
+    let outcome = runner.cast(valakut).resolve();
+    // REACH GUARD: stalled at the placement's own prompt.
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::EffectZoneChoice {
+                effect_kind: EffectKind::PutAtLibraryPosition,
+                ..
+            }
+        ),
+        "reach guard: the cast must stop at the placement prompt, got {:?}; {}",
+        outcome.final_waiting_for(),
+        board_state(&runner, valakut, outcome.events())
+    );
+
+    let result = runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("zero is a legal any-number choice");
+
+    assert!(
+        emitted_placement_resolved(&result.events),
+        "reach guard: the zero selection must resolve the placement; events={:?}",
+        result.events
+    );
+    for (index, card) in hand.iter().enumerate() {
+        assert_eq!(
+            runner.state().objects[card].zone,
+            Zone::Hand,
+            "hand card {} was not chosen and must stay in hand",
+            index + 1
+        );
+    }
+    assert_eq!(
+        runner.state().objects[&library_ids[0]].zone,
+        Zone::Hand,
+        "that many (0) plus one draws the top card"
+    );
+    assert_eq!(
+        runner.state().objects[&library_ids[1]].zone,
+        Zone::Library,
+        "exactly one card is drawn"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the run must end at priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().objects[&valakut].zone,
+        Zone::Graveyard,
+        "the spell must have resolved into the graveyard"
+    );
+}
+
+/// Matrix row 12 — preservation. Brainstorm's placement is an EXACT count
+/// ("put two cards"), so its prompt must still demand exactly two cards
+/// (`up_to: false`, `count: 2`) and reject a one-card selection.
+///
+/// GREEN AT BASE. Its pairing is mutation MP-FLAG-T (the prompt flag forced
+/// `true`), which must turn it red.
+#[test]
+fn brainstorm_prompt_still_demands_exactly_two() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![])],
+    );
+    let library_ids = stage_library_top_first(&mut scenario, &LIBRARY_CARDS[..5]);
+    let brainstorm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Brainstorm", true, BRAINSTORM_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::Blue],
+        })
+        .id();
+    let mut runner = scenario.build();
+    grant_priority(&mut runner, P0);
+    let drawn = &library_ids[..3];
+
+    let outcome = runner.cast(brainstorm).resolve();
+
+    let WaitingFor::EffectZoneChoice {
+        effect_kind,
+        zone,
+        cards,
+        up_to,
+        count,
+        ..
+    } = outcome.final_waiting_for()
+    else {
+        panic!(
+            "reach guard: Brainstorm must stop at its placement prompt, got {:?}; {}",
+            outcome.final_waiting_for(),
+            board_state(&runner, brainstorm, outcome.events())
+        );
+    };
+    // REACH GUARDS: the placement's prompt over the three drawn cards.
+    assert_eq!(*effect_kind, EffectKind::PutAtLibraryPosition);
+    assert_eq!(*zone, Zone::Hand);
+    assert!(
+        cards.len() == 3 && drawn.iter().all(|card| cards.contains(card)),
+        "reach guard: the prompt must offer exactly the three drawn cards, got {cards:?}"
+    );
+    assert_eq!(outcome.zone_of(library_ids[3]), Zone::Library);
+    assert_eq!(outcome.zone_of(library_ids[4]), Zone::Library);
+    // PRESERVATION: an exact count still demands exactly that count.
+    assert!(!*up_to, "an exact-count prompt must not accept fewer cards");
+    assert_eq!(*count, 2, "Brainstorm puts exactly two cards");
+    assert!(
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![library_ids[0]]
+            })
+            .is_err(),
+        "a one-card selection must be rejected by an exactly-two prompt"
     );
 }

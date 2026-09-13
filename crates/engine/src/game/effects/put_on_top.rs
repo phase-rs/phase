@@ -186,9 +186,35 @@ pub fn resolve(
     // CR 115.1 + CR 400.2: When the filter specifies a private zone (hand/library)
     // and no targets were pre-selected during casting (because the Oracle text does
     // not say "target"), present an EffectZoneChoice for resolution-time selection.
-    // This covers Brainstorm ("put two cards from your hand on top of your library")
-    // and similar cards where the player chooses during resolution.
+    // This covers an exact count — Brainstorm ("put two cards from your hand on top
+    // of your library"), whose prompt demands exactly `count` — and an any-number
+    // count — Valakut Awakening ("put any number of cards from your hand on the
+    // bottom of your library"), whose prompt accepts 0..=count.
     let expected = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as usize;
+    // CR 107.1c + CR 608.2d: "put ANY NUMBER of <population> …" carries its
+    // player-chosen cardinality as the `UpTo` wrapper (the parser's
+    // `LibraryPlacementCardinality::AnyNumber` arm — the same encoding as
+    // "sacrifice any number of …"). `resolve_quantity_with_targets` already reads
+    // `UpTo` as its max, so `expected` is the eligible pool's size; the prompt must
+    // then accept 0..=count instead of exactly `count`. The submission validator
+    // (`engine_resolution_choices.rs`, `EffectZoneChoice` × `SelectCards`) bounds an
+    // `up_to` selection with two comparisons (`< min_count`, `> count`); with
+    // `up_to: false` it rejects any `chosen.len() != count`. A zero selection then
+    // takes that arm's generic empty branch, which stamps `last_effect_count = 0`
+    // for a chained "that many".
+    //
+    // TEST-HARNESS CONSEQUENCES (measured by
+    // `valakut_awakening_stalls_at_any_number_prompt_without_declared_cards`; do
+    // not remove this note):
+    //   * `GameRunner::advance_until_stack_empty` auto-answers a pending
+    //     `PutAtLibraryPosition` choice ONLY when `!up_to`; for an any-number
+    //     placement it leaves the prompt pending.
+    //   * `SpellCast::resolve` (`drive_resolution`) stops at ANY `EffectZoneChoice`
+    //     with no declared `.effect_zone(..)` cards, regardless of `up_to`.
+    //   * "Choose zero" cannot be declared: `.effect_zone(&[])` is the same as no
+    //     intent. Submit `GameAction::SelectCards { cards: vec![] }` via
+    //     `runner.act(..)` instead.
+    let count_is_up_to = count_expr.is_up_to();
     let expected = if expected == 0
         && matches!(
             position,
@@ -278,7 +304,8 @@ pub fn resolve(
                     cards: eligible,
                     count: expected.min(eligible_count),
                     min_count: 0,
-                    up_to: false,
+                    // load-bearing: the any-number placement prompt.
+                    up_to: count_is_up_to,
                     source_id: ability.source_id,
                     effect_kind: EffectKind::PutAtLibraryPosition,
                     zone: source_zone,
@@ -331,7 +358,9 @@ pub fn resolve(
             cards: collected_targets,
             count: expected,
             min_count: 0,
-            up_to: false,
+            // Set for parity with the eligible-pool prompt so the two constructions
+            // cannot drift; no any-number placement reaches this prompt today.
+            up_to: count_is_up_to,
             source_id: ability.source_id,
             effect_kind: EffectKind::PutAtLibraryPosition,
             // PART 2 of a two-part fix — this half PREVENTS FUTURE WEDGES; the
