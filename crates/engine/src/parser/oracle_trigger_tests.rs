@@ -1822,6 +1822,24 @@ fn intervening_if_fewer_than_three_charge_adaptive_training_post() {
     );
 }
 
+/// A source-counter intervening-if can be AND-composed with a pre-existing
+/// `while` counter gate. The counter effect's `it` still denotes the source
+/// artifact, rather than the spell that caused the trigger.
+#[test]
+fn compound_source_counter_condition_rebinds_counter_recipient() {
+    let def = parse_trigger_line(
+        "Whenever you cast an instant or sorcery spell while this artifact has one or more charge counters on it, if this artifact has fewer than three charge counters on it, put a charge counter on it.",
+        "Adaptive Training Post",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert!(matches!(def.condition, Some(TriggerCondition::And { .. })));
+    assert_fewer_than_put_counter(
+        &def,
+        CounterType::Generic("charge".to_string()),
+        TargetFilter::SelfRef,
+    );
+}
+
 /// Ayara's Oathsworn: bound `it`, N=4, combat-damage. First sentence only —
 /// the then-clause search is out of scope.
 #[test]

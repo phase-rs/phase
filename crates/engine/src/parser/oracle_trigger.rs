@@ -2378,7 +2378,11 @@ fn valid_target_blocks_event_source_lift(
 /// its event object. The typed condition is the authority that disambiguates
 /// this source-referential grammar class.
 fn rebind_source_counter_condition_recipient(def: &mut TriggerDefinition) {
-    if !matches!(def.condition, Some(TriggerCondition::HasCounters { .. })) {
+    if !def
+        .condition
+        .as_ref()
+        .is_some_and(condition_contains_source_counter)
+    {
         return;
     }
     let Some(execute) = def.execute.as_deref_mut() else {
@@ -2389,6 +2393,21 @@ fn rebind_source_counter_condition_recipient(def: &mut TriggerDefinition) {
     };
     if matches!(target, TargetFilter::TriggeringSource) {
         *target = TargetFilter::SelfRef;
+    }
+}
+
+/// Whether a trigger condition tree contains a source-counter predicate.
+///
+/// Intervening-if conditions are composed with pre-existing gates through
+/// `And`, so the source-counter fact need not be the root condition.
+fn condition_contains_source_counter(condition: &TriggerCondition) -> bool {
+    match condition {
+        TriggerCondition::HasCounters { .. } => true,
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            conditions.iter().any(condition_contains_source_counter)
+        }
+        TriggerCondition::Not { condition } => condition_contains_source_counter(condition),
+        _ => false,
     }
 }
 
