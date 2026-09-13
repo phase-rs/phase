@@ -49,7 +49,23 @@ impl std::fmt::Display for CommanderBracketTier {
     }
 }
 
+/// Every label [`CommanderBracketTier::from_label`] accepts.
+pub const ACCEPTED_BRACKET_LABELS: &[&str] =
+    &["Exhibition", "Core", "Upgraded", "Optimized", "Cedh"];
+
 impl CommanderBracketTier {
+    /// Parses a case-insensitive, whitespace-trimmed bracket label.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label.trim().to_lowercase().as_str() {
+            "exhibition" => Some(Self::Exhibition),
+            "core" => Some(Self::Core),
+            "upgraded" => Some(Self::Upgraded),
+            "optimized" => Some(Self::Optimized),
+            "cedh" => Some(Self::Cedh),
+            _ => None,
+        }
+    }
+
     /// Numeric bracket level (B1..=B5 → 1..=5). Used for ordered
     /// comparisons (e.g., sorting violations by tier).
     pub fn as_u8(self) -> u8 {
