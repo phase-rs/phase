@@ -507,7 +507,7 @@ const GAEAS_WILL: &str = "Suspend 4—{G}\nUntil end of turn, you may play lands
 const MAGUS_OF_THE_WILL: &str = "{2}{B}, {T}, Exile this creature: Until end of turn, you may play lands and cast spells from your graveyard. If a card would be put into your graveyard from anywhere this turn, exile that card instead.";
 
 #[test]
-fn v5_will_cycle_cards_remain_honestly_unsupported() {
+fn v5_will_cycle_permission_body_is_no_longer_refused() {
     // MULTI-AUTHORITY hostile fixture: three different arrival shapes — a bare
     // sorcery, a sorcery preceded by a Suspend line, and a creature's activated
     // ability. All three must yield the SAME verdict, proving the outcome keys
@@ -530,13 +530,44 @@ fn v5_will_cycle_cards_remain_honestly_unsupported() {
     ] {
         let parsed = parse_with_types(text, name, types);
 
-        // (i) coverage stays RED — the permission body is still unimplemented.
+        // (i) The permission body is no longer refused.
+        //
+        // INVERTED by the delivery seam (`will_cycle_delivery.rs`). It previously
+        // read "must still report an Unimplemented effect", pinning B1's honest
+        // claim that the duration seam alone made zero cards supported. That claim
+        // was true when written: the refused `"play lands"` fragment survived,
+        // because parsing it was never sufficient — `Effect::CastFromZone` is not a
+        // channel any land-permission consumer reads.
+        //
+        // The delivery pass now lowers the whole coordinated sentence to one
+        // `GenericEffect` that installs a `GraveyardCastPermission`, so no
+        // `Unimplemented` fragment remains. This row stays a REGRESSION GUARD on
+        // the ARRIVAL SHAPE — all three shapes must agree — while
+        // `will_cycle_delivery.rs` owns what a player can actually do with the
+        // grant (it resolves the card and asks the production consumer).
+        assert!(
+            !parsed
+                .abilities
+                .iter()
+                .any(|a| matches!(&*a.effect, Effect::Unimplemented { .. })),
+            "{name}: the permission body must not be refused"
+        );
+        // (i-b) POSITIVE SHAPE, paired with the absence check above.
+        //
+        // Assertion (i) is a negative, and for the Magus fixture so are (ii) and
+        // (iii) — its `expected_installs` is 0 because line 2 sits inside an
+        // activated ability's effect text. An empty or wholly failed parse would
+        // therefore satisfy every assertion in this loop body for that row.
+        //
+        // Pin the delivered grant BY ITS MODE so the row cannot pass on an
+        // unrelated `GenericEffect`: the permission must actually be installed,
+        // on all three arrival shapes.
         assert!(
             parsed
                 .abilities
                 .iter()
-                .any(|a| matches!(&*a.effect, Effect::Unimplemented { .. })),
-            "{name}: must still report an Unimplemented effect"
+                .any(ability_installs_graveyard_permission),
+            "{name}: the coordinated sentence must deliver a GraveyardCastPermission"
         );
         // (ii) B1 fabricates no emblem.
         assert!(
@@ -640,4 +671,40 @@ fn v5b_the_same_grammar_on_a_permanent_host_is_stamped_not_permanent() {
              PERMANENT replacement on a permanent host"
         );
     }
+}
+
+/// Does this ability (or anything down its chain) install a
+/// `GraveyardCastPermission`?
+///
+/// Selects the grant by the static mode it carries rather than by "some
+/// `GenericEffect` exists", so a fixture carrying an unrelated windowed
+/// continuous effect cannot satisfy the positive shape check.
+fn ability_installs_graveyard_permission(
+    ability: &engine::types::ability::AbilityDefinition,
+) -> bool {
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*ability.effect
+    {
+        let installs = static_abilities.iter().any(|static_def| {
+            static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    engine::types::ability::ContinuousModification::GrantStaticAbility {
+                        definition,
+                    } if matches!(
+                        definition.mode,
+                        engine::types::statics::StaticMode::GraveyardCastPermission { .. }
+                    )
+                )
+            })
+        });
+        if installs {
+            return true;
+        }
+    }
+    ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_installs_graveyard_permission)
 }

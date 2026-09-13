@@ -5119,7 +5119,112 @@ fn graveyard_permission_sources(
                 _ => None,
             })
         })
+        .chain(transient_graveyard_permission_sources(
+            state,
+            player,
+            play_mode_filter,
+        ))
         .collect()
+}
+
+/// CR 611.2a + CR 611.2c + CR 116.2a: the RESOLUTION-CREATED arm of
+/// [`graveyard_permission_sources`] — "Until end of turn, you may play lands and
+/// cast spells from your graveyard" (Yawgmoth's Will, Gaea's Will, Magus of the
+/// Will).
+///
+/// **Why this is read off the TCE rather than off an object's statics.** CR
+/// 611.2c splits resolution-created continuous effects in two: one that "modifies
+/// the characteristics or changes the controller of any objects" freezes its
+/// affected set at resolution, and one that does neither "modifies the rules of
+/// the game, so it can affect objects that weren't affected when that continuous
+/// effect began." A permission to play a land (CR 116.2a — a special action, not
+/// a characteristic) is the SECOND kind, and the rule's own second example is
+/// exactly this shape ("Prevent all damage creatures would deal this turn" also
+/// covers creatures that arrive later).
+///
+/// That is load-bearing for THIS card and not a technicality. Yawgmoth's Will's
+/// second sentence — "If a card would be put into your graveyard from anywhere
+/// this turn, exile that card instead" — only makes sense because the first
+/// sentence covers cards that reach the graveyard AFTER it resolved: you cast a
+/// spell from the graveyard, and the replacement catches it on the way back. A
+/// grant stamped onto the objects present at resolution would silently miss every
+/// card milled, discarded or cast later in the turn.
+///
+/// So the grant is bound to the PLAYER (`SpecificPlayer`), and its `affected`
+/// filter is re-evaluated live against whatever is in the graveyard at query
+/// time — which is what the caller already does with `filter` for the printed
+/// battlefield sources above.
+///
+/// Shape mirrors the three sibling TCE-direct readers, each of which is skipped
+/// from the layer gather for the same CR 611.2c reason and documented at
+/// `layers.rs::gather_transient_continuous_effects`:
+/// `visibility::viewer_may_look_at_face_down` (`MayLookAtFaceDown`),
+/// `reduce_activated_ability_cost` (`ReduceAbilityCost`) and
+/// `transient_cast_free_permission` (`CastFromHandFree`). The closest of them,
+/// `transient_granted_spell_keywords_for`, likewise unwraps a
+/// `GrantStaticAbility` off a raw TCE.
+fn transient_graveyard_permission_sources(
+    state: &GameState,
+    player: PlayerId,
+    play_mode_filter: Option<CardPlayMode>,
+) -> impl Iterator<Item = GraveyardPermissionSource<'_>> {
+    state
+        .transient_continuous_effects
+        .iter()
+        .filter(move |tce| {
+            // CR 611.2c: the grant is bound to the GRANTEE ("**you** may play
+            // lands"), not to the source object's presence — the sorcery is in a
+            // graveyard by the time anyone consults this, and Magus of the Will
+            // exiles itself as an activation cost.
+            let TargetFilter::SpecificPlayer { id } = tce.affected else {
+                return false;
+            };
+            if id != player {
+                return false;
+            }
+            // CR 611.2b + CR 514.2: every gate of a resolution-created effect must
+            // hold for it to apply. `transient_gate_conditions` is the authority
+            // over which those are, and it is what ends the window: an
+            // `UntilEndOfTurn` TCE is dropped by
+            // `layers::prune_end_of_turn_effects` at cleanup.
+            super::layers::transient_gate_conditions(tce).all(|condition| {
+                super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id)
+            })
+        })
+        .flat_map(move |tce| {
+            tce.modifications.iter().filter_map(move |modification| {
+                let ContinuousModification::GrantStaticAbility { definition } = modification else {
+                    return None;
+                };
+                let StaticMode::GraveyardCastPermission {
+                    frequency,
+                    play_mode,
+                    graveyard_destination_replacement,
+                    ref extra_cost,
+                    ..
+                } = definition.mode
+                else {
+                    return None;
+                };
+                if !graveyard_permission_play_mode_matches(play_mode, play_mode_filter) {
+                    return None;
+                }
+                definition
+                    .affected
+                    .as_ref()
+                    .map(|filter| GraveyardPermissionSource {
+                        // CR 601.2a: the per-source frequency slots
+                        // (`graveyard_cast_permissions_used*`) are keyed on this id,
+                        // so a resolution-created grant keys on the card that
+                        // created it exactly as a battlefield permanent does.
+                        source_id: tce.source_id,
+                        filter,
+                        frequency,
+                        graveyard_destination_replacement,
+                        extra_cost,
+                    })
+            })
+        })
 }
 
 fn graveyard_permission_play_mode_matches(
