@@ -543,9 +543,12 @@ impl Broker {
 
             LobbyClientMessage::GetTournament { code } => self.handle_get_tournament(code),
 
-            LobbyClientMessage::RenewTournamentCredential { code, role, token } => {
-                self.handle_renew_tournament_credential(code, role, token, env)
-            }
+            LobbyClientMessage::RenewTournamentCredential {
+                code,
+                role,
+                token,
+                rotation_nonce,
+            } => self.handle_renew_tournament_credential(code, role, token, rotation_nonce, env),
 
             // The four gated actions destructure their correlator by name and
             // route the handler's outcome through [`Broker::settle_gated`], the
@@ -1372,9 +1375,13 @@ impl Broker {
         code: String,
         role: TournamentRole,
         token: String,
+        rotation_nonce: String,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
-        match self.tournaments.renew_credential(&code, role, &token, env) {
+        match self
+            .tournaments
+            .renew_credential(&code, role, &token, &rotation_nonce, env)
+        {
             Ok(minted) => {
                 // The code and the role, never the secret — the same rule
                 // `ConnState`'s tournament bookkeeping already follows.
@@ -2524,7 +2531,7 @@ mod tests {
     use crate::tournament::{
         BracketShape, MatchArity, PairingOutcome, PodOutcome, ScoringPolicy, TournamentAction,
         TournamentStatus, IN_PROGRESS_ABANDON_SECS, REGISTRATION_TIMEOUT_SECS,
-        TOURNAMENT_CREDENTIAL_OVERLAP_MS, TOURNAMENT_CREDENTIAL_TTL_MS,
+        TOURNAMENT_CREDENTIAL_TTL_MS,
     };
 
     /// Creates a tournament through the real dispatch path and returns
@@ -4604,6 +4611,7 @@ mod tests {
                 code: code.clone(),
                 role: TournamentRole::Organizer,
                 token: organizer_token.clone(),
+                rotation_nonce: "nonce-a".to_string(),
             },
             &env,
         );
@@ -4645,6 +4653,7 @@ mod tests {
                 code: code.clone(),
                 role: TournamentRole::Organizer,
                 token: organizer_token.clone(),
+                rotation_nonce: "nonce-a".to_string(),
             },
             &env,
         );
@@ -4655,30 +4664,12 @@ mod tests {
             "a rotated secret must never be broadcast: {out:?}"
         );
 
-        // The broker's own authority boundary honors the credential's bounded
-        // overlap, not only the manager. Right after rotation the just-presented
-        // secret still authorizes — the lost-reply recovery path, end-to-end
-        // through the broker's gate — so it is NOT refused as an invalid token.
-        let within_overlap = broker.handle(
-            &mut conn,
-            LobbyClientMessage::StartTournamentRound {
-                code: code.clone(),
-                organizer_token: organizer_token.clone(),
-                request_id: None,
-            },
-            &env,
-        );
-        assert!(
-            !error_reason_contains(&within_overlap, "Invalid organizer token"),
-            "the just-superseded secret must still authorize during overlap: {within_overlap:?}"
-        );
-
-        // Once the overlap window closes it stops authorizing. A byte match past
-        // its window is `Expired`, so the broker reports the expiry — the
-        // recoverable arm — rather than a bare mismatch, at its own boundary as
-        // inside the manager.
-        env.advance_secs(TOURNAMENT_CREDENTIAL_OVERLAP_MS / 1_000 + 1);
-        let after_overlap = broker.handle(
+        // The superseded secret stops authorizing actions the instant it is
+        // rotated away — only the current secret does, at the broker's own gate
+        // as inside the manager. Its sole residual power is an idempotent replay
+        // through RenewTournamentCredential with the matching nonce, exercised in
+        // the tournament unit tests; it can never authorize an action.
+        let refused = broker.handle(
             &mut conn,
             LobbyClientMessage::StartTournamentRound {
                 code,
@@ -4688,8 +4679,8 @@ mod tests {
             &env,
         );
         assert!(
-            gated_rejection_reason(&after_overlap).contains("expired"),
-            "the superseded secret must stop authorizing once its overlap lapses: {after_overlap:?}"
+            error_reason_contains(&refused, "Invalid organizer token"),
+            "the rotated-away secret must not authorize an action: {refused:?}"
         );
     }
 

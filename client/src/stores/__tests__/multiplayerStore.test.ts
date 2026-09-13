@@ -2916,24 +2916,28 @@ describe("proactive credential rotation", () => {
       "TOUR01",
       "Organizer", // the CAPITALIZED wire role
       "old",
+      expect.any(String), // the client-minted rotation nonce
       expect.objectContaining({ signal: controller.signal }),
     );
     expect(token).toBe("fresh");
     const stored = useMultiplayerStore.getState().tournamentCredentials.TOUR01;
     expect(stored?.organizerToken).toBe("fresh");
     expect(stored?.organizerTokenExpiresAtMs).toBe(newExpiry);
+    // The pending nonce is cleared once the rotation confirms.
+    expect(stored?.organizerPendingRotationNonce).toBeUndefined();
   });
 
-  // The #8782 [HIGH] regression, client layer: a renewal reply lost in transit
-  // must NOT strand the holder. Under the v9 overlap the held secret is still
-  // valid, so keeping it (and recovering on the next attempt) is correct.
-  it("keeps the held token when a renewal reply is lost, leaving the store untouched", async () => {
+  // The #8782 [HIGH] regression, client layer: an uncertain renewal must not
+  // strand the holder. It retries once in-call with the SAME nonce (to replay a
+  // committed-but-lost rotation), and if still uncertain leaves the held token
+  // and the PERSISTED nonce in place so the next attempt recovers.
+  it("retries with the same nonce on an uncertain result and persists it for recovery", async () => {
     seedOrganizer(NOW + 1000);
-    // An uncertain/lost result: the RPC could not confirm an outcome.
+    // A genuinely uncertain result (not an abort): triggers the in-call retry.
     vi.mocked(renewTournamentCredentialOver).mockResolvedValue({
       ok: false,
-      reason: "aborted",
-      message: "aborted",
+      reason: "timeout",
+      message: "timeout",
     });
 
     const controller = new AbortController();
@@ -2948,13 +2952,64 @@ describe("proactive credential rotation", () => {
       NOW,
     );
 
-    expect(renewTournamentCredentialOver).toHaveBeenCalledTimes(1);
-    // The held token flows through to the action unchanged...
+    // Initial attempt + one in-call retry, both with the SAME nonce.
+    expect(renewTournamentCredentialOver).toHaveBeenCalledTimes(2);
+    const firstNonce = vi.mocked(renewTournamentCredentialOver).mock.calls[0][4];
+    const retryNonce = vi.mocked(renewTournamentCredentialOver).mock.calls[1][4];
+    expect(retryNonce).toBe(firstNonce);
+
+    // The held token flows through to the action; the secret is not advanced.
     expect(token).toBe("old");
-    // ...and nothing about the stored credential was mutated on the failure.
     const stored = useMultiplayerStore.getState().tournamentCredentials.TOUR01;
     expect(stored?.organizerToken).toBe("old");
-    expect(stored?.organizerTokenExpiresAtMs).toBe(NOW + 1000);
+    // The nonce is PERSISTED so the next proactive renewal replays rather than
+    // minting a fresh nonce the broker would refuse against a superseded token.
+    expect(stored?.organizerPendingRotationNonce).toBe(firstNonce);
+  });
+
+  it("reuses the persisted nonce on a later attempt, then clears it on recovery", async () => {
+    // Seed a credential mid-recovery: a prior uncertain attempt left a nonce.
+    useMultiplayerStore.setState({
+      tournamentCredentials: {
+        TOUR01: {
+          organizerToken: "old",
+          organizerTokenExpiresAtMs: NOW + 1000,
+          organizerPendingRotationNonce: "stuck-nonce",
+          updatedAt: 0,
+        },
+      },
+    });
+    vi.mocked(renewTournamentCredentialOver).mockResolvedValue({
+      ok: true,
+      value: {
+        code: "TOUR01",
+        role: "Organizer",
+        token: "recovered",
+        expires_at_ms: NOW + 7 * 24 * 60 * 60 * 1000,
+      },
+    });
+
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+
+    // The retry reused the PERSISTED nonce (so the broker can replay), not a
+    // fresh one.
+    expect(vi.mocked(renewTournamentCredentialOver).mock.calls[0][4]).toBe(
+      "stuck-nonce",
+    );
+    expect(token).toBe("recovered");
+    const stored = useMultiplayerStore.getState().tournamentCredentials.TOUR01;
+    expect(stored?.organizerToken).toBe("recovered");
+    expect(stored?.organizerPendingRotationNonce).toBeUndefined();
   });
 
   // Superagent P2: two near-expiry gated actions firing at once must not rotate

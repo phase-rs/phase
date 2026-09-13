@@ -385,13 +385,15 @@ describe("renewTournamentCredentialOver", () => {
       CODE,
       "Organizer",
       "tok",
+      "nonce-1",
       { signal: controller.signal },
     );
 
-    // Uncorrelated (no request_id), and the role is the wire spelling — the
-    // broker rejects a lowercase "organizer" with a serde unknown-variant error.
+    // Uncorrelated (no request_id), the role is the wire spelling — the broker
+    // rejects a lowercase "organizer" with a serde unknown-variant error — and
+    // the client-minted nonce rides as `rotation_nonce`.
     expect(ws.send).toHaveBeenCalledWith(
-      `{"type":"RenewTournamentCredential","data":{"code":"${CODE}","role":"Organizer","token":"tok"}}`,
+      `{"type":"RenewTournamentCredential","data":{"code":"${CODE}","role":"Organizer","token":"tok","rotation_nonce":"nonce-1"}}`,
     );
 
     controller.abort();
@@ -400,7 +402,7 @@ describe("renewTournamentCredentialOver", () => {
 
   it("settles ok on a TournamentCredentialRenewed matching code and role", async () => {
     const ws = new MockWebSocket();
-    const promise = renewTournamentCredentialOver(makePhaseSocket(ws), CODE, "Player", "tok");
+    const promise = renewTournamentCredentialOver(makePhaseSocket(ws), CODE, "Player", "tok", "n");
     ws.deliver(
       JSON.stringify({
         type: "TournamentCredentialRenewed",
@@ -417,7 +419,7 @@ describe("renewTournamentCredentialOver", () => {
     const ws = new MockWebSocket();
     // An organizer who also joined holds both authorities on one code; a Player
     // renewal reply must not settle an Organizer request with the wrong token.
-    const promise = renewTournamentCredentialOver(makePhaseSocket(ws), CODE, "Organizer", "tok", {
+    const promise = renewTournamentCredentialOver(makePhaseSocket(ws), CODE, "Organizer", "tok", "n", {
       timeoutMs: 40,
     });
     ws.deliver(

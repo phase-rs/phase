@@ -1053,6 +1053,55 @@ function tokenExpiryFor(
     : credential?.playerTokenExpiresAtMs;
 }
 
+/** The nonce a prior, not-yet-confirmed rotation of `code`'s `role` credential
+ *  minted, or `undefined` when none is pending. Reusing it lets a retry REPLAY
+ *  the committed secret instead of minting one the broker refuses. */
+function pendingRotationNonceFor(
+  credential: TournamentCredential | undefined,
+  role: TournamentRole,
+): string | undefined {
+  return role === "organizer"
+    ? credential?.organizerPendingRotationNonce
+    : credential?.playerPendingRotationNonce;
+}
+
+/** A fresh, unguessable rotation nonce. Unguessability is what binds recovery to
+ *  the initiator: a holder of a merely-superseded secret cannot present the
+ *  matching nonce, so it cannot replay. */
+function newRotationNonce(): string {
+  return crypto.randomUUID();
+}
+
+/** Patch that records a pending rotation nonce for `role`. */
+function pendingNoncePatch(
+  role: TournamentRole,
+  nonce: string,
+): Omit<Partial<TournamentCredential>, "updatedAt"> {
+  return role === "organizer"
+    ? { organizerPendingRotationNonce: nonce }
+    : { playerPendingRotationNonce: nonce };
+}
+
+/** Patch that adopts a freshly rotated secret + expiry for `role` and CLEARS the
+ *  pending nonce (the rotation is confirmed, so a retry must not replay it). */
+function adoptRotatedPatch(
+  role: TournamentRole,
+  token: string,
+  expiresAtMs: number,
+): Omit<Partial<TournamentCredential>, "updatedAt"> {
+  return role === "organizer"
+    ? {
+        organizerToken: token,
+        organizerTokenExpiresAtMs: expiresAtMs,
+        organizerPendingRotationNonce: undefined,
+      }
+    : {
+        playerToken: token,
+        playerTokenExpiresAtMs: expiresAtMs,
+        playerPendingRotationNonce: undefined,
+      };
+}
+
 /**
  * Whether a credential should be proactively rotated now. Three conjuncts, each
  * a real boundary:
@@ -1079,22 +1128,23 @@ export function shouldRenewCredential(
  * {@link TOURNAMENT_CREDENTIAL_RENEW_MARGIN_MS} of its expiry, this rotates it
  * and returns the fresh secret; otherwise it returns `heldToken` untouched.
  *
- * **Gated on the broker's lobby protocol version.** Proactive rotation is only
- * SAFE against a broker that keeps a just-superseded secret valid through the
- * bounded overlap window ({@link MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION}):
- * there, a renewal reply lost after the server commits is survivable, because
- * the held secret still authorizes and the best-effort "return the held token"
- * below recovers on the next attempt. Against an older broker the same fallback
- * would strand the holder on a secret the broker invalidated instantly, so this
- * does not rotate at all below the floor — leaving the pre-rotation behavior
- * (the credential simply lapses at its TTL) rather than introducing a strand.
+ * **Gated on the broker's lobby protocol version.** Idempotent-replay recovery
+ * only exists at or above {@link MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION}:
+ * there, a renewal reply lost after the server commits is recovered by retrying
+ * with the SAME nonce (the broker replays the committed secret). Against an
+ * older broker there is no replay, so proactive rotation is skipped entirely —
+ * leaving the pre-rotation behavior (the credential simply lapses at its TTL)
+ * rather than risking a strand on a superseded, unreplayable secret.
  *
- * Best-effort otherwise by design: a failed, timed-out or unsupported rotation
- * returns the held token and lets the gated action proceed and surface any
- * refusal itself — rotation must never turn a working action into a failed one.
- * It never rotates a credential with no known expiry (nothing to rotate ahead
- * of) or one already past expiry (the broker would refuse it as unrenewable).
- * `now` is injectable for deterministic tests.
+ * Recovery, not best-effort-and-forget: the rotation mints a per-attempt nonce
+ * (reusing a persisted one from a prior uncertain attempt), and on an uncertain
+ * result retries with that same nonce so a lost reply is replayed rather than
+ * re-minted. The nonce is persisted on the credential until a rotation confirms,
+ * so even a give-up-then-later-action recovers instead of minting a fresh nonce
+ * the broker would refuse against the now-superseded token. It never rotates a
+ * credential with no known expiry (nothing to rotate ahead of) or one already
+ * past expiry (the broker refuses it as unrenewable). `now` is injectable for
+ * deterministic tests.
  *
  * Concurrent near-expiry actions on the same authority share a single rotation
  * (see {@link credentialRenewalsInFlight}), so two actions firing at once can
@@ -1130,19 +1180,18 @@ export async function maybeRenewNearExpiry(
 
   // Dedupe concurrent near-expiry rotations of the SAME authority. Two gated
   // actions firing at once each capture the same held token and would otherwise
-  // BOTH rotate: the broker parks the old secret on the first rotation, accepts
-  // it again during overlap for the second, and the second's fresh secret
-  // supersedes the first's — so the first action proceeds with a token that is
-  // now a mismatch and fails despite a successful renewal. Sharing one in-flight
-  // renewal makes both actions settle on the same surviving secret. Keyed on
-  // (code, role); the entry is cleared when the renewal settles so a later,
-  // non-concurrent action starts a fresh one.
+  // BOTH rotate: the second's fresh secret supersedes the first's, so the first
+  // action proceeds with a token that is now a mismatch and fails despite a
+  // successful renewal. Sharing one in-flight renewal makes both actions settle
+  // on the same surviving secret. Keyed on (code, role); the entry is cleared
+  // when the renewal settles so a later, non-concurrent action starts fresh.
   const key = `${code}:${role}`;
   const existing = credentialRenewalsInFlight.get(key);
   if (existing !== undefined) return existing;
 
   const inflight = performCredentialRotation(
     set,
+    get,
     socket,
     code,
     role,
@@ -1169,43 +1218,76 @@ const credentialRenewalsInFlight = new Map<string, Promise<string>>();
 
 /**
  * The actual rotation round trip behind {@link maybeRenewNearExpiry}, split out
- * so the in-flight dedup there wraps exactly one call. Adopts the fresh secret
- * and expiry into the store on success; on any uncertain result returns the held
- * token untouched — safe under the broker's bounded overlap (the held secret is
- * still honored), so the next attempt recovers.
+ * so the in-flight dedup there wraps exactly one call.
+ *
+ * Nonce lifecycle — the heart of recoverable-yet-safe rotation. It reuses a
+ * nonce persisted by a prior uncertain attempt (so a retry REPLAYS the committed
+ * secret rather than minting a second one) or mints a fresh one, and persists it
+ * BEFORE the attempt so a reconnect or a later action retries with the SAME
+ * nonce. On an uncertain (non-aborted) result it retries once in-call with that
+ * nonce, recovering a single lost reply within this action. On success it adopts
+ * the fresh secret and CLEARS the pending nonce; on give-up it leaves the nonce
+ * persisted and returns the held token, so the next proactive renewal recovers.
  */
 async function performCredentialRotation(
   set: MultiplayerSet,
+  get: MultiplayerGet,
   socket: PhaseSocket,
   code: string,
   role: TournamentRole,
   heldToken: string,
   signal: AbortSignal,
 ): Promise<string> {
-  const result = await renewTournamentCredentialOver(
+  const existingNonce = pendingRotationNonceFor(
+    get().tournamentCredentials[code],
+    role,
+  );
+  const nonce = existingNonce ?? newRotationNonce();
+  if (existingNonce === undefined) {
+    // Persist the nonce before the attempt: if this call is torn down or its
+    // reply is lost, the next attempt must reuse it to replay, not mint anew.
+    set((state) => ({
+      tournamentCredentials: rememberTournamentCredential(
+        state.tournamentCredentials,
+        code,
+        pendingNoncePatch(role, nonce),
+      ),
+    }));
+  }
+
+  let result = await renewTournamentCredentialOver(
     socket,
     code,
     wireRoleFor(role),
     heldToken,
+    nonce,
     { signal },
   );
-  if (!result.ok) return heldToken;
+  if (!result.ok && !signal.aborted) {
+    // One in-call retry with the SAME nonce recovers a single lost reply: the
+    // broker replays if the first attempt committed, or mints if it never
+    // arrived. Skipped on abort — that is teardown, not a lost reply.
+    result = await renewTournamentCredentialOver(
+      socket,
+      code,
+      wireRoleFor(role),
+      heldToken,
+      nonce,
+      { signal },
+    );
+  }
+  if (!result.ok) {
+    // Leave the pending nonce persisted; the next proactive renewal retries with
+    // it. The held token flows through — the action may fail if it was already
+    // superseded, and that next renewal recovers.
+    return heldToken;
+  }
 
-  const patch =
-    role === "organizer"
-      ? {
-          organizerToken: result.value.token,
-          organizerTokenExpiresAtMs: result.value.expires_at_ms,
-        }
-      : {
-          playerToken: result.value.token,
-          playerTokenExpiresAtMs: result.value.expires_at_ms,
-        };
   set((state) => ({
     tournamentCredentials: rememberTournamentCredential(
       state.tournamentCredentials,
       code,
-      patch,
+      adoptRotatedPatch(role, result.value.token, result.value.expires_at_ms),
     ),
   }));
   return result.value.token;
@@ -1852,11 +1934,23 @@ export interface TournamentCredential {
    * rotated separately.
    */
   organizerTokenExpiresAtMs?: number;
+  /**
+   * The nonce of an organizer rotation this browser started but has not yet
+   * confirmed (its reply was lost or the attempt is mid-flight). Present only
+   * between initiating a rotation and confirming one; reused so a retry REPLAYS
+   * the committed secret rather than minting one the broker would refuse against
+   * the now-superseded token. Persisted with the credential so recovery survives
+   * a reconnect. See {@link maybeRenewNearExpiry}.
+   */
+  organizerPendingRotationNonce?: string;
   /** Entrant authority for this code. Present iff this browser joined it. */
   playerToken?: string;
   /** When `playerToken` stops being accepted (epoch ms). Same semantics as
    * {@link TournamentCredential.organizerTokenExpiresAtMs}. */
   playerTokenExpiresAtMs?: number;
+  /** Pending player rotation nonce. Same semantics as
+   * {@link TournamentCredential.organizerPendingRotationNonce}. */
+  playerPendingRotationNonce?: string;
   /**
    * The `player_key` this browser joined under — the identity every later
    * `TournamentView` keys on (`PlayerSummary.player_key`). Stored beside the
@@ -1983,14 +2077,32 @@ export function normalizeTournamentCredentials(
       playerToken !== undefined && isFiniteNumber(raw.playerTokenExpiresAtMs)
         ? raw.playerTokenExpiresAtMs
         : undefined;
+    // A pending rotation nonce is kept only beside a surviving token — like the
+    // expiry — so a recovery in flight when the tab was backgrounded resumes.
+    const organizerPendingRotationNonce =
+      organizerToken !== undefined &&
+      typeof raw.organizerPendingRotationNonce === "string"
+        ? raw.organizerPendingRotationNonce
+        : undefined;
+    const playerPendingRotationNonce =
+      playerToken !== undefined &&
+      typeof raw.playerPendingRotationNonce === "string"
+        ? raw.playerPendingRotationNonce
+        : undefined;
     out[code] = {
       ...(organizerToken !== undefined ? { organizerToken } : {}),
       ...(organizerTokenExpiresAtMs !== undefined
         ? { organizerTokenExpiresAtMs }
         : {}),
+      ...(organizerPendingRotationNonce !== undefined
+        ? { organizerPendingRotationNonce }
+        : {}),
       ...(playerToken !== undefined ? { playerToken } : {}),
       ...(playerTokenExpiresAtMs !== undefined
         ? { playerTokenExpiresAtMs }
+        : {}),
+      ...(playerPendingRotationNonce !== undefined
+        ? { playerPendingRotationNonce }
         : {}),
       ...(playerKey !== undefined ? { playerKey } : {}),
       updatedAt:

@@ -731,21 +731,31 @@ export function getTournamentOver(
  * The presented `token` must still be accepted: the broker refuses rotation of
  * an already-expired credential (it extends nothing that has lapsed,
  * `crates/lobby-broker/src/tournament.rs`), so the caller renews from the client
- * clock BEFORE `expires_at_ms`, never after a rejection. Under lobby protocol v9
- * the just-presented secret keeps being honored through a bounded overlap
- * window, which is what makes a lost reply recoverable — but the caller adopts
- * the returned secret immediately all the same.
+ * clock BEFORE `expires_at_ms`, never after a rejection.
+ *
+ * `rotationNonce` is the client-minted, per-attempt nonce that makes a lost
+ * reply recoverable under lobby protocol v9: a first attempt sends a fresh nonce
+ * and the broker mints; a RETRY after an uncertain result re-sends the SAME
+ * nonce with the SAME (possibly now-superseded) `token`, and the broker REPLAYS
+ * the already-committed secret rather than minting a second one. Presenting a
+ * superseded token WITHOUT the matching nonce is refused, which is what stops a
+ * stolen superseded secret from becoming a fresh authority — so the caller must
+ * hold the nonce stable across retries of the same rotation.
  */
 export function renewTournamentCredentialOver(
   socket: PhaseSocket,
   code: string,
   role: TournamentCredentialRole,
   token: string,
+  rotationNonce: string,
   opts: TournamentRequestOptions = {},
 ): Promise<TournamentRpcResult<TournamentCredentialRenewedReply>> {
   return requestOver<TournamentCredentialRenewedReply>(
     socket,
-    { type: "RenewTournamentCredential", data: { code, role, token } },
+    {
+      type: "RenewTournamentCredential",
+      data: { code, role, token, rotation_nonce: rotationNonce },
+    },
     (msg) => {
       if (msg.type !== "TournamentCredentialRenewed") return null;
       // Read as optional-everything at the trust boundary, as the other
