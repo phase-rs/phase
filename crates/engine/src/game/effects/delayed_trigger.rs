@@ -283,12 +283,15 @@ pub fn resolve(
         bind_tracked_set_to_ability_chain(&mut delayed_ability, real_id);
     }
 
-    // CR 603.7c: A delayed trigger whose inner effect targets the trigger's
-    // source object via TriggeringSource or ParentTarget must snapshot that
-    // object at creation time. At creation, current_trigger_event =
-    // ZoneChanged { dying_creature } and TriggeringSource resolves correctly.
+    // CR 603.7c: A delayed trigger whose inner effect names an object from its
+    // CREATION event — via either event-subject anaphor (`TriggeringSource`,
+    // `EventTarget`; see `EVENT_SUBJECT_ANAPHORS`) or via ParentTarget — must
+    // snapshot that object at creation time. At creation, current_trigger_event =
+    // ZoneChanged { dying_creature } and TriggeringSource resolves correctly;
+    // for an "at end of combat" destroy it is DamageDealt { target } and
+    // EventTarget resolves correctly.
     //
-    // Without the snapshot, at end-step firing:
+    // Without the snapshot, at end-step / end-of-combat firing:
     //   current_trigger_event = PhaseChanged { End }
     //   - is_pure_event_context_filter(TriggeringSource) = true → block IS entered
     //   - resolve_event_context_target returns None (PhaseChanged carries no
@@ -299,7 +302,8 @@ pub fn resolve(
     //   - second resolve_event_context_target attempt → None
     //   - final ability.targets.clone() fallback returns [] (empty snapshot)
     //     → the zone move silently skips (bugs #2883 Grave Betrayal,
-    //       #2886 Liliana emblem)
+    //       #2886 Liliana emblem), and the delayed destroy silently skips
+    //       (#4229 Ohran Viper, Lowland/Thicket/Simic Basilisk).
     //
     // With the snapshot: delayed_ability.targets = [dying_creature] at
     // creation, and the final fallback correctly returns [dying_creature].
@@ -307,10 +311,10 @@ pub fn resolve(
     // CR 603.7c: See separate branch for LastCreated snapshots.
     //
     // Event-delayed triggers, including one-shot `WhenNextEvent`, must not
-    // snapshot TriggeringSource at creation: each firing resolves it from the
-    // event that actually fired the trigger. Only phase-delayed triggers need
-    // the creation-time fallback because their later phase event has no object
-    // subject.
+    // snapshot an event-subject anaphor at creation: each firing resolves it
+    // from the event that actually fired the trigger. Only phase-delayed
+    // triggers need the creation-time fallback because their later phase event
+    // has no object subject.
     //
     // CR 603.7b: Computed ONCE here and reused for the creation-snapshot gate, the
     // `DelayedTrigger.one_shot` field. `condition`'s variant is not reassigned
@@ -343,29 +347,47 @@ pub fn resolve(
     //    reads a condition both binders have already rewritten and yields
     //    `false` for every card in the class.
     //
-    // Scoped to the ParentTarget arm: the TriggeringSource arm re-resolves from
-    // the firing event and already carries a creation-time zone guard
-    // (`stamp_triggering_source_origins_in_ability_chain`, below); the
-    // LastCreated arm names tokens, which cease to exist on a zone change
-    // (CR 111.7) rather than returning as a new incarnation.
+    // Scoped to the ParentTarget arm: the event-subject arm computes its own
+    // pins inline against the same operative test (see below); the LastCreated
+    // arm names tokens, which cease to exist on a zone change (CR 111.7) rather
+    // than returning as a new incarnation.
     let creation_time_provenance = condition_uses_creation_time_provenance(&condition);
-    let (snapshot_targets, target_pins) = if creation_time_provenance
-        && super::ability_refs_triggering_source(&delayed_ability)
-    {
-        // CR 603.7c: TriggeringSource always reads the event context (the dying
-        // creature from the ZoneChanged event), not the parent ability's chosen
-        // targets. Bypasses parent_target_snapshot's ability.targets early-return,
-        // which is correct for ParentTarget (Flickerwisp) but wrong here.
-        (
-            crate::game::targeting::resolve_event_context_target(
-                state,
-                &crate::types::ability::TargetFilter::TriggeringSource,
-                ability.source_id,
-            )
-            .map(|t| vec![t])
-            .unwrap_or_default(),
-            Vec::new(),
-        )
+    // CR 608.2k: TWO different questions, deliberately asked separately.
+    //
+    // `chain_names_event_subject` — does ANY clause name an event subject? This
+    // gates the per-node rebind pass, which must run whenever any clause needs
+    // its own referent.
+    //
+    // `root_event_subject_anaphor` — does the ROOT clause name one, and which?
+    // This drives the root `targets` snapshot, which binds the ROOT.
+    //
+    // Asking the chain-wide question for the ROOT snapshot is wrong: a root that
+    // names no event subject (a `ParentTarget` return, a `TargetOnly` land
+    // choice) would take the event-subject arm on the strength of a DESCENDANT's
+    // anaphor, skip `parent_target_snapshot`, and bind the root slot to the
+    // descendant's event referent. Before `bind_event_subject_nodes` existed
+    // that over-broad root binding was load-bearing — it was the only way a
+    // descendant's anaphor survived to firing. Now each clause carries its own
+    // binding, so the root is free to answer only for itself.
+    let chain_names_event_subject = creation_time_provenance
+        && super::ability_event_subject_anaphor(&delayed_ability).is_some();
+    let root_event_subject_anaphor = creation_time_provenance
+        .then(|| super::effect_event_subject_anaphor(&delayed_ability.effect))
+        .flatten();
+    let (snapshot_targets, target_pins) = if let Some(anaphor) = root_event_subject_anaphor {
+        // CR 608.2k: An event-subject anaphor always reads the event context —
+        // `TriggeringSource` the event's subject (the dying creature of a
+        // ZoneChanged), `EventTarget` its object slot (the damaged creature of
+        // a DamageDealt) — never the parent ability's chosen targets. Bypasses
+        // parent_target_snapshot's ability.targets early-return, which is
+        // correct for ParentTarget (Flickerwisp) but wrong here.
+        //
+        // Resolving the ANAPHOR THE CLAUSE ACTUALLY NAMES, rather than a
+        // hardcoded `TriggeringSource`, is what keeps the two members of the
+        // set from drifting: CR 120.1 makes the subject the damage DEALER, so
+        // snapshotting `TriggeringSource` for an `EventTarget` chain would
+        // destroy the attacking creature instead of the one it damaged.
+        snapshot_event_subject(state, anaphor, ability.source_id)
     } else if super::ability_refs_parent_target(&delayed_ability) {
         let targets = parent_target_snapshot(state, ability);
         let pins =
@@ -409,6 +431,14 @@ pub fn resolve(
     // TriggeringSource destination zone only for phase-delayed triggers, whose
     // later firing event has no source and relies on the creation-time snapshot.
     // Event-delayed triggers re-resolve TriggeringSource from their firing event.
+    //
+    // Deliberately NARROWER than the snapshot above, which covers both
+    // `EVENT_SUBJECT_ANAPHORS`: `triggering_source_destination_zone` reads the
+    // destination of the event's own moved object (`ZoneChanged.to` /
+    // `Milled.to`). That is the zone the SUBJECT landed in, which says nothing
+    // about where an `EventTarget` referent is — on a `DamageDealt` event there
+    // is no destination at all. Stamping it onto an `EventTarget` chain would
+    // invent a zone guard the creation event never established.
     if creation_time_provenance && super::ability_refs_triggering_source(&delayed_ability) {
         if let Some(zone) = triggering_source_destination_zone(state) {
             stamp_triggering_source_origins_in_ability_chain(&mut delayed_ability, zone);
@@ -431,6 +461,20 @@ pub fn resolve(
 
     delayed_ability.set_target_incarnations_recursive(target_pins);
     delayed_ability.targets = snapshot_targets;
+    // CR 608.2k: Give each clause that names an event-subject anaphor its own
+    // referent, so a chain naming both the event's subject and its object slot
+    // does not hand one clause the other's object.
+    //
+    // MUST run after `set_target_incarnations_recursive` (which overwrites every
+    // node's pins with the root's) and after the root `targets` assignment —
+    // either would otherwise clobber the per-node bindings.
+    //
+    // Gated on the same creation-time-provenance test as the root snapshot:
+    // event-delayed triggers re-resolve their anaphors from the event that
+    // actually fires them and must not be frozen here.
+    if chain_names_event_subject {
+        bind_event_subject_nodes(&mut delayed_ability, state, ability.source_id);
+    }
     // CR 603.7c: A delayed triggered ability that refers to information from
     // its creation event keeps that creation-time binding for later resolution.
     delayed_ability.scoped_player = ability.scoped_player;
@@ -500,6 +544,180 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 603.7c + CR 608.2k + CR 400.7: Resolve one event-subject anaphor against
+/// the CREATION event and pin the referent to its current incarnation.
+///
+/// The single authority for both the chain-wide root snapshot and the per-node
+/// rebind below, so the two cannot drift in how they resolve or pin.
+///
+/// The pin implements CR 400.7 / CR 603.7c: "if that object leaves the
+/// battlefield and returns, it becomes a new object and the ability no longer
+/// affects it." Without it an "at end of combat" destroy would still hit a
+/// creature that was damaged, then blinked or bounced, and came back before the
+/// trigger fired. `live_object_targets` — the list `destroy::resolve` reads once
+/// `targets` is non-empty — drops a stale pin.
+///
+/// Pinning is scoped to referents the creation event did NOT move, the same
+/// operative test `condition_expects_referent_move` applies on the ParentTarget
+/// arm. A `TriggeringSource` snapshot taken off a ZoneChanged/Milled event names
+/// an object that event just moved, so it is ALREADY a new incarnation at
+/// creation and a pin would make it inert forever (#2883 Grave Betrayal, #2886
+/// Liliana emblem); its guard is the `ChangeZone.origin` stamp instead. A
+/// `DamageDealt` event moves nothing, so its recipient is pinnable.
+fn snapshot_event_subject(
+    state: &GameState,
+    anaphor: &TargetFilter,
+    source_id: crate::types::identifiers::ObjectId,
+) -> (
+    Vec<TargetRef>,
+    Vec<crate::types::identifiers::ObjectIncarnationRef>,
+) {
+    let targets = crate::game::targeting::resolve_event_context_target(state, anaphor, source_id)
+        .map(|t| vec![t])
+        .unwrap_or_default();
+    let creation_event_moved_this_referent = matches!(anaphor, TargetFilter::TriggeringSource)
+        && triggering_source_destination_zone(state).is_some();
+    let pins = if creation_event_moved_this_referent {
+        Vec::new()
+    } else {
+        targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => state
+                    .objects
+                    .get(id)
+                    .map(crate::types::identifiers::ObjectIncarnationRef::from_object),
+                TargetRef::Player(_) => None,
+            })
+            .collect()
+    };
+    (targets, pins)
+}
+
+/// CR 608.2k + CR 120.1 + CR 120.3: Bind each clause that names an
+/// event-subject anaphor to ITS OWN referent.
+///
+/// `ResolvedAbility::targets` is a single shared slot, and the chain-wide root
+/// snapshot fills it from the FIRST anaphor the chain names. A chain naming
+/// both — the event's subject AND its object slot, e.g. "destroy that creature
+/// and return it" — has two distinct referents (CR 120.1: the subject of an
+/// active-voice damage condition is the DEALER; CR 120.3: its object slot is
+/// the RECIPIENT), so that one shared slot would silently hand one clause the
+/// other's object.
+///
+/// Every node that names an anaphor is bound from its own, unconditionally.
+/// Keying off the node rather than off "differs from the chain-wide pick" is
+/// what makes this correct in BOTH mixed orders: the chain-wide pick is
+/// whichever anaphor comes first in [`EVENT_SUBJECT_ANAPHORS`], not whichever
+/// the root clause happens to use, so a root naming `EventTarget` under a sub
+/// naming `TriggeringSource` would otherwise keep the dealer.
+///
+/// This is safe precisely because propagation is gated on emptiness:
+/// `effects::can_inherit_parent_targets` inherits a parent's targets only when
+/// `sub.targets.is_empty()`, so a node given its own binding here keeps it.
+///
+/// Single-anaphor chains — the entire shipped corpus — are unaffected: a node
+/// resolves to the same object it would have inherited. Nodes naming NO
+/// event-subject anaphor (`ParentTarget`, typed pools) are left untouched,
+/// because giving them targets would BLOCK the inheritance they rely on; so is
+/// a node whose anaphor resolves to nothing, which falls back to inheritance
+/// exactly as before.
+fn bind_event_subject_nodes(
+    ability: &mut ResolvedAbility,
+    state: &GameState,
+    source_id: crate::types::identifiers::ObjectId,
+) {
+    if let Some(node_anaphor) = super::effect_event_subject_anaphor(&ability.effect) {
+        let (targets, pins) = snapshot_event_subject(state, node_anaphor, source_id);
+        if !targets.is_empty() {
+            concretize_mass_population_event_subject(&mut ability.effect, &targets);
+            ability.targets = targets;
+            ability.target_incarnations = pins;
+        }
+    }
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        bind_event_subject_nodes(sub, state, source_id);
+    }
+    if let Some(alt) = ability.else_ability.as_deref_mut() {
+        bind_event_subject_nodes(alt, state, source_id);
+    }
+}
+
+/// CR 603.7c + CR 608.2k: Concretize a MASS-POPULATION effect's event-subject
+/// references to the object they name at creation time.
+///
+/// The mass family does not consume `ResolvedAbility::targets`. It scans a zone
+/// and evaluates its `target` filter against each object, and
+/// `matches_target_filter` resolves an event-subject anaphor from
+/// `state.current_trigger_event` — which at the later phase event carries no
+/// object. Populating `targets` alone therefore fixes the SINGLE-target effects
+/// and leaves the mass ones silently affecting nothing.
+///
+/// Rewriting to `SpecificObject` is the technique
+/// `rebind_last_created_to_parent_target` uses for `LastCreated`, and
+/// `SpecificObject` is the concrete form this path already produces
+/// (`filter::normalize_contextual_filter` rewrites `Not(ParentTarget)` to
+/// `Not(SpecificObject)`).
+///
+/// RECURSES through the enclosing filter structure rather than matching only a
+/// bare leaf, mirroring `filter_refs_event_subject`'s traversal so detection and
+/// concretization agree on what counts as a reference. A compound filter left
+/// unconcretized is worse than a bare one: `Not(EventTarget)` whose inner
+/// reference resolves to NOTHING at the phase event inverts into "everything",
+/// turning a delayed "destroy each OTHER creature" into a board wipe that also
+/// takes the referent it was meant to spare.
+///
+/// The enclosing structure is preserved exactly — only the leaves are replaced —
+/// so `DistinctFrom { reference }` keeps its property shape and continues to be
+/// read by its own resolver.
+fn concretize_mass_population_event_subject(effect: &mut Effect, targets: &[TargetRef]) {
+    let Some(TargetRef::Object(id)) = targets
+        .iter()
+        .find(|target| matches!(target, TargetRef::Object(_)))
+    else {
+        return;
+    };
+    let Some(target) = super::mass_population_target_mut(effect) else {
+        return;
+    };
+    concretize_event_subject_leaves(target, *id);
+}
+
+/// Replace every [`EVENT_SUBJECT_ANAPHORS`](super::EVENT_SUBJECT_ANAPHORS) leaf
+/// with `SpecificObject { id }`, preserving the enclosing filter structure.
+///
+/// Traverses exactly the forms `effects::filter_refs_event_subject` inspects, so
+/// a reference it can DETECT is a reference this can BIND. The two walking
+/// different shapes is the bug class here: a detected-but-unbound reference
+/// takes the creation snapshot path and then resolves against an empty event.
+fn concretize_event_subject_leaves(
+    filter: &mut TargetFilter,
+    id: crate::types::identifiers::ObjectId,
+) {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            for prop in &mut typed.properties {
+                if let crate::types::ability::FilterProp::DistinctFrom { reference } = prop {
+                    concretize_event_subject_leaves(reference, id);
+                }
+            }
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for inner in filters {
+                concretize_event_subject_leaves(inner, id);
+            }
+        }
+        TargetFilter::Not { filter } => concretize_event_subject_leaves(filter, id),
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            concretize_event_subject_leaves(filter, id)
+        }
+        other if super::EVENT_SUBJECT_ANAPHORS.contains(other) => {
+            *other = TargetFilter::SpecificObject { id };
+        }
+        _ => {}
+    }
 }
 
 /// CR 603.7c: Only phase-delayed triggers lose their event subject between
@@ -2143,9 +2361,23 @@ mod tests {
         );
     }
 
-    /// CR 603.7c: The snapshot gate must inspect the whole delayed ability chain,
-    /// not only the first effect, because sub-abilities inherit parent targets at
-    /// delayed-trigger resolution.
+    /// CR 603.7c + CR 608.2k: The snapshot gate must inspect the whole delayed
+    /// ability chain, not only the first effect — a sub-ability that names the
+    /// event subject must still be bound to it at creation time.
+    ///
+    /// The binding now lands on the clause that NAMES the anaphor rather than on
+    /// the chain root. Previously the root snapshot answered the chain-wide
+    /// question, so a root naming no event subject (here a plain `Draw`) had the
+    /// descendant's referent stuffed into its own target slot and the descendant
+    /// reached it by inheritance. That conflated two clauses' bindings and, for a
+    /// root that legitimately owns a different referent (a `ParentTarget` return,
+    /// a `TargetOnly` land choice), silently overwrote it.
+    ///
+    /// `bind_event_subject_nodes` now binds each naming clause directly, so this
+    /// asserts the SUB carries the referent and the non-naming root is left
+    /// alone. Detection is unchanged — that is what this test is named for — only
+    /// the slot the referent lands in has moved, and moved to the more precise
+    /// one.
     #[test]
     fn triggering_source_snapshot_detects_sub_ability_reference() {
         let mut state = GameState::new_two_player(42);
@@ -2200,9 +2432,22 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
+        let delayed = &state.delayed_triggers[0].ability;
         assert_eq!(
-            state.delayed_triggers[0].ability.targets,
-            vec![TargetRef::Object(dying_creature)]
+            delayed
+                .sub_ability
+                .as_ref()
+                .expect("the delayed chain must retain its sub-ability")
+                .targets,
+            vec![TargetRef::Object(dying_creature)],
+            "the sub-ability that NAMES TriggeringSource must be bound to the \
+             ZoneChanged event's object"
+        );
+        assert!(
+            delayed.targets.is_empty(),
+            "the root Draw names no event subject, so its target slot must be \
+             left alone rather than receiving the descendant's referent; got {:?}",
+            delayed.targets
         );
     }
 

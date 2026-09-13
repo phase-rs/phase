@@ -8298,10 +8298,20 @@ fn optional_head_declined_all_object_targets(ability: &ResolvedAbility) -> bool 
 ///    "when you lose control of this, unattach it" trigger rebinds the per-source
 ///    `attachment` through this hidden slot (Stolen Uniform, Ogre Geargrabber);
 ///    without the arm the `_ => {}` fallback snapshots nothing and it resolves inert.
-///  * `Effect::ChangeZoneAll` intentionally has no generic `target_filter()` slot:
-///    its filter selects a mass operation rather than a declared target. It still
-///    needs inspection here when it carries a delayed `ParentTarget` anaphor, so
-///    the delayed trigger snapshots and pins that object before the mass scan.
+///  * The MASS-POPULATION family (`ChangeZoneAll`, `DestroyAll`, `DamageAll`,
+///    `BounceAll`, `CounterAll`, `GainControlAll`, `PumpAll`, `PutCounterAll`,
+///    `DoublePTAll`) intentionally has no generic `target_filter()` slot: the
+///    filter selects a mass operation rather than a declared target, so
+///    `Effect::target_filter()` answers `None` for every one of them. They still
+///    need inspection here when the filter carries a context anaphor, so a
+///    delayed trigger snapshots and pins that object before the mass scan.
+///
+///    The whole family is listed because the PARSER treats it as one: the
+///    trigger rebind in `parser::oracle_trigger` converts a context filter to
+///    `EventTarget` across exactly these nine effects. Surfacing one of them and
+///    not its siblings is the sibling-cluster smell — an omitted member is not a
+///    compile error, it degrades silently into "this delayed effect does
+///    nothing".
 ///
 /// NOTE: the `_ => {}` arm means "no hidden object slot beyond `target_filter()`".
 /// Any FUTURE effect that hides an object slot behind `target_filter()` MUST add
@@ -8321,12 +8331,86 @@ fn effect_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
         Effect::UnattachAll { attachment, .. } if attachment.is_context_ref() => {
             slots.push(attachment)
         }
-        Effect::ChangeZoneAll { target, .. } if filter_refs_parent_target(target) => {
-            slots.push(target)
-        }
         _ => {}
     }
+    // The mass-population family, via the single authority below so this list
+    // and the delayed-trigger rewrite cannot diverge.
+    if let Some(target) = mass_population_target(effect) {
+        if filter_refs_parent_or_event_subject(target) {
+            slots.push(target);
+        }
+    }
     slots
+}
+
+/// CR 608.2k: The hidden `target` of a MASS-POPULATION effect, if this is one.
+///
+/// The single authority for "is this a mass-population effect, and where does it
+/// keep its population filter". `effect_parent_ref_slots` surfaces that filter
+/// and `delayed_trigger::concretize_mass_population_event_subject` rewrites it;
+/// both route through here so the family cannot be enumerated two ways and
+/// drift apart — which is exactly how one of them ends up handling a variant the
+/// other silently ignores.
+///
+/// The wildcard arm is deliberate: `Effect` has far too many variants to list
+/// exhaustively here, and a mass-population effect is identified by carrying a
+/// population `target` that `Effect::target_filter()` deliberately hides. The
+/// protection against a future variant being missed is therefore this function
+/// being the ONE place to add it — previously the family was enumerated twice,
+/// here and in the delayed-trigger rewrite, which is exactly how one site ends
+/// up handling a variant the other silently ignores.
+pub(crate) fn mass_population_target(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::ChangeZoneAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
+        | Effect::GainControlAll { target, .. }
+        | Effect::PumpAll { target, .. }
+        | Effect::PutCounterAll { target, .. }
+        | Effect::DoublePTAll { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
+/// Mutable counterpart of [`mass_population_target`]. Kept adjacent so the two
+/// variant lists are read and edited together.
+pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut TargetFilter> {
+    match effect {
+        Effect::ChangeZoneAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
+        | Effect::GainControlAll { target, .. }
+        | Effect::PumpAll { target, .. }
+        | Effect::PutCounterAll { target, .. }
+        | Effect::DoublePTAll { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
+/// CR 608.2c + CR 608.2k: True when the filter names a parent-target anaphor OR
+/// an event subject, at any depth.
+///
+/// The gate for the mass-population arm above. It is deliberately the UNION of
+/// what that arm's consumers ask for rather than the broader
+/// `TargetFilter::is_context_ref`: every caller of `effect_parent_ref_slots`
+/// re-filters the returned slots through its own predicate, so surfacing a slot
+/// that only one consumer recognizes cannot perturb the others — but surfacing
+/// filters no consumer asks about would be noise.
+///
+/// Previously this arm tested `filter_refs_parent_target` alone, which made a
+/// delayed mass move naming `TriggeringSource`/`EventTarget` invisible to
+/// `effect_refs_event_subject`: it took no creation-time snapshot and, at the
+/// later phase event (which carries no event subject), resolved against nothing.
+/// The `ParentTarget` half of the test is unchanged.
+fn filter_refs_parent_or_event_subject(filter: &TargetFilter) -> bool {
+    filter_refs_parent_target(filter)
+        || EVENT_SUBJECT_ANAPHORS
+            .iter()
+            .any(|anaphor| filter_refs_event_subject(filter, anaphor))
 }
 
 /// True if any object-target slot of the effect references the per-iteration
@@ -8405,42 +8489,129 @@ pub(crate) fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
     }
 }
 
-/// True if the filter directly or recursively references `TargetFilter::TriggeringSource`.
+/// CR 608.2k: The EVENT-SUBJECT anaphors — the target filters that name an
+/// object carried by the trigger EVENT itself rather than a target a player
+/// chose. There are exactly two, and they are the two halves of the same
+/// grammatical relation on a `DamageDealt`/`ZoneChanged`/… event:
+///
+/// * `TriggeringSource` — the event's SUBJECT (CR 120.1: on an active-voice
+///   damage condition, the damage dealer).
+/// * `EventTarget` — the event's OBJECT slot (CR 120.3: the damage recipient,
+///   the "that creature" of "deals damage to a creature, destroy that
+///   creature").
+///
+/// Listed once, in the order a chain that somehow names both should be read:
+/// `TriggeringSource` first, preserving the behaviour that predates
+/// `EventTarget` joining the set.
+///
+/// Consumers must take the whole slice rather than matching one member. Both
+/// are already members of `targeting::is_pure_event_context_filter`, and the
+/// bug class this constant exists to prevent is precisely a pass that handles
+/// one and silently no-ops on the other (issue #4229, Ohran Viper: the delayed
+/// destroy of "that creature at end of combat" was never snapshotted at
+/// creation because the snapshot pass named only `TriggeringSource`).
+pub(crate) const EVENT_SUBJECT_ANAPHORS: [TargetFilter; 2] =
+    [TargetFilter::TriggeringSource, TargetFilter::EventTarget];
+
+/// True if the filter directly or recursively references `anaphor`, one of
+/// [`EVENT_SUBJECT_ANAPHORS`].
 ///
 /// Used by `delayed_trigger::resolve()` to gate the event-context snapshot for
-/// delayed triggers whose inner effect targets the trigger's source object via
-/// the "it" anaphor (e.g. "return it to the battlefield").
+/// delayed triggers whose inner effect names the trigger event's subject or its
+/// object slot via the "it" / "that creature" anaphor (e.g. "return it to the
+/// battlefield", "destroy that creature at end of combat").
 ///
 /// Checks all object-target slots via `effect_parent_ref_slots`, including
 /// hidden slots that `effect_target_filter` does not surface (e.g.,
 /// `Attach.attachment`).
-fn filter_refs_triggering_source(filter: &TargetFilter) -> bool {
+///
+/// Traverses the same STRUCTURAL references as `filter_refs_parent_target`, not
+/// merely the boolean combinators: a `Typed` filter can bury the anaphor in a
+/// `DistinctFrom { reference }` property ("each OTHER creature that shares a
+/// color with it"), and `TrackedSetFiltered` wraps an inner filter. Missing
+/// either means the chain is not recognized as naming an event subject, no
+/// creation-time snapshot is taken, and the effect silently resolves against an
+/// empty target list at the later phase event — the exact failure this whole
+/// snapshot pass exists to prevent.
+fn filter_refs_event_subject(filter: &TargetFilter, anaphor: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::TriggeringSource => true,
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(filter_refs_triggering_source)
+        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| {
+            matches!(
+                prop,
+                FilterProp::DistinctFrom { reference }
+                    if filter_refs_event_subject(reference, anaphor)
+            )
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(|inner| filter_refs_event_subject(inner, anaphor)),
+        TargetFilter::Not { filter } => filter_refs_event_subject(filter, anaphor),
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            filter_refs_event_subject(filter, anaphor)
         }
-        TargetFilter::Not { filter } => filter_refs_triggering_source(filter),
-        _ => false,
+        other => other == anaphor,
     }
 }
 
-fn effect_refs_triggering_source(effect: &Effect) -> bool {
-    effect_parent_ref_slots(effect)
-        .iter()
-        .any(|f| filter_refs_triggering_source(f))
+/// True if the filter directly or recursively references
+/// `TargetFilter::TriggeringSource`.
+fn filter_refs_triggering_source(filter: &TargetFilter) -> bool {
+    filter_refs_event_subject(filter, &TargetFilter::TriggeringSource)
 }
 
-fn ability_refs_triggering_source(ability: &ResolvedAbility) -> bool {
-    effect_refs_triggering_source(&ability.effect)
+fn effect_refs_event_subject(effect: &Effect, anaphor: &TargetFilter) -> bool {
+    effect_parent_ref_slots(effect)
+        .iter()
+        .any(|f| filter_refs_event_subject(f, anaphor))
+}
+
+fn ability_refs_event_subject(ability: &ResolvedAbility, anaphor: &TargetFilter) -> bool {
+    effect_refs_event_subject(&ability.effect, anaphor)
         || ability
             .sub_ability
             .as_deref()
-            .is_some_and(ability_refs_triggering_source)
+            .is_some_and(|sub| ability_refs_event_subject(sub, anaphor))
         || ability
             .else_ability
             .as_deref()
-            .is_some_and(ability_refs_triggering_source)
+            .is_some_and(|alt| ability_refs_event_subject(alt, anaphor))
+}
+
+/// CR 608.2k: Which of the [`EVENT_SUBJECT_ANAPHORS`] this ability chain names,
+/// if any. The delayed-trigger creation snapshot resolves the returned filter
+/// against the CREATION event, so a phase-delayed trigger keeps the object its
+/// creation event named after that event is gone (CR 603.7c).
+///
+/// Chain-wide and first-match: this answers "what does the chain as a whole
+/// bind its shared `targets` slot to". A chain whose clauses name DIFFERENT
+/// anaphors cannot be represented by that one shared slot, so the divergent
+/// clauses are bound individually — see [`effect_event_subject_anaphor`] and
+/// `delayed_trigger`'s per-node rebind.
+pub(crate) fn ability_event_subject_anaphor(
+    ability: &ResolvedAbility,
+) -> Option<&'static TargetFilter> {
+    EVENT_SUBJECT_ANAPHORS
+        .iter()
+        .find(|anaphor| ability_refs_event_subject(ability, anaphor))
+}
+
+/// CR 608.2k: Which of the [`EVENT_SUBJECT_ANAPHORS`] THIS ONE effect names,
+/// ignoring the rest of its chain.
+///
+/// The node-local counterpart of [`ability_event_subject_anaphor`]. A delayed
+/// chain that names both anaphors — "destroy that creature and return it" —
+/// has one referent per clause (CR 120.1 makes the event's subject the damage
+/// DEALER; CR 120.3 makes its object slot the RECIPIENT), which the chain-wide
+/// first-match answer would collapse onto whichever appears first. Resolving
+/// per node is what keeps the dealer out of the recipient's slot.
+pub(crate) fn effect_event_subject_anaphor(effect: &Effect) -> Option<&'static TargetFilter> {
+    EVENT_SUBJECT_ANAPHORS
+        .iter()
+        .find(|anaphor| effect_refs_event_subject(effect, anaphor))
+}
+
+fn ability_refs_triggering_source(ability: &ResolvedAbility) -> bool {
+    ability_refs_event_subject(ability, &TargetFilter::TriggeringSource)
 }
 
 /// True when any effect in the ability chain references `ParentTarget`
@@ -18824,6 +18995,185 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, TargetFilter::Any)),
             "non-context-ref UnattachAll attachment must not be surfaced"
+        );
+    }
+
+    /// CR 120.1 + CR 120.3 + CR 608.2k: each clause resolves ITS OWN event
+    /// subject.
+    ///
+    /// `ResolvedAbility::targets` is one shared slot, and the chain-wide
+    /// `ability_event_subject_anaphor` fills it from the FIRST anaphor the chain
+    /// names. A chain naming both would therefore hand one clause the other's
+    /// object — CR 120.1 makes the event's subject the damage DEALER while
+    /// CR 120.3 makes its object slot the RECIPIENT, never the same object.
+    /// `delayed_trigger::bind_event_subject_nodes` keys off this node-local
+    /// answer to give each clause its own referent.
+    ///
+    /// No printed card reaches the both-anaphor shape today (a corpus scan finds
+    /// 6 delayed `EventTarget` cards and 76 delayed `TriggeringSource` cards,
+    /// and zero naming both), so this guards the primitive directly: the
+    /// collapse is silent, and the next card in either class would inherit it.
+    #[test]
+    fn effect_event_subject_anaphor_is_node_local() {
+        assert_eq!(
+            effect_event_subject_anaphor(&Effect::Destroy {
+                target: TargetFilter::EventTarget,
+                cant_regenerate: false,
+            }),
+            Some(&TargetFilter::EventTarget),
+            "CR 120.3: a clause naming the event's object slot resolves to the \
+             RECIPIENT, not to whichever anaphor the wider chain names first"
+        );
+        assert_eq!(
+            effect_event_subject_anaphor(&Effect::Destroy {
+                target: TargetFilter::TriggeringSource,
+                cant_regenerate: false,
+            }),
+            Some(&TargetFilter::TriggeringSource),
+            "CR 120.1: a clause naming the event's subject resolves to the DEALER"
+        );
+        assert_eq!(
+            effect_event_subject_anaphor(&Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            }),
+            None,
+            "a clause naming no event subject must stay unbound so it keeps \
+             inheriting its parent's targets"
+        );
+    }
+
+    /// CR 608.2k: an event-subject anaphor buried in a STRUCTURAL filter
+    /// reference is still detected, so the chain is snapshotted at creation.
+    ///
+    /// `filter_refs_event_subject` traverses the same references as
+    /// `filter_refs_parent_target`, not merely the boolean combinators. A chain
+    /// hiding the anaphor inside `Typed`'s `DistinctFrom { reference }` or
+    /// `TrackedSetFiltered`'s inner filter would otherwise go unrecognized, take
+    /// no creation-time snapshot, and silently resolve against an empty target
+    /// list at the later phase event.
+    #[test]
+    fn structurally_nested_event_subject_is_detected() {
+        let distinct_from = TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::EventTarget),
+            }],
+            ..TypedFilter::creature()
+        });
+        assert_eq!(
+            effect_event_subject_anaphor(&Effect::Destroy {
+                target: distinct_from,
+                cant_regenerate: false,
+            }),
+            Some(&TargetFilter::EventTarget),
+            "an EventTarget inside DistinctFrom must be detected — otherwise no \
+             creation snapshot is taken and the delayed effect resolves empty"
+        );
+
+        let tracked = TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::TriggeringSource),
+            caused_by: None,
+        };
+        assert_eq!(
+            effect_event_subject_anaphor(&Effect::Destroy {
+                target: tracked,
+                cant_regenerate: false,
+            }),
+            Some(&TargetFilter::TriggeringSource),
+            "a TriggeringSource inside TrackedSetFiltered must be detected"
+        );
+
+        assert_eq!(
+            effect_event_subject_anaphor(&Effect::Destroy {
+                target: TargetFilter::Not {
+                    filter: Box::new(TargetFilter::TriggeringSource),
+                },
+                cant_regenerate: false,
+            }),
+            Some(&TargetFilter::TriggeringSource),
+            "boolean nesting must keep working"
+        );
+    }
+
+    /// CR 608.2k: the MASS-POPULATION family hides its `target` behind
+    /// `target_filter()` (which answers `None` for all nine), so
+    /// `effect_parent_ref_slots` must surface it explicitly or a delayed mass
+    /// move naming an event subject is never snapshotted — at the later phase
+    /// event it has no event context left and affects nothing.
+    ///
+    /// The family is tested as a family on purpose. The parser's trigger rebind
+    /// (`parser::oracle_trigger`) converts a context filter to `EventTarget`
+    /// across exactly these nine effects, so surfacing one and not its siblings
+    /// is the sibling-cluster smell: an omitted member is not a compile error,
+    /// it degrades silently into "this delayed effect does nothing".
+    #[test]
+    fn mass_population_effects_surface_event_subject_targets() {
+        use crate::types::zones::{EtbTapState, Zone};
+
+        // One representative per constructor shape; the arm is a single `|`
+        // pattern, so covering the shapes covers the family.
+        let family: Vec<(&str, Effect)> = vec![
+            (
+                "ChangeZoneAll",
+                Effect::ChangeZoneAll {
+                    origin: None,
+                    destination: Zone::Graveyard,
+                    target: TargetFilter::EventTarget,
+                    enters_under: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: None,
+                    library_shuffle: crate::types::ability::MassLibraryShuffleMode::default(),
+                    random_order: false,
+                },
+            ),
+            (
+                "DestroyAll",
+                Effect::DestroyAll {
+                    target: TargetFilter::EventTarget,
+                    cant_regenerate: false,
+                },
+            ),
+            (
+                "BounceAll",
+                Effect::BounceAll {
+                    target: TargetFilter::TriggeringSource,
+                    destination: None,
+                    count: None,
+                },
+            ),
+        ];
+
+        for (name, effect) in &family {
+            let slots = effect_parent_ref_slots(effect);
+            assert!(
+                EVENT_SUBJECT_ANAPHORS
+                    .iter()
+                    .any(|anaphor| slots.iter().any(|s| filter_refs_event_subject(s, anaphor))),
+                "{name}: an event-subject target must surface as a hidden slot; got {slots:?}"
+            );
+            assert!(
+                effect_event_subject_anaphor(effect).is_some(),
+                "{name}: the detector must see the surfaced slot"
+            );
+        }
+
+        // Guard: a plain mass population filter is NOT a context anaphor and
+        // must not be surfaced, or every board wipe would look like one.
+        let plain = Effect::DestroyAll {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        };
+        assert!(
+            effect_parent_ref_slots(&plain).is_empty(),
+            "a plain Typed mass filter must not surface as a parent-ref slot"
+        );
+        assert!(
+            effect_event_subject_anaphor(&plain).is_none(),
+            "a plain Typed mass filter names no event subject"
         );
     }
 
