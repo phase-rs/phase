@@ -80,6 +80,7 @@ mod haunt_tests;
 pub mod keywords;
 pub mod layers;
 pub mod ledger;
+pub(crate) mod legend_scope;
 pub mod library;
 pub mod life_costs;
 pub mod life_safety;
@@ -185,6 +186,7 @@ pub mod triggers;
 pub mod turn_control;
 pub mod turns;
 pub mod visibility;
+pub(crate) mod wish_scope;
 pub mod zone_pipeline;
 // Zone-mutation primitives. Production code outside the engine crate must go
 // through zone_pipeline::move_object — the module is only public to test

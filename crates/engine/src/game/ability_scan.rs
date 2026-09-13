@@ -1226,6 +1226,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             reveal: _,
             destination: _,
             source_pool: _,
+            reach: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(filter, target_ctx, mode));

@@ -8,8 +8,8 @@ use crate::types::ability::{
     ControllerRef, CopyRetargetPermission, CounterAdjustment, CounterKindChooser,
     CounterKindDomain, CounterSourceRider, DigRestOrder, DoorLockOp, Duration, Effect, EffectScope,
     FaceDownProfile, ForceBlockAttackerRef, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ManaTargetRole, ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue,
-    QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
+    ManaTargetRole, ModalSelectionConstraint, OutsideGameReach, OutsideGameSourcePool,
+    PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
     TargetFilter, ThisWayCause,
 };
@@ -1316,6 +1316,9 @@ pub(crate) enum SearchCreationImperativeAst {
         up_to: bool,
         /// CR 400.11 + CR 406.3: Which source pool the outside-game search uses.
         source_pool: OutsideGameSourcePool,
+        /// CR 400.11: which era's "outside the game" boundary this search was
+        /// templated against. See `OutsideGameReach`.
+        reach: OutsideGameReach,
     },
     Dig {
         count: QuantityExpr,
