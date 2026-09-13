@@ -272,30 +272,40 @@ fn caps_at_tier(tier: CommanderBracketTier) -> BracketAxisCaps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::bracket_lists::BracketLists;
+    use crate::database::bracket_lists::{BracketCardClass, BracketLists};
     use crate::database::{BracketSignals, CardDatabase};
     use crate::game::deck_loading::PlayerDeckList;
 
     fn db_with_signals(entries: &[(&str, BracketSignals)]) -> CardDatabase {
-        let mut db = CardDatabase::default().with_bracket_lists(BracketLists {
-            version: "test-1".to_string(),
-            source: String::new(),
-            mass_land_denial: entries
-                .iter()
-                .filter(|(_, s)| s.mass_land_denial)
-                .map(|(n, _)| n.to_lowercase())
-                .collect(),
-            extra_turns: entries
-                .iter()
-                .filter(|(_, s)| s.extra_turn)
-                .map(|(n, _)| n.to_lowercase())
-                .collect(),
-            efficient_tutors: entries
-                .iter()
-                .filter(|(_, s)| s.efficient_tutor)
-                .map(|(n, _)| n.to_lowercase())
-                .collect(),
-        });
+        let mass_land_denial: Vec<&str> = entries
+            .iter()
+            .filter(|(_, signals)| signals.mass_land_denial)
+            .map(|(name, _)| *name)
+            .collect();
+        let extra_turns: Vec<&str> = entries
+            .iter()
+            .filter(|(_, signals)| signals.extra_turn)
+            .map(|(name, _)| *name)
+            .collect();
+        let efficient_tutors: Vec<&str> = entries
+            .iter()
+            .filter(|(_, signals)| signals.efficient_tutor)
+            .map(|(name, _)| *name)
+            .collect();
+        let mut db = CardDatabase::default().with_bracket_lists(BracketLists::from_pairs(
+            "test-1",
+            &[
+                (
+                    BracketCardClass::MassLandSweepers,
+                    mass_land_denial.as_slice(),
+                ),
+                (BracketCardClass::ExtraTurns, extra_turns.as_slice()),
+                (
+                    BracketCardClass::EfficientTutors,
+                    efficient_tutors.as_slice(),
+                ),
+            ],
+        ));
         db.bracket_signals_by_name = entries
             .iter()
             .map(|(name, signals)| (name.to_lowercase(), *signals))

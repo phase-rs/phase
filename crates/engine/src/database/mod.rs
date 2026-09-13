@@ -33,7 +33,9 @@ mod meld_tests;
 #[cfg(test)]
 mod unearth_tests;
 
-pub use bracket_lists::{BracketLists, BracketSignals};
+pub use bracket_lists::{
+    BracketCardClass, BracketLists, BracketSignals, CuratedList, LoadedList, PolicySource,
+};
 pub use card_db::CardDatabase;
 pub use search::{CardSearchQuery, CardSearchResult, CardSearchResults};
 

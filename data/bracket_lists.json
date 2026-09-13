@@ -1,46 +1,177 @@
 {
-  "version": "2025-09-24-wotc",
-  "source": "https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta",
-  "mass_land_denial": [
-    "Armageddon",
-    "Cataclysm",
-    "Catastrophe",
-    "Decree of Annihilation",
-    "Jokulhaups",
-    "Obliterate",
-    "Ravages of War",
-    "Ruination",
-    "Wildfire"
-  ],
-  "extra_turns": [
-    "Aggravated Assault",
-    "Beacon of Tomorrows",
-    "Capture of Jingzhou",
-    "Final Fortune",
-    "Hellkite Charger",
-    "Karn's Temporal Sundering",
-    "Last Chance",
-    "Nexus of Fate",
-    "Notorious Throng",
-    "Savage Beating",
-    "Temporal Manipulation",
-    "Time Stretch",
-    "Time Warp",
-    "Walk the Aeons"
-  ],
-  "efficient_tutors": [
-    "Demonic Consultation",
-    "Demonic Tutor",
-    "Diabolic Intent",
-    "Enlightened Tutor",
-    "Grim Tutor",
-    "Imperial Seal",
-    "Mystical Tutor",
-    "Personal Tutor",
-    "Sylvan Tutor",
-    "Tainted Pact",
-    "Vampiric Tutor",
-    "Wishclaw Talisman",
-    "Worldly Tutor"
-  ]
+  "version": "2026-02-09-wotc",
+  "lists": {
+    "game_changers": {
+      "source": {
+        "url": "https://magic.wizards.com/en/news/announcements/commander-brackets-beta-update-february-9-2026",
+        "published": "2026-02-09",
+        "retrieved": "2026-09-12",
+        "local_copy": "docs/bracket-sources/commander-brackets-beta-update-february-9-2026.txt"
+      },
+      "note": "The 2025-10-21 'Updated Game Changers' list (51 names) plus Farewell and Biorhythm, added 2026-02-09. AUTHORITATIVE over MTGJSON isGameChanger: WotC removes names as well as adding them (ten came off on 2025-10-21), which a union could never express.",
+      "names": [
+        "Drannith Magistrate",
+        "Enlightened Tutor",
+        "Farewell",
+        "Humility",
+        "Serra's Sanctum",
+        "Smothering Tithe",
+        "Teferi's Protection",
+        "Consecrated Sphinx",
+        "Cyclonic Rift",
+        "Force of Will",
+        "Fierce Guardianship",
+        "Gifts Ungiven",
+        "Intuition",
+        "Mystical Tutor",
+        "Narset, Parter of Veils",
+        "Rhystic Study",
+        "Thassa's Oracle",
+        "Ad Nauseam",
+        "Bolas's Citadel",
+        "Braids, Cabal Minion",
+        "Demonic Tutor",
+        "Imperial Seal",
+        "Necropotence",
+        "Opposition Agent",
+        "Orcish Bowmasters",
+        "Tergrid, God of Fright",
+        "Vampiric Tutor",
+        "Gamble",
+        "Jeska's Will",
+        "Underworld Breach",
+        "Crop Rotation",
+        "Biorhythm",
+        "Gaea's Cradle",
+        "Natural Order",
+        "Seedborn Muse",
+        "Survival of the Fittest",
+        "Worldly Tutor",
+        "Aura Shards",
+        "Coalition Victory",
+        "Grand Arbiter Augustin IV",
+        "Notion Thief",
+        "Ancient Tomb",
+        "Chrome Mox",
+        "Field of the Dead",
+        "Glacial Chasm",
+        "Grim Monolith",
+        "Lion's Eye Diamond",
+        "Mana Vault",
+        "Mishra's Workshop",
+        "Mox Diamond",
+        "Panoptic Mirror",
+        "The One Ring",
+        "The Tabernacle at Pendrell Vale"
+      ]
+    },
+    "mass_land_sweepers": {
+      "source": {
+        "url": "https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta",
+        "published": "2025-02-11",
+        "retrieved": "2026-09-12",
+        "local_copy": "docs/bracket-sources/introducing-commander-brackets-beta.txt"
+      },
+      "note": "These cards regularly destroy, exile, and bounce other lands, keep lands tapped, or change what mana is produced by four or more lands per player without replacing them.",
+      "names": [
+        "Armageddon",
+        "Cataclysm",
+        "Catastrophe",
+        "Decree of Annihilation",
+        "Jokulhaups",
+        "Obliterate",
+        "Ravages of War",
+        "Ruination",
+        "Sunder",
+        "Wildfire"
+      ]
+    },
+    "mass_mana_denial": {
+      "source": {
+        "url": "https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta",
+        "published": "2025-02-11",
+        "retrieved": "2026-09-12",
+        "local_copy": "docs/bracket-sources/introducing-commander-brackets-beta.txt"
+      },
+      "note": "Bounded coverage of the official class, not a complete enumeration. deck-lens ADR 0015 records that the derivation did not converge; illustrative known misses include Infernal Darkness, Ritual of Subdual, Naked Singularity, Reality Twist, Hall of Gemstone, Mist of Stagnation, Storm Cauldron, Worldpurge, Realm Razer. A cost increase is not a change to what mana a land produces, so Trinisphere is deliberately absent.",
+      "names": [
+        "Back to Basics",
+        "Blood Moon",
+        "Contamination",
+        "Hokori, Dust Drinker",
+        "Magus of the Moon",
+        "Overburden",
+        "Rising Waters",
+        "Stasis",
+        "Static Orb",
+        "Winter Orb"
+      ]
+    },
+    "extra_turns": {
+      "source": {
+        "url": "https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta",
+        "published": "2025-02-11",
+        "retrieved": "2026-09-12",
+        "local_copy": "docs/bracket-sources/introducing-commander-brackets-beta.txt"
+      },
+      "note": "The extra-turn line is the one threshold this programme leaves at its current value pending a corpus.",
+      "names": [
+        "Beacon of Tomorrows",
+        "Capture of Jingzhou",
+        "Final Fortune",
+        "Karn's Temporal Sundering",
+        "Last Chance",
+        "Nexus of Fate",
+        "Notorious Throng",
+        "Temporal Manipulation",
+        "Time Stretch",
+        "Time Warp",
+        "Walk the Aeons"
+      ]
+    },
+    "extra_combats": {
+      "source": {
+        "url": "phase.rs engine taxonomy — Effect::AdditionalPhase (crates/engine/src/types/ability.rs:17737, CR 500.8) vs Effect::ExtraTurn (:17677, CR 500.7)",
+        "published": "2026-09-12",
+        "retrieved": "2026-09-12",
+        "local_copy": null
+      },
+      "note": "EVIDENCE ONLY — feeds no policy axis and no floor rule. These three cards were mis-filed under extra_turns; their Oracle text grants additional combat phases, never an extra turn. Verified against the Scryfall oracle-cards snapshot of 2026-09-01.",
+      "names": [
+        "Aggravated Assault",
+        "Hellkite Charger",
+        "Savage Beating"
+      ]
+    },
+    "efficient_tutors": {
+      "source": {
+        "url": "https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta",
+        "published": "2025-02-11",
+        "retrieved": "2026-09-12",
+        "local_copy": "docs/bracket-sources/introducing-commander-brackets-beta.txt"
+      },
+      "superseded_by": {
+        "url": "https://magic.wizards.com/en/news/announcements/commander-brackets-beta-update-october-21-2025",
+        "published": "2025-10-21",
+        "retrieved": "2026-09-12",
+        "local_copy": "docs/bracket-sources/commander-brackets-beta-update-october-21-2025.txt"
+      },
+      "note": "WotC: 'the avenue we'd like to take is to remove the tutor restrictions from Commander Brackets entirely and rely on Game Changers to catch the most efficient tutors.' 6 of these 13 are themselves Game Changers (Demonic Tutor, Enlightened Tutor, Imperial Seal, Mystical Tutor, Vampiric Tutor, Worldly Tutor); the overlap is computed by BracketLists::overlap, not stored, and must not read as six independent findings. Retiring the floor that consumes this list is P3.",
+      "names": [
+        "Demonic Consultation",
+        "Demonic Tutor",
+        "Diabolic Intent",
+        "Enlightened Tutor",
+        "Grim Tutor",
+        "Imperial Seal",
+        "Mystical Tutor",
+        "Personal Tutor",
+        "Sylvan Tutor",
+        "Tainted Pact",
+        "Vampiric Tutor",
+        "Wishclaw Talisman",
+        "Worldly Tutor"
+      ]
+    }
+  }
 }
