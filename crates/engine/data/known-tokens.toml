@@ -206,6 +206,11 @@ scryfall_id = "f82fce56-307a-44bf-8c46-0e1328550e17"
 [[token.source_card_refs]]
 card_name = "Fanatic of Rhonas"
 scryfall_oracle_id = "7973820b-fdaf-46ec-9e3e-d4c0e77b5067"
+scryfall_id = "15844392-111e-4bab-91eb-4fe53c52c34c"
+
+[[token.source_card_refs]]
+card_name = "Fanatic of Rhonas"
+scryfall_oracle_id = "7973820b-fdaf-46ec-9e3e-d4c0e77b5067"
 scryfall_id = "1f9fb33a-3b39-4aff-93b8-aedafe0ea694"
 
 [token.token_image_ref]
@@ -17704,6 +17709,11 @@ scryfall_oracle_id = "cd45a29f-73bc-435c-9d50-09a4ecaa77be"
 scryfall_id = "cc43b129-06e9-4b17-8320-2699bfc67d0e"
 
 [[token.source_card_refs]]
+card_name = "Beetleback Chief"
+scryfall_oracle_id = "f5c5f64c-6911-430c-a825-b32b96d39c7d"
+scryfall_id = "9eb27caf-57e4-4fca-a734-148195dcad1b"
+
+[[token.source_card_refs]]
 card_name = "Mogg War Marshal"
 scryfall_oracle_id = "7b8f4879-578e-40e4-863a-41d0c32c6bdd"
 scryfall_id = "d3f75cf8-5346-497d-b5af-72b268a72f2b"
@@ -33763,6 +33773,11 @@ keywords = []
 card_name = "Vernal Sovereign"
 scryfall_oracle_id = "bf30b8ae-0125-4a00-bae8-ac1aa7703a08"
 scryfall_id = "7c54fe0b-56f6-4cff-adde-56aa5326194d"
+
+[[token.source_card_refs]]
+card_name = "Voice of Resurgence"
+scryfall_oracle_id = "5cbbb3f3-63a4-4983-81ea-8c405b10e63f"
+scryfall_id = "5af28ad7-5736-44f0-81ae-67ec82d03ee2"
 
 [[token.source_card_refs]]
 card_name = "Voice of Resurgence"
@@ -51063,6 +51078,11 @@ keywords = [
     "Flying",
     "Vigilance",
 ]
+
+[[token.source_card_refs]]
+card_name = "Resplendent Angel"
+scryfall_oracle_id = "2ac93092-1a57-4cf7-8f03-1dca86d5c476"
+scryfall_id = "1740ef90-42a6-454d-bb85-b495bb149ca6"
 
 [token.token_image_ref]
 scryfall_id = "2e974146-736c-430c-860a-2230f52c8a4e"
@@ -75992,11 +76012,6 @@ scryfall_oracle_id = "ef08d371-9d6c-4a2d-a444-d475fbf1b633"
 scryfall_id = "f9540288-9aef-49a2-a5da-3e42ba9dbbcd"
 
 [[token.source_card_refs]]
-card_name = "Xyris, the Writhing Storm"
-scryfall_oracle_id = "8687948c-456b-495b-9b31-f818c65624b6"
-scryfall_id = "466a7198-d022-47af-a7c5-351a54eb71de"
-
-[[token.source_card_refs]]
 card_name = "Orochi Eggwatcher // Shidako, Broodmistress"
 face_name = "Orochi Eggwatcher"
 scryfall_oracle_id = "e448e27c-f66d-4369-8215-7f7275e456e1"
@@ -76006,6 +76021,11 @@ scryfall_id = "a2a0181f-44bf-487d-a685-f92a8a43afe3"
 card_name = "Xyris, the Writhing Storm"
 scryfall_oracle_id = "8687948c-456b-495b-9b31-f818c65624b6"
 scryfall_id = "1032c8be-3de4-47e4-8885-38dba8d90de0"
+
+[[token.source_card_refs]]
+card_name = "Xyris, the Writhing Storm"
+scryfall_oracle_id = "8687948c-456b-495b-9b31-f818c65624b6"
+scryfall_id = "648ab4fb-337a-4ef2-895f-3687ad927337"
 
 [token.token_image_ref]
 scryfall_id = "4bfc751d-af71-49ff-a8b2-0d3a20eb136a"
@@ -83939,6 +83959,11 @@ scryfall_id = "adea9871-807e-471d-9a9f-ad6efcf07e80"
 card_name = "Ghalta and Mavren"
 scryfall_oracle_id = "756042c5-e444-45d7-8dc6-ae7c83c98438"
 scryfall_id = "7ccb21e9-5169-4934-83c3-78ac00e5ffc7"
+
+[[token.source_card_refs]]
+card_name = "Ghalta and Mavren"
+scryfall_oracle_id = "756042c5-e444-45d7-8dc6-ae7c83c98438"
+scryfall_id = "05e1189b-837d-4c1f-85a2-35d229c4dee8"
 
 [token.token_image_ref]
 scryfall_id = "50b6ea55-c976-40e7-aa09-5ba77688bfe9"
@@ -116695,6 +116720,11 @@ card_name = "Mercy Killing"
 scryfall_oracle_id = "4d80bac5-ce62-4c5c-873a-ce81d2697842"
 scryfall_id = "0ef5649d-10a4-44cc-b94a-9f2ee4c0aac7"
 
+[[token.source_card_refs]]
+card_name = "Rhys the Redeemed"
+scryfall_oracle_id = "f7252190-ad24-4ba3-a644-2790dd1d680d"
+scryfall_id = "af107542-ebf3-4a35-a313-b8803d8eda0c"
+
 [token.token_image_ref]
 scryfall_id = "cee23d72-2cd6-4133-98d1-c7b8da839408"
 scryfall_oracle_id = "86f88b6a-762c-4cbd-8ea2-d30ee16c7f99"
@@ -127619,6 +127649,11 @@ keywords = ["Vigilance"]
 card_name = "Grove of the Guardian"
 scryfall_oracle_id = "f746612a-fbed-44ca-b2cc-5928e10cf4bb"
 scryfall_id = "0079326b-ef87-49b8-9772-9134fb5deb3e"
+
+[[token.source_card_refs]]
+card_name = "Grove of the Guardian"
+scryfall_oracle_id = "f746612a-fbed-44ca-b2cc-5928e10cf4bb"
+scryfall_id = "d41f7539-738f-4e27-a538-a442e0d2fe84"
 
 [[token.source_card_refs]]
 card_name = "Grove of the Guardian"
@@ -153407,6 +153442,11 @@ face_name = "Lisette, Dean of the Root"
 scryfall_oracle_id = "6e1aa07a-5d9b-4daf-8dc4-c1717360855f"
 scryfall_id = "902bc049-5348-47c3-95ad-d9dc935838cb"
 
+[[token.source_card_refs]]
+card_name = "Pest Infestation"
+scryfall_oracle_id = "1b704798-0c69-4c18-ac7e-42933ce90028"
+scryfall_id = "4a45bf1f-748d-4075-976d-cc355fce1862"
+
 [token.token_image_ref]
 scryfall_id = "1ae25997-391f-45b2-bdc1-d86cf6b69223"
 scryfall_oracle_id = "37c4adc8-7455-4725-95fb-169a8b0254e5"
@@ -156619,6 +156659,11 @@ scryfall_oracle_id = "1e9b0fd6-5aae-401a-8df5-d94ce6442696"
 scryfall_id = "35cd0122-0b38-4aae-84cd-4d5a8e2ae2f5"
 
 [[token.source_card_refs]]
+card_name = "Excavation Technique"
+scryfall_oracle_id = "bcd3e6a1-7b76-408d-9236-3791c3e1064a"
+scryfall_id = "ff1f6e62-eb7b-4d9b-8034-f227f655431f"
+
+[[token.source_card_refs]]
 card_name = "The Reaver Cleaver"
 scryfall_oracle_id = "37a2a31d-51e6-4c07-b4c2-b206ad40eb42"
 scryfall_id = "10e6f41c-cb5a-48ea-9ae6-86249bcce629"
@@ -156633,6 +156678,11 @@ card_name = "Young Red Dragon // Bathe in Gold"
 face_name = "Bathe in Gold"
 scryfall_oracle_id = "2f865ae9-9328-4f6f-924f-d5e0a65aaa96"
 scryfall_id = "2e391516-e04f-4432-aaa2-ee90ee564330"
+
+[[token.source_card_refs]]
+card_name = "Prosperous Innkeeper"
+scryfall_oracle_id = "da785227-cf8a-4d44-9e7c-fc909ea868f2"
+scryfall_id = "ef5793d2-58e7-4da2-9777-8db45abc09c0"
 
 [[token.source_card_refs]]
 card_name = "Xorn"
@@ -163186,6 +163236,33 @@ scryfall_id = "7da2511d-f5ae-4c51-a9b2-dffd581243b6"
 scryfall_id = "3f1092e1-c7c0-4ea6-8128-eb7069783747"
 scryfall_oracle_id = "c02feaa1-8540-4948-b92f-01a719218c2b"
 preset_id = "b9aa07f8-d31a-58af-b034-082736e07773"
+
+[[token]]
+id = "b9bd9f4f-7ce0-54a7-a53c-ae0794f5c63d"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "11"
+released_at = "2026-10-02"
+type_line = "Token Artifact — Heartwood"
+rules_text = "{T}: Add {R} or {G}."
+
+[token.body]
+display_name = "Heartwood"
+core_types = ["Artifact"]
+subtypes = ["Heartwood"]
+supertypes = []
+colors = [
+    "Green",
+    "Red",
+]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "eb4bf635-04d7-4994-9f70-4ff573a767e7"
+scryfall_oracle_id = "ed1d8118-b182-413b-99ba-52844d35a35b"
+preset_id = "b9bd9f4f-7ce0-54a7-a53c-ae0794f5c63d"
 
 [[token]]
 id = "b9e5620b-de9f-5422-b5b1-6c9647b9b607"
@@ -170101,6 +170178,16 @@ card_name = "Legion's Landing // Adanto, the First Fort"
 face_name = "Adanto, the First Fort"
 scryfall_oracle_id = "f7d8b91b-6541-4d3e-af51-7e000eac69c1"
 scryfall_id = "14a41e7e-9f68-4449-9e2c-4c862036bce5"
+
+[[token.source_card_refs]]
+card_name = "Elenda's Hierophant"
+scryfall_oracle_id = "cb99c675-adc5-4dad-8be8-524f5f921213"
+scryfall_id = "a0b21a6d-5f3c-41e3-b994-42a6a7af538f"
+
+[[token.source_card_refs]]
+card_name = "Ghalta and Mavren"
+scryfall_oracle_id = "756042c5-e444-45d7-8dc6-ae7c83c98438"
+scryfall_id = "05e1189b-837d-4c1f-85a2-35d229c4dee8"
 
 [token.token_image_ref]
 scryfall_id = "1c9ace77-f1e7-4abf-beb3-369febda9394"
@@ -206452,6 +206539,11 @@ scryfall_id = "68e9ba91-9bab-4b2f-a82d-05b333b8deed"
 [[token.source_card_refs]]
 card_name = "Arasta of the Endless Web"
 scryfall_oracle_id = "695eea46-1535-48c5-bbb6-0b8379e77bfc"
+scryfall_id = "d75a8f9b-e16c-496c-80a2-6fc857e9d159"
+
+[[token.source_card_refs]]
+card_name = "Arasta of the Endless Web"
+scryfall_oracle_id = "695eea46-1535-48c5-bbb6-0b8379e77bfc"
 scryfall_id = "95a87b4e-f0ea-457c-9517-4acf313c4ca6"
 
 [token.token_image_ref]
@@ -210738,7 +210830,7 @@ toughness = 2
 core_types = ["Creature"]
 subtypes = ["Dwarf"]
 supertypes = []
-colors = []
+colors = ["Red"]
 keywords = []
 
 [[token.source_card_refs]]
@@ -222527,6 +222619,11 @@ card_name = "Pegasus Guardian // Rescue the Foal"
 face_name = "Rescue the Foal"
 scryfall_oracle_id = "e71863a7-0de1-4ab5-95e8-c39e6810d899"
 scryfall_id = "d32dcd09-8542-4135-8955-e29ee63e3589"
+
+[[token.source_card_refs]]
+card_name = "Storm Herd"
+scryfall_oracle_id = "30aa362b-7ab1-486e-9802-1171e0dc2416"
+scryfall_id = "e4a25752-9155-44be-a7eb-865755c2f915"
 
 [token.token_image_ref]
 scryfall_id = "ebd8f43d-7e54-46d4-9fe9-ac818a9fd91f"
