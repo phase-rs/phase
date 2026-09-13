@@ -29,7 +29,7 @@ pub fn resolve(
     };
 
     let dur = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
-    let target_filter = crate::game::effects::resolved_object_filter(ability, target_filter);
+    let target_filter = crate::game::effects::resolved_object_filter(state, ability, target_filter);
 
     // CR 608.2c + 603.10a: Delegate target resolution to the unified 3-tier
     // dispatch (`resolved_targets`), matching `bounce` / `change_zone`. This
@@ -186,7 +186,7 @@ pub(crate) fn pump_all_affected_objects(
     // `Not{SpecificObject{target}}`, excluding the already-pumped target so it is
     // not shrunk twice. No-op for filters without contextual refs, mirroring the
     // single `resolve` and `destroy`/`bounce`.
-    let target_filter = crate::game::effects::resolved_object_filter(ability, target);
+    let target_filter = crate::game::effects::resolved_object_filter(state, ability, target);
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
     let ctx = filter::FilterContext::from_ability(ability);
     // CR 702.26b: a phased-out permanent "is treated as though it does not

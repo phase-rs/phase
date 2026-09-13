@@ -465,7 +465,7 @@ pub fn resolve_all(
             properties: vec![],
         })
     } else {
-        crate::game::effects::resolved_object_filter(ability, &target_filter)
+        crate::game::effects::resolved_object_filter(state, ability, &target_filter)
     };
     let scoped_ability;
     let ability = if filter_uses_scoped_player(&effective_filter) && ability.scoped_player.is_none()

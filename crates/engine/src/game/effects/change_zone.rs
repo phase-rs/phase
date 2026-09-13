@@ -1981,7 +1981,7 @@ pub fn resolve_all(
             properties: vec![],
         })
     } else {
-        crate::game::effects::resolved_object_filter(ability, &target_filter)
+        crate::game::effects::resolved_object_filter(state, ability, &target_filter)
     };
 
     // CR 603.7: Resolve the `TrackedSetId(0)` sentinel emitted by the parser for

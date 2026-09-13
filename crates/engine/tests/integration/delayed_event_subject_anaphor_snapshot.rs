@@ -6,7 +6,7 @@
 //! `CreateDelayedTrigger { condition: AtNextPhase(EndCombat), effect: Destroy {
 //! target: EventTarget } }`. `EventTarget` resolves out of
 //! `state.current_trigger_event`, which at the end-of-combat step is the phase
-//! change â€” it carries no object, so the referent resolved to nothing and the
+//! change — it carries no object, so the referent resolved to nothing and the
 //! destroy silently did nothing (issue #4229, Ohran Viper).
 //!
 //! `delayed_trigger::resolve` already creation-time-snapshots the OTHER
@@ -38,7 +38,7 @@ const DELAYED_SLIVER: &str =
     "Whenever a Sliver deals combat damage to a creature, destroy that creature at end of combat.";
 const SIMIC_BASILISK_GRANT: &str = "{1}{G}: Until end of turn, target creature with a +1/+1 counter on it gains \"Whenever this creature deals combat damage to a creature, destroy that creature at end of combat.\"";
 /// Verbatim Oracle text (Scryfall). An instant, so it can be cast in the
-/// combat-damage step's priority window â€” which is the only place a blink can
+/// combat-damage step's priority window — which is the only place a blink can
 /// land BETWEEN the delayed trigger's creation and its end-of-combat firing.
 /// "Creature you control" is satisfiable here because the damage RECIPIENT is
 /// by construction controlled by the trigger controller's opponent.
@@ -70,8 +70,8 @@ fn pass_into_declare_blockers(runner: &mut GameRunner) {
 }
 
 /// CR 511.1 + CR 603.7c: the reported board state (issue #4229). Ohran Viper
-/// attacks, a 0/6 Wall blocks. The Viper deals 1 combat damage to the Wall â€” not
-/// lethal, so only the delayed destroy can remove it â€” and takes 0 back. At the
+/// attacks, a 0/6 Wall blocks. The Viper deals 1 combat damage to the Wall — not
+/// lethal, so only the delayed destroy can remove it — and takes 0 back. At the
 /// END OF COMBAT step the delayed trigger fires and must destroy the Wall it
 /// damaged.
 #[test]
@@ -100,7 +100,7 @@ fn ohran_viper_destroys_the_damaged_creature_at_end_of_combat() {
     assert_eq!(
         damage.zone_of(wall),
         Zone::Battlefield,
-        "CR 704.5g: 1 damage is not lethal to a 0/6 â€” the Wall may only die to the \
+        "CR 704.5g: 1 damage is not lethal to a 0/6 — the Wall may only die to the \
          delayed destroy, so this test would pass vacuously if it died here"
     );
 
@@ -125,7 +125,7 @@ fn ohran_viper_destroys_the_damaged_creature_at_end_of_combat() {
 /// not the trigger source and not the ability's source object. Here the trigger
 /// source (a 3/3 Sliver lord that never fights) watches a DIFFERENT Sliver deal
 /// the combat damage, so a snapshot keyed on `ability.source_id` or on
-/// `TriggeringSource` would destroy the wrong creature â€” or nothing at all.
+/// `TriggeringSource` would destroy the wrong creature — or nothing at all.
 #[test]
 fn delayed_sliver_trigger_destroys_the_recipient_not_the_source() {
     let mut scenario = GameScenario::new();
@@ -158,7 +158,7 @@ fn delayed_sliver_trigger_destroys_the_recipient_not_the_source() {
     assert_eq!(
         damage.zone_of(blocker),
         Zone::Battlefield,
-        "1 damage is not lethal to a 0/6 â€” guards against a vacuous pass"
+        "1 damage is not lethal to a 0/6 — guards against a vacuous pass"
     );
 
     runner.advance_to_phase(Phase::PostCombatMain);
@@ -171,7 +171,7 @@ fn delayed_sliver_trigger_destroys_the_recipient_not_the_source() {
     assert_eq!(
         zone_of(&runner, dealer),
         Zone::Battlefield,
-        "CR 120.1: the damage dealer must survive â€” `TriggeringSource` is the wrong anaphor"
+        "CR 120.1: the damage dealer must survive — `TriggeringSource` is the wrong anaphor"
     );
     assert_eq!(
         zone_of(&runner, watcher),
@@ -184,7 +184,7 @@ fn delayed_sliver_trigger_destroys_the_recipient_not_the_source() {
 /// trigger is printed on the grantor's activated ability and granted to a
 /// DIFFERENT creature, so the delayed trigger created at combat damage belongs
 /// to the GRANTEE. The creation-time snapshot must read the grantee's own
-/// creation event â€” anything keyed on the grantor (which never fought) resolves
+/// creation event — anything keyed on the grantor (which never fought) resolves
 /// to nothing.
 #[test]
 fn granted_delayed_damage_trigger_snapshots_its_own_creation_event() {
@@ -222,7 +222,7 @@ fn granted_delayed_damage_trigger_snapshots_its_own_creation_event() {
     assert_eq!(
         damage.zone_of(blocker),
         Zone::Battlefield,
-        "2 damage is not lethal to a 0/6 â€” guards against a vacuous pass"
+        "2 damage is not lethal to a 0/6 — guards against a vacuous pass"
     );
 
     runner.advance_to_phase(Phase::PostCombatMain);
@@ -250,7 +250,7 @@ fn granted_delayed_damage_trigger_snapshots_its_own_creation_event() {
 ///
 /// Two arms. Arm 1 is a mandatory reach-guard: without it, "the creature lived"
 /// in arm 2 would also pass on a trigger that never fired, or on a snapshot pass
-/// that silently bound nothing â€” the exact bug this file exists to catch.
+/// that silently bound nothing — the exact bug this file exists to catch.
 ///
 /// The blink is cast by the RECIPIENT's controller, which is always the trigger
 /// controller's opponent, so Ephemerate's "creature you control" is satisfied.
@@ -283,7 +283,7 @@ fn delayed_destroy_does_not_affect_a_blinked_and_returned_recipient() {
                 runner.state().phase,
                 Phase::EndCombat,
                 "reached end of combat before the damage trigger installed its \
-                 delayed trigger â€” the blink would have nothing to race"
+                 delayed trigger — the blink would have nothing to race"
             );
             runner
                 .act(GameAction::PassPriority)
@@ -317,7 +317,7 @@ fn delayed_destroy_does_not_affect_a_blinked_and_returned_recipient() {
         zone_of(&runner, wall),
         Zone::Graveyard,
         "arm 1 reach-guard: with no blink the delayed destroy must kill the \
-         damaged creature â€” otherwise arm 2 proves nothing"
+         damaged creature — otherwise arm 2 proves nothing"
     );
 
     // ---- Arm 2 (the detector): blink the recipient, it must SURVIVE. ----
@@ -383,7 +383,7 @@ fn delayed_destroy_does_not_affect_a_blinked_and_returned_recipient() {
 /// `EventTarget` cards, 76 delayed `TriggeringSource` cards, and zero naming
 /// both), so the chain is built by taking the REAL parsed Ohran Viper delayed
 /// payload and cloning its clause with the other anaphor substituted. That keeps
-/// every field the parser produces and changes only the axis under test â€” the
+/// every field the parser produces and changes only the axis under test — the
 /// printed reading is "destroy that creature and this creature at end of
 /// combat", a coherent mutual-destruction basilisk.
 ///
@@ -474,12 +474,12 @@ fn a_mixed_event_subject_delayed_chain_destroys_both_dealer_and_recipient() {
         assert_eq!(
             damage.zone_of(recipient),
             Zone::Battlefield,
-            "{label}: 1 damage is not lethal to a 0/6 â€” guards against a vacuous pass"
+            "{label}: 1 damage is not lethal to a 0/6 — guards against a vacuous pass"
         );
         assert_eq!(
             damage.zone_of(dealer),
             Zone::Battlefield,
-            "{label}: a 0/6 deals no damage â€” the dealer must survive combat itself"
+            "{label}: a 0/6 deals no damage — the dealer must survive combat itself"
         );
 
         runner.advance_to_phase(Phase::PostCombatMain);
@@ -487,12 +487,12 @@ fn a_mixed_event_subject_delayed_chain_destroys_both_dealer_and_recipient() {
         assert_eq!(
             zone_of(&runner, recipient),
             Zone::Graveyard,
-            "{label}: CR 120.3 â€” the EventTarget clause must destroy the damage RECIPIENT"
+            "{label}: CR 120.3 — the EventTarget clause must destroy the damage RECIPIENT"
         );
         assert_eq!(
             zone_of(&runner, dealer),
             Zone::Graveyard,
-            "{label}: CR 120.1 â€” the TriggeringSource clause must destroy the damage \
+            "{label}: CR 120.1 — the TriggeringSource clause must destroy the damage \
              DEALER. Both in the graveyard is the whole point: one shared target slot \
              would send both clauses at the same object and leave the other alive"
         );
@@ -512,7 +512,7 @@ fn a_mixed_event_subject_delayed_chain_destroys_both_dealer_and_recipient() {
 ///
 /// This is a CHARACTERIZATION test, not a revert-detector, and the distinction
 /// is deliberate: the binding asserted below is identical under the old
-/// chain-wide root snapshot and the new root-local one â€” verified by running it
+/// chain-wide root snapshot and the new root-local one — verified by running it
 /// both ways. That is precisely the point. It pins the one card at risk and
 /// records that this change does not move it, which is the evidence that
 /// switching the root question is safe. Do not read a passing run here as proof
@@ -560,16 +560,16 @@ fn swooping_pteranodon_root_clause_keeps_its_own_target_slot() {
 /// CR 608.2k + CR 603.7c: a delayed MASS zone move keeps its creation event's
 /// referent, end to end.
 ///
-/// `Effect::ChangeZoneAll` answers `None` from `target_filter()` â€” the whole
-/// mass-population family does â€” so its `target` is a HIDDEN slot that
+/// `Effect::ChangeZoneAll` answers `None` from `target_filter()` — the whole
+/// mass-population family does — so its `target` is a HIDDEN slot that
 /// `effect_parent_ref_slots` must surface explicitly. While that arm was gated
 /// on `filter_refs_parent_target` alone, a mass move naming `EventTarget` was
 /// invisible to the event-subject detector: no creation-time snapshot was taken,
 /// and at the end-of-combat step (whose phase event carries no event subject)
 /// it resolved against nothing and moved no cards.
 ///
-/// The parser can produce this shape â€” its trigger rebind converts a context
-/// filter to `EventTarget` across all nine mass effects â€” but no printed card
+/// The parser can produce this shape — its trigger rebind converts a context
+/// filter to `EventTarget` across all nine mass effects — but no printed card
 /// pairs it with a delayed suffix today, so the payload is built by substituting
 /// a `ChangeZoneAll` into the real parsed Ohran Viper delayed trigger. The
 /// printed reading is "put that creature into its owner's graveyard at end of
@@ -644,7 +644,7 @@ fn a_delayed_mass_zone_move_keeps_its_creation_event_referent() {
     assert_eq!(
         damage.zone_of(wall),
         Zone::Battlefield,
-        "1 damage is not lethal to a 0/6 â€” the wall may only leave via the \
+        "1 damage is not lethal to a 0/6 — the wall may only leave via the \
          delayed mass move, so this test would pass vacuously if it died here"
     );
 
@@ -659,7 +659,7 @@ fn a_delayed_mass_zone_move_keeps_its_creation_event_referent() {
     assert_eq!(
         zone_of(&runner, bystander),
         Zone::Battlefield,
-        "EventTarget names exactly one object â€” an uninvolved creature must not \
+        "EventTarget names exactly one object — an uninvolved creature must not \
          be swept up by the mass move"
     );
 }
@@ -739,7 +739,7 @@ fn a_delayed_mass_move_binds_a_nested_event_subject_reference() {
     assert_eq!(
         damage.zone_of(wall),
         Zone::Battlefield,
-        "1 damage is not lethal to a 0/6 â€” guards against a vacuous pass"
+        "1 damage is not lethal to a 0/6 — guards against a vacuous pass"
     );
 
     runner.advance_to_phase(Phase::PostCombatMain);
@@ -749,12 +749,12 @@ fn a_delayed_mass_move_binds_a_nested_event_subject_reference() {
         Zone::Battlefield,
         "CR 608.2k: the nested Not(EventTarget) must still EXCLUDE the damaged \
          creature. An unbound inner reference resolves to nothing, and \
-         Not(nothing) sweeps everything â€” including the object it must spare"
+         Not(nothing) sweeps everything — including the object it must spare"
     );
     assert_eq!(
         zone_of(&runner, bystander),
         Zone::Graveyard,
-        "the mass destroy must still apply to every OTHER creature â€” asserting \
+        "the mass destroy must still apply to every OTHER creature — asserting \
          only the exclusion would pass on a filter that matched nobody at all"
     );
 }
@@ -764,15 +764,15 @@ fn a_delayed_mass_move_binds_a_nested_event_subject_reference() {
 ///
 /// CHARACTERIZATION test, and the label is load-bearing: unlike its
 /// single-target sibling above, this one does **not** detect a missing pin.
-/// Verified by revert-probe â€” disabling a `target_pin_is_current` gate on the
+/// Verified by revert-probe — disabling a `target_pin_is_current` gate on the
 /// `ChangeZoneAll` scan leaves it green, so whatever spares the returned object
 /// on the mass path is not that gate. The mass resolvers (`change_zone`,
-/// `destroy_all`, â€¦) each scan and filter independently and `DestroyAll` carries
+/// `destroy_all`, …) each scan and filter independently and `DestroyAll` carries
 /// no pin check at all, so the mechanism here is still unidentified.
 ///
 /// It is kept because the BEHAVIOR is correct and worth locking in: if a future
 /// change starts sweeping blinked referents on the mass path, this goes red.
-/// Do not read it as proof that the mass path enforces CR 400.7 â€” establishing
+/// Do not read it as proof that the mass path enforces CR 400.7 — establishing
 /// that needs a repro this test does not yet provide.
 #[test]
 fn a_delayed_mass_move_does_not_affect_a_blinked_and_returned_referent() {
@@ -853,7 +853,7 @@ fn a_delayed_mass_move_does_not_affect_a_blinked_and_returned_referent() {
         zone_of(&runner, wall),
         Zone::Graveyard,
         "arm 1 reach-guard: without the blink the delayed mass destroy must kill \
-         the damaged creature â€” otherwise arm 2 proves nothing"
+         the damaged creature — otherwise arm 2 proves nothing"
     );
 
     // ---- Arm 2 (the detector): blink the referent, it must SURVIVE. ----
@@ -893,7 +893,7 @@ fn a_delayed_mass_move_does_not_affect_a_blinked_and_returned_referent() {
         zone_of(&runner, wall),
         Zone::Battlefield,
         "CR 400.7: the blinked referent is a NEW object, so the pinned delayed \
-         MASS destroy must not affect it â€” the mass path filters per object and \
+         MASS destroy must not affect it — the mass path filters per object and \
          never reads ability.targets, so it needs its own pin check"
     );
 }
@@ -902,7 +902,7 @@ fn a_delayed_mass_move_does_not_affect_a_blinked_and_returned_referent() {
 /// destroy a referent that left and returned.
 ///
 /// `DestroyAll` scans the battlefield through `matches_target_filter`, and
-/// `TargetFilter::SpecificObject` matches on OBJECT ID ALONE â€” it never consults
+/// `TargetFilter::SpecificObject` matches on OBJECT ID ALONE — it never consults
 /// `ability.target_incarnations`. A blinked permanent keeps its id and comes back
 /// as a new object (CR 400.7), so the concretized filter matches it again.
 #[test]
@@ -990,7 +990,7 @@ fn a_delayed_bare_mass_destroy_spares_a_blinked_and_returned_referent() {
         zone_of(&runner, wall),
         Zone::Graveyard,
         "arm 1 reach-guard: without the blink the delayed bare DestroyAll must \
-         kill the damaged creature â€” otherwise arm 2 proves nothing"
+         kill the damaged creature — otherwise arm 2 proves nothing"
     );
 
     // ---- Arm 2 (the detector): blink the referent, it must SURVIVE. ----
@@ -1021,5 +1021,184 @@ fn a_delayed_bare_mass_destroy_spares_a_blinked_and_returned_referent() {
         Zone::Battlefield,
         "CR 400.7: the returned permanent is a NEW object (incarnation {incarnation_after_blink}), \
          so the delayed bare DestroyAll must not destroy it"
+    );
+}
+
+/// CR 400.7 + CR 603.7c: a delayed EXCLUSION expires with the object it names.
+///
+/// "Destroy each creature OTHER than that creature at end of combat" lowers to
+/// `DestroyAll { And[Typed(Creature), Not(EventTarget)] }`. The exclusion is an
+/// anaphor to the creation event, so its LIFETIME is the referent's. Once that
+/// permanent leaves and returns it is a NEW object (CR 400.7) which the old
+/// exclusion no longer names, so it must be destroyed like any other creature.
+///
+/// Three assertions across two arms, because each distinguishes a different
+/// wrong outcome:
+///  * no blink — referent EXCLUDED, bystander DESTROYED. Proves the exclusion
+///    works at all, so arm 2 is not passing on an effect that does nothing.
+///  * blink — referent DESTROYED (the exclusion expired) AND bystander STILL
+///    destroyed. The bystander cell is the load-bearing one: it separates
+///    "the exclusion correctly expired" from "the whole effect was cancelled",
+///    which is how a naive pin fix fails.
+///
+/// Drains through `advance_until_delayed_triggers_resolve` rather than sampling
+/// straight after `advance_to_phase`. A fired delayed trigger is removed from
+/// `state.delayed_triggers` when it goes ON THE STACK, not when it resolves, and
+/// `advance_to_phase` stops at the phase boundary without draining — so an
+/// earlier version of this test observed "nothing happened" purely because the
+/// trigger was still sitting on the stack.
+#[test]
+fn a_delayed_exclusion_expires_when_its_referent_blinks() {
+    fn other_creatures_trigger() -> TriggerDefinition {
+        let abilities =
+            engine::parser::oracle::parse_oracle_text(OHRAN_VIPER, "Ohran Viper", &[], &[], &[]);
+        let mut trigger = abilities
+            .triggers
+            .first()
+            .expect("Ohran Viper must parse a damage trigger")
+            .clone();
+        let execute = trigger
+            .execute
+            .as_deref_mut()
+            .expect("trigger must have a body");
+        let Effect::CreateDelayedTrigger {
+            effect: delayed, ..
+        } = &mut *execute.effect
+        else {
+            panic!("Ohran Viper's body must be a CreateDelayedTrigger");
+        };
+        *delayed.effect = Effect::DestroyAll {
+            target: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(engine::types::ability::TypedFilter::creature()),
+                    TargetFilter::Not {
+                        filter: Box::new(TargetFilter::EventTarget),
+                    },
+                ],
+            },
+            cant_regenerate: false,
+        };
+        delayed.sub_ability = None;
+        delayed.else_ability = None;
+        trigger.clone()
+    }
+
+    /// Drain until every delayed trigger has fired AND the stack is empty.
+    fn drain(runner: &mut GameRunner) {
+        for _ in 0..256 {
+            if runner.state().delayed_triggers.is_empty() && runner.state().stack.is_empty() {
+                return;
+            }
+            if !matches!(
+                runner.state().waiting_for,
+                engine::types::game_state::WaitingFor::Priority { .. }
+            ) {
+                // A non-priority prompt (trigger ordering, a replacement choice)
+                // cannot be advanced by passing priority. Let the scenario
+                // driver settle it, then resume draining.
+                runner.advance_to_phase(Phase::End);
+                continue;
+            }
+            if runner.act(GameAction::PassPriority).is_err() {
+                return;
+            }
+        }
+        panic!("delayed trigger never resolved");
+    }
+
+    fn setup(with_blink: bool) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        if with_blink {
+            scenario.with_mana_pool(P1, vec![mana(ManaType::White), mana(ManaType::White)]);
+        }
+        let viper = {
+            let mut b = scenario.add_creature(P0, "Ohran Viper", 1, 2);
+            b.with_trigger_definition(other_creatures_trigger());
+            b.id()
+        };
+        let wall = scenario.add_creature(P1, "Wall of Stone", 0, 6).id();
+        let bystander = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let ephemerate = with_blink.then(|| {
+            scenario
+                .add_spell_to_hand_from_oracle(P1, "Ephemerate", true, EPHEMERATE)
+                .id()
+        });
+
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(viper, AttackTarget::Player(P1))])
+            .expect("declare attackers");
+        pass_into_declare_blockers(&mut runner);
+        runner
+            .declare_blockers(&[(wall, viper)])
+            .expect("declare blockers");
+        for _ in 0..16 {
+            if !runner.state().delayed_triggers.is_empty() {
+                break;
+            }
+            assert_ne!(
+                runner.state().phase,
+                Phase::EndCombat,
+                "reached end of combat before the delayed trigger was installed"
+            );
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority toward the combat damage step");
+        }
+        (runner, wall, bystander, ephemerate)
+    }
+
+    // ---- Arm 1: no blink — the exclusion holds. ----
+    let (mut runner, wall, bystander, _) = setup(false);
+    drain(&mut runner);
+    assert_eq!(
+        zone_of(&runner, wall),
+        Zone::Battlefield,
+        "arm 1: Not(EventTarget) must EXCLUDE the damaged creature"
+    );
+    assert_eq!(
+        zone_of(&runner, bystander),
+        Zone::Graveyard,
+        "arm 1 reach-guard: the mass destroy must kill every OTHER creature — \
+         without this, 'the referent survived' would also pass on an effect that \
+         did nothing at all"
+    );
+
+    // ---- Arm 2: blink — the exclusion expires with its referent. ----
+    let (mut runner, wall, bystander, ephemerate) = setup(true);
+    for _ in 0..4 {
+        if runner.state().waiting_for.acting_players().first().copied() == Some(P1) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass active-player priority so the blinker can respond");
+    }
+    let blinked = runner
+        .cast(ephemerate.expect("blink arm builds Ephemerate"))
+        .target_object(wall)
+        .resolve();
+    assert_eq!(
+        blinked.zone_of(wall),
+        Zone::Battlefield,
+        "reach-guard: Ephemerate must return the creature to the battlefield"
+    );
+
+    drain(&mut runner);
+
+    assert_eq!(
+        zone_of(&runner, wall),
+        Zone::Graveyard,
+        "CR 400.7 + CR 603.7c: the returned permanent is a NEW object, so the \
+         creation-time exclusion no longer names it and it dies with the rest"
+    );
+    assert_eq!(
+        zone_of(&runner, bystander),
+        Zone::Graveyard,
+        "the exclusion expiring must not cancel the EFFECT: every other creature \
+         is still destroyed. This cell separates 'exclusion expired' from \
+         'whole effect suppressed'"
     );
 }

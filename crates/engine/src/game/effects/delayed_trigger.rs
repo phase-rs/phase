@@ -662,11 +662,12 @@ fn bind_event_subject_nodes(
 /// `target_pin_is_current` (filter.rs), whereas `SpecificObject` is a bare
 /// object-id comparison that never consults `target_incarnations`.
 ///
-/// KNOWN GAP (nested negative forms): `filter::normalize_contextual_filter`
-/// rewrites `Not(ParentTarget)` to `Not(SpecificObject)` before the scan, which
-/// drops the pin again — so a blinked referent stays wrongly EXCLUDED from a
-/// delayed `Not(EventTarget)` mass filter. The bare and positive-nested forms
-/// are pin-correct; the negative-nested one is not yet. Tracked, not fixed here.
+/// The NEGATIVE nested form is pin-correct too, but by a different route:
+/// `filter::normalize_contextual_filter` concretizes `Not(ParentTarget)` into
+/// `Not(SpecificObject)` before the scan, which would drop the pin — so
+/// `effects::resolved_object_filter` pin-filters the referents it hands that
+/// normalization, and an exclusion whose referent went stale collapses to
+/// `Any` (nothing excluded) rather than continuing to spare a new object.
 ///
 /// RECURSES through the enclosing filter structure rather than matching only a
 /// bare leaf, mirroring `filter_refs_event_subject`'s traversal so detection and

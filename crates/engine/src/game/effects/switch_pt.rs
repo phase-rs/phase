@@ -19,7 +19,7 @@ pub fn resolve(
     };
 
     let dur = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
-    let target_filter = super::resolved_object_filter(ability, target_filter);
+    let target_filter = super::resolved_object_filter(state, ability, target_filter);
 
     // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch so `SelfRef`
     // resolves to the source object regardless of `ability.targets` (issue #323

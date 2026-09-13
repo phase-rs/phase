@@ -2600,16 +2600,30 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
         // (the spell lives on the STACK). Re-validate against the source leaf
         // (`InZone Stack`-aware) instead, preserving the spell target.
         validate_pinned_targets(state, &validated.targets, &src_leaf, &validated)
-    } else if matches!(
-        &validated.effect,
-        Effect::ChangeZoneAll { target, .. } if crate::game::effects::filter_refs_parent_target(target)
-    ) {
-        // CR 115.1 + CR 608.2b: `ChangeZoneAll` is a resolution-time mass
-        // instruction when its filter carries a delayed `ParentTarget` snapshot
-        // inside a tracked set. Treating that internal filter as a target would
-        // fizzle a valid Exile -> Battlefield return before the mass resolver
-        // can inspect the tracked member. Ordinary ChangeZoneAll player filters
-        // remain declared targets and follow the generic validation below.
+    } else if crate::game::effects::mass_population_target(&validated.effect)
+        .is_some_and(crate::game::effects::filter_refs_parent_or_event_subject)
+    {
+        // CR 115.1 + CR 608.2b: a MASS-POPULATION instruction whose filter
+        // carries a delayed anaphor snapshot (`ParentTarget` from a tracked set,
+        // or an `EVENT_SUBJECT_ANAPHORS` referent concretized at delayed-trigger
+        // creation) is a RESOLUTION-TIME population scan, not a declared target.
+        // CR 608.2b governs targets; treating the internal filter as one makes
+        // the stale-pin drop below empty `targets`, which then reads as "no
+        // legal choice" and removes the whole ability from the stack before the
+        // mass resolver ever runs.
+        //
+        // That is the wrong outcome for an EXCLUSION: when "destroy each
+        // creature OTHER than that one" loses its referent to a blink, only the
+        // exclusion expires (CR 400.7) — every other creature is still
+        // destroyed. Liveness is enforced where it belongs, in
+        // `effects::resolved_object_filter`, which pin-checks the referents it
+        // concretizes.
+        //
+        // Previously scoped to `ChangeZoneAll` alone. The whole family shares
+        // one `target_filter() == None` shape, so the narrow form silently left
+        // `DestroyAll`, `DamageAll`, `BounceAll` and the rest fizzling on a
+        // stale snapshot. Routed through the single `mass_population_target`
+        // authority so the two lists cannot drift apart again.
         validated.targets.clone()
     } else if matches!(
         mass_all_target_filter(&validated.effect),

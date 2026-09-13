@@ -6944,7 +6944,7 @@ fn affected_objects_from_events(
             if effect::generic_effect_affected_uses_inherited_targets(governing) {
                 return Vec::new();
             }
-            let filter = resolved_object_filter(ability, governing);
+            let filter = resolved_object_filter(state, ability, governing);
             let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter);
             // CR 107.3a + CR 601.2b: ability-context filter evaluation.
             let ctx = filter::FilterContext::from_ability(ability);
@@ -8406,7 +8406,7 @@ pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut Tar
 /// `effect_refs_event_subject`: it took no creation-time snapshot and, at the
 /// later phase event (which carries no event subject), resolved against nothing.
 /// The `ParentTarget` half of the test is unchanged.
-fn filter_refs_parent_or_event_subject(filter: &TargetFilter) -> bool {
+pub(crate) fn filter_refs_parent_or_event_subject(filter: &TargetFilter) -> bool {
     filter_refs_parent_target(filter)
         || EVENT_SUBJECT_ANAPHORS
             .iter()
@@ -9363,11 +9363,35 @@ fn rebind_iterated_counter_kind(
     }
 }
 
+/// CR 608.2c + CR 400.7 + CR 603.7c: Concretize an effect's contextual filter
+/// for a mass scan, honouring the creation-time incarnation pin.
+///
+/// Takes `state` so the parent-target exclusions this concretizes can be
+/// pin-checked. A delayed trigger's exclusion ("destroy each creature OTHER than
+/// that one") names a specific object, so the exclusion's LIFETIME is that
+/// referent's: once the permanent leaves and returns it is a NEW object the
+/// exclusion no longer names (CR 400.7), and it must be affected like any other.
+/// Without the check `Not(ParentTarget)` concretizes to `Not(SpecificObject)` —
+/// an id-only comparison — and keeps sparing the returned permanent forever.
+///
+/// This is inert for any ability whose referents are unpinned:
+/// `target_pin_is_current` is `is_none_or`, so an id with no recorded pin always
+/// reads live and normalization is byte-identical to before.
+///
+/// Pins are set by three authorities, all of which want this check — a pinned
+/// referent that became a new object should stop being named, whichever one
+/// recorded it: the delayed-trigger creation snapshot
+/// (`delayed_trigger::bind_event_subject_nodes`), zone-change triggers
+/// (`triggers::seed_event_context_parent_targets`), and forwarded-result
+/// rebinding (`bind_forwarded_result_targets_for_legacy_effect`).
 pub(crate) fn resolved_object_filter(
+    state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> TargetFilter {
-    filter::normalize_contextual_filter(target_filter, &ability.targets)
+    filter::normalize_contextual_filter_with_liveness(target_filter, &ability.targets, &|id| {
+        ability.target_pin_is_current(id, state)
+    })
 }
 
 fn filter_uses_relative_controller_you(filter: &TargetFilter) -> bool {
@@ -13874,7 +13898,7 @@ fn resolve_chain_body(
             &ability.effect
         {
             if !target.contains_source_attachment_host() {
-                let effective_filter = resolved_object_filter(ability, target);
+                let effective_filter = resolved_object_filter(state, ability, target);
                 let filter_ctx = filter::FilterContext::from_ability(ability);
                 let legal: Vec<ObjectId> = state
                     .battlefield_phased_in_ids()

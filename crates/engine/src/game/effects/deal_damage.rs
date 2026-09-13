@@ -1751,7 +1751,8 @@ pub fn resolve_all(
         Some(resolve_quantity_with_targets(state, amount, ability).max(0) as u32)
     };
 
-    let target_filter = crate::game::effects::resolved_object_filter(ability, &target_filter);
+    let target_filter =
+        crate::game::effects::resolved_object_filter(state, ability, &target_filter);
 
     // Collect matching object IDs.
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
@@ -2642,7 +2643,8 @@ pub fn resolve_each_source_deals_damage(
             })
             .collect(),
         EachDamageRecipient::Shared(_) | EachDamageRecipient::EachController => {
-            let resolved_sources = crate::game::effects::resolved_object_filter(ability, sources);
+            let resolved_sources =
+                crate::game::effects::resolved_object_filter(state, ability, sources);
             let filter_ctx = filter::FilterContext::from_ability(ability);
             state
                 .battlefield
