@@ -80,6 +80,33 @@ pub fn has_each_time_event_relative_prevention(input: &str) -> bool {
     .is_some()
 }
 
+/// ORIGINAL-CASE input, case-sensitive — the OPPOSITE of this module's `has_*`
+/// siblings, which document already-lowercased input. The contract is in the
+/// name so a caller cannot silently feed it lowered text. Measured: across the
+/// 38 corpus occurrences of this phrase (37 cards) ZERO are capitalized, so the
+/// lowercase tag misses nothing today; if a capitalized printing ever appears,
+/// lower the input at the call site rather than widening the tag, which would
+/// also widen the adjacent Awe Strike arm in `oracle_effect/assembly.rs`.
+///
+/// CR 615.5: recognize the `"prevented this way"` back-reference anywhere in a
+/// clause fragment. The anaphor can only bind to a prevention printed earlier in
+/// the same effect chain, so its presence is the TEXTUAL half of "this clause is
+/// a rider on that prevention". The STRUCTURAL half — whether the clause carries
+/// a clause-level distributive quantifier over the prevented amount — is read
+/// from the lowered IR by the caller (`ClauseIr::repeat_for`), never re-parsed
+/// here: the parser already lowered it, and re-deriving it would put one truth
+/// in two representations that can drift.
+///
+/// Scanned at word boundaries rather than matched as an arbitrary substring, so
+/// only the complete phrase counts as Oracle grammar.
+pub fn scan_original_case_prevented_this_way_back_reference(input: &str) -> bool {
+    crate::parser::oracle_nom::primitives::scan_at_word_boundaries(
+        input,
+        tag::<_, _, crate::parser::oracle_nom::error::OracleError<'_>>("prevented this way"),
+    )
+    .is_some()
+}
+
 /// Recognize one complete event-relative prevention watcher. The event clause
 /// and its prevention formula must share the same sentence, rather than two
 /// independent scans accidentally binding unrelated phrases on a card.
@@ -163,6 +190,40 @@ mod tests {
         ));
         assert!(!has_each_time_event_relative_prevention(
             "each time a player draws a card, they gain 1 life. Prevent half that damage."
+        ));
+    }
+
+    #[test]
+    fn scans_original_case_prevented_this_way_back_reference() {
+        // Positive, leading order (Inkshield's fragment).
+        assert!(scan_original_case_prevented_this_way_back_reference(
+            "For each 1 damage prevented this way, create a 2/1 white and black Inkling creature token with flying."
+        ));
+        // Positive, trailing order (Immortal Coil's fragment). The recognizer
+        // is position-agnostic, and so is the caller's predicate: nothing
+        // tests clause position. Immortal Coil is refused there by the
+        // `repeat_for` conjunct, not by position — it is a static replacement
+        // whose `ChangeZone` rider has no count axis at all, so the trailing
+        // for-each is dropped rather than absorbed and no clause-level
+        // `repeat_for` survives either way.
+        assert!(scan_original_case_prevented_this_way_back_reference(
+            "Exile a card from your graveyard for each 1 damage prevented this way."
+        ));
+        // Negative: a different anaphor over the same "for each ... this way"
+        // grammar (Read the Runes) must not be recognized as this one.
+        assert!(!scan_original_case_prevented_this_way_back_reference(
+            "for each card drawn this way, discard a card"
+        ));
+        // Negative: the bare word alone is not the phrase.
+        assert!(!scan_original_case_prevented_this_way_back_reference(
+            "prevented"
+        ));
+        // Negative: CASE CONTRACT. This combinator takes ORIGINAL-case input
+        // and its tag is lowercase-only, unlike this module's `has_*` siblings
+        // which document lowercased input. A capitalized printing must not
+        // match until the input is explicitly lowered at the call site.
+        assert!(!scan_original_case_prevented_this_way_back_reference(
+            "Prevented this way"
         ));
     }
 }

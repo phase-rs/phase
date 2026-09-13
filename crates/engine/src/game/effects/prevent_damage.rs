@@ -577,18 +577,36 @@ pub fn resolve(
     // CR 615.5: A `ContinuationStep` rider ("prevent that damage and put that
     // many +1/+1 counters on it" — Gatta and Luzzu) fires per prevented event,
     // so it installs as the shield's `runtime_execute`. A `SequentialSibling`
-    // sub is an independent instruction (CR 700.2d — a separate chosen mode of a
-    // modal spell, e.g. Dromoka's Command mode 3), NOT a rider; it is resolved
-    // on its own by the chain walker and must not become the shield rider.
+    // sub is an independent instruction (CR 700.2 + CR 608.2c — each chosen mode
+    // of a modal spell is its own instruction, followed in the order written;
+    // e.g. Dromoka's Command mode 3), NOT a rider; it is resolved on its own by
+    // the chain walker and must not become the shield rider.
     //
-    // CR 615.5: AWE STRIKE — "You gain life equal to the damage prevented this
-    // way" is a bare prevented-this-way rider (no when/whenever/if prelude). It
-    // reaches this resolver as a `ContinuationStep` only for the one-shot
-    // shape: the assembly gate (assembly.rs) forces `ContinuationStep` for the
-    // bare rider only when the chain root's prevention carries the
+    // CR 615.5: which sentence-boundary riders arrive here as
+    // `ContinuationStep` is decided by `assembly.rs`'s `prevented_this_way_gate`,
+    // which has three arms. (1) An explicit `when|whenever|if … is prevented
+    // this way,` prelude — shape-unrestricted. (2) AWE STRIKE — "You gain life
+    // equal to the damage prevented this way" is a BARE rider (no prelude), and
+    // folds only when the chain root's prevention carries the
     // `And{[ParentTargetSlot, Typed(creature)]}` source filter; for every other
     // chain root (e.g. Reverse Damage's `ChosenDamageSource` shape) the bare
-    // rider stays a `SequentialSibling` and must NOT install here.
+    // rider stays a `SequentialSibling` and must NOT install here. (3) The
+    // DISTRIBUTIVE rider "For each 1 damage prevented this way, <effect>",
+    // recognized by its clause-level `repeat_for` reading `EventContextAmount`
+    // plus the anaphor (#8777). Arm 3 has NO shape gate whatsoever — not on the
+    // prevention amount, not on a source filter, not on whether the shield is
+    // targeted. It reaches BOTH the untargeted player-scoped
+    // `PreventionAmount::All` combat shield (Inkshield, which works end to end)
+    // AND object-hosted TARGETED shields, `PreventionAmount::All` or
+    // `PreventionAmount::Next(N)` alike (Brace for Impact, Test of Faith,
+    // Temper), whose `PutCounter { target: ParentTarget }` rider is
+    // installed here but currently resolves against an empty target vector,
+    // because the clone below carries no targets — a separate resolver-seam
+    // defect, tracked as follow-up to #8777.
+    //
+    // A `SequentialSibling` still never installs here regardless of arm — that
+    // is the CR 700.2 + CR 608.2c boundary above, and widening it is what would
+    // capture an independent chosen mode.
     //
     // The rider is installed via the SAME `runtime_execute` slot as every other
     // prevention rider — the resolution-time `ResolvedAbility` payload. The
