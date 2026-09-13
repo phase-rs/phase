@@ -6276,6 +6276,24 @@ fn resolve_ref(
                                 crate::game::ability_utils::parent_target_controller(a, state)
                             })
                             .is_some_and(|pid| pid == snap.controller),
+                        // CR 120.1 + CR 109.4: the damage RECIPIENT's controller.
+                        // Routed through the shared `TargetFilter` authority
+                        // (which reads `DamageDealt.target` and applies the
+                        // CR 608.2h LKI fallback), NOT through
+                        // `parent_target_controller` above — that helper reads
+                        // only `ability.targets` / `effect_context_object` and
+                        // never consults the trigger event, so it would return
+                        // the dealer-derived binding this variant exists to
+                        // replace.
+                        Some(ControllerRef::EventTargetController) => ability
+                            .and_then(|a| {
+                                crate::game::targeting::resolve_effect_player_ref(
+                                    state,
+                                    a,
+                                    &TargetFilter::EventTargetController,
+                                )
+                            })
+                            .is_some_and(|pid| pid == snap.controller),
                         Some(ControllerRef::ParentTargetOwner) => ability
                             .and_then(|a| crate::game::ability_utils::parent_target_owner(a, state))
                             .is_some_and(|pid| pid == snap.controller),
@@ -6346,6 +6364,19 @@ fn damage_source_controller_matches(
         ControllerRef::ParentTargetController => ability
             .and_then(|ability| {
                 crate::game::ability_utils::parent_target_controller(ability, state)
+            })
+            .is_some_and(|player| actual == player),
+        // CR 120.1 + CR 109.4: the damage RECIPIENT's controller. Same shared
+        // authority as the attachment-scope branch above, and for the same
+        // reason: `parent_target_controller` never reads the trigger event, so
+        // reusing it here would keep the dealer binding.
+        ControllerRef::EventTargetController => ability
+            .and_then(|ability| {
+                crate::game::targeting::resolve_effect_player_ref(
+                    state,
+                    ability,
+                    &TargetFilter::EventTargetController,
+                )
             })
             .is_some_and(|player| actual == player),
         ControllerRef::ParentTargetOwner => ability
@@ -20949,6 +20980,96 @@ mod tests {
         assert_eq!(
             got, 7,
             "an undeparted Army still reads its LIVE mana value (7), proving the negative above is not vacuous"
+        );
+    }
+
+    /// CR 120.1 + CR 109.4: `ControllerRef::EventTargetController` in a
+    /// damage-source controller scope resolves to the controller of the damage
+    /// RECIPIENT, never the dealer.
+    ///
+    /// Regression for a real defect: both `EventTargetController` branches in
+    /// this file were introduced by mechanically cloning the
+    /// `ParentTargetController` arms, which left them calling
+    /// `ability_utils::parent_target_controller`. That helper reads only
+    /// `ability.targets` / `effect_context_object` and never consults the
+    /// trigger event, so the clone silently preserved the dealer binding the
+    /// new reference exists to replace — invisible to the parser-level
+    /// serialization tests, which only inspect the emitted AST.
+    ///
+    /// Two-sided by construction: the recipient's controller must be accepted
+    /// AND the dealer's controller rejected. P0 controls the dealer, P1 the
+    /// recipient, so a resolver that returned either the parent target (absent
+    /// here) or the dealer fails the first assertion.
+    #[test]
+    fn damage_source_controller_event_target_controller_reads_the_recipient_not_the_dealer() {
+        let mut state = GameState::new_two_player(42);
+
+        let dealer = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dealer".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Recipient".to_string(),
+            Zone::Battlefield,
+        );
+
+        // CR 120.1: the dealer is the event's `source_id`, the recipient its
+        // `target` — the whole point of the distinction under test.
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: dealer,
+            target: TargetRef::Object(recipient),
+            amount: 3,
+            is_combat: true,
+            excess: 0,
+        });
+
+        // No targets: an untargeted damage trigger, which is exactly the shape
+        // where `parent_target_controller` has nothing to read and the old
+        // clone fell through to the dealer.
+        let ability = ResolvedAbility::new(
+            Effect::unimplemented("test", "test"),
+            vec![],
+            dealer,
+            PlayerId(0),
+        );
+        let ctx = QuantityContext {
+            entering: None,
+            source: dealer,
+            trigger_source: None,
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+            event_amount: None,
+        };
+
+        assert!(
+            damage_source_controller_matches(
+                &state,
+                PlayerId(1),
+                PlayerId(0),
+                ctx.clone(),
+                Some(&ability),
+                &ControllerRef::EventTargetController,
+            ),
+            "P1 controls the damaged object, so the recipient's controller must match (CR 109.4)"
+        );
+        assert!(
+            !damage_source_controller_matches(
+                &state,
+                PlayerId(0),
+                PlayerId(0),
+                ctx,
+                Some(&ability),
+                &ControllerRef::EventTargetController,
+            ),
+            "P0 controls the DEALER (CR 120.1) and must NOT match; matching here is the \
+             dealer-derived binding this reference replaces"
         );
     }
 }

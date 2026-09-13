@@ -2331,6 +2331,48 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         }
     }
 
+    // CR 120.1 + CR 109.4 + CR 608.2c: An ACTIVE-voice damage trigger with an
+    // OBJECT recipient makes "that creature's controller" / "its controller"
+    // the controller of the damage RECIPIENT. Both `ParentTargetController` and
+    // `TriggeringSpellController` resolve via `extract_source_from_event` — the
+    // DEALER — so without this rebind every card in the class punishes its own
+    // controller. Runs on the whole trigger: the payer of an `unless_pay`
+    // modifier is the same anaphor in a different slot (Plague Fiend, Death
+    // Charmer, Soul Charmer).
+    //
+    // Gated on `valid_target` naming an object-only recipient, so
+    // "deals combat damage to a player" triggers are untouched.
+    //
+    // Deliberately NOT gated on `execute.optional_targeting`, unlike the
+    // event-SOURCE lift above. That flag marks an optional object SLOT
+    // ("up to one target permanent", the CR 115.1d stamp above); the reference
+    // rewritten here names a PLAYER, so the two axes are independent and the
+    // guard conflated them.
+    //
+    // MEASURED: no currently-parseable shape distinguishes the two, because the
+    // one phrasing that would ("… up to one target permanent that creature's
+    // controller controls") has its possessive scope dropped upstream by
+    // `parse_type_phrase_folding` and lowers to `controller: null`. Dropping the
+    // guard is therefore a correctness-by-construction change today and a
+    // latent correctness fix if that suffix ever parses. The "chosen target,
+    // then ITS controller" reading stays excluded by the fresh-choice boundary
+    // inside the rebind helper, which rewrites the current link and then stops
+    // as soon as that link introduces a player-chosen object target. Both sides
+    // are pinned in `oracle_trigger_tests.rs`.
+    if def.mode == TriggerMode::DamageDone
+        && def
+            .valid_target
+            .as_ref()
+            .is_some_and(damage_recipient_is_object_only)
+    {
+        if let Some(execute) = def.execute.as_deref_mut() {
+            rebind_immediate_parent_target_controller_to_event_target_controller(execute);
+        }
+        if let Some(unless) = def.unless_pay.as_mut() {
+            rebind_parent_target_controller_in_filter(&mut unless.payer);
+        }
+    }
+
     def
 }
 
@@ -2570,6 +2612,178 @@ fn rebind_parent_target_to_event_target_in_effect(effect: &mut Effect) {
             rebind_parent_target_to_event_target_in_filter(target)
         }
         _ => {}
+    }
+}
+
+/// CR 120.1 + CR 109.4 + CR 608.2c: On an ACTIVE-voice damage trigger whose
+/// recipient is an object ("Whenever ~ deals damage to a creature, that
+/// creature's controller …"), rebind the possessive anaphor's player reference
+/// from the dealer-derived `ParentTargetController` / `TriggeringSpellController`
+/// to `EventTargetController` — the controller of the damage RECIPIENT.
+///
+/// CR 120.1 is the whole reason this pass exists: "an object that deals damage
+/// is the source of that damage". The dealer lives in `DamageDealt.source_id`
+/// and the recipient in `.target`, and both `ParentTargetController` and
+/// `TriggeringSpellController` resolve through `extract_source_from_event` —
+/// i.e. the DEALER. On these triggers there is no chosen parent target at all,
+/// so the surface phrase silently resolved to the attacking creature's own
+/// controller, making every card in this class punish its own controller
+/// (Bellowing Fiend, Flayed Nim, Greatbow Doyen, Death Charmer, Soul Charmer,
+/// Plague Fiend, Maarika).
+///
+/// Structural twin of [`rebind_immediate_parent_target_to_event_target`] (the
+/// BecomesTarget object-anaphor rebind) and of the prevention follow-up's
+/// `ParentTargetController` → `PostReplacementSourceController` rewrite: the
+/// surface phrase stays consolidated in `parse_target`, and only the call site
+/// that owns the event context re-points it.
+///
+/// Shares that function's fresh-choice boundary — once an instruction
+/// introduces a player-chosen object target, a later "its controller" denotes
+/// *that* choice and `ParentTargetController` is once again correct. Delayed
+/// payloads are likewise not traversed: they resolve in a later trigger window
+/// and would need a creation-time snapshot.
+fn rebind_immediate_parent_target_controller_to_event_target_controller(
+    ability: &mut AbilityDefinition,
+) {
+    for mode in &mut ability.mode_abilities {
+        rebind_immediate_parent_target_controller_to_event_target_controller(mode);
+    }
+
+    let mut node = Some(ability);
+    while let Some(link) = node {
+        if matches!(link.effect.as_ref(), Effect::CreateDelayedTrigger { .. }) {
+            break;
+        }
+        if let Some(else_ability) = link.else_ability.as_deref_mut() {
+            rebind_immediate_parent_target_controller_to_event_target_controller(else_ability);
+        }
+        rebind_parent_target_controller_in_effect(link.effect.as_mut());
+        // CR 118.12 + CR 608.2c: the unless-clause payer is the same possessive
+        // anaphor in a different slot, and it can sit on the ABILITY as well as
+        // on the trigger ("you gain 2 life unless that creature's controller
+        // pays {2}" — Soul Charmer parses the modifier onto the gain-life
+        // clause, whereas Plague Fiend's lands on the trigger).
+        if let Some(unless) = link.unless_pay.as_mut() {
+            rebind_parent_target_controller_in_filter(&mut unless.payer);
+        }
+        if introduces_chosen_object_target(link.effect.as_ref()) {
+            break;
+        }
+        node = link.sub_ability.as_deref_mut();
+    }
+}
+
+fn rebind_parent_target_controller_in_effect(effect: &mut Effect) {
+    crate::parser::oracle_effect::each_target_filter_mut(effect, &mut |filter| {
+        rebind_parent_target_controller_in_filter(filter);
+    });
+
+    // Population filters are not target slots, so the shared target-field
+    // walker deliberately excludes them — but they carry the same possessive
+    // anaphor ("that creature's controller sacrifices a … permanent" reaches
+    // the engine as a `Sacrifice` whose population is scoped by
+    // `TypedFilter.controller`). Mirrors the identical list in
+    // `rebind_parent_target_to_event_target_in_effect`.
+    match effect {
+        Effect::PutCounterAll { target, .. }
+        | Effect::PumpAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::GainControlAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
+        | Effect::ChangeZoneAll { target, .. }
+        | Effect::DoublePTAll { target, .. } => rebind_parent_target_controller_in_filter(target),
+        _ => {}
+    }
+}
+
+/// The player-reference half of the rebind. `TriggeringSpellController` is
+/// included because the unless-clause payer path lowers "its controller" to it
+/// (Plague Fiend), and on a damage trigger it reads the same wrong object
+/// (`extract_source_from_event`) as `ParentTargetController`.
+fn rebind_parent_target_controller_in_filter(filter: &mut TargetFilter) {
+    match filter {
+        TargetFilter::ParentTargetController | TargetFilter::TriggeringSpellController => {
+            *filter = TargetFilter::EventTargetController;
+        }
+        TargetFilter::Typed(typed) => {
+            if matches!(
+                typed.controller,
+                Some(ControllerRef::ParentTargetController)
+            ) {
+                typed.controller = Some(ControllerRef::EventTargetController);
+            }
+            for prop in &mut typed.properties {
+                rebind_parent_target_controller_in_prop(prop);
+            }
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for filter in filters {
+                rebind_parent_target_controller_in_filter(filter);
+            }
+        }
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            rebind_parent_target_controller_in_filter(filter);
+        }
+        _ => {}
+    }
+}
+
+fn rebind_parent_target_controller_in_prop(prop: &mut FilterProp) {
+    match prop {
+        FilterProp::CanEnchant { target }
+        | FilterProp::DifferentNameFrom { filter: target }
+        | FilterProp::DistinctFrom { reference: target }
+        | FilterProp::TargetsOnly { filter: target }
+        | FilterProp::Targets { filter: target } => {
+            rebind_parent_target_controller_in_filter(target);
+        }
+        FilterProp::SharesQuality {
+            reference: Some(reference),
+            ..
+        } => rebind_parent_target_controller_in_filter(reference),
+        FilterProp::AnyOf { props } => {
+            for prop in props {
+                rebind_parent_target_controller_in_prop(prop);
+            }
+        }
+        FilterProp::Not { prop } => rebind_parent_target_controller_in_prop(prop),
+        _ => {}
+    }
+}
+
+/// CR 120.1 + CR 120.3: Does this `DamageDone` trigger's recipient filter name
+/// an OBJECT only?
+///
+/// The rebind above re-points a possessive anaphor at
+/// `GameEvent::DamageDealt.target`, which `extract_target_object_from_event`
+/// yields only for `TargetRef::Object`. A trigger that can fire on damage to a
+/// PLAYER ("deals combat damage to a player") has no recipient *object* whose
+/// controller could be named, and its "that player" anaphor is already served
+/// by `TriggeringPlayer` — so those keep their existing binding rather than
+/// being re-pointed at a reference that would resolve to nobody.
+///
+/// Conservative by construction: an absent filter, a bare `Any`, or any
+/// disjunction with a player-matching arm ("a permanent or player") declines.
+///
+/// NOT expressed as `!damage_recipient_filter_can_match_player`
+/// (`game/trigger_matchers.rs`), despite that predicate asking the apparent
+/// inverse. That one bottoms out in `is_player_scope_damage_filter`'s
+/// `_ => false` tail, which is the right default for ITS caller — an
+/// unrecognized recipient shape there means "let the player recipient through"
+/// — but inverting it flips the safety direction: `can_match_player(Any)` is
+/// `false`, so the negation would report a bare `Any` as object-only and rebind
+/// a trigger that fires on damage to a PLAYER. The two predicates must fail in
+/// opposite directions, so they cannot share an implementation.
+fn damage_recipient_is_object_only(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => !typed.type_filters.is_empty(),
+        TargetFilter::And { filters } => filters.iter().any(damage_recipient_is_object_only),
+        TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(damage_recipient_is_object_only)
+        }
+        _ => false,
     }
 }
 

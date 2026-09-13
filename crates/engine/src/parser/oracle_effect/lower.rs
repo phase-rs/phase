@@ -461,6 +461,7 @@ fn target_filter_is_player_scoped(filter: &TargetFilter) -> bool {
             | TargetFilter::TriggeringSpellController
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
             | TargetFilter::PostReplacementSourceController
             | TargetFilter::SpecificPlayer { .. }
     )
@@ -3472,6 +3473,7 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::TriggeringSource
             | TargetFilter::EventTarget
             | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
             | TargetFilter::ParentTarget
             | TargetFilter::ParentTargetSlot { .. }
             | TargetFilter::ParentTargetController
@@ -9453,6 +9455,7 @@ fn resolve_player_anaphor_damage_recipient(
     match ctx.relative_player_scope {
         Some(ControllerRef::ScopedPlayer) => Some(TargetFilter::ScopedPlayer),
         Some(ControllerRef::ParentTargetController) => Some(TargetFilter::ParentTargetController),
+        Some(ControllerRef::EventTargetController) => Some(TargetFilter::EventTargetController),
         Some(ControllerRef::ParentTargetOwner) => Some(TargetFilter::ParentTargetOwner),
         Some(ControllerRef::TriggeringPlayer) | Some(ControllerRef::TargetPlayer) => {
             Some(TargetFilter::TriggeringPlayer)
