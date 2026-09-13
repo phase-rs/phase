@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 210,
+      "date": "2026-09-13",
+      "title": "Inkshield makes Inklings",
+      "tags": [
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "🛠️ Cards That Now Work Right\n• Inkshield now makes its Inkling tokens for each damage it prevents. Brace for Impact, Test of Faith, Gatta and Luzzu, and the wider prevention-rider class also keep the creature they refer to\n• Delay now exiles a countered spell with its three time counters, gives it suspend when needed, and lets it cast normally after the final counter is removed\n• City of Traitors sees another land enter even when that land asks an as-enters question, so its printed sacrifice trigger works again\n• Damage triggers now keep the creature that was damaged—and that creature’s controller—straight. This repairs cards including Phage the Untouchable, Toxin Sliver, Maarika, and the Kashi-Tribe cycle\n• Pack tactics checks the combined power of the creatures that attacked, including attackers that leave combat before its trigger resolves\n• Changeling cards in a library count as every creature type for revealed-card checks, so Herald’s Horn can reveal Morophon after naming Slivers\n• Spells with an unreadable additional cost are refused instead of being cast for free\n\n⚔️ Combat & Gameplay\n• Game choices, combat logs, and token entries retain clearer source information, including copied triggers\n• The AI no longer spends buffs on opposing creatures\n\n🖥️ Interface\n• Choosing cards from a zone starts fresh for each new prompt without losing a selection when the same prompt refreshes\n• Desktop game-state exports download correctly again, report their result accurately, and no longer interrupt a running game\n\n🌐 Multiplayer\n• P2P games stay connected through temporary signaling outages; latency is advisory and each player’s ping is visible\n• Self-hosted servers can replace an unusable data file safely instead of exiting",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424"
+    },
+    {
       "id": 209,
       "date": "2026-09-12",
       "title": "Mana burn returns to the game",
