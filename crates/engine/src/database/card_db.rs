@@ -493,10 +493,11 @@ impl CardDatabase {
         self
     }
 
-    /// Case-insensitive bracket-signal lookup. Game Changers are card-level
-    /// MTGJSON facts stamped into `bracket_signals_by_name`; other axes may
-    /// come from either the export or `bracket_lists`. Returns all-false
-    /// `BracketSignals` when the name is unknown to both.
+    /// Case-insensitive bracket-signal lookup. The export is the runtime
+    /// authority for Game Changers and is stamped by `oracle-gen` from the
+    /// curated list. The loaded list supplies a Game Changer value only for a
+    /// name absent from the export; other axes may come from either source.
+    /// Returns all-false `BracketSignals` when the name is unknown to both.
     ///
     /// Multi-face combined names (`"A // B"` — partner pairs, MDFCs, split,
     /// etc.) are aggregated face-by-face with logical-OR *before* the
@@ -1343,11 +1344,11 @@ mod tests {
 
     #[test]
     fn bracket_signals_lookup_uses_loaded_lists() {
-        use crate::database::bracket_lists::BracketLists;
-        let lists = BracketLists::from_json_str(
-            r#"{ "version":"t", "efficient_tutors":["Demonic Tutor"] }"#,
-        )
-        .unwrap();
+        use crate::database::bracket_lists::{BracketCardClass, BracketLists};
+        let lists = BracketLists::from_pairs(
+            "t",
+            &[(BracketCardClass::EfficientTutors, &["Demonic Tutor"])],
+        );
         let db = CardDatabase::default().with_bracket_lists(lists);
         let sig = db.bracket_signals_for("Demonic Tutor");
         assert!(sig.efficient_tutor);
@@ -1518,7 +1519,19 @@ mod tests {
         // `bracket_lists` too, or the name is split into two nonexistent faces
         // and its real mass-land-denial signal is lost.
         let lists = BracketLists::from_json_str(
-            r#"{"version":"t","mass_land_denial":["SP//dr, Piloted by Peni"]}"#,
+            r#"{
+                "version":"t",
+                "lists": {
+                    "mass_land_sweepers": {
+                        "source": {
+                            "url":"test",
+                            "published":"2026-09-12",
+                            "retrieved":"2026-09-12"
+                        },
+                        "names":["SP//dr, Piloted by Peni"]
+                    }
+                }
+            }"#,
         )
         .unwrap();
         let db = CardDatabase::default().with_bracket_lists(lists);
@@ -1534,7 +1547,19 @@ mod tests {
         use crate::database::bracket_lists::BracketLists;
         // No export entries — bracket_lists is the source of truth.
         let lists = BracketLists::from_json_str(
-            r#"{"version":"t","efficient_tutors":["Halana, Kessig Ranger"]}"#,
+            r#"{
+                "version":"t",
+                "lists": {
+                    "efficient_tutors": {
+                        "source": {
+                            "url":"test",
+                            "published":"2026-09-12",
+                            "retrieved":"2026-09-12"
+                        },
+                        "names":["Halana, Kessig Ranger"]
+                    }
+                }
+            }"#,
         )
         .unwrap();
         let db = CardDatabase::default().with_bracket_lists(lists);
@@ -1749,7 +1774,7 @@ mod tests {
 
     #[test]
     fn from_json_merges_card_signals_with_list_signals() {
-        use crate::database::bracket_lists::BracketLists;
+        use crate::database::bracket_lists::{BracketCardClass, BracketLists};
 
         let json = r#"{
             "demonic tutor": {
@@ -1766,9 +1791,10 @@ mod tests {
                 }
             }
         }"#;
-        let lists =
-            BracketLists::from_json_str(r#"{"version":"t","efficient_tutors":["Demonic Tutor"]}"#)
-                .unwrap();
+        let lists = BracketLists::from_pairs(
+            "t",
+            &[(BracketCardClass::EfficientTutors, &["Demonic Tutor"])],
+        );
         let db = CardDatabase::from_json_str(json)
             .unwrap()
             .with_bracket_lists(lists);
