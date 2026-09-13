@@ -2751,6 +2751,16 @@ fn rebind_parent_target_controller_in_prop(prop: &mut FilterProp) {
 ///
 /// Conservative by construction: an absent filter, a bare `Any`, or any
 /// disjunction with a player-matching arm ("a permanent or player") declines.
+///
+/// NOT expressed as `!damage_recipient_filter_can_match_player`
+/// (`game/trigger_matchers.rs`), despite that predicate asking the apparent
+/// inverse. That one bottoms out in `is_player_scope_damage_filter`'s
+/// `_ => false` tail, which is the right default for ITS caller — an
+/// unrecognized recipient shape there means "let the player recipient through"
+/// — but inverting it flips the safety direction: `can_match_player(Any)` is
+/// `false`, so the negation would report a bare `Any` as object-only and rebind
+/// a trigger that fires on damage to a PLAYER. The two predicates must fail in
+/// opposite directions, so they cannot share an implementation.
 fn damage_recipient_is_object_only(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(typed) => !typed.type_filters.is_empty(),
