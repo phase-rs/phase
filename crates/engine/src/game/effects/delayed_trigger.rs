@@ -655,11 +655,18 @@ fn bind_event_subject_nodes(
 /// object. Populating `targets` alone therefore fixes the SINGLE-target effects
 /// and leaves the mass ones silently affecting nothing.
 ///
-/// Rewriting to `SpecificObject` is the technique
-/// `rebind_last_created_to_parent_target` uses for `LastCreated`, and
-/// `SpecificObject` is the concrete form this path already produces
-/// (`filter::normalize_contextual_filter` rewrites `Not(ParentTarget)` to
-/// `Not(SpecificObject)`).
+/// Rewriting to `ParentTarget` is the technique
+/// `rebind_last_created_to_parent_target` uses for `LastCreated`, and it is the
+/// PIN-AWARE concrete form on this scan path: `filter::matches_target_filter`
+/// resolves `ParentTarget` against `ability.targets` and additionally requires
+/// `target_pin_is_current` (filter.rs), whereas `SpecificObject` is a bare
+/// object-id comparison that never consults `target_incarnations`.
+///
+/// KNOWN GAP (nested negative forms): `filter::normalize_contextual_filter`
+/// rewrites `Not(ParentTarget)` to `Not(SpecificObject)` before the scan, which
+/// drops the pin again — so a blinked referent stays wrongly EXCLUDED from a
+/// delayed `Not(EventTarget)` mass filter. The bare and positive-nested forms
+/// are pin-correct; the negative-nested one is not yet. Tracked, not fixed here.
 ///
 /// RECURSES through the enclosing filter structure rather than matching only a
 /// bare leaf, mirroring `filter_refs_event_subject`'s traversal so detection and
@@ -673,48 +680,56 @@ fn bind_event_subject_nodes(
 /// so `DistinctFrom { reference }` keeps its property shape and continues to be
 /// read by its own resolver.
 fn concretize_mass_population_event_subject(effect: &mut Effect, targets: &[TargetRef]) {
-    let Some(TargetRef::Object(id)) = targets
+    if !targets
         .iter()
-        .find(|target| matches!(target, TargetRef::Object(_)))
-    else {
+        .any(|target| matches!(target, TargetRef::Object(_)))
+    {
         return;
-    };
+    }
     let Some(target) = super::mass_population_target_mut(effect) else {
         return;
     };
-    concretize_event_subject_leaves(target, *id);
+    concretize_event_subject_leaves(target);
 }
 
 /// Replace every [`EVENT_SUBJECT_ANAPHORS`](super::EVENT_SUBJECT_ANAPHORS) leaf
-/// with `SpecificObject { id }`, preserving the enclosing filter structure.
+/// with `ParentTarget`, preserving the enclosing filter structure.
+///
+/// `ParentTarget` — not `SpecificObject` — because it is the PIN-AWARE concrete
+/// form on the scan-based mass paths. `filter::matches_target_filter` resolves
+/// `ParentTarget` against `ability.targets` and additionally requires
+/// `target_pin_is_current` (CR 400.7 + CR 603.7c: "match the creation-time
+/// target only while its recorded incarnation is current"), whereas
+/// `SpecificObject` is a bare object-id comparison that never consults
+/// `target_incarnations`. Concretizing to `SpecificObject` would therefore
+/// re-affect a referent that left and returned as a new object.
+///
+/// This is the same rewrite `rebind_last_created_to_parent_target` performs for
+/// `LastCreated`, and for the same reason: `ParentTarget` reads the delayed
+/// ability's own snapshotted `targets` and pins instead of live event state.
 ///
 /// Traverses exactly the forms `effects::filter_refs_event_subject` inspects, so
 /// a reference it can DETECT is a reference this can BIND. The two walking
 /// different shapes is the bug class here: a detected-but-unbound reference
 /// takes the creation snapshot path and then resolves against an empty event.
-fn concretize_event_subject_leaves(
-    filter: &mut TargetFilter,
-    id: crate::types::identifiers::ObjectId,
-) {
+fn concretize_event_subject_leaves(filter: &mut TargetFilter) {
     match filter {
         TargetFilter::Typed(typed) => {
             for prop in &mut typed.properties {
                 if let crate::types::ability::FilterProp::DistinctFrom { reference } = prop {
-                    concretize_event_subject_leaves(reference, id);
+                    concretize_event_subject_leaves(reference);
                 }
             }
         }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             for inner in filters {
-                concretize_event_subject_leaves(inner, id);
+                concretize_event_subject_leaves(inner);
             }
         }
-        TargetFilter::Not { filter } => concretize_event_subject_leaves(filter, id),
-        TargetFilter::TrackedSetFiltered { filter, .. } => {
-            concretize_event_subject_leaves(filter, id)
-        }
+        TargetFilter::Not { filter } => concretize_event_subject_leaves(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => concretize_event_subject_leaves(filter),
         other if super::EVENT_SUBJECT_ANAPHORS.contains(other) => {
-            *other = TargetFilter::SpecificObject { id };
+            *other = TargetFilter::ParentTarget;
         }
         _ => {}
     }
