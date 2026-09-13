@@ -93,6 +93,7 @@ data/mtgjson/allsets/
 !data/bracket_lists.json
 !data/bracket_sources.json
 !data/baselines/
+!data/bundled_cedh_decks.json
 
 # Tauri build output
 client/src-tauri/binaries/
