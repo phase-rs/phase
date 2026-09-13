@@ -529,6 +529,10 @@ fn parse_damage_dealt_this_turn_conditions(input: &str) -> OracleResult<'_, Stat
         // "was dealt excess damage this turn" wins over the shorter "was dealt
         // damage this turn" prefix in `parse_source_was_dealt_damage_this_turn`.
         parse_subject_was_dealt_excess_damage_this_turn,
+        // Quantity-first passive ("N or more damage was dealt to it this turn")
+        // must precede the subject-first player threshold so a leading numeral
+        // is not left for a later Fail.
+        parse_n_or_more_damage_was_dealt_to_source_this_turn,
         parse_player_was_dealt_damage_threshold_this_turn,
         parse_player_dealt_combat_damage_by_source_this_turn,
         parse_source_dealt_damage_this_turn,
@@ -614,6 +618,44 @@ fn parse_subject_was_dealt_excess_damage_this_turn(
 /// CR 603.4 + CR 120.3: "you were/an opponent was dealt N or more damage this
 /// turn" — Boarded Window and Phoenix Chick-style end-step intervening-if
 /// predicates. Any-source damage to the matching player set.
+/// CR 107.1 + CR 120.1 + CR 603.4: "N or more damage was dealt to
+/// it/this creature/~ this turn" — Zubera-class dies intervening-if.
+///
+/// Quantity-first passive, distinct from
+/// `parse_player_was_dealt_damage_threshold_this_turn` (subject-first
+/// "you were dealt N or more damage this turn") and from
+/// `parse_source_was_dealt_damage_this_turn` (existential "this creature
+/// was dealt damage this turn"). Reuses `parse_ge_threshold` and
+/// `DamageDealtThisTurn` (target `SelfRef`); no new variant.
+fn parse_n_or_more_damage_was_dealt_to_source_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, amount) = parse_ge_threshold(input)?;
+    let (rest, _) = tag("damage was dealt to ").parse(rest)?;
+    let (rest, _) = alt((
+        tag("this creature"),
+        tag("this permanent"),
+        tag("~"),
+        tag("it"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::SelfRef),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::Any,
+                channel: DamageChannel::Total,
+            },
+            amount,
+        ),
+    ))
+}
+
 fn parse_player_was_dealt_damage_threshold_this_turn(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
@@ -22575,6 +22617,74 @@ mod tests {
             !matches!(target.as_ref(), TargetFilter::Any),
             "target filter must be non-Any, got: {target:?}"
         );
+    }
+
+    /// CR 107.1 + CR 120.1 + CR 603.4: quantity-first "N or more damage was
+    /// dealt to it this turn" (Burning-Eye Zubera / Rushing-Tide Zubera).
+    #[test]
+    fn parse_inner_condition_n_or_more_damage_was_dealt_to_it_this_turn() {
+        let (rest, cond) =
+            parse_inner_condition("4 or more damage was dealt to it this turn").unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DamageDealtThisTurn {
+                            ref source,
+                            ref target,
+                            channel,
+                            damage_kind,
+                            ..
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 4 },
+        } = cond
+        else {
+            panic!("expected DamageDealtThisTurn GE 4, got: {cond:?}");
+        };
+        assert_eq!(source.as_ref(), &TargetFilter::Any);
+        assert_eq!(target.as_ref(), &TargetFilter::SelfRef);
+        assert_eq!(channel, DamageChannel::Total);
+        assert_eq!(damage_kind, DamageKindFilter::Any);
+    }
+
+    /// English numeral + `this creature` self-ref, same encoding.
+    #[test]
+    fn parse_inner_condition_four_or_more_damage_was_dealt_to_this_creature() {
+        let (rest, cond) =
+            parse_inner_condition("four or more damage was dealt to this creature this turn")
+                .unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::DamageDealtThisTurn { ref target, .. },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 4 },
+        } = cond
+        else {
+            panic!("expected DamageDealtThisTurn GE 4, got: {cond:?}");
+        };
+        assert_eq!(target.as_ref(), &TargetFilter::SelfRef);
+    }
+
+    /// Existential "was dealt damage this turn" must not swallow the
+    /// quantity-first form (reach-guard for alt order).
+    #[test]
+    fn parse_inner_condition_n_or_more_damage_was_dealt_does_not_collapse_to_ge_1() {
+        let (_, cond) =
+            parse_inner_condition("4 or more damage was dealt to it this turn").unwrap();
+        let StaticCondition::QuantityComparison {
+            rhs: QuantityExpr::Fixed { value },
+            ..
+        } = cond
+        else {
+            panic!("expected QuantityComparison, got: {cond:?}");
+        };
+        assert_eq!(value, 4, "must not collapse to existential GE 1");
     }
 }
 
