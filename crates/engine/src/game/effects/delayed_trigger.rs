@@ -352,10 +352,29 @@ pub fn resolve(
     // arm names tokens, which cease to exist on a zone change (CR 111.7) rather
     // than returning as a new incarnation.
     let creation_time_provenance = condition_uses_creation_time_provenance(&condition);
-    let event_subject_anaphor = creation_time_provenance
-        .then(|| super::ability_event_subject_anaphor(&delayed_ability))
+    // CR 608.2k: TWO different questions, deliberately asked separately.
+    //
+    // `chain_names_event_subject` — does ANY clause name an event subject? This
+    // gates the per-node rebind pass, which must run whenever any clause needs
+    // its own referent.
+    //
+    // `root_event_subject_anaphor` — does the ROOT clause name one, and which?
+    // This drives the root `targets` snapshot, which binds the ROOT.
+    //
+    // Asking the chain-wide question for the ROOT snapshot is wrong: a root that
+    // names no event subject (a `ParentTarget` return, a `TargetOnly` land
+    // choice) would take the event-subject arm on the strength of a DESCENDANT's
+    // anaphor, skip `parent_target_snapshot`, and bind the root slot to the
+    // descendant's event referent. Before `bind_event_subject_nodes` existed
+    // that over-broad root binding was load-bearing — it was the only way a
+    // descendant's anaphor survived to firing. Now each clause carries its own
+    // binding, so the root is free to answer only for itself.
+    let chain_names_event_subject = creation_time_provenance
+        && super::ability_event_subject_anaphor(&delayed_ability).is_some();
+    let root_event_subject_anaphor = creation_time_provenance
+        .then(|| super::effect_event_subject_anaphor(&delayed_ability.effect))
         .flatten();
-    let (snapshot_targets, target_pins) = if let Some(anaphor) = event_subject_anaphor {
+    let (snapshot_targets, target_pins) = if let Some(anaphor) = root_event_subject_anaphor {
         // CR 608.2k: An event-subject anaphor always reads the event context —
         // `TriggeringSource` the event's subject (the dying creature of a
         // ZoneChanged), `EventTarget` its object slot (the damaged creature of
@@ -363,7 +382,7 @@ pub fn resolve(
         // parent_target_snapshot's ability.targets early-return, which is
         // correct for ParentTarget (Flickerwisp) but wrong here.
         //
-        // Resolving the ANAPHOR THE CHAIN ACTUALLY NAMES, rather than a
+        // Resolving the ANAPHOR THE CLAUSE ACTUALLY NAMES, rather than a
         // hardcoded `TriggeringSource`, is what keeps the two members of the
         // set from drifting: CR 120.1 makes the subject the damage DEALER, so
         // snapshotting `TriggeringSource` for an `EventTarget` chain would
@@ -453,7 +472,7 @@ pub fn resolve(
     // Gated on the same creation-time-provenance test as the root snapshot:
     // event-delayed triggers re-resolve their anaphors from the event that
     // actually fires them and must not be frozen here.
-    if event_subject_anaphor.is_some() {
+    if chain_names_event_subject {
         bind_event_subject_nodes(&mut delayed_ability, state, ability.source_id);
     }
     // CR 603.7c: A delayed triggered ability that refers to information from
@@ -2266,9 +2285,23 @@ mod tests {
         );
     }
 
-    /// CR 603.7c: The snapshot gate must inspect the whole delayed ability chain,
-    /// not only the first effect, because sub-abilities inherit parent targets at
-    /// delayed-trigger resolution.
+    /// CR 603.7c + CR 608.2k: The snapshot gate must inspect the whole delayed
+    /// ability chain, not only the first effect — a sub-ability that names the
+    /// event subject must still be bound to it at creation time.
+    ///
+    /// The binding now lands on the clause that NAMES the anaphor rather than on
+    /// the chain root. Previously the root snapshot answered the chain-wide
+    /// question, so a root naming no event subject (here a plain `Draw`) had the
+    /// descendant's referent stuffed into its own target slot and the descendant
+    /// reached it by inheritance. That conflated two clauses' bindings and, for a
+    /// root that legitimately owns a different referent (a `ParentTarget` return,
+    /// a `TargetOnly` land choice), silently overwrote it.
+    ///
+    /// `bind_event_subject_nodes` now binds each naming clause directly, so this
+    /// asserts the SUB carries the referent and the non-naming root is left
+    /// alone. Detection is unchanged — that is what this test is named for — only
+    /// the slot the referent lands in has moved, and moved to the more precise
+    /// one.
     #[test]
     fn triggering_source_snapshot_detects_sub_ability_reference() {
         let mut state = GameState::new_two_player(42);
@@ -2323,9 +2356,22 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
+        let delayed = &state.delayed_triggers[0].ability;
         assert_eq!(
-            state.delayed_triggers[0].ability.targets,
-            vec![TargetRef::Object(dying_creature)]
+            delayed
+                .sub_ability
+                .as_ref()
+                .expect("the delayed chain must retain its sub-ability")
+                .targets,
+            vec![TargetRef::Object(dying_creature)],
+            "the sub-ability that NAMES TriggeringSource must be bound to the \
+             ZoneChanged event's object"
+        );
+        assert!(
+            delayed.targets.is_empty(),
+            "the root Draw names no event subject, so its target slot must be \
+             left alone rather than receiving the descendant's referent; got {:?}",
+            delayed.targets
         );
     }
 

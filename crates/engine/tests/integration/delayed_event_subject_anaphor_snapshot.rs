@@ -24,6 +24,7 @@
 use super::rules::{GameScenario, Phase, P0, P1};
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::GameRunner;
+use engine::types::ability::{TargetRef, TriggerDefinition};
 use engine::types::actions::GameAction;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -363,5 +364,195 @@ fn delayed_destroy_does_not_affect_a_blinked_and_returned_recipient() {
         Zone::Battlefield,
         "CR 400.7: the blinked recipient came back as a NEW object, so the \
          pinned delayed destroy must not affect it"
+    );
+}
+
+/// CR 120.1 + CR 120.3 + CR 608.2k: a delayed chain naming BOTH event subjects
+/// binds each clause to its own object, END TO END through the delayed-trigger
+/// pipeline.
+///
+/// `ResolvedAbility::targets` is ONE shared slot. Without
+/// `delayed_trigger::bind_event_subject_nodes` both clauses read that slot, so
+/// they hit the same object: one of the two creatures wrongly survives. CR 120.1
+/// makes the event's subject the damage DEALER and CR 120.3 makes its object
+/// slot the RECIPIENT, and on a blocked attack those are never the same object.
+///
+/// No printed card reaches this shape (a `card-data.json` scan finds 6 delayed
+/// `EventTarget` cards, 76 delayed `TriggeringSource` cards, and zero naming
+/// both), so the chain is built by taking the REAL parsed Ohran Viper delayed
+/// payload and cloning its clause with the other anaphor substituted. That keeps
+/// every field the parser produces and changes only the axis under test — the
+/// printed reading is "destroy that creature and this creature at end of
+/// combat", a coherent mutual-destruction basilisk.
+///
+/// Run in BOTH orderings, because the chain-wide answer is whichever anaphor
+/// comes first in `EVENT_SUBJECT_ANAPHORS` rather than whichever the root clause
+/// uses: a rebind keyed on "differs from the chain-wide pick" passes one
+/// ordering and fails the other.
+#[test]
+fn a_mixed_event_subject_delayed_chain_destroys_both_dealer_and_recipient() {
+    use engine::types::ability::{AbilityDefinition, Effect, TargetFilter};
+
+    /// Ohran Viper's parsed trigger, with a second delayed clause appended that
+    /// names the opposite anaphor. `root_anaphor` becomes the delayed payload's
+    /// ROOT clause and the other becomes its sub-clause.
+    fn mixed_trigger(root_anaphor: TargetFilter, sub_anaphor: TargetFilter) -> TriggerDefinition {
+        let abilities =
+            engine::parser::oracle::parse_oracle_text(OHRAN_VIPER, "Ohran Viper", &[], &[], &[]);
+        let mut trigger = abilities
+            .triggers
+            .first()
+            .expect("Ohran Viper must parse a damage trigger")
+            .clone();
+
+        fn set_destroy_target(def: &mut AbilityDefinition, filter: TargetFilter) {
+            match &mut *def.effect {
+                Effect::Destroy { target, .. } => *target = filter,
+                other => panic!("expected a Destroy payload, got {other:?}"),
+            }
+        }
+
+        let execute = trigger
+            .execute
+            .as_deref_mut()
+            .expect("trigger must have a body");
+        let Effect::CreateDelayedTrigger {
+            effect: delayed, ..
+        } = &mut *execute.effect
+        else {
+            panic!("Ohran Viper's body must be a CreateDelayedTrigger");
+        };
+
+        // The second clause: same shape, opposite anaphor, no further chain.
+        let mut sub = delayed.as_ref().clone();
+        sub.sub_ability = None;
+        sub.else_ability = None;
+        set_destroy_target(&mut sub, sub_anaphor);
+
+        set_destroy_target(delayed, root_anaphor);
+        delayed.sub_ability = Some(Box::new(sub));
+
+        trigger.clone()
+    }
+
+    // Both orderings of the same chain must behave identically.
+    for (label, root, sub) in [
+        (
+            "root=EventTarget sub=TriggeringSource",
+            TargetFilter::EventTarget,
+            TargetFilter::TriggeringSource,
+        ),
+        (
+            "root=TriggeringSource sub=EventTarget",
+            TargetFilter::TriggeringSource,
+            TargetFilter::EventTarget,
+        ),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        // 1/2 dealer vs 0/6 blocker: neither kills the other in combat, so any
+        // death below is attributable ONLY to a delayed destroy clause.
+        let dealer = {
+            let mut b = scenario.add_creature(P0, "Ohran Viper", 1, 2);
+            b.with_trigger_definition(mixed_trigger(root.clone(), sub.clone()));
+            b.id()
+        };
+        let recipient = scenario.add_creature(P1, "Wall of Stone", 0, 6).id();
+
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(dealer, AttackTarget::Player(P1))])
+            .expect("declare attackers");
+        pass_into_declare_blockers(&mut runner);
+        runner
+            .declare_blockers(&[(recipient, dealer)])
+            .expect("declare blockers");
+
+        let damage = runner.combat_damage();
+        assert_eq!(
+            damage.zone_of(recipient),
+            Zone::Battlefield,
+            "{label}: 1 damage is not lethal to a 0/6 — guards against a vacuous pass"
+        );
+        assert_eq!(
+            damage.zone_of(dealer),
+            Zone::Battlefield,
+            "{label}: a 0/6 deals no damage — the dealer must survive combat itself"
+        );
+
+        runner.advance_to_phase(Phase::PostCombatMain);
+
+        assert_eq!(
+            zone_of(&runner, recipient),
+            Zone::Graveyard,
+            "{label}: CR 120.3 — the EventTarget clause must destroy the damage RECIPIENT"
+        );
+        assert_eq!(
+            zone_of(&runner, dealer),
+            Zone::Graveyard,
+            "{label}: CR 120.1 — the TriggeringSource clause must destroy the damage \
+             DEALER. Both in the graveyard is the whole point: one shared target slot \
+             would send both clauses at the same object and leave the other alive"
+        );
+    }
+}
+
+/// CR 608.2k: the root snapshot answers for the ROOT clause only.
+///
+/// Swooping Pteranodon is the ONE card in the shipped corpus whose delayed chain
+/// names an event subject in a DESCENDANT but not in its root:
+///
+///   root: TargetOnly { Typed(Land) }                      <- the chosen land
+///   sub : DealDamage { 3, target: TriggeringSource, .. }  <- "that creature"
+///
+/// It is therefore the only shipped card whose behavior the root-local snapshot
+/// could move, and it had NO coverage before this test.
+///
+/// This is a CHARACTERIZATION test, not a revert-detector, and the distinction
+/// is deliberate: the binding asserted below is identical under the old
+/// chain-wide root snapshot and the new root-local one — verified by running it
+/// both ways. That is precisely the point. It pins the one card at risk and
+/// records that this change does not move it, which is the evidence that
+/// switching the root question is safe. Do not read a passing run here as proof
+/// that root-local is in effect; `a_mixed_event_subject_delayed_chain_*` above
+/// carries that proof.
+#[test]
+fn swooping_pteranodon_root_clause_keeps_its_own_target_slot() {
+    const SWOOPING_PTERANODON: &str = "Whenever this creature or another Dinosaur you control with flying enters, gain control of target creature an opponent controls until end of turn. Untap that creature. It gains flying and haste until end of turn. At the beginning of the next end step, target land deals 3 damage to that creature.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, vec![mana(ManaType::Green); 6]);
+
+    let pteranodon = scenario
+        .add_spell_to_hand_from_oracle(P0, "Swooping Pteranodon", false, SWOOPING_PTERANODON)
+        .as_creature()
+        .with_subtypes(vec!["Dinosaur"])
+        .id();
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    scenario.add_land_from_oracle(P0, "Mountain", "{T}: Add {R}.");
+
+    let mut runner = scenario.build();
+    runner.cast(pteranodon).target_object(victim).resolve();
+
+    // Reach-guard: the ETB resolved and installed the delayed trigger. Without
+    // this, the binding assertions below would pass vacuously on an empty list.
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "reach-guard: Pteranodon's ETB must install exactly one delayed trigger"
+    );
+
+    // The root clause is `TargetOnly` over a LAND; the creature referent belongs
+    // to the damage sub-clause. Asserting the root slot does not hold the
+    // creature records the separation of the two clauses' bindings.
+    let delayed = &runner.state().delayed_triggers[0];
+    assert!(
+        !delayed.ability.targets.contains(&TargetRef::Object(victim)),
+        "the root TargetOnly(Land) clause must not hold the damage clause's \
+         creature referent; got {:?}",
+        delayed.ability.targets
     );
 }
