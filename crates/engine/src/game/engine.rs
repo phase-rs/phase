@@ -16098,6 +16098,27 @@ fn finalize_committed_land_play(
     });
 }
 
+/// CR 305.1 + CR 603.2: Park a finalized `LandPlayed` event so it survives a
+/// paused land-entry continuation. The pre-entry shock/payment choice
+/// (`ReplacementResult::NeedsChoice`) and the delivery-tail counter-order choice
+/// (`ZoneDeliveryResult::NeedsChoice`) both hand back a non-`Priority` waiting
+/// state, so the `LandPlayed` occurrence `finalize_committed_land_play` emitted
+/// into the action's `events` is dropped before `process_triggers` can scan it.
+/// Parking a clone here lets the resume site flush it into the priority-time
+/// scan via `flush_deferred_entry_events_into_priority_scan` (issue #8738).
+fn park_land_played_for_deferred_entry(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    origin_zone: Zone,
+) {
+    state.deferred_entry_events.push(GameEvent::LandPlayed {
+        object_id,
+        player_id: player,
+        from_zone: origin_zone,
+    });
+}
+
 fn mark_land_played_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone) {
     if let Some(obj) = state.objects.get_mut(&object_id) {
         obj.played_from_zone = Some(zone);
@@ -16493,6 +16514,10 @@ fn handle_play_land(
                             library_permission_src,
                             events,
                         );
+                        // CR 305.1 + CR 603.2: the delivery-tail counter-order
+                        // pause drops the `LandPlayed` occurrence emitted above,
+                        // so park a clone for the resume to replay (issue #8738).
+                        park_land_played_for_deferred_entry(state, player, object_id, origin_zone);
                         return Ok(state.waiting_for.clone());
                     }
                 }
@@ -16521,14 +16546,13 @@ fn handle_play_land(
                 // land" observers (City of Traitors) fire after the choice
                 // resolves instead of being dropped (issue #8738).
                 //
-                // NOTE: the pre-entry `ReplacementResult::NeedsChoice` return
-                // (shock lands, "as this enters you may pay 2 life…") and the
+                // The pre-entry `ReplacementResult::NeedsChoice` return (shock
+                // lands, "as this enters you may pay 2 life…") and the
                 // delivery-tail `ZoneDeliveryResult::NeedsChoice` return (entry
                 // counter-order pause) also emit `LandPlayed` and hand back a
-                // non-`Priority` waiting state, so they drop the same `LandPlayed`
-                // occurrence. They have no post-replacement drain, so no deferred
-                // capture runs here for them — a separate mechanism, and a known
-                // remaining follow-up on #8738, not covered by this fix.
+                // non-`Priority` waiting state, but they have no post-replacement
+                // drain, so no deferred capture runs here for them — each arm
+                // parks its own `LandPlayed` via `park_land_played_for_deferred_entry`.
                 finalize_committed_land_play(
                     state,
                     player,
@@ -16573,6 +16597,10 @@ fn handle_play_land(
                 library_permission_src,
                 events,
             );
+            // CR 305.1 + CR 603.2: the pre-entry shock/payment pause drops the
+            // `LandPlayed` occurrence emitted above, so park a clone for the
+            // resume to replay once the land actually enters (issue #8738).
+            park_land_played_for_deferred_entry(state, player, object_id, origin_zone);
 
             return Ok(super::replacement::replacement_choice_waiting_for(
                 player, state,
