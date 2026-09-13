@@ -16,9 +16,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// Per-card bracket signal flags. Stamped onto every `CardExportEntry`
-/// during `oracle-gen data` so the runtime engine and frontend both see
-/// the signals without re-reading `bracket_lists.json`.
+/// **Frozen wire DTO.** Per-card bracket signal flags stamped onto every
+/// `CardExportEntry`. Its field names, order, defaults, and derives preserve
+/// the existing `card-data.json` and AI-worker subset representation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BracketSignals {
     #[serde(default)]
@@ -32,6 +32,33 @@ pub struct BracketSignals {
 }
 
 impl BracketSignals {
+    /// Convert the legacy wire booleans into the engine's axis-keyed domain set.
+    pub fn axes(self) -> BTreeSet<crate::game::bracket_estimate::BracketAxis> {
+        use crate::game::bracket_estimate::BracketAxis;
+        use strum::IntoEnumIterator;
+
+        BracketAxis::iter()
+            .filter(|axis| match axis {
+                BracketAxis::GameChangers => self.game_changer,
+                BracketAxis::MassLandDenial => self.mass_land_denial,
+                BracketAxis::ExtraTurns => self.extra_turn,
+                BracketAxis::EfficientTutors => self.efficient_tutor,
+            })
+            .collect()
+    }
+
+    /// Convert an axis-keyed domain set back to the frozen wire DTO.
+    pub fn from_axes(axes: &BTreeSet<crate::game::bracket_estimate::BracketAxis>) -> Self {
+        use crate::game::bracket_estimate::BracketAxis;
+
+        Self {
+            game_changer: axes.contains(&BracketAxis::GameChangers),
+            mass_land_denial: axes.contains(&BracketAxis::MassLandDenial),
+            extra_turn: axes.contains(&BracketAxis::ExtraTurns),
+            efficient_tutor: axes.contains(&BracketAxis::EfficientTutors),
+        }
+    }
+
     pub fn is_clean(self) -> bool {
         !self.game_changer && !self.mass_land_denial && !self.extra_turn && !self.efficient_tutor
     }
@@ -457,5 +484,41 @@ mod tests {
     fn all_names_dedups_across_six_lists() {
         let lists = BracketLists::from_json_str(SAMPLE).unwrap();
         assert_eq!(lists.all_names().count(), 6);
+    }
+
+    #[test]
+    fn bracket_signals_wire_shape_is_byte_stable() {
+        use crate::game::bracket_estimate::BracketAxis;
+
+        let signals = BracketSignals::from_axes(&BTreeSet::from([BracketAxis::GameChangers]));
+        assert_eq!(
+            serde_json::to_string(&signals).unwrap(),
+            r#"{"game_changer":true,"mass_land_denial":false,"extra_turn":false,"efficient_tutor":false}"#
+        );
+    }
+
+    #[test]
+    fn legacy_partial_signals_object_deserializes_with_signals_intact() {
+        use crate::game::bracket_estimate::BracketAxis;
+
+        let signals: BracketSignals = serde_json::from_str(r#"{"game_changer":true}"#).unwrap();
+        assert_eq!(signals.axes(), BTreeSet::from([BracketAxis::GameChangers]));
+        assert!(serde_json::from_str::<BracketSignals>("{}")
+            .unwrap()
+            .axes()
+            .is_empty());
+    }
+
+    #[test]
+    fn signals_axes_round_trip_over_every_axis() {
+        use crate::game::bracket_estimate::BracketAxis;
+        use strum::IntoEnumIterator;
+
+        for axis in BracketAxis::iter() {
+            let axes = BTreeSet::from([axis]);
+            assert_eq!(BracketSignals::from_axes(&axes).axes(), axes);
+        }
+        let all = BracketAxis::iter().collect();
+        assert_eq!(BracketSignals::from_axes(&all).axes(), all);
     }
 }

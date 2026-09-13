@@ -18,9 +18,15 @@ export const BRACKET_AXES: readonly BracketAxis[] = [
   "efficient_tutors",
 ];
 
-export type BracketAxisCounts = Record<BracketAxis, number>;
-export type BracketContributingCards = Record<BracketAxis, string[]>;
-export type BracketAxisCaps = Record<BracketAxis, number | null>;
+export interface AxisReading {
+  count: number;
+  /** null = no cap on this axis at the resolved tier. */
+  cap_at_tier: number | null;
+  contributing: string[];
+}
+
+/** Total, not Partial: the engine emits every BracketAxis, including zero-count axes. */
+export type BracketAxisReadings = Record<BracketAxis, AxisReading>;
 
 export interface BracketViolation {
   axis: BracketAxis;
@@ -31,9 +37,7 @@ export interface BracketViolation {
 
 export interface BracketEstimate {
   tier: CommanderBracketTier;
-  axes: BracketAxisCounts;
-  axis_caps_at_tier: BracketAxisCaps;
-  contributing: BracketContributingCards;
+  axes: BracketAxisReadings;
   /**
    * Per-axis violations recorded for axes whose count exceeded a tier
    * ceiling. Serialized from Rust `BTreeMap<BracketAxis, BracketViolation>`
@@ -61,34 +65,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
 }
 
-function hasNumberByAxis(value: unknown): value is BracketAxisCounts {
-  return isRecord(value) && BRACKET_AXES.every((axis) => typeof value[axis] === "number");
-}
-
-function hasCapByAxis(value: unknown): value is BracketAxisCaps {
+function isAxisReading(value: unknown): value is AxisReading {
   return (
     isRecord(value) &&
-    BRACKET_AXES.every((axis) => value[axis] === null || typeof value[axis] === "number")
+    typeof value.count === "number" &&
+    (value.cap_at_tier === null || typeof value.cap_at_tier === "number") &&
+    Array.isArray(value.contributing) &&
+    value.contributing.every((card) => typeof card === "string")
   );
 }
 
-function hasStringArrayByAxis(value: unknown): value is BracketContributingCards {
-  return (
-    isRecord(value) &&
-    BRACKET_AXES.every(
-      (axis) => Array.isArray(value[axis]) && value[axis].every((card) => typeof card === "string"),
-    )
-  );
+function hasReadingByAxis(value: unknown): value is BracketAxisReadings {
+  return isRecord(value) && BRACKET_AXES.every((axis) => isAxisReading(value[axis]));
 }
 
 export function isBracketEstimate(value: unknown): value is BracketEstimate {
   if (!isRecord(value) || typeof value.tier !== "string") return false;
   if (!(value.tier in BRACKET_TIER_NUMERIC)) return false;
   if (typeof value.data_version !== "string") return false;
-  return (
-    hasNumberByAxis(value.axes) &&
-    hasCapByAxis(value.axis_caps_at_tier) &&
-    hasStringArrayByAxis(value.contributing) &&
-    isRecord(value.violations)
-  );
+  return hasReadingByAxis(value.axes) && isRecord(value.violations);
 }
