@@ -65699,3 +65699,485 @@ fn unclassified_any_number_placement_recipient_keeps_fixed_count() {
         nodes[0].multi_target
     );
 }
+
+/// Phase 3, row L1 (P3-C1, P3-C2; the parse half of C-4). Sweet-Gum Recluse's
+/// ETB "put three +1/+1 counters on each of any number of target creatures that
+/// entered this turn" lowers to a targeted `PutCounter` whose recipient names
+/// the stated class, carrying the announced target set `unlimited(0)`.
+///
+/// RED AT BASE: the recipient is mass-classified as `PutCounterAll` with an
+/// empty `Typed` filter and no `multi_target`. Paired mutations MP-ARM-OFF and
+/// MP-RECOVER-OFF must each turn it red.
+#[test]
+fn sweet_gum_recluse_any_number_target_counter_gets_target_set_shape() {
+    let parsed = parse_oracle_text(
+        "Flash\nCascade\nReach\nWhen this creature enters, put three +1/+1 counters on each of any number of target creatures that entered this turn.",
+        "Sweet-Gum Recluse",
+        &[
+            "Cascade".to_string(),
+            "Flash".to_string(),
+            "Reach".to_string(),
+        ],
+        &["Creature".to_string()],
+        &["Spider".to_string()],
+    );
+    let execute = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .unwrap_or_else(|| {
+            panic!(
+                "reach guard: triggers[0].execute must exist, got {:?}",
+                parsed.triggers
+            )
+        });
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::PutCounter { .. } | Effect::PutCounterAll { .. }
+        ),
+        "reach guard: triggers[0].execute is the counter-placement node, got {:?}",
+        execute.effect
+    );
+    assert_eq!(
+        *execute.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnteredThisTurn])
+            ),
+        },
+        "the recipient must be a targeted PutCounter over creatures that entered this turn"
+    );
+    assert_eq!(
+        execute.multi_target,
+        Some(MultiTargetSpec::unlimited(0)),
+        "\"each of any number of target\" announces an unlimited(0) target set"
+    );
+}
+
+/// Phase 3, row L2 (P3-C1, P3-C2; the modal member). Chong and Lily's mode one
+/// "Put a lore counter on each of any number of target Sagas you control"
+/// lowers, inside the trigger's first mode sub-ability, to a targeted
+/// `PutCounter` over Sagas you control with the announced target set
+/// `unlimited(0)`.
+///
+/// RED AT BASE: mode one is mass-classified as `PutCounterAll` with an empty
+/// `Typed` filter and no `multi_target`. Paired mutations MP-ARM-OFF and
+/// MP-RECOVER-OFF must each turn it red.
+#[test]
+fn chong_and_lily_mode_one_any_number_target_counter_gets_target_set_shape() {
+    let parsed = parse_oracle_text(
+        "Whenever one or more Bards you control attack, choose one —\n• Put a lore counter on each of any number of target Sagas you control.\n• Creatures you control get +1/+0 until end of turn for each lore counter among Sagas you control.",
+        "Chong and Lily, Nomads",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Bard".to_string(), "Ally".to_string()],
+    );
+    let execute = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .unwrap_or_else(|| {
+            panic!(
+                "reach guard: triggers[0].execute must exist, got {:?}",
+                parsed.triggers
+            )
+        });
+    assert_eq!(
+        execute.mode_abilities.len(),
+        2,
+        "reach guard: the modal trigger carries two mode sub-abilities, got {:?}",
+        execute.mode_abilities
+    );
+    let mode_one = &execute.mode_abilities[0];
+    assert!(
+        matches!(
+            mode_one.effect.as_ref(),
+            Effect::PutCounter { .. } | Effect::PutCounterAll { .. }
+        ),
+        "reach guard: mode_abilities[0] is the counter-placement node, got {:?}",
+        mode_one.effect
+    );
+    assert!(
+        matches!(
+            execute.mode_abilities[1].effect.as_ref(),
+            Effect::PumpAll { .. }
+        ),
+        "reach guard: mode_abilities[1] keeps its base effect kind (PumpAll), got {:?}",
+        execute.mode_abilities[1].effect
+    );
+    assert_eq!(
+        *mode_one.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Lore,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Saga".to_string())
+                    .controller(ControllerRef::You)
+            ),
+        },
+        "mode one must be a targeted PutCounter over Sagas you control"
+    );
+    assert_eq!(
+        mode_one.multi_target,
+        Some(MultiTargetSpec::unlimited(0)),
+        "\"each of any number of target\" announces an unlimited(0) target set"
+    );
+}
+
+/// Phase 3, row L3 (C-5 / P3-C4): the preservation witness of the "each of up to
+/// N target" population the new target-set arm takes over. Rishkar's node keeps
+/// its full value: a targeted `PutCounter` over creatures with `up_to(2)`.
+///
+/// Leading-space direction: the legacy article-less arm fed the target parser
+/// `" target creatures"` (the text sliced after the count); the new arm feeds it
+/// `"target creatures"` with no leading space, so this lock observes that the
+/// parse tolerates the ABSENCE of the leading space.
+///
+/// GREEN AT BASE. Non-vacuous by mutation: its filter half is paired with
+/// MP-ARM-TEXT and its spec half with MP-RECOVER-UNLIMITED, each of which must
+/// turn it red. The other 151 cards of the population are covered by the M8
+/// whole-export value-identity gate.
+#[test]
+fn rishkar_peema_renegade_up_to_two_target_counter_shape_unchanged() {
+    let parsed = parse_oracle_text(
+        "When Rishkar enters, put a +1/+1 counter on each of up to two target creatures.\nEach creature you control with a counter on it has \"{T}: Add {G}.\"",
+        "Rishkar, Peema Renegade",
+        &[],
+        &["Creature".to_string()],
+        &["Elf".to_string(), "Druid".to_string()],
+    );
+    let execute = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .unwrap_or_else(|| {
+            panic!(
+                "reach guard: triggers[0].execute must exist, got {:?}",
+                parsed.triggers
+            )
+        });
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::PutCounter { .. }),
+        "reach guard: triggers[0].execute is the counter-placement node, got {:?}",
+        execute.effect
+    );
+    assert_eq!(
+        *execute.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        },
+        "Rishkar's recipient filter must be value-identical to base"
+    );
+    assert_eq!(
+        execute.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 })),
+        "Rishkar's announced target set must stay up_to(2)"
+    );
+}
+
+/// Phase 3, row L4 (C-6 / P3-C5): the article-less "each of up to two Soldiers
+/// you control" is not an announced target phrase, so the target-set arm
+/// declines it and the retained article-less route keeps its value.
+///
+/// Decline observation: the unmutated values cannot show which route produced
+/// them. The negative side is observed by mutation: MP-LEGACY-C (counter.rs) and
+/// MP-LEGACY-L (lower.rs) remove the legacy route, and this row can go red under
+/// them only if the new arm declined the article-less text.
+///
+/// GREEN AT BASE. Non-vacuous by mutation: its filter half is paired with
+/// MP-LEGACY-C and its spec half with MP-LEGACY-L, each of which must turn it
+/// red. The direct helper carrier is
+/// `strip_optional_target_prefix_up_to_n_without_article_is_declined`.
+#[test]
+fn soldier_military_program_article_less_up_to_two_counter_shape_unchanged() {
+    let parsed = parse_oracle_text(
+        "At the beginning of combat on your turn, choose one. If you control a commander, you may choose both instead.\n• Create a 1/1 white Soldier creature token.\n• Put a +1/+1 counter on each of up to two Soldiers you control.",
+        "SOLDIER Military Program",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let execute = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .unwrap_or_else(|| {
+            panic!(
+                "reach guard: triggers[0].execute must exist, got {:?}",
+                parsed.triggers
+            )
+        });
+    let mode_two = execute.mode_abilities.get(1).unwrap_or_else(|| {
+        panic!(
+            "reach guard: triggers[0].execute.mode_abilities[1] must exist, got {:?}",
+            execute.mode_abilities
+        )
+    });
+    assert!(
+        matches!(
+            mode_two.effect.as_ref(),
+            Effect::PutCounter { .. } | Effect::PutCounterAll { .. }
+        ),
+        "reach guard: mode_abilities[1] is the counter-placement node, got {:?}",
+        mode_two.effect
+    );
+    assert_eq!(
+        *mode_two.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Soldier".to_string())
+                    .controller(ControllerRef::You)
+            ),
+        },
+        "the article-less recipient filter must be value-identical to base"
+    );
+    assert_eq!(
+        mode_two.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 })),
+        "the article-less form must keep its up_to(2) spec"
+    );
+}
+
+/// Phase 3, row L5 (C-6 / P3-C5): Gix's Command's article-less "Put two +1/+1
+/// counters on up to one creature" keeps its value.
+///
+/// GREEN AT BASE. Spec half: paired with MP-LEGACY-L, which must turn it red.
+/// Filter half: a VALUE LOCK WITH NO COUNTER-PATH PAIRING, disclosed here. The
+/// filter is route-invariant: `parse_target`'s quantified prefixes strip
+/// "up to one " before the type word, so it is byte-identical even with the
+/// legacy counter.rs arm removed (MP-LEGACY-C). The C-6 negative side is carried
+/// by `soldier_military_program_article_less_up_to_two_counter_shape_unchanged`
+/// and `strip_optional_target_prefix_up_to_n_without_article_is_declined`.
+#[test]
+fn gixs_command_article_less_up_to_one_counter_shape_unchanged() {
+    let parsed = parse_oracle_text(
+        "Choose two —\n• Put two +1/+1 counters on up to one creature. It gains lifelink until end of turn.\n• Destroy each creature with power 2 or less.\n• Return up to two creature cards from your graveyard to your hand.\n• Each opponent sacrifices a creature with the greatest power among creatures they control.",
+        "Gix's Command",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed.abilities.first().unwrap_or_else(|| {
+        panic!(
+            "reach guard: abilities[0] must exist, got {:?}",
+            parsed.abilities
+        )
+    });
+    assert!(
+        matches!(ability.effect.as_ref(), Effect::PutCounter { .. }),
+        "reach guard: abilities[0] is the counter-placement node, got {:?}",
+        ability.effect
+    );
+    assert_eq!(
+        *ability.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        },
+        "the article-less recipient filter must be value-identical to base"
+    );
+    assert_eq!(
+        ability.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+        "the article-less form must keep its up_to(1) spec"
+    );
+}
+
+/// Phase 3, row L6 (C-7 / P3-C6): Deepglow Skate's counter-doubling "on any
+/// number of target permanents" keeps its measured node.
+///
+/// GREEN AT BASE. Non-vacuous by mutation: MP-DOUBLE-OFF must turn it red.
+#[test]
+fn counter_doubling_any_number_deepglow_skate_shape_unchanged() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, double the number of each kind of counter on any number of target permanents.",
+        "Deepglow Skate",
+        &["Double".to_string()],
+        &["Creature".to_string()],
+        &["Fish".to_string()],
+    );
+    let execute = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .unwrap_or_else(|| {
+            panic!(
+                "reach guard: triggers[0].execute must exist, got {:?}",
+                parsed.triggers
+            )
+        });
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Double { .. }),
+        "reach guard: triggers[0].execute is the doubling node, got {:?}",
+        execute.effect
+    );
+    assert_eq!(
+        *execute.effect,
+        Effect::Double {
+            target_kind: DoubleTarget::Counters { counter_type: None },
+            target: TargetFilter::Typed(TypedFilter::permanent()),
+        },
+        "the doubling node must be value-identical to base"
+    );
+    assert_eq!(
+        execute.multi_target,
+        Some(MultiTargetSpec::unlimited(0)),
+        "the doubling node must keep its unlimited(0) spec"
+    );
+}
+
+/// Phase 3, row L7 (C-7 / P3-C6): Kinetic Ooze's "double the number of +1/+1
+/// counters on any number of other target creatures" keeps its measured node,
+/// two sub-abilities below the ETB's Destroy.
+///
+/// GREEN AT BASE. Non-vacuous by mutation: MP-DOUBLE-OFF must turn it red.
+#[test]
+fn counter_doubling_any_number_kinetic_ooze_shape_unchanged() {
+    let parsed = parse_oracle_text(
+        "This creature enters with X +1/+1 counters on it.\nWhen this creature enters, destroy up to one target artifact or enchantment with mana value X or less. If X is 5 or more, you draw a card. If X is 10 or more, double the number of +1/+1 counters on any number of other target creatures.",
+        "Kinetic Ooze",
+        &["Double".to_string()],
+        &["Creature".to_string()],
+        &["Ooze".to_string()],
+    );
+    let execute = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .unwrap_or_else(|| {
+            panic!(
+                "reach guard: triggers[0].execute must exist, got {:?}",
+                parsed.triggers
+            )
+        });
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Destroy { .. }),
+        "reach guard: triggers[0].execute is the ETB's Destroy, got {:?}",
+        execute.effect
+    );
+    assert_eq!(
+        execute.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+        "reach guard: the sibling Destroy keeps its up_to(1) spec"
+    );
+    let doubling = execute
+        .sub_ability
+        .as_deref()
+        .and_then(|sub| sub.sub_ability.as_deref())
+        .unwrap_or_else(|| {
+            panic!(
+                "reach guard: triggers[0].execute.sub_ability.sub_ability must exist, got {:?}",
+                execute.sub_ability
+            )
+        });
+    assert!(
+        matches!(doubling.effect.as_ref(), Effect::MultiplyCounter { .. }),
+        "reach guard: the nested node is the counter multiplier, got {:?}",
+        doubling.effect
+    );
+    assert_eq!(
+        *doubling.effect,
+        Effect::MultiplyCounter {
+            counter_type: CounterType::Plus1Plus1,
+            multiplier: 2,
+            target: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Another])
+            ),
+        },
+        "the doubling node must be value-identical to base"
+    );
+    assert_eq!(
+        doubling.multi_target,
+        Some(MultiTargetSpec::unlimited(0)),
+        "the doubling node must keep its unlimited(0) spec"
+    );
+}
+
+/// Phase 3, row L8 (C-7 / P3-C6): The Thing's reflexive "double the number of
+/// each kind of counter on any number of target permanents you control" keeps
+/// its measured node under its attack trigger.
+///
+/// GREEN AT BASE. Non-vacuous by mutation: MP-DOUBLE-OFF must turn it red.
+#[test]
+fn counter_doubling_any_number_the_thing_shape_unchanged() {
+    let parsed = parse_oracle_text(
+        "Trample\nAt the beginning of combat on your turn, if you've cast a noncreature spell this turn, put four +1/+1 counters on The Thing.\nWhenever The Thing attacks, you may pay {R}{G}{W}{U}. When you do, double the number of each kind of counter on any number of target permanents you control.",
+        "The Thing",
+        &["Double".to_string(), "Trample".to_string()],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Hero".to_string()],
+    );
+    let first = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .unwrap_or_else(|| {
+            panic!(
+                "reach guard: triggers[0].execute must exist, got {:?}",
+                parsed.triggers
+            )
+        });
+    assert!(
+        matches!(
+            first.effect.as_ref(),
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "reach guard: triggers[0].execute is the unrelated self PutCounter, got {:?}",
+        first.effect
+    );
+    let doubling = parsed
+        .triggers
+        .get(1)
+        .and_then(|trigger| trigger.execute.as_deref())
+        .and_then(|execute| execute.sub_ability.as_deref())
+        .unwrap_or_else(|| {
+            panic!(
+                "reach guard: triggers[1].execute.sub_ability must exist, got {:?}",
+                parsed.triggers
+            )
+        });
+    assert!(
+        matches!(doubling.effect.as_ref(), Effect::Double { .. }),
+        "reach guard: the reflexive node is the doubling node, got {:?}",
+        doubling.effect
+    );
+    assert_eq!(
+        *doubling.effect,
+        Effect::Double {
+            target_kind: DoubleTarget::Counters { counter_type: None },
+            target: TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        },
+        "the doubling node must be value-identical to base"
+    );
+    assert_eq!(
+        doubling.multi_target,
+        Some(MultiTargetSpec::unlimited(0)),
+        "the doubling node must keep its unlimited(0) spec"
+    );
+}
+
+/// CR 115.1d: only an announced target phrase is a target set; the article-less
+/// `up to N <noun>` form is declined unchanged so the counter path's
+/// article-less fallback keeps it.
+///
+/// GREEN AT BASE; non-vacuous by construction (direct helper call) and paired
+/// with mutation MP-AUTH-ARTICLE, which must turn it red.
+#[test]
+fn strip_optional_target_prefix_up_to_n_without_article_is_declined() {
+    for input in ["up to two Soldiers you control", "up to one creature"] {
+        assert_eq!(strip_optional_target_prefix(input), (input, None));
+    }
+}
