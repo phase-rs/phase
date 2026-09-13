@@ -663,3 +663,237 @@ fn a_delayed_mass_zone_move_keeps_its_creation_event_referent() {
          be swept up by the mass move"
     );
 }
+
+/// CR 608.2k + CR 603.7c: a delayed mass filter that NESTS the event subject
+/// binds it too, and the enclosing structure keeps its meaning.
+///
+/// `Not(EventTarget)` is the sharp case, and it fails in the most dangerous
+/// direction: if the inner reference is detected but never bound, at the phase
+/// event it resolves to NO object, and `Not(nothing)` inverts into "everything".
+/// A delayed "destroy each OTHER creature" would then wipe the board AND take
+/// the one creature it was written to spare.
+///
+/// So this asserts both halves: the referent survives (the exclusion still
+/// excludes) and a bystander dies (the mass effect still applies to the rest).
+/// Asserting only one half would pass on a filter that had collapsed.
+#[test]
+fn a_delayed_mass_move_binds_a_nested_event_subject_reference() {
+    fn nested_mass_trigger() -> TriggerDefinition {
+        let abilities =
+            engine::parser::oracle::parse_oracle_text(OHRAN_VIPER, "Ohran Viper", &[], &[], &[]);
+        let mut trigger = abilities
+            .triggers
+            .first()
+            .expect("Ohran Viper must parse a damage trigger")
+            .clone();
+        let execute = trigger
+            .execute
+            .as_deref_mut()
+            .expect("trigger must have a body");
+        let Effect::CreateDelayedTrigger {
+            effect: delayed, ..
+        } = &mut *execute.effect
+        else {
+            panic!("Ohran Viper's body must be a CreateDelayedTrigger");
+        };
+
+        // "Destroy each creature OTHER THAN that creature at end of combat."
+        *delayed.effect = Effect::DestroyAll {
+            target: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(engine::types::ability::TypedFilter::creature()),
+                    TargetFilter::Not {
+                        filter: Box::new(TargetFilter::EventTarget),
+                    },
+                ],
+            },
+            cant_regenerate: false,
+        };
+        delayed.sub_ability = None;
+        delayed.else_ability = None;
+        trigger.clone()
+    }
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let viper = {
+        let mut b = scenario.add_creature(P0, "Ohran Viper", 1, 2);
+        b.with_trigger_definition(nested_mass_trigger());
+        b.id()
+    };
+    let wall = scenario.add_creature(P1, "Wall of Stone", 0, 6).id();
+    let bystander = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(viper, AttackTarget::Player(P1))])
+        .expect("declare attackers");
+    pass_into_declare_blockers(&mut runner);
+    runner
+        .declare_blockers(&[(wall, viper)])
+        .expect("declare blockers");
+
+    let damage = runner.combat_damage();
+    assert_eq!(
+        damage.zone_of(wall),
+        Zone::Battlefield,
+        "1 damage is not lethal to a 0/6 — guards against a vacuous pass"
+    );
+
+    runner.advance_to_phase(Phase::PostCombatMain);
+
+    assert_eq!(
+        zone_of(&runner, wall),
+        Zone::Battlefield,
+        "CR 608.2k: the nested Not(EventTarget) must still EXCLUDE the damaged \
+         creature. An unbound inner reference resolves to nothing, and \
+         Not(nothing) sweeps everything — including the object it must spare"
+    );
+    assert_eq!(
+        zone_of(&runner, bystander),
+        Zone::Graveyard,
+        "the mass destroy must still apply to every OTHER creature — asserting \
+         only the exclusion would pass on a filter that matched nobody at all"
+    );
+}
+
+/// CR 400.7 + CR 603.7c: a blinked-and-returned referent is not affected by a
+/// delayed MASS move either.
+///
+/// CHARACTERIZATION test, and the label is load-bearing: unlike its
+/// single-target sibling above, this one does **not** detect a missing pin.
+/// Verified by revert-probe — disabling a `target_pin_is_current` gate on the
+/// `ChangeZoneAll` scan leaves it green, so whatever spares the returned object
+/// on the mass path is not that gate. The mass resolvers (`change_zone`,
+/// `destroy_all`, …) each scan and filter independently and `DestroyAll` carries
+/// no pin check at all, so the mechanism here is still unidentified.
+///
+/// It is kept because the BEHAVIOR is correct and worth locking in: if a future
+/// change starts sweeping blinked referents on the mass path, this goes red.
+/// Do not read it as proof that the mass path enforces CR 400.7 — establishing
+/// that needs a repro this test does not yet provide.
+#[test]
+fn a_delayed_mass_move_does_not_affect_a_blinked_and_returned_referent() {
+    fn mass_move_trigger() -> TriggerDefinition {
+        let abilities =
+            engine::parser::oracle::parse_oracle_text(OHRAN_VIPER, "Ohran Viper", &[], &[], &[]);
+        let mut trigger = abilities
+            .triggers
+            .first()
+            .expect("Ohran Viper must parse a damage trigger")
+            .clone();
+        let execute = trigger
+            .execute
+            .as_deref_mut()
+            .expect("trigger must have a body");
+        let Effect::CreateDelayedTrigger {
+            effect: delayed, ..
+        } = &mut *execute.effect
+        else {
+            panic!("Ohran Viper's body must be a CreateDelayedTrigger");
+        };
+        *delayed.effect = Effect::ChangeZoneAll {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Graveyard,
+            target: TargetFilter::EventTarget,
+            enters_under: None,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: Default::default(),
+            random_order: false,
+        };
+        delayed.sub_ability = None;
+        delayed.else_ability = None;
+        trigger.clone()
+    }
+
+    fn deal_damage_and_hold(runner: &mut GameRunner, viper: ObjectId, wall: ObjectId) {
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(viper, AttackTarget::Player(P1))])
+            .expect("declare attackers");
+        pass_into_declare_blockers(runner);
+        runner
+            .declare_blockers(&[(wall, viper)])
+            .expect("declare blockers");
+        for _ in 0..16 {
+            if !runner.state().delayed_triggers.is_empty() {
+                return;
+            }
+            assert_ne!(
+                runner.state().phase,
+                Phase::EndCombat,
+                "reached end of combat before the delayed trigger was installed"
+            );
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority toward the combat damage step");
+        }
+        panic!("combat damage never installed a delayed trigger");
+    }
+
+    // ---- Arm 1 (reach-guard): no blink, the mass destroy DOES land. ----
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let viper = {
+        let mut b = scenario.add_creature(P0, "Ohran Viper", 1, 2);
+        b.with_trigger_definition(mass_move_trigger());
+        b.id()
+    };
+    let wall = scenario.add_creature(P1, "Wall of Stone", 0, 6).id();
+    let mut runner = scenario.build();
+    deal_damage_and_hold(&mut runner, viper, wall);
+    runner.advance_to_phase(Phase::PostCombatMain);
+    assert_eq!(
+        zone_of(&runner, wall),
+        Zone::Graveyard,
+        "arm 1 reach-guard: without the blink the delayed mass destroy must kill \
+         the damaged creature — otherwise arm 2 proves nothing"
+    );
+
+    // ---- Arm 2 (the detector): blink the referent, it must SURVIVE. ----
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P1, vec![mana(ManaType::White), mana(ManaType::White)]);
+    let viper = {
+        let mut b = scenario.add_creature(P0, "Ohran Viper", 1, 2);
+        b.with_trigger_definition(mass_move_trigger());
+        b.id()
+    };
+    let wall = scenario.add_creature(P1, "Wall of Stone", 0, 6).id();
+    let ephemerate = scenario
+        .add_spell_to_hand_from_oracle(P1, "Ephemerate", true, EPHEMERATE)
+        .id();
+
+    let mut runner = scenario.build();
+    deal_damage_and_hold(&mut runner, viper, wall);
+    for _ in 0..4 {
+        if runner.state().waiting_for.acting_players().first().copied() == Some(P1) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass active-player priority so the blinker can respond");
+    }
+    let blinked = runner.cast(ephemerate).target_object(wall).resolve();
+    assert_eq!(
+        blinked.zone_of(wall),
+        Zone::Battlefield,
+        "reach-guard: Ephemerate must return the creature to the battlefield"
+    );
+
+    runner.advance_to_phase(Phase::PostCombatMain);
+
+    assert_eq!(
+        zone_of(&runner, wall),
+        Zone::Battlefield,
+        "CR 400.7: the blinked referent is a NEW object, so the pinned delayed \
+         MASS destroy must not affect it — the mass path filters per object and \
+         never reads ability.targets, so it needs its own pin check"
+    );
+}

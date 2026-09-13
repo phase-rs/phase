@@ -646,25 +646,32 @@ fn bind_event_subject_nodes(
 }
 
 /// CR 603.7c + CR 608.2k: Concretize a MASS-POPULATION effect's event-subject
-/// filter to the object it names at creation time.
+/// references to the object they name at creation time.
 ///
-/// The mass family (`ChangeZoneAll`, `DestroyAll`, …) does not consume
-/// `ResolvedAbility::targets`. It scans a zone and evaluates its `target` filter
-/// against each object, and `matches_target_filter` resolves an event-subject
-/// anaphor from `state.current_trigger_event` — which at the later phase event
-/// carries no object. Populating `targets` alone therefore fixes the SINGLE-
-/// target effects and leaves the mass ones silently moving nothing.
+/// The mass family does not consume `ResolvedAbility::targets`. It scans a zone
+/// and evaluates its `target` filter against each object, and
+/// `matches_target_filter` resolves an event-subject anaphor from
+/// `state.current_trigger_event` — which at the later phase event carries no
+/// object. Populating `targets` alone therefore fixes the SINGLE-target effects
+/// and leaves the mass ones silently affecting nothing.
 ///
-/// Rewriting the filter to `SpecificObject` is the same technique
+/// Rewriting to `SpecificObject` is the technique
 /// `rebind_last_created_to_parent_target` uses for `LastCreated`, and
 /// `SpecificObject` is the concrete form this path already produces
 /// (`filter::normalize_contextual_filter` rewrites `Not(ParentTarget)` to
 /// `Not(SpecificObject)`).
 ///
-/// Scoped to a BARE event-subject target. A compound filter ("each OTHER
-/// creature that shares a color with it") keeps its structure: the anaphor there
-/// is a property of the population test, not the population itself, so replacing
-/// the whole filter would change which objects the effect scans.
+/// RECURSES through the enclosing filter structure rather than matching only a
+/// bare leaf, mirroring `filter_refs_event_subject`'s traversal so detection and
+/// concretization agree on what counts as a reference. A compound filter left
+/// unconcretized is worse than a bare one: `Not(EventTarget)` whose inner
+/// reference resolves to NOTHING at the phase event inverts into "everything",
+/// turning a delayed "destroy each OTHER creature" into a board wipe that also
+/// takes the referent it was meant to spare.
+///
+/// The enclosing structure is preserved exactly — only the leaves are replaced —
+/// so `DistinctFrom { reference }` keeps its property shape and continues to be
+/// read by its own resolver.
 fn concretize_mass_population_event_subject(effect: &mut Effect, targets: &[TargetRef]) {
     let Some(TargetRef::Object(id)) = targets
         .iter()
@@ -672,23 +679,44 @@ fn concretize_mass_population_event_subject(effect: &mut Effect, targets: &[Targ
     else {
         return;
     };
-    // The same nine effects `effects::effect_parent_ref_slots` surfaces as
-    // hidden mass-population slots, and the same nine the parser's trigger
-    // rebind converts to `EventTarget`.
-    let target = match effect {
-        Effect::ChangeZoneAll { target, .. }
-        | Effect::DestroyAll { target, .. }
-        | Effect::DamageAll { target, .. }
-        | Effect::BounceAll { target, .. }
-        | Effect::CounterAll { target, .. }
-        | Effect::GainControlAll { target, .. }
-        | Effect::PumpAll { target, .. }
-        | Effect::PutCounterAll { target, .. }
-        | Effect::DoublePTAll { target, .. } => target,
-        _ => return,
+    let Some(target) = super::mass_population_target_mut(effect) else {
+        return;
     };
-    if super::EVENT_SUBJECT_ANAPHORS.contains(target) {
-        *target = TargetFilter::SpecificObject { id: *id };
+    concretize_event_subject_leaves(target, *id);
+}
+
+/// Replace every [`EVENT_SUBJECT_ANAPHORS`](super::EVENT_SUBJECT_ANAPHORS) leaf
+/// with `SpecificObject { id }`, preserving the enclosing filter structure.
+///
+/// Traverses exactly the forms `effects::filter_refs_event_subject` inspects, so
+/// a reference it can DETECT is a reference this can BIND. The two walking
+/// different shapes is the bug class here: a detected-but-unbound reference
+/// takes the creation snapshot path and then resolves against an empty event.
+fn concretize_event_subject_leaves(
+    filter: &mut TargetFilter,
+    id: crate::types::identifiers::ObjectId,
+) {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            for prop in &mut typed.properties {
+                if let crate::types::ability::FilterProp::DistinctFrom { reference } = prop {
+                    concretize_event_subject_leaves(reference, id);
+                }
+            }
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for inner in filters {
+                concretize_event_subject_leaves(inner, id);
+            }
+        }
+        TargetFilter::Not { filter } => concretize_event_subject_leaves(filter, id),
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            concretize_event_subject_leaves(filter, id)
+        }
+        other if super::EVENT_SUBJECT_ANAPHORS.contains(other) => {
+            *other = TargetFilter::SpecificObject { id };
+        }
+        _ => {}
     }
 }
 
