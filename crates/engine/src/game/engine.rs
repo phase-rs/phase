@@ -16524,6 +16524,34 @@ fn handle_play_land(
             // the wrong controller context.
             if state.has_post_replacement_drain() {
                 state.clear_post_replacement_source();
+                // CR 305.1 + CR 603.2: Finalize the land play BEFORE dispatching
+                // the post-replacement continuation, so the `LandPlayed` event is
+                // already present in `events` when a mid-entry choice (as-enters
+                // "choose a color/creature type", enters-with-counter, or copy
+                // replacement) defers the entry events for later replay. The
+                // deferred-entry capture in `engine_replacement` clones both the
+                // entry `ZoneChanged` and the sibling `LandPlayed`, so "play a
+                // land" observers (City of Traitors) fire after the choice
+                // resolves instead of being dropped (issue #8738).
+                //
+                // NOTE: the pre-entry `ReplacementResult::NeedsChoice` return
+                // (shock lands, "as this enters you may pay 2 life…") and the
+                // delivery-tail `ZoneDeliveryResult::NeedsChoice` return (entry
+                // counter-order pause) also emit `LandPlayed` and hand back a
+                // non-`Priority` waiting state, so they drop the same `LandPlayed`
+                // occurrence. They have no post-replacement drain, so no deferred
+                // capture runs here for them — a separate mechanism, and a known
+                // remaining follow-up on #8738, not covered by this fix.
+                finalize_committed_land_play(
+                    state,
+                    player,
+                    object_id,
+                    origin_zone,
+                    gy_permission_source,
+                    exile_play_authorization,
+                    library_permission_src,
+                    events,
+                );
                 if let Some(next_waiting_for) =
                     engine_replacement::apply_pending_post_replacement_effect(
                         state,
@@ -16533,18 +16561,9 @@ fn handle_play_land(
                         events,
                     )
                 {
-                    finalize_committed_land_play(
-                        state,
-                        player,
-                        object_id,
-                        origin_zone,
-                        gy_permission_source,
-                        exile_play_authorization,
-                        library_permission_src,
-                        events,
-                    );
                     return Ok(next_waiting_for);
                 }
+                return Ok(WaitingFor::Priority { player });
             }
         }
         super::replacement::ReplacementResult::Prevented => {
