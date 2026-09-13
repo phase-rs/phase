@@ -117,6 +117,10 @@ pub fn aggregate(games: &[PodGameRow]) -> PodTotals {
     totals
 }
 
+/// Compares reports only after guarding seeds and each seat's difficulty, tier, and label.
+/// `card_data_hash` is recorded but deliberately unchecked, so changed card data can appear as
+/// an unexplained measurement regression. Any automated gate using this function must explicitly
+/// decide whether a hash mismatch is a refusal, a warning, or an accepted difference.
 pub fn compare(baseline: &PodReport, current: &PodReport) -> Result<PodComparison, CompareError> {
     if baseline.schema_version != current.schema_version {
         return Err(CompareError::SchemaMismatch {
