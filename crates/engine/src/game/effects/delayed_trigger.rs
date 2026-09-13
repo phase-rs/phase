@@ -632,6 +632,7 @@ fn bind_event_subject_nodes(
     if let Some(node_anaphor) = super::effect_event_subject_anaphor(&ability.effect) {
         let (targets, pins) = snapshot_event_subject(state, node_anaphor, source_id);
         if !targets.is_empty() {
+            concretize_mass_population_event_subject(&mut ability.effect, &targets);
             ability.targets = targets;
             ability.target_incarnations = pins;
         }
@@ -641,6 +642,53 @@ fn bind_event_subject_nodes(
     }
     if let Some(alt) = ability.else_ability.as_deref_mut() {
         bind_event_subject_nodes(alt, state, source_id);
+    }
+}
+
+/// CR 603.7c + CR 608.2k: Concretize a MASS-POPULATION effect's event-subject
+/// filter to the object it names at creation time.
+///
+/// The mass family (`ChangeZoneAll`, `DestroyAll`, …) does not consume
+/// `ResolvedAbility::targets`. It scans a zone and evaluates its `target` filter
+/// against each object, and `matches_target_filter` resolves an event-subject
+/// anaphor from `state.current_trigger_event` — which at the later phase event
+/// carries no object. Populating `targets` alone therefore fixes the SINGLE-
+/// target effects and leaves the mass ones silently moving nothing.
+///
+/// Rewriting the filter to `SpecificObject` is the same technique
+/// `rebind_last_created_to_parent_target` uses for `LastCreated`, and
+/// `SpecificObject` is the concrete form this path already produces
+/// (`filter::normalize_contextual_filter` rewrites `Not(ParentTarget)` to
+/// `Not(SpecificObject)`).
+///
+/// Scoped to a BARE event-subject target. A compound filter ("each OTHER
+/// creature that shares a color with it") keeps its structure: the anaphor there
+/// is a property of the population test, not the population itself, so replacing
+/// the whole filter would change which objects the effect scans.
+fn concretize_mass_population_event_subject(effect: &mut Effect, targets: &[TargetRef]) {
+    let Some(TargetRef::Object(id)) = targets
+        .iter()
+        .find(|target| matches!(target, TargetRef::Object(_)))
+    else {
+        return;
+    };
+    // The same nine effects `effects::effect_parent_ref_slots` surfaces as
+    // hidden mass-population slots, and the same nine the parser's trigger
+    // rebind converts to `EventTarget`.
+    let target = match effect {
+        Effect::ChangeZoneAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
+        | Effect::GainControlAll { target, .. }
+        | Effect::PumpAll { target, .. }
+        | Effect::PutCounterAll { target, .. }
+        | Effect::DoublePTAll { target, .. } => target,
+        _ => return,
+    };
+    if super::EVENT_SUBJECT_ANAPHORS.contains(target) {
+        *target = TargetFilter::SpecificObject { id: *id };
     }
 }
 

@@ -8298,10 +8298,20 @@ fn optional_head_declined_all_object_targets(ability: &ResolvedAbility) -> bool 
 ///    "when you lose control of this, unattach it" trigger rebinds the per-source
 ///    `attachment` through this hidden slot (Stolen Uniform, Ogre Geargrabber);
 ///    without the arm the `_ => {}` fallback snapshots nothing and it resolves inert.
-///  * `Effect::ChangeZoneAll` intentionally has no generic `target_filter()` slot:
-///    its filter selects a mass operation rather than a declared target. It still
-///    needs inspection here when it carries a delayed `ParentTarget` anaphor, so
-///    the delayed trigger snapshots and pins that object before the mass scan.
+///  * The MASS-POPULATION family (`ChangeZoneAll`, `DestroyAll`, `DamageAll`,
+///    `BounceAll`, `CounterAll`, `GainControlAll`, `PumpAll`, `PutCounterAll`,
+///    `DoublePTAll`) intentionally has no generic `target_filter()` slot: the
+///    filter selects a mass operation rather than a declared target, so
+///    `Effect::target_filter()` answers `None` for every one of them. They still
+///    need inspection here when the filter carries a context anaphor, so a
+///    delayed trigger snapshots and pins that object before the mass scan.
+///
+///    The whole family is listed because the PARSER treats it as one: the
+///    trigger rebind in `parser::oracle_trigger` converts a context filter to
+///    `EventTarget` across exactly these nine effects. Surfacing one of them and
+///    not its siblings is the sibling-cluster smell — an omitted member is not a
+///    compile error, it degrades silently into "this delayed effect does
+///    nothing".
 ///
 /// NOTE: the `_ => {}` arm means "no hidden object slot beyond `target_filter()`".
 /// Any FUTURE effect that hides an object slot behind `target_filter()` MUST add
@@ -8321,12 +8331,44 @@ fn effect_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
         Effect::UnattachAll { attachment, .. } if attachment.is_context_ref() => {
             slots.push(attachment)
         }
-        Effect::ChangeZoneAll { target, .. } if filter_refs_parent_target(target) => {
+        Effect::ChangeZoneAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
+        | Effect::GainControlAll { target, .. }
+        | Effect::PumpAll { target, .. }
+        | Effect::PutCounterAll { target, .. }
+        | Effect::DoublePTAll { target, .. }
+            if filter_refs_parent_or_event_subject(target) =>
+        {
             slots.push(target)
         }
         _ => {}
     }
     slots
+}
+
+/// CR 608.2c + CR 608.2k: True when the filter names a parent-target anaphor OR
+/// an event subject, at any depth.
+///
+/// The gate for the mass-population arm above. It is deliberately the UNION of
+/// what that arm's consumers ask for rather than the broader
+/// `TargetFilter::is_context_ref`: every caller of `effect_parent_ref_slots`
+/// re-filters the returned slots through its own predicate, so surfacing a slot
+/// that only one consumer recognizes cannot perturb the others — but surfacing
+/// filters no consumer asks about would be noise.
+///
+/// Previously this arm tested `filter_refs_parent_target` alone, which made a
+/// delayed mass move naming `TriggeringSource`/`EventTarget` invisible to
+/// `effect_refs_event_subject`: it took no creation-time snapshot and, at the
+/// later phase event (which carries no event subject), resolved against nothing.
+/// The `ParentTarget` half of the test is unchanged.
+fn filter_refs_parent_or_event_subject(filter: &TargetFilter) -> bool {
+    filter_refs_parent_target(filter)
+        || EVENT_SUBJECT_ANAPHORS
+            .iter()
+            .any(|anaphor| filter_refs_event_subject(filter, anaphor))
 }
 
 /// True if any object-target slot of the effect references the per-iteration
@@ -19021,6 +19063,87 @@ mod tests {
             }),
             Some(&TargetFilter::TriggeringSource),
             "boolean nesting must keep working"
+        );
+    }
+
+    /// CR 608.2k: the MASS-POPULATION family hides its `target` behind
+    /// `target_filter()` (which answers `None` for all nine), so
+    /// `effect_parent_ref_slots` must surface it explicitly or a delayed mass
+    /// move naming an event subject is never snapshotted — at the later phase
+    /// event it has no event context left and affects nothing.
+    ///
+    /// The family is tested as a family on purpose. The parser's trigger rebind
+    /// (`parser::oracle_trigger`) converts a context filter to `EventTarget`
+    /// across exactly these nine effects, so surfacing one and not its siblings
+    /// is the sibling-cluster smell: an omitted member is not a compile error,
+    /// it degrades silently into "this delayed effect does nothing".
+    #[test]
+    fn mass_population_effects_surface_event_subject_targets() {
+        use crate::types::zones::{EtbTapState, Zone};
+
+        // One representative per constructor shape; the arm is a single `|`
+        // pattern, so covering the shapes covers the family.
+        let family: Vec<(&str, Effect)> = vec![
+            (
+                "ChangeZoneAll",
+                Effect::ChangeZoneAll {
+                    origin: None,
+                    destination: Zone::Graveyard,
+                    target: TargetFilter::EventTarget,
+                    enters_under: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: None,
+                    library_shuffle: crate::types::ability::MassLibraryShuffleMode::default(),
+                    random_order: false,
+                },
+            ),
+            (
+                "DestroyAll",
+                Effect::DestroyAll {
+                    target: TargetFilter::EventTarget,
+                    cant_regenerate: false,
+                },
+            ),
+            (
+                "BounceAll",
+                Effect::BounceAll {
+                    target: TargetFilter::TriggeringSource,
+                    destination: None,
+                    count: None,
+                },
+            ),
+        ];
+
+        for (name, effect) in &family {
+            let slots = effect_parent_ref_slots(effect);
+            assert!(
+                EVENT_SUBJECT_ANAPHORS
+                    .iter()
+                    .any(|anaphor| slots.iter().any(|s| filter_refs_event_subject(s, anaphor))),
+                "{name}: an event-subject target must surface as a hidden slot; got {slots:?}"
+            );
+            assert!(
+                effect_event_subject_anaphor(effect).is_some(),
+                "{name}: the detector must see the surfaced slot"
+            );
+        }
+
+        // Guard: a plain mass population filter is NOT a context anaphor and
+        // must not be surfaced, or every board wipe would look like one.
+        let plain = Effect::DestroyAll {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        };
+        assert!(
+            effect_parent_ref_slots(&plain).is_empty(),
+            "a plain Typed mass filter must not surface as a parent-ref slot"
+        );
+        assert!(
+            effect_event_subject_anaphor(&plain).is_none(),
+            "a plain Typed mass filter names no event subject"
         );
     }
 

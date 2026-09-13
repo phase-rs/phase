@@ -556,3 +556,110 @@ fn swooping_pteranodon_root_clause_keeps_its_own_target_slot() {
         delayed.ability.targets
     );
 }
+
+/// CR 608.2k + CR 603.7c: a delayed MASS zone move keeps its creation event's
+/// referent, end to end.
+///
+/// `Effect::ChangeZoneAll` answers `None` from `target_filter()` — the whole
+/// mass-population family does — so its `target` is a HIDDEN slot that
+/// `effect_parent_ref_slots` must surface explicitly. While that arm was gated
+/// on `filter_refs_parent_target` alone, a mass move naming `EventTarget` was
+/// invisible to the event-subject detector: no creation-time snapshot was taken,
+/// and at the end-of-combat step (whose phase event carries no event subject)
+/// it resolved against nothing and moved no cards.
+///
+/// The parser can produce this shape — its trigger rebind converts a context
+/// filter to `EventTarget` across all nine mass effects — but no printed card
+/// pairs it with a delayed suffix today, so the payload is built by substituting
+/// a `ChangeZoneAll` into the real parsed Ohran Viper delayed trigger. The
+/// printed reading is "put that creature into its owner's graveyard at end of
+/// combat".
+#[test]
+fn a_delayed_mass_zone_move_keeps_its_creation_event_referent() {
+    /// Ohran Viper's parsed trigger with its delayed payload replaced by a mass
+    /// zone move over the damage recipient.
+    fn mass_move_trigger() -> TriggerDefinition {
+        let abilities =
+            engine::parser::oracle::parse_oracle_text(OHRAN_VIPER, "Ohran Viper", &[], &[], &[]);
+        let mut trigger = abilities
+            .triggers
+            .first()
+            .expect("Ohran Viper must parse a damage trigger")
+            .clone();
+
+        let execute = trigger
+            .execute
+            .as_deref_mut()
+            .expect("trigger must have a body");
+        let Effect::CreateDelayedTrigger {
+            effect: delayed, ..
+        } = &mut *execute.effect
+        else {
+            panic!("Ohran Viper's body must be a CreateDelayedTrigger");
+        };
+
+        *delayed.effect = Effect::ChangeZoneAll {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Graveyard,
+            target: TargetFilter::EventTarget,
+            enters_under: None,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: Default::default(),
+            random_order: false,
+        };
+        delayed.sub_ability = None;
+        delayed.else_ability = None;
+
+        trigger.clone()
+    }
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let viper = {
+        let mut b = scenario.add_creature(P0, "Ohran Viper", 1, 2);
+        b.with_trigger_definition(mass_move_trigger());
+        b.id()
+    };
+    let wall = scenario.add_creature(P1, "Wall of Stone", 0, 6).id();
+    // A bystander the mass move must NOT sweep: `EventTarget` names ONE object,
+    // so a filter that degraded to "all creatures" would take this too.
+    let bystander = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(viper, AttackTarget::Player(P1))])
+        .expect("declare attackers");
+    pass_into_declare_blockers(&mut runner);
+    runner
+        .declare_blockers(&[(wall, viper)])
+        .expect("declare blockers");
+
+    let damage = runner.combat_damage();
+    assert_eq!(
+        damage.zone_of(wall),
+        Zone::Battlefield,
+        "1 damage is not lethal to a 0/6 — the wall may only leave via the \
+         delayed mass move, so this test would pass vacuously if it died here"
+    );
+
+    runner.advance_to_phase(Phase::PostCombatMain);
+
+    assert_eq!(
+        zone_of(&runner, wall),
+        Zone::Graveyard,
+        "CR 603.7c: the delayed mass move must affect the creature its CREATION \
+         event damaged, snapshotted before the phase event erased that context"
+    );
+    assert_eq!(
+        zone_of(&runner, bystander),
+        Zone::Battlefield,
+        "EventTarget names exactly one object — an uninvolved creature must not \
+         be swept up by the mass move"
+    );
+}
