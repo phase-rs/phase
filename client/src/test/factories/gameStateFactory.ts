@@ -34,6 +34,7 @@ type PayAmountChoiceWaitingFor = Extract<WaitingFor, { type: "PayAmountChoice" }
 type UntapChoiceWaitingFor = Extract<WaitingFor, { type: "UntapChoice" }>;
 type AssistPaymentWaitingFor = Extract<WaitingFor, { type: "AssistPayment" }>;
 type CastOfferWaitingFor = Extract<WaitingFor, { type: "CastOffer" }>;
+type ModalFaceChoiceWaitingFor = Extract<WaitingFor, { type: "ModalFaceChoice" }>;
 type LoopShortcutWaitingFor = Extract<WaitingFor, { type: "LoopShortcut" }>;
 type RespondToShortcutWaitingFor = Extract<WaitingFor, { type: "RespondToShortcut" }>;
 type CopyRetargetWaitingFor = Extract<WaitingFor, { type: "CopyRetarget" }>;
@@ -515,6 +516,18 @@ export const buildCastOfferWaitingFor = ({
   return factory.build();
 };
 
+export class ModalFaceChoiceWaitingForFactory extends PlayerWaitingForFactory<ModalFaceChoiceWaitingFor> {
+  forObject(objectId: ObjectId, cardId: ObjectId = objectId) {
+    return this.withData({ object_id: objectId, card_id: cardId });
+  }
+}
+
+export const modalFaceChoiceWaitingForFactory =
+  ModalFaceChoiceWaitingForFactory.define((): ModalFaceChoiceWaitingFor => ({
+    type: "ModalFaceChoice",
+    data: { player: 0, object_id: 1, card_id: 1 },
+  }));
+
 interface WaitingForTransient {
   variant?: WaitingFor;
 }
@@ -595,6 +608,10 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
     if (player !== undefined) factory = factory.forPlayer(player);
     if (kind !== undefined) factory = factory.withKind(kind);
     return this.variant(factory.build());
+  }
+
+  modalFaceChoice(data: Partial<ModalFaceChoiceWaitingFor["data"]> = {}) {
+    return this.variant(modalFaceChoiceWaitingForFactory.withData(data).build());
   }
 
   private variant(variant: WaitingFor) {
@@ -857,6 +874,10 @@ export class GameStateFactory extends Factory<GameState> {
     kind?: CastOfferWaitingFor["data"]["kind"];
   } = {}) {
     return this.waitingFor(waitingForFactory.castOffer({ player, kind }).build());
+  }
+
+  modalFaceChoice(data: Partial<ModalFaceChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.modalFaceChoice(data).build());
   }
 
   /**

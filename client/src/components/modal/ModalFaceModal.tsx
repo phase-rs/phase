@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
 import type { CardType, GameAction, ManaCost, WaitingFor } from "../../adapter/types.ts";
+import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { formatTypeLine } from "../../viewmodel/cardProps.ts";
@@ -9,18 +10,41 @@ import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { DialogShell } from "./DialogShell.tsx";
 
 type ModalFaceChoice = Extract<WaitingFor, { type: "ModalFaceChoice" }>;
+type ChooseModalFaceAction = Extract<GameAction, { type: "ChooseModalFace" }>;
 
 export function ModalFaceModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const legalActions = useGameStore((s) => s.legalActions);
+  const dispatch = useGameDispatch();
 
   if (waitingFor?.type !== "ModalFaceChoice") return null;
   if (!canActForWaitingState) return null;
 
   const data = waitingFor.data as ModalFaceChoice["data"];
 
-  return <ModalFaceContent objectId={data.object_id} dispatch={dispatch} />;
+  // CR 712.11c: Only the face that will be face up on the stack is evaluated to
+  // determine if it can be cast. The engine has already done that evaluation and
+  // publishes the outcome as the legal `ChooseModalFace` actions, so this overlay
+  // displays that result and dispatches the engine's own action verbatim. Never
+  // rebuild the action or re-derive affordability here.
+  const frontAction = legalActions.find(
+    (action): action is ChooseModalFaceAction =>
+      action.type === "ChooseModalFace" && !action.data.back_face,
+  );
+  const backAction = legalActions.find(
+    (action): action is ChooseModalFaceAction =>
+      action.type === "ChooseModalFace" && action.data.back_face,
+  );
+
+  return (
+    <ModalFaceContent
+      objectId={data.object_id}
+      frontAction={frontAction}
+      backAction={backAction}
+      dispatch={dispatch}
+    />
+  );
 }
 
 /** A land face is put onto the battlefield (CR 712.12 play-land special action);
@@ -37,10 +61,14 @@ function faceLabel(
 
 function ModalFaceContent({
   objectId,
+  frontAction,
+  backAction,
   dispatch,
 }: {
   objectId: number;
-  dispatch: (action: GameAction) => Promise<unknown>;
+  frontAction: ChooseModalFaceAction | undefined;
+  backAction: ChooseModalFaceAction | undefined;
+  dispatch: (action: GameAction) => Promise<void>;
 }) {
   const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -66,18 +94,22 @@ function ModalFaceContent({
       previewObjectId={objectId}
     >
       <div className="flex flex-col gap-2 px-3 py-3 lg:px-5 lg:py-5">
-        <FaceButton
-          face={front}
-          label={t("modalFace.labelFront")}
-          accent="hover:ring-cyan-400/30"
-          onClick={() => dispatch({ type: "ChooseModalFace", data: { back_face: false } })}
-        />
-        <FaceButton
-          face={back}
-          label={t("modalFace.labelBack")}
-          accent="hover:ring-amber-400/30"
-          onClick={() => dispatch({ type: "ChooseModalFace", data: { back_face: true } })}
-        />
+        {frontAction && (
+          <FaceButton
+            face={front}
+            label={t("modalFace.labelFront")}
+            accent="hover:ring-cyan-400/30"
+            onClick={() => dispatch(frontAction)}
+          />
+        )}
+        {backAction && (
+          <FaceButton
+            face={back}
+            label={t("modalFace.labelBack")}
+            accent="hover:ring-amber-400/30"
+            onClick={() => dispatch(backAction)}
+          />
+        )}
       </div>
     </DialogShell>
   );

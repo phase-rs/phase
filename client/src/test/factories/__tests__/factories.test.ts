@@ -4,6 +4,7 @@ import { gameObjectFactory } from "../gameObjectFactory.ts";
 import {
   castOfferWaitingForFactory,
   gameStateFactory,
+  modalFaceChoiceWaitingForFactory,
   resolutionOptionalPaymentWaitingForFactory,
   targetSelectionWaitingForFactory,
   waitingForFactory,
@@ -114,6 +115,15 @@ describe("waitingForFactory", () => {
           payment_mode: { type: "Auto" },
         },
       },
+    });
+  });
+
+  it("exposes ModalFaceChoice's domain fields through chainable factory methods", () => {
+    const waitingFor = modalFaceChoiceWaitingForFactory.forPlayer(1).forObject(42).build();
+
+    expect(waitingFor).toEqual({
+      type: "ModalFaceChoice",
+      data: { player: 1, object_id: 42, card_id: 42 },
     });
   });
 });
