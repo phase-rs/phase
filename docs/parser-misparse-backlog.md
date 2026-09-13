@@ -1430,7 +1430,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - A-Kargan Intimidator
 - A-Minsc & Boo, Timeless Heroes
 - A-Precipitous Drop
-- Accursed Witch
 - Acererak the Archlich
 - Acidic Dagger
 - Adarkar Valkyrie
