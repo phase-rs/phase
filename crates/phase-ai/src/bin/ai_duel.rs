@@ -10,8 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{
-    load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
-    PlayerDeckPayload,
+    load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckPayload,
 };
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -29,6 +28,8 @@ use phase_ai::duel_suite::run::{
     resolve_matchup, run_suite, AttributionMode, ReportSink, SuiteOptions,
 };
 use phase_ai::duel_suite::{all_matchups, find_matchup};
+use phase_ai::pod::feed::load_commander_decks;
+pub use phase_ai::pod::StopReason;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -685,7 +686,17 @@ struct CommanderSuiteOptions<'a> {
 
 fn run_commander_suite(db: &CardDatabase, options: CommanderSuiteOptions<'_>) {
     let seats = usize::from(COMMANDER_SUITE_SEATS);
-    let deck_lists = load_commander_decks(db, options.cards_root, options.feed, Some(seats));
+    let (feed_decks, skipped) =
+        load_commander_decks(db, options.cards_root, options.feed, Some(seats)).unwrap_or_else(
+            |error| {
+                eprintln!("{error}");
+                std::process::exit(1);
+            },
+        );
+    for message in skipped {
+        eprintln!("Skipping {message}");
+    }
+    let deck_lists: Vec<_> = feed_decks.into_iter().map(|deck| deck.list).collect();
     if deck_lists.len() < seats {
         eprintln!(
             "Commander suite needs at least {seats} resolvable decks, found {}",
@@ -808,48 +819,6 @@ fn run_commander_suite(db: &CardDatabase, options: CommanderSuiteOptions<'_>) {
         "{}",
         serde_json::to_string_pretty(&report).expect("commander report serializes")
     );
-}
-
-/// Why the driver abandoned a game that never reached `WaitingFor::GameOver`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StopReason {
-    /// The whole-game action cap was reached.
-    ActionCap,
-    /// The wall-clock budget for the game was reached.
-    WallTimeout,
-    /// Actions kept being taken with no change in turn number — a driver loop.
-    StalledSameTurn,
-    /// No AI seat could act while the game was not over
-    /// (`AiActionsStop::NoEligibleAiActor`).
-    NoLegalActions,
-    /// The AI policy stack returned no action for a decision it was asked to
-    /// make (`AiActionsStop::ChooseActionNone`).
-    AiChoseNoAction,
-    /// The engine rejected an action the AI chose
-    /// (`AiActionsStop::ApplyFailed`).
-    ActionRejected,
-    /// A seat had no `AiConfig` (`AiActionsStop::MissingAiConfig`). Caller
-    /// wiring, not a game condition.
-    MissingAiConfig,
-    /// `auto_play`'s module-wide safety cap fired inside one batch.
-    ActionSafetyCap,
-}
-
-impl StopReason {
-    /// Stable label for reports. Reports are archived and diffed across runs, so
-    /// these strings are part of the output contract, not debug text.
-    fn label(self) -> &'static str {
-        match self {
-            StopReason::ActionCap => "action_cap",
-            StopReason::WallTimeout => "wall_timeout",
-            StopReason::StalledSameTurn => "stalled_same_turn",
-            StopReason::NoLegalActions => "no_legal_actions",
-            StopReason::AiChoseNoAction => "ai_chose_no_action",
-            StopReason::ActionRejected => "action_rejected",
-            StopReason::MissingAiConfig => "missing_ai_config",
-            StopReason::ActionSafetyCap => "action_safety_cap",
-        }
-    }
 }
 
 /// Maps one batch's terminal condition onto this driver's stop reasons.
@@ -1270,72 +1239,6 @@ fn run_commander_game(options: CommanderGameOptions<'_>) -> CommanderGameResult 
     }
 }
 
-fn load_commander_decks(
-    db: &CardDatabase,
-    cards_root: &std::path::Path,
-    feed: &str,
-    max_decks: Option<usize>,
-) -> Vec<PlayerDeckList> {
-    let feed_path = cards_root.join(feed);
-    let feed_file = std::fs::File::open(&feed_path).unwrap_or_else(|err| {
-        eprintln!("failed to open {}: {err}", feed_path.display());
-        std::process::exit(1);
-    });
-    let feed_json: serde_json::Value = serde_json::from_reader(feed_file).unwrap_or_else(|err| {
-        eprintln!("failed to parse {}: {err}", feed_path.display());
-        std::process::exit(1);
-    });
-    let decks_json = feed_json["decks"].as_array().unwrap_or_else(|| {
-        eprintln!("{} missing decks array", feed_path.display());
-        std::process::exit(1);
-    });
-
-    let mut deck_lists = Vec::new();
-    for deck in decks_json {
-        if max_decks.is_some_and(|max| deck_lists.len() == max) {
-            break;
-        }
-        let deck_name = deck["name"].as_str().unwrap_or("<unnamed>");
-        let commander_names: Vec<String> = match deck["commander"].as_array() {
-            Some(arr) if !arr.is_empty() => arr
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect(),
-            _ => vec![deck_name.to_string()],
-        };
-        let Some(primary_commander) = commander_names.first() else {
-            continue;
-        };
-        if db.get_face_by_name(primary_commander).is_none() {
-            eprintln!("Skipping {deck_name}: commander '{primary_commander}' not in card db");
-            continue;
-        }
-
-        let mut main_deck = Vec::new();
-        let Some(main_entries) = deck["main"].as_array() else {
-            continue;
-        };
-        for entry in main_entries {
-            let Some(name) = entry["name"].as_str() else {
-                continue;
-            };
-            if commander_names.iter().any(|commander| commander == name) {
-                continue;
-            }
-            let count = entry["count"].as_u64().unwrap_or(0) as usize;
-            main_deck.extend(std::iter::repeat_n(name.to_string(), count));
-        }
-
-        deck_lists.push(PlayerDeckList {
-            main_deck,
-            sideboard: Vec::new(),
-            commander: commander_names,
-            ..Default::default()
-        });
-    }
-    deck_lists
-}
-
 /// Instrumentation for diagnosing games that do not terminate.
 ///
 /// Output settings only. Every condition that can stop a game lives on
@@ -1579,7 +1482,15 @@ fn run_commander_duel(db: &CardDatabase, options: CommanderDuelOptions<'_>) {
         eprintln!("{message}");
         std::process::exit(2);
     }
-    let decks = load_commander_decks(db, options.cards_root, options.feed, None);
+    let (feed_decks, skipped) = load_commander_decks(db, options.cards_root, options.feed, None)
+        .unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(1);
+        });
+    for message in skipped {
+        eprintln!("Skipping {message}");
+    }
+    let decks: Vec<_> = feed_decks.into_iter().map(|deck| deck.list).collect();
     let find = |needle: &str| {
         decks
             .iter()
@@ -1903,7 +1814,7 @@ mod tests {
 
     /// A resolved two-seat Commander payload built from `fixture_db`.
     fn fixture_duel_payload(db: &CardDatabase) -> DeckPayload {
-        let seat = PlayerDeckList {
+        let seat = engine::game::deck_loading::PlayerDeckList {
             main_deck: vec!["Test Land".to_string(); 10],
             commander: vec!["Test Commander".to_string()],
             ..Default::default()
