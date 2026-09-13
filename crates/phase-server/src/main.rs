@@ -13936,7 +13936,7 @@ mod game_submission_tests {
     use super::issue_4548_full_create_tests::{recv_server_message, spawn_full_mode_server};
     use super::*;
     use engine::game::interaction::MAX_INTERACTION_STRING_LEN;
-    use engine::types::actions::DebugAction;
+    use engine::types::actions::{DebugAction, DebugCardCreationKind};
     use engine::types::interaction::{InteractionChoiceId, InteractionId, InteractionResponse};
     use engine::types::zones::Zone;
     use futures_util::SinkExt;
@@ -13957,6 +13957,7 @@ mod game_submission_tests {
                 attach_to: None,
                 run_etb: false,
                 nonlegendary: false,
+                creation_kind: DebugCardCreationKind::Card,
             }))
         };
 

@@ -9605,6 +9605,7 @@ pub(crate) fn compute_current_copiable_values(
                     let triggers = Arc::make_mut(&mut values.trigger_definitions);
                     if !triggers.iter().any(|t| t == trigger.as_ref()) {
                         triggers.push(*trigger.clone());
+                        Arc::make_mut(&mut values.trigger_printed_origins).push(None);
                     }
                 }
             }
@@ -9645,6 +9646,14 @@ pub(crate) fn compute_current_copiable_values(
                     let triggers = Arc::make_mut(&mut values.trigger_definitions);
                     if !triggers.iter().any(|t| t == &trigger) {
                         triggers.push(trigger);
+                        Arc::make_mut(&mut values.trigger_printed_origins).push(
+                            crate::game::printed_cards::base_trigger_printed_origins(
+                                &state.objects[&effect.source_id],
+                            )
+                            .get(*source_trigger_index)
+                            .cloned()
+                            .flatten(),
+                        );
                     }
                 }
             }
@@ -9679,9 +9688,15 @@ pub(crate) fn compute_current_copiable_values(
                         }
                     }
                     let triggers = Arc::make_mut(&mut values.trigger_definitions);
-                    for trigger in src.base_trigger_definitions.iter() {
+                    let origins = Arc::make_mut(&mut values.trigger_printed_origins);
+                    let source_origins =
+                        crate::game::printed_cards::base_trigger_printed_origins(src);
+                    for (printed_occurrence, trigger) in
+                        src.base_trigger_definitions.iter().enumerate()
+                    {
                         if !triggers.contains(trigger) {
                             triggers.push(trigger.clone());
+                            origins.push(source_origins[printed_occurrence].clone());
                         }
                     }
                     let statics = Arc::make_mut(&mut values.static_definitions);
@@ -23049,6 +23064,7 @@ mod tests {
             keywords: vec![],
             abilities: Default::default(),
             trigger_definitions: Default::default(),
+            trigger_printed_origins: Default::default(),
             replacement_definitions: Default::default(),
             static_definitions: Default::default(),
             room_halves: None,
@@ -25607,6 +25623,7 @@ mod tests {
                     keywords: Vec::new(),
                     abilities: Arc::new(Vec::new()),
                     trigger_definitions: Arc::new(Vec::new()),
+                    trigger_printed_origins: Arc::new(Vec::new()),
                     replacement_definitions: Arc::new(Vec::new()),
                     static_definitions: Arc::new(Vec::new()),
                     room_halves: None,

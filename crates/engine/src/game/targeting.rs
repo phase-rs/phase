@@ -6077,6 +6077,7 @@ mod tests {
             attacker_ids: vec![attacker],
             defending_player: PlayerId(0),
             attacks: vec![(attacker, AttackTarget::Player(PlayerId(0)))],
+            declaration_records: Vec::new(),
         });
 
         let filter =
@@ -6140,6 +6141,7 @@ mod tests {
             attacker_ids: vec![a, b],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         };
 
         assert_eq!(
@@ -6160,6 +6162,7 @@ mod tests {
             attacker_ids: vec![a],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         };
         assert_eq!(extract_source_from_event(&solo), Some(a));
         assert_eq!(extract_sources_from_event(&solo), vec![a]);
@@ -6317,6 +6320,7 @@ mod tests {
                 (a1, crate::game::combat::AttackTarget::Player(PlayerId(1))),
                 (a2, crate::game::combat::AttackTarget::Player(PlayerId(1))),
             ],
+            declaration_records: Vec::new(),
         });
         let ability = make_resolved_with_targets(vec![], a1);
 

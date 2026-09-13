@@ -31,7 +31,8 @@ use crate::types::ability::{
     CastManaSpentMetric, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel,
     DamageGroupKey, DamageKindFilter, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
     PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality,
-    SharedQualityRelation, StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    SharedQualityRelation, StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -120,6 +121,7 @@ fn parse_condition_connector(input: &str) -> OracleResult<'_, ConditionConnectiv
 
 fn parse_single_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        parse_you_attacked_with_total_power_this_combat,
         // CR 601.2h + CR 608.2c: whole-phrase "it wasn't cast or no mana was spent
         // to cast <self>" gate. MUST precede the event-history arm's
         // `parse_was_cast_condition`, which would otherwise claim the bare "it
@@ -132,6 +134,48 @@ fn parse_single_inner_condition(input: &str) -> OracleResult<'_, StaticCondition
         parse_resolution_context_conditions,
     ))
     .parse(input)
+}
+
+/// CR 508.1a + CR 603.4: "you attacked with creatures with total power N or
+/// greater this combat" compares declaration-time power from this trigger's
+/// attacker batch rather than the current battlefield or turn history.
+fn parse_you_attacked_with_total_power_this_combat(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you attacked with ").parse(input)?;
+    let (rest, condition) = parse_creatures_with_total_power_or_greater(rest)?;
+    let (rest, _) = tag(" this combat").parse(rest)?;
+    Ok((rest, condition))
+}
+
+/// Parse the shared attacker-total threshold phrase after its grammatical
+/// subject: "creatures with total power N or greater".
+fn parse_creatures_with_total_power_or_greater(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("creatures with total power ").parse(input)?;
+    let (rest, threshold) = parse_number(rest)?;
+    let (rest, comparator) = value(Comparator::GE, tag(" or greater")).parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TrackedSet {
+                            set: TrackedAnaphorSource::TriggeringBatch,
+                            caused_by: None,
+                        },
+                    )
+                    .expect("object property aggregate is valid"),
+                ),
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed {
+                value: threshold as i32,
+            },
+        },
+    ))
 }
 
 /// CR 601.2h + CR 608.2c: "it wasn't cast or no mana was spent to cast <self>" —
@@ -21166,6 +21210,44 @@ mod tests {
     }
 
     // -- "have total {power|toughness|mana value} N or {greater|less}" predicate --
+
+    #[test]
+    fn pack_tactics_total_power_uses_triggering_batch() {
+        let (rest, condition) = parse_inner_condition(
+            "you attacked with creatures with total power 6 or greater this combat",
+        )
+        .expect("Pack Tactics condition should parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::PropertyAggregate(
+                        PropertyAggregate::new(
+                            AggregateFunction::Sum,
+                            ObjectProperty::Power,
+                            CardTypeSetSource::TrackedSet {
+                                set: TrackedAnaphorSource::TriggeringBatch,
+                                caused_by: None,
+                            },
+                        )
+                        .expect("valid aggregate"),
+                    ),
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 6 },
+            }
+        );
+    }
+
+    #[test]
+    fn pack_tactics_near_phrasing_does_not_parse_as_total_power_condition() {
+        assert!(parse_inner_condition(
+            "you attacked with creatures with combined power 6 or greater this combat"
+        )
+        .is_err());
+    }
+
     //
     // CR 107.3e + CR 208.1 + CR 202.3: Building-block predicate for
     // aggregate-property thresholds across a filter (Sum function). Single

@@ -1822,6 +1822,7 @@ pub(super) fn matching_attack_events(
         attacker_ids,
         defending_player,
         attacks,
+        declaration_records,
         ..
     } = event
     {
@@ -1873,6 +1874,10 @@ pub(super) fn matching_attack_events(
                         attacker_ids: vec![*id],
                         defending_player: event_defending_player,
                         attacks: vec![(*id, target)],
+                        // The trigger source is narrowed to this attacker, but
+                        // event-scoped conditions such as Pack Tactics still
+                        // refer to the full declaration batch.
+                        declaration_records: declaration_records.clone(),
                     })
                 })
                 .collect();
@@ -1933,6 +1938,10 @@ pub(super) fn matching_attack_events(
                     attacker_ids: vec![*id],
                     defending_player: event_defending_player,
                     attacks: vec![(*id, target)],
+                    // Keep the complete declaration for event-scoped
+                    // conditions; `attacker_ids` remains the per-trigger
+                    // source identity.
+                    declaration_records: declaration_records.clone(),
                 })
             })
             .collect()
@@ -4401,7 +4410,9 @@ pub(super) fn matching_you_attack_events_by_attacked_player(
     state: &GameState,
 ) -> Vec<GameEvent> {
     let GameEvent::AttackersDeclared {
-        defending_player, ..
+        defending_player,
+        declaration_records,
+        ..
     } = event
     else {
         return Vec::new();
@@ -4427,6 +4438,7 @@ pub(super) fn matching_you_attack_events_by_attacked_player(
             attacker_ids: attacks.iter().map(|(id, _)| *id).collect(),
             defending_player: attacked,
             attacks,
+            declaration_records: declaration_records.clone(),
         })
         .collect()
 }
@@ -7687,6 +7699,7 @@ mod tests {
                     crate::game::combat::AttackTarget::Player(PlayerId(1)),
                 ),
             ],
+            declaration_records: Vec::new(),
         };
 
         let matched = matching_attack_events(
@@ -7741,6 +7754,7 @@ mod tests {
                 attacker,
                 crate::game::combat::AttackTarget::Player(PlayerId(1)),
             )],
+            declaration_records: Vec::new(),
         };
         assert!(match_attacks(
             &enchanted_player_event,
@@ -7756,6 +7770,7 @@ mod tests {
                 attacker,
                 crate::game::combat::AttackTarget::Player(PlayerId(0)),
             )],
+            declaration_records: Vec::new(),
         };
         assert!(!match_attacks(
             &other_player_event,
@@ -7810,6 +7825,7 @@ mod tests {
                 attacker,
                 crate::game::combat::AttackTarget::Player(PlayerId(1)),
             )],
+            declaration_records: Vec::new(),
         };
         assert!(match_attacks(
             &enchanted_player_event,
@@ -7826,6 +7842,7 @@ mod tests {
                 attacker,
                 crate::game::combat::AttackTarget::Player(PlayerId(0)),
             )],
+            declaration_records: Vec::new(),
         };
         assert!(!match_attacks(
             &other_player_event,
@@ -7863,6 +7880,7 @@ mod tests {
                     crate::game::combat::AttackTarget::Player(PlayerId(1)),
                 ),
             ],
+            declaration_records: Vec::new(),
         };
         let events = matching_attack_events(
             &two_attackers_event,
@@ -7892,6 +7910,7 @@ mod tests {
                 attacker,
                 crate::game::combat::AttackTarget::Planeswalker(pw),
             )],
+            declaration_records: Vec::new(),
         };
         assert!(
             !match_attacks(
@@ -16966,6 +16985,7 @@ mod tests {
             attacker_ids: vec![source, d2, d3, non],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         };
         let filter = TargetFilter::Typed(
             TypedFilter::card()
@@ -16990,6 +17010,7 @@ mod tests {
             attacker_ids: vec![ObjectId(1), ObjectId(2)],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         };
         let count = count_trigger_subjects_in_batch(
             &state,
@@ -17011,6 +17032,7 @@ mod tests {
             attacker_ids: vec![ObjectId(1)],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         };
         let count = count_trigger_subjects_in_batch(
             &state,

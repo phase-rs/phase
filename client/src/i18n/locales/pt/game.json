@@ -1,4 +1,5 @@
 {
+  "playerLatency": {"host":"Anfitrião","waiting":"Aguardando","value":"{{ms}} ms","description":"Latência de ida e volta até o anfitrião. A falta de resposta não desconecta a partida."},
   "abilityBlock": {
     "badge": "Bloqueada",
     "cantBeActivated": "Esta habilidade não pode ser ativada",
@@ -104,6 +105,7 @@
   },
   "debugCreate": {
     "copies": "Cópias",
+    "asToken": "Criar como ficha",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
@@ -310,8 +312,10 @@
     "underAttack_one": "Atacado por {{count}} criatura",
     "underAttack_other": "Atacado por {{count}} criaturas",
     "target": "Alvo",
+    "token": "Ficha",
+    "tokenTooltip": "Ficha que é uma cópia de uma carta real",
     "copy": "Cópia",
-    "copyTooltip": "Cópia em ficha de uma carta real",
+    "copyTooltip": "Permanente que não é ficha e copia outra carta",
     "cantBeBlocked": "Não pode ser bloqueada",
     "ringBearer": "Anel",
     "ringBearerTooltip": "Portador do Anel",
@@ -2112,6 +2116,7 @@
     "exportClientSnapshot": "Exportar instantâneo do cliente",
     "exported": "Exportado",
     "exportFailed": "Falha na exportação",
+    "exportRequested": "Exportação não confirmada",
     "copyDiagnostic": "Copiar diagnóstico",
     "copied": "Copiado!",
     "reportOnGithub": "Reportar no GitHub",
@@ -2215,7 +2220,7 @@
     "yes": "Sim",
     "no": "Não",
     "dontAskAgain": "Não perguntar novamente neste jogo",
-    "dontAskAgainForSameCard": "Aplicar a todas as cópias desta carta"
+    "dontAskAgainForSameCard": "Usar esta escolha para cada cópia desta carta neste jogo"
   },
   "resolutionOptionalPayment": {
     "title": "Escolha um pagamento opcional",

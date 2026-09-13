@@ -1497,6 +1497,7 @@ mod tests {
             card_types.core_types.push(CoreType::Sorcery);
             crate::game::game_object::BackFaceData {
                 is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "Test Prepare Face".to_string(),
                 power: None,
                 toughness: None,

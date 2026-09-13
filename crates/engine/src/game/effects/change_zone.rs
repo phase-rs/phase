@@ -10624,6 +10624,7 @@ mod tests {
             // Back face: Sorin, Ravenous Neonate — planeswalker with loyalty 3
             obj.back_face = Some(BackFaceData {
                 is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "Sorin, Ravenous Neonate".to_string(),
                 power: None,
                 toughness: None,

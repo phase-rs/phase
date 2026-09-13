@@ -57,9 +57,12 @@ describe("gameStateExport", () => {
       turnCheckpoints: [],
     });
 
-    const filename = await exportGameStateDebugZip(gameState);
+    const result = await exportGameStateDebugZip(gameState);
 
-    expect(filename).toMatch(/^game-state-turn-7-.*\.zip$/);
+    expect(result).toStrictEqual({
+      kind: "saved",
+      filename: expect.stringMatching(/^game-state-turn-7-.*\.zip$/),
+    });
     expect(write).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
     expect(writtenBlob).not.toBeNull();
@@ -96,9 +99,12 @@ describe("gameStateExport", () => {
     });
     useGameStore.setState({ gameMode: "ai" });
 
-    const filename = await exportAuthoritativeGameStateZip(adapter);
+    const result = await exportAuthoritativeGameStateZip(adapter);
 
-    expect(filename).toMatch(/^authoritative-game-state-.*\.zip$/);
+    expect(result).toStrictEqual({
+      kind: "saved",
+      filename: expect.stringMatching(/^authoritative-game-state-.*\.zip$/),
+    });
     expect(adapter.exportPersistenceState).toHaveBeenCalledOnce();
     const entries = unzipSync(new Uint8Array(await writtenBlob!.arrayBuffer()));
     const [entryName] = Object.keys(entries);
@@ -106,7 +112,9 @@ describe("gameStateExport", () => {
     expect(strFromU8(entries[entryName])).toBe(trustedState);
 
     const imported = gameStateFromImportText(
-      await readImportFile(new File([writtenBlob!], filename, { type: "application/zip" })),
+      await readImportFile(
+        new File([writtenBlob!], result.filename, { type: "application/zip" }),
+      ),
     );
     expect(imported).toEqual(trustedEnvelope);
   });
@@ -164,9 +172,12 @@ describe("gameStateExport", () => {
     });
     useGameStore.setState({ gameMode: "ai" });
 
-    const filename = await exportAuthoritativeGameStateZip(adapter);
+    const result = await exportAuthoritativeGameStateZip(adapter);
 
-    expect(filename).toMatch(/^authoritative-game-state-.*\.zip$/);
+    expect(result).toStrictEqual({
+      kind: "saved",
+      filename: expect.stringMatching(/^authoritative-game-state-.*\.zip$/),
+    });
     expect(clickSpy).toHaveBeenCalledOnce();
     expect(downloadedBlob).not.toBeNull();
     const entries = unzipSync(new Uint8Array(await downloadedBlob!.arrayBuffer()));

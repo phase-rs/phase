@@ -1270,6 +1270,7 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
             attach_to: a4,
             run_etb: a5,
             nonlegendary: a6,
+            creation_kind: a7,
         } => {
             let DebugAction::CreateCard {
                 card_name: b0,
@@ -1279,6 +1280,7 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
                 attach_to: b4,
                 run_etb: b5,
                 nonlegendary: b6,
+                creation_kind: b7,
             } = b
             else {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
@@ -1290,6 +1292,7 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
                 .then_with(|| cmp_val(a4, b4))
                 .then_with(|| cmp_val(a5, b5))
                 .then_with(|| cmp_val(a6, b6))
+                .then_with(|| cmp_val(a7, b7))
         }
         DebugAction::RemoveObject { object_id: a0 } => {
             let DebugAction::RemoveObject { object_id: b0 } = b else {

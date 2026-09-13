@@ -15,7 +15,7 @@ import {
   WebSocketAdapter,
 } from "../ws-adapter";
 import { AdapterError, supportsMatchConcede, supportsServerRewind } from "../types";
-import type { FormatConfig, GameState } from "../types";
+import type { FormatConfig, GameAction, GameState } from "../types";
 import type {
   InteractionChoiceId,
   InteractionId,
@@ -1725,6 +1725,7 @@ describe("WebSocketAdapter", () => {
               zone: "Hand",
               run_etb: false,
               nonlegendary: false,
+              creation_kind: "Card",
               count: 0,
             },
           },
@@ -1809,6 +1810,40 @@ describe("WebSocketAdapter", () => {
         }),
       );
     });
+
+    it.each(["Card", "Token"] as const)(
+      "preserves the %s creation kind in a nonzero debug CreateCard action frame",
+      async (creationKind) => {
+        const action: GameAction = {
+          type: "Debug",
+          data: {
+            type: "CreateCard",
+            data: {
+              card_name: "Lightning Bolt",
+              owner: 0,
+              zone: "Battlefield",
+              run_etb: false,
+              nonlegendary: false,
+              creation_kind: creationKind,
+              count: 1,
+            },
+          },
+        };
+
+        ws.send.mockClear();
+        const pending = adapter.submitAction(action, 0);
+
+        expect(JSON.parse(ws.send.mock.lastCall![0] as string)).toEqual({
+          type: "Action",
+          data: { action },
+        });
+
+        // Settle the promise after inspecting the outgoing frame; ActionNoOp
+        // is not the source of truth for this transport assertion.
+        ws.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp" }));
+        await pending;
+      },
+    );
 
     it("resolves a mana-payment preview only for its matching request", async () => {
       ws.send.mockClear();
