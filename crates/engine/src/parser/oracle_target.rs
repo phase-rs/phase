@@ -8208,12 +8208,33 @@ fn parse_shared_quality_reference<'a>(
         }
     }
 
-    let (filter, rest) = parse_target(input);
+    let (filter, rest) = parse_target_disjunction(input);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
         )));
+    }
+    Ok((rest, filter))
+}
+
+/// CR 109.2 + CR 109.2a: parse a reference noun phrase that may be a two-leg
+/// disjunction — "a creature you control **or** a creature card in your
+/// graveyard" (Guardian Project, Volo) — into `TargetFilter::Or`.
+///
+/// Each leg is parsed by `parse_target`, so the per-leg zone semantics are the
+/// ordinary ones: a zone-less type description means a permanent on the
+/// battlefield (CR 109.2) while a leg naming a zone keeps it (CR 109.2a). The
+/// single-leg path returns exactly what `parse_target` returned, so callers that
+/// never see a disjunction are unaffected.
+///
+/// Extracted from `parse_shared_quality_reference` so the name-relation
+/// combinator in `oracle_effect::search` shares one authority for the reference
+/// axis instead of duplicating the disjunction handling.
+pub(crate) fn parse_target_disjunction(input: &str) -> (TargetFilter, &str) {
+    let (filter, rest) = parse_target(input);
+    if matches!(filter, TargetFilter::Any) {
+        return (filter, rest);
     }
     let rest_trimmed = rest.trim_start();
     if let Ok((after_or, sep)) =
@@ -8221,17 +8242,17 @@ fn parse_shared_quality_reference<'a>(
     {
         let (filter2, rest2) = parse_target(after_or);
         if !matches!(filter2, TargetFilter::Any) {
-            return Ok((
-                rest2,
+            return (
                 TargetFilter::Or {
                     filters: vec![filter, filter2],
                 },
-            ));
+                rest2,
+            );
         }
         // Fall through: only accept the first leg if the disjunction tail didn't parse.
         let _ = sep;
     }
-    Ok((rest, filter))
+    (filter, rest)
 }
 
 /// CR 608.2k: "the sacrificed/exiled <noun>" — an untargeted reference to the

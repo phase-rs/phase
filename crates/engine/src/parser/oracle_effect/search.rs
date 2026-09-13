@@ -14,7 +14,7 @@ use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity;
 use super::super::oracle_target::{
     distribute_properties_to_or, parse_mana_value_suffix, parse_shared_quality_clause,
-    parse_target, parse_type_phrase_folding, parse_zone_word,
+    parse_target, parse_target_disjunction, parse_type_phrase_folding, parse_zone_word,
 };
 use super::super::oracle_util::{
     contains_possessive, infer_core_type_for_subtype, split_around, strip_after,
@@ -1838,34 +1838,55 @@ fn single_search_type_filter(filter: TargetFilter) -> Option<TypeFilter> {
     }
 }
 
+/// CR 201.2a + CR 201.2c: the verb-and-negation core of a same-name comparison,
+/// with any leading determiner already consumed by the caller.
+///
+/// Composed as two independent axes rather than enumerated as whole phrases, so
+/// every combination falls out of two `alt()` calls instead of a cross-product of
+/// `tag()` arms:
+///
+/// * negation — "doesn't " / "does not " / "don't " / "do not ", or absent;
+/// * verb phrase — "have/has the same name as" or "share(s) a name with".
+///
+/// Both verb spellings ask the same CR 201.2a question ("at least one name in
+/// common"); only the preposition differs. The negated forms are the CR 201.2a
+/// negation, which is what `SharedQualityRelation::DoesNotShare` encodes.
+fn parse_name_relation_body(
+    input: &str,
+) -> Result<(&str, SharedQualityRelation), nom::Err<OracleError<'_>>> {
+    let (rest, negated) = opt(alt((
+        tag::<_, _, OracleError<'_>>("doesn't "),
+        tag("does not "),
+        tag("don't "),
+        tag("do not "),
+    )))
+    .parse(input)?;
+    let (rest, _) = alt((
+        preceded(alt((tag("have "), tag("has "))), tag("the same name as ")),
+        preceded(alt((tag("share "), tag("shares "))), tag("a name with ")),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        if negated.is_some() {
+            SharedQualityRelation::DoesNotShare
+        } else {
+            SharedQualityRelation::Shares
+        },
+    ))
+}
+
 pub(crate) fn parse_search_name_reference_suffix(
     input: &str,
 ) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
     let (rest, relation) = alt((
-        value(
-            SharedQualityRelation::DoesNotShare,
-            tag("that doesn't have the same name as "),
-        ),
-        value(
-            SharedQualityRelation::DoesNotShare,
-            tag("that does not have the same name as "),
-        ),
-        value(
-            SharedQualityRelation::DoesNotShare,
-            tag("that doesn't share a name with "),
-        ),
-        value(
-            SharedQualityRelation::DoesNotShare,
-            tag("that does not share a name with "),
-        ),
-        value(
-            SharedQualityRelation::Shares,
-            tag("that has the same name as "),
-        ),
-        value(
-            SharedQualityRelation::Shares,
-            tag("that have the same name as "),
-        ),
+        // Relative-clause frame: "<noun> that (doesn't) have/share ...".
+        preceded(tag("that "), parse_name_relation_body),
+        // Bare predicate frame: "if it (doesn't) have/share ..." — the subject is
+        // supplied by the caller's anaphor rather than a relativizer.
+        parse_name_relation_body,
+        // Prepositional frame. It carries no verb, so it is not a cell of the
+        // negation x verb product above and stays an explicit arm.
         value(SharedQualityRelation::Shares, tag("with the same name as ")),
     ))
     .parse(input)?;
@@ -1877,7 +1898,7 @@ pub(crate) fn parse_search_name_reference_suffix(
         )));
     }
 
-    let (reference, after_reference) = parse_target(rest);
+    let (reference, after_reference) = parse_target_disjunction(rest);
     if !matches!(reference, TargetFilter::Any) {
         return Ok((
             after_reference,

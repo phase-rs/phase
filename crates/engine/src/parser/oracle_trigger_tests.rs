@@ -11413,6 +11413,7 @@ fn subtype_intervening_if_dispatches_by_trigger_kind() {
         "",
         None,
         Some((Zone::Battlefield, Zone::Graveyard)),
+        false,
     );
     let Some(TriggerCondition::Not { condition }) = zone_change else {
         panic!("expected negated condition, got {zone_change:?}");
