@@ -389,6 +389,7 @@ mod idol_of_false_gods_counter_animation;
 mod inevitable_betrayal_no_mana_cost;
 mod infantry_shield_mobilize_grant;
 mod inherent_rule_trigger_display_name;
+mod inkshield_prevented_this_way_token_rider;
 mod innocent_bystander_whole_event_damage;
 mod inside_information;
 mod inspiring_call_indestructible_grant;
