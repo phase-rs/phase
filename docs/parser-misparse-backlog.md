@@ -1884,7 +1884,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Conductive Current
 - Conundrum Sphinx
 - Convenient Target
-- Corpse Appraiser
 - Corruption of Towashi
 - Cosmic Horror
 - Covenant of Minds

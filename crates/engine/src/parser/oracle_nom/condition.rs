@@ -9781,7 +9781,8 @@ pub(crate) fn parse_unless_condition(input: &str) -> OracleResult<'_, StaticCond
 /// CR 400.7 + CR 608.2c: Parse "a[n] [type] (is|was) [verb-phrase] this way"
 /// — the noun-anaphoric clause that gates a sub-ability on the LKI of an
 /// object the parent effect just operated on (destroyed, exiled, sacrificed,
-/// returned, discarded, milled, countered, or "put onto the battlefield").
+/// returned, discarded, milled, countered, "put onto the battlefield",
+/// "put into a graveyard", or "put into exile").
 ///
 /// CR 303.4f / CR 301.5b are the host-rules that motivate the present-tense
 /// "is put onto the battlefield this way" variant — Aura/Equipment ETB
@@ -9801,9 +9802,9 @@ pub(crate) fn parse_unless_condition(input: &str) -> OracleResult<'_, StaticCond
 /// `remainder` is the input after the consumed " this way" suffix (caller is
 /// responsible for stripping any trailing punctuation like ", " or ".").
 /// `destination` is `Some(zone)` for wording that names an arrival zone
-/// ("enters", "put onto the battlefield", "dies", or "put into a graveyard")
-/// and `None` for cause-bound verbs. On `wasn't`/`was not` the negation is
-/// exposed via `negated`.
+/// ("enters", "put onto the battlefield", "dies", "put into a graveyard",
+/// or "put into exile") and `None` for cause-bound verbs. On `wasn't`/`was not`
+/// the negation is exposed via `negated`.
 pub fn parse_zone_changed_this_way_clause(
     input: &str,
 ) -> OracleResult<'_, (TargetFilter, bool, Option<crate::types::zones::Zone>)> {
@@ -9818,8 +9819,9 @@ pub fn parse_zone_changed_this_way_clause(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThisWayVerbScope {
     /// Every verb the rider grammar covers: the present-tense "enters"/"enter"
-    /// branch plus "put onto the battlefield", "destroyed", "exiled",
-    /// "sacrificed", "returned", "discarded", "milled", "countered".
+    /// branch plus "put onto the battlefield", "put into a graveyard",
+    /// "put into exile", "destroyed", "exiled", "sacrificed", "returned",
+    /// "discarded", "milled", "countered".
     AnyZoneChange,
     /// Battlefield-entry verbs only: the present-tense "enters"/"enter" branch
     /// plus "put onto the battlefield". CR 614.1c replacement classification is
@@ -9920,8 +9922,8 @@ pub fn parse_zone_changed_this_way_clause_scoped(
     ))
     .parse(after_filter)?;
 
-    // verb-phrase: single-word imperatives + the multi-word
-    // "put onto the battlefield". The verb itself is value-discarded; the
+    // verb-phrase: single-word imperatives + the multi-word destination-bound
+    // "put onto/into …" family. The verb itself is value-discarded; the
     // " this way" suffix is the discriminator. Under
     // `ThisWayVerbScope::BattlefieldEntry` only the battlefield-entry verb is
     // offered; the non-entry zone-change verbs are withheld.
@@ -9948,6 +9950,15 @@ pub fn parse_zone_changed_this_way_clause_scoped(
             value(
                 Some(crate::types::zones::Zone::Graveyard),
                 tag("put into a graveyard"),
+            ),
+            // CR 608.2c + CR 701.13a + CR 614.6: "put into exile" names the
+            // arrival (Corpse Appraiser: "If a card is put into exile this
+            // way, …"). Distinct from cause-bound "exiled this way": a
+            // replacement that redirects the move away from exile defeats
+            // this clause, because the replaced event never happened.
+            value(
+                Some(crate::types::zones::Zone::Exile),
+                tag("put into exile"),
             ),
         ))
         .parse(rest)?,
@@ -20703,6 +20714,22 @@ mod tests {
         assert_eq!(rest, ", draw a card");
         assert!(!negated);
         assert_eq!(destination, Some(Zone::Graveyard));
+
+        // CR 608.2c + CR 701.13a + CR 614.6: destination-bound exile wording
+        // (Corpse Appraiser) is the exile sibling of "put into a graveyard".
+        let (rest, (filter, negated, destination)) = parse_zone_changed_this_way_clause(
+            "a card is put into exile this way, look at the top three cards",
+        )
+        .unwrap();
+        assert_eq!(rest, ", look at the top three cards");
+        assert!(!negated);
+        assert_eq!(destination, Some(Zone::Exile));
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert_eq!(type_filters, vec![TypeFilter::Card]);
+            }
+            other => panic!("expected Typed Card, got {other:?}"),
+        }
     }
 
     /// Every imperative verb in the `alt` chain must round-trip; this guards

@@ -902,7 +902,8 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
     // `parse_zone_changed_this_way_clause` combinator in `oracle_nom::condition`.
     // The combinator covers past + present tense, single-word imperatives
     // (destroyed/exiled/sacrificed/returned/discarded/milled/countered) AND
-    // the multi-word "put onto the battlefield" verb, with subtype filters
+    // the multi-word destination-bound "put onto the battlefield" /
+    // "put into a graveyard" / "put into exile" verbs, with subtype filters
     // (Aura/Equipment/...) via `parse_type_phrase_folding`. Replaces the prior
     // hand-rolled past-tense / single-word / top-level-type-only matcher.
     if let Ok((rest, _)) =
