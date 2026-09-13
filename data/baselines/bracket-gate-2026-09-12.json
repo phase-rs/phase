@@ -1,0 +1,36 @@
+{
+  "mtgjson_vintage": "2026-09-12",
+  "bracket_lists_version": "2025-09-24-wotc",
+  "commander_deck_population": 201,
+  "game_changer_histogram": {
+    "0": 179,
+    "1": 20,
+    "2": 2
+  },
+  "tier_histogram": {
+    "1": 177,
+    "3": 23,
+    "4": 1
+  },
+  "exhibition_decks": 177,
+  "contributing_card_name_frequency": {
+    "Aura Shards": 1,
+    "Crop Rotation": 1,
+    "Cyclonic Rift": 1,
+    "Enlightened Tutor": 2,
+    "Farewell": 6,
+    "Fierce Guardianship": 1,
+    "Gamble": 1,
+    "Hellkite Charger": 1,
+    "Jeska's Will": 2,
+    "Narset, Parter of Veils": 1,
+    "Notion Thief": 2,
+    "Notorious Throng": 1,
+    "Rhystic Study": 1,
+    "Ruination": 1,
+    "Seedborn Muse": 4,
+    "Smothering Tithe": 1,
+    "Teferi's Protection": 1
+  },
+  "unresolved_curated_names": []
+}
