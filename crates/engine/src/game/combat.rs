@@ -5609,19 +5609,6 @@ pub(super) fn commit_attack_declaration(
         }
     }
 
-    // CR 508.1a + CR 608.2c: Snapshot declaration-time characteristics before
-    // later combat/SBA movement can make post-combat "attacked with <quality>"
-    // queries chase stale or missing live objects.
-    let attacker_declarations: Vec<_> = attacker_ids
-        .iter()
-        .filter_map(|id| {
-            state
-                .objects
-                .get(id)
-                .map(|obj| obj.snapshot_for_attack_declaration(*id))
-        })
-        .collect();
-
     // Populate CombatState with per-creature defending players and attack targets
     let mut attackers: Vec<AttackerInfo> = attacks
         .iter()
@@ -5681,10 +5668,26 @@ pub(super) fn commit_attack_declaration(
         .map(|a| a.defending_player)
         .unwrap_or_else(|| players::next_player(state, state.active_player));
 
+    // CR 508.1k + CR 613.1: an attacker becomes attacking before its
+    // declaration-time characteristics are fixed. Flush attack-dependent
+    // continuous effects first, then retain the exact values through later
+    // movement and state-based actions.
+    crate::game::layers::flush_layers(state);
+    let attacker_declarations: Vec<_> = attacker_ids
+        .iter()
+        .filter_map(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| obj.snapshot_for_attack_declaration(*id))
+        })
+        .collect();
+
     events.push(GameEvent::AttackersDeclared {
         attacker_ids: attacker_ids.clone(),
         defending_player,
         attacks: attacks.to_vec(),
+        declaration_records: attacker_declarations.clone(),
     });
 
     // CR 508.1a: Record attacker object IDs for per-turn tracking.
@@ -7606,6 +7609,7 @@ mod tests {
             attacker_ids: vec![attacker],
             defending_player: global,
             attacks: vec![(attacker, target)],
+            declaration_records: Vec::new(),
         }
     }
 
@@ -7751,6 +7755,7 @@ mod tests {
                 (a, AttackTarget::Player(PlayerId(2))),
                 (b, AttackTarget::Player(PlayerId(1))),
             ],
+            declaration_records: Vec::new(),
         });
 
         assert_eq!(
@@ -18064,6 +18069,7 @@ mod tests {
             attacker_ids: vec![attacker],
             defending_player: PlayerId(1),
             attacks: vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+            declaration_records: Vec::new(),
         });
 
         enter_attacking(&mut state, token, caesar, PlayerId(0));

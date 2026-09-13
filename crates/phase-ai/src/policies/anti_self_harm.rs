@@ -152,6 +152,13 @@ fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
         GameAction::CastSpell { .. } if cast_has_unpayable_self_etb_may_cost(ctx) => {
             Some(PolicyReason::new("anti_self_harm_unpayable_etb_may_cost"))
         }
+        GameAction::CastSpell { .. }
+            if beneficial_creature_spell_has_no_friendly_recipient(ctx) =>
+        {
+            Some(PolicyReason::new(
+                "anti_self_harm_beneficial_creature_spell_no_friendly_recipient",
+            ))
+        }
         GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. }
             if grants_extra_turn_then_self_loss(ctx) =>
         {
@@ -171,6 +178,40 @@ fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
             .find_map(|target| target_reject_reason(ctx, target)),
         _ => None,
     }
+}
+
+/// Reject a pure creature-benefit spell when the AI has no creature that can
+/// receive any of its upside. A soft no-target penalty still lets softmax spend
+/// a card to enhance an opponent's creature, which is never a useful line when
+/// the spell supplies no separate damage, removal, or AI-directed resource.
+fn beneficial_creature_spell_has_no_friendly_recipient(ctx: &PolicyContext<'_>) -> bool {
+    let effects = ctx.effects();
+    let has_beneficial_creature_effect = effects.iter().any(|effect| {
+        matches!(effect_polarity(effect), EffectPolarity::Beneficial) && targets_creatures(effect)
+    });
+    if !has_beneficial_creature_effect {
+        return false;
+    }
+
+    let has_friendly_creature = ctx.state.battlefield.iter().any(|&id| {
+        ctx.state.objects.get(&id).is_some_and(|object| {
+            object.controller == ctx.ai_player
+                && object.card_types.core_types.contains(&CoreType::Creature)
+        })
+    });
+    if has_friendly_creature {
+        return false;
+    }
+
+    effects.iter().all(|effect| {
+        matches!(effect_polarity(effect), EffectPolarity::Beneficial)
+            || matches!(
+                effect,
+                Effect::TargetOnly { .. } | Effect::ChooseOneOf { .. }
+            )
+    }) && !effects
+        .iter()
+        .any(|effect| untargeted_effect_confirms_ai_payoff(ctx, effect))
 }
 
 fn cast_has_unpayable_self_etb_may_cost(ctx: &PolicyContext<'_>) -> bool {
@@ -3303,6 +3344,62 @@ mod tests {
             "X +1/+1 counters must go on our own creature: own={own_score}, \
              opponent={opponent_score}"
         );
+    }
+
+    #[test]
+    fn practiced_offense_rejected_without_a_friendly_creature_recipient() {
+        let mut state = make_state();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        add_creature(&mut state, PlayerId(1), "Opponent Creature", 2, 2);
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(90_007),
+            PlayerId(0),
+            "Practiced Offense".to_string(),
+            Zone::Hand,
+        );
+        let spell = state.objects.get_mut(&spell_id).unwrap();
+        spell.card_types.core_types.push(CoreType::Sorcery);
+        spell.mana_cost = ManaCost::zero();
+        *Arc::make_mut(&mut spell.abilities) = parsed_abilities(
+            "Practiced Offense",
+            "Put a +1/+1 counter on each creature target player controls. Target creature gains \
+             your choice of double strike or lifelink until end of turn.",
+            &[],
+            &["Sorcery"],
+        );
+
+        let candidate = engine::ai_support::candidate_actions(&state)
+            .into_iter()
+            .find(|candidate| {
+                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == spell_id)
+            })
+            .expect("the engine must offer the cast before the policy rejects it");
+        let verdicts = shared_registry_verdicts_for(&state, &candidate);
+        assert!(matches!(
+            verdicts
+                .iter()
+                .find(|(id, _)| *id == PolicyId::AntiSelfHarm)
+                .map(|(_, verdict)| verdict),
+            Some(PolicyVerdict::Reject { reason })
+                if reason.kind == "anti_self_harm_beneficial_creature_spell_no_friendly_recipient"
+        ));
+
+        add_creature(&mut state, PlayerId(0), "Friendly Creature", 2, 2);
+        let verdicts = shared_registry_verdicts_for(&state, &candidate);
+        assert!(matches!(
+            verdicts
+                .iter()
+                .find(|(id, _)| *id == PolicyId::AntiSelfHarm)
+                .map(|(_, verdict)| verdict),
+            Some(PolicyVerdict::Score { .. })
+        ));
     }
 
     #[test]

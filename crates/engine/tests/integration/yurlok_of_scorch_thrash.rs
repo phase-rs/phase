@@ -22,7 +22,7 @@ fn mana(color: ManaType, count: usize) -> Vec<ManaUnit> {
     vec![ManaUnit::new(color, ObjectId(9_999), false, vec![]); count]
 }
 
-fn add_yurlok(scenario: &mut GameScenario) -> ObjectId {
+pub(crate) fn add_yurlok(scenario: &mut GameScenario) -> ObjectId {
     scenario
         .add_creature_from_oracle(P0, "Yurlok of Scorch Thrash", 4, 4, YURLOK_ORACLE)
         .id()

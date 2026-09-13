@@ -46,6 +46,7 @@ fn add_mana(runner: &mut GameRunner, player: PlayerId, color: ManaType, count: u
 fn stomp_back_face() -> BackFaceData {
     BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Stomp".to_string(),
         power: None,
         toughness: None,

@@ -1,6 +1,6 @@
 import { WasmAdapter } from "../adapter/wasm-adapter";
 import { useGameStore } from "../stores/gameStore";
-import { downloadBlob } from "./fileDownload";
+import { downloadBlob, type DownloadResult } from "./fileDownload";
 
 /**
  * Whether the active game has an in-progress replay recording available to
@@ -33,9 +33,9 @@ export async function exportCurrentReplayJson(): Promise<string | null> {
 
 /**
  * Export the active game's replay and trigger a browser download. Returns
- * the saved filename, or `null` if no recording was available to export.
+ * `null` if no recording was available to export.
  */
-export async function downloadCurrentReplay(): Promise<string | null> {
+export async function downloadCurrentReplay(): Promise<DownloadResult | null> {
   const json = await exportCurrentReplayJson();
   if (json === null) return null;
 

@@ -315,6 +315,8 @@ describe("TargetingOverlay", () => {
 
     const confirm = screen.getByRole("button", { name: "Confirm (1/3)" });
     expect(confirm).not.toBeDisabled();
+    const actions = confirm.closest<HTMLElement>("[data-board-choice-actions]");
+    expect(actions?.style.bottom).toBe("var(--game-board-choice-bottom)");
 
     fireEvent.click(confirm);
 

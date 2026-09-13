@@ -47,7 +47,14 @@ let capturedOnP2PEvent: ((event: P2PAdapterEvent) => void) | undefined;
 // The join/spectate origin the route carried, handed down as a provider prop.
 let capturedServerUrl: string | undefined;
 
-const { mockClearPromptOverlayState, mockIsMobile, mockSetGameState, storeOverrides } = vi.hoisted(() => ({
+const {
+  mockCanActForWaitingState,
+  mockClearPromptOverlayState,
+  mockIsMobile,
+  mockSetGameState,
+  storeOverrides,
+} = vi.hoisted(() => ({
+  mockCanActForWaitingState: vi.fn(() => true),
   mockClearPromptOverlayState: vi.fn(),
   mockIsMobile: vi.fn(() => false),
   mockSetGameState: vi.fn(),
@@ -212,7 +219,7 @@ vi.mock("../../stores/multiplayerStore", () => ({
 vi.mock("../../hooks/usePlayerId", () => ({
   usePlayerId: () => 0,
   usePerspectivePlayerId: () => 0,
-  useCanActForWaitingState: () => true,
+  useCanActForWaitingState: mockCanActForWaitingState,
   // useTurnStatus (reached via the mounted <TurnStatusLine/>) also imports
   // waitingPlayer from this module; the whole module is mocked, so it must be
   // re-declared or the call throws. gameStore is mocked with waitingFor: null,
@@ -258,6 +265,24 @@ vi.mock("../../components/board/GameBoard", () => ({
       />
     );
   },
+}));
+
+vi.mock("../../components/hand/PlayerHand", () => ({
+  PlayerHand: ({ interactionDisabled = false }: { interactionDisabled?: boolean }) => (
+    <div
+      data-interaction-disabled={String(interactionDisabled)}
+      data-testid="player-hand-gate"
+    />
+  ),
+}));
+
+vi.mock("../../components/hand/MobileHandDrawer", () => ({
+  MobileHandDrawer: ({ interactionDisabled = false }: { interactionDisabled?: boolean }) => (
+    <div
+      data-interaction-disabled={String(interactionDisabled)}
+      data-testid="mobile-hand-drawer-gate"
+    />
+  ),
 }));
 
 vi.mock("../../components/modal/EngineLostModal", () => ({
@@ -432,6 +457,7 @@ beforeEach(() => {
   });
   capturedConcedeDialogProps = undefined;
   vi.clearAllMocks();
+  mockCanActForWaitingState.mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -794,6 +820,53 @@ describe("GamePage — CR 118.3 unaffordable-ability rows in the ability picker"
 });
 
 describe("GamePage — multiplayer board layout during board choices", () => {
+  it("disables both hand surfaces only for the authorized local board choice actor", () => {
+    const untapCandidate = gameObjectFactory
+      .creature(2, 2)
+      .onBattlefield()
+      .tapped()
+      .withId(10)
+      .ownedBy(0)
+      .build();
+    const stateForActor = (player: number) => gameStateFactory
+      .withPlayers(0, 1)
+      .withObjects(untapCandidate)
+      .untapChoice({ player, candidates: [untapCandidate.id] })
+      .build();
+    mockCanActForWaitingState.mockImplementation(() => {
+      const waitingFor = storeOverrides.waitingFor as { data?: { player?: number } } | null;
+      return waitingFor?.data?.player === 0;
+    });
+
+    const localChoice = stateForActor(0);
+    storeOverrides.gameState = localChoice;
+    storeOverrides.waitingFor = localChoice.waiting_for;
+    const view = renderGamePage();
+
+    expect(screen.getByTestId("player-hand-gate")).toHaveAttribute(
+      "data-interaction-disabled",
+      "true",
+    );
+    expect(screen.getByTestId("mobile-hand-drawer-gate")).toHaveAttribute(
+      "data-interaction-disabled",
+      "true",
+    );
+
+    const opponentChoice = stateForActor(1);
+    storeOverrides.gameState = opponentChoice;
+    storeOverrides.waitingFor = opponentChoice.waiting_for;
+    view.rerender(gamePageTree());
+
+    expect(screen.getByTestId("player-hand-gate")).toHaveAttribute(
+      "data-interaction-disabled",
+      "false",
+    );
+    expect(screen.getByTestId("mobile-hand-drawer-gate")).toHaveAttribute(
+      "data-interaction-disabled",
+      "false",
+    );
+  });
+
   it("forces split visibility for an authorized untap choice at a three-player table", () => {
     mockIsMobile.mockReturnValue(true);
     const untapCandidate = gameObjectFactory

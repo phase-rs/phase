@@ -22,6 +22,7 @@ fn attach_transform_back_face(runner: &mut GameRunner, object_id: ObjectId) {
         .unwrap()
         .back_face = Some(BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Back Face".to_string(),
         power: Some(3),
         toughness: Some(3),

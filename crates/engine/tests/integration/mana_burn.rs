@@ -29,6 +29,8 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
 
+use super::yurlok_of_scorch_thrash::add_yurlok;
+
 const POOL: usize = 2;
 
 fn pool(count: usize) -> Vec<ManaUnit> {
@@ -270,6 +272,27 @@ fn gain_branches() -> Effect {
     }
 }
 
+/// A modifier of an opponent's life loss.
+fn opponent_loss_modifier(
+    modification: QuantityModification,
+    description: &str,
+) -> ReplacementDefinition {
+    let mut def = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+        .quantity_modification(modification)
+        .description(description.to_string());
+    def.valid_player = Some(ReplacementPlayerScope::Opponent);
+    def
+}
+
+const DOUBLED_WITH_SUBSTITUTE: &str = "Double, then choose a gain";
+
+/// Doubles an opponent's life loss, then runs `gain_branches` — so the loss is
+/// applied before the substitute hands control to a prompt.
+fn doubled_with_substitute() -> ReplacementDefinition {
+    opponent_loss_modifier(QuantityModification::DOUBLE, DOUBLED_WITH_SUBSTITUTE)
+        .execute(AbilityDefinition::new(AbilityKind::Spell, gain_branches()))
+}
+
 /// A two-player game in the precombat main phase under Old School 93/94, with
 /// `P1` holding `POOL` unspent mana. `P0` hosts the replacement effects, so
 /// `ReplacementPlayerScope::Opponent` names `P1` and nothing else.
@@ -297,12 +320,7 @@ fn burner_facing_replacements(defs: Vec<ReplacementDefinition>) -> GameRunner {
 /// with no `ManaBurn` beside it.
 #[test]
 fn a_burn_whose_substitute_pauses_still_names_itself() {
-    let mut doubled_with_substitute = ReplacementDefinition::new(ReplacementEvent::LoseLife)
-        .quantity_modification(QuantityModification::DOUBLE)
-        .execute(AbilityDefinition::new(AbilityKind::Spell, gain_branches()))
-        .description("Double, then choose a gain".to_string());
-    doubled_with_substitute.valid_player = Some(ReplacementPlayerScope::Opponent);
-    let mut runner = burner_facing_replacements(vec![doubled_with_substitute]);
+    let mut runner = burner_facing_replacements(vec![doubled_with_substitute()]);
     let life_before = runner.state().players[1].life;
 
     let mut events = Vec::new();
@@ -324,6 +342,16 @@ fn a_burn_whose_substitute_pauses_still_names_itself() {
         burns(&events),
         vec![(P1, burned as u32)],
         "the resolved burn is narrated once, with what was actually lost"
+    );
+    // Narrated, so nothing is parked: a record left here would outlive its
+    // event and be inherited by the next same-player loss to resume.
+    assert!(
+        runner
+            .state()
+            .pending_phase_transition_progress
+            .as_ref()
+            .is_some_and(|progress| progress.in_flight_life_loss.is_none()),
+        "the paused cursor must hold no provenance for a burn already narrated"
     );
 
     // Answering the prompt finishes the transition and adds no second burn.
@@ -406,4 +434,147 @@ fn a_prevented_burn_leaves_no_provenance_behind() {
     );
     assert!(runner.state().players[1].mana_pool.mana.is_empty());
     assert_eq!(runner.state().phase, Phase::BeginCombat);
+}
+
+/// Answer the paused ordering choice with the replacement named `description`.
+fn choose_replacement(runner: &mut GameRunner, description: &str) -> Vec<GameEvent> {
+    let index = match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { candidates, .. } => candidates
+            .iter()
+            .position(|candidate| candidate.description == description)
+            .unwrap_or_else(|| panic!("no {description:?} replacement candidate")),
+        waiting => panic!("expected a life-loss replacement choice, got {waiting:?}"),
+    };
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("the replacement choice resolves")
+        .events
+}
+
+/// Answer the paused `gain_branches` prompt, and prove the phase transition
+/// held behind it then completes exactly once, running the substitute once.
+fn answer_substitute(runner: &mut GameRunner, mut events: Vec<GameEvent>) -> Vec<GameEvent> {
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseOneOfBranch { .. }
+        ),
+        "the substitute must pause, or this exercises the synchronous path; \
+         got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().pending_phase_transition_progress.is_some(),
+        "the phase transition must be held behind the substitute's prompt"
+    );
+    let host_life = runner.life(P0);
+    events.extend(
+        runner
+            .act(GameAction::ChooseBranch { index: 1 })
+            .expect("answering the substitute resumes the drain")
+            .events,
+    );
+    assert!(
+        runner.state().pending_phase_transition_progress.is_none(),
+        "answering the substitute must finish the phase transition, not strand it"
+    );
+    assert_eq!(runner.state().phase, Phase::BeginCombat);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::PhaseChanged {
+                    phase: Phase::BeginCombat
+                }
+            ))
+            .count(),
+        1,
+        "the phase entry completes exactly once"
+    );
+    assert_eq!(
+        runner.life(P0),
+        host_life + 2,
+        "the chosen gain runs exactly once"
+    );
+    events
+}
+
+/// CR 616.1: an ordering choice applies nothing until it is answered, so the
+/// choice's resume, not the drain, names the loss — and it names what the
+/// chosen order produced, not the pool count.
+#[test]
+fn a_burn_resolved_by_an_ordering_choice_names_the_chosen_loss_once() {
+    let mut runner = burner_facing_replacements(vec![
+        opponent_loss_modifier(QuantityModification::DOUBLE, "Double"),
+        opponent_loss_modifier(QuantityModification::Plus { value: 1 }, "Plus one"),
+    ]);
+    let life_before = runner.life(P1);
+
+    let mut events = Vec::new();
+    engine::game::turns::advance_phase(runner.state_mut(), &mut events);
+    events.extend(choose_replacement(&mut runner, "Double"));
+
+    // Double first, then the remaining Plus one.
+    let burned = POOL as u32 * 2 + 1;
+    assert_eq!(runner.life(P1), life_before - burned as i32);
+    assert_eq!(burns(&events), vec![(P1, burned)]);
+    assert!(runner.state().pending_phase_transition_progress.is_none());
+    assert_eq!(runner.state().phase, Phase::BeginCombat);
+}
+
+/// CR 614.6 + CR 500.5: the ordering choice picks a replacement whose
+/// substitute pauses only AFTER the choice's resume has applied the loss. The
+/// drain may not advance until that substitute finishes, and must finish once
+/// it is answered.
+///
+/// Reverts to red by dropping the `Execute` arm's
+/// `mark_phase_transition_awaiting_post_replacement`: the answered prompt then
+/// leaves the phase cursor standing, and no resume path ever drains it.
+#[test]
+fn a_burn_whose_chosen_replacement_substitute_pauses_still_finishes_the_phase() {
+    let mut runner = burner_facing_replacements(vec![
+        doubled_with_substitute(),
+        opponent_loss_modifier(QuantityModification::Plus { value: 1 }, "Plus one"),
+    ]);
+    let life_before = runner.life(P1);
+
+    let mut events = Vec::new();
+    engine::game::turns::advance_phase(runner.state_mut(), &mut events);
+    events.extend(choose_replacement(&mut runner, DOUBLED_WITH_SUBSTITUTE));
+    let events = answer_substitute(&mut runner, events);
+
+    // The chosen Double first, then the remaining Plus one.
+    let burned = POOL as u32 * 2 + 1;
+    assert_eq!(runner.life(P1), life_before - burned as i32);
+    assert_eq!(burns(&events), vec![(P1, burned)]);
+}
+
+/// The `UnspentManaStatic` control on the substitute path: the same paused
+/// substitute, applied to a Yurlok loss under a modern format. That loss is a
+/// card's doing, not mana burn, so its `LifeChanged` says everything and no
+/// `ManaBurn` may name it. The Yurlok suite drives this path but asserts
+/// nothing about `ManaBurn`, so it cannot stand in for this.
+#[test]
+fn an_unspent_mana_static_loss_through_a_paused_substitute_is_not_mana_burn() {
+    let mut scenario = GameScenario::new_n_player(2, 51);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P1, pool(POOL));
+    scenario
+        .add_creature(P0, "Burn Replacements", 1, 1)
+        .with_replacement_definition(doubled_with_substitute());
+    add_yurlok(&mut scenario);
+    let mut runner = scenario.build();
+    let life_before = runner.life(P1);
+
+    let mut events = Vec::new();
+    engine::game::turns::advance_phase(runner.state_mut(), &mut events);
+    let events = answer_substitute(&mut runner, events);
+
+    assert_eq!(
+        runner.life(P1),
+        life_before - POOL as i32 * 2,
+        "reach guard: the Yurlok loss really resolved through the paused substitute"
+    );
+    assert!(burns(&events).is_empty());
 }

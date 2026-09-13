@@ -550,10 +550,11 @@ pub(super) fn discharge_owed_life_losses(
             next.amount,
             events,
         ) {
-            // The ACTUAL life lost, which is not always what emptied: CR 119.8
-            // ("a player who can't lose life is unaffected") and prevention or
-            // replacement effects can reduce it, to zero. Narrating the pool
-            // count instead would tell a player they lost life they still have.
+            // The ACTUAL life lost, which is not always what emptied: a
+            // "can't lose life" effect takes precedence over the loss
+            // (CR 101.2), and prevention or replacement effects can reduce it,
+            // to zero. Narrating the pool count instead would tell a player
+            // they lost life they still have.
             Ok(actual) => emit_life_loss_cause(next, actual, events),
             Err(deferred) => {
                 // Either way this loss is mid-flight and must NOT be re-queued
@@ -631,7 +632,7 @@ fn park_in_flight_life_loss(state: &mut GameState, loss: PendingEmptyPoolLifeLos
 /// correct narration for a prevented loss.
 ///
 /// `actual` is what the pipeline really took, which is the point: a replacement
-/// effect may have reduced it, and CR 119.8 can make it zero.
+/// effect may have reduced it, even to zero.
 pub(super) fn note_empty_pool_life_loss_resolved(
     state: &mut GameState,
     player_id: PlayerId,

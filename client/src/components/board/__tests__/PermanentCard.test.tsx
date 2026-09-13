@@ -307,23 +307,58 @@ describe("PermanentCard", () => {
     cleanup();
   });
 
+  it("badges a face-up card-art token copy as a token", () => {
+    const gameState = makeState();
+    gameState.objects[1].is_token = true;
+    gameState.objects[1].display_source = "Card";
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.getByTitle("Token copy of a real card")).toHaveTextContent("Token");
+    expect(screen.queryByText("Copy")).not.toBeInTheDocument();
+  });
+
+  it("does not badge an ordinary generic token as a card-art token copy", () => {
+    const gameState = makeState();
+    gameState.objects[1].is_token = true;
+    gameState.objects[1].display_source = "Token";
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.queryByText("Token")).not.toBeInTheDocument();
+    expect(screen.queryByText("Copy")).not.toBeInTheDocument();
+  });
+
+  it("gives the token badge precedence when a card-art token is also engine-classified as copied", () => {
+    const gameState = makeState();
+    gameState.objects[1].is_token = true;
+    gameState.objects[1].display_source = "Card";
+    gameState.derived = { copied_permanents: [1] };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.getByTitle("Token copy of a real card")).toHaveTextContent("Token");
+    expect(screen.queryByText("Copy")).not.toBeInTheDocument();
+  });
+
   // Issue #5932: a Phantasmal Image copying a Reveillark rendered identically to
-  // the real one. The board's copy badge was gated on a TOKEN-copy heuristic
-  // (`is_token`), so a real card under a copy effect never qualified. The engine
-  // now classifies it (CR 613.2a Layer 1a + CR 707.2) and this reads that.
-  it("badges a real card that a copy effect turned into a copy", () => {
+  // the real one. The engine classifies its Layer 1a copy effect in
+  // `copied_permanents`; the board distinguishes this nontoken case from a token.
+  it("badges a face-up nontoken permanent under a copy effect as a copy", () => {
     const gameState = makeState();
     gameState.derived = { copied_permanents: [1] };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
 
     renderPermanent();
 
-    expect(screen.getByText("Copy")).toBeInTheDocument();
+    expect(screen.getByTitle("Nontoken permanent copying another card")).toHaveTextContent("Copy");
+    expect(screen.queryByText("Token")).not.toBeInTheDocument();
   });
 
-  it("shows no copy badge on an ordinary permanent", () => {
-    // Discriminating guard: without it the test above would still pass if the
-    // badge rendered unconditionally.
+  it("shows neither provenance badge on an ordinary permanent", () => {
     const gameState = makeState();
     gameState.derived = { copied_permanents: [] };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
@@ -331,6 +366,7 @@ describe("PermanentCard", () => {
     renderPermanent();
 
     expect(screen.queryByText("Copy")).not.toBeInTheDocument();
+    expect(screen.queryByText("Token")).not.toBeInTheDocument();
   });
 
   it("renders the engine-authored temporary can't-be-blocked badge with its public source", () => {
@@ -382,19 +418,33 @@ describe("PermanentCard", () => {
     expect(screen.queryByLabelText("Can't be blocked")).not.toBeInTheDocument();
   });
 
-  it("never badges a face-down permanent as a copy (CR 708.2)", () => {
+  it("shows neither provenance badge on a face-down token classified as copied (CR 708.2)", () => {
     // A face-down permanent has only the characteristics its face-down rules
-    // grant, so surfacing "Copy" would leak what it really is. The engine omits
-    // it from the projection; the client keeps its own guard so neither side
-    // alone can leak it.
+    // grant, so surfacing either provenance would leak what it really is.
     const gameState = makeState();
     gameState.objects[1].face_down = true;
+    gameState.objects[1].is_token = true;
+    gameState.objects[1].display_source = "Card";
     gameState.derived = { copied_permanents: [1] };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
 
     renderPermanent();
 
     expect(screen.queryByText("Copy")).not.toBeInTheDocument();
+    expect(screen.queryByText("Token")).not.toBeInTheDocument();
+  });
+
+  it("shows neither provenance badge on a face-down nontoken classified as copied (CR 708.2)", () => {
+    const gameState = makeState();
+    gameState.objects[1].face_down = true;
+    gameState.objects[1].is_token = false;
+    gameState.derived = { copied_permanents: [1] };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.queryByText("Copy")).not.toBeInTheDocument();
+    expect(screen.queryByText("Token")).not.toBeInTheDocument();
   });
 
   it("renders only the engine-classified battlefield keyword badges", () => {

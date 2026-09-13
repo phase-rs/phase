@@ -7,7 +7,7 @@ use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::bytes::complete::take_until;
 use nom::character::complete::multispace1;
-use nom::combinator::{cut, eof, map, opt, peek, value, verify};
+use nom::combinator::{cut, eof, map, not, opt, peek, value, verify};
 use nom::multi::many0;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -31,7 +31,8 @@ use crate::types::ability::{
     CastManaSpentMetric, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel,
     DamageGroupKey, DamageKindFilter, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
     PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality,
-    SharedQualityRelation, StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    SharedQualityRelation, StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -120,6 +121,7 @@ fn parse_condition_connector(input: &str) -> OracleResult<'_, ConditionConnectiv
 
 fn parse_single_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        parse_you_attacked_with_total_power_this_combat,
         // CR 601.2h + CR 608.2c: whole-phrase "it wasn't cast or no mana was spent
         // to cast <self>" gate. MUST precede the event-history arm's
         // `parse_was_cast_condition`, which would otherwise claim the bare "it
@@ -132,6 +134,48 @@ fn parse_single_inner_condition(input: &str) -> OracleResult<'_, StaticCondition
         parse_resolution_context_conditions,
     ))
     .parse(input)
+}
+
+/// CR 508.1a + CR 603.4: "you attacked with creatures with total power N or
+/// greater this combat" compares declaration-time power from this trigger's
+/// attacker batch rather than the current battlefield or turn history.
+fn parse_you_attacked_with_total_power_this_combat(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you attacked with ").parse(input)?;
+    let (rest, condition) = parse_creatures_with_total_power_or_greater(rest)?;
+    let (rest, _) = tag(" this combat").parse(rest)?;
+    Ok((rest, condition))
+}
+
+/// Parse the shared attacker-total threshold phrase after its grammatical
+/// subject: "creatures with total power N or greater".
+fn parse_creatures_with_total_power_or_greater(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("creatures with total power ").parse(input)?;
+    let (rest, threshold) = parse_number(rest)?;
+    let (rest, comparator) = value(Comparator::GE, tag(" or greater")).parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TrackedSet {
+                            set: TrackedAnaphorSource::TriggeringBatch,
+                            caused_by: None,
+                        },
+                    )
+                    .expect("object property aggregate is valid"),
+                ),
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed {
+                value: threshold as i32,
+            },
+        },
+    ))
 }
 
 /// CR 601.2h + CR 608.2c: "it wasn't cast or no mana was spent to cast <self>" —
@@ -2262,15 +2306,16 @@ fn parse_source_enchanted_by_aura_count(input: &str) -> OracleResult<'_, StaticC
 pub(crate) fn parse_source_has_counters(input: &str) -> OracleResult<'_, StaticCondition> {
     // The shared condition path (intervening-"if" triggers and static gates that
     // delegate to `parse_inner_condition`) reads the subject as
-    // source-referential: "whenever ~ attacks, if it has three +1/+1 counters on
-    // it" (Ayara's Oathsworn) means the triggering source itself. The
-    // recipient-bound "for as long as it has a counter" reading is the duration
-    // grammar's job — see `parse_recipient_has_counters`.
+    // source-referential: "whenever ~ deals combat damage to a player, if it has
+    // fewer than four +1/+1 counters on it" (Ayara's Oathsworn) means the
+    // triggering source itself. The recipient-bound "for as long as it has a
+    // counter" reading is the duration grammar's job — see
+    // `parse_recipient_has_counters`.
     let (rest, (subject, counters, minimum, maximum)) = parse_has_counters_axes(input)?;
     match subject {
         // "~"/"this creature" and the bound pronoun "it" are both
         // source-referential in this path (the intervening-"if" trigger /
-        // static-gate reading — #3084 Ayara's Oathsworn).
+        // static-gate reading — Ayara's Oathsworn "fewer than four").
         CounterConditionSubject::Source | CounterConditionSubject::RecipientPronoun => Ok((
             rest,
             StaticCondition::HasCounters {
@@ -2460,6 +2505,8 @@ fn parse_counter_condition_subject(input: &str) -> OracleResult<'_, CounterCondi
 /// - `"N or more"` → `(N, None)`
 /// - `"exactly N"` → `(N, Some(N))`
 /// - `"N or fewer"` → `(0, Some(N))`
+/// - `"fewer than N"` → `(0, Some(N-1))`
+/// - `"more than N"` → `(N+1, None)`
 fn parse_has_counters_quantity(input: &str) -> OracleResult<'_, (u32, Option<u32>)> {
     alt((
         value((1u32, None), tag("a ")),
@@ -2468,6 +2515,7 @@ fn parse_has_counters_quantity(input: &str) -> OracleResult<'_, (u32, Option<u32
         parse_exactly_n_counters,
         parse_n_or_more_counters,
         parse_n_or_fewer_counters,
+        parse_strict_n_counters,
         // CR 122.1: a bare "counter(s)" with no quantifier word means "at least
         // one" — "if ~ has counters on it" (The Ozolith, Denry Klin). `peek` so
         // the counter-type axis still consumes the noun, and gate on the bare
@@ -2498,6 +2546,38 @@ fn parse_exactly_n_counters(input: &str) -> OracleResult<'_, (u32, Option<u32>)>
     let (rest, n) = parse_number(rest)?;
     let (rest, _) = tag(" ").parse(rest)?;
     Ok((rest, (n, Some(n))))
+}
+
+/// CR 107.1 + CR 122.1: "fewer than N" / "more than N" are strict integer
+/// inequalities on the source's matching counters. Encoded as inclusive
+/// HasCounters bounds: LT N → (0, Some(N-1)); GT N → (N+1, None).
+/// CR 603.4: the resulting HasCounters is the intervening-if predicate.
+fn parse_strict_n_counters(input: &str) -> OracleResult<'_, (u32, Option<u32>)> {
+    let (rest, comparator) = parse_strict_comparator_prefix(input)?;
+    let (rest, n) = parse_number(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    // Refuse mixed "fewer than N or more" (same refuse as parse_there_are_conditions).
+    let (rest, _) = peek(not(alt((
+        tag("or more "),
+        tag("or fewer "),
+        tag("at least "),
+    ))))
+    .parse(rest)?;
+    match comparator {
+        Comparator::LT => {
+            let Some(max) = n.checked_sub(1) else {
+                return Err(oracle_err(input));
+            };
+            Ok((rest, (0, Some(max))))
+        }
+        Comparator::GT => {
+            let Some(min) = n.checked_add(1) else {
+                return Err(oracle_err(input));
+            };
+            Ok((rest, (min, None)))
+        }
+        Comparator::GE | Comparator::LE | Comparator::EQ | Comparator::NE => Err(oracle_err(input)),
+    }
 }
 
 /// Consume `"<type> counter"` / `"<type> counters"` and return
@@ -4057,9 +4137,10 @@ fn parse_ge_threshold(input: &str) -> OracleResult<'_, u32> {
 /// are the strict-inequality prefix idioms (LT / GT), in contrast to the
 /// "N or more" (GE) / "N or fewer" (LE) suffix idioms. Single authority for
 /// the comparator-prefix family — shared by `parse_put_onto_battlefield_this_way`
-/// ("you put fewer than two lands onto the battlefield this way") and
+/// ("you put fewer than two lands onto the battlefield this way"),
 /// `parse_there_are_conditions` ("there are fewer than six creature cards in
-/// your graveyard").
+/// your graveyard"), and `parse_strict_n_counters` ("has fewer than three
+/// +1/+1 counters on it" / "has more than two +1/+1 counters on it").
 fn parse_strict_comparator_prefix(input: &str) -> OracleResult<'_, Comparator> {
     alt((
         value(Comparator::LT, tag("fewer than ")),
@@ -9032,7 +9113,8 @@ fn parse_zone_count_ref(input: &str) -> OracleResult<'_, ZoneRef> {
 ///
 /// Composes the same axes as `parse_source_has_counters`:
 /// - Quantity axis (`parse_has_counters_quantity`): "no" / "a" / "N or more"
-///   / "N or fewer" / "exactly N" / "one or more".
+///   / "N or fewer" / "exactly N" / "one or more" / "fewer than N"
+///   (`(0, Some(N-1))`) / "more than N" (`(N+1, None)`).
 /// - Counter type axis (`parse_typed_counter_noun` then `Any` fallback).
 /// - Source subject: any pronoun / `~` form accepted by
 ///   `parse_counter_on_source_subject`.
@@ -19872,12 +19954,12 @@ mod tests {
         );
     }
 
-    /// Regression for the coverage-honesty flip (#3084): the bare pronoun "it"
-    /// in an intervening-"if" trigger condition (Ayara's Oathsworn — "whenever ~
-    /// attacks, if it has three or more +1/+1 counters on it, …") is
-    /// source-referential. It must stay `HasCounters` (evaluated against the
-    /// triggering source), not `RecipientHasCounters`, which has no recipient at
-    /// trigger-evaluation time and is silently swallowed by the coverage gate.
+    /// Generic "N or more" sibling: the bare pronoun "it" in an intervening-"if"
+    /// trigger condition is source-referential. It must stay `HasCounters`
+    /// (evaluated against the triggering source), not `RecipientHasCounters`,
+    /// which has no recipient at trigger-evaluation time and is silently
+    /// swallowed by the coverage gate. Ayara's printed Oracle is "fewer than
+    /// four" — see `has_counters_fewer_than_four_pronoun_is_source`.
     #[test]
     fn parse_inner_condition_it_has_counters_is_source_referential() {
         let (rest, c) = parse_inner_condition("it has three or more +1/+1 counters on it").unwrap();
@@ -20163,6 +20245,130 @@ mod tests {
                 maximum: Some(2),
             }
         );
+    }
+
+    /// CR 107.1 + CR 122.1: "fewer than three" is the strict-LT integer band
+    /// {0,1,2}, encoded `(0, Some(2))` — the same AST as inclusive "two or fewer".
+    #[test]
+    fn has_counters_fewer_than_three_plus1() {
+        let expected = StaticCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            minimum: 0,
+            maximum: Some(2),
+        };
+        for text in [
+            "~ has fewer than three +1/+1 counters on it",
+            "this creature has fewer than three +1/+1 counters on it",
+        ] {
+            let (rest, cond) = parse_source_has_counters(text)
+                .unwrap_or_else(|e| panic!("failed to parse {text:?}: {e:?}"));
+            assert_eq!(rest, "", "unconsumed remainder for {text:?}");
+            assert_eq!(cond, expected, "wrong condition for {text:?}");
+        }
+
+        let (_, or_fewer) = parse_source_has_counters("~ has two or fewer +1/+1 counters on it")
+            .expect("two or fewer sibling must still parse");
+        assert_eq!(or_fewer, expected);
+    }
+
+    /// Ayara's Oathsworn: intervening-if "if it has fewer than four +1/+1
+    /// counters on it" is source-referential `HasCounters`, not
+    /// `RecipientHasCounters`.
+    #[test]
+    fn has_counters_fewer_than_four_pronoun_is_source() {
+        let expected = StaticCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            minimum: 0,
+            maximum: Some(3),
+        };
+        let (rest, inner) =
+            parse_inner_condition("it has fewer than four +1/+1 counters on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(inner, expected);
+
+        let (rest, source) =
+            parse_source_has_counters("it has fewer than four +1/+1 counters on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(source, expected);
+        assert!(
+            !matches!(inner, StaticCondition::RecipientHasCounters { .. }),
+            "source-referential `it` must not lower to RecipientHasCounters"
+        );
+    }
+
+    /// Adaptive Training Post: charge-counter type axis with the same LT bounds.
+    #[test]
+    fn has_counters_fewer_than_three_charge() {
+        let (rest, cond) =
+            parse_source_has_counters("this artifact has fewer than three charge counters on it")
+                .expect("ATP charge fewer-than form must parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            cond,
+            StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("charge".to_string())),
+                minimum: 0,
+                maximum: Some(2),
+            }
+        );
+    }
+
+    /// CR 107.1: "more than two" is the paired GT prefix → `(3, None)`, equal
+    /// to inclusive "three or more".
+    #[test]
+    fn has_counters_more_than_two_plus1() {
+        let expected = StaticCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            minimum: 3,
+            maximum: None,
+        };
+        let (rest, more) =
+            parse_source_has_counters("~ has more than two +1/+1 counters on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(more, expected);
+
+        let (_, or_more) = parse_source_has_counters("~ has three or more +1/+1 counters on it")
+            .expect("three or more sibling must still parse");
+        assert_eq!(or_more, expected);
+    }
+
+    /// Mixed "fewer than N or more" is not English and must fail rather than
+    /// swallow "or more +1/+1" as a Generic counter type. Reach-guard: the
+    /// unmixed fewer-than form is Ok.
+    #[test]
+    fn has_counters_fewer_than_mixed_or_more_is_err() {
+        let (rest, ok) = parse_source_has_counters("~ has fewer than three +1/+1 counters on it")
+            .expect("unmixed fewer-than form is the reach-guard");
+        assert_eq!(rest, "");
+        assert!(matches!(
+            ok,
+            StaticCondition::HasCounters {
+                minimum: 0,
+                maximum: Some(2),
+                ..
+            }
+        ));
+
+        assert!(
+            parse_source_has_counters("~ has fewer than three or more +1/+1 counters on it")
+                .is_err(),
+            "mixed fewer-than N or more must fail"
+        );
+
+        // CR 107.1: "fewer than 0" is not an English integer band.
+        assert!(parse_source_has_counters("~ has fewer than 0 +1/+1 counters on it").is_err());
+
+        // Sibling: "exactly three" is unchanged EQ.
+        let (_, exact) = parse_source_has_counters("~ has exactly three +1/+1 counters on it")
+            .expect("exactly N sibling must still parse");
+        assert!(matches!(
+            exact,
+            StaticCondition::HasCounters {
+                minimum: 3,
+                maximum: Some(3),
+                ..
+            }
+        ));
     }
 
     /// "no" variant — zero counters (min 0, max 0).
@@ -21004,6 +21210,44 @@ mod tests {
     }
 
     // -- "have total {power|toughness|mana value} N or {greater|less}" predicate --
+
+    #[test]
+    fn pack_tactics_total_power_uses_triggering_batch() {
+        let (rest, condition) = parse_inner_condition(
+            "you attacked with creatures with total power 6 or greater this combat",
+        )
+        .expect("Pack Tactics condition should parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::PropertyAggregate(
+                        PropertyAggregate::new(
+                            AggregateFunction::Sum,
+                            ObjectProperty::Power,
+                            CardTypeSetSource::TrackedSet {
+                                set: TrackedAnaphorSource::TriggeringBatch,
+                                caused_by: None,
+                            },
+                        )
+                        .expect("valid aggregate"),
+                    ),
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 6 },
+            }
+        );
+    }
+
+    #[test]
+    fn pack_tactics_near_phrasing_does_not_parse_as_total_power_condition() {
+        assert!(parse_inner_condition(
+            "you attacked with creatures with combined power 6 or greater this combat"
+        )
+        .is_err());
+    }
+
     //
     // CR 107.3e + CR 208.1 + CR 202.3: Building-block predicate for
     // aggregate-property thresholds across a filter (Sum function). Single
@@ -22122,6 +22366,37 @@ mod tests {
             StaticCondition::HasCounters {
                 counters: CounterMatch::Any,
                 minimum: 1,
+                maximum: None,
+            }
+        );
+    }
+
+    /// Same quantity axis: existential "there are fewer than N [type] counters
+    /// on ~" shares the LT encoding. Reach-guard: Mazemind "four or more" still
+    /// `(4, None)`.
+    #[test]
+    fn parse_source_counters_exist_fewer_than() {
+        let (rest, cond) =
+            parse_source_counters_exist("there are fewer than three charge counters on ~")
+                .expect("existential fewer-than form must parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            cond,
+            StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("charge".to_string())),
+                minimum: 0,
+                maximum: Some(2),
+            }
+        );
+
+        let (_, mazemind) =
+            parse_source_counters_exist("there are four or more page counters on ~")
+                .expect("Mazemind four-or-more reach-guard must still parse");
+        assert_eq!(
+            mazemind,
+            StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("page".to_string())),
+                minimum: 4,
                 maximum: None,
             }
         );

@@ -2984,6 +2984,7 @@ pub(super) fn parse_subject_application(
             TargetFilter::TriggeringPlayer
                 | TargetFilter::DefendingPlayer
                 | TargetFilter::TriggeringSourceController
+                | TargetFilter::EventTargetController
         ) {
             // CR 608.2c + CR 109.4 (issue #534): "That player" after a
             // `Choose(Player)`/`Choose(Opponent)` clause binds to the

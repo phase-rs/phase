@@ -1,4 +1,5 @@
 {
+  "playerLatency": {"host":"Host","waiting":"Oczekiwanie","value":"{{ms}} ms","description":"Opóźnienie w obie strony do hosta. Brak odpowiedzi nie rozłącza gry."},
   "abilityBlock": {
     "badge": "Zablokowana",
     "cantBeActivated": "Tej zdolności nie można aktywować",
@@ -104,6 +105,7 @@
   },
   "debugCreate": {
     "copies": "Kopie",
+    "asToken": "Utwórz jako żeton",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
@@ -310,8 +312,10 @@
     "underAttack_one": "Atakowany przez {{count}} stwora",
     "underAttack_other": "Atakowany przez {{count}} stworów",
     "target": "Cel",
+    "token": "Żeton",
+    "tokenTooltip": "Żeton będący kopią prawdziwej karty",
     "copy": "Kopia",
-    "copyTooltip": "Kopia tokenowa prawdziwej karty",
+    "copyTooltip": "Nietokenowy permanent kopiujący inną kartę",
     "cantBeBlocked": "Nie może zostać zablokowana",
     "ringBearer": "Pierścień",
     "ringBearerTooltip": "Powiernik Pierścienia",
@@ -2112,6 +2116,7 @@
     "exportClientSnapshot": "Eksportuj migawkę klienta",
     "exported": "Wyeksportowano",
     "exportFailed": "Eksport nie powiódł się",
+    "exportRequested": "Eksport niepotwierdzony",
     "copyDiagnostic": "Kopiuj diagnostykę",
     "copied": "Skopiowano!",
     "reportOnGithub": "Zgłoś na GitHub",
@@ -2215,7 +2220,7 @@
     "yes": "Tak",
     "no": "Nie",
     "dontAskAgain": "Nie pytaj ponownie w tej grze",
-    "dontAskAgainForSameCard": "Zastosuj do każdej kopii tej karty"
+    "dontAskAgainForSameCard": "Użyj tego wyboru dla każdej kopii tej karty w tej grze"
   },
   "resolutionOptionalPayment": {
     "title": "Wybierz opcjonalną opłatę",

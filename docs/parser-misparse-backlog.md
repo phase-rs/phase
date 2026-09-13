@@ -810,7 +810,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 <details><summary>Cards</summary>
 
 - A-Paragon of Modernity
-- Adaptive Training Post
 - Adrestia
 - Aether Revolt
 - Aether Rift
@@ -1240,7 +1239,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Routeway Moose
 - Rowdy Crew
 - Rubblebelt Braggart
-- Runaway Steam-Kin
 - Rushing-Tide Zubera
 - Rushwood Legate
 - Saffi Eriksdotter

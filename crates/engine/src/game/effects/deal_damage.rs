@@ -84,6 +84,20 @@ fn player_context_target(
             .map(TargetRef::Player);
     }
 
+    // CR 120.1 + CR 109.4: The damage RECIPIENT's controller. Resolved strictly
+    // through the event-context authority and returned as an `Option`, for the
+    // same reason `ParentTargetController` is handled above rather than being
+    // added to the `resolve_player_for_context_ref` list below: that resolver
+    // ends in an `ability.controller` fallback, and here that fallback IS the
+    // defect this variant exists to prevent — Bellowing Fiend would deal its
+    // "that creature's controller" damage to its own controller, on top of the
+    // "and 3 damage to you" clause. An unresolvable recipient must deal no
+    // damage (CR 608.2b), not damage the wrong player.
+    if matches!(target_filter, TargetFilter::EventTargetController) {
+        return crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
+            .map(TargetRef::Player);
+    }
+
     if matches!(
         target_filter,
         TargetFilter::Controller
@@ -5400,6 +5414,7 @@ mod tests {
             attacker_ids: vec![star_athlete],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         });
         // Zero targets chosen for "up to one target nonland permanent".
         let ability = ResolvedAbility::new(
@@ -5454,6 +5469,7 @@ mod tests {
             attacker_ids: vec![star_athlete],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         });
         let ability = ResolvedAbility::new(
             Effect::DealDamage {

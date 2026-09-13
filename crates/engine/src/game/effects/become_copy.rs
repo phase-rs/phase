@@ -354,6 +354,8 @@ fn fold_admitted_copy_exceptions_into_values(
     };
 
     let mut candidate = values.clone();
+    let trigger_count = candidate.trigger_definitions.len();
+    std::sync::Arc::make_mut(&mut candidate.trigger_printed_origins).resize(trigger_count, None);
     for operation in foldable_operations {
         operation.apply(&mut candidate, source, all_creature_types);
     }
@@ -622,6 +624,7 @@ impl FoldableCopyException<'_> {
                 let triggers = std::sync::Arc::make_mut(&mut values.trigger_definitions);
                 if !triggers.contains(trigger) {
                     triggers.push(trigger.clone());
+                    std::sync::Arc::make_mut(&mut values.trigger_printed_origins).push(None);
                 }
             }
             Self::AddType { core_type } => {
@@ -669,6 +672,14 @@ impl FoldableCopyException<'_> {
                     let triggers = std::sync::Arc::make_mut(&mut values.trigger_definitions);
                     if !triggers.contains(&trigger) {
                         triggers.push(trigger);
+                        std::sync::Arc::make_mut(&mut values.trigger_printed_origins).push(
+                            source.and_then(|source| {
+                                crate::game::printed_cards::base_trigger_printed_origins(source)
+                                    .get(*source_trigger_index)
+                                    .cloned()
+                                    .flatten()
+                            }),
+                        );
                     }
                 }
             }
@@ -693,9 +704,15 @@ impl FoldableCopyException<'_> {
                         }
                     }
                     let triggers = std::sync::Arc::make_mut(&mut values.trigger_definitions);
-                    for trigger in source.base_trigger_definitions.iter() {
+                    let origins = std::sync::Arc::make_mut(&mut values.trigger_printed_origins);
+                    let source_origins =
+                        crate::game::printed_cards::base_trigger_printed_origins(source);
+                    for (printed_occurrence, trigger) in
+                        source.base_trigger_definitions.iter().enumerate()
+                    {
                         if !triggers.contains(trigger) {
                             triggers.push(trigger.clone());
+                            origins.push(source_origins[printed_occurrence].clone());
                         }
                     }
                     let statics = std::sync::Arc::make_mut(&mut values.static_definitions);
@@ -1627,6 +1644,7 @@ mod tests {
             obj.base_color = vec![ManaColor::Green];
             obj.back_face = Some(BackFaceData {
                 is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "Back Face".to_string(),
                 power: Some(5),
                 toughness: Some(4),

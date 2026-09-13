@@ -60,6 +60,7 @@ fn attach_aang_back_face(runner: &mut engine::game::scenario::GameRunner, aang: 
     let obj = runner.state_mut().objects.get_mut(&aang).unwrap();
     obj.back_face = Some(BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Avatar Aang, Master of Elements".to_string(),
         power: Some(6),
         toughness: Some(6),

@@ -9406,6 +9406,7 @@ fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: C
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
@@ -24025,8 +24026,8 @@ fn apply_anchor_subject_to_clause(
 /// continuation of the anchored player's instruction ("…, then draws a card")
 /// rather than a bare IMPERATIVE addressed to the ability's controller ("Draw a
 /// card."). A conjugated verb ("draws") is not itself a clause starter but
-/// deconjugates to one, which is exactly the shared grammar distinction
-/// `inherits_carried_targeted_player_subject` uses for the same question.
+/// deconjugates to one — the same grammar distinction the chain loop's
+/// `CarriedPlayerSubject` inheritance asks.
 fn chunk_continues_anchored_subject(text_lower: &str) -> bool {
     !sequence::starts_clause_text(text_lower)
         && sequence::starts_clause_text_or_conjugated(text_lower)
@@ -24517,6 +24518,62 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
         TargetFilter::Not { filter } => target_filter_can_target_player(filter),
         _ => false,
     }
+}
+
+/// CR 608.2c: A player subject stated once at the head of a same-sentence verb
+/// list governs every subjectless conjugated continuation after it ("target
+/// opponent sacrifices …, discards …, and loses 3 life"; "that player loses 2
+/// life and draws two cards"). The chain parser carries it chunk to chunk and
+/// re-supplies it to each continuation exactly as if it had been printed there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CarriedPlayerSubject {
+    /// CR 601.2c: a declared player target is chosen once, at announcement, for
+    /// the whole verb list. Continuations inherit the leading verb's chosen
+    /// player (`ParentTarget`) rather than a fresh copy of the player filter,
+    /// which would surface a second target slot and prompt again (#2344).
+    Targeted,
+    /// CR 608.2c: the phase-scoped player ("at the beginning of each player's
+    /// upkeep, that player …") is not targeted; it is bound when the ability
+    /// resolves, so each continuation names the same `ScopedPlayer`.
+    Scoped,
+}
+
+impl CarriedPlayerSubject {
+    /// The carry a chunk's leading subject establishes, if it is a player
+    /// subject a following continuation can inherit.
+    fn from_leading_subject(application: &SubjectApplication) -> Option<Self> {
+        match &application.target {
+            Some(target) if target_filter_can_target_player(target) => Some(Self::Targeted),
+            None if application.affected == TargetFilter::ScopedPlayer => Some(Self::Scoped),
+            _ => None,
+        }
+    }
+
+    /// The subject phrase re-supplied to an inheriting continuation.
+    fn subject_phrase(self) -> SubjectPhraseAst {
+        let (player, target) = match self {
+            Self::Targeted => (TargetFilter::ParentTarget, Some(TargetFilter::ParentTarget)),
+            Self::Scoped => (TargetFilter::ScopedPlayer, None),
+        };
+        SubjectPhraseAst {
+            affected: Some(player),
+            target,
+            multi_target: None,
+            inherits_parent: self == Self::Targeted,
+            is_optional: false,
+        }
+    }
+}
+
+/// CR 608.2c: true when `head`'s leading subject establishes a
+/// `CarriedPlayerSubject`, i.e. the chain will re-supply it to a subjectless
+/// continuation split off after it. Probes a throwaway context because subject
+/// parsing may record target state on it.
+fn head_carries_player_subject(head: &str, ctx: &ParseContext) -> bool {
+    subject::parse_leading_subject_application(head, &mut ctx.clone_throwaway())
+        .as_ref()
+        .and_then(CarriedPlayerSubject::from_leading_subject)
+        .is_some()
 }
 
 /// CR 608.2c: true when `filter` is the resolution-scoped "that player"/"that
@@ -34718,16 +34775,10 @@ pub(crate) fn parse_effect_chain_ir(
     let (chain_zada_distinct_copy_targets, text) =
         lower::strip_each_copy_targets_distinct_member_suffix(text);
     let text = text.as_str();
-    let chunks = split_clause_sequence(text);
-    let chunks = if ctx.in_trigger
-        && matches!(
-            ctx.relative_player_scope.as_ref(),
-            Some(ControllerRef::ScopedPlayer)
-        ) {
-        sequence::split_subject_elided_control_continuations(chunks)
-    } else {
-        chunks
-    };
+    let chunks =
+        sequence::split_subject_elided_control_continuations(split_clause_sequence(text), |head| {
+            head_carries_player_subject(head, ctx)
+        });
     // CR 611.2a + CR 608.2c: expand any chunk whose leading duration governs conjuncts the
     // single-clause parse discarded. The expanded conjuncts become ORDINARY chunks of THIS
     // chain, which is the only construction under which chain-level anaphor state
@@ -34820,15 +34871,12 @@ pub(crate) fn parse_effect_chain_ir(
     // ScopedPlayer, "you" → OriginalController). Reset at the next `Sentence`
     // boundary, so a following independent instruction is unaffected.
     let mut decline_consequence_active = false;
-    // CR 608.2c: Within one sentence, English can state a targeted player
-    // subject once and then continue with conjugated predicates:
-    // "target opponent sacrifices ..., discards ..., and loses ...". Carry the
-    // targeted player subject so the bare conjugated continuations inherit the
-    // same player target rather than falling back to the ability controller.
-    let mut carried_targeted_player_subject: Option<SubjectApplication> = None;
-    // CR 608.2c: a scoped phase subject applies only to its immediate
-    // same-sentence conjugated continuation.
-    let mut carried_scoped_player_subject: Option<SubjectApplication> = None;
+    // CR 608.2c: Within one sentence, English can state a player subject once
+    // and then continue with conjugated predicates: "target opponent sacrifices
+    // ..., discards ..., and loses ..." / "that player loses 2 life and draws
+    // two cards". Carry the player subject so the bare conjugated continuations
+    // inherit it rather than falling back to the ability controller.
+    let mut carried_player_subject: Option<CarriedPlayerSubject> = None;
     // CR 608.2c + CR 109.4: Chain-spanning "its controller" antecedent. Armed
     // when a chunk's leading subject is "its/their controller may <act>"
     // (SubjectApplication { affected: ParentTargetController, is_optional: true });
@@ -36899,6 +36947,19 @@ pub(crate) fn parse_effect_chain_ir(
                         .flatten()
                 }),
             card_name: ctx.card_name.clone(),
+            // The DEMONSTRATIVE-scoped antecedent is a property of the whole
+            // trigger body (the Kashi-Tribe "tap that creature and it doesn't
+            // untap" tail lives in a sub-ability chunk), so it propagates like
+            // `plural_object_pronoun_ref`. A typed referent introduced by an
+            // earlier chunk is more specific than the outer trigger-condition
+            // context, so a later demonstrative retains that chain-local binding.
+            //
+            // The `binds_source_counter_pronoun` rung is deliberately absent:
+            // that gate exists for the bare "it" pronoun's source-counter class
+            // (#8549), which is not a demonstrative grammar.
+            demonstrative_object_ref: prior_typed_referent
+                .then_some(TargetFilter::ParentTarget)
+                .or_else(|| ctx.demonstrative_object_ref.clone()),
             // CR 707.9a + CR 603.1: propagate the trigger index from the parent
             // ctx — `current_trigger_index` is a property of the whole trigger
             // body, not of an individual chunk, so all chunks inside a trigger
@@ -37052,15 +37113,6 @@ pub(crate) fn parse_effect_chain_ir(
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
-        // Consume before every dispatch path so a non-continuation (including a
-        // special clause that exits early) cannot leak the subject farther down
-        // the sentence.
-        let consumed_scoped_player_subject = carried_scoped_player_subject.take();
-        let scoped_player_trigger_context = ctx.in_trigger
-            && matches!(
-                ctx.relative_player_scope.as_ref(),
-                Some(ControllerRef::ScopedPlayer)
-            );
         // CR 608.2c + CR 109.4 (issue #1670): Path-independent consumption-clear
         // of the single-shot "its controller" antecedent. The chunk consumed the
         // seeded scope above when `chunk_ctx.relative_player_scope` cloned
@@ -37093,24 +37145,35 @@ pub(crate) fn parse_effect_chain_ir(
                 leading_subject_application.as_ref().map(|s| &s.affected),
                 Some(TargetFilter::Controller)
             ) || (is_optional && opponent_may_scope.is_none() && player_scope.is_none());
-        let inherits_carried_targeted_player_subject = leading_subject_application.is_none()
+        // CR 608.2c: a subjectless conjugated verb ("draws", not the imperative
+        // "draw") continues the previous chunk's subject.
+        let continues_elided_subject = leading_subject_application.is_none()
             && player_scope.is_none()
-            && !sequence::starts_clause_text(&text)
-            && sequence::starts_clause_text_or_conjugated(&text);
-        let inherits_carried_scoped_player_subject = consumed_scoped_player_subject.filter(|_| {
-            leading_subject_application.is_none()
-                && player_scope.is_none()
-                && !sequence::starts_clause_text(&text)
-                && sequence::starts_clause_text_or_conjugated(&text)
-        });
-        // CR 608.2c: when a scoped phase player continues an immediately
-        // preceding self-targeted instruction, its bare object pronoun refers to
-        // that source rather than to an absent parent target.
-        if inherits_carried_scoped_player_subject.is_some()
+            && chunk_continues_anchored_subject(&text);
+        let inherited_player_subject = carried_player_subject.filter(|_| continues_elided_subject);
+        // CR 608.2c: the carry spans a run of inheriting continuations. A new
+        // leading subject replaces it, a chunk that neither states a subject nor
+        // continues one ends it, and it never crosses a sentence boundary.
+        // Updated here, before any later special-clause `continue`, so every
+        // chunk that consulted the carry also advances it (mirrors the #1670
+        // path-independent clear above).
+        if chunk.boundary_after == Some(ClauseBoundary::Sentence) {
+            carried_player_subject = None;
+        } else if let Some(application) = leading_subject_application.as_ref() {
+            carried_player_subject = CarriedPlayerSubject::from_leading_subject(application);
+        } else if !continues_elided_subject {
+            carried_player_subject = None;
+        }
+        // CR 608.2c: when a carried player subject continues an immediately
+        // preceding instruction that named the source (`~`), its bare object
+        // pronoun refers to that source rather than to an absent parent target
+        // ("that player untaps Karona and gains control of it"). Same antecedent
+        // test as the named-`~` pronoun rewrite below.
+        if inherited_player_subject.is_some()
             && builder
                 .clauses()
                 .last()
-                .is_some_and(|previous| effect_targets_self_ref(&deepest_clause_effect(previous)))
+                .is_some_and(|previous| parsed_clause_targets_self_ref(&previous.parsed))
         {
             ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
         }
@@ -37716,36 +37779,10 @@ pub(crate) fn parse_effect_chain_ir(
         if is_decline_consequence {
             rebind_clause_recipients_with(&mut clause, rebind_decline_body_recipient);
         }
-        if inherits_carried_targeted_player_subject {
-            if let Some(subject) = carried_targeted_player_subject.as_ref() {
-                // CR 601.2c: a single "target opponent" governs the whole verb
-                // list ("sacrifices …, discards …, and loses 3 life") — the
-                // target is chosen ONCE at announcement and every conjugated
-                // continuation applies to that same player. Inject
-                // `ParentTarget` (inherit the leading verb's chosen player) and
-                // NOT a fresh copy of the player filter, which would surface a
-                // second target slot and prompt the player again (#2344).
-                let subject = SubjectPhraseAst {
-                    affected: Some(TargetFilter::ParentTarget),
-                    target: Some(TargetFilter::ParentTarget),
-                    multi_target: None,
-                    inherits_parent: true,
-                    is_optional: subject.is_optional,
-                };
-                inject_subject_target(&mut clause.effect, &subject);
-            }
-        }
-        if let Some(subject) = inherits_carried_scoped_player_subject.as_ref() {
-            if matches!(clause.effect, Effect::GainControl { .. }) {
-                let subject = SubjectPhraseAst {
-                    affected: Some(subject.affected.clone()),
-                    target: None,
-                    multi_target: None,
-                    inherits_parent: subject.inherits_parent,
-                    is_optional: subject.is_optional,
-                };
-                inject_subject_target(&mut clause.effect, &subject);
-            }
+        // CR 608.2c: re-supply the elided player subject exactly as a printed
+        // subject would be applied (`inject_subject_target` is that authority).
+        if let Some(carried) = inherited_player_subject {
+            inject_subject_target(&mut clause.effect, &carried.subject_phrase());
         }
         if nom_primitives::scan_contains(&text.to_lowercase(), "villainous choice") {
             if let (Effect::ChooseOneOf { chooser, .. }, Some(scope)) =
@@ -38689,9 +38726,7 @@ pub(crate) fn parse_effect_chain_ir(
         // it runs on every iteration regardless of early `continue`; this block
         // only ARMS. The arming chunk (leading subject "its controller may
         // <act>") has `seeded == false` (the local was None at its start), so the
-        // hoisted clear was a no-op for it and this arm fires unimpeded. Read
-        // `leading_subject_application` via `.as_ref()` because it is MOVED
-        // below in the `carried_targeted_player_subject` update.
+        // hoisted clear was a no-op for it and this arm fires unimpeded.
         if matches!(
             leading_subject_application.as_ref(),
             Some(app) if app.is_optional && app.affected == TargetFilter::ParentTargetController
@@ -38704,31 +38739,6 @@ pub(crate) fn parse_effect_chain_ir(
         // "for each opponent who doesn't" body.
         if chunk.boundary_after == Some(ClauseBoundary::Sentence) {
             decline_consequence_active = false;
-        }
-        carried_scoped_player_subject = if scoped_player_trigger_context
-            && chunk.boundary_after != Some(ClauseBoundary::Sentence)
-            && chunks.get(chunk_idx + 1).is_some()
-        {
-            leading_subject_application
-                .as_ref()
-                .filter(|application| {
-                    application.affected == TargetFilter::ScopedPlayer
-                        && application.target.is_none()
-                })
-                .cloned()
-        } else {
-            None
-        };
-        if chunk.boundary_after == Some(ClauseBoundary::Sentence) {
-            carried_targeted_player_subject = None;
-        } else if let Some(application) = leading_subject_application {
-            carried_targeted_player_subject = application
-                .target
-                .as_ref()
-                .is_some_and(target_filter_can_target_player)
-                .then_some(application);
-        } else if !inherits_carried_targeted_player_subject {
-            carried_targeted_player_subject = None;
         }
     }
     // CR 601.2c + CR 608.2c: restore the caller's antecedent. Paired with the

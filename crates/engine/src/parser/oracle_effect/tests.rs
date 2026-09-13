@@ -41276,6 +41276,28 @@ fn targeted_player_sacrifice_preserves_target_scope() {
     }
 }
 
+/// CR 608.2c: a subject-elided control continuation is split off only after a
+/// head whose subject the chain carries into it. The scoped "that player"
+/// anaphor carries; a non-anaphoric or seating-relative player subject does not,
+/// so its clause is never split into an orphaned subjectless continuation.
+#[test]
+fn control_continuation_split_uses_the_carried_subject_classification() {
+    let ctx = ParseContext {
+        relative_player_scope: Some(ControllerRef::ScopedPlayer),
+        ..Default::default()
+    };
+    assert!(head_carries_player_subject("that player untaps ~", &ctx));
+    for head in [
+        "each player draws a card",
+        "the player to your right untaps ~",
+    ] {
+        assert!(
+            !head_carries_player_subject(head, &ctx),
+            "must not split after: {head}"
+        );
+    }
+}
+
 /// CR 106.4 + CR 608.2c (issue #2900): Blinkmoth Urn — subject-predicate
 /// "that player adds {C} for each artifact they control" must stamp
 /// `Effect::Mana.target = ScopedPlayer` after imperative lowering.
@@ -45149,6 +45171,7 @@ fn name_hate_draw_rider_targets_searched_player() {
         );
         let expected_axis = match axis {
             ControllerRef::ParentTargetController => TargetFilter::ParentTargetController,
+            ControllerRef::EventTargetController => TargetFilter::EventTargetController,
             ControllerRef::ParentTargetOwner => TargetFilter::ParentTargetOwner,
             _ => unreachable!(),
         };
@@ -60243,6 +60266,7 @@ fn filter_has_chosen_color(f: &TargetFilter) -> bool {
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController

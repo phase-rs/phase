@@ -1,201 +1,16 @@
 //! Regression for Karona, False God's phase-triggered control handoff.
 
-use engine::game::scenario::{GameRunner, GameScenario};
-use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::phase::Phase;
-use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
-
-const P0: PlayerId = PlayerId(0);
-const P1: PlayerId = PlayerId(1);
 
 const KARONA_ORACLE: &str = "Haste\n\
     At the beginning of each player's upkeep, that player untaps Karona and gains control of it.\n\
     Whenever Karona attacks, creatures of the creature type of your choice get +3/+3 until end of turn.";
 
-/// Drive normal game actions until P1's upkeep trigger has resolved, while
-/// recording that the asserted handoff actually occurred during P1's upkeep.
-fn advance_until_karona_controlled_by_p1(
-    runner: &mut GameRunner,
-    karona: engine::types::identifiers::ObjectId,
-) -> bool {
-    let mut reached_p1_upkeep = false;
-    for _ in 0..240 {
-        reached_p1_upkeep |=
-            runner.state().active_player == P1 && runner.state().phase == Phase::Upkeep;
-        if reached_p1_upkeep && runner.state().objects[&karona].controller == P1 {
-            return true;
-        }
-        match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } => {
-                if runner.act(GameAction::PassPriority).is_err() {
-                    return false;
-                }
-            }
-            WaitingFor::DeclareAttackers { .. } => {
-                if runner
-                    .act(GameAction::DeclareAttackers {
-                        attacks: vec![],
-                        bands: vec![],
-                    })
-                    .is_err()
-                {
-                    return false;
-                }
-            }
-            WaitingFor::DeclareBlockers { .. } => {
-                if runner
-                    .act(GameAction::DeclareBlockers {
-                        assignments: vec![],
-                    })
-                    .is_err()
-                {
-                    return false;
-                }
-            }
-            // Keep this exhaustive: adding a new interaction state must make
-            // this driver choose an action deliberately.
-            WaitingFor::ResolveAllConsent { .. }
-            | WaitingFor::ResolveAllReady { .. }
-            | WaitingFor::MeldPairChoice { .. }
-            | WaitingFor::MeldAttackTargetChoice { .. }
-            | WaitingFor::EntryAttackTargetChoice { .. }
-            | WaitingFor::MulliganDecision { .. }
-            | WaitingFor::OpeningHandBottomCards { .. }
-            | WaitingFor::ManaPayment { .. }
-            | WaitingFor::ManaSourceSelection { .. }
-            | WaitingFor::AssistChoosePlayer { .. }
-            | WaitingFor::AssistPayment { .. }
-            | WaitingFor::ChooseXValue { .. }
-            | WaitingFor::TargetSelection { .. }
-            | WaitingFor::UntapChoice { .. }
-            | WaitingFor::ChooseUntapSubset { .. }
-            | WaitingFor::ExertChoice { .. }
-            | WaitingFor::EnlistChoice { .. }
-            | WaitingFor::GameOver { .. }
-            | WaitingFor::ReplacementChoice { .. }
-            | WaitingFor::EntryControllerChoice { .. }
-            | WaitingFor::OrderTriggers { .. }
-            | WaitingFor::CopyTargetChoice { .. }
-            | WaitingFor::ExploreChoice { .. }
-            | WaitingFor::ReturnAsAuraTarget { .. }
-            | WaitingFor::EquipTarget { .. }
-            | WaitingFor::CrewVehicle { .. }
-            | WaitingFor::StationTarget { .. }
-            | WaitingFor::SaddleMount { .. }
-            | WaitingFor::ScryChoice { .. }
-            | WaitingFor::RippleRevealChoice { .. }
-            | WaitingFor::RippleBottomOrder { .. }
-            | WaitingFor::ArrangePlanarDeckTopChoice { .. }
-            | WaitingFor::RedistributeLifeTotals { .. }
-            | WaitingFor::CoinFlipKeepChoice { .. }
-            | WaitingFor::DieKeepChoice { .. }
-            | WaitingFor::DigChoice { .. }
-            | WaitingFor::SurveilChoice { .. }
-            | WaitingFor::RevealChoice { .. }
-            | WaitingFor::SearchChoice { .. }
-            | WaitingFor::SearchPartitionChoice { .. }
-            | WaitingFor::OutsideGameChoice { .. }
-            | WaitingFor::ChooseFromZoneChoice { .. }
-            | WaitingFor::BeholdChoice { .. }
-            | WaitingFor::ChooseOneOfBranch { .. }
-            | WaitingFor::ConniveDiscard { .. }
-            | WaitingFor::DiscardChoice { .. }
-            | WaitingFor::EffectZoneChoice { .. }
-            | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
-            | WaitingFor::LearnChoice { .. }
-            | WaitingFor::ManifestDreadChoice { .. }
-            | WaitingFor::TriggerTargetSelection { .. }
-            | WaitingFor::BetweenGamesSideboard { .. }
-            | WaitingFor::BetweenGamesChoosePlayDraw { .. }
-            | WaitingFor::NamedChoice { .. }
-            | WaitingFor::OpponentGuess { .. }
-            | WaitingFor::SpellbookDraft { .. }
-            | WaitingFor::DamageSourceChoice { .. }
-            | WaitingFor::ModeChoice { .. }
-            | WaitingFor::DiscardToHandSize { .. }
-            | WaitingFor::OptionalCostChoice { .. }
-            | WaitingFor::ChooseGiftRecipient { .. }
-            | WaitingFor::SpliceOffer { .. }
-            | WaitingFor::DefilerPayment { .. }
-            | WaitingFor::CastOffer { .. }
-            | WaitingFor::ModalFaceChoice { .. }
-            | WaitingFor::AlternativeCastChoice { .. }
-            | WaitingFor::MutateMergeChoice { .. }
-            | WaitingFor::CipherEncodeChoice { .. }
-            | WaitingFor::CastingVariantChoice { .. }
-            | WaitingFor::ChoosePermanentTypeSlot { .. }
-            | WaitingFor::MultiTargetSelection { .. }
-            | WaitingFor::AbilityModeChoice { .. }
-            | WaitingFor::OptionalEffectChoice { .. }
-            | WaitingFor::ResolutionOptionalPaymentChoice { .. }
-            | WaitingFor::PairChoice { .. }
-            | WaitingFor::TributeChoice { .. }
-            | WaitingFor::MiracleReveal { .. }
-            | WaitingFor::OpponentMayChoice { .. }
-            | WaitingFor::LoopShortcut { .. }
-            | WaitingFor::RespondToShortcut { .. }
-            | WaitingFor::PrecastCopyShortcutOffer { .. }
-            | WaitingFor::RespondToPrecastCopyShortcut { .. }
-            | WaitingFor::UnlessPayment { .. }
-            | WaitingFor::UnlessPaymentChooseCost { .. }
-            | WaitingFor::WardDiscardChoice { .. }
-            | WaitingFor::WardSacrificeChoice { .. }
-            | WaitingFor::UnlessBounceChoice { .. }
-            | WaitingFor::ChooseRingBearer { .. }
-            | WaitingFor::ChooseRoomDoor { .. }
-            | WaitingFor::ChooseDungeon { .. }
-            | WaitingFor::ChooseDungeonRoom { .. }
-            | WaitingFor::SpecializeColor { .. }
-            | WaitingFor::PayCost { .. }
-            | WaitingFor::ActivationCostOneOfChoice { .. }
-            | WaitingFor::CostTypeChoice { .. }
-            | WaitingFor::BlightChoice { .. }
-            | WaitingFor::PayManaAbilityMana { .. }
-            | WaitingFor::ChooseManaColor { .. }
-            | WaitingFor::CollectEvidenceChoice { .. }
-            | WaitingFor::HarmonizeTapChoice { .. }
-            | WaitingFor::RevealUntilKeptChoice { .. }
-            | WaitingFor::RepeatDecision { .. }
-            | WaitingFor::TopOrBottomChoice { .. }
-            | WaitingFor::PopulateChoice { .. }
-            | WaitingFor::ClashChooseOpponent { .. }
-            | WaitingFor::ChooseFromZoneOpponentChooser { .. }
-            | WaitingFor::ChooseAnnouncingOpponent { .. }
-            | WaitingFor::ClashCardPlacement { .. }
-            | WaitingFor::VoteChoice { .. }
-            | WaitingFor::SeparatePilesChooseOpponent { .. }
-            | WaitingFor::SeparatePilesPartition { .. }
-            | WaitingFor::SeparatePilesChoice { .. }
-            | WaitingFor::CompanionReveal { .. }
-            | WaitingFor::ChooseLegend { .. }
-            | WaitingFor::CommanderZoneChoice { .. }
-            | WaitingFor::BattleProtectorChoice { .. }
-            | WaitingFor::ProliferateChoice { .. }
-            | WaitingFor::TimeTravelChoice { .. }
-            | WaitingFor::ChooseObjectsSelection { .. }
-            | WaitingFor::CategoryChoice { .. }
-            | WaitingFor::EachPlayerCopyChosenSelection { .. }
-            | WaitingFor::KeepWithinTotalPowerChoice { .. }
-            | WaitingFor::KeepExactPermanentsChoice { .. }
-            | WaitingFor::CopyRetarget { .. }
-            | WaitingFor::AssignCombatDamage { .. }
-            | WaitingFor::AssignBlockerDamage { .. }
-            | WaitingFor::DistributeAmong { .. }
-            | WaitingFor::MoveCountersDistribution { .. }
-            | WaitingFor::RemoveCountersChoice { .. }
-            | WaitingFor::PayAmountChoice { .. }
-            | WaitingFor::RetargetChoice { .. }
-            | WaitingFor::CombatTaxPayment { .. }
-            | WaitingFor::PhyrexianPayment { .. } => return false,
-        }
-    }
-    false
-}
-
 /// CR 608.2c: P1 is the scoped player on P1's upkeep, so Karona's printed
-/// untap and control instructions resolve for P1 in order.
+/// untap and control instructions resolve for P1 in order — even though P0,
+/// Karona's controller, controls the triggered ability.
 #[test]
 fn karona_upkeep_untaps_and_transfers_to_the_upkeep_player() {
     let mut scenario = GameScenario::new_n_player(2, 42);
@@ -219,22 +34,49 @@ fn karona_upkeep_untaps_and_transfers_to_the_upkeep_player() {
             }),
         "complete Karona Oracle text must provide its phase/upkeep trigger"
     );
+    // CR 502.3: P1's untap step untaps only permanents P1 controls, so a tapped
+    // Karona under P0 stays tapped until its own trigger untaps it.
+    // CR 508.1a: a tapped Karona also can't attack, so P0's combat declares no
+    // attackers and the turn rolls forward on priority passes alone.
     runner.state_mut().objects.get_mut(&karona).unwrap().tapped = true;
 
+    // The next upkeep after P0's precombat main is P1's.
+    runner.advance_to_upkeep();
     assert!(
-        advance_until_karona_controlled_by_p1(&mut runner, karona),
-        "must reach and resolve Karona's trigger during P1's upkeep"
-    );
-    assert_eq!(
-        runner.state().active_player,
-        P1,
-        "handoff must occur on P1's turn"
-    );
-    assert_eq!(
+        runner.state().active_player == P1 && runner.state().phase == Phase::Upkeep,
+        "must reach P1's upkeep; stopped at {:?} of {:?}'s turn on {:?}",
         runner.state().phase,
-        Phase::Upkeep,
-        "handoff must occur during upkeep"
+        runner.state().active_player,
+        runner.state().waiting_for
     );
+    // CR 503.1a: the upkeep trigger is on the stack before P1 gets priority,
+    // controlled by P0 — so the recipient below is not the ability controller.
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == karona && entry.controller == P0),
+        "Karona's P0-controlled upkeep trigger must be on the stack at P1's upkeep; stack={:?}",
+        runner.state().stack
+    );
+    let before = &runner.state().objects[&karona];
+    assert_eq!(
+        before.controller, P0,
+        "reach-guard: P0 controls Karona pre-resolution"
+    );
+    assert!(
+        before.tapped,
+        "reach-guard: Karona is still tapped pre-resolution"
+    );
+
+    runner.advance_until_stack_empty();
+    assert!(
+        runner.state().stack.is_empty(),
+        "Karona's trigger must resolve; stopped on {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().phase, Phase::Upkeep);
     let object = &runner.state().objects[&karona];
     assert_eq!(object.controller, P1, "P1 must gain control of Karona");
     assert!(

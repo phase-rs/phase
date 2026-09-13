@@ -427,6 +427,8 @@ export type P2PMessage = P2PAuthorityWire & (
   | { type: "interaction_preview"; requestId: string; answer: P2PInteractionPreviewAnswer }
   | { type: "ping"; timestamp: number }
   | { type: "pong"; timestamp: number }
+  /** Host-measured round-trip latency for each connected human seat. */
+  | { type: "player_latencies"; latencies: Record<number, number | null> }
   | { type: "disconnect"; reason: string }
   | { type: "emote"; emote: string }
   | { type: "concede" }
@@ -508,6 +510,7 @@ const VALID_TYPES = new Set([
   "interaction_preview",
   "ping",
   "pong",
+  "player_latencies",
   "disconnect",
   "emote",
   "concede",

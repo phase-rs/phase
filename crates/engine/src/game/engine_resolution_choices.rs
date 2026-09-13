@@ -11371,6 +11371,7 @@ mod tests {
             keywords: vec![],
             abilities: std::sync::Arc::default(),
             trigger_definitions: std::sync::Arc::default(),
+            trigger_printed_origins: std::sync::Arc::default(),
             replacement_definitions: std::sync::Arc::default(),
             static_definitions: std::sync::Arc::default(),
             room_halves: None,

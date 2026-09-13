@@ -608,7 +608,15 @@ export function TargetingOverlay() {
             several rows at narrow widths, so an interactive container would
             block board clicks across a strip that grows with the number of
             seats. The top block does the same. */}
-        <div className="absolute bottom-6 left-0 right-0 flex flex-wrap justify-center gap-4">
+        {/* Keep irreversible confirmation controls above the resting hand fan.
+            The player row uses this same responsive height expression in
+            GamePage, so the controls remain visible without guessing from the
+            number or rotation of cards in hand. */}
+        <div
+          data-board-choice-actions
+          className="absolute left-0 right-0 flex flex-wrap justify-center gap-4 px-2"
+          style={{ bottom: "var(--game-board-choice-bottom)" }}
+        >
           {legalPlayerTargets.map((targetPlayerId) => {
             const seatColor = getSeatColor(targetPlayerId, seatOrder);
             return (

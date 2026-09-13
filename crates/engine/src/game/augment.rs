@@ -381,7 +381,8 @@ fn merged_copiable_values(
         }
     }
 
-    let (abilities, triggers, statics, replacements) = merged_ability_sets(augment, &host_values);
+    let (abilities, triggers, trigger_printed_origins, statics, replacements) =
+        merged_ability_sets(augment, &host_values);
     let values = CopiableValues {
         name: combine_name(&augment.base_name, &host_values.name),
         mana_cost: host_values.mana_cost,
@@ -395,6 +396,7 @@ fn merged_copiable_values(
         keywords,
         abilities: Arc::new(abilities),
         trigger_definitions: Arc::new(triggers),
+        trigger_printed_origins: Arc::new(trigger_printed_origins),
         replacement_definitions: Arc::new(replacements),
         static_definitions: Arc::new(statics),
         // An augment merge is a Host+Augment creature, never a Room — augment
@@ -411,15 +413,18 @@ fn merged_copiable_values(
     ))
 }
 
+type MergedAbilitySets = (
+    Vec<AbilityDefinition>,
+    Vec<TriggerDefinition>,
+    Vec<Option<crate::types::ability::TriggerPrintedOrigin>>,
+    Vec<crate::types::ability::StaticDefinition>,
+    Vec<crate::types::ability::ReplacementDefinition>,
+);
+
 fn merged_ability_sets(
     augment: &crate::game::game_object::GameObject,
     host_values: &CopiableValues,
-) -> (
-    Vec<AbilityDefinition>,
-    Vec<TriggerDefinition>,
-    Vec<crate::types::ability::StaticDefinition>,
-    Vec<crate::types::ability::ReplacementDefinition>,
-) {
+) -> MergedAbilitySets {
     let host_body = host_values
         .trigger_definitions
         .iter()
@@ -456,16 +461,21 @@ fn merged_ability_sets(
     }
 
     let mut triggers = Vec::new();
-    for trigger in augment.base_trigger_definitions.iter() {
+    let mut trigger_printed_origins = Vec::new();
+    let augment_origins = printed_cards::base_trigger_printed_origins(augment);
+    for (printed_occurrence, trigger) in augment.base_trigger_definitions.iter().enumerate() {
         if trigger.execute.is_none() {
             if let Some(body) = host_body.clone() {
                 let mut combined = trigger.clone();
                 combined.execute = Some(Box::new(body));
                 triggers.push(combined);
+                trigger_printed_origins
+                    .push(augment_origins.get(printed_occurrence).cloned().flatten());
             }
             continue;
         }
         triggers.push(trigger.clone());
+        trigger_printed_origins.push(augment_origins.get(printed_occurrence).cloned().flatten());
     }
 
     let statics = augment.base_static_definitions.iter().cloned().collect();
@@ -476,7 +486,13 @@ fn merged_ability_sets(
         .cloned()
         .collect();
 
-    (abilities, triggers, statics, replacements)
+    (
+        abilities,
+        triggers,
+        trigger_printed_origins,
+        statics,
+        replacements,
+    )
 }
 
 fn splice_host_body_onto_activated_prefix(

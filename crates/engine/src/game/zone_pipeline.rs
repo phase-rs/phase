@@ -6305,6 +6305,7 @@ mod effect_driven_transformed_entry_tests {
             obj.base_card_types = obj.card_types.clone();
             obj.back_face = Some(BackFaceData {
                 is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "MDFC Back".to_string(),
                 power: None,
                 toughness: None,

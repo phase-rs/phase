@@ -323,6 +323,16 @@ pub(crate) fn additional_cost_declaration_is_offerable(
     pending: &PendingCast,
     cost: AbilityCost,
 ) -> Result<bool, EngineError> {
+    // CR 601.2h: "Unpayable costs can't be paid." A cost the parser could not
+    // read has no payment procedure at all, so it can never be declared — a
+    // required one makes the cast illegal (CR 601.2 + CR 733.1), and an optional
+    // one is simply never offered. `AbilityCost::is_payable` deliberately answers
+    // true for `Unimplemented` so unrelated fallback paths stay ungated (see the
+    // comment on that arm in `cost_payability.rs`), so the refusal belongs here,
+    // at the declaration authority, rather than in that shared predicate.
+    if matches!(cost, AbilityCost::Unimplemented { .. }) {
+        return Ok(false);
+    }
     let exile_this_way_cost = is_exile_any_number_effect_cost(&cost);
     let split = split_declared_mana_addition_and_residual(state, pending, cost)?;
     if let Some(residual) = split.residual.as_ref() {
@@ -7027,6 +7037,18 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 pending.cast_timing_permission = cast_timing_permission;
                 pending.origin_zone = origin_zone;
                 pending.payment_mode = payment_mode;
+                // CR 601.2f + CR 601.2h: a required additional cost the parser
+                // could not read is part of the total cost and has no payment
+                // procedure, so the cast is illegal. Refused here rather than by
+                // the generic check below only so the message names the cost, in
+                // the wording the activation-cost sibling in `costs.rs` and the
+                // payment-step backstop below both use.
+                if let AbilityCost::Unimplemented { description } = req_cost {
+                    super::casting::handle_cancel_cast(state, &pending, events);
+                    return Err(EngineError::ActionNotAllowed(format!(
+                        "Cost not implemented: {description}"
+                    )));
+                }
                 // CR 601.2b + CR 601.2f: Required additional cost whose
                 // residual object choice is unavailable or whose declared mana
                 // total is unaffordable makes the spell uncastable.
@@ -8489,6 +8511,39 @@ fn pay_additional_cost_with_source(
                     spell: Box::new(pending),
                 },
             });
+        }
+        AbilityCost::Unimplemented { description } => {
+            // CR 601.2f + CR 601.2h: an additional cost the parser could not read
+            // is part of the total cost and cannot be paid, so the payment step
+            // must refuse it. Without this arm it falls into the catch-all below,
+            // which does nothing and then continues to `finish_pending_cost_or_cast`
+            // — i.e. the unpayable cost is silently declared PAID and the spell is
+            // cast for free.
+            //
+            // BACKSTOP, AND DELIBERATELY UNCOVERED BY TEST. Every path a shipping
+            // card takes today is already refused upstream — enumeration by
+            // `can_cast_prepared_now_with_probe`, declaration by
+            // `additional_cost_declaration_is_offerable`, and a directly submitted
+            // announcement by the `Required` arm of
+            // `check_additional_cost_or_pay_with_distribute`. Deleting this arm
+            // breaks no test, and that is expected rather than a gap in the suite.
+            //
+            // It is not dead code: the `AdditionalCost::Required` arm of the
+            // additional-cost QUEUE walk calls this function directly, without
+            // re-consulting the offerable gate. No corpus card puts a
+            // `Required(Unimplemented)` on that queue today — a card's own single
+            // additional cost travels via `additional_cost_flow` — so the path is
+            // reachable in principle and unreached in practice. Removing the arm
+            // to satisfy coverage would restore the silent-satisfaction hole for
+            // the first card that does queue one.
+            //
+            // The wording matches the activation-cost sibling in `costs.rs`, which
+            // has always refused here (CR 602.2b extends CR 601.2h to an
+            // activation cost).
+            super::casting::handle_cancel_cast(state, &pending, events);
+            return Err(EngineError::ActionNotAllowed(format!(
+                "Cost not implemented: {description}"
+            )));
         }
         _ => {
             // Other cost types (Exile, etc.) — not yet interactive

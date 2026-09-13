@@ -3290,6 +3290,7 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -3868,6 +3869,7 @@ fn incubator_phyrexian_back_face() -> BackFaceData {
         parse_warnings: vec![],
         layout_kind: None,
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
     }
 }
 

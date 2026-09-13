@@ -6191,6 +6191,8 @@ fn replacement_active_player_matches(
         Some(ControllerRef::ScopedPlayer) => false,
         Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
         Some(ControllerRef::ParentTargetController) => false,
+        // CR 120.1 + CR 109.4: the damage recipient's controller.
+        Some(ControllerRef::EventTargetController) => false,
         Some(ControllerRef::ParentTargetOwner) => false,
         Some(ControllerRef::DefendingPlayer) => false,
         Some(ControllerRef::SourceChosenPlayer) => false,
@@ -6327,6 +6329,8 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                 Some(ControllerRef::ParentTargetController) => false,
+                // CR 120.1 + CR 109.4: the damage recipient's controller.
+                Some(ControllerRef::EventTargetController) => false,
                 Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 // CR 613.1: "the chosen player" is undefined at replacement-check
@@ -6381,6 +6385,8 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                 Some(ControllerRef::ParentTargetController) => false,
+                // CR 120.1 + CR 109.4: the damage recipient's controller.
+                Some(ControllerRef::EventTargetController) => false,
                 Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 // CR 613.1: "the chosen player" is undefined at replacement-check
@@ -6573,6 +6579,7 @@ fn evaluate_replacement_condition(
                 | ControllerRef::TargetPlayer
                 | ControllerRef::TargetOpponent
                 | ControllerRef::ParentTargetController
+                | ControllerRef::EventTargetController
                 | ControllerRef::ParentTargetOwner
                 | ControllerRef::DefendingPlayer
                 | ControllerRef::SourceChosenPlayer
@@ -6809,6 +6816,10 @@ fn apply_state_level_gates(
                 | crate::types::ability::ControllerRef::TargetPlayer
                 | crate::types::ability::ControllerRef::TargetOpponent
                 | crate::types::ability::ControllerRef::ParentTargetController
+                // Engine constraint: resolving the damage recipient's
+                // controller needs a trigger event window, which a replacement
+                // check does not have. Fails closed like the parent-target refs.
+                | crate::types::ability::ControllerRef::EventTargetController
                 | crate::types::ability::ControllerRef::ParentTargetOwner
                 | crate::types::ability::ControllerRef::DefendingPlayer
                 | crate::types::ability::ControllerRef::SourceChosenPlayer
@@ -7268,6 +7279,10 @@ fn object_replacement_candidate_applies(
                 // replacement-check time — fails closed identically to TargetPlayer.
                 | crate::types::ability::ControllerRef::TargetOpponent
                 | crate::types::ability::ControllerRef::ParentTargetController
+                // Engine constraint: no trigger event window at
+                // replacement-check time; fails closed like the parent-target
+                // refs.
+                | crate::types::ability::ControllerRef::EventTargetController
                 | crate::types::ability::ControllerRef::ParentTargetOwner
                 | crate::types::ability::ControllerRef::DefendingPlayer
                 | crate::types::ability::ControllerRef::SourceChosenPlayer

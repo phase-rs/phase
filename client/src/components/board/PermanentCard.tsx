@@ -588,27 +588,18 @@ export const PermanentCard = memo(function PermanentCard({
 
   // CR 707.2: A token-copy of a real card (Twinflame, Helm of the Host, or a
   // debug `CreateTokenCopy`) is `is_token` yet keeps `display_source = "Card"`,
-  // so it renders pixel-identical to the printed permanent. Flag it so the
-  // board carries a "Copy" badge — generic tokens (Treasure, Goblin) already
-  // read as tokens via their distinct generic-token art and are excluded.
-  // CR 708.2: a face-down permanent has no characteristics other than those
-  // its face-down rule grants, so never surface "Copy" on it — that would leak
-  // that it's a token-copy. Deliberately NOT symmetric with the keyword strip
-  // below, which does render for face-down permanents: the keywords it shows
-  // are public (the face-down rules' own ward, or an external grant), whereas
-  // being a copy is exactly the hidden fact.
-  // Two independent ways a permanent is a copy, unioned so the badge covers the
-  // whole class rather than only the token half (issue #5932):
-  //   - a token minted as a copy (`is_token` + card art), and
-  //   - a real card under a live copy effect (`copied_permanents`) — Clone,
-  //     Phantasmal Image, Vesuvan Doppelganger. These were previously missed
-  //     entirely, so two Reveillarks were indistinguishable on the board.
-  // CR 708.2: the face-down guard leads, so it covers BOTH sources — a
-  // face-down permanent has only the characteristics its face-down rules grant,
-  // and surfacing "Copy" on one would leak what it really is.
-  const isCopy =
-    !obj.face_down
-    && ((obj.is_token === true && obj.display_source !== "Token") || isCopiedPermanent);
+  // so it renders pixel-identical to the printed permanent. Generic tokens
+  // (Treasure, Goblin) already use distinct token art and need no provenance
+  // badge. A token-copy remains a token even if the engine also includes it in
+  // `copied_permanents`, so TOKEN takes precedence over COPY.
+  // CR 613.2a + CR 707.2: COPY is reserved for a nontoken permanent whose live
+  // Layer 1a copy effect appears in the engine-authored projection.
+  // CR 708.2: the face-down guard covers both sources; surfacing either badge
+  // would leak a hidden permanent's identity.
+  const isTokenCopy =
+    !obj.face_down && obj.is_token === true && obj.display_source !== "Token";
+  const isNontokenCopy =
+    !obj.face_down && obj.is_token !== true && isCopiedPermanent;
   const temporaryCantBeBlockedSourceName =
     temporaryCantBeBlockedSourceId == null
       ? undefined
@@ -1124,18 +1115,16 @@ export const PermanentCard = memo(function PermanentCard({
         </div>
       )}
 
-      {/* CR 707.2: "Copy" badge for token-copies of real cards — these are
-          pixel-identical to the printed permanent, so without this tag there's
-          no way to tell a copy apart from the original on the board. Hidden
-          while the card is a valid target (the lime "Target" tag owns the
-          corner during targeting) and shifted down under attack to clear the
-          ⚔ badge — same coordination the Target tag uses. */}
-      {isCopy && !isValidTarget && (
+      {/* CR 707.2: provenance badge for card-art token copies and nontoken
+          permanents under copy effects. Hidden while the card is a valid target
+          (the lime "Target" tag owns the corner during targeting) and shifted
+          down under attack to clear the ⚔ badge. */}
+      {(isTokenCopy || isNontokenCopy) && !isValidTarget && (
         <div
           className={`pointer-events-none absolute left-1 ${isUnderAttack ? "top-7" : "top-1"} z-20 rounded bg-indigo-600/90 px-1 py-0.5 text-[9px] font-black uppercase leading-none tracking-wide text-white ring-1 ring-black/60 shadow-[0_1px_4px_rgba(0,0,0,0.6)]`}
-          title={t("permanent.copyTooltip")}
+          title={t(isTokenCopy ? "permanent.tokenTooltip" : "permanent.copyTooltip")}
         >
-          {t("permanent.copy")}
+          {t(isTokenCopy ? "permanent.token" : "permanent.copy")}
         </div>
       )}
 

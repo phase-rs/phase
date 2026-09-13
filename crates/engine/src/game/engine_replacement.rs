@@ -745,22 +745,15 @@ fn handle_replacement_choice_inner(
                     apply_life_gain_after_replacement(state, gain, events);
                 }
                 // CR 120.3: Life loss accepted after replacement choice.
-                loss @ ProposedEvent::LifeLoss { .. } => {
-                    // Captured before the move: an empty-pool loss that
-                    // deferred here never returns to the phase-transition
-                    // drain, so this is the only place its cause can still be
-                    // named (a mana burn would otherwise land as an unexplained
-                    // life change).
-                    let loser = match &loss {
-                        ProposedEvent::LifeLoss { player_id, .. } => Some(*player_id),
-                        _ => None,
-                    };
+                loss @ ProposedEvent::LifeLoss { player_id, .. } => {
+                    // An empty-pool loss that deferred here never returns to
+                    // the phase-transition drain, so this is the only place
+                    // its cause can still be named (a mana burn would
+                    // otherwise land as an unexplained life change).
                     let actual = apply_life_loss_after_replacement(state, loss, events);
-                    if let Some(player_id) = loser {
-                        crate::game::turns::note_empty_pool_life_loss_resolved(
-                            state, player_id, actual, events,
-                        );
-                    }
+                    crate::game::turns::note_empty_pool_life_loss_resolved(
+                        state, player_id, actual, events,
+                    );
                 }
                 // CR 701.9a: Discard accepted after replacement choice — move the
                 // object hand → graveyard and record/emit the discard event. The
@@ -1014,6 +1007,17 @@ fn handle_replacement_choice_inner(
                     events,
                 ) {
                     waiting_for = next_waiting_for;
+                    // CR 614.6 + CR 500.5: the substitute of the replacement
+                    // chosen for the phase drain's loss paused, and the drain
+                    // may not advance until that substitute finishes. Park it
+                    // exactly as the `Prevented` arm does: the shared resumer
+                    // then finishes the transition once the substitute
+                    // terminally drains, and a loss the substitute raises is
+                    // not mistaken for the drain's own
+                    // (`pending_phase_drain_life_loser` needs Ready).
+                    if pending_phase_drain_life_loser.is_some() {
+                        super::turns::mark_phase_transition_awaiting_post_replacement(state);
+                    }
                 }
             }
 
