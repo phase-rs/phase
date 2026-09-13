@@ -11,6 +11,7 @@ mod abigale_integration;
 mod ability_block_display_clone_gate;
 mod ability_cost_block_readout;
 mod abundance_optional_draw_replacement;
+mod accursed_witch_dies_return_anaphor;
 mod action_rejection;
 mod ad_nauseam_repeat;
 mod adamant_enters_with_leading_if_gate;
