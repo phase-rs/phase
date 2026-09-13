@@ -191,6 +191,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
@@ -469,6 +470,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
@@ -851,6 +853,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
@@ -1407,6 +1410,23 @@ fn parent_target_controller_player(
     })
 }
 
+/// CR 120.1 + CR 109.4 + CR 608.2h: The controller of the triggering event's
+/// TARGET object — the damage RECIPIENT, not the dealer. Delegates to the
+/// `TargetFilter` twin so both spellings share one resolution authority
+/// (including its LKI fallback for a recipient already destroyed by CR 704.5g).
+fn event_target_controller_player(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+) -> Option<PlayerId> {
+    ability.and_then(|a| {
+        crate::game::targeting::resolve_effect_player_ref(
+            state,
+            a,
+            &TargetFilter::EventTargetController,
+        )
+    })
+}
+
 fn parent_target_owner_player(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
@@ -1534,6 +1554,11 @@ pub(crate) fn controller_ref_player(
             target_player_from_ability_or_root(state, ability)
         }
         ControllerRef::ParentTargetController => parent_target_controller_player(state, ability),
+        // CR 120.1 + CR 109.4 + CR 608.2c: resolved through the `TargetFilter`
+        // twin so the two spellings of the damage-recipient's controller can
+        // never disagree (Maarika, Brutal Gladiator's "that creature's
+        // controller sacrifices a noncreature, nonland permanent").
+        ControllerRef::EventTargetController => event_target_controller_player(state, ability),
         ControllerRef::ParentTargetOwner => parent_target_owner_player(state, ability),
         ControllerRef::DefendingPlayer => {
             crate::game::combat::resolve_defending_player(state, source_id)
@@ -1682,6 +1707,7 @@ pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
@@ -1887,6 +1913,73 @@ pub(crate) fn filter_contains_last_zone_changed(filter: &TargetFilter) -> bool {
 /// resolution-local anaphors stay discoverable as one pair.
 pub(crate) fn filter_contains_last_created(filter: &TargetFilter) -> bool {
     filter_contains(filter, &|inner| matches!(inner, TargetFilter::LastCreated))
+}
+
+/// CR 109.2 + CR 110.1: does `filter` describe its object by a card type or
+/// subtype the way "a creature you control" or "a permanent" does — a
+/// description that, absent a named zone or the word "card"/"spell", "means a
+/// permanent of that card type or subtype on the battlefield"? True for a
+/// `Typed` predicate naming a permanent card type (Creature, Artifact,
+/// Enchantment, Planeswalker, Land, Battle, Kindred, Permanent) or a subtype;
+/// false for plain "card" (`TypeFilter::Card`), "spell", `Any`, a negated
+/// type ("nonland" describes any other card), and every non-`Typed`
+/// reference. A disjunction (`TypeFilter::AnyOf`, `TargetFilter::Or`) is
+/// battlefield-only when every branch is — "creature or instant" is not; the
+/// terms of one `Typed` filter and the legs of an `And` are conjunctive, so
+/// one battlefield-only term settles those. Zone is NOT read here — the caller pairs this with
+/// its own zone reading (`population_zones`, or an explicit `zone` field),
+/// because the two callers substitute different defaults when no zone is
+/// written.
+///
+/// Neighbour, not the same question: `typed_reference_names_zone` /
+/// `reference_leg_admits` below apply CR 109.2 to a SharesQuality reference
+/// leg and count every type word; this predicate names the permanent types
+/// only, because its first caller substitutes "hand" for a "card" filter.
+///
+/// Callers: `cost_payability::exile_cost_effective_zone` (Food Chain's "Exile
+/// a creature you control: …" — `zone: None` means the battlefield, a "card"
+/// filter keeps the hand default) and `replacement::replacement_valid_card_matches`
+/// (a counter replacement's "a permanent you control" does not reach a card in
+/// exile). `Kindred` and subtype descriptions were added for the second
+/// caller; MEASURED over `card-data.json`, the first caller's answers are
+/// unchanged: no zone-less exile cost names `Kindred`, and the one naming a
+/// subtype (Mechtitan Core, `Or[Typed[Artifact, Creature], Typed[Vehicle]]`)
+/// answers battlefield through both branches — the artifact-creature leg as
+/// before, the Vehicle leg through the subtype reading, which the universal
+/// `Or` aggregation now requires.
+pub(crate) fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> bool {
+    fn type_implies_battlefield(t: &TypeFilter) -> bool {
+        match t {
+            TypeFilter::Creature
+            | TypeFilter::Artifact
+            | TypeFilter::Enchantment
+            | TypeFilter::Planeswalker
+            | TypeFilter::Land
+            | TypeFilter::Battle
+            | TypeFilter::Kindred
+            | TypeFilter::Permanent
+            | TypeFilter::Subtype(_) => true,
+            // "nonland", "noncreature": a negated type describes nothing that
+            // must be on the battlefield — a nonland card is any other card.
+            TypeFilter::Non(_) => false,
+            // A union is battlefield-only when EVERY branch is: "artifact or
+            // creature" is, "creature or instant" is not.
+            TypeFilter::AnyOf(inners) => {
+                !inners.is_empty() && inners.iter().all(type_implies_battlefield)
+            }
+            TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Card | TypeFilter::Any => false,
+        }
+    }
+    match filter {
+        // The terms of one `Typed` filter are conjunctive ("artifact creature"),
+        // so one battlefield-only term settles it.
+        TargetFilter::Typed(tf) => tf.type_filters.iter().any(type_implies_battlefield),
+        TargetFilter::And { filters } => filters.iter().any(filter_implies_battlefield_permanent),
+        TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(filter_implies_battlefield_permanent)
+        }
+        _ => false,
+    }
 }
 
 /// Check if an object matches a typed TargetFilter against the given context.
@@ -2098,6 +2191,11 @@ fn stack_entry_controller_matches(
         }
         Some(ControllerRef::ParentTargetController) => {
             parent_target_controller_player(state, ctx.ability)
+                .is_some_and(|pid| pid == entry_controller)
+        }
+        // CR 120.1 + CR 109.4: the damage recipient's controller.
+        Some(ControllerRef::EventTargetController) => {
+            event_target_controller_player(state, ctx.ability)
                 .is_some_and(|pid| pid == entry_controller)
         }
         Some(ControllerRef::ParentTargetOwner) => parent_target_owner_player(state, ctx.ability)
@@ -3298,6 +3396,14 @@ fn filter_inner_for_object(
                             _ => return false,
                         }
                     }
+                    // CR 120.1 + CR 109.4: the damage recipient's controller.
+                    ControllerRef::EventTargetController => {
+                        let target_player = event_target_controller_player(state, ability);
+                        match target_player {
+                            Some(pid) if pid == obj_ctrl => {}
+                            _ => return false,
+                        }
+                    }
                     ControllerRef::ParentTargetOwner => {
                         let target_player = parent_target_owner_player(state, ability);
                         match target_player {
@@ -3701,6 +3807,7 @@ fn filter_inner_for_object(
         TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::DefendingPlayer => false,
         // CR 608.2k: `TriggeringSource` IS object-valued (unlike its player-axis
@@ -3974,6 +4081,14 @@ fn zone_change_filter_inner(
                             _ => return false,
                         }
                     }
+                    // CR 120.1 + CR 109.4: the damage recipient's controller.
+                    ControllerRef::EventTargetController => {
+                        let target_player = event_target_controller_player(state, ability);
+                        match target_player {
+                            Some(pid) if pid == record.controller => {}
+                            _ => return false,
+                        }
+                    }
                     // CR 608.2c + CR 109.4: match the spell record's controller
                     // against the resolution-scoped chosen player.
                     ControllerRef::ChosenPlayer { index } => {
@@ -4098,6 +4213,7 @@ fn zone_change_filter_inner(
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
@@ -4336,6 +4452,8 @@ pub fn spell_record_matches_filter(
                     ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => return false,
                     ControllerRef::ParentTargetOwner => return false,
                     ControllerRef::ParentTargetController => return false,
+                    // CR 120.1 + CR 109.4: the damage recipient's controller.
+                    ControllerRef::EventTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
                     // CR 613.1: "the chosen player" has no meaning for a
                     // spell-history record. Fail closed.
@@ -4431,6 +4549,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
@@ -4665,6 +4784,8 @@ fn spell_object_matches_filter_inner(
                     // let it fall through and match with no controller restriction.
                     ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => return false,
                     ControllerRef::ParentTargetController => return false,
+                    // CR 120.1 + CR 109.4: the damage recipient's controller.
+                    ControllerRef::EventTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
                     // CR 109.4: Chosen-player scope is undefined for spell-cast
                     // history (no resolution context). Fail closed.
@@ -4751,6 +4872,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
@@ -5945,6 +6067,10 @@ fn matches_filter_prop(
                     (Some(ControllerRef::ParentTargetController), Some(pid)) => {
                         perm.controller == pid
                     }
+                    // CR 120.1 + CR 109.4: the damage recipient's controller.
+                    (Some(ControllerRef::EventTargetController), Some(pid)) => {
+                        perm.controller == pid
+                    }
                     (Some(ControllerRef::ParentTargetOwner), Some(pid)) => perm.owner == pid,
                     (Some(ControllerRef::DefendingPlayer), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::SourceChosenPlayer), Some(pid)) => perm.controller == pid,
@@ -5988,6 +6114,11 @@ fn matches_filter_prop(
             }
             ControllerRef::ParentTargetController => {
                 parent_target_controller_player(state, source.ability)
+                    .is_some_and(|pid| pid == obj.owner)
+            }
+            // CR 120.1 + CR 109.4: the damage recipient's controller.
+            ControllerRef::EventTargetController => {
+                event_target_controller_player(state, source.ability)
                     .is_some_and(|pid| pid == obj.owner)
             }
             ControllerRef::ParentTargetOwner => parent_target_owner_player(state, source.ability)
@@ -6775,6 +6906,11 @@ fn zone_change_record_matches_property(
                 parent_target_controller_player(state, source.ability)
                     .is_some_and(|pid| pid == record.owner)
             }
+            // CR 120.1 + CR 109.4: the damage recipient's controller.
+            ControllerRef::EventTargetController => {
+                event_target_controller_player(state, source.ability)
+                    .is_some_and(|pid| pid == record.owner)
+            }
             ControllerRef::ParentTargetOwner => parent_target_owner_player(state, source.ability)
                 .is_some_and(|pid| pid == record.owner),
             ControllerRef::DefendingPlayer => source_defending_player(state, source)
@@ -7142,6 +7278,11 @@ fn attachment_controller_matches(
         }
         Some(ControllerRef::ParentTargetController) => {
             parent_target_controller_player(state, source.ability)
+                .is_some_and(|pid| pid == attachment_controller)
+        }
+        // CR 120.1 + CR 109.4: the damage recipient's controller.
+        Some(ControllerRef::EventTargetController) => {
+            event_target_controller_player(state, source.ability)
                 .is_some_and(|pid| pid == attachment_controller)
         }
         Some(ControllerRef::ParentTargetOwner) => parent_target_owner_player(state, source.ability)
@@ -7972,6 +8113,8 @@ fn player_matches_target_filter_with(
             // pattern established at filter.rs:526–569 for spell-record filters).
             Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
             Some(ControllerRef::ParentTargetController) => false,
+            // CR 120.1 + CR 109.4: the damage recipient's controller.
+            Some(ControllerRef::EventTargetController) => false,
             Some(ControllerRef::ParentTargetOwner) => false,
             Some(ControllerRef::DefendingPlayer) => false,
             // CR 613.1: "the chosen player" has no meaning in this name-filter

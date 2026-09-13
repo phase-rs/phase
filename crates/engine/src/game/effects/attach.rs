@@ -4184,12 +4184,13 @@ mod tests {
 
     #[test]
     fn attachment_restriction_power_ge_blocks_weak_host_allows_strong_host() {
-        // CR 301.5b + CR 701.3a: Strata Scythe class — Equipment that "can be
-        // attached only to a creature with power 3 or greater" may not attach to a
-        // power-2 creature, but may attach to a power-3 creature. The restriction
-        // lives on the ATTACHMENT, not the host (contrast CantBeEquipped).
+        // CR 301.5b + CR 701.3a: positive-attachment-restriction class —
+        // O-Naginata ("can be attached only to a creature with power 3 or
+        // greater") may not attach to a power-2 creature, but may attach to a
+        // power-3 creature. The restriction lives on the ATTACHMENT, not the
+        // host (contrast CantBeEquipped).
         let mut state = setup();
-        let equipment = spawn_with_subtype(&mut state, "Strata Scythe", "Equipment");
+        let equipment = spawn_with_subtype(&mut state, "O-Naginata", "Equipment");
         let power_filter = TargetFilter::Typed(
             crate::types::ability::TypedFilter::creature().properties(vec![
                 crate::types::ability::FilterProp::PtComparison {

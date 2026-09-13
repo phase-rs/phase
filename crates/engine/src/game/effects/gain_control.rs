@@ -823,6 +823,7 @@ mod tests {
             attacker_ids: vec![attacker],
             defending_player: PlayerId(0),
             attacks: vec![],
+            declaration_records: Vec::new(),
         });
         let ability = ResolvedAbility::new(
             Effect::GiveControl {

@@ -2741,6 +2741,7 @@ fn matches_via_origin_scoped_branch(
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
@@ -15776,6 +15777,14 @@ fn can_cast_prepared_now_with_probe(
             if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, amount) {
                 return false;
             }
+        }
+        // CR 601.2f + CR 601.2h: a REQUIRED additional cost the parser could not
+        // read is part of the total cost and has no payment procedure, so it
+        // can't be paid and the spell can't be cast. Gate enumeration here so
+        // the action never reaches `legal_actions_full`; the payment step in
+        // `casting_costs.rs` is the backstop for a directly submitted `CastSpell`.
+        if matches!(cost, AbilityCost::Unimplemented { .. }) {
+            return false;
         }
     }
 

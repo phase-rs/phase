@@ -280,6 +280,7 @@ mod tests {
                 attacker,
                 crate::game::combat::AttackTarget::Player(PlayerId(0)),
             )],
+            declaration_records: Vec::new(),
         });
         let ability = ResolvedAbility::new(
             Effect::ExileTop {

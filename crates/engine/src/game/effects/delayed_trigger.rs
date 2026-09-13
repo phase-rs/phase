@@ -390,27 +390,29 @@ pub fn resolve(
         snapshot_event_subject(state, anaphor, ability.source_id)
     } else if super::ability_refs_parent_target(&delayed_ability) {
         let targets = parent_target_snapshot(state, ability);
-        let pins =
-            if ability_pins_object_anaphor(&delayed_ability) && !condition_expects_referent_move {
-                ability
-                    .context
-                    .forwarded_result_context
-                    .as_ref()
-                    .map(|context| context.object_incarnations.clone())
-                    .unwrap_or_else(|| {
-                        targets
-                            .iter()
-                            .filter_map(|target| match target {
-                                TargetRef::Object(id) => state.objects.get(id).map(
-                                    crate::types::identifiers::ObjectIncarnationRef::from_object,
-                                ),
-                                TargetRef::Player(_) => None,
-                            })
-                            .collect()
-                    })
-            } else {
-                Vec::new()
-            };
+        let pins = if super::ability_pins_object_anaphor(&delayed_ability)
+            && !condition_expects_referent_move
+        {
+            ability
+                .context
+                .forwarded_result_context
+                .as_ref()
+                .map(|context| context.object_incarnations.clone())
+                .unwrap_or_else(|| {
+                    targets
+                        .iter()
+                        .filter_map(|target| match target {
+                            TargetRef::Object(id) => state
+                                .objects
+                                .get(id)
+                                .map(crate::types::identifiers::ObjectIncarnationRef::from_object),
+                            TargetRef::Player(_) => None,
+                        })
+                        .collect()
+                })
+        } else {
+            Vec::new()
+        };
         (targets, pins)
     } else if effect_references_last_created(&delayed_ability.effect)
         && !state.last_created_token_ids.is_empty()
@@ -754,87 +756,24 @@ fn condition_uses_creation_time_provenance(condition: &DelayedTriggerCondition) 
     }
 }
 
-/// CR 603.7c + CR 608.2c: A delayed triggered ability that refers to a
-/// particular object snapshots that object at creation time. The snapshot is
-/// seeded from the FLATTENED ROOT chain (`parent_chain_targets_from_root`), not
-/// the current node's per-clause `targets`: for a multi-clause parent chain the
-/// tail clause carries only its own local slot, so an inner delayed
-/// `ParentTargetSlot { index }` anaphor pointing at an earlier slot would index
-/// out of range and degrade to `Any`. Flattening the root chain exposes every
-/// declared slot in order so the indexed anaphor resolves.
+/// CR 603.7c + CR 608.2c: the parent referent a DELAYED trigger snapshots at creation.
+/// Tiers 1–4 are the shared chain authority (`targeting::parent_chain_referents`); tier 5 —
+/// the creation event's `TriggeringSource` — is DELAYED-TRIGGER-SPECIFIC and deliberately
+/// lives only here (the fallback for slotless parents, where "it" genuinely names the event
+/// source; #5901's Depthshaker Titan is why tier 4 must short-circuit it).
 ///
-/// CR 608.2c (phase#4767): When the root chain exposes NO concrete slot — because
-/// the parent target was injected at runtime by a `forward_result` zone-change
-/// rather than declared as an explicit chain slot (Animate Dead / Dance of the
-/// Dead: the reanimated creature is the moved object, bound into the sub-chain's
-/// `targets` by `effects/mod.rs`'s forward_result block, never a declared slot) —
-/// the node's OWN propagated `targets` are the resolved parent target. Prefer them
-/// over the triggering-source fallback, which would otherwise snapshot the
-/// triggering object (the Aura) instead of "that creature". Only when BOTH the
-/// root chain and the node's own targets are empty do we fall back to the
-/// triggering source (unchanged).
+/// DO NOT hoist tier 5 into `parent_chain_referents`, and DO NOT unify this function with
+/// `effects::bind_detached_continuation_to_parent` — see that function's note.
 fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
-    // CR 608.2c: A forward-result producer is a more recent antecedent than
-    // root-chain slots, node-local targets, or trigger-event fallback. Preserve
-    // the raw order for `ParentTargetSlot`; `Some([])` is a real zero-result and
-    // must not fall through to any older antecedent.
-    if let Some(context) = &ability.context.forwarded_result_context {
-        return context.targets.clone();
-    }
-    let root_chain = crate::game::targeting::parent_chain_targets_from_root(state, ability);
-    if !root_chain.is_empty() {
-        return root_chain;
-    }
-
-    if !ability.targets.is_empty() {
-        return ability.targets.clone();
-    }
-
-    // CR 603.3d + CR 115.6 + CR 608.2c (issue #5901): When the resolving root
-    // chain DECLARED a chooseable target slot — a `multi_target` bound ("any
-    // number of target noncreature artifacts", Depthshaker Titan) or an
-    // optional "up to one target" slot — reaching this point means the player
-    // legally chose ZERO targets: triggered-ability targets are chosen while
-    // putting the ability on the stack, and such an ability may allow zero
-    // targets. The ParentTarget anaphor ("them"/"it") refers to that empty
-    // chosen set, so the delayed trigger has no subject. Falling through to the
-    // triggering-source fallback instead bound the trigger's own event source
-    // — the Titan sacrificed ITSELF at the next end step.
-    // The fallback below remains for slotless parents (a dies/LTB trigger's
-    // "exile it at end of turn", where "it" genuinely names the event source).
-    if chain_declares_chooseable_target_slots(crate::game::targeting::resolving_root_ability(
-        state, ability,
-    )) {
-        return Vec::new();
-    }
-
-    crate::game::targeting::resolve_event_context_target(
-        state,
-        &TargetFilter::TriggeringSource,
-        ability.source_id,
-    )
-    .map(|target| vec![target])
-    .unwrap_or_default()
-}
-
-/// True when any link of the chain declares a target slot whose selection may
-/// legally be empty: a `multi_target` bound ("any number of target ...") or
-/// `optional_targeting` ("up to one target ..."). CR 115.6 permits zero
-/// targets; CR 603.3d governs the target choice for triggered abilities. Used
-/// by [`parent_target_snapshot`] to distinguish "slots were declared but zero
-/// were chosen" (referent = empty set) from "no slots exist at all" (referent
-/// = the creation event's source object).
-fn chain_declares_chooseable_target_slots(ability: &ResolvedAbility) -> bool {
-    ability.multi_target.is_some()
-        || ability.optional_targeting
-        || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(chain_declares_chooseable_target_slots)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(chain_declares_chooseable_target_slots)
+    crate::game::targeting::parent_chain_referents(state, ability).unwrap_or_else(|| {
+        crate::game::targeting::resolve_event_context_target(
+            state,
+            &TargetFilter::TriggeringSource,
+            ability.source_id,
+        )
+        .map(|target| vec![target])
+        .unwrap_or_default()
+    })
 }
 
 fn triggering_source_destination_zone(state: &GameState) -> Option<Zone> {
@@ -1549,23 +1488,6 @@ pub(super) fn filter_refs_parent_object_anaphor(filter: &TargetFilter) -> bool {
         }
         _ => false,
     }
-}
-
-/// True when any effect in the ability chain references a parent OBJECT anaphor
-/// (including nested sub/else abilities). Mirrors `ability_refs_parent_target`'s
-/// walk over `effect_parent_ref_slots`; narrower in exactly one respect (above).
-fn ability_pins_object_anaphor(ability: &ResolvedAbility) -> bool {
-    super::effect_parent_ref_slots(&ability.effect)
-        .iter()
-        .any(|filter| filter_refs_parent_object_anaphor(filter))
-        || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(ability_pins_object_anaphor)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(ability_pins_object_anaphor)
 }
 
 /// CR 400.7 + CR 603.7c: True when this embedded trigger definition names a zone

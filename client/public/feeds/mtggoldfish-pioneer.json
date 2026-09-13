@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-09-12T00:00:00Z",
+  "updated": "2026-09-13T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -447,152 +447,6 @@
       ]
     },
     {
-      "name": "Mono-Red Prowess",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 3,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 1,
-          "name": "Den of the Bugbear"
-        },
-        {
-          "count": 4,
-          "name": "Emberheart Challenger"
-        },
-        {
-          "count": 4,
-          "name": "Kumano Faces Kakkazan"
-        },
-        {
-          "count": 4,
-          "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 4,
-          "name": "Monstrous Rage"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 2,
-          "name": "Ramunap Ruins"
-        },
-        {
-          "count": 4,
-          "name": "Reckless Rage"
-        },
-        {
-          "count": 1,
-          "name": "Rockface Village"
-        },
-        {
-          "count": 4,
-          "name": "Screaming Nemesis"
-        },
-        {
-          "count": 1,
-          "name": "Sokenzan, Crucible of Defiance"
-        },
-        {
-          "count": 4,
-          "name": "Soul-Scar Mage"
-        },
-        {
-          "count": 1,
-          "name": "Sunspine Lynx"
-        },
-        {
-          "count": 1,
-          "name": "The Legend of Roku"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 3,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 2,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 3,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Mutavault"
-        },
-        {
-          "count": 3,
-          "name": "Sunspine Lynx"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Flowstone Infusion"
-        },
-        {
-          "count": 4,
-          "name": "Magebane Lizard"
-        },
-        {
-          "count": 1,
-          "name": "Pyroclasm"
-        },
-        {
-          "count": 2,
-          "name": "Redcap Melee"
-        },
-        {
-          "count": 3,
-          "name": "Scorching Shot"
-        },
-        {
-          "count": 2,
-          "name": "Weathered Runestone"
-        },
-        {
-          "count": 1,
-          "name": "Pyroclasm"
-        }
-      ]
-    },
-    {
       "name": "Jeskai Lessons",
       "author": "MTGGoldfish",
       "colors": [
@@ -737,6 +591,152 @@
         {
           "count": 1,
           "name": "Soulless Jailer"
+        }
+      ]
+    },
+    {
+      "name": "Mono-Red Prowess",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 3,
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 1,
+          "name": "Den of the Bugbear"
+        },
+        {
+          "count": 4,
+          "name": "Emberheart Challenger"
+        },
+        {
+          "count": 4,
+          "name": "Kumano Faces Kakkazan"
+        },
+        {
+          "count": 4,
+          "name": "Monastery Swiftspear"
+        },
+        {
+          "count": 4,
+          "name": "Monstrous Rage"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 2,
+          "name": "Ramunap Ruins"
+        },
+        {
+          "count": 4,
+          "name": "Reckless Rage"
+        },
+        {
+          "count": 1,
+          "name": "Rockface Village"
+        },
+        {
+          "count": 4,
+          "name": "Screaming Nemesis"
+        },
+        {
+          "count": 1,
+          "name": "Sokenzan, Crucible of Defiance"
+        },
+        {
+          "count": 4,
+          "name": "Soul-Scar Mage"
+        },
+        {
+          "count": 1,
+          "name": "Sunspine Lynx"
+        },
+        {
+          "count": 1,
+          "name": "The Legend of Roku"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 3,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 3,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Mutavault"
+        },
+        {
+          "count": 3,
+          "name": "Sunspine Lynx"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Flowstone Infusion"
+        },
+        {
+          "count": 4,
+          "name": "Magebane Lizard"
+        },
+        {
+          "count": 1,
+          "name": "Pyroclasm"
+        },
+        {
+          "count": 2,
+          "name": "Redcap Melee"
+        },
+        {
+          "count": 3,
+          "name": "Scorching Shot"
+        },
+        {
+          "count": 2,
+          "name": "Weathered Runestone"
+        },
+        {
+          "count": 1,
+          "name": "Pyroclasm"
         }
       ]
     },

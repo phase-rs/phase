@@ -938,6 +938,17 @@ fn apply_pending_counter_post_action(
                             return false;
                         }
                     }
+                    // CR 305.1 + CR 603.2: a played land whose delivery-tail
+                    // counter-order choice paused this entry parked its
+                    // `LandPlayed` occurrence in `deferred_entry_events`. The
+                    // entry is now complete, so flush it into `events` for the
+                    // priority-time trigger scan (issue #8738).
+                    if to == Zone::Battlefield {
+                        crate::game::engine_replacement::flush_deferred_entry_events_into_priority_scan(
+                            state,
+                            events,
+                        );
+                    }
                     true
                 }
                 super::change_zone::ZoneDeliveryResult::NeedsChoice(_) => false,
