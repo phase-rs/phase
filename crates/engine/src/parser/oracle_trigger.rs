@@ -2342,6 +2342,23 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     //
     // Gated on `valid_target` naming an object-only recipient, so
     // "deals combat damage to a player" triggers are untouched.
+    //
+    // Deliberately NOT gated on `execute.optional_targeting`, unlike the
+    // event-SOURCE lift above. That flag marks an optional object SLOT
+    // ("up to one target permanent", the CR 115.1d stamp above); the reference
+    // rewritten here names a PLAYER, so the two axes are independent and the
+    // guard conflated them.
+    //
+    // MEASURED: no currently-parseable shape distinguishes the two, because the
+    // one phrasing that would ("… up to one target permanent that creature's
+    // controller controls") has its possessive scope dropped upstream by
+    // `parse_type_phrase_folding` and lowers to `controller: null`. Dropping the
+    // guard is therefore a correctness-by-construction change today and a
+    // latent correctness fix if that suffix ever parses. The "chosen target,
+    // then ITS controller" reading stays excluded by the fresh-choice boundary
+    // inside the rebind helper, which rewrites the current link and then stops
+    // as soon as that link introduces a player-chosen object target. Both sides
+    // are pinned in `oracle_trigger_tests.rs`.
     if def.mode == TriggerMode::DamageDone
         && def
             .valid_target
@@ -2349,9 +2366,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             .is_some_and(damage_recipient_is_object_only)
     {
         if let Some(execute) = def.execute.as_deref_mut() {
-            if !execute.optional_targeting {
-                rebind_immediate_parent_target_controller_to_event_target_controller(execute);
-            }
+            rebind_immediate_parent_target_controller_to_event_target_controller(execute);
         }
         if let Some(unless) = def.unless_pay.as_mut() {
             rebind_parent_target_controller_in_filter(&mut unless.payer);

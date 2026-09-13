@@ -311,7 +311,9 @@ fn find_legal_targets_with_context(
                     // chosen here — fail closed as a candidate-enumeration scope.
                     Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                     Some(ControllerRef::ParentTargetController) => false,
-                    // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+                    // Engine constraint: resolving this reference needs a trigger event
+                    // window, which target-candidate matching does not have.
+                    // Fail closed, mirroring the parent-target refs above.
                     Some(ControllerRef::EventTargetController) => false,
                     Some(ControllerRef::ParentTargetOwner) => false,
                     Some(ControllerRef::DefendingPlayer) => false,
@@ -1414,16 +1416,27 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         TargetFilter::EventTargetController => {
             let event = event?;
             let target_obj_id = extract_target_object_from_event(event)?;
-            let controller = state
-                .objects
-                .get(&target_obj_id)
-                .map(|obj| obj.controller)
-                .or_else(|| {
-                    state
-                        .lki_cache
-                        .get(&target_obj_id)
-                        .map(|lki| lki.controller)
-                })?;
+            let obj_opt = state.objects.get(&target_obj_id);
+            // CR 608.2h + CR 109.4: prefer the LKI snapshot once the recipient
+            // has LEFT the battlefield, rather than reading live first.
+            // `reset_for_battlefield_exit` reverts `controller` to the OWNER on
+            // exit, and the object row survives in the graveyard, so a
+            // live-first read silently returns the owner for exactly the case
+            // this variant must handle — lethal combat damage, where CR 704.5g
+            // has already moved the recipient before the trigger resolves.
+            // When owner and controller coincide that substitution is
+            // invisible, which is why the regressions deliberately diverge
+            // them. Mirrors `ability_utils::parent_target_controller`.
+            let off_battlefield = obj_opt.is_none_or(|obj| obj.zone != Zone::Battlefield);
+            let controller = if off_battlefield {
+                state
+                    .lki_cache
+                    .get(&target_obj_id)
+                    .map(|lki| lki.controller)
+                    .or_else(|| obj_opt.map(|obj| obj.controller))
+            } else {
+                obj_opt.map(|obj| obj.controller)
+            }?;
             Some(TargetRef::Player(controller))
         }
         TargetFilter::ParentTarget => {

@@ -2323,8 +2323,10 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
 fn legacy_controller_ref(x: &ControllerRef) -> bool {
     match x {
         ControllerRef::ParentTargetController
-        // CR 120.1 + CR 603.2: the damage recipient's controller is read from
-        // the trigger event, exactly like `ParentTargetController` above.
+        // Engine classification: this reference is resolved from the firing
+        // event, so it belongs to the same event-context carrier class as
+        // `ParentTargetController` above. Not a rules decision — no CR governs
+        // how this crate partitions refs for read/write analysis.
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::TriggeringPlayer => true,
@@ -2702,8 +2704,9 @@ fn member_bound_controller_ref(x: &ControllerRef) -> bool {
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::EnchantedPlayer => true,
         ControllerRef::ParentTargetController
-        // CR 120.1 + CR 603.2: event-derived like `ParentTargetController` —
-        // read from the firing event, not per-source member storage.
+        // Engine classification: event-derived like `ParentTargetController`,
+        // so it is read from the firing event rather than from per-source
+        // member storage. Not a rules decision.
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::TriggeringPlayer
@@ -7157,8 +7160,9 @@ fn rw_controller_ref(x: &ControllerRef) -> RwProfile {
     match x {
         // D5 carriers.
         ControllerRef::ParentTargetController
-        // CR 120.1 + CR 603.2: same event-context carrier class as
-        // `ParentTargetController` — it reads the firing event too.
+        // Engine classification: same event-context carrier class as
+        // `ParentTargetController` — it reads the firing event too. Not a
+        // rules decision.
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::TriggeringPlayer => legacy_ref(),

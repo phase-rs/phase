@@ -137,7 +137,14 @@ fn flayed_nim_combat_damage_drains_the_blockers_controller_not_its_own() {
     let nim = scenario
         .add_creature_from_oracle(P0, "Flayed Nim", 3, 4, FLAYED_NIM_TEXT)
         .id();
-    let blocker = scenario.add_creature(P1, "Blocker", 1, 1).id();
+    // P1 controls a 1/1 creature that blocks. It is OWNED by P0 and controlled
+    // by P1 so the fixture discriminates controller from owner: an
+    // owner-based implementation of the anaphor would resolve to P0 and fail
+    // the assertions below, even though CR 109.4 (not CR 108.3) governs here.
+    let blocker = scenario
+        .add_creature(P0, "Blocker", 1, 1)
+        .controlled_by(P1)
+        .id();
 
     let mut runner = scenario.build();
     runner.advance_to_combat();
@@ -196,7 +203,12 @@ fn bellowing_fiend_splits_damage_between_victims_controller_and_its_own() {
     let fiend = scenario
         .add_creature_from_oracle(P0, "Bellowing Fiend", 2, 5, BELLOWING_FIEND_TEXT)
         .id();
-    let blocker = scenario.add_creature(P1, "Blocker", 1, 3).id();
+    // Owned by P0, controlled by P1 — see the Flayed Nim fixture: this keeps the
+    // test sensitive to a controller-vs-owner mix-up (CR 109.4 vs CR 108.3).
+    let blocker = scenario
+        .add_creature(P0, "Blocker", 1, 3)
+        .controlled_by(P1)
+        .id();
 
     let mut runner = scenario.build();
     runner.advance_to_combat();
@@ -257,7 +269,15 @@ fn maarika_excess_damage_makes_the_victims_controller_sacrifice() {
     let maarika = scenario
         .add_creature_from_oracle(P0, "Maarika, Brutal Gladiator", 7, 4, MAARIKA_TEXT)
         .id();
-    let blocker = scenario.add_creature(P1, "Chump Blocker", 1, 1).id();
+    // Owned by P0, controlled by P1. This matters most here: the creature dies
+    // to the excess damage, and CR 400.3 sends it to its OWNER's graveyard
+    // (P0's) while the CR 608.2h LKI snapshot holds its at-departure CONTROLLER
+    // (P1). An owner-based resolution would therefore make P0 sacrifice — the
+    // exact confusion the two-sided assertions below catch.
+    let blocker = scenario
+        .add_creature(P0, "Chump Blocker", 1, 1)
+        .controlled_by(P1)
+        .id();
 
     // Both players control exactly one noncreature, nonland permanent, so the
     // test is two-sided: only the victim's controller may lose theirs.
@@ -269,9 +289,13 @@ fn maarika_excess_damage_makes_the_victims_controller_sacrifice() {
     run_combat(&mut runner, P0, maarika, P1, Some(blocker));
     runner.advance_until_stack_empty();
 
-    // CR 120.10 + CR 109.4: P1 controlled the creature dealt excess damage, so
-    // P1 sacrifices. CR 608.2h: resolved from the LKI snapshot, because the
-    // blocker is already in the graveyard (CR 704.5g).
+    // CR 120.10 + CR 109.4: P1 CONTROLLED the creature dealt excess damage, so
+    // P1 sacrifices. CR 608.2h + CR 400.3: the creature is already in P0's
+    // graveyard (its OWNER's, CR 400.3) and its live `controller` has been
+    // reset to that owner by `reset_for_battlefield_exit`, so this only
+    // resolves correctly by reading the LKI snapshot's at-departure controller.
+    // A live-first read returns P0 here and fails — which is exactly what this
+    // fixture caught once owner and controller were made to diverge.
     assert_eq!(
         runner.state().objects[&p1_artifact].zone,
         Zone::Graveyard,

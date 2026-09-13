@@ -3278,7 +3278,7 @@ fn filter_inner_for_object(
                             _ => return false,
                         }
                     }
-                    // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+                    // CR 120.1 + CR 109.4: the damage recipient's controller.
                     ControllerRef::EventTargetController => {
                         let target_player = event_target_controller_player(state, ability);
                         match target_player {
@@ -3963,7 +3963,7 @@ fn zone_change_filter_inner(
                             _ => return false,
                         }
                     }
-                    // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+                    // CR 120.1 + CR 109.4: the damage recipient's controller.
                     ControllerRef::EventTargetController => {
                         let target_player = event_target_controller_player(state, ability);
                         match target_player {
@@ -4334,7 +4334,7 @@ pub fn spell_record_matches_filter(
                     ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => return false,
                     ControllerRef::ParentTargetOwner => return false,
                     ControllerRef::ParentTargetController => return false,
-                    // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+                    // CR 120.1 + CR 109.4: the damage recipient's controller.
                     ControllerRef::EventTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
                     // CR 613.1: "the chosen player" has no meaning for a
@@ -4666,7 +4666,7 @@ fn spell_object_matches_filter_inner(
                     // let it fall through and match with no controller restriction.
                     ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => return false,
                     ControllerRef::ParentTargetController => return false,
-                    // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+                    // CR 120.1 + CR 109.4: the damage recipient's controller.
                     ControllerRef::EventTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
                     // CR 109.4: Chosen-player scope is undefined for spell-cast
@@ -5949,7 +5949,7 @@ fn matches_filter_prop(
                     (Some(ControllerRef::ParentTargetController), Some(pid)) => {
                         perm.controller == pid
                     }
-                    // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+                    // CR 120.1 + CR 109.4: the damage recipient's controller.
                     (Some(ControllerRef::EventTargetController), Some(pid)) => {
                         perm.controller == pid
                     }
@@ -5998,7 +5998,7 @@ fn matches_filter_prop(
                 parent_target_controller_player(state, source.ability)
                     .is_some_and(|pid| pid == obj.owner)
             }
-            // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+            // CR 120.1 + CR 109.4: the damage recipient's controller.
             ControllerRef::EventTargetController => {
                 event_target_controller_player(state, source.ability)
                     .is_some_and(|pid| pid == obj.owner)
@@ -6788,7 +6788,7 @@ fn zone_change_record_matches_property(
                 parent_target_controller_player(state, source.ability)
                     .is_some_and(|pid| pid == record.owner)
             }
-            // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+            // CR 120.1 + CR 109.4: the damage recipient's controller.
             ControllerRef::EventTargetController => {
                 event_target_controller_player(state, source.ability)
                     .is_some_and(|pid| pid == record.owner)
@@ -7162,7 +7162,7 @@ fn attachment_controller_matches(
             parent_target_controller_player(state, source.ability)
                 .is_some_and(|pid| pid == attachment_controller)
         }
-        // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+        // CR 120.1 + CR 109.4: the damage recipient's controller.
         Some(ControllerRef::EventTargetController) => {
             event_target_controller_player(state, source.ability)
                 .is_some_and(|pid| pid == attachment_controller)
@@ -7995,7 +7995,7 @@ fn player_matches_target_filter_with(
             // pattern established at filter.rs:526–569 for spell-record filters).
             Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
             Some(ControllerRef::ParentTargetController) => false,
-            // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+            // CR 120.1 + CR 109.4: the damage recipient's controller.
             Some(ControllerRef::EventTargetController) => false,
             Some(ControllerRef::ParentTargetOwner) => false,
             Some(ControllerRef::DefendingPlayer) => false,

@@ -662,7 +662,9 @@ fn static_affects_player(
             // CR 109.4: TargetOpponent fails closed identically to TargetPlayer here.
             Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
             Some(ControllerRef::ParentTargetController) => false,
-            // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+            // Engine constraint: this reference resolves only inside a trigger
+            // event window, which a state-based-action check does not have.
+            // Fail closed, mirroring the parent-target refs above.
             Some(ControllerRef::EventTargetController) => false,
             Some(ControllerRef::ParentTargetOwner) => false,
             Some(ControllerRef::DefendingPlayer) => false,

@@ -491,7 +491,6 @@ pub(crate) fn try_parse_impose_additional_cost(
             // semantics — fall back to an untyped card filter.
             Some(ControllerRef::TargetOpponent) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
-            // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
             Some(ControllerRef::EventTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
@@ -879,7 +878,6 @@ pub(crate) fn try_parse_cost_modification(
             // semantics — fall back to an untyped card filter.
             Some(ControllerRef::TargetOpponent) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
-            // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
             Some(ControllerRef::EventTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetOwner) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),

@@ -6191,7 +6191,7 @@ fn replacement_active_player_matches(
         Some(ControllerRef::ScopedPlayer) => false,
         Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
         Some(ControllerRef::ParentTargetController) => false,
-        // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+        // CR 120.1 + CR 109.4: the damage recipient's controller.
         Some(ControllerRef::EventTargetController) => false,
         Some(ControllerRef::ParentTargetOwner) => false,
         Some(ControllerRef::DefendingPlayer) => false,
@@ -6329,7 +6329,7 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                 Some(ControllerRef::ParentTargetController) => false,
-                // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+                // CR 120.1 + CR 109.4: the damage recipient's controller.
                 Some(ControllerRef::EventTargetController) => false,
                 Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
@@ -6385,7 +6385,7 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                 Some(ControllerRef::ParentTargetController) => false,
-                // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+                // CR 120.1 + CR 109.4: the damage recipient's controller.
                 Some(ControllerRef::EventTargetController) => false,
                 Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
@@ -6816,9 +6816,9 @@ fn apply_state_level_gates(
                 | crate::types::ability::ControllerRef::TargetPlayer
                 | crate::types::ability::ControllerRef::TargetOpponent
                 | crate::types::ability::ControllerRef::ParentTargetController
-                // CR 120.1 + CR 603.2: the damage-recipient's controller needs a
-                // trigger event window, which a replacement check does not have.
-                // Fails closed identically to the parent-target refs.
+                // Engine constraint: resolving the damage recipient's
+                // controller needs a trigger event window, which a replacement
+                // check does not have. Fails closed like the parent-target refs.
                 | crate::types::ability::ControllerRef::EventTargetController
                 | crate::types::ability::ControllerRef::ParentTargetOwner
                 | crate::types::ability::ControllerRef::DefendingPlayer
@@ -7279,8 +7279,9 @@ fn object_replacement_candidate_applies(
                 // replacement-check time — fails closed identically to TargetPlayer.
                 | crate::types::ability::ControllerRef::TargetOpponent
                 | crate::types::ability::ControllerRef::ParentTargetController
-                // CR 120.1 + CR 603.2: no trigger event window at replacement-check
-                // time; fails closed identically to the parent-target refs.
+                // Engine constraint: no trigger event window at
+                // replacement-check time; fails closed like the parent-target
+                // refs.
                 | crate::types::ability::ControllerRef::EventTargetController
                 | crate::types::ability::ControllerRef::ParentTargetOwner
                 | crate::types::ability::ControllerRef::DefendingPlayer

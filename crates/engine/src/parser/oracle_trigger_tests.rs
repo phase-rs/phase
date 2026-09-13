@@ -15813,6 +15813,67 @@ fn active_voice_damage_trigger_possessive_binds_recipient_controller() {
     }
 }
 
+/// CR 115.1d + CR 120.1 + CR 608.2c: an OPTIONAL object target does not
+/// suppress the possessive rebind.
+///
+/// `optional_targeting` / `multi_target` mark an optional object SLOT; the
+/// possessive names a PLAYER, and the two axes are independent. The rebind was
+/// briefly gated on `!execute.optional_targeting`, which conflated them; the
+/// gate is gone.
+///
+/// MEASURED SCOPE, so the next reader does not over-trust this pin: no
+/// currently-parseable shape distinguishes the two behaviours. The suffix form
+/// ("destroy up to one target permanent that creature's controller controls")
+/// has its possessive scope dropped by `parse_type_phrase_folding` — it lowers
+/// to `controller: null`, optional or not — so it never reaches this rebind at
+/// all. That is a pre-existing parser gap, not a regression, and it is why this
+/// test asserts only the reachable half: the trigger still parses, and nothing
+/// dealer-derived survives on it. The companion below pins the other side of
+/// the boundary.
+#[test]
+fn optional_object_target_does_not_suppress_the_recipient_controller_rebind() {
+    let def = parse_trigger_line(
+        "Whenever this creature deals combat damage to a creature, destroy up to one target \
+         permanent that creature's controller controls.",
+        "Test Card",
+    );
+    let json = serde_json::to_string(&def).expect("trigger serializes");
+    // Reach-guard: the fixture really is the optional-slot shape on a
+    // DamageDone trigger, so the negative below is not vacuous.
+    assert_eq!(def.mode, crate::types::triggers::TriggerMode::DamageDone);
+    assert!(
+        json.contains("multi_target"),
+        "fixture must really carry an optional/ranged target slot, got: {json}"
+    );
+    assert!(
+        !json.contains("ParentTargetController"),
+        "no dealer-derived binding may survive on the optional-target shape, got: {json}"
+    );
+}
+
+/// CR 608.2c: the fresh-choice boundary still holds after the optional-target
+/// guard was removed. Once an instruction introduces a player-CHOSEN object
+/// target, a following "its controller" names THAT choice, not the damaged
+/// creature, and keeps `ParentTargetController`.
+///
+/// Paired with the test above: together they pin both sides of the boundary, so
+/// removing the guard cannot silently widen into a rebind of every chained
+/// controller anaphor.
+#[test]
+fn chosen_object_target_boundary_keeps_the_parent_target_controller_binding() {
+    let def = parse_trigger_line(
+        "Whenever this creature deals combat damage to a creature, destroy target creature. \
+         Its controller loses 2 life.",
+        "Test Card",
+    );
+    let json = serde_json::to_string(&def).expect("trigger serializes");
+    assert!(
+        json.contains("ParentTargetController"),
+        "after a chosen object target, \"its controller\" refers to that choice \
+         (CR 608.2c) and must keep ParentTargetController, got: {json}"
+    );
+}
+
 /// CR 120.3 + CR 603.2: the rebind must NOT fire when the damage recipient can
 /// be a PLAYER. `extract_target_object_from_event` yields no object for a player
 /// recipient, so re-pointing the anaphor there would resolve to nobody; those

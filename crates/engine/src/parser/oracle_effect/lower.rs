@@ -9455,7 +9455,6 @@ fn resolve_player_anaphor_damage_recipient(
     match ctx.relative_player_scope {
         Some(ControllerRef::ScopedPlayer) => Some(TargetFilter::ScopedPlayer),
         Some(ControllerRef::ParentTargetController) => Some(TargetFilter::ParentTargetController),
-        // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
         Some(ControllerRef::EventTargetController) => Some(TargetFilter::EventTargetController),
         Some(ControllerRef::ParentTargetOwner) => Some(TargetFilter::ParentTargetOwner),
         Some(ControllerRef::TriggeringPlayer) | Some(ControllerRef::TargetPlayer) => {

@@ -19509,9 +19509,10 @@ impl TargetFilter {
                 | TargetFilter::ParentTarget
                 | TargetFilter::ParentTargetSlot { .. }
                 | TargetFilter::ParentTargetController
-                // CR 120.1 + CR 603.2: the damage recipient's controller is read
-                // from the triggering event at resolution, never announced. Without
-                // this arm the targeting layer builds a CR 115 target slot for it,
+                // CR 115.1: only something identified by the word "target" is a
+                // target, so this reference — read from the triggering event at
+                // resolution — is never announced and claims no target slot.
+                // Without this arm the targeting layer builds a slot for it,
                 // finds zero legal candidates (there is no such player to choose
                 // while the trigger goes on the stack) and removes the whole
                 // ability for lack of a legal target before it can resolve —
