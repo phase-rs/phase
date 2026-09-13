@@ -16095,6 +16095,18 @@ const DIE_RESULT_EM_DASH: &str = "\u{2014}";
 /// printed `"0 or less"` row is nonsense and is still refused, by that arm's own
 /// `verify` on the printed maximum.
 ///
+/// ASYMMETRY WITH `"N+"`, deliberate and bounded. The open-ended UPPER form maps
+/// to `u8::MAX` so a modifier-boosted roll above the printed bound still lands in
+/// the branch (CR 706.2). The `"N or less"` form does NOT get the mirrored
+/// treatment of a `0` floor, because CR 706.1a makes 1 the smallest NATURAL
+/// result and this lower bound is exact for an unmodified roll. A negative
+/// modifier can drive a result below 1 (CR 706.2 allows the final number to be
+/// any integer), and such a result would fall through this branch rather than
+/// into it. No printed card combines a downward modifier with an "or less" row,
+/// so the gap is unreachable today; it is recorded here rather than papered over
+/// by widening the floor to 0, which would silently swallow `"0 or less"` — the
+/// exact refusal the guard below exists to make.
+///
 /// This is also the DETECTOR the spell-resolution continuation loop uses to
 /// recognize a results-table row (`oracle.rs`), so the loop and the row
 /// collector share this one row grammar.
