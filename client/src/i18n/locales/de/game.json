@@ -1,4 +1,5 @@
 {
+  "playerLatency": {"host":"Host","waiting":"Warten","value":"{{ms}} ms","description":"Hin- und Rücklaufzeit zum Host. Eine fehlende Antwort trennt das Spiel nicht."},
   "abilityBlock": {
     "badge": "Blockiert",
     "cantBeActivated": "Diese Fähigkeit kann nicht aktiviert werden",
@@ -104,6 +105,7 @@
   },
   "debugCreate": {
     "copies": "Kopien",
+    "asToken": "Als Spielstein erstellen",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
@@ -310,8 +312,10 @@
     "underAttack_one": "Von {{count}} Kreatur angegriffen",
     "underAttack_other": "Von {{count}} Kreaturen angegriffen",
     "target": "Ziel",
+    "token": "Spielstein",
+    "tokenTooltip": "Spielstein-Kopie einer echten Karte",
     "copy": "Kopie",
-    "copyTooltip": "Spielstein-Kopie einer echten Karte",
+    "copyTooltip": "Nicht-Spielstein-Permanent, das eine andere Karte kopiert",
     "cantBeBlocked": "Kann nicht geblockt werden",
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ringträger",
@@ -2112,6 +2116,7 @@
     "exportClientSnapshot": "Client-Snapshot exportieren",
     "exported": "Exportiert",
     "exportFailed": "Export fehlgeschlagen",
+    "exportRequested": "Export unbestätigt",
     "copyDiagnostic": "Diagnose kopieren",
     "copied": "Kopiert!",
     "reportOnGithub": "Auf GitHub melden",
@@ -2215,7 +2220,7 @@
     "yes": "Ja",
     "no": "Nein",
     "dontAskAgain": "Dieses Spiel nicht mehr fragen",
-    "dontAskAgainForSameCard": "Auf jede Kopie dieser Karte anwenden"
+    "dontAskAgainForSameCard": "Diese Entscheidung für jede Kopie dieser Karte in diesem Spiel verwenden"
   },
   "resolutionOptionalPayment": {
     "title": "Optionale Zahlung wählen",

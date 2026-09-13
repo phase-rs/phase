@@ -1608,30 +1608,40 @@ export interface CopyEffectInstanceRef {
   modification_index: number;
 }
 
+export interface TriggerPrintedOrigin {
+  printed_ref: PrintedCardRef;
+  printed_occurrence: number;
+}
+
 export type TriggerDefinitionOccurrenceRef =
-  | { Printed: { base_set: number; printed_index: number } }
+  | { type: "Printed"; data: { base_set: number; printed_index: number } }
   | {
-      CopiedValue: {
+      type: "CopiedValue";
+      data: {
         copy_effect: CopyEffectInstanceRef;
         copied_slot: number;
+        printed_origin?: TriggerPrintedOrigin;
       };
     }
   | {
-      KeywordCompanion: {
+      type: "KeywordCompanion";
+      data: {
         grant_instance: number;
         companion_index: number;
       };
     }
   | {
-      CopyRetained: {
+      type: "CopyRetained";
+      data: {
         grant_instance: number;
         source_base_set: number;
         source_printed_index: number;
       };
     }
-  | { Granted: { grant_instance: number } }
+  | { type: "Granted"; data: { grant_instance: number } }
   | {
-      ExpandedGrant: {
+      type: "ExpandedGrant";
+      data: {
         grant_instance: number;
         provider: TriggerDefinitionRef;
         provider_output_index: number;
@@ -2633,6 +2643,7 @@ export type DebugAction =
         attach_to?: AttachTarget;
         run_etb: boolean;
         nonlegendary: boolean;
+        creation_kind: "Card" | "Token";
         count: number;
       };
     }

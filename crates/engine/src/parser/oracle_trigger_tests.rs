@@ -1798,8 +1798,8 @@ fn intervening_if_fewer_than_three_plus1_steam_kin() {
     );
 }
 
-/// Adaptive Training Post: charge counters, N=3, SpellCast. Execute `it` is
-/// `TriggeringSource` (existing SpellCast anaphor) — pin, do not retarget.
+/// Adaptive Training Post: charge counters, N=3, SpellCast. The source-counter
+/// intervening-if makes the body pronoun refer to the artifact, not the spell.
 #[test]
 fn intervening_if_fewer_than_three_charge_adaptive_training_post() {
     let def = parse_trigger_line(
@@ -1818,7 +1818,25 @@ fn intervening_if_fewer_than_three_charge_adaptive_training_post() {
     assert_fewer_than_put_counter(
         &def,
         CounterType::Generic("charge".to_string()),
-        TargetFilter::TriggeringSource,
+        TargetFilter::SelfRef,
+    );
+}
+
+/// A source-counter intervening-if can be AND-composed with a pre-existing
+/// `while` counter gate. The counter effect's `it` still denotes the source
+/// artifact, rather than the spell that caused the trigger.
+#[test]
+fn compound_source_counter_condition_rebinds_counter_recipient() {
+    let def = parse_trigger_line(
+        "Whenever you cast an instant or sorcery spell while this artifact has one or more charge counters on it, if this artifact has fewer than three charge counters on it, put a charge counter on it.",
+        "Adaptive Training Post",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert!(matches!(def.condition, Some(TriggerCondition::And { .. })));
+    assert_fewer_than_put_counter(
+        &def,
+        CounterType::Generic("charge".to_string()),
+        TargetFilter::SelfRef,
     );
 }
 
@@ -5304,11 +5322,30 @@ fn trigger_battalion() {
 #[test]
 fn trigger_pack_tactics() {
     let def = parse_trigger_line(
-            "Whenever Werewolf Pack Leader attacks, if the total power of creatures you control is 6 or greater, draw a card.",
+            "Whenever this creature attacks, if you attacked with creatures with total power 6 or greater this combat, draw a card.",
             "Werewolf Pack Leader",
         );
-    // Pack tactics is a different pattern (if-condition), not battalion
     assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TrackedSet {
+                            set: crate::types::ability::TrackedAnaphorSource::TriggeringBatch,
+                            caused_by: None,
+                        },
+                    )
+                    .expect("statically valid property aggregate"),
+                ),
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 6 },
+        })
+    );
 }
 
 #[test]

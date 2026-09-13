@@ -7,8 +7,8 @@ use crate::types::ability::{DurationEvent, EffectKind, KeywordAction, TargetRef}
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use crate::types::actions::{
-    DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, ResolveAllConsentDecision,
-    ResolveAllScope, TriggerOrderTemplateOp,
+    DebugAction, DebugCardCreationKind, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp,
+    ResolveAllConsentDecision, ResolveAllScope, TriggerOrderTemplateOp,
 };
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -15190,12 +15190,25 @@ pub fn preflight_debug_action(
         zone,
         count,
         run_etb,
+        creation_kind,
         ..
     } = action
     {
         if !state.players.iter().any(|player| player.id == *owner) {
             return Err(EngineError::InvalidAction(
                 "Debug: invalid owner player id".into(),
+            ));
+        }
+        // CR 111.7 + CR 704.5d: debug card-tokens are battlefield fixtures.
+        // Reject impossible direct placement in another zone rather than
+        // returning a state in which a token survives where it should cease.
+        let token_outside_battlefield = match creation_kind {
+            DebugCardCreationKind::Card => false,
+            DebugCardCreationKind::Token => *zone != Zone::Battlefield,
+        };
+        if *count != 0 && token_outside_battlefield {
+            return Err(EngineError::InvalidAction(
+                "Debug::CreateCard tokens must be created on the battlefield".into(),
             ));
         }
         // Real entry can park a private parent frame while replacements or
@@ -18512,6 +18525,7 @@ mod priority_principal_tests {
             .unwrap()
             .back_face = Some(BackFaceData {
             is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Blow Off Steam".to_string(),
             power: None,
             toughness: None,

@@ -27160,6 +27160,10 @@ pub enum TriggerDefinitionOccurrenceRef {
     CopiedValue {
         copy_effect: CopyEffectInstanceRef,
         copied_slot: usize,
+        /// Semantic printed identity carried by this copied slot. `None` is
+        /// intentional for synthesized triggers that must fail closed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        printed_origin: Option<TriggerPrintedOrigin>,
     },
     KeywordCompanion {
         grant_instance: TriggerGrantInstanceRef,
@@ -29257,6 +29261,16 @@ pub struct RoomCopiableHalves {
     pub right: Option<RoomHalfIdentity>,
 }
 
+/// Printed-card identity of one trigger slot carried through CR 707 copiable
+/// values. This is semantic provenance, not display routing: merged permanents
+/// can contain trigger slots from several printed cards while showing only the
+/// top component's art and name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TriggerPrintedOrigin {
+    pub printed_ref: PrintedCardRef,
+    pub printed_occurrence: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopiableValues {
     pub name: String,
@@ -29273,6 +29287,11 @@ pub struct CopiableValues {
     /// source to target uses refcount sharing rather than deep clones.
     pub abilities: Arc<Vec<AbilityDefinition>>,
     pub trigger_definitions: Arc<Vec<TriggerDefinition>>,
+    /// One semantic printed origin per `trigger_definitions` slot. `None`
+    /// denotes a synthesized/nonprinted trigger; an empty legacy vector fails
+    /// closed for broad same-card preferences.
+    #[serde(default)]
+    pub trigger_printed_origins: Arc<Vec<Option<TriggerPrintedOrigin>>>,
     pub replacement_definitions: Arc<Vec<ReplacementDefinition>>,
     pub static_definitions: Arc<Vec<StaticDefinition>>,
     /// CR 709.5 + CR 709.5b: present iff the copied object is a Room — the

@@ -5644,6 +5644,7 @@ mod tests {
         card_types.core_types.push(core_type);
         BackFaceData {
             is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: name.to_string(),
             power: None,
             toughness: None,

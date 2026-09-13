@@ -16437,31 +16437,19 @@ pub(crate) fn evaluate_condition(
                 }),
             };
             let filter_matches = match additional_filter {
-                // CR 205.3m: "of the chosen type" — check the revealed card's subtype
-                // against the source permanent's chosen creature type.
-                Some(FilterProp::IsChosenCreatureType) => {
-                    let source = state.objects.get(&ability.source_id);
-                    let subject_subtypes = subject.as_ref().and_then(|(id, lki)| match lki {
-                        Some(lki) => Some(lki.subtypes.as_slice()),
-                        None => state
-                            .objects
-                            .get(id)
-                            .map(|object| object.card_types.subtypes.as_slice()),
-                    });
-                    source
-                        .and_then(|src| src.chosen_creature_type())
-                        .zip(subject_subtypes)
-                        .is_some_and(|(chosen_type, subtypes)| {
-                            subtypes
-                                .iter()
-                                .any(|subtype| subtype.eq_ignore_ascii_case(chosen_type))
-                        })
-                }
                 // CR 202.3 + CR 700.1: Generic property gates on the revealed card
                 // (e.g. Kellan, Daring Traveler's "creature card with mana value 3
                 // or less" → `FilterProp::Cmc`). Evaluate the property against the
                 // revealed subject through the shared filter evaluator, exactly as
                 // `subtype_filter` does above.
+                //
+                // CR 205.3m + CR 702.73a: `IsChosenCreatureType` ("of the chosen
+                // type" — Herald's Horn) routes through this same arm on purpose.
+                // The shared evaluator resolves the chosen type via
+                // `subtype_matches_with_changeling`, so a Changeling card in the
+                // library (Morophon, the Boundless under a Horn naming Slivers)
+                // matches every creature type. A hand-rolled subtype string
+                // comparison here would silently drop that expansion.
                 Some(prop) => subject.as_ref().is_some_and(|(id, lki)| {
                     let filter = TargetFilter::Typed(crate::types::ability::TypedFilter {
                         type_filters: vec![],
@@ -20687,14 +20675,6 @@ mod tests {
                 },
             },
         );
-
-        let mut copied_state = state.clone();
-        copied_state
-            .objects
-            .get_mut(&second_key.source_id)
-            .unwrap()
-            .is_copy = true;
-        reject_forged_same_card(&mut copied_state, second_key.clone());
 
         let mut stale_state = state;
         stale_state
@@ -32077,6 +32057,106 @@ mod tests {
                 .count(),
             1,
             "land-card rider must create a Treasure after the parent ChangeZone moved a land",
+        );
+    }
+
+    /// CR 205.3m + CR 702.73a: Herald's Horn naming Slivers must offer Morophon,
+    /// the Boundless off the top of the library. Morophon prints no Sliver
+    /// subtype — it is a Shapeshifter with Changeling, so it IS every creature
+    /// type, including in the library where the layer system does not run.
+    ///
+    /// This pins the `RevealedHasCardType { additional_filter }` gate to the
+    /// shared filter evaluator (`subtype_matches_with_changeling`). A hand-rolled
+    /// subtype string comparison at this site passes the plain-Sliver case and
+    /// silently drops every Changeling card — the whole class (Herald's Horn,
+    /// Vanquisher's Banner-style chosen-type reveals, Kindred Discovery) is
+    /// affected, not just this printing.
+    #[test]
+    fn revealed_chosen_creature_type_matches_a_changeling_card_in_the_library() {
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec![
+            "Sliver".to_string(),
+            "Shapeshifter".to_string(),
+            "Goblin".to_string(),
+        ];
+
+        let horn = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Herald's Horn".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&horn).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.chosen_attributes
+                .push(crate::types::ability::ChosenAttribute::CreatureType(
+                    "Sliver".to_string(),
+                ));
+        }
+
+        // Morophon: Shapeshifter creature card with Changeling, sitting on top
+        // of the library. No printed Sliver subtype.
+        let morophon = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Morophon, the Boundless".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&morophon).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Shapeshifter".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.keywords
+                .push(crate::types::keywords::Keyword::Changeling);
+        }
+
+        // Control: a plain Goblin creature card, no Changeling, no Sliver type.
+        let goblin = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Mogg Fanatic".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&goblin).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            horn,
+            PlayerId(0),
+        );
+        let condition = AbilityCondition::RevealedHasCardType {
+            card_types: vec![CoreType::Creature],
+            additional_filter: Some(FilterProp::IsChosenCreatureType),
+            subtype_filter: None,
+        };
+
+        state.last_revealed_ids.push(morophon);
+        assert!(
+            evaluate_condition(&condition, &state, &ability),
+            "Changeling card must satisfy \"creature card of the chosen type\" \
+             (CR 702.73a) — Herald's Horn naming Slivers must offer Morophon",
+        );
+
+        state.last_revealed_ids.clear();
+        state.last_revealed_ids.push(goblin);
+        assert!(
+            !evaluate_condition(&condition, &state, &ability),
+            "a non-Changeling Goblin must NOT satisfy the chosen type Sliver",
         );
     }
 

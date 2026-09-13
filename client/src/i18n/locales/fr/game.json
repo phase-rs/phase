@@ -1,4 +1,5 @@
 {
+  "playerLatency": {"host":"Hôte","waiting":"En attente","value":"{{ms}} ms","description":"Latence aller-retour vers l’hôte. Une réponse manquante ne déconnecte pas la partie."},
   "abilityBlock": {
     "badge": "Bloquée",
     "cantBeActivated": "Cette capacité ne peut pas être activée",
@@ -104,6 +105,7 @@
   },
   "debugCreate": {
     "copies": "Copies",
+    "asToken": "Créer comme jeton",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
@@ -310,8 +312,10 @@
     "underAttack_one": "Attaqué par {{count}} créature",
     "underAttack_other": "Attaqué par {{count}} créatures",
     "target": "Cible",
+    "token": "Jeton",
+    "tokenTooltip": "Jeton qui est une copie d'une vraie carte",
     "copy": "Copie",
-    "copyTooltip": "Jeton-copie d'une vraie carte",
+    "copyTooltip": "Permanent non-jeton copiant une autre carte",
     "cantBeBlocked": "Ne peut pas être bloquée",
     "ringBearer": "Anneau",
     "ringBearerTooltip": "Porteur de l'Anneau",
@@ -2112,6 +2116,7 @@
     "exportClientSnapshot": "Exporter l’instantané du client",
     "exported": "Exporté",
     "exportFailed": "Échec de l'exportation",
+    "exportRequested": "Export non confirmé",
     "copyDiagnostic": "Copier le diagnostic",
     "copied": "Copié !",
     "reportOnGithub": "Signaler sur GitHub",
@@ -2215,7 +2220,7 @@
     "yes": "Oui",
     "no": "Non",
     "dontAskAgain": "Ne plus demander pendant cette partie",
-    "dontAskAgainForSameCard": "Appliquer à chaque exemplaire de cette carte"
+    "dontAskAgainForSameCard": "Utiliser ce choix pour chaque copie de cette carte dans cette partie"
   },
   "resolutionOptionalPayment": {
     "title": "Choisissez un paiement optionnel",

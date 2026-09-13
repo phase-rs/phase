@@ -36946,6 +36946,19 @@ pub(crate) fn parse_effect_chain_ir(
                         .flatten()
                 }),
             card_name: ctx.card_name.clone(),
+            // The DEMONSTRATIVE-scoped antecedent is a property of the whole
+            // trigger body (the Kashi-Tribe "tap that creature and it doesn't
+            // untap" tail lives in a sub-ability chunk), so it propagates like
+            // `plural_object_pronoun_ref`. A typed referent introduced by an
+            // earlier chunk is more specific than the outer trigger-condition
+            // context, so a later demonstrative retains that chain-local binding.
+            //
+            // The `binds_source_counter_pronoun` rung is deliberately absent:
+            // that gate exists for the bare "it" pronoun's source-counter class
+            // (#8549), which is not a demonstrative grammar.
+            demonstrative_object_ref: prior_typed_referent
+                .then_some(TargetFilter::ParentTarget)
+                .or_else(|| ctx.demonstrative_object_ref.clone()),
             // CR 707.9a + CR 603.1: propagate the trigger index from the parent
             // ctx — `current_trigger_index` is a property of the whole trigger
             // body, not of an individual chunk, so all chunks inside a trigger

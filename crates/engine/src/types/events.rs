@@ -1262,6 +1262,10 @@ pub enum GameEvent {
         /// Per-attacker targets — parallel to attacker_ids, same length and order.
         #[serde(default)]
         attacks: Vec<(ObjectId, crate::game::combat::AttackTarget)>,
+        /// CR 508.1a + CR 603.4: declaration-time characteristics for the
+        /// exact attackers in this event, used by event-scoped trigger checks.
+        #[serde(default)]
+        declaration_records: Vec<crate::types::game_state::AttackDeclarationRecord>,
     },
     BlockersDeclared {
         assignments: Vec<(ObjectId, ObjectId)>,

@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 209,
+      "date": "2026-09-12",
+      "title": "Mana burn returns to the game",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Mana burn is now available in custom formats: unspent mana can cost life as phases end, including the normal replacement-effect choices\n• Spell Queller and Mirror Strike join the playable card pool\n• Tournament Organizer now supports the server’s latest lobby features, while Booster Tutor builds packs from the original Cube pool\n\n🛠️ Cards That Now Work Right\n• Sins of the Past and the wider \"cast from a graveyard, then exile this\" family finish every instruction in the order printed; qualifying \"if you cast it this way\" effects wait for that cast\n• Gifts Ungiven no longer offers each found card twice, and cards that count cards \"this way\" no longer double-count the same card\n• A copied Class begins at level 1 and can level up normally (Mirrormade copying Stormchaser’s Talent)\n• Descendants’ Path only offers its free cast when your library’s revealed card shares a creature type with one you control\n• Alms Collector, Karona, Appa, Steadfast Guardian, Echoing Return, Blizzard Brawl, Runaway Steam-Kin, and Tomb Tyrant now follow their printed conditions and recipients\n• Graveyard redirects, counters’ exile riders, damage-prevention formulas, mana-color conditions, and guarded modal choices retain the subjects and conditions their text names\n\n⚔️ Combat & Gameplay\n• Tainted Pact ends the game in a draw if its mandatory repeat reaches an empty library and can no longer progress, rather than freezing the game\n• A player named once in an upkeep trigger remains the recipient of the following actions, fixing effects such as Seizan, Anvil of Bogardan, and Maralen of the Mornsong\n• Loop shortcuts can be shortened by a responder when the rules allow, while the engine refuses shortcuts it cannot safely drive\n• Phase-changing effects that pause for a replacement choice now resume and finish the phase correctly\n\n🖥️ Interface\n• The visual-pack download picker works again in Chrome\n• Long choice lists appear without distracting staggered animation\n• Tournament credentials are kept only for the current browser session\n\n🌐 Multiplayer\n• P2P heartbeats keep flowing even while another game handler is busy, making connections more resilient",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424"
+    },
+    {
       "id": 208,
       "date": "2026-09-09",
       "title": "P2P hosting finds your LAN",

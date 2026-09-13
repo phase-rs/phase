@@ -1,4 +1,5 @@
 {
+  "playerLatency": {"host":"Host","waiting":"Waiting","value":"{{ms}} ms","description":"Round-trip latency to the host. A missing reply does not disconnect the game."},
   "abilityBlock": {
     "badge": "Blocked",
     "cantBeActivated": "This ability can't be activated",
@@ -104,6 +105,7 @@
   },
   "debugCreate": {
     "copies": "Copies",
+    "asToken": "Create as token",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
@@ -311,8 +313,10 @@
     "underAttack_other": "Attacked by {{count}} creatures",
     "target": "Target",
     "sacrifice": "Sacrifice",
+    "token": "Token",
+    "tokenTooltip": "Token copy of a real card",
     "copy": "Copy",
-    "copyTooltip": "Token copy of a real card",
+    "copyTooltip": "Nontoken permanent copying another card",
     "cantBeBlocked": "Can't be blocked",
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ring-bearer",
@@ -2150,6 +2154,7 @@
     "exportClientSnapshot": "Export client snapshot",
     "exported": "Exported",
     "exportFailed": "Export failed",
+    "exportRequested": "Export unconfirmed",
     "copyDiagnostic": "Copy diagnostic",
     "copied": "Copied!",
     "reportOnGithub": "Report on GitHub",
@@ -2253,7 +2258,7 @@
     "yes": "Yes",
     "no": "No",
     "dontAskAgain": "Don't ask again this game",
-    "dontAskAgainForSameCard": "Apply this to every copy of this card"
+    "dontAskAgainForSameCard": "Use this choice for every copy of this card this game"
   },
   "resolutionOptionalPayment": {
     "title": "Choose an optional payment",

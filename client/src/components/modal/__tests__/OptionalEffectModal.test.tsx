@@ -110,7 +110,16 @@ describe("OptionalEffectModalContent", () => {
       ),
     );
 
-    fireEvent.click(screen.getByLabelText("Apply this to every copy of this card"));
+    const rememberCheckbox = screen.getByLabelText("Don't ask again this game");
+    const sameCardCheckbox = screen.getByLabelText(
+      "Use this choice for every copy of this card this game",
+    );
+
+    fireEvent.click(sameCardCheckbox);
+
+    expect(sameCardCheckbox).toBeChecked();
+    expect(rememberCheckbox).toBeChecked();
+
     fireEvent.click(screen.getByRole("button", { name: "Yes" }));
 
     expect(dispatch).toHaveBeenCalledWith({
@@ -129,8 +138,11 @@ describe("OptionalEffectModalContent", () => {
       <OptionalEffectModalContent waitingFor={optionalWaitingFor(keyed, true)} dispatch={vi.fn()} />,
     );
 
-    fireEvent.click(screen.getByLabelText("Apply this to every copy of this card"));
-    expect(screen.getByLabelText("Apply this to every copy of this card")).toBeChecked();
+    const sameCardLabel = "Use this choice for every copy of this card this game";
+    const rememberLabel = "Don't ask again this game";
+    fireEvent.click(screen.getByLabelText(sameCardLabel));
+    expect(screen.getByLabelText(sameCardLabel)).toBeChecked();
+    expect(screen.getByLabelText(rememberLabel)).toBeChecked();
 
     rerender(
       <OptionalEffectModalContent
@@ -138,6 +150,7 @@ describe("OptionalEffectModalContent", () => {
         dispatch={vi.fn()}
       />,
     );
-    expect(screen.getByLabelText("Apply this to every copy of this card")).not.toBeChecked();
+    expect(screen.getByLabelText(sameCardLabel)).not.toBeChecked();
+    expect(screen.getByLabelText(rememberLabel)).not.toBeChecked();
   });
 });

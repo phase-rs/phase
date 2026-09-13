@@ -164,6 +164,7 @@ fn cards_exiled_this_turn_for_context(state: &GameState, ctx: &QuantityContext) 
 enum CharacteristicView<'a> {
     Object(&'a crate::game::game_object::GameObject),
     Lki(&'a crate::types::game_state::LKISnapshot),
+    AttackDeclaration(Box<crate::types::game_state::AttackDeclarationRecord>),
     SpellRecord(&'a crate::types::game_state::SpellCastRecord),
 }
 
@@ -171,44 +172,98 @@ enum CharacteristicView<'a> {
 enum CharacteristicMember {
     Object(ObjectId),
     Cast(CastOccurrence),
+    AttackDeclaration {
+        event_index: usize,
+        record_index: usize,
+    },
 }
 
 impl<'a> CharacteristicView<'a> {
     /// CR 205.2a: the member's card types.
-    fn core_types(&self) -> &'a [CoreType] {
+    fn core_types(&self) -> &[CoreType] {
         match self {
             CharacteristicView::Object(obj) => &obj.card_types.core_types,
             CharacteristicView::Lki(lki) => &lki.card_types,
+            CharacteristicView::AttackDeclaration(record) => &record.lki.card_types,
             CharacteristicView::SpellRecord(record) => &record.core_types,
         }
     }
 
     /// CR 205.3: the member's subtypes.
-    fn subtypes(&self) -> &'a [String] {
+    fn subtypes(&self) -> &[String] {
         match self {
             CharacteristicView::Object(obj) => &obj.card_types.subtypes,
             CharacteristicView::Lki(lki) => &lki.subtypes,
+            CharacteristicView::AttackDeclaration(record) => &record.lki.subtypes,
             CharacteristicView::SpellRecord(record) => &record.subtypes,
         }
     }
 
     /// CR 105.2: the member's colors. An object with no color contributes none.
-    fn colors(&self) -> &'a [ManaColor] {
+    fn colors(&self) -> &[ManaColor] {
         match self {
             CharacteristicView::Object(obj) => &obj.color,
             CharacteristicView::Lki(lki) => &lki.colors,
+            CharacteristicView::AttackDeclaration(record) => &record.lki.colors,
             CharacteristicView::SpellRecord(record) => &record.colors,
         }
     }
 
-    /// CR 202.3: the member's mana value. Cast records carry the exact
-    /// cast-time snapshot; live objects include the stack-only X contribution.
-    fn mana_value(&self) -> i32 {
-        match self {
-            CharacteristicView::Object(obj) => u32_to_i32_saturating(obj.effective_mana_value()),
-            CharacteristicView::Lki(lki) => u32_to_i32_saturating(lki.mana_value),
-            CharacteristicView::SpellRecord(record) => u32_to_i32_saturating(record.mana_value),
+    /// Reads the characteristic supplied by this population member. In
+    /// particular, an attack declaration record must not be re-resolved through
+    /// the live object: Pack Tactics is defined by the declaration event.
+    fn property_value(&self, property: ObjectProperty) -> Option<i32> {
+        match (self, property) {
+            (CharacteristicView::Object(obj), ObjectProperty::Power) => obj.power,
+            (CharacteristicView::Object(obj), ObjectProperty::Toughness) => obj.toughness,
+            (CharacteristicView::Object(obj), ObjectProperty::ManaValue) => {
+                Some(u32_to_i32_saturating(obj.effective_mana_value()))
+            }
+            (CharacteristicView::Object(obj), ObjectProperty::ManaSymbolCount(color)) => {
+                Some(u32_to_i32_saturating(
+                    crate::game::devotion::count_cost_color_symbols(&obj.mana_cost, color),
+                ))
+            }
+            (CharacteristicView::Lki(lki), ObjectProperty::Power) => lki.power,
+            (CharacteristicView::Lki(lki), ObjectProperty::Toughness) => lki.toughness,
+            (CharacteristicView::Lki(lki), ObjectProperty::ManaValue) => {
+                Some(u32_to_i32_saturating(lki.mana_value))
+            }
+            (CharacteristicView::Lki(_), ObjectProperty::ManaSymbolCount(_)) => None,
+            (CharacteristicView::AttackDeclaration(record), ObjectProperty::Power) => {
+                record.lki.power
+            }
+            (CharacteristicView::AttackDeclaration(record), ObjectProperty::Toughness) => {
+                record.lki.toughness
+            }
+            (CharacteristicView::AttackDeclaration(record), ObjectProperty::ManaValue) => {
+                Some(u32_to_i32_saturating(record.lki.mana_value))
+            }
+            (CharacteristicView::AttackDeclaration(_), ObjectProperty::ManaSymbolCount(_)) => None,
+            (CharacteristicView::SpellRecord(_), ObjectProperty::Power)
+            | (CharacteristicView::SpellRecord(_), ObjectProperty::Toughness) => None,
+            (CharacteristicView::SpellRecord(record), ObjectProperty::ManaValue) => {
+                Some(u32_to_i32_saturating(record.mana_value))
+            }
+            (CharacteristicView::SpellRecord(_), ObjectProperty::ManaSymbolCount(_)) => None,
         }
+    }
+}
+
+/// Prefer last-known characteristics when an off-battlefield object no longer
+/// carries power or toughness in its live representation.
+fn characteristic_view_for_object(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<CharacteristicView<'_>> {
+    match state.objects.get(&object_id) {
+        Some(object) if object.power.is_none() && object.toughness.is_none() => state
+            .lki_cache
+            .get(&object_id)
+            .map(CharacteristicView::Lki)
+            .or(Some(CharacteristicView::Object(object))),
+        Some(object) => Some(CharacteristicView::Object(object)),
+        None => state.lki_cache.get(&object_id).map(CharacteristicView::Lki),
     }
 }
 
@@ -279,11 +334,9 @@ fn visit_characteristic_leaf<'s>(
                             obj.owner,
                         );
                         if owner_matches {
-                            visit(
-                                CharacteristicMember::Object(obj_id),
-                                CharacteristicView::Object(obj),
-                                false,
-                            );
+                            if let Some(view) = characteristic_view_for_object(state, obj_id) {
+                                visit(CharacteristicMember::Object(obj_id), view, false);
+                            }
                         }
                     }
                 }
@@ -297,12 +350,8 @@ fn visit_characteristic_leaf<'s>(
                         ZoneRef::Exile => unreachable!(),
                     };
                     for &obj_id in zone_ids {
-                        if let Some(obj) = state.objects.get(&obj_id) {
-                            visit(
-                                CharacteristicMember::Object(obj_id),
-                                CharacteristicView::Object(obj),
-                                false,
-                            );
+                        if let Some(view) = characteristic_view_for_object(state, obj_id) {
+                            visit(CharacteristicMember::Object(obj_id), view, false);
                         }
                     }
                 }
@@ -310,12 +359,8 @@ fn visit_characteristic_leaf<'s>(
         },
         CardTypeSetSource::ExiledBySource => {
             for linked in linked_exile_for_context(state, &ctx) {
-                if let Some(obj) = state.objects.get(&linked.exiled_id) {
-                    visit(
-                        CharacteristicMember::Object(linked.exiled_id),
-                        CharacteristicView::Object(obj),
-                        false,
-                    );
+                if let Some(view) = characteristic_view_for_object(state, linked.exiled_id) {
+                    visit(CharacteristicMember::Object(linked.exiled_id), view, false);
                 }
             }
         }
@@ -325,11 +370,7 @@ fn visit_characteristic_leaf<'s>(
         // the exact same members as object-count quantities.
         CardTypeSetSource::Objects { filter } => {
             for obj_id in object_count_matching_ids(state, filter, filter_ctx, ctx.source) {
-                let view = state
-                    .objects
-                    .get(&obj_id)
-                    .map(CharacteristicView::Object)
-                    .or_else(|| state.lki_cache.get(&obj_id).map(CharacteristicView::Lki));
+                let view = characteristic_view_for_object(state, obj_id);
                 if let Some(view) = view {
                     visit(CharacteristicMember::Object(obj_id), view, false);
                 }
@@ -346,6 +387,46 @@ fn visit_characteristic_leaf<'s>(
         // `effects::publish_tracked_set`. Deliberately not routed through
         // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
         // under mode scoping not skipping is the correct semantics here.
+        CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::TriggeringBatch,
+            caused_by,
+        } => {
+            // CR 603.4: detection checks must prefer their explicit TLS event;
+            // resolution checks instead see the current trigger event(s). For
+            // attackers, use declaration records so repeated declarations and
+            // post-declaration mutations retain their own snapshot.
+            let events = detection_trigger_event()
+                .map(|event| vec![event])
+                .unwrap_or_else(|| state.current_trigger_events.clone());
+            for (event_index, event) in events.iter().enumerate() {
+                if let GameEvent::AttackersDeclared {
+                    declaration_records,
+                    ..
+                } = event
+                {
+                    if !declaration_records.is_empty() {
+                        for (record_index, record) in declaration_records.iter().enumerate() {
+                            visit(
+                                CharacteristicMember::AttackDeclaration {
+                                    event_index,
+                                    record_index,
+                                },
+                                CharacteristicView::AttackDeclaration(Box::new(record.clone())),
+                                false,
+                            );
+                        }
+                        continue;
+                    }
+                }
+                for object_id in crate::game::targeting::extract_sources_from_event(event) {
+                    let view = characteristic_view_for_object(state, object_id);
+                    if let Some(view) = view {
+                        visit(CharacteristicMember::Object(object_id), view, false);
+                    }
+                }
+            }
+            let _ = caused_by;
+        }
         CardTypeSetSource::TrackedSet { set, caused_by } => {
             let tracked: Vec<(Option<crate::types::identifiers::TrackedSetId>, ObjectId)> =
                 match set {
@@ -355,12 +436,9 @@ fn visit_characteristic_leaf<'s>(
                         .max_by_key(|(id, _)| id.0)
                         .map(|(set_id, ids)| ids.iter().map(|&id| (Some(*set_id), id)).collect())
                         .unwrap_or_default(),
-                    TrackedAnaphorSource::TriggeringBatch => state
-                        .current_trigger_events
-                        .iter()
-                        .flat_map(crate::game::targeting::extract_sources_from_event)
-                        .map(|id| (None, id))
-                        .collect(),
+                    TrackedAnaphorSource::TriggeringBatch => unreachable!(
+                        "TriggeringBatch is handled above so declaration LKI is preserved"
+                    ),
                 };
             for (set_id, oid) in tracked {
                 let cause_ok = match caused_by {
@@ -374,11 +452,7 @@ fn visit_characteristic_leaf<'s>(
                     }),
                 };
                 if cause_ok {
-                    let view = state
-                        .objects
-                        .get(&oid)
-                        .map(CharacteristicView::Object)
-                        .or_else(|| state.lki_cache.get(&oid).map(CharacteristicView::Lki));
+                    let view = characteristic_view_for_object(state, oid);
                     if let Some(view) = view {
                         visit(CharacteristicMember::Object(oid), view, false);
                     }
@@ -4811,12 +4885,7 @@ fn resolve_ref(
                     if !seen.insert(member) {
                         return;
                     }
-                    let value = match member {
-                        CharacteristicMember::Object(id) => {
-                            object_property_value(state, id, aggregate.property())
-                        }
-                        CharacteristicMember::Cast(_) => Some(view.mana_value()),
-                    };
+                    let value = view.property_value(aggregate.property());
                     if let Some(value) = value {
                         values.push(value);
                     }
@@ -5027,10 +5096,9 @@ fn resolve_ref(
             } else {
                 HashSet::new()
             };
-            // The `&str` subtype borrows stay tied to `state` for the lifetime of
-            // `seen` because `visit_characteristic_source` yields views borrowed
-            // from `state`, not from a transient buffer.
-            let mut seen: HashSet<&str> = HashSet::new();
+            // A triggering-batch declaration may supply owned LKI rather than
+            // a state borrow, so keep each distinct subtype as an owned name.
+            let mut seen: HashSet<String> = HashSet::new();
             visit_characteristic_source(
                 state,
                 source,
@@ -5046,7 +5114,7 @@ fn resolve_ref(
                         if exclude_creature && creature_types.contains(sub.as_str()) {
                             continue;
                         }
-                        seen.insert(sub.as_str());
+                        seen.insert(sub.clone());
                     }
                 },
             );
@@ -17255,6 +17323,7 @@ mod tests {
             attacker_ids: vec![batch_member],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         }];
 
         let aggregate = |set| QuantityExpr::Ref {
@@ -17287,6 +17356,106 @@ mod tests {
                 source,
             ),
             5,
+        );
+    }
+
+    /// CR 603.4 + CR 508.1a: Pack Tactics evaluates the particular declaration
+    /// event that caused the check, and each declaration record keeps its own
+    /// power even when a hostile fixture reuses the same object id.
+    #[test]
+    fn triggering_batch_attack_declarations_preserve_snapshot_and_detection_provenance() {
+        use crate::types::game_state::AttackDeclarationRecord;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(526),
+            PlayerId(0),
+            "Pack Tactics source".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(527),
+            PlayerId(0),
+            "Repeated attacker".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&attacker).unwrap();
+            object.card_types.core_types = vec![CoreType::Creature];
+            object.power = Some(99);
+        }
+        let record_with_power = |power| AttackDeclarationRecord {
+            object_id: attacker,
+            lki: {
+                let mut lki = state.objects[&attacker].snapshot_public_characteristics();
+                lki.power = Some(power);
+                lki
+            },
+            is_token: false,
+            is_commander: false,
+        };
+        let declaration_event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker, attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+            declaration_records: vec![record_with_power(2), record_with_power(5)],
+        };
+        let unrelated_attacker = create_object(
+            &mut state,
+            CardId(528),
+            PlayerId(0),
+            "Unrelated attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let unrelated_event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![unrelated_attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+            declaration_records: vec![AttackDeclarationRecord {
+                object_id: unrelated_attacker,
+                lki: {
+                    let mut lki =
+                        state.objects[&unrelated_attacker].snapshot_public_characteristics();
+                    lki.power = Some(100);
+                    lki
+                },
+                is_token: false,
+                is_commander: false,
+            }],
+        };
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::TriggeringBatch,
+                        caused_by: None,
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+
+        state.current_trigger_events = vec![unrelated_event];
+        let detected = resolve_quantity_for_trigger_check(
+            &state,
+            &aggregate,
+            PlayerId(0),
+            None,
+            Some(&declaration_event),
+        );
+        assert_eq!(detected, 7, "detection must prefer its explicit event");
+        assert!(detected >= 6);
+        assert!(detected >= 6 && !(detected < 6));
+
+        state.current_trigger_events = vec![declaration_event];
+        assert_eq!(
+            resolve_quantity(&state, &aggregate, PlayerId(0), source),
+            7,
+            "resolution must preserve both declaration snapshots, not live power 99"
         );
     }
 
@@ -18041,6 +18210,7 @@ mod tests {
             attacker_ids: vec![ObjectId(1)],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         });
         // Resolution-local subject count: two Treasures sacrificed for the
         // "may sacrifice one or more" cost, recorded by the reflexive's
@@ -20154,6 +20324,7 @@ mod tests {
                     .iter()
                     .map(|&d| (attacker, AttackTarget::Player(d)))
                     .collect(),
+                declaration_records: Vec::new(),
             };
 
         // APPLY: P1 attacks only P0, so opponent P2 is un-attacked → count 1.

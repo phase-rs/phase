@@ -11,7 +11,7 @@ use crate::types::ability::{
     ChosenSubtypeKind, CostPaidObjectSnapshot, ExiledSpellRider, ModalChoice,
     ReplacementDefinition, SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition,
     TriggerBaseSetInstanceRef, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry,
-    TriggerOccurrenceState,
+    TriggerOccurrenceState, TriggerPrintedOrigin,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -168,6 +168,8 @@ pub struct CleaveFormState {
     pub replacements: Definitions<ReplacementDefinition>,
     pub base_abilities: Arc<Vec<AbilityDefinition>>,
     pub base_triggers: Arc<Vec<TriggerDefinition>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_trigger_printed_origins: Vec<Option<TriggerPrintedOrigin>>,
     pub trigger_base_set_instance: TriggerBaseSetInstanceRef,
     pub next_trigger_base_set_instance: u64,
     pub base_statics: Arc<Vec<StaticDefinition>>,
@@ -231,6 +233,10 @@ pub struct BackFaceData {
     /// Stored card-face payload. Live object definitions are materialized with
     /// recipient-local occurrence provenance when this face is installed.
     pub trigger_definitions: Definitions<TriggerDefinition>,
+    /// Semantic printed identity for each trigger slot when this face is a
+    /// snapshot of copied values. Empty means derive identity from `printed_ref`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_printed_origins: Vec<Option<TriggerPrintedOrigin>>,
     pub replacement_definitions: Definitions<ReplacementDefinition>,
     pub static_definitions: Definitions<StaticDefinition>,
     pub color: Vec<ManaColor>,
@@ -696,6 +702,11 @@ pub struct GameObject {
     /// than the `Definitions<T>` wrapper that gates live reads.
     /// Wrapped in `Arc` for structural sharing across cloned `GameState`s.
     pub base_trigger_definitions: Arc<Vec<TriggerDefinition>>,
+    /// Semantic printed origin for each materialized base trigger. Empty for an
+    /// ordinary printed face (where `base_printed_ref` + local slot is enough);
+    /// populated for copied values whose slots can come from several cards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_trigger_printed_origins: Vec<Option<TriggerPrintedOrigin>>,
     /// Current ordered printed/base trigger-set generation. This stays stable
     /// across ordinary layer resets and only changes when a caller intentionally
     /// installs a new base/face/cleave trigger set.
@@ -1439,6 +1450,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_keywords: _,
         base_abilities: _,
         base_trigger_definitions: _,
+        base_trigger_printed_origins: _,
         trigger_base_set_instance: _,
         next_trigger_base_set_instance: _,
         trigger_occurrence_state: _,
@@ -1612,6 +1624,17 @@ impl GameObject {
             base.push(definition.clone());
             index
         };
+        if !self.base_trigger_printed_origins.is_empty() {
+            self.base_trigger_printed_origins
+                .push(
+                    self.base_printed_ref
+                        .clone()
+                        .map(|printed_ref| TriggerPrintedOrigin {
+                            printed_ref,
+                            printed_occurrence: printed_index,
+                        }),
+                );
+        }
         self.trigger_definitions.push(TriggerEntry::new(
             TriggerDefinitionOccurrenceRef::Printed {
                 base_set,
@@ -1746,6 +1769,25 @@ impl GameObject {
     ) -> Result<(), &'static str> {
         self.allocate_trigger_base_set_instance()?;
         self.base_trigger_definitions = definitions;
+        self.base_trigger_printed_origins.clear();
+        self.materialize_base_trigger_definitions();
+        Ok(())
+    }
+
+    /// Installs a base trigger set materialized from CR 707 copiable values,
+    /// preserving each slot's semantic printed-card origin across future layer
+    /// resets. An empty origin vector is the legacy/ordinary printed shape.
+    pub fn install_copiable_trigger_base_definitions(
+        &mut self,
+        definitions: Arc<Vec<TriggerDefinition>>,
+        printed_origins: Arc<Vec<Option<TriggerPrintedOrigin>>>,
+    ) -> Result<(), &'static str> {
+        if !printed_origins.is_empty() && printed_origins.len() != definitions.len() {
+            return Err("copiable trigger origins must align with base definitions");
+        }
+        self.allocate_trigger_base_set_instance()?;
+        self.base_trigger_definitions = definitions;
+        self.base_trigger_printed_origins = printed_origins.as_ref().clone();
         self.materialize_base_trigger_definitions();
         Ok(())
     }
@@ -1764,6 +1806,11 @@ impl GameObject {
 
     /// Validates the object-local portion of trigger occurrence provenance.
     pub fn validate_trigger_definitions(&self) -> Result<(), &'static str> {
+        if !self.base_trigger_printed_origins.is_empty()
+            && self.base_trigger_printed_origins.len() != self.base_trigger_definitions.len()
+        {
+            return Err("copiable trigger origins do not align with the active base set");
+        }
         for entry in self.trigger_definitions.iter_all() {
             match &entry.occurrence {
                 TriggerDefinitionOccurrenceRef::Printed {
@@ -2568,6 +2615,7 @@ impl GameObject {
             base_keywords: Vec::new(),
             base_abilities: Arc::new(Vec::new()),
             base_trigger_definitions: Default::default(),
+            base_trigger_printed_origins: Vec::new(),
             trigger_base_set_instance: TriggerBaseSetInstanceRef::INITIAL,
             next_trigger_base_set_instance: 2,
             trigger_occurrence_state: TriggerOccurrenceState::default(),
@@ -2855,23 +2903,53 @@ impl GameObject {
             RoomDoor::Left => RoomDoor::Right,
             RoomDoor::Right => RoomDoor::Left,
         };
-        let base = Arc::make_mut(&mut self.base_trigger_definitions);
-        for definition in base.iter_mut() {
-            if definition.room_door.is_none() {
-                definition.room_door = Some(live_door);
+        let should_install_other_door = {
+            let base = Arc::make_mut(&mut self.base_trigger_definitions);
+            for definition in base.iter_mut() {
+                if definition.room_door.is_none() {
+                    definition.room_door = Some(live_door);
+                }
             }
-        }
-        if let Some(back) = &self.back_face {
-            if !base
-                .iter()
-                .any(|definition| definition.room_door == Some(other_door))
-            {
-                base.extend(back.trigger_definitions.iter_all().map(|printed| {
+            self.back_face.as_ref().is_some_and(|_| {
+                !base
+                    .iter()
+                    .any(|definition| definition.room_door == Some(other_door))
+            })
+        };
+        if should_install_other_door {
+            let mut origins = crate::game::printed_cards::base_trigger_printed_origins(self)
+                .as_ref()
+                .clone();
+            let back = self
+                .back_face
+                .as_ref()
+                .expect("other Room door requires a stored face");
+            let back_origins =
+                back.trigger_definitions
+                    .iter_all()
+                    .enumerate()
+                    .map(|(printed_occurrence, _)| {
+                        back.trigger_printed_origins
+                            .get(printed_occurrence)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                back.printed_ref
+                                    .clone()
+                                    .map(|printed_ref| TriggerPrintedOrigin {
+                                        printed_ref,
+                                        printed_occurrence,
+                                    })
+                            })
+                    });
+            origins.extend(back_origins);
+            Arc::make_mut(&mut self.base_trigger_definitions).extend(
+                back.trigger_definitions.iter_all().map(|printed| {
                     let mut definition = printed.clone();
                     definition.room_door = Some(other_door);
                     definition
-                }));
-            }
+                }),
+            );
+            self.base_trigger_printed_origins = origins;
         }
         self.materialize_base_trigger_definitions();
 
@@ -3890,6 +3968,47 @@ mod tests {
         let deserialized: GameObject = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "Test Card");
         assert_eq!(deserialized.id, ObjectId(1));
+    }
+
+    #[test]
+    fn room_door_install_keeps_both_faces_trigger_origins_aligned() {
+        let live_ref = PrintedCardRef {
+            oracle_id: "room-oracle".to_string(),
+            face_name: "Left Door".to_string(),
+        };
+        let back_ref = PrintedCardRef {
+            oracle_id: "room-oracle".to_string(),
+            face_name: "Right Door".to_string(),
+        };
+        let mut object = trigger_test_object();
+        object.base_printed_ref = Some(live_ref.clone());
+        object.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::Phase)]);
+        object.back_face = Some(BackFaceData {
+            printed_ref: Some(back_ref.clone()),
+            trigger_definitions: vec![TriggerDefinition::new(TriggerMode::Attacks)].into(),
+            ..Default::default()
+        });
+
+        object.install_room_door_text();
+
+        assert_eq!(object.base_trigger_definitions.len(), 2);
+        assert_eq!(
+            object.base_trigger_printed_origins,
+            vec![
+                Some(TriggerPrintedOrigin {
+                    printed_ref: live_ref,
+                    printed_occurrence: 0,
+                }),
+                Some(TriggerPrintedOrigin {
+                    printed_ref: back_ref,
+                    printed_occurrence: 0,
+                }),
+            ]
+        );
+        object
+            .validate_trigger_definitions()
+            .expect("Room trigger definitions and origins remain aligned");
     }
 
     #[test]

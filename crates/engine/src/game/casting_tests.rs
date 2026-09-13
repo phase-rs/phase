@@ -11137,6 +11137,7 @@ fn hearth_elemental_self_cost_reduction_counts_adventures() {
         if i == 2 {
             obj.back_face = Some(crate::game::game_object::BackFaceData {
                 is_swap_snapshot: false,
+                trigger_printed_origins: Vec::new(),
                 name: "Adventure".to_string(),
                 power: None,
                 toughness: None,
@@ -27473,6 +27474,7 @@ fn create_adventure_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId
     // Adventure face stored in back_face (Stomp - instant, {1}{R})
     obj.back_face = Some(crate::game::game_object::BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Stomp".to_string(),
         power: None,
         toughness: None,
@@ -27566,6 +27568,7 @@ fn create_enchantment_adventure_in_hand(state: &mut GameState, player: PlayerId)
 
     obj.back_face = Some(crate::game::game_object::BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Embereth Blaze".to_string(),
         power: None,
         toughness: None,
@@ -27655,6 +27658,7 @@ fn create_omen_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
 
     obj.back_face = Some(crate::game::game_object::BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Good Omen".to_string(),
         power: None,
         toughness: None,
@@ -31500,6 +31504,7 @@ fn add_disturb_creature_to_graveyard(
     obj.keywords = obj.base_keywords.clone();
     obj.back_face = Some(crate::game::game_object::BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: "Luminous Phantom".to_string(),
         power: Some(1),
         toughness: Some(1),
@@ -37829,6 +37834,7 @@ mod mtmte_cast_flow {
         card_types.core_types.push(CoreType::Creature);
         BackFaceData {
             is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Streetwise Operative".to_string(),
             power: Some(7),
             toughness: Some(7),
@@ -53521,6 +53527,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
         obj.mana_cost = ManaCost::zero();
         obj.back_face = Some(crate::game::game_object::BackFaceData {
             is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Back Face".to_string(),
             power: Some(3),
             toughness: Some(3),
@@ -56627,6 +56634,323 @@ mod fixed_mana_ability_tap_cost_rejects_partial_payment {
         assert!(
             runner.state().objects[&creatures[0]].tapped,
             "the chosen creature must be tapped by the accepted payment"
+        );
+    }
+}
+
+/// CR 601.2f + CR 601.2h (#8701): an additional cost the parser cannot read is
+/// still part of the total cost, and "unpayable costs can't be paid" — so the
+/// spell must be honestly refused rather than cast with the cost silently
+/// treated as satisfied. Before this fix `AbilityCost::Unimplemented` had no arm
+/// in the cast-time payment match and fell into its catch-all, which does
+/// nothing and then continues to `finish_pending_cost_or_cast`: the spell cast
+/// and resolved for free.
+///
+/// Every fixture below is built with `from_oracle_text`, so it exercises the
+/// real parser rather than a hand-assembled cost.
+#[cfg(test)]
+mod unreadable_additional_cost_is_refused_not_free {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+
+    const CLOSE_ENCOUNTER_ORACLE: &str = "As an additional cost to cast this spell, choose a creature you control or a warped creature card you own in exile.\nClose Encounter deals damage equal to the power of the chosen creature or card to target creature.";
+
+    fn setup() -> (
+        crate::game::scenario::GameRunner,
+        ObjectId,
+        ObjectId,
+        ObjectId,
+    ) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Green);
+        scenario.add_basic_land(P0, ManaColor::Green);
+        let mine = scenario.add_creature(P0, "Chosen Creature", 3, 3).id();
+        let victim = scenario.add_creature(P1, "Victim", 0, 5).id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Close Encounter", true)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            })
+            .from_oracle_text(CLOSE_ENCOUNTER_ORACLE)
+            .id();
+        (scenario.build(), spell, mine, victim)
+    }
+
+    /// Anti-vacuity guard: the real parser must actually attach
+    /// `Required(Unimplemented)` to this object, otherwise every assertion
+    /// below is about the wrong shape.
+    #[test]
+    fn fixture_really_carries_required_unimplemented() {
+        let (runner, spell, _mine, _victim) = setup();
+        assert!(
+            matches!(
+                runner.state().objects[&spell].additional_cost,
+                Some(AdditionalCost::Required(AbilityCost::Unimplemented { .. }))
+            ),
+            "fixture must be the production choose-behold shape, got {:?}",
+            runner.state().objects[&spell].additional_cost
+        );
+    }
+
+    /// The cast must not be enumerated as a legal action.
+    #[test]
+    fn cast_is_not_offered() {
+        let (runner, spell, _mine, _victim) = setup();
+        let offered: Vec<_> = crate::ai_support::legal_actions_full(runner.state())
+            .0
+            .into_iter()
+            .filter(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == spell))
+            .collect();
+        assert!(
+            offered.is_empty(),
+            "a spell whose required additional cost is unreadable must not be castable: {offered:?}"
+        );
+    }
+
+    /// Driving the full cast pipeline must be refused, not silently accepted.
+    #[test]
+    fn full_cast_is_refused_not_silently_free() {
+        let (mut runner, spell, _mine, victim) = setup();
+        let outcome = runner.cast(spell).target_object(victim).try_resolve();
+        let err = match outcome {
+            Ok(o) => panic!(
+                "the cast must be refused; instead it resolved (spell zone {:?})",
+                o.state().objects.get(&spell).map(|obj| obj.zone)
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err:?}").contains("Cost not implemented"),
+            "refusal must name the unimplemented cost, got {err:?}"
+        );
+    }
+
+    /// CR 601.2 + CR 733.1: a force-submitted cast that is refused mid-
+    /// announcement must not wedge — `CancelCast` returns the game to the
+    /// moment before the proposal.
+    #[test]
+    fn refused_cast_is_recoverable_via_cancel() {
+        let (mut runner, spell, _mine, victim) = setup();
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the reducer still accepts a force-submitted announcement");
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(victim)],
+            })
+            .expect_err("the unreadable additional cost must refuse the cast");
+        // CR 733.1: the rejected action was rolled back, so the announcement is
+        // still live and must be backed out explicitly.
+        assert_eq!(runner.state().stack.len(), 1);
+        runner
+            .act(GameAction::CancelCast)
+            .expect("cancelling the stuck announcement must be accepted");
+        assert!(
+            runner.state().stack.is_empty(),
+            "cancel must clear the announced spell: {:?}",
+            runner.state().stack
+        );
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "after cancel the game must be back at priority, got {:?}",
+            runner.state().waiting_for
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // The cards the parser change newly reaches: an unreadable REQUIRED cost
+    // (Main Event Horizon) and an unreadable OPTIONAL one (Myntasha, Honored
+    // One). Both were `additional_cost: None` before the fix — no cost at all.
+    // ---------------------------------------------------------------------
+
+    const MAIN_EVENT_HORIZON_ORACLE: &str = "As an additional cost to cast this spell, choose A through M or N through Z.\nDestroy each creature whose name begins with a letter in the chosen range.";
+
+    fn main_event_horizon() -> (crate::game::scenario::GameRunner, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..5 {
+            scenario.add_basic_land(P0, ManaColor::White);
+        }
+        let bystander = scenario.add_creature(P0, "Bystander", 2, 2).id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Main Event Horizon", false)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White, ManaCostShard::White],
+                generic: 3,
+            })
+            .from_oracle_text(MAIN_EVENT_HORIZON_ORACLE)
+            .id();
+        (scenario.build(), spell, bystander)
+    }
+
+    /// Anti-vacuity guard: before asserting the cast is refused, prove the
+    /// parser actually attached a required unreadable cost to this face. On
+    /// pre-fix parser code this is `None` and the two tests below are asserting
+    /// about a spell that simply has no additional cost.
+    #[test]
+    fn main_event_horizon_carries_a_required_unreadable_cost() {
+        let (runner, spell, _) = main_event_horizon();
+        match &runner.state().objects[&spell].additional_cost {
+            Some(AdditionalCost::Required(AbilityCost::Unimplemented { description })) => {
+                assert_eq!(description, "choose A through M or N through Z");
+            }
+            other => panic!("expected Required(Unimplemented), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn main_event_horizon_is_not_offered_and_is_refused() {
+        let (mut runner, spell, bystander) = main_event_horizon();
+        let offered: Vec<_> = crate::ai_support::legal_actions_full(runner.state())
+            .0
+            .into_iter()
+            .filter(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == spell))
+            .collect();
+        assert!(
+            offered.is_empty(),
+            "a spell whose required additional cost is unreadable must not be castable: {offered:?}"
+        );
+        let card_id = runner.state().objects[&spell].card_id;
+        let err = runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect_err("a force-submitted cast must be refused, not silently cast for free");
+        assert!(
+            format!("{err:?}").contains("Cost not implemented"),
+            "the refusal must name the unreadable cost, got {err:?}"
+        );
+        // CR 733.1: the illegal action is reversed — nothing was destroyed, no
+        // mana was spent, and the spell is still in hand.
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+        assert_eq!(runner.state().objects[&bystander].zone, Zone::Battlefield);
+        assert_eq!(
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|o| o.zone == Zone::Battlefield && o.tapped)
+                .count(),
+            0,
+            "a refused cast must not leave lands tapped"
+        );
+    }
+
+    const MYNTASHA_ORACLE: &str = "As an additional cost to cast this spell, you may open a sealed Magic booster pack and put the cards on the bottom of your booster pile in a random order.\nSpells you cast have booster cascade.";
+
+    /// CR 601.2b: an unreadable OPTIONAL additional cost must NOT brick the
+    /// spell. Declining an optional additional cost is always legal, and an
+    /// unpayable one can never be declared (CR 601.2h), so the prompt is skipped
+    /// and the spell casts normally. This is the guard against the fix being
+    /// wrong in the restrictive direction.
+    #[test]
+    fn optional_unreadable_cost_leaves_the_spell_castable() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..4 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let spell = scenario
+            .add_creature_to_hand_from_oracle(P0, "Myntasha, Honored One", 4, 4, MYNTASHA_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+                generic: 2,
+            })
+            .id();
+        let mut runner = scenario.build();
+        // Anti-vacuity: the parser really did attach an unreadable OPTIONAL cost.
+        match &runner.state().objects[&spell].additional_cost {
+            Some(AdditionalCost::Optional {
+                cost: AbilityCost::Unimplemented { .. },
+                ..
+            }) => {}
+            other => panic!("expected Optional(Unimplemented), got {other:?}"),
+        }
+        let offered: Vec<_> = crate::ai_support::legal_actions_full(runner.state())
+            .0
+            .into_iter()
+            .filter(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == spell))
+            .collect();
+        assert!(
+            !offered.is_empty(),
+            "an OPTIONAL unreadable additional cost must not make the spell uncastable"
+        );
+        let resolved = runner
+            .cast(spell)
+            .try_resolve()
+            .expect("the spell must cast and resolve with the optional cost declined");
+        assert_eq!(resolved.state().objects[&spell].zone, Zone::Battlefield);
+    }
+
+    /// CR 601.2h: an unpayable optional cost must never be OFFERED, not merely be
+    /// declinable. This is what `additional_cost_declaration_is_offerable` uniquely
+    /// contributes: at the `AdditionalCost::Optional` arm of the queue walk it
+    /// drops the instance and finishes the cast, where without it the engine calls
+    /// `make_optional_cost_choice` and parks on `WaitingFor::OptionalCostChoice`,
+    /// asking the player to decide about a cost that has no payment procedure.
+    ///
+    /// `optional_unreadable_cost_leaves_the_spell_castable` above cannot see this:
+    /// the spell resolves either way, because a prompt that is offered is then
+    /// simply declined. The prompt's ABSENCE is the observable.
+    ///
+    /// Revert-failing: delete the `AbilityCost::Unimplemented` early return from
+    /// `additional_cost_declaration_is_offerable` and the cast parks on
+    /// `OptionalCostChoice` instead of proceeding.
+    #[test]
+    fn an_unpayable_optional_cost_is_never_offered_to_the_player() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..4 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let spell = scenario
+            .add_creature_to_hand_from_oracle(P0, "Myntasha, Honored One", 4, 4, MYNTASHA_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+                generic: 2,
+            })
+            .id();
+        let mut runner = scenario.build();
+
+        // Anti-vacuity: the fixture must really carry an unreadable OPTIONAL cost,
+        // or the absence of a prompt below proves nothing.
+        match &runner.state().objects[&spell].additional_cost {
+            Some(AdditionalCost::Optional {
+                cost: AbilityCost::Unimplemented { .. },
+                ..
+            }) => {}
+            other => panic!("expected Optional(Unimplemented), got {other:?}"),
+        }
+
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("announcing the cast must be accepted");
+
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice { .. }
+            ),
+            "an unpayable optional cost must be skipped, not offered — got {:?}",
+            runner.state().waiting_for
         );
     }
 }

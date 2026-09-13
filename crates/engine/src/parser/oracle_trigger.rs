@@ -1515,6 +1515,10 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // otherwise bind "return it" to the cast spell instead of the Phoenix.
         object_pronoun_ref: trigger_object_pronoun_ref_for_intervening_if(&if_condition)
             .or_else(|| trigger_object_pronoun_ref_for_condition(condition_text, &trigger_subject)),
+        demonstrative_object_ref: trigger_demonstrative_object_ref_for_condition(
+            condition_text,
+            &trigger_subject,
+        ),
         plural_object_pronoun_ref: trigger_plural_object_pronoun_ref_for_intervening_if(
             &if_condition,
         ),
@@ -2015,6 +2019,13 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         None => def.condition.take(),
     };
 
+    // CR 603.4 + CR 608.2c + CR 122.1: a source-counter intervening-if
+    // establishes the source as the antecedent for its immediate counter
+    // instruction. In "if this artifact has fewer than three charge counters
+    // on it, put a charge counter on it", the second "it" is the artifact,
+    // not the spell that caused a SpellCast trigger.
+    rebind_source_counter_condition_recipient(&mut def);
+
     // CR 601.2h + CR 400.7d: On a spell-cast-family trigger, an intervening-if
     // anaphor "mana spent to cast it"/"...this spell" denotes the *triggering
     // spell*, not the ability's source permanent. The bare anaphor parses to
@@ -2360,6 +2371,47 @@ fn valid_target_blocks_event_source_lift(
     match mode {
         TriggerMode::Discarded | TriggerMode::DiscardedAll | TriggerMode::Unattach => false,
         _ => valid_target.is_some(),
+    }
+}
+
+/// Bind the immediate counter recipient to the source when the trigger's
+/// intervening condition reads counters on that same source.
+///
+/// The effect parser sees the trigger head but not the subsequently hoisted
+/// [`TriggerCondition`], so a SpellCast head initially resolves a bare `it` to
+/// its event object. The typed condition is the authority that disambiguates
+/// this source-referential grammar class.
+fn rebind_source_counter_condition_recipient(def: &mut TriggerDefinition) {
+    if !def
+        .condition
+        .as_ref()
+        .is_some_and(condition_contains_source_counter)
+    {
+        return;
+    }
+    let Some(execute) = def.execute.as_deref_mut() else {
+        return;
+    };
+    let Effect::PutCounter { target, .. } = execute.effect.as_mut() else {
+        return;
+    };
+    if matches!(target, TargetFilter::TriggeringSource) {
+        *target = TargetFilter::SelfRef;
+    }
+}
+
+/// Whether a trigger condition tree contains a source-counter predicate.
+///
+/// Intervening-if conditions are composed with pre-existing gates through
+/// `And`, so the source-counter fact need not be the root condition.
+fn condition_contains_source_counter(condition: &TriggerCondition) -> bool {
+    match condition {
+        TriggerCondition::HasCounters { .. } => true,
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            conditions.iter().any(condition_contains_source_counter)
+        }
+        TriggerCondition::Not { condition } => condition_contains_source_counter(condition),
+        _ => false,
     }
 }
 
@@ -10892,6 +10944,135 @@ fn parse_passive_dealt_damage(input: &str) -> OracleResult<'_, ()> {
     Ok((input, ()))
 }
 
+/// CR 120.1: the ACTIVE-voice damage verb, both grammatical numbers.
+///
+/// Singular `"deals"` and plural `"deal"` (a `&`-joined subject, or a plural
+/// noun phrase such as "creatures you control") are the same verb on the same
+/// axis, so every consumer of the active-voice damage grammar must accept both
+/// or they drift apart. `try_parse_event`'s subject-led damage arm collapsed
+/// them from the start; this is that same alternative, factored so the
+/// antecedent scan below and the trigger parsers cannot diverge.
+///
+/// A scan that accepted only `"deals "` while the trigger parser accepted both
+/// is precisely how a plural condition ("Whenever creatures you control deal
+/// combat damage to a creature, destroy that creature") classifies as
+/// `DamageDone` yet leaves its recipient antecedent unset — the trigger fires
+/// and the effect resolves against nothing.
+fn parse_damage_verb(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag::<_, _, OracleError<'_>>("deals ")),
+        value((), tag("deal ")),
+    ))
+    .parse(input)
+}
+
+/// CR 120.1 + CR 120.3 + CR 608.2k: the ACTIVE-voice damage verb phrase that
+/// names an OBJECT recipient — "deal[s] [combat|noncombat|excess] [N or more]
+/// damage to <object>".
+///
+/// The voice dual of [`parse_passive_dealt_damage`]. In the active voice the
+/// grammatical subject is the damage SOURCE (CR 120.1: "an object that deals
+/// damage is the source of that damage"), so the subject is *not* the object a
+/// later anaphor names. What the condition introduces as the nearest object
+/// antecedent is the RECIPIENT named by the `"to <object>"` tail — "Whenever a
+/// Sliver deals combat damage to a creature, destroy THAT CREATURE" destroys the
+/// damaged creature, never the Sliver that dealt the damage.
+///
+/// Composed entirely from the combinators the `DamageDone` trigger grammar
+/// already uses for this exact phrase — `parse_damage_verb` (grammatical
+/// number), `parse_damage_predicate_tail` (damage class × amount threshold) and
+/// `parse_object_recipient_filter` (the recipient axis) — so the antecedent
+/// recognized here is by construction the same recipient
+/// `try_parse_source_deals_damage_trigger` stores in
+/// `TriggerDefinition::valid_target`, and all three move together when any axis
+/// gains a form.
+///
+/// `parse_object_recipient_filter` is what makes this OBJECT-only: it requires
+/// an `"a "`/`"an "` article plus a type phrase and explicitly declines the
+/// `"creature or player"` / `"creature or opponent"` disjunctions, so a
+/// player-recipient trigger ("deals combat damage to a player") never reaches
+/// here and keeps its own `TriggeringPlayer` / `DefendingPlayer` antecedents.
+fn parse_active_deals_damage_to_object(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = parse_damage_verb(input)?;
+    let (input, _) = parse_damage_predicate_tail(input)?;
+    let (input, _) = parse_object_recipient_filter(input)?;
+    Ok((input, ()))
+}
+
+/// CR 608.2k + CR 120.1 + CR 120.3: the damage RECIPIENT antecedent introduced
+/// by a damage trigger's condition, in either voice.
+///
+/// Single authority for "the trigger condition named an object that the damage
+/// was dealt TO". Both voices resolve to [`TargetFilter::EventTarget`], which
+/// reads `GameEvent::DamageDealt.target`:
+///
+///   * PASSIVE — "whenever `<subject>` is dealt damage": the grammatical subject
+///     IS the recipient. Gated on a non-self-referential subject, because on a
+///     self-scoped enrage trigger the recipient is the source itself and
+///     `SelfRef`/`ParentTarget` are the more precise antecedents — they resolve
+///     without consulting the trigger event at all.
+///   * ACTIVE — "whenever `<source>` deals damage to a creature": the subject is
+///     the SOURCE and the recipient is a different object, named by the
+///     `"to <object>"` tail. Deliberately NOT gated on a self-referential
+///     subject: voice is exactly what makes that gate unnecessary, and Phage the
+///     Untouchable ("Whenever Phage deals combat damage to a creature") has a
+///     self-referential subject while still meaning the damaged creature.
+///
+/// The subject phrase is arbitrarily long ("a creature or planeswalker an
+/// opponent controls with a bounty counter on it"), so each verb phrase is found
+/// by scanning the shared word-boundary primitive rather than by anchoring at a
+/// fixed offset.
+fn trigger_damage_recipient_ref_for_condition(
+    after_keyword: &str,
+    trigger_subject: &TargetFilter,
+) -> Option<TargetFilter> {
+    use crate::parser::oracle_nom::primitives::scan_at_word_boundaries;
+
+    // CR 608.2k + CR 120.1: a PASSIVE-voice damage trigger condition ("whenever
+    // <subject> is dealt damage") makes its grammatical subject the damage
+    // RECIPIENT, so the effect body's untargeted object anaphor ("destroy it",
+    // "put a +1/+1 counter on it") names the damaged permanent. The
+    // subject-derived `TargetFilter::TriggeringSource` fallback in
+    // `resolve_it_pronoun` reads `.source_id`, which on a passive-voice trigger
+    // is the damage DEALER — a different object entirely (Termination
+    // Facilitator destroyed the source of the damage instead of the bountied
+    // creature, issue #8379).
+    //
+    // Gated on the subject NOT being self-referential, mirroring the exclusion
+    // set both pronoun resolvers already apply (`resolve_it_pronoun`,
+    // `resolve_pronoun_target`).
+    let subject_is_self_referential = matches!(
+        trigger_subject,
+        TargetFilter::SelfRef | TargetFilter::Any | TargetFilter::CostPaidObject
+    );
+    if !subject_is_self_referential
+        && scan_at_word_boundaries(after_keyword, parse_passive_dealt_damage).is_some()
+    {
+        return Some(TargetFilter::EventTarget);
+    }
+
+    // CR 608.2k + CR 120.1 + CR 120.3: the ACTIVE-voice sibling. "Destroy that
+    // creature" / "exile that creature" / "tap that creature" / "put a -1/-1
+    // counter on that creature" all name the damaged permanent (Phage the
+    // Untouchable, Toxin Sliver, Stinkweed Imp, Pit Spawn, Sword of Kaldra,
+    // Kaldra Compleat, the Kashi-Tribe and basilisk cycles, Obelisk Spider).
+    //
+    // Without the pin, the reference fell through to the generic anaphor grammar
+    // and bound `ParentTarget`. An untargeted damage trigger has no chosen
+    // target, and the parentless-`ParentTarget` event fallback in
+    // `game/targeting.rs` carries no `DamageDealt` arm, so the referent resolved
+    // to NOTHING and every effect in the class silently did nothing. The
+    // subject-derived `TriggeringSource` fallback is equally wrong here and worse
+    // for being plausible: on an active-voice condition the event's `source_id`
+    // is the damage DEALER, so "destroy that creature" would destroy the
+    // blocking creature instead of the attacker.
+    if scan_at_word_boundaries(after_keyword, parse_active_deals_damage_to_object).is_some() {
+        return Some(TargetFilter::EventTarget);
+    }
+
+    None
+}
+
 fn trigger_object_pronoun_ref_for_condition(
     condition_text: &str,
     trigger_subject: &TargetFilter,
@@ -10922,44 +11103,54 @@ fn trigger_object_pronoun_ref_for_condition(
         return Some(TargetFilter::TriggeringSource);
     }
 
-    // CR 608.2k + CR 120.1: a PASSIVE-voice damage trigger condition ("whenever
-    // <subject> is dealt damage") makes its grammatical subject the damage
-    // RECIPIENT, so the effect body's untargeted object anaphor ("destroy it",
-    // "put a +1/+1 counter on it") names the damaged permanent — CR 608.2k's
-    // "specific untargeted object … previously referred to by that ability's …
-    // trigger condition". `TargetFilter::EventTarget` reads
-    // `GameEvent::DamageDealt.target`; the subject-derived
-    // `TargetFilter::TriggeringSource` fallback in `resolve_it_pronoun` reads
-    // `.source_id`, which on a passive-voice trigger is the damage DEALER — a
-    // different object entirely (Termination Facilitator destroyed the source of
-    // the damage instead of the bountied creature, issue #8379).
-    //
-    // The subject phrase is arbitrarily long ("a creature or planeswalker an
-    // opponent controls with a bounty counter on it"), so the verb phrase is
-    // found by scanning the shared word-boundary primitive rather than by
-    // anchoring at a fixed offset.
-    //
-    // Gated on the subject NOT being self-referential, mirroring the exclusion
-    // set both pronoun resolvers already apply (`resolve_it_pronoun`,
-    // `resolve_pronoun_target`): on a self-scoped enrage trigger ("whenever this
-    // creature is dealt damage") the recipient IS the source, and `SelfRef` /
-    // `ParentTarget` remain the more precise antecedents — they resolve without
-    // consulting the trigger event at all.
-    let subject_is_self_referential = matches!(
-        trigger_subject,
-        TargetFilter::SelfRef | TargetFilter::Any | TargetFilter::CostPaidObject
-    );
-    if !subject_is_self_referential
-        && crate::parser::oracle_nom::primitives::scan_at_word_boundaries(
-            after_keyword,
-            parse_passive_dealt_damage,
-        )
-        .is_some()
+    // CR 608.2k + CR 120.1 + CR 120.3: a damage trigger condition names the
+    // damage RECIPIENT as the body's untargeted object antecedent, in either
+    // voice. Delegated to the single authority so the bare-pronoun pin and the
+    // demonstrative pin below can never recognize different condition shapes.
+    if let Some(recipient) =
+        trigger_damage_recipient_ref_for_condition(after_keyword, trigger_subject)
     {
-        return Some(TargetFilter::EventTarget);
+        return Some(recipient);
     }
 
     None
+}
+
+/// CR 608.2k: the antecedent a singular DEMONSTRATIVE ("that creature" / "that
+/// permanent" / "that card" / "that token") in the current trigger body may
+/// bind, as opposed to the wider set a bare pronoun ("it") may bind.
+///
+/// Deliberately NARROWER than [`trigger_object_pronoun_ref_for_condition`], and
+/// separate for the same reason `plural_object_pronoun_ref` is separate from
+/// `object_pronoun_ref`: this codebase pins antecedents per surface form,
+/// because which references a given antecedent may capture is a property of the
+/// grammar, not of the antecedent alone.
+///
+/// Only the damage-RECIPIENT provenance qualifies. A demonstrative names an
+/// object the condition acted UPON, which is exactly what the `"to <object>"`
+/// tail (active voice) and the grammatical subject (passive voice) supply.
+///
+/// The spell-cast provenance deliberately does NOT qualify. "Whenever you cast
+/// an instant or sorcery spell from your hand, exile THAT CARD ... instead of
+/// putting it into your graveyard as it resolves" (Gandalf of the Secret Fire,
+/// Goliath Daydreamer) is a replacement clause whose demonstrative is consumed
+/// by its own grammar; routing it through the cast-spell pin reclassifies the
+/// clause and silently swallows the replacement. Bare pronouns in a spell-cast
+/// body keep their `TriggeringSource` pin — that binding is unchanged.
+fn trigger_demonstrative_object_ref_for_condition(
+    condition_text: &str,
+    trigger_subject: &TargetFilter,
+) -> Option<TargetFilter> {
+    let lower = condition_text.to_lowercase();
+    let after_keyword = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower.as_str())
+    .map(|(rest, _)| rest)
+    .unwrap_or(&lower);
+
+    trigger_damage_recipient_ref_for_condition(after_keyword, trigger_subject)
 }
 
 /// CR 603.4 + CR 406.6 + CR 607.2a: an intervening-if introduces the

@@ -2273,6 +2273,7 @@ impl SessionManager {
                 attach_to,
                 run_etb,
                 nonlegendary,
+                creation_kind,
                 ..
             }) => {
                 let result = create_debug_cards_with_rejection(
@@ -2287,6 +2288,7 @@ impl SessionManager {
                         attach_to,
                         run_etb,
                         nonlegendary,
+                        creation_kind,
                     },
                 )
                 .map_err(SessionActionError::Rejected)?;
@@ -2686,7 +2688,8 @@ mod tests {
     use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::ability::{Effect, ResolvedAbility, TargetRef};
     use engine::types::actions::{
-        PrecastCopyShortcutResponse, ResolveAllConsentDecision, ResolveAllScope,
+        DebugCardCreationKind, PrecastCopyShortcutResponse, ResolveAllConsentDecision,
+        ResolveAllScope,
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::CardType;
@@ -5413,6 +5416,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    creation_kind: DebugCardCreationKind::Token,
                 }),
                 Some(&*db),
             )
@@ -5449,6 +5453,7 @@ mod tests {
                     object.name == "Server Debug Creature"
                         && object.owner == PlayerId(1)
                         && object.zone == Zone::Battlefield
+                        && object.is_token
                 })
                 .count(),
             2
@@ -5479,6 +5484,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    creation_kind: DebugCardCreationKind::Card,
                 }),
             ),
             (
@@ -5541,6 +5547,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    creation_kind: DebugCardCreationKind::Card,
                 }),
             )
             .expect_err("an invalid owner must fail before database lookup");
@@ -5567,6 +5574,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    creation_kind: DebugCardCreationKind::Card,
                 }),
             )
             .expect_err("a valid nonzero request requires a database");
@@ -5594,6 +5602,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    creation_kind: DebugCardCreationKind::Card,
                 }),
             )
             .expect_err("a real entry off Priority must fail before database lookup");
@@ -6329,6 +6338,7 @@ mod tests {
                     attach_to: None,
                     run_etb: true,
                     nonlegendary: false,
+                    creation_kind: DebugCardCreationKind::Card,
                 }),
                 None,
             )

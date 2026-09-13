@@ -11067,6 +11067,7 @@ fn apply_cleave_text_change(obj: &mut crate::game::game_object::GameObject) -> b
         replacements: obj.replacement_definitions.clone(),
         base_abilities: std::sync::Arc::clone(&obj.base_abilities),
         base_triggers: std::sync::Arc::clone(&obj.base_trigger_definitions),
+        base_trigger_printed_origins: obj.base_trigger_printed_origins.clone(),
         trigger_base_set_instance: obj.trigger_base_set_instance,
         next_trigger_base_set_instance: obj.next_trigger_base_set_instance,
         base_statics: std::sync::Arc::clone(&obj.base_static_definitions),
@@ -11101,6 +11102,7 @@ pub(crate) fn revert_cleave_text_change(obj: &mut crate::game::game_object::Game
     obj.replacement_definitions = snapshot.replacements;
     obj.base_abilities = snapshot.base_abilities;
     obj.base_trigger_definitions = snapshot.base_triggers;
+    obj.base_trigger_printed_origins = snapshot.base_trigger_printed_origins;
     obj.trigger_base_set_instance = snapshot.trigger_base_set_instance;
     obj.next_trigger_base_set_instance = snapshot.next_trigger_base_set_instance;
     obj.base_static_definitions = snapshot.base_statics;
@@ -15774,6 +15776,14 @@ fn can_cast_prepared_now_with_probe(
             if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, amount) {
                 return false;
             }
+        }
+        // CR 601.2f + CR 601.2h: a REQUIRED additional cost the parser could not
+        // read is part of the total cost and has no payment procedure, so it
+        // can't be paid and the spell can't be cast. Gate enumeration here so
+        // the action never reaches `legal_actions_full`; the payment step in
+        // `casting_costs.rs` is the backstop for a directly submitted `CastSpell`.
+        if matches!(cost, AbilityCost::Unimplemented { .. }) {
+            return false;
         }
     }
 

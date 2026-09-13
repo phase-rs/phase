@@ -1181,6 +1181,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 fn back_face(name: &str) -> BackFaceData {
     BackFaceData {
         is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
         name: name.to_string(),
         power: None,
         toughness: None,

@@ -24,7 +24,7 @@ use super::ability::{
     TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef,
     TriggerDefinitionRef, TriggerEntry,
 };
-use super::actions::ResolveAllScope;
+use super::actions::{DebugCardCreationKind, ResolveAllScope};
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
@@ -1941,8 +1941,9 @@ pub enum MayTriggerAutoChoiceScope {
 ///
 /// `SameCard` deliberately carries a printed reference rather than `CardId`:
 /// `CardId` identifies one physical object, while `PrintedCardRef` identifies
-/// the printed face shared by physical copies. The `printed_occurrence` keeps
-/// independently functioning printed triggers separate.
+/// the card face shared by physical cards and copies of that card. The
+/// `printed_occurrence` keeps independently functioning copiable triggers
+/// separate.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(tag = "type", content = "data")]
 pub enum MayTriggerAutoChoiceSelector {
@@ -4163,6 +4164,8 @@ pub struct PendingDebugCardEntries {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_to: Option<AttachTarget>,
     pub nonlegendary: bool,
+    #[serde(default)]
+    pub creation_kind: DebugCardCreationKind,
     pub remaining: u32,
 }
 
@@ -24829,17 +24832,11 @@ impl GameState {
         let MayTriggerOrigin::Definition { definition_ref } = &key.origin else {
             return None;
         };
-        let TriggerDefinitionOccurrenceRef::Printed { printed_index, .. } =
-            &definition_ref.occurrence
-        else {
-            return None;
-        };
         if definition_ref.source.object_id != key.source_id {
             return None;
         }
         let source = self.objects.get(&key.source_id)?;
         if source.incarnation != definition_ref.source.incarnation
-            || !source.is_represented_by_a_card()
             || !source
                 .trigger_definitions
                 .iter_all()
@@ -24847,10 +24844,53 @@ impl GameState {
         {
             return None;
         }
+        let (printed_ref, printed_occurrence) = match &definition_ref.occurrence {
+            TriggerDefinitionOccurrenceRef::Printed { printed_index, .. } => {
+                if source.base_trigger_printed_origins.is_empty() {
+                    (source.base_printed_ref.clone()?, *printed_index)
+                } else {
+                    let origin = source
+                        .base_trigger_printed_origins
+                        .get(*printed_index)?
+                        .as_ref()?;
+                    (origin.printed_ref.clone(), origin.printed_occurrence)
+                }
+            }
+            TriggerDefinitionOccurrenceRef::CopiedValue {
+                copy_effect,
+                copied_slot,
+                ..
+            } => {
+                // A copied slot is only a position in the CopyValues payload;
+                // merged permanents may carry slots from several printed cards
+                // while displaying the top component. Read the immutable
+                // semantic origin captured with the copiable values instead of
+                // inferring identity from display art or a duration binding.
+                let effect = self
+                    .transient_continuous_effects
+                    .iter()
+                    .find(|effect| effect.id == copy_effect.continuous_effect_id)?;
+                if effect.affected_recipient != Some(definition_ref.source) {
+                    return None;
+                }
+                let ContinuousModification::CopyValues { values, .. } =
+                    effect.modifications.get(copy_effect.modification_index)?
+                else {
+                    return None;
+                };
+                let origin = values.trigger_printed_origins.get(*copied_slot)?.as_ref()?;
+                (origin.printed_ref.clone(), origin.printed_occurrence)
+            }
+            TriggerDefinitionOccurrenceRef::KeywordCompanion { .. }
+            | TriggerDefinitionOccurrenceRef::CopyRetained { .. }
+            | TriggerDefinitionOccurrenceRef::Granted { .. }
+            | TriggerDefinitionOccurrenceRef::ExpandedGrant { .. }
+            | TriggerDefinitionOccurrenceRef::Unmaterialized => return None,
+        };
         Some(MayTriggerAutoChoiceSelector::SameCard {
             player: key.player,
-            printed_ref: source.base_printed_ref.clone()?,
-            printed_occurrence: *printed_index,
+            printed_ref,
+            printed_occurrence,
         })
     }
 
@@ -33599,6 +33639,7 @@ mod tests {
             keywords: vec![],
             abilities: std::sync::Arc::default(),
             trigger_definitions: std::sync::Arc::default(),
+            trigger_printed_origins: std::sync::Arc::default(),
             replacement_definitions: std::sync::Arc::default(),
             static_definitions: std::sync::Arc::default(),
             room_halves: None,
@@ -36973,6 +37014,231 @@ mod tests {
         assert_eq!(
             state.may_trigger_auto_choice_for_prompt(&second_key, Some(&second_selector)),
             Some(AutoMayChoice::Decline)
+        );
+    }
+
+    #[test]
+    fn same_card_may_trigger_selector_includes_token_and_layer_copies() {
+        let printed_ref = PrintedCardRef {
+            oracle_id: "copied-oracle-id".to_string(),
+            face_name: "Copied Face".to_string(),
+        };
+        let trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        let mut state = GameState::new_two_player(42);
+
+        let mut printed = GameObject::new(
+            ObjectId(10),
+            CardId(101),
+            PlayerId(0),
+            "Copied Face".to_string(),
+            Zone::Battlefield,
+        );
+        printed.printed_ref = Some(printed_ref.clone());
+        printed.base_printed_ref = Some(printed_ref.clone());
+        printed.push_printed_trigger(trigger.clone());
+        let printed_ref_key = printed.trigger_definition_ref(&printed.trigger_definitions[0]);
+        let copied_values = crate::game::printed_cards::intrinsic_copiable_values(&printed);
+
+        let mut token_copy = GameObject::new(
+            ObjectId(11),
+            CardId(0),
+            PlayerId(0),
+            "Copied Face".to_string(),
+            Zone::Battlefield,
+        );
+        token_copy.is_token = true;
+        token_copy.printed_ref = Some(printed_ref.clone());
+        token_copy.base_printed_ref = Some(printed_ref.clone());
+        token_copy.push_printed_trigger(trigger.clone());
+        let token_ref_key = token_copy.trigger_definition_ref(&token_copy.trigger_definitions[0]);
+
+        let layer_copy = GameObject::new(
+            ObjectId(12),
+            CardId(303),
+            PlayerId(0),
+            "Copied Face".to_string(),
+            Zone::Battlefield,
+        );
+
+        state.objects.insert(ObjectId(10), printed);
+        state.objects.insert(ObjectId(11), token_copy);
+        state.objects.insert(ObjectId(12), layer_copy);
+        let recipient = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(12)]);
+        let copy_source = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(10)]);
+        let copy_effect_id = state.add_transient_continuous_effect_with_bindings(
+            ObjectId(12),
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: ObjectId(12) },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(copied_values.clone()),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: Some(printed_ref.clone()),
+                token_image_ref: None,
+            }],
+            None,
+            TransientContinuousEffectBindings {
+                affected_recipient: Some(recipient),
+                duration_subject: Some(copy_source),
+            },
+        );
+        crate::game::printed_cards::apply_copiable_values(
+            state
+                .objects
+                .get_mut(&ObjectId(12))
+                .expect("layer-copy recipient exists"),
+            &copied_values,
+            crate::types::ability::CopyEffectInstanceRef {
+                continuous_effect_id: copy_effect_id,
+                modification_index: 0,
+            },
+        );
+        let layer_copy = &state.objects[&ObjectId(12)];
+        let layer_ref_key = layer_copy.trigger_definition_ref(&layer_copy.trigger_definitions[0]);
+
+        let selector_for = |state: &GameState, source_id, definition_ref| {
+            state
+                .same_card_may_trigger_auto_choice_selector(&MayTriggerAutoChoiceKey {
+                    player: PlayerId(0),
+                    source_id,
+                    origin: MayTriggerOrigin::Definition { definition_ref },
+                })
+                .expect("copiable trigger is eligible for same-card choices")
+        };
+        let printed_selector = selector_for(&state, ObjectId(10), printed_ref_key);
+        let token_selector = selector_for(&state, ObjectId(11), token_ref_key);
+        state.objects.remove(&ObjectId(10));
+        let layer_selector = selector_for(&state, ObjectId(12), layer_ref_key);
+
+        assert_eq!(printed_selector, token_selector);
+        assert_eq!(printed_selector, layer_selector);
+    }
+
+    #[test]
+    fn same_card_may_trigger_selector_keeps_component_origin_for_merged_copy_values() {
+        let top_printed_ref = PrintedCardRef {
+            oracle_id: "merged-top".to_string(),
+            face_name: "Top Face".to_string(),
+        };
+        let component_printed_ref = PrintedCardRef {
+            oracle_id: "merged-component".to_string(),
+            face_name: "Component Face".to_string(),
+        };
+        let trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        let mut state = GameState::new_two_player(42);
+
+        let mut composite_source = GameObject::new(
+            ObjectId(10),
+            CardId(101),
+            PlayerId(0),
+            "Top Face".to_string(),
+            Zone::Battlefield,
+        );
+        composite_source.printed_ref = Some(top_printed_ref.clone());
+        composite_source.base_printed_ref = Some(top_printed_ref.clone());
+        composite_source.push_printed_trigger(trigger);
+        composite_source.merged_components = vec![ObjectId(10), ObjectId(11)];
+        let mut copied_values =
+            crate::game::printed_cards::intrinsic_copiable_values(&composite_source);
+        copied_values.trigger_printed_origins =
+            std::sync::Arc::new(vec![Some(crate::types::ability::TriggerPrintedOrigin {
+                printed_ref: component_printed_ref.clone(),
+                printed_occurrence: 2,
+            })]);
+        let materialized_values = copied_values.clone();
+
+        let recipient = GameObject::new(
+            ObjectId(12),
+            CardId(303),
+            PlayerId(0),
+            "Copy".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(10), composite_source);
+        state.objects.insert(ObjectId(12), recipient);
+        let recipient_ref = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(12)]);
+        let source_ref = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(10)]);
+        let copy_effect_id = state.add_transient_continuous_effect_with_bindings(
+            ObjectId(12),
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: ObjectId(12) },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(copied_values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: Some(top_printed_ref),
+                token_image_ref: None,
+            }],
+            None,
+            TransientContinuousEffectBindings {
+                affected_recipient: Some(recipient_ref),
+                duration_subject: Some(source_ref),
+            },
+        );
+        crate::game::printed_cards::apply_copiable_values(
+            state
+                .objects
+                .get_mut(&ObjectId(12))
+                .expect("layer-copy recipient exists"),
+            &materialized_values,
+            crate::types::ability::CopyEffectInstanceRef {
+                continuous_effect_id: copy_effect_id,
+                modification_index: 0,
+            },
+        );
+        let copied = &state.objects[&ObjectId(12)];
+        let definition_ref = copied.trigger_definition_ref(&copied.trigger_definitions[0]);
+
+        assert_eq!(
+            state
+                .same_card_may_trigger_auto_choice_selector(&MayTriggerAutoChoiceKey {
+                    player: PlayerId(0),
+                    source_id: ObjectId(12),
+                    origin: MayTriggerOrigin::Definition { definition_ref },
+                })
+                .expect("merged component origin remains available after copying"),
+            MayTriggerAutoChoiceSelector::SameCard {
+                player: PlayerId(0),
+                printed_ref: component_printed_ref.clone(),
+                printed_occurrence: 2,
+            }
+        );
+
+        let mut token_copy = GameObject::new(
+            ObjectId(13),
+            CardId(0),
+            PlayerId(0),
+            "Top Face".to_string(),
+            Zone::Battlefield,
+        );
+        token_copy.is_token = true;
+        token_copy.printed_ref = Some(PrintedCardRef {
+            oracle_id: "merged-top".to_string(),
+            face_name: "Top Face".to_string(),
+        });
+        token_copy.base_printed_ref = token_copy.printed_ref.clone();
+        crate::game::printed_cards::install_copiable_values_as_base(
+            &mut token_copy,
+            &materialized_values,
+        );
+        let materialized_ref =
+            token_copy.trigger_definition_ref(&token_copy.trigger_definitions[0]);
+        state.objects.insert(ObjectId(13), token_copy);
+        assert_eq!(
+            state
+                .same_card_may_trigger_auto_choice_selector(&MayTriggerAutoChoiceKey {
+                    player: PlayerId(0),
+                    source_id: ObjectId(13),
+                    origin: MayTriggerOrigin::Definition {
+                        definition_ref: materialized_ref,
+                    },
+                })
+                .expect("materialized token copy keeps its component origin"),
+            MayTriggerAutoChoiceSelector::SameCard {
+                player: PlayerId(0),
+                printed_ref: component_printed_ref,
+                printed_occurrence: 2,
+            }
         );
     }
 

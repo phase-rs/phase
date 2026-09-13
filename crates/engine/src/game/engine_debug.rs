@@ -5,17 +5,18 @@ use crate::types::ability::{
     TargetRef,
 };
 use crate::types::action_rejection::ActionRejection;
-use crate::types::actions::{DebugAction, DebugTokenRequest, GameAction};
+use crate::types::actions::{DebugAction, DebugCardCreationKind, DebugTokenRequest, GameAction};
 use crate::types::card::CardFace;
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, DebugCardEntrySource, GameState, PendingDebugCardEntries, WaitingFor,
+    ActionResult, DebugCardEntrySource, GameState, LiminalEntry, PendingDebugCardEntries,
+    PendingLiminalEntryResume, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::{PlayerCounterKind, PlayerId};
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent};
 use crate::types::resolved_commands::ResolvedPlayerEdit;
 use crate::types::zones::Zone;
 
@@ -26,6 +27,7 @@ use super::engine::{
     EngineError,
 };
 use super::game_object::AttachTarget;
+use super::replacement::{self, ReplacementResult};
 use super::visibility::filter_action_rejection_for_viewer;
 use super::zones;
 use crate::database::CardDatabase;
@@ -825,9 +827,8 @@ pub fn route_debug_create_to_battlefield(
     state: &mut GameState,
     object_id: ObjectId,
     run_etb: bool,
+    attach_to: Option<AttachTarget>,
 ) -> ActionResult {
-    use super::replacement::{self, ReplacementResult};
-
     let mut events: Vec<GameEvent> = vec![];
 
     // "Run ETB effects" unchecked: place the staged object on the battlefield
@@ -853,6 +854,14 @@ pub fn route_debug_create_to_battlefield(
         };
     }
 
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.is_token)
+    {
+        return route_debug_token_to_battlefield(state, object_id, attach_to);
+    }
+
     let from = state
         .objects
         .get(&object_id)
@@ -864,7 +873,7 @@ pub fn route_debug_create_to_battlefield(
         from,
         to: Zone::Battlefield,
         cause: None,
-        attach_to: None,
+        attach_to,
         enter_tapped: Default::default(),
         enters_attacking: false,
         enter_with_counters: vec![],
@@ -914,6 +923,131 @@ pub fn route_debug_create_to_battlefield(
     }
 }
 
+/// CR 111.1 + CR 614.12: A token does not move from a staging zone onto the
+/// battlefield. Convert the debug-selected printed characteristics into the
+/// same liminal token projection used by copy-token effects, then consult the
+/// standard token-entry replacement and delivery pipeline.
+fn route_debug_token_to_battlefield(
+    state: &mut GameState,
+    object_id: ObjectId,
+    attach_to: Option<AttachTarget>,
+) -> ActionResult {
+    let mut events = Vec::new();
+    let staged = state
+        .objects
+        .remove(&object_id)
+        .expect("debug token must exist before its entry is staged");
+    // allow-raw-zone: removes a private debug staging row before its CR 111.1 no-from-zone token entry; no game event may observe the staging zone.
+    zones::remove_from_zone(state, object_id, staged.zone, staged.owner);
+
+    let values = super::printed_cards::intrinsic_copiable_values(&staged);
+    let copy = CopyTokenSpec {
+        values: Box::new(values.clone()),
+        display_source: staged.display_source,
+        printed_ref: staged.printed_ref.clone(),
+        token_image_ref: staged.token_image_ref.clone(),
+        extra_keywords: Vec::new(),
+        additional_modifications: Vec::new(),
+        tapped: false,
+        enters_attacking: false,
+        sacrifice_at: None,
+        source_id: object_id,
+        controller: staged.controller,
+    };
+    let mut token = super::game_object::GameObject::new(
+        object_id,
+        CardId(0),
+        staged.owner,
+        values.name.clone(),
+        Zone::Battlefield,
+    );
+    let entry_timestamp = state.next_timestamp();
+    super::effects::token::materialize_token_copy_body(
+        &mut token,
+        &copy,
+        &crate::types::resolved_commands::ResolvedCopyBodyModifications::NoExceptions,
+        state.turn_number,
+        entry_timestamp,
+        false,
+    );
+    state.liminal_entries.insert(
+        object_id,
+        LiminalEntry {
+            object: crate::types::game_state::LiminalEntrant::Token(
+                crate::types::game_state::TokenProjection::materialize(token),
+            ),
+            name: values.name,
+            source_id: object_id,
+            controller: staged.controller,
+            enters_attacking: false,
+            attach_to,
+            sacrifice_at: None,
+            remaining_count: 0,
+            created_ids: Vec::new(),
+            copy_resume: Some(Box::new(copy)),
+            spec_resume: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            kind: crate::types::game_state::LiminalEntryKind::Token,
+            replacement_applied: HashSet::new(),
+        },
+    );
+
+    let proposed = ProposedEvent::TokenEntry {
+        entry_ref: object_id,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enter_with_counters: Vec::new(),
+        applied: HashSet::new(),
+    };
+    match replacement::replace_event(state, proposed, &mut events) {
+        ReplacementResult::Execute(event) => {
+            if state.has_post_replacement_drain() {
+                if let Some(waiting_for) =
+                    super::engine_replacement::apply_pending_post_replacement_effect(
+                        state,
+                        Some(object_id),
+                        None,
+                        Some(crate::types::replacements::ReplacementEvent::Moved),
+                        &mut events,
+                    )
+                {
+                    state.pending_liminal_entry_resume = Some(PendingLiminalEntryResume::Token {
+                        source_id: object_id,
+                        player: waiting_for.acting_player().unwrap_or(staged.controller),
+                        event,
+                    });
+                    state.waiting_for = waiting_for;
+                    return ActionResult {
+                        events,
+                        waiting_for: state.waiting_for.clone(),
+                        log_entries: vec![],
+                    };
+                }
+            }
+            if super::effects::token::commit_liminal_token_entry_and_continue_copy_batch(
+                state,
+                event,
+                &mut events,
+            ) {
+                super::triggers::process_triggers(state, &events);
+                super::sba::check_state_based_actions(state, &mut events);
+            }
+        }
+        ReplacementResult::Prevented => {
+            state.liminal_entries.remove(&object_id);
+        }
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+        }
+    }
+
+    ActionResult {
+        events,
+        waiting_for: state.waiting_for.clone(),
+        log_entries: vec![],
+    }
+}
+
 /// Bind a debug card request to its complete printed characteristics before a
 /// batch can pause. The source can then survive save/restore without a later
 /// lookup through the adapter-owned card database.
@@ -936,6 +1070,7 @@ pub struct DebugCardCreateRequest {
     pub attach_to: Option<AttachTarget>,
     pub run_etb: bool,
     pub nonlegendary: bool,
+    pub creation_kind: DebugCardCreationKind,
 }
 
 impl DebugCardCreateRequest {
@@ -948,6 +1083,7 @@ impl DebugCardCreateRequest {
             attach_to: self.attach_to,
             run_etb: self.run_etb,
             nonlegendary: self.nonlegendary,
+            creation_kind: self.creation_kind,
         }
     }
 }
@@ -980,6 +1116,7 @@ pub fn create_debug_cards(
         attach_to,
         run_etb,
         nonlegendary,
+        creation_kind,
     } = request;
     let mut events = Vec::new();
 
@@ -1000,10 +1137,11 @@ pub fn create_debug_cards(
                     None
                 },
                 nonlegendary,
+                creation_kind,
                 initial_zone,
             );
             if zone == Zone::Battlefield {
-                let entry = route_debug_create_to_battlefield(state, object_id, false);
+                let entry = route_debug_create_to_battlefield(state, object_id, false, None);
                 events.extend(entry.events);
             }
         }
@@ -1020,6 +1158,7 @@ pub fn create_debug_cards(
                 owner,
                 attach_to,
                 nonlegendary,
+                creation_kind,
                 remaining: count,
             },
             &mut events,
@@ -1091,12 +1230,13 @@ fn drain_debug_card_entries(
             state,
             &pending.source,
             pending.owner,
-            pending.attach_to,
+            None,
             pending.nonlegendary,
+            pending.creation_kind,
             Zone::Hand,
         );
         pending.remaining -= 1;
-        let entry = route_debug_create_to_battlefield(state, object_id, true);
+        let entry = route_debug_create_to_battlefield(state, object_id, true, pending.attach_to);
         events.extend(entry.events);
         state.waiting_for = entry.waiting_for;
 
@@ -1121,6 +1261,7 @@ fn materialize_debug_card(
     owner: PlayerId,
     attach_to: Option<AttachTarget>,
     nonlegendary: bool,
+    creation_kind: DebugCardCreationKind,
     initial_zone: Zone,
 ) -> ObjectId {
     // CR 400.7: The object receives an identity only at the point its own
@@ -1139,6 +1280,12 @@ fn materialize_debug_card(
         .expect("just-created debug card");
     super::printed_cards::apply_card_face_to_object(object, &source.face);
     object.back_face = source.back_face.clone();
+    // CR 111.3 + CR 111.7: the sandbox may define a token from the printed
+    // characteristics above; shared zone/SBA paths enforce token disappearance.
+    object.is_token = match creation_kind {
+        DebugCardCreationKind::Card => false,
+        DebugCardCreationKind::Token => true,
+    };
     // CR 205.4a-b: The sandbox override removes only the legendary
     // supertype from both copiable and current characteristics.
     if nonlegendary {
@@ -1238,6 +1385,7 @@ mod tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
+            creation_kind: DebugCardCreationKind::Card,
         };
         let owner_error = preflight_debug_action(&state, PlayerId(0), &invalid_owner)
             .expect_err("CreateCard must name an existing owner");
@@ -1251,6 +1399,7 @@ mod tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
+            creation_kind: DebugCardCreationKind::Card,
         };
         let priority_error = preflight_debug_action(&state, PlayerId(0), &real_entry)
             .expect_err("a real battlefield entry may start only from Priority");
@@ -1264,6 +1413,7 @@ mod tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
+            creation_kind: DebugCardCreationKind::Card,
         };
         preflight_debug_action(&state, PlayerId(0), &zero_entry)
             .expect("zero is a no-op even off Priority");
@@ -1275,9 +1425,25 @@ mod tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
+            creation_kind: DebugCardCreationKind::Card,
         };
         preflight_debug_action(&state, PlayerId(0), &hand_create)
             .expect("off-battlefield creation is synchronous off Priority");
+        let token_in_hand = DebugAction::CreateCard {
+            card_name: "Debug Creature".into(),
+            owner: PlayerId(0),
+            zone: Zone::Hand,
+            count: 1,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
+            creation_kind: DebugCardCreationKind::Token,
+        };
+        let token_zone_error = preflight_debug_action(&state, PlayerId(0), &token_in_hand)
+            .expect_err("a debug card-token cannot be created outside the battlefield");
+        assert!(token_zone_error
+            .to_string()
+            .contains("must be created on the battlefield"));
         let raw_battlefield_create = DebugAction::CreateCard {
             card_name: "Debug Creature".into(),
             owner: PlayerId(0),
@@ -1286,6 +1452,7 @@ mod tests {
             attach_to: None,
             run_etb: false,
             nonlegendary: false,
+            creation_kind: DebugCardCreationKind::Card,
         };
         preflight_debug_action(&state, PlayerId(0), &raw_battlefield_create)
             .expect("raw battlefield creation is synchronous off Priority");
@@ -1312,6 +1479,7 @@ mod tests {
                 attach_to: None,
                 run_etb: true,
                 nonlegendary: false,
+                creation_kind: DebugCardCreationKind::Card,
             },
         )
         .expect_err("the source-bound creator must reuse the shared owner preflight");
@@ -1338,6 +1506,7 @@ mod tests {
                 attach_to: None,
                 run_etb: true,
                 nonlegendary: false,
+                creation_kind: DebugCardCreationKind::Card,
             },
         )
         .expect_err("the actor carried by the source-bound request must be authorized");
@@ -1361,6 +1530,7 @@ mod tests {
                 attach_to: None,
                 run_etb: true,
                 nonlegendary: false,
+                creation_kind: DebugCardCreationKind::Card,
             }),
         )
         .expect_err("the action-boundary zero fast path must validate CreateCard owner");
@@ -1392,6 +1562,7 @@ mod tests {
                 attach_to: None,
                 run_etb: true,
                 nonlegendary: false,
+                creation_kind: DebugCardCreationKind::Token,
             },
         )
         .expect("an authorized debug batch should succeed");
@@ -1408,6 +1579,11 @@ mod tests {
                 .count(),
             2
         );
+        assert!(state
+            .objects
+            .values()
+            .filter(|object| object.name == "Debug Batch Creature")
+            .all(|object| object.is_token));
     }
 
     #[test]
@@ -1424,6 +1600,7 @@ mod tests {
             owner: PlayerId(0),
             attach_to: None,
             nonlegendary: false,
+            creation_kind: DebugCardCreationKind::Card,
             remaining: 1,
         });
 
@@ -1483,6 +1660,7 @@ mod tests {
                 attach_to: None,
                 run_etb: true,
                 nonlegendary: false,
+                creation_kind: DebugCardCreationKind::Card,
             },
         )
         .expect("an authorized debug batch should start");
@@ -1644,6 +1822,7 @@ mod tests {
         card_types.core_types.push(CoreType::Sorcery);
         BackFaceData {
             is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
             name: "Test Prepare Face".to_string(),
             power: None,
             toughness: None,

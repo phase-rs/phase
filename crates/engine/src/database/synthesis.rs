@@ -16009,6 +16009,7 @@ mod annihilator_runtime_tests {
             attacker_ids: vec![attacker_id],
             defending_player,
             attacks: vec![(attacker_id, AttackTarget::Player(defending_player))],
+            declaration_records: Vec::new(),
         }
     }
 

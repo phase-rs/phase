@@ -157,6 +157,7 @@ function CreateCardForm({ onDispatch }: Props) {
   // meaningfully for Battlefield — the engine ignores it for other zones.
   const [runEtb, setRunEtb] = useState(true);
   const [nonlegendary, setNonlegendary] = useState(false);
+  const [isToken, setIsToken] = useState(false);
   const [face, setFace] = useState<CardFaceShape | null>(null);
   const [targetKind, setTargetKind] = useState<"Object" | "Player">("Object");
   const [targetObjectId, setTargetObjectId] = useState<ObjectId | null>(null);
@@ -204,6 +205,9 @@ function CreateCardForm({ onDispatch }: Props) {
     if (info.canTargetPlayer && !info.canTargetObject) setTargetKind("Player");
     else if (!info.canTargetPlayer && info.canTargetObject) setTargetKind("Object");
   }, [info.canTargetPlayer, info.canTargetObject]);
+  useEffect(() => {
+    if (zone !== "Battlefield") setIsToken(false);
+  }, [zone]);
 
   const buildAttachTo = (): AttachTarget | undefined => {
     if (!showAttachPicker) return undefined;
@@ -275,6 +279,15 @@ function CreateCardForm({ onDispatch }: Props) {
           label="Make nonlegendary"
         />
       </FieldRow>
+      {zone === "Battlefield" && (
+        <FieldRow label="">
+          <CheckboxInput
+            checked={isToken}
+            onChange={setIsToken}
+            label={t("debugCreate.asToken")}
+          />
+        </FieldRow>
+      )}
       <SubmitButton
         onClick={() =>
           onDispatch({
@@ -286,6 +299,7 @@ function CreateCardForm({ onDispatch }: Props) {
               attach_to: buildAttachTo(),
               run_etb: runEtb,
               nonlegendary,
+              creation_kind: isToken ? "Token" : "Card",
               count,
             },
           })
