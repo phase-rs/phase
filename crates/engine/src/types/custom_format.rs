@@ -119,12 +119,12 @@ pub enum WishOutsideGameScope {
 }
 
 /// CR 704.5j: the "legend rule" state-based action. `PreM14AnyController`
-/// reproduces a historical ruling some casual formats use (the Legends
-/// 1994 / pre-M14 "both die" form): same-named legendary permanents go to
-/// their owners' graveyards across ALL controllers combined, choicelessly,
+/// reproduces the rule M14 replaced — the "nullification" form in force from
+/// Champions of Kamigawa (2004) until 2013: same-named legendary permanents go
+/// to their owners' graveyards across ALL controllers combined, choicelessly,
 /// rather than per-controller. Variant names match `docs/proposals/
-/// custom-format-engine/PLAN.md`'s canonical schema exactly. Schema only in
-/// this phase.
+/// custom-format-engine/PLAN.md`'s canonical schema exactly. Runtime behavior
+/// lives in `game::legend_scope` and `game::sba` (Phase 2cd).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum LegendRuleScope {
     /// Per-controller + choice (post-2013-07 M14). All four EC presets use

@@ -23,6 +23,7 @@ pub fn resolve(
         reveal,
         destination,
         source_pool,
+        reach,
     } = &ability.effect
     else {
         return Ok(());
@@ -81,8 +82,11 @@ pub fn resolve(
     // The pool is resolved through `game::wish_scope`, never read raw: a format
     // declaring the pre-M10 Wish reach widens a plain `Sideboard` search to this
     // same pool, and that decision belongs to the axis authority rather than to
-    // every site that consumes a pool.
-    if crate::game::wish_scope::effective_pool(state, *source_pool).includes_face_up_exile() {
+    // every site that consumes a pool. `reach` is passed because the widening
+    // applies to the Wish cycle only — Learn declares the same pool and must
+    // keep the modern boundary.
+    if crate::game::wish_scope::effective_pool(state, *source_pool, *reach).includes_face_up_exile()
+    {
         let exile_candidates = collect_face_up_exile_candidates(state, ability, filter);
         choices.extend(exile_candidates);
     }
@@ -324,7 +328,9 @@ mod tests {
     use crate::game::deck_loading::DeckEntry;
     use crate::game::effects;
     use crate::game::zones::create_object;
-    use crate::types::ability::{OutsideGameSourcePool, QuantityExpr, TypeFilter, TypedFilter};
+    use crate::types::ability::{
+        OutsideGameReach, OutsideGameSourcePool, QuantityExpr, TypeFilter, TypedFilter,
+    };
     use crate::types::actions::{GameAction, OutsideGameSelection};
     use crate::types::card::CardFace;
     use crate::types::card_type::{CardType, CoreType};
@@ -379,6 +385,7 @@ mod tests {
                 reveal: true,
                 destination: Zone::Hand,
                 source_pool: OutsideGameSourcePool::Sideboard,
+                reach: OutsideGameReach::WishCycle,
             },
             vec![],
             source_id,
@@ -748,6 +755,10 @@ mod tests {
                 reveal: true,
                 destination: Zone::Hand,
                 source_pool: OutsideGameSourcePool::SideboardAndFaceUpExile,
+                // Karn Liberated is a post-M10 card: it reaches face-up exile
+                // because its OWN text says so, not because of any legacy
+                // format rule. Keeping the modern reach here proves that.
+                reach: OutsideGameReach::CurrentRules,
             },
             vec![],
             source,
@@ -819,6 +830,10 @@ mod tests {
                 reveal: true,
                 destination: Zone::Hand,
                 source_pool: OutsideGameSourcePool::SideboardAndFaceUpExile,
+                // Karn Liberated is a post-M10 card: it reaches face-up exile
+                // because its OWN text says so, not because of any legacy
+                // format rule. Keeping the modern reach here proves that.
+                reach: OutsideGameReach::CurrentRules,
             },
             vec![],
             source,
@@ -927,6 +942,7 @@ mod tests {
                 reveal: true,
                 destination: Zone::Hand,
                 source_pool: OutsideGameSourcePool::Sideboard,
+                reach: OutsideGameReach::WishCycle,
             },
             vec![],
             source,

@@ -13,15 +13,20 @@
 //! not a wording preference: in a mirror where both players resolve the same
 //! legend, pre-M14 both die and today each keeps one.
 //!
-//! **What [`LegendRuleScope::PreM14AnyController`] models, precisely.** The
-//! mechanic shifted across pre-M14 eras — early *Legends*-era "first in play
-//! trumps", the Sixth Edition (1999) "all of them go to the graveyard" form,
-//! and the *Champions of Kamigawa* (2004) nullification variant. This variant
-//! is the **Sixth Edition form**: global grouping, no choice, every member of a
-//! two-or-more same-name group put into its owner's graveyard. That is the form
-//! that changes cross-controller legal board states, and it is deliberately the
-//! only one modeled — the era-specific micro-variants are out of scope, and the
-//! enum has room for one later if a format ever needs it.
+//! **What [`LegendRuleScope::PreM14AnyController`] models, precisely.** WotC's
+//! own announcement of the M14 change ("The Legendary Rule Change",
+//! 2013-05-23) names exactly two earlier forms: under the original rule "the
+//! first legend to come into play trumped all others", and "this was changed in
+//! Champions of Kamigawa to the nullification rule that we have played with
+//! since" — the form where same-named legends put *each other* into the
+//! graveyard, which is why that article complains of games where players
+//! "'legend rule' each other turn after turn".
+//!
+//! This variant is that **Champions of Kamigawa (2004) through M14 (2013)
+//! form**: global grouping, no choice, every member of a two-or-more same-name
+//! group put into its owner's graveyard. The earlier first-in-trumps rule is
+//! deliberately not modeled; the enum has room for it if a format ever needs
+//! one.
 //!
 //! This module does not implement current CR; it re-enables a scope the M14
 //! update replaced, and only for a custom format that declares it. None of the
@@ -54,10 +59,13 @@ pub(crate) fn policy_of(format_config: &FormatConfig) -> LegendRuleScope {
 /// standalone "is grouping global?" that a caller could pair with the wrong
 /// resolution. See `sba::check_legend_rule`.
 pub(crate) fn groups_across_controllers(state: &GameState) -> bool {
-    matches!(
-        policy_of(&state.format_config),
-        LegendRuleScope::PreM14AnyController
-    )
+    // Exhaustive rather than `matches!`: a scope added later must be an
+    // intentional decision at this seam, not silently inherit modern behavior
+    // because it fell through a wildcard.
+    match policy_of(&state.format_config) {
+        LegendRuleScope::Modern => false,
+        LegendRuleScope::PreM14AnyController => true,
+    }
 }
 
 #[cfg(test)]

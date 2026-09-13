@@ -1,9 +1,9 @@
 //! Legend-rule scope — the pre-M14 rule a custom format can opt back into.
 //!
-//! CR 704.5j is per-controller and gives the controller a choice. Every form of
-//! the rule before Magic 2014 grouped same-named legends across ALL
-//! controllers, and the form modeled here (Sixth Edition, 1999) put every one
-//! of them into its owner's graveyard with no choice at all.
+//! CR 704.5j is per-controller and gives the controller a choice. The form
+//! modeled here — the "nullification rule" in force from Champions of Kamigawa
+//! (2004) until M14 (2013) — grouped same-named legends across ALL controllers
+//! and put every one of them into its owner's graveyard with no choice at all.
 //!
 //! Two things separate it from the modern rule, and both are asserted here
 //! against a real state-based-action pass rather than against the helpers:
@@ -19,13 +19,18 @@
 
 use engine::game::sba::check_state_based_actions;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter, TypeFilter,
+    TypedFilter,
+};
 use engine::types::custom_format::{test_rules_with_legacy, LegacyRuleSet, LegendRuleScope};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::{EtbTapState, Zone};
 
 const MIRROR: &str = "Mirrored Hero";
 
@@ -201,5 +206,116 @@ fn a_nonlegendary_with_the_same_name_is_not_in_the_group() {
         !in_graveyard(&runner, legend) && !in_graveyard(&runner, mundane),
         "one legendary permanent and one ordinary one of the same name is not a \
          group of two legends"
+    );
+}
+
+/// CR 616.1 + CR 704.3: **the pass must stop when a pre-M14 legend move parks a
+/// replacement-ordering choice.**
+///
+/// `move_to_graveyard_via_pipeline` requires its caller to bail when it reports
+/// a pause; the modern legend rule never moves anything, so before this scope
+/// existed there was no guard between `check_legend_rule` and the Aura check
+/// that follows it. An unattached Aura is the witness: if the pass ran on, it
+/// would be swept into the graveyard (CR 704.5m) while the legend's own move is
+/// still unsettled.
+#[test]
+fn a_paused_legend_move_stops_the_rest_of_the_sba_pass() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // CR 616.1: two replacements that both apply to the SAME battlefield ->
+    // graveyard move, so the controller must order them and the pipeline parks
+    // a choice. `Moved` + `destination_zone(Graveyard)` is the Rest-in-Peace
+    // shape the engine already uses for "if it would be put into a graveyard,
+    // do this instead"; the two differ in where they send it, so neither
+    // subsumes the other.
+    let redirect = |label: &str, destination: Zone| {
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Graveyard)
+            // Creatures only. Left unscoped these would also intercept the
+            // Aura's own graveyard move, and the Aura is the witness — it would
+            // then survive whether or not the pass stopped, and this test would
+            // prove nothing. (It did exactly that on the first attempt.)
+            .valid_card(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+            .description(label.to_string())
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    destination,
+                    origin: None,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))
+    };
+    scenario
+        .add_creature(P0, "Graveyard Redirects", 1, 1)
+        .with_replacement_definition(redirect("Exile instead", Zone::Exile))
+        .with_replacement_definition(redirect("To hand instead", Zone::Hand));
+
+    let first = scenario.add_creature(P0, MIRROR, 2, 2).as_legendary().id();
+    let second = scenario.add_creature(P1, MIRROR, 2, 2).as_legendary().id();
+
+    // An Aura attached to nothing: CR 704.5m would put it into its owner's
+    // graveyard on this same pass, if the pass were allowed to continue.
+    let orphan_aura = scenario
+        .add_enchantment_from_oracle(P0, "Orphaned Aura", "")
+        .with_subtypes(vec!["Aura"])
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().format_config = legacy_format();
+    sba(&mut runner);
+
+    assert!(
+        runner.state().pending_replacement.is_some()
+            || matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+        "the legend move must park a CR 616.1 ordering choice, or this test is \
+         not exercising the pause at all; got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        !in_graveyard(&runner, orphan_aura),
+        "CR 704.3: no later SBA may run while the legend move is unsettled — \
+         the unattached Aura must still be on the battlefield"
+    );
+    // CONTROL: the witness must be live. Without the replacements — so nothing
+    // pauses — the very same board sweeps the Aura on this same pass, which is
+    // what makes its survival above evidence of anything.
+    {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_creature(P0, MIRROR, 2, 2).as_legendary();
+        scenario.add_creature(P1, MIRROR, 2, 2).as_legendary();
+        let aura = scenario
+            .add_enchantment_from_oracle(P0, "Orphaned Aura", "")
+            .with_subtypes(vec!["Aura"])
+            .id();
+        let mut unpaused = scenario.build();
+        unpaused.state_mut().format_config = legacy_format();
+        sba(&mut unpaused);
+        assert!(
+            in_graveyard(&unpaused, aura),
+            "CR 704.5m: an unattached Aura must be swept when the pass is NOT \
+             paused, or the assertion above proves nothing"
+        );
+    }
+
+    // And the paused move really has not completed.
+    assert!(
+        !in_graveyard(&runner, first) || !in_graveyard(&runner, second),
+        "the paused move has not completed"
     );
 }

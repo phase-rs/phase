@@ -564,13 +564,24 @@ rules-tips "M14 Rules changes! Legendary permanents"
 
 - **Legends (1994) → pre-M14 (through 2013): NOT per-controller — global.** If
   two or more legendary permanents with the *same name* were on the battlefield,
-  they were affected **regardless of which player(s) controlled them**. The exact
-  mechanic shifted across eras (early "first legend in play trumps / newest is
-  denied"; Sixth Edition 1999 unified it across all legendary permanent types
-  with the "both go to the graveyard" form; *Champions of Kamigawa* 2004 changed
-  it to a "nullification" variant), but the invariant across every pre-M14 form
-  is that **same-named legends interacted across controllers** — two different
-  players could not each keep their own copy of the same legendary permanent.
+  they were affected **regardless of which player(s) controlled them**. The
+  invariant across every pre-M14 form is that **same-named legends interacted
+  across controllers** — two different players could not each keep their own
+  copy of the same legendary permanent.
+  - **CORRECTED 2026-09-12 (this bullet previously had the eras wrong, and the
+    error reached shipped code before review caught it).** An earlier revision
+    claimed three pre-M14 forms, with Sixth Edition (1999) introducing the
+    "both go to the graveyard" form and *Champions of Kamigawa* (2004) changing
+    it to a "nullification" variant. WotC's own announcement of the M14 change
+    ("The Legendary Rule Change", magic.wizards.com, 2013-05-23) names only
+    **two**, and maps them the other way: under the original rule "the first
+    legend to come into play trumped all others", and "this was changed in
+    Champions of Kamigawa to the **nullification** rule that we have played with
+    since" — i.e. the CoK rule IS the all-die form (hence that article's
+    complaint about players who "'legend rule' each other turn after turn"), and
+    it held until M14. Sixth Edition does not feature in WotC's account.
+  - So the two pre-M14 forms are: **first-in-trumps** (Legends 1994 → CoK 2004)
+    and **all-die / "nullification"** (CoK 2004 → M14 2013).
 - **Magic 2014 (effective 2013-07-13, the M14 prerelease): today's
   per-controller rule.** Rewritten so that only when *a single player* controls
   two or more legendary permanents with the same name does that player choose one
@@ -686,11 +697,12 @@ world-rule choiceless-global precedent and the shared SBA departure pipeline.
 **Size: SMALL** — comparable to mana burn (§5) and pre-M10 Wish (§9); materially
 smaller than damage-on-stack (§6). The only design nuance is scoping the enum:
 model just `Modern` vs a single consolidated `PreM14AnyController` "all
-same-named copies across all controllers go to the graveyard" form (the Sixth-
-Edition "both die" version, which is the one that changes cross-controller legal
-board states); do **not** attempt to reproduce the era-specific "first-in
-trumps" / Kamigawa "nullification" micro-variants — they are out of scope and a
-future enum variant can carry them if a format ever needs one. Because the flag
+same-named copies across all controllers go to the graveyard" form — the
+**Champions of Kamigawa (2004) "nullification" rule**, in force until M14, which
+is the one that changes cross-controller legal board states (era attribution
+corrected 2026-09-12, see 10a); do **not** attempt to reproduce the earlier
+Legends-era "first legend in play trumps" rule — it is out of scope and a future
+enum variant can carry it if a format ever needs one. Because the flag
 re-enables a rule the current CR replaced (M14), annotate it as a *legacy rule
 reverting the M14 change* and cite CR 704.5j (the modern boundary being relaxed),
 exactly as mana burn cites the obsolete-glossary entry and the Wish flag cites

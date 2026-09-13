@@ -642,6 +642,34 @@ impl OutsideGameSourcePool {
     }
 }
 
+/// CR 400.11 + CR 400.11a: which era's "outside the game" boundary an
+/// outside-the-game search was templated against.
+///
+/// The M10 zone change deleted "removed from the game" and made exile an
+/// ordinary in-game zone. That is the boundary a format can revert with
+/// `WishOutsideGameScope::PreM10ReachesExile` — but reverting it must widen
+/// only the effects that were WRITTEN against the old boundary. Learn
+/// (CR 701.48a, 2021) also says "from outside the game" and also declares
+/// [`OutsideGameSourcePool::Sideboard`], so the pool alone cannot tell the two
+/// apart; inferring era from the present-day pool would let a 2021 mechanic
+/// reach a zone its designers never contemplated.
+///
+/// So the distinction is carried from whichever builder constructs the effect,
+/// not re-derived downstream. The default is the modern reading, which means a
+/// new outside-the-game effect is unaffected by the legacy axis unless it opts
+/// in deliberately.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OutsideGameReach {
+    /// Whatever the current rules place outside the game — the sideboard. Every
+    /// effect templated after the M10 change, Learn included.
+    #[default]
+    CurrentRules,
+    /// The Wish cycle and its kin, templated while cards "removed from the
+    /// game" were outside it. Identical to [`Self::CurrentRules`] unless the
+    /// format declares the pre-M10 scope; see `game::wish_scope`.
+    WishCycle,
+}
+
 /// CR 701.23a + CR 608.2c: A search whose found set is partitioned between two
 /// destinations — e.g. Cultivate ("put one onto the battlefield tapped and the
 /// other into your hand"). `primary_count` cards go to `primary_destination`
@@ -16344,6 +16372,11 @@ pub enum Effect {
         destination: Zone,
         #[serde(default, skip_serializing_if = "is_default_outside_game_source_pool")]
         source_pool: OutsideGameSourcePool,
+        /// CR 400.11: which era's "outside the game" boundary this search was
+        /// templated against. Carried, not inferred from `source_pool` — see
+        /// [`OutsideGameReach`].
+        #[serde(default, skip_serializing_if = "is_default_outside_game_reach")]
+        reach: OutsideGameReach,
     },
     /// CR 400.11 + CR 400.11b + CR 701.20: Open a sealed Magic booster pack —
     /// a set of cards from OUTSIDE the game — reveal them, and bring `count` of
@@ -18533,6 +18566,10 @@ fn is_default_damage_kind(k: &DamageKindFilter) -> bool {
 
 fn is_default_search_selection_constraint(c: &SearchSelectionConstraint) -> bool {
     matches!(c, SearchSelectionConstraint::None)
+}
+
+fn is_default_outside_game_reach(reach: &OutsideGameReach) -> bool {
+    matches!(reach, OutsideGameReach::CurrentRules)
 }
 
 fn is_default_outside_game_source_pool(pool: &OutsideGameSourcePool) -> bool {

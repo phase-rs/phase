@@ -47,9 +47,9 @@ use crate::types::ability::{
     CounterKindDomain, DigSource, DoorLockOp, Duration, Effect, EffectScope, FaceDownProfile,
     FilterProp, ForceBlockAttackerRef, GrantedAbilityScope, LibraryPosition,
     MassLibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
-    ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
-    PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
-    PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, SearchSelectionConstraint,
+    ObjectSelectionEligibility, OutsideGameReach, OutsideGameSourcePool, PerPlayerScope,
+    PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope,
+    PtStat, PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, SearchSelectionConstraint,
     StaticDefinition, StickerTicketCostPayment, TapStateChange, TargetFilter, TargetSelectionMode,
     ThisWayCause, TypeFilter, TypedFilter, ZoneOwner,
 };
@@ -3682,6 +3682,13 @@ fn parse_search_outside_game_ast(
         destination,
         up_to: true,
         source_pool,
+        // CR 400.11 + CR 701.23j: this is the generic "a card you own from
+        // outside the game" templating — the Wish cycle and the cards that
+        // reuse its wording. A format reverting the pre-M10 zone boundary
+        // widens exactly this class. Mechanics that merely reach the same
+        // sideboard through their own keyword (Learn) build their effect
+        // elsewhere and keep the modern reading.
+        reach: OutsideGameReach::WishCycle,
     })
 }
 
@@ -3743,6 +3750,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             destination,
             up_to,
             source_pool,
+            reach,
         } => Effect::SearchOutsideGame {
             filter,
             count: if up_to {
@@ -3753,6 +3761,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             reveal,
             destination,
             source_pool,
+            reach,
         },
         SearchCreationImperativeAst::Dig {
             count,
@@ -15984,9 +15993,15 @@ mod tests {
                 reveal,
                 destination,
                 source_pool,
+                reach,
             } => {
                 assert_eq!(count, QuantityExpr::up_to(QuantityExpr::Fixed { value: 1 }));
                 assert!(reveal);
+                // CR 400.11: the generic "card you own from outside the game"
+                // templating is the class a pre-M10 format widens. The parser
+                // marks it here; nothing downstream can recover it from the
+                // pool, which Learn also declares.
+                assert_eq!(reach, OutsideGameReach::WishCycle);
                 assert_eq!(destination, Zone::Hand);
                 assert!(
                     !source_pool.includes_face_up_exile(),
@@ -16144,7 +16159,9 @@ mod tests {
                 reveal,
                 destination,
                 source_pool,
+                reach,
             } => {
+                assert_eq!(*reach, OutsideGameReach::WishCycle);
                 assert_eq!(
                     *filter,
                     TargetFilter::Any,
