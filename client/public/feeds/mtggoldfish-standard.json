@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-09-12T00:00:00Z",
+  "updated": "2026-09-13T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -19,16 +19,8 @@
       ],
       "main": [
         {
-          "count": 4,
+          "count": 3,
           "name": "Earthbender Ascension"
-        },
-        {
-          "count": 1,
-          "name": "Demolition Field"
-        },
-        {
-          "count": 4,
-          "name": "Esper Origins"
         },
         {
           "count": 4,
@@ -36,47 +28,19 @@
         },
         {
           "count": 4,
-          "name": "Icetill Explorer"
+          "name": "Esper Origins"
         },
         {
-          "count": 14,
-          "name": "Forest"
+          "count": 2,
+          "name": "Ba Sing Se"
         },
         {
-          "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 1,
-          "name": "Keen-Eyed Curator"
-        },
-        {
-          "count": 4,
+          "count": 3,
           "name": "Mightform Harmonizer"
         },
         {
-          "count": 1,
-          "name": "Lumbering Worldwagon"
-        },
-        {
-          "count": 2,
-          "name": "Meltstrider's Resolve"
-        },
-        {
-          "count": 2,
+          "count": 3,
           "name": "Sapling Nursery"
-        },
-        {
-          "count": 1,
-          "name": "Surrak, Elusive Hunter"
-        },
-        {
-          "count": 1,
-          "name": "Snakeskin Veil"
-        },
-        {
-          "count": 2,
-          "name": "Shared Roots"
         },
         {
           "count": 4,
@@ -84,49 +48,65 @@
         },
         {
           "count": 3,
-          "name": "Ba Sing Se"
+          "name": "Shared Roots"
         },
-        {
-          "count": 4,
-          "name": "Fabled Passage"
-        }
-      ],
-      "sideboard": [
         {
           "count": 4,
           "name": "Mossborn Hydra"
         },
         {
-          "count": 1,
+          "count": 15,
+          "name": "Forest"
+        },
+        {
+          "count": 4,
+          "name": "Fabled Passage"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 2,
           "name": "Keen-Eyed Curator"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Meltstrider's Resolve"
         },
         {
-          "count": 2,
-          "name": "Torpor Orb"
+          "count": 4,
+          "name": "Icetill Explorer"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 3,
+          "name": "Meltstrider's Resolve"
         },
         {
           "count": 1,
           "name": "Sapling Nursery"
         },
         {
-          "count": 1,
-          "name": "Snakeskin Veil"
+          "count": 4,
+          "name": "Soul-Guide Lantern"
         },
         {
-          "count": 1,
-          "name": "Surrak, Elusive Hunter"
-        },
-        {
-          "count": 1,
+          "count": 2,
           "name": "Warg Tactics"
         },
         {
           "count": 2,
-          "name": "Gigantic Big Bear"
+          "name": "Surrak, Elusive Hunter"
+        },
+        {
+          "count": 1,
+          "name": "Lumbering Worldwagon"
+        },
+        {
+          "count": 2,
+          "name": "Torpor Orb"
         }
       ]
     },
