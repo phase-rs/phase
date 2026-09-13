@@ -4388,14 +4388,20 @@ fn split_inverted_instead_clause(text: &str) -> Option<(String, String)> {
 /// clause, and it splits the grammar in two:
 ///
 /// - **CR 614.1a EVENT replacement** — "If that spell *would* be put into your
-///   graveyard, exile it instead" (Torrential Gearhulk, Goblin Dark-Dwellers,
-///   Mission Briefing; ~68 faces). The clause names an event, not a game state.
+///   graveyard, exile it instead" (Torrential Gearhulk, Goblin Dark-Dwellers;
+///   ~68 faces). The clause names an event, not a game state.
 ///   These are owned elsewhere — by a `ReplacementDefinition`, by the line-level
 ///   replacement parser, or by the structural cast-then-exile rider chain that
 ///   `swallow_check::any_ability_has_exile_parent_rider` recognizes as the "exile
 ///   it instead" encoding. An unlowerable EVENT condition must therefore fall
 ///   through UNCHANGED: reporting it as `ConditionUnlowerable` would make the
 ///   caller replace a *working* rider encoding with `Effect::unimplemented`.
+///   Which faces are genuinely owned is settled by `oracle::guard_owner`, not by
+///   this predicate: it is the arbiter of whether the assembled tree actually
+///   places the body under a typed owner (CR 614.1a + CR 608.2n / CR 608.2c +
+///   CR 614.1a / CR 615.5), and a face whose rider has no such owner — a
+///   `GrantCastingPermission` carries no redirect, for one — gaps honestly
+///   instead of falling through.
 ///
 /// - **CR 608.2c STATE override** — "If the creature had power 4 or greater,
 ///   create two of those tokens instead" (Anax, Hardened in the Forge). The

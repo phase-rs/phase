@@ -5036,6 +5036,10 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         sub_link: _,
         iteration_kind_binding: _,
         sibling_condition: _,
+        // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
+        // deferred guard verdict before it hands a tree out, so this is `None` on
+        // every finished parse and expresses no resolution-time read.
+        unlowered_guard: _,
     } = def;
 
     let mut acc = scan_effect(effect, mode);

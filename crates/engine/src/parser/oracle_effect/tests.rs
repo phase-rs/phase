@@ -41125,11 +41125,11 @@ fn leading_conditional_threads_condition_through_ast() {
         matches!(
             ast,
             ClauseAst::Conditional {
-                condition: Some(_),
+                guard: ConditionalGuard::Lowered(_),
                 ..
             }
         ),
-        "expected Conditional with Some condition, got: {ast:?}"
+        "expected Conditional with a lowered guard, got: {ast:?}"
     );
     let clause = lower_clause_ast(ast, &mut ParseContext::default());
     assert!(
@@ -41144,29 +41144,363 @@ fn leading_conditional_threads_condition_through_ast() {
     );
 }
 
+/// V19 — the in-tree statement of the behaviour this phase deliberately changes.
+///
+/// This test was `leading_conditional_unrecognized_produces_none`, and it asserted the
+/// opposite: an unrecognized guard used to be dropped and its body emitted anyway, so a
+/// conditional instruction silently became an unconditional one. CR 608.2c gives a
+/// leading "if" that names no event a STATE reading, and a guard the single condition
+/// authority cannot lower may not simply be discarded. `draw a card` is no ownership
+/// candidate, so the whole clause is recorded as one honest gap.
+///
+/// Venue S: the entry point IS the producer, so no chunk loop sits between the literal
+/// and the comparand and the trailing-punctuation rule does not bind here.
 #[test]
-fn leading_conditional_unrecognized_produces_none() {
-    // An unrecognized condition should produce condition: None (backward-compatible).
+fn leading_conditional_unlowerable_state_guard_gaps_the_whole_clause() {
     let ast = parse_clause_ast(
         "if a random unrecognized condition, draw a card",
+        &mut ParseContext::default(),
+    );
+    // Paired positive: a green row must not be a fixture that produced no Conditional.
+    assert!(
+        matches!(
+            ast,
+            ClauseAst::Conditional {
+                guard: ConditionalGuard::Unlowered(GuardReading::State),
+                ..
+            }
+        ),
+        "expected an unlowered STATE guard, got: {ast:?}"
+    );
+    let clause = lower_clause_ast(ast, &mut ParseContext::default());
+    let Effect::Unimplemented { name, description } = &clause.effect else {
+        panic!(
+            "expected the refused guard to gap its whole clause, got: {:?}",
+            clause.effect
+        );
+    };
+    assert_eq!(name, "unparsed_condition");
+    assert_eq!(
+        description.as_deref(),
+        Some("if a random unrecognized condition, draw a card"),
+        "the gap is recorded over the full clause, guard included"
+    );
+    assert!(
+        clause.condition.is_none(),
+        "a refused guard leaves no condition behind, got: {:?}",
+        clause.condition
+    );
+}
+
+/// V2s — the ladder swap's discriminator, asserted at the producing function.
+///
+/// `parse_clause_ast` lowers a leading guard through `lower_instead_condition`, the
+/// single condition authority (CR 608.2c), not through the nom rung alone. The paired
+/// rung assertions are what make the row discriminate: without them the fixture could
+/// be a guard both paths accept, and the test would pass identically before the swap.
+///
+/// Venue S is load-bearing. At venue C the same guard is consumed upstream by
+/// `strip_leading_general_conditional`, whose ladder is a superset, and the row would
+/// pass with or without the swap.
+#[test]
+fn leading_conditional_lowers_through_the_ladder_not_the_nom_rung_alone() {
+    let mut ctx = ParseContext::default();
+    assert!(
+        conditions::try_nom_condition_as_ability_condition("X is 1 or more", &mut ctx).is_none(),
+        "control: the nom rung alone must refuse this guard, or the row cannot discriminate"
+    );
+    assert!(
+        conditions::lower_instead_condition("X is 1 or more", &mut ctx).is_some(),
+        "control: the full ladder must accept it"
+    );
+
+    let ast = parse_clause_ast(
+        "if X is 1 or more, draw a card",
+        &mut ParseContext::default(),
+    );
+    let ClauseAst::Conditional { guard, .. } = &ast else {
+        panic!("expected a Conditional, got: {ast:?}");
+    };
+    assert_eq!(
+        *guard,
+        ConditionalGuard::Lowered(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }),
+        "the ladder's lowered value, not merely that something lowered"
+    );
+    let clause = lower_clause_ast(ast, &mut ParseContext::default());
+    assert!(
+        matches!(clause.effect, Effect::Draw { .. }),
+        "a lowered guard leaves its body intact, got: {:?}",
+        clause.effect
+    );
+}
+
+/// V2c — production-path companion to V2s, on the nested-guard shape that is the only
+/// shape reaching the seam on a chain (an outer `"If you do,"` already occupies the
+/// definition's condition slot, so no upstream stripper can consume the inner guard).
+#[test]
+fn nested_leading_guard_lowers_on_the_chain() {
+    let def = parse_effect_chain(
+        "You may pay {X}. If you do, if X is 1 or more, draw a card",
+        AbilityKind::Spell,
+    );
+    // Occupancy reach-guard.
+    assert!(
+        matches!(
+            def.condition,
+            Some(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed
+            })
+        ),
+        "V2c reach-guard: the outer \"If you do,\" must occupy the condition slot, got: {:?}",
+        def.condition
+    );
+    assert!(
+        guard_chain_gaps(&def).is_empty(),
+        "V2c: the inner guard lowers, so nothing gaps, got: {:?}",
+        guard_chain_gaps(&def)
+    );
+    assert!(
+        guard_chain_nodes(&def)
+            .iter()
+            .any(|node| matches!(*node.effect, Effect::Draw { .. })),
+        "V2c: the guarded body must survive"
+    );
+}
+
+/// V17 — the five-arm leading-conditional prefix production is the one `parse_clause_ast`
+/// uses. Stated as single-authority hygiene, not as coverage: no corpus guard reaches
+/// the seam with a `"then if"` connector.
+///
+/// The paired production assertion is what makes the row discriminate — it pins the
+/// fixture as one the narrower alternative could not have stripped.
+#[test]
+fn leading_conditional_accepts_the_then_if_connector() {
+    assert_eq!(
+        conditions::parse_leading_conditional_prefix("then if it's your turn"),
+        Some("it's your turn"),
+        "control: the shared production must strip the connector"
+    );
+    let ast = parse_clause_ast(
+        "then if it's your turn, draw a card",
         &mut ParseContext::default(),
     );
     assert!(
         matches!(
             ast,
             ClauseAst::Conditional {
-                condition: None,
+                guard: ConditionalGuard::Lowered(AbilityCondition::IsYourTurn),
                 ..
             }
         ),
-        "expected Conditional with None condition for unrecognized text, got: {ast:?}"
+        "expected the connector-prefixed guard to lower, got: {ast:?}"
     );
     let clause = lower_clause_ast(ast, &mut ParseContext::default());
     assert!(
-        clause.condition.is_none(),
-        "expected None condition for unrecognized text, got: {:?}",
-        clause.condition
+        matches!(clause.effect, Effect::Draw { .. }),
+        "expected the body intact, got: {:?}",
+        clause.effect
     );
+}
+
+/// V13 — a non-rider EVENT body gaps rather than lowering. At `PHASE_BASE_SHA` the
+/// guard was dropped and `Effect::PreventDamage` was emitted unconditionally.
+///
+/// No terminating period: `push_clause_chunk` strips one before the seam sees the text,
+/// so a fixture ending in `.` cannot produce a byte-equal description. Do not weaken
+/// the byte-equality if this goes red — the equality is the reach-guard.
+#[test]
+fn non_rider_event_guard_gaps_over_the_whole_clause() {
+    const CLAUSE: &str =
+        "If damage would be dealt to you this turn by a source of your choice, prevent that damage";
+    let def = parse_effect_chain(CLAUSE, AbilityKind::Activated);
+
+    let gaps = guard_chain_gaps(&def);
+    assert_eq!(
+        gaps.len(),
+        1,
+        "V13: expected exactly one gap over the clause, got {gaps:?}"
+    );
+    assert_eq!(gaps[0].0, "unparsed_replacement");
+    assert_eq!(gaps[0].1.as_deref(), Some(CLAUSE));
+    assert!(
+        !guard_chain_nodes(&def)
+            .iter()
+            .any(|node| matches!(*node.effect, Effect::PreventDamage { .. })),
+        "V13: the guarded body must be emitted nowhere"
+    );
+}
+
+/// V18 — the re-record arm: a clause whose body already lowered to an `Unimplemented`
+/// is re-recorded under the guard's own reading over the FULL clause text, so the
+/// antecedent is recoverable instead of being a bare body fragment.
+///
+/// Fixture is Jeska, Thrice Reborn's `[0]` clause verbatim, written without its
+/// `"Until your next turn, "` duration prefix and without terminating punctuation,
+/// because the chunk loop peels both before the seam.
+#[test]
+fn unlowerable_event_guard_re_records_over_the_full_clause() {
+    const CLAUSE: &str = "if that creature would deal combat damage to one of your opponents, it \
+                          deals triple that damage to that player instead";
+    let def = parse_effect_chain(CLAUSE, AbilityKind::Activated);
+
+    let gaps = guard_chain_gaps(&def);
+    assert_eq!(
+        gaps.len(),
+        1,
+        "V18: expected exactly one gap on the clause, got {gaps:?}"
+    );
+    assert_eq!(gaps[0].0, "unparsed_replacement");
+    let description = gaps[0]
+        .1
+        .as_deref()
+        .expect("V18: the gap must carry the clause it was recorded over");
+    assert_eq!(
+        description, CLAUSE,
+        "V18: the re-record must span the whole clause, not the body fragment"
+    );
+    assert_eq!(
+        diagnose_clause_gap(description),
+        ClauseGap::Replacement {
+            antecedent: "that creature would deal combat damage to one of your opponents"
+                .to_string()
+        },
+        "V18: the antecedent must be recoverable from the recorded text"
+    );
+}
+
+/// V10c — seam companion to the venue-P row `guard_ownership::v10_*`.
+///
+/// The mark IS minted here, which is what makes the venue-P gap attributable to the
+/// resolver's CR 615.5 **ancestor** test rather than to the text gate. The fixture is
+/// shared verbatim with the P row; only the hostile context (`"Draw a card"` where a
+/// prevention would normally stand) is composed — the rider sentence is Acolyte's
+/// Reward's and Divine Deflection's printed rider as the seam receives it.
+#[test]
+fn o2_rider_clause_is_marked_by_the_seam_even_with_no_shield() {
+    const RIDER: &str = "If damage is prevented this way, ~ deals that much damage to any target";
+    let def = parse_effect_chain(
+        "Draw a card. If damage is prevented this way, ~ deals that much damage to any target",
+        AbilityKind::Spell,
+    );
+
+    // Shape precondition: the clause is an ownership candidate by the parser's own gate.
+    assert!(
+        crate::parser::oracle_replacement::prevented_this_way_rider_source_gate(RIDER).is_some(),
+        "V10c precondition: the source gate must hold on this clause text"
+    );
+    let nodes = guard_chain_nodes(&def);
+    assert!(
+        nodes
+            .iter()
+            .any(|node| matches!(*node.effect, Effect::Draw { .. })),
+        "V10c reach-guard: the preceding clause must be present and lowered"
+    );
+    assert!(
+        !nodes
+            .iter()
+            .any(|node| matches!(*node.effect, Effect::PreventDamage { .. })),
+        "V10c: the hostile condition is that no shield exists in the chain"
+    );
+    assert!(
+        nodes.iter().any(|node| node.unlowered_guard
+            == Some(UnloweredGuard {
+                reading: GuardReading::State,
+                clause_text: RIDER.to_string(),
+            })),
+        "V10c: the seam must DEFER this clause, not decide it — marks: {:?}",
+        nodes
+            .iter()
+            .map(|node| node.unlowered_guard.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        nodes
+            .iter()
+            .any(|node| matches!(*node.effect, Effect::DealDamage { .. })),
+        "V10c: the deferred body is still present at this venue"
+    );
+}
+
+/// V11c — seam companion to the venue-P row `guard_ownership::v11_*`.
+///
+/// The mark IS minted here, so the venue-P gap is the `Event` conjunct of the O1a arm
+/// refusing, not the seam refusing — which is what keeps the ownership decision on the
+/// assembled tree. Fixture shared verbatim with the P row; see that row's doc comment
+/// for its three real donors.
+#[test]
+fn o1a_shape_under_a_state_guard_is_marked_by_the_seam() {
+    const RIDER: &str =
+        "If at least three mana of the same color was spent to cast it, exile it instead";
+    let def = parse_effect_chain(
+        "You may cast target instant card from your graveyard without paying its mana cost. If at \
+         least three mana of the same color was spent to cast it, exile it instead",
+        // The plan names `AbilityKind::Triggered`, which does not exist. `Spell` is not a
+        // convenience substitute: it is the kind Torrential Gearhulk's own trigger payload
+        // carries at `PHASE_BASE_SHA` (`triggers[0].execute.kind == "Spell"`), which is the
+        // donor this fixture's head clause comes from.
+        AbilityKind::Spell,
+    );
+
+    let nodes = guard_chain_nodes(&def);
+    assert!(
+        nodes
+            .iter()
+            .any(|node| matches!(*node.effect, Effect::CastFromZone { .. })),
+        "V11c reach-guard: the CastFromZone head must be on the chain"
+    );
+    let rider = nodes
+        .iter()
+        .find(|node| node.unlowered_guard.is_some())
+        .expect("V11c: the seam must DEFER this clause rather than decide it");
+    assert_eq!(
+        rider.unlowered_guard,
+        Some(UnloweredGuard {
+            reading: GuardReading::State,
+            clause_text: RIDER.to_string(),
+        })
+    );
+    // Shape precondition, measured rather than assumed: the body really is the O1a
+    // rider shape, so only the guard's reading can be what refuses it downstream.
+    assert!(
+        crate::game::effects::cast_from_zone::graveyard_destination_rider(&rider.effect).is_some(),
+        "V11c precondition: the body must be the graveyard-redirect rider shape, got {:?}",
+        rider.effect
+    );
+}
+
+/// Every definition on a chain, following both the `sub_ability` continuation link and
+/// the `else_ability` branch that `parse_effect_chain` can produce.
+fn guard_chain_nodes(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    let mut out = Vec::new();
+    let mut stack = vec![def];
+    while let Some(node) = stack.pop() {
+        out.push(node);
+        if let Some(sub) = node.sub_ability.as_deref() {
+            stack.push(sub);
+        }
+        if let Some(branch) = node.else_ability.as_deref() {
+            stack.push(branch);
+        }
+    }
+    out
+}
+
+fn guard_chain_gaps(def: &AbilityDefinition) -> Vec<(String, Option<String>)> {
+    guard_chain_nodes(def)
+        .into_iter()
+        .filter_map(|node| match &*node.effect {
+            Effect::Unimplemented { name, description } => {
+                Some((name.clone(), description.clone()))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]

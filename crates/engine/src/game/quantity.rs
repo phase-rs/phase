@@ -798,6 +798,10 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         sub_link: _,
         iteration_kind_binding: _,
         sibling_condition: _,
+        // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
+        // deferred guard verdict before it hands a tree out, so this is `None` on
+        // every finished parse and cannot make a definition cast-unstable.
+        unlowered_guard: _,
     } = definition;
 
     activation_mana_payment_restriction.is_none()
@@ -915,6 +919,10 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         sub_link: _,
         iteration_kind_binding: _,
         sibling_condition: _,
+        // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
+        // deferred guard verdict before it hands a tree out, so this is `None` on
+        // every finished parse and carries no game-state payload.
+        unlowered_guard: _,
     } = definition
     else {
         return false;

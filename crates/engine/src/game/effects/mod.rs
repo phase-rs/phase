@@ -3738,7 +3738,7 @@ pub(crate) fn optional_decline_branch(ability: &ResolvedAbility) -> Option<&Reso
             || (sub.sub_link == SubAbilityLink::SequentialSibling
                 && !sub_ability_is_reflexive(sub)
                 && !(matches!(&ability.effect, Effect::CastFromZone { .. })
-                    && (cast_from_zone::graveyard_destination_rider(sub).is_some()
+                    && (cast_from_zone::graveyard_destination_rider(&sub.effect).is_some()
                         || cast_from_zone::is_enters_with_counter_rider_subability(sub))));
         if !selected {
             return None;
@@ -14939,7 +14939,7 @@ fn resolve_chain_body(
         // during `counter::resolve` (stack -> exile directly).
         let direct_cast_from_zone_graveyard_rider =
             matches!(&ability.effect, Effect::CastFromZone { .. })
-                && cast_from_zone::graveyard_destination_rider(sub).is_some();
+                && cast_from_zone::graveyard_destination_rider(&sub.effect).is_some();
         if direct_cast_from_zone_graveyard_rider {
             // The RIDER is metadata, but the chain does not end with it.
             // Whatever the parser hung after the rider as a `SequentialSibling`
@@ -15153,7 +15153,7 @@ fn resolve_chain_body(
         // its condition reads none and grants nothing, while the spell stays
         // on the stack (measured: `delay_leaves_an_uncounterable_spell_alone`).
         if matches!(&ability.effect, Effect::Counter { .. })
-            && cast_from_zone::is_graveyard_exile_rider_subability(sub)
+            && cast_from_zone::is_graveyard_exile_rider_subability(&sub.effect)
         {
             // Not pinned by a test: no printed card reaches this state
             // (measured above), and returning here preserves `main`'s

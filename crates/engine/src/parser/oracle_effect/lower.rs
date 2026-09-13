@@ -8502,6 +8502,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
     let (target, _) = parse_target(stripped_target_text);
 
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::DealDamage {
             amount,
             target,
@@ -8587,6 +8588,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
 
     let counter_name = counter_type.as_str().into_owned();
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::PutCounter {
             counter_type,
             count: count_expr,
@@ -8656,6 +8658,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
     };
 
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::PreventDamage {
             amount,
             amount_dynamic,
@@ -8757,6 +8760,7 @@ pub(super) fn try_parse_bidirectional_prevent(
     by_ability.sub_link = SubAbilityLink::SequentialSibling;
 
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: to_effect,
         duration: None,
         sub_ability: Some(Box::new(by_ability)),
