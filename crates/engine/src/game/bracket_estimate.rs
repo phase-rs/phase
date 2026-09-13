@@ -79,34 +79,6 @@ impl CommanderBracketTier {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BracketAxisCounts {
-    pub game_changers: u8,
-    pub mass_land_denial: u8,
-    pub extra_turns: u8,
-    pub efficient_tutors: u8,
-}
-
-impl BracketAxisCounts {
-    /// Read the count for a given axis, by enum variant.
-    pub fn count_for(&self, axis: BracketAxis) -> u8 {
-        match axis {
-            BracketAxis::GameChangers => self.game_changers,
-            BracketAxis::MassLandDenial => self.mass_land_denial,
-            BracketAxis::ExtraTurns => self.extra_turns,
-            BracketAxis::EfficientTutors => self.efficient_tutors,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BracketContributingCards {
-    pub game_changers: Vec<String>,
-    pub mass_land_denial: Vec<String>,
-    pub extra_turns: Vec<String>,
-    pub efficient_tutors: Vec<String>,
-}
-
 /// One axis that forced the deck above a tier ceiling.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BracketViolation {
@@ -116,7 +88,9 @@ pub struct BracketViolation {
     pub forced_floor: CommanderBracketTier,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, strum::EnumIter,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum BracketAxis {
     GameChangers,
@@ -125,25 +99,25 @@ pub enum BracketAxis {
     EfficientTutors,
 }
 
-/// Per-axis cap at the resolved tier. `None` means "no cap at this tier"
-/// (i.e. the axis is unrestricted past this point — what was `u8::MAX` in
-/// the internal `CAPS` table).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BracketAxisCaps {
-    pub game_changers: Option<u8>,
-    pub mass_land_denial: Option<u8>,
-    pub extra_turns: Option<u8>,
-    pub efficient_tutors: Option<u8>,
+/// One bracket axis's reading for a deck.
+///
+/// Bracket policy is WotC Commander Format Panel guidance, not the
+/// Comprehensive Rules, so no rules annotation applies.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AxisReading {
+    pub count: u8,
+    /// `None` means no cap on this axis at the resolved tier. This must remain
+    /// an explicit JSON `null` so the frontend can validate every reading.
+    pub cap_at_tier: Option<u8>,
+    /// Cards that counted toward this axis, in deck order (commander first).
+    pub contributing: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BracketEstimate {
     pub tier: CommanderBracketTier,
-    pub axes: BracketAxisCounts,
-    /// Per-axis cap at the resolved tier, for UI display ("count / cap"
-    /// in the breakdown panel). `None` per axis = no cap at this tier.
-    pub axis_caps_at_tier: BracketAxisCaps,
-    pub contributing: BracketContributingCards,
+    /// Every `BracketAxis` is present, including zero-count axes.
+    pub axes: BTreeMap<BracketAxis, AxisReading>,
     /// At most one violation per axis — keyed by `BracketAxis` so the
     /// invariant is expressed in the type. Iterate in `BracketAxis`
     /// declaration order (BTreeMap) or sort by `forced_floor` on the
@@ -155,42 +129,33 @@ pub struct BracketEstimate {
 
 /// Returns `None` when the deck has no commander.
 pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<BracketEstimate> {
+    use strum::IntoEnumIterator;
+
     if deck.commander.is_empty() {
         return None;
     }
 
-    let mut axes = BracketAxisCounts::default();
-    let mut contributing = BracketContributingCards::default();
+    let mut axes: BTreeMap<BracketAxis, AxisReading> = BracketAxis::iter()
+        .map(|axis| (axis, AxisReading::default()))
+        .collect();
 
     let all_cards = deck.commander.iter().chain(deck.main_deck.iter());
     for name in all_cards {
-        let sig = db.bracket_signals_for(name);
-        if sig.game_changer {
-            axes.game_changers = axes.game_changers.saturating_add(1);
-            contributing.game_changers.push(name.clone());
-        }
-        if sig.mass_land_denial {
-            axes.mass_land_denial = axes.mass_land_denial.saturating_add(1);
-            contributing.mass_land_denial.push(name.clone());
-        }
-        if sig.extra_turn {
-            axes.extra_turns = axes.extra_turns.saturating_add(1);
-            contributing.extra_turns.push(name.clone());
-        }
-        if sig.efficient_tutor {
-            axes.efficient_tutors = axes.efficient_tutors.saturating_add(1);
-            contributing.efficient_tutors.push(name.clone());
+        for axis in db.bracket_signals_for(name).axes() {
+            let reading = axes.entry(axis).or_default();
+            reading.count = reading.count.saturating_add(1);
+            reading.contributing.push(name.clone());
         }
     }
 
     let (tier, violations) = decide_tier(&axes);
-    let axis_caps_at_tier = caps_at_tier(tier);
+    for (axis, reading) in &mut axes {
+        reading.cap_at_tier = cap_for(*axis, tier);
+    }
 
     Some(BracketEstimate {
         tier,
         axes,
-        axis_caps_at_tier,
-        contributing,
         violations,
         data_version: db.bracket_lists.version.clone(),
     })
@@ -222,7 +187,7 @@ const TIERS: [CommanderBracketTier; 4] = [
 /// per axis — the type expresses this invariant). Callers that need display
 /// ordering should sort by `forced_floor` on their side.
 fn decide_tier(
-    axes: &BracketAxisCounts,
+    axes: &BTreeMap<BracketAxis, AxisReading>,
 ) -> (
     CommanderBracketTier,
     BTreeMap<BracketAxis, BracketViolation>,
@@ -231,7 +196,7 @@ fn decide_tier(
     let mut violations: BTreeMap<BracketAxis, BracketViolation> = BTreeMap::new();
 
     for (axis, caps) in CAPS {
-        let count = axes.count_for(*axis);
+        let count = axes.get(axis).map_or(0, |reading| reading.count);
         let mut highest_crossed: Option<(u8, CommanderBracketTier)> = None;
         for (tier_idx, cap) in caps.iter().enumerate() {
             if count > *cap {
@@ -258,10 +223,8 @@ fn decide_tier(
     (TIERS[floor_index], violations)
 }
 
-/// Computes the per-axis cap values at a given tier for UI display
-/// ("count / cap" in the breakdown panel). Returns `None` for an axis
-/// that has no cap at the given tier (i.e., was `u8::MAX` in `CAPS`).
-fn caps_at_tier(tier: CommanderBracketTier) -> BracketAxisCaps {
+/// Cap for one axis at one tier. `None` means uncapped (`u8::MAX` in `CAPS`).
+fn cap_for(axis: BracketAxis, tier: CommanderBracketTier) -> Option<u8> {
     let tier_idx = match tier {
         CommanderBracketTier::Exhibition => 0,
         CommanderBracketTier::Core => 1,
@@ -269,20 +232,12 @@ fn caps_at_tier(tier: CommanderBracketTier) -> BracketAxisCaps {
         // cEDH caps mirror B4 (no caps at this tier).
         CommanderBracketTier::Optimized | CommanderBracketTier::Cedh => 3,
     };
-    let read = |axis: BracketAxis| -> Option<u8> {
-        CAPS.iter()
-            .find(|(a, _)| *a == axis)
-            .and_then(|(_, c)| match c[tier_idx] {
-                u8::MAX => None,
-                v => Some(v),
-            })
-    };
-    BracketAxisCaps {
-        game_changers: read(BracketAxis::GameChangers),
-        mass_land_denial: read(BracketAxis::MassLandDenial),
-        extra_turns: read(BracketAxis::ExtraTurns),
-        efficient_tutors: read(BracketAxis::EfficientTutors),
-    }
+    CAPS.iter()
+        .find(|(candidate, _)| *candidate == axis)
+        .and_then(|(_, caps)| match caps[tier_idx] {
+            u8::MAX => None,
+            value => Some(value),
+        })
 }
 
 #[cfg(test)]
@@ -358,7 +313,10 @@ mod tests {
         let d = deck(vec!["Atraxa, Praetors' Voice"], vec!["Forest", "Island"]);
         let e = estimate_bracket(&d, &db).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Exhibition);
-        assert_eq!(e.axes, BracketAxisCounts::default());
+        assert!(e
+            .axes
+            .values()
+            .all(|reading| reading.count == 0 && reading.contributing.is_empty()));
         assert!(e.violations.is_empty());
     }
 
@@ -386,7 +344,7 @@ mod tests {
         );
         let e = estimate_bracket(&d, &db).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Core);
-        assert_eq!(e.axes.efficient_tutors, 2);
+        assert_eq!(e.axes[&BracketAxis::EfficientTutors].count, 2);
     }
 
     #[test]
@@ -420,7 +378,7 @@ mod tests {
         );
         let e = estimate_bracket(&d, &db).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Upgraded);
-        assert_eq!(e.axes.efficient_tutors, 3);
+        assert_eq!(e.axes[&BracketAxis::EfficientTutors].count, 3);
     }
 
     #[test]
@@ -435,7 +393,7 @@ mod tests {
         let d = deck(vec!["Atraxa, Praetors' Voice"], vec!["Smothering Tithe"]);
         let e = estimate_bracket(&d, &db).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Upgraded);
-        assert_eq!(e.axes.game_changers, 1);
+        assert_eq!(e.axes[&BracketAxis::GameChangers].count, 1);
         assert!(
             e.violations.contains_key(&BracketAxis::GameChangers),
             "GameChangers violation must be present"
@@ -452,7 +410,7 @@ mod tests {
         let d = deck(vec!["Cmdr"], vec!["A", "B", "C", "D"]);
         let e = estimate_bracket(&d, &db).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Optimized);
-        assert_eq!(e.axes.game_changers, 4);
+        assert_eq!(e.axes[&BracketAxis::GameChangers].count, 4);
     }
 
     #[test]
@@ -495,11 +453,17 @@ mod tests {
         )]);
         let d = deck(vec!["Cmdr"], vec!["Demonic Tutor"]);
         let e = estimate_bracket(&d, &db).unwrap();
-        assert_eq!(e.axes.game_changers, 1);
-        assert_eq!(e.axes.efficient_tutors, 1);
+        assert_eq!(e.axes[&BracketAxis::GameChangers].count, 1);
+        assert_eq!(e.axes[&BracketAxis::EfficientTutors].count, 1);
         assert_eq!(e.tier, CommanderBracketTier::Upgraded);
-        assert_eq!(e.contributing.game_changers, vec!["Demonic Tutor"]);
-        assert_eq!(e.contributing.efficient_tutors, vec!["Demonic Tutor"]);
+        assert_eq!(
+            e.axes[&BracketAxis::GameChangers].contributing,
+            vec!["Demonic Tutor"]
+        );
+        assert_eq!(
+            e.axes[&BracketAxis::EfficientTutors].contributing,
+            vec!["Demonic Tutor"]
+        );
     }
 
     #[test]
@@ -558,10 +522,13 @@ mod tests {
         );
         let e = estimate_bracket(&d, &db).unwrap();
         assert_eq!(
-            e.contributing.game_changers,
+            e.axes[&BracketAxis::GameChangers].contributing,
             vec!["Smothering Tithe", "Cyclonic Rift"]
         );
-        assert_eq!(e.contributing.efficient_tutors, vec!["Demonic Tutor"]);
+        assert_eq!(
+            e.axes[&BracketAxis::EfficientTutors].contributing,
+            vec!["Demonic Tutor"]
+        );
     }
 
     #[test]
@@ -598,7 +565,7 @@ mod tests {
         )]);
         let d = deck(vec!["Sol Ring"], vec!["Forest", "Forest"]);
         let e = estimate_bracket(&d, &db).unwrap();
-        assert_eq!(e.axes.game_changers, 1);
+        assert_eq!(e.axes[&BracketAxis::GameChangers].count, 1);
         assert_eq!(e.tier, CommanderBracketTier::Upgraded);
     }
 
@@ -614,7 +581,7 @@ mod tests {
         let d = deck(vec!["Cmdr"], vec!["Demonic Tutor"]);
         let e = estimate_bracket(&d, &db).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Core);
-        assert_eq!(e.axes.efficient_tutors, 1);
+        assert_eq!(e.axes[&BracketAxis::EfficientTutors].count, 1);
     }
 
     #[test]
@@ -650,35 +617,65 @@ mod tests {
     }
 
     #[test]
-    fn axis_caps_at_tier_shape_per_tier() {
-        // B1 (Exhibition): all axes capped at 0.
-        let b1 = caps_at_tier(CommanderBracketTier::Exhibition);
-        assert_eq!(b1.game_changers, Some(0));
-        assert_eq!(b1.mass_land_denial, Some(0));
-        assert_eq!(b1.extra_turns, Some(0));
-        assert_eq!(b1.efficient_tutors, Some(0));
+    fn caps_are_defined_for_every_axis_at_every_tier() {
+        use strum::IntoEnumIterator;
 
-        // B2 (Core): game_changers=0, mass_land_denial=0, extra_turns=0,
-        //            efficient_tutors=2.
-        let b2 = caps_at_tier(CommanderBracketTier::Core);
-        assert_eq!(b2.game_changers, Some(0));
-        assert_eq!(b2.mass_land_denial, Some(0));
-        assert_eq!(b2.extra_turns, Some(0));
-        assert_eq!(b2.efficient_tutors, Some(2));
+        let expected = [
+            (
+                CommanderBracketTier::Exhibition,
+                [Some(0), Some(0), Some(0), Some(0)],
+            ),
+            (
+                CommanderBracketTier::Core,
+                [Some(0), Some(0), Some(0), Some(2)],
+            ),
+            (
+                CommanderBracketTier::Upgraded,
+                [Some(3), Some(0), None, None],
+            ),
+            (CommanderBracketTier::Optimized, [None, None, None, None]),
+        ];
+        for (tier, caps) in expected {
+            for (axis, expected_cap) in BracketAxis::iter().zip(caps) {
+                assert_eq!(cap_for(axis, tier), expected_cap, "{tier:?} {axis:?}");
+            }
+        }
+    }
 
-        // B3 (Upgraded): game_changers=3, mass_land_denial=0,
-        //                extra_turns=None (uncapped), efficient_tutors=None.
-        let b3 = caps_at_tier(CommanderBracketTier::Upgraded);
-        assert_eq!(b3.game_changers, Some(3));
-        assert_eq!(b3.mass_land_denial, Some(0));
-        assert_eq!(b3.extra_turns, None, "ExtraTurns uncapped at B3");
-        assert_eq!(b3.efficient_tutors, None, "EfficientTutors uncapped at B3");
+    #[test]
+    fn every_axis_is_present_even_at_zero() {
+        use strum::IntoEnumIterator;
 
-        // B4 (Optimized): all axes uncapped.
-        let b4 = caps_at_tier(CommanderBracketTier::Optimized);
-        assert_eq!(b4.game_changers, None, "GameChangers uncapped at B4");
-        assert_eq!(b4.mass_land_denial, None, "MassLandDenial uncapped at B4");
-        assert_eq!(b4.extra_turns, None);
-        assert_eq!(b4.efficient_tutors, None);
+        let estimate =
+            estimate_bracket(&deck(vec!["Cmdr"], vec!["Forest"]), &db_with_signals(&[])).unwrap();
+        assert_eq!(estimate.axes.len(), BracketAxis::iter().count());
+        for axis in BracketAxis::iter() {
+            let reading = &estimate.axes[&axis];
+            assert_eq!(reading.count, 0);
+            assert!(reading.contributing.is_empty());
+        }
+    }
+
+    #[test]
+    fn estimate_serializes_as_an_axis_keyed_reading_map() {
+        let db = db_with_signals(&[(
+            "Smothering Tithe",
+            BracketSignals {
+                game_changer: true,
+                ..Default::default()
+            },
+        )]);
+        let estimate =
+            estimate_bracket(&deck(vec!["Cmdr"], vec!["Smothering Tithe"]), &db).unwrap();
+        let value = serde_json::to_value(estimate).unwrap();
+
+        assert_eq!(value["axes"]["game_changers"]["count"], 1);
+        assert_eq!(
+            value["axes"]["game_changers"]["contributing"][0],
+            "Smothering Tithe"
+        );
+        assert!(value["axes"]["extra_turns"]["cap_at_tier"].is_null());
+        assert!(value.get("axis_caps_at_tier").is_none());
+        assert!(value.get("contributing").is_none());
     }
 }

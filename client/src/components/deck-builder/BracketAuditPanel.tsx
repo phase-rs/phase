@@ -88,9 +88,7 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
       {expanded && (
         <dl className="mt-3 space-y-2 text-xs">
           {BRACKET_AXES.map((axis) => {
-            const count = estimate.axes[axis];
-            const cards = estimate.contributing[axis];
-            const cap = estimate.axis_caps_at_tier[axis];
+            const { count, contributing: cards, cap_at_tier: cap } = estimate.axes[axis];
             const violation = estimate.violations[axis];
             return (
               <div key={axis} className="grid grid-cols-[180px_60px_1fr] items-start gap-2">

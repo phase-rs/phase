@@ -7,13 +7,15 @@ import type { ParsedDeck } from "../../services/deckParser";
 
 const mockEstimate: BracketEstimate = {
   tier: "upgraded",
-  axes: { game_changers: 1, mass_land_denial: 0, extra_turns: 0, efficient_tutors: 2 },
-  axis_caps_at_tier: { game_changers: 3, mass_land_denial: 0, extra_turns: null, efficient_tutors: null },
-  contributing: {
-    game_changers: ["Smothering Tithe"],
-    mass_land_denial: [],
-    extra_turns: [],
-    efficient_tutors: ["Demonic Tutor", "Vampiric Tutor"],
+  axes: {
+    game_changers: { count: 1, cap_at_tier: 3, contributing: ["Smothering Tithe"] },
+    mass_land_denial: { count: 0, cap_at_tier: 0, contributing: [] },
+    extra_turns: { count: 0, cap_at_tier: null, contributing: [] },
+    efficient_tutors: {
+      count: 2,
+      cap_at_tier: null,
+      contributing: ["Demonic Tutor", "Vampiric Tutor"],
+    },
   },
   violations: {},
   data_version: "test-1",
@@ -97,12 +99,18 @@ describe("useBracketEstimate", () => {
     const firstEstimate: BracketEstimate = {
       ...mockEstimate,
       tier: "core",
-      contributing: { ...mockEstimate.contributing, game_changers: ["FIRST"] },
+      axes: {
+        ...mockEstimate.axes,
+        game_changers: { ...mockEstimate.axes.game_changers, contributing: ["FIRST"] },
+      },
     };
     const secondEstimate: BracketEstimate = {
       ...mockEstimate,
       tier: "optimized",
-      contributing: { ...mockEstimate.contributing, game_changers: ["SECOND"] },
+      axes: {
+        ...mockEstimate.axes,
+        game_changers: { ...mockEstimate.axes.game_changers, contributing: ["SECOND"] },
+      },
     };
 
     let resolveFirst: (v: BracketEstimate) => void = () => {};
@@ -149,7 +157,7 @@ describe("useBracketEstimate", () => {
     await new Promise((r) => setTimeout(r, 50));
     // Hook should still show the second (newer) estimate.
     expect(result.current.estimate?.tier).toBe("optimized");
-    expect(result.current.estimate?.contributing.game_changers).toEqual(["SECOND"]);
+    expect(result.current.estimate?.axes.game_changers.contributing).toEqual(["SECOND"]);
   });
 
   it("returns an estimate for Brawl format (commander family)", async () => {

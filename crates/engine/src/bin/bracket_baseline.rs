@@ -16,6 +16,7 @@ use engine::database::bracket_lists::BracketLists;
 use engine::database::CardDatabase;
 use engine::game::bracket_estimate::{estimate_bracket, BracketEstimate, CommanderBracketTier};
 use engine::game::deck_loading::PlayerDeckList;
+use engine::game::BracketAxis;
 use serde::{Deserialize, Serialize};
 
 const DECK_CATALOG_PATH: &str = "client/public/decks.json";
@@ -337,7 +338,7 @@ impl GateAccumulator {
             .ok_or_else(|| "commander deck population overflowed".to_string())?;
         increment(
             &mut self.game_changer_histogram,
-            estimate.axes.game_changers,
+            estimate.axes[&BracketAxis::GameChangers].count,
         )?;
         increment(&mut self.tier_histogram, estimate.tier.as_u8())?;
         if estimate.tier == CommanderBracketTier::Exhibition {
@@ -346,15 +347,10 @@ impl GateAccumulator {
                 .checked_add(1)
                 .ok_or_else(|| "Exhibition deck count overflowed".to_string())?;
         }
-        for name in estimate
-            .contributing
-            .game_changers
-            .iter()
-            .chain(estimate.contributing.mass_land_denial.iter())
-            .chain(estimate.contributing.extra_turns.iter())
-            .chain(estimate.contributing.efficient_tutors.iter())
-        {
-            increment(&mut self.contributing_card_name_frequency, name.clone())?;
+        for reading in estimate.axes.values() {
+            for name in &reading.contributing {
+                increment(&mut self.contributing_card_name_frequency, name.clone())?;
+            }
         }
         Ok(())
     }
@@ -450,9 +446,8 @@ impl std::fmt::Display for GateVerdict {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::game::bracket_estimate::{
-        BracketAxisCaps, BracketAxisCounts, BracketContributingCards,
-    };
+    use engine::game::AxisReading;
+    use strum::IntoEnumIterator;
 
     fn catalog_deck(commander: Vec<CatalogCard>) -> CatalogDeck {
         CatalogDeck {
@@ -475,9 +470,9 @@ mod tests {
             result: BaselineEstimateResult::Estimated {
                 estimate: BracketEstimate {
                     tier,
-                    axes: BracketAxisCounts::default(),
-                    axis_caps_at_tier: BracketAxisCaps::default(),
-                    contributing: BracketContributingCards::default(),
+                    axes: BracketAxis::iter()
+                        .map(|axis| (axis, AxisReading::default()))
+                        .collect(),
                     violations: BTreeMap::new(),
                     data_version: "test".to_string(),
                 },

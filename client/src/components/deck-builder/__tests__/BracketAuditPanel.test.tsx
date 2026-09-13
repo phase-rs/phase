@@ -7,13 +7,19 @@ afterEach(cleanup);
 
 const estimate: BracketEstimate = {
   tier: "upgraded",
-  axes: { game_changers: 2, mass_land_denial: 0, extra_turns: 1, efficient_tutors: 3 },
-  axis_caps_at_tier: { game_changers: 3, mass_land_denial: 0, extra_turns: null, efficient_tutors: null },
-  contributing: {
-    game_changers: ["Smothering Tithe", "Cyclonic Rift"],
-    mass_land_denial: [],
-    extra_turns: ["Time Warp"],
-    efficient_tutors: ["Demonic Tutor", "Vampiric Tutor", "Enlightened Tutor"],
+  axes: {
+    game_changers: {
+      count: 2,
+      cap_at_tier: 3,
+      contributing: ["Smothering Tithe", "Cyclonic Rift"],
+    },
+    mass_land_denial: { count: 0, cap_at_tier: 0, contributing: [] },
+    extra_turns: { count: 1, cap_at_tier: null, contributing: ["Time Warp"] },
+    efficient_tutors: {
+      count: 3,
+      cap_at_tier: null,
+      contributing: ["Demonic Tutor", "Vampiric Tutor", "Enlightened Tutor"],
+    },
   },
   violations: {},
   data_version: "2025-09-24-wotc",
