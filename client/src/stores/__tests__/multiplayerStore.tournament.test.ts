@@ -603,12 +603,18 @@ describe("tournament credentials", () => {
     fake.deliver("TournamentCreated", {
       code: "ZZZ",
       organizer_token: "org-zzz",
+      expires_at_ms: 1_800_000_000_000,
       view: viewFor("ZZZ"),
     });
     const result = await pending;
 
     expect(result.ok).toBe(true);
     expect(store().tournamentCredentials.ZZZ?.organizerToken).toBe("org-zzz");
+    // The mint reply's expiry is filed beside the token, so proactive rotation
+    // has something to renew ahead of.
+    expect(store().tournamentCredentials.ZZZ?.organizerTokenExpiresAtMs).toBe(
+      1_800_000_000_000,
+    );
     expect(Object.keys(store().tournamentCredentials)).toEqual(["ZZZ"]);
   });
 
@@ -716,6 +722,7 @@ describe("tournament credentials", () => {
     fake.deliver("TournamentJoined", {
       code: "AAA",
       player_token: "ply-a",
+      expires_at_ms: 1_800_000_000_000,
       view: viewFor("AAA"),
     });
     const result = await pending;
@@ -723,6 +730,7 @@ describe("tournament credentials", () => {
     expect(result.ok).toBe(true);
     expect(store().tournamentCredentials.AAA).toEqual({
       playerToken: "ply-a",
+      playerTokenExpiresAtMs: 1_800_000_000_000,
       playerKey: sent.player_key,
       updatedAt: expect.any(Number) as unknown as number,
     });
