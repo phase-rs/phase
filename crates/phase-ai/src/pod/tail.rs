@@ -78,8 +78,7 @@ fn q05(observations: &[PodObservation]) -> Option<u32> {
         let count = count_at(observations, *turn);
         count.uninformative == 0
             && count.informative > 0
-            && count.decided_at_or_before.saturating_mul(100)
-                >= count.informative.saturating_mul(5)
+            && count.decided_at_or_before.saturating_mul(100) >= count.informative.saturating_mul(5)
     })
 }
 
