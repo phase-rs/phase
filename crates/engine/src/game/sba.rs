@@ -662,6 +662,8 @@ fn static_affects_player(
             // CR 109.4: TargetOpponent fails closed identically to TargetPlayer here.
             Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
             Some(ControllerRef::ParentTargetController) => false,
+            // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+            Some(ControllerRef::EventTargetController) => false,
             Some(ControllerRef::ParentTargetOwner) => false,
             Some(ControllerRef::DefendingPlayer) => false,
             // CR 613.1: chosen-player scope has no meaning here. Fail closed.

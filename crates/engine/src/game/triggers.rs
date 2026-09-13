@@ -11839,6 +11839,7 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         // `PlayerScope::DefendingPlayer` are adjudicated non-divergent under.
         | TargetFilter::TriggeringSource
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
@@ -11876,6 +11877,7 @@ fn controller_ref_binding_diverges(controller: &ControllerRef) -> bool {
         // CR 109.4 + CR 108.3: the parent target's controller / owner, read off
         // the same empty `ability.targets`.
         | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         // CR 608.2c: `ability.chosen_players`, populated BY the resolution that
         // ran the `Choose(Player)`.

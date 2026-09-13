@@ -5137,6 +5137,18 @@ pub(crate) fn collect_player_targets(
                 // targets are resolved from ability.targets directly); fail closed.
                 Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                 Some(ControllerRef::ParentTargetController) => false,
+                // CR 120.1 + CR 109.4 + CR 603.2: unlike the parent-target refs
+                // (which need a target slot this population expansion has no
+                // access to), the damage recipient's controller IS resolvable
+                // here — it comes off the firing event. Mirrors the
+                // `TriggeringPlayer` arm below rather than failing closed.
+                Some(ControllerRef::EventTargetController) => {
+                    targeting::resolve_effect_player_ref(
+                        state,
+                        ability,
+                        &TargetFilter::EventTargetController,
+                    ) == Some(p.id)
+                }
                 Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 // CR 613.1: no card scopes this shape to a persisted chosen

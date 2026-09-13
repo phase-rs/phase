@@ -6208,6 +6208,12 @@ fn resolve_ref(
                                 crate::game::ability_utils::parent_target_controller(a, state)
                             })
                             .is_some_and(|pid| pid == snap.controller),
+                        // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+                        Some(ControllerRef::EventTargetController) => ability
+                            .and_then(|a| {
+                                crate::game::ability_utils::parent_target_controller(a, state)
+                            })
+                            .is_some_and(|pid| pid == snap.controller),
                         Some(ControllerRef::ParentTargetOwner) => ability
                             .and_then(|a| crate::game::ability_utils::parent_target_owner(a, state))
                             .is_some_and(|pid| pid == snap.controller),
@@ -6276,6 +6282,12 @@ fn damage_source_controller_matches(
             })
             .is_some_and(|player| actual == player),
         ControllerRef::ParentTargetController => ability
+            .and_then(|ability| {
+                crate::game::ability_utils::parent_target_controller(ability, state)
+            })
+            .is_some_and(|player| actual == player),
+        // CR 120.1 + CR 109.4: the damage recipient's controller (event-derived twin).
+        ControllerRef::EventTargetController => ability
             .and_then(|ability| {
                 crate::game::ability_utils::parent_target_controller(ability, state)
             })

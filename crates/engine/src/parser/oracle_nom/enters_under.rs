@@ -244,6 +244,7 @@ fn map_relative_player_scope(scope: &ControllerRef) -> Option<ControllerRef> {
         // wildcarded so adding a `ControllerRef` variant breaks the build here.
         ControllerRef::You
         | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::DefendingPlayer
         | ControllerRef::SourceChosenPlayer

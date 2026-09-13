@@ -3295,6 +3295,13 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             sibling: false,
             projected: false,
         },
+        // CR 120.1 + CR 603.2: reads `DamageDealt.target` off the firing event,
+        // the same event axis as `EventTarget` and `TriggeringSourceController`.
+        TargetFilter::EventTargetController => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         TargetFilter::ParentTarget => Axes {
             event: true,
             sibling: false,
@@ -4856,6 +4863,12 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes {
         // restriction is enforced at target selection, not a walker axis).
         ControllerRef::TargetOpponent => Axes::NONE,
         ControllerRef::ParentTargetController => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
+        // CR 120.1 + CR 603.2: event-axis read, same as the sibling above.
+        ControllerRef::EventTargetController => Axes {
             event: true,
             sibling: false,
             projected: false,

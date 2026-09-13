@@ -61,6 +61,20 @@ fn resolve_sacrifice_scope(
             .map(|pid| vec![pid])
             .unwrap_or_default()
         }
+        // CR 120.1 + CR 109.4: Maarika, Brutal Gladiator — "that creature's
+        // controller sacrifices a noncreature, nonland permanent". The
+        // sacrificing player is the controller of the DAMAGED creature, which
+        // the shared resolver reads off `DamageDealt.target` (with the CR 608.2h
+        // LKI fallback, since excess damage has usually already killed it).
+        Some(ControllerRef::EventTargetController) => {
+            crate::game::targeting::resolve_effect_player_ref(
+                state,
+                ability,
+                &TargetFilter::EventTargetController,
+            )
+            .map(|pid| vec![pid])
+            .unwrap_or_default()
+        }
         Some(ControllerRef::ParentTargetOwner) => {
             crate::game::targeting::resolve_effect_player_ref(
                 state,
