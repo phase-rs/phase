@@ -83,12 +83,14 @@ fn run(
         rows.push(row);
     }
     for (deck_identifier, deck) in bundled_cedh {
-        rows.push(baseline_row(
+        let row = baseline_row(
             deck_identifier,
             BaselineDeckSource::BundledCedh,
             deck,
             &db,
-        ));
+        );
+        gate.record(&row)?;
+        rows.push(row);
     }
 
     let unresolved_curated_names = bracket_lists
@@ -128,6 +130,15 @@ fn run(
         gate_report.exhibition_decks, gate_report.commander_deck_population
     )
     .map_err(|error| format!("could not write gate verdict: {error}"))?;
+    let designed_deck_count = gate_report
+        .designed_population
+        .get(&BaselineDeckSource::BundledCedh)
+        .map_or(0, |population| population.deck_count);
+    writeln!(
+        diagnostics,
+        "bracket-baseline: designed population bundled_cedh ({designed_deck_count} decks; excluded from sampled gate rate)"
+    )
+    .map_err(|error| format!("could not write designed population summary: {error}"))?;
     Ok(())
 }
 
@@ -220,7 +231,7 @@ impl CatalogDeck {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum BaselineDeckSource {
     ProjectedDeckCatalog,
@@ -290,6 +301,13 @@ struct BracketGateReport {
     exhibition_decks: u64,
     contributing_card_name_frequency: BTreeMap<String, u64>,
     unresolved_curated_names: Vec<String>,
+    designed_population: BTreeMap<BaselineDeckSource, DesignedPopulationReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DesignedPopulationReport {
+    deck_count: u64,
+    tier_histogram: BTreeMap<u8, u64>,
 }
 
 #[derive(Default)]
@@ -299,6 +317,7 @@ struct GateAccumulator {
     tier_histogram: BTreeMap<u8, u64>,
     exhibition_decks: u64,
     contributing_card_name_frequency: BTreeMap<String, u64>,
+    designed_population: BTreeMap<BaselineDeckSource, DesignedPopulationReport>,
 }
 
 impl GateAccumulator {
@@ -306,6 +325,17 @@ impl GateAccumulator {
         let BaselineEstimateResult::Estimated { estimate } = &row.result else {
             return Ok(());
         };
+
+        // The projected catalog is a sampled population used for the gate rate.
+        // Bundled cEDH decks are hand-authored designs, so mixing them into that
+        // rate would conflate designed fixtures with sampled population data.
+        match row.source {
+            BaselineDeckSource::ProjectedDeckCatalog => self.record_sampled(estimate),
+            BaselineDeckSource::BundledCedh => self.record_designed(row.source, estimate),
+        }
+    }
+
+    fn record_sampled(&mut self, estimate: &BracketEstimate) -> Result<(), String> {
         self.commander_deck_population = self
             .commander_deck_population
             .checked_add(1)
@@ -334,6 +364,25 @@ impl GateAccumulator {
         Ok(())
     }
 
+    fn record_designed(
+        &mut self,
+        source: BaselineDeckSource,
+        estimate: &BracketEstimate,
+    ) -> Result<(), String> {
+        let population = self
+            .designed_population
+            .entry(source)
+            .or_insert_with(|| DesignedPopulationReport {
+                deck_count: 0,
+                tier_histogram: BTreeMap::new(),
+            });
+        population.deck_count = population
+            .deck_count
+            .checked_add(1)
+            .ok_or_else(|| "designed deck population overflowed".to_string())?;
+        increment(&mut population.tier_histogram, estimate.tier.as_u8())
+    }
+
     fn finish(
         self,
         mtgjson_vintage: String,
@@ -354,6 +403,7 @@ impl GateAccumulator {
             exhibition_decks: self.exhibition_decks,
             contributing_card_name_frequency: self.contributing_card_name_frequency,
             unresolved_curated_names,
+            designed_population: self.designed_population,
         })
     }
 }
@@ -405,6 +455,9 @@ impl std::fmt::Display for GateVerdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::game::bracket_estimate::{
+        BracketAxisCaps, BracketAxisCounts, BracketContributingCards,
+    };
 
     fn catalog_deck(commander: Vec<CatalogCard>) -> CatalogDeck {
         CatalogDeck {
@@ -414,6 +467,29 @@ mod tests {
             commander,
             main_board: Vec::new(),
             side_board: Vec::new(),
+        }
+    }
+
+    fn estimated_row(
+        source: BaselineDeckSource,
+        tier: CommanderBracketTier,
+    ) -> BracketBaselineRow {
+        BracketBaselineRow {
+            deck_identifier: "test".to_string(),
+            source,
+            code: "TST".to_string(),
+            name: "Test deck".to_string(),
+            deck_type: "Test".to_string(),
+            result: BaselineEstimateResult::Estimated {
+                estimate: BracketEstimate {
+                    tier,
+                    axes: BracketAxisCounts::default(),
+                    axis_caps_at_tier: BracketAxisCaps::default(),
+                    contributing: BracketContributingCards::default(),
+                    violations: BTreeMap::new(),
+                    data_version: "test".to_string(),
+                },
+            },
         }
     }
 
@@ -460,5 +536,43 @@ mod tests {
                 reason: NotEstimatedReason::EmptyCommander
             }
         );
+    }
+
+    #[test]
+    fn bundled_cedh_does_not_contribute_to_sampled_gate_counts() {
+        let mut gate = GateAccumulator::default();
+        gate.record(&estimated_row(
+            BaselineDeckSource::BundledCedh,
+            CommanderBracketTier::Exhibition,
+        ))
+        .unwrap();
+
+        assert_eq!(gate.commander_deck_population, 0);
+        assert_eq!(gate.exhibition_decks, 0);
+    }
+
+    #[test]
+    fn bundled_cedh_contributes_to_designed_population_tier_histogram() {
+        let mut gate = GateAccumulator::default();
+        gate.record(&estimated_row(
+            BaselineDeckSource::ProjectedDeckCatalog,
+            CommanderBracketTier::Core,
+        ))
+        .unwrap();
+        gate.record(&estimated_row(
+            BaselineDeckSource::BundledCedh,
+            CommanderBracketTier::Optimized,
+        ))
+        .unwrap();
+
+        let report = gate
+            .finish("test".to_string(), "test".to_string(), Vec::new())
+            .unwrap();
+        let designed = report
+            .designed_population
+            .get(&BaselineDeckSource::BundledCedh)
+            .unwrap();
+        assert_eq!(designed.deck_count, 1);
+        assert_eq!(designed.tier_histogram.get(&4), Some(&1));
     }
 }

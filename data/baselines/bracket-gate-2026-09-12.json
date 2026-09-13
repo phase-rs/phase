@@ -32,5 +32,14 @@
     "Smothering Tithe": 1,
     "Teferi's Protection": 1
   },
-  "unresolved_curated_names": []
+  "unresolved_curated_names": [],
+  "designed_population": {
+    "bundled_cedh": {
+      "deck_count": 3,
+      "tier_histogram": {
+        "3": 1,
+        "4": 2
+      }
+    }
+  }
 }

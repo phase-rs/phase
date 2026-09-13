@@ -19694,6 +19694,173 @@
         "status": "not_estimated",
         "reason": "empty_commander"
       }
+    },
+    {
+      "deck_identifier": "BundledCedh_HeliodBallista_Demo",
+      "source": "bundled_cedh",
+      "code": "BCDH",
+      "name": "cEDH Demo - Heliod Combo",
+      "deck_type": "Commander Deck",
+      "result": {
+        "status": "estimated",
+        "estimate": {
+          "tier": "upgraded",
+          "axes": {
+            "game_changers": 2,
+            "mass_land_denial": 0,
+            "extra_turns": 0,
+            "efficient_tutors": 1
+          },
+          "axis_caps_at_tier": {
+            "game_changers": 3,
+            "mass_land_denial": 0,
+            "extra_turns": null,
+            "efficient_tutors": null
+          },
+          "contributing": {
+            "game_changers": [
+              "Mox Diamond",
+              "Enlightened Tutor"
+            ],
+            "mass_land_denial": [],
+            "extra_turns": [],
+            "efficient_tutors": [
+              "Enlightened Tutor"
+            ]
+          },
+          "violations": {
+            "game_changers": {
+              "axis": "game_changers",
+              "count": 2,
+              "prior_cap": 0,
+              "forced_floor": "upgraded"
+            },
+            "efficient_tutors": {
+              "axis": "efficient_tutors",
+              "count": 1,
+              "prior_cap": 0,
+              "forced_floor": "core"
+            }
+          },
+          "data_version": "2025-09-24-wotc"
+        }
+      }
+    },
+    {
+      "deck_identifier": "BundledCedh_InallaThoracle_Demo",
+      "source": "bundled_cedh",
+      "code": "BCDI",
+      "name": "cEDH Demo - Inalla Thoracle Combo",
+      "deck_type": "Commander Deck",
+      "result": {
+        "status": "estimated",
+        "estimate": {
+          "tier": "optimized",
+          "axes": {
+            "game_changers": 9,
+            "mass_land_denial": 0,
+            "extra_turns": 0,
+            "efficient_tutors": 6
+          },
+          "axis_caps_at_tier": {
+            "game_changers": null,
+            "mass_land_denial": null,
+            "extra_turns": null,
+            "efficient_tutors": null
+          },
+          "contributing": {
+            "game_changers": [
+              "Thassa's Oracle",
+              "Demonic Tutor",
+              "Vampiric Tutor",
+              "Mystical Tutor",
+              "Imperial Seal",
+              "Force of Will",
+              "Mox Diamond",
+              "Mana Vault",
+              "Chrome Mox"
+            ],
+            "mass_land_denial": [],
+            "extra_turns": [],
+            "efficient_tutors": [
+              "Demonic Consultation",
+              "Demonic Tutor",
+              "Vampiric Tutor",
+              "Mystical Tutor",
+              "Imperial Seal",
+              "Grim Tutor"
+            ]
+          },
+          "violations": {
+            "game_changers": {
+              "axis": "game_changers",
+              "count": 9,
+              "prior_cap": 3,
+              "forced_floor": "optimized"
+            },
+            "efficient_tutors": {
+              "axis": "efficient_tutors",
+              "count": 6,
+              "prior_cap": 2,
+              "forced_floor": "upgraded"
+            }
+          },
+          "data_version": "2025-09-24-wotc"
+        }
+      }
+    },
+    {
+      "deck_identifier": "BundledCedh_WinotaKikiFelidar_Demo",
+      "source": "bundled_cedh",
+      "code": "BCDW",
+      "name": "cEDH Demo - Winota Kiki-Felidar Combo",
+      "deck_type": "Commander Deck",
+      "result": {
+        "status": "estimated",
+        "estimate": {
+          "tier": "optimized",
+          "axes": {
+            "game_changers": 4,
+            "mass_land_denial": 0,
+            "extra_turns": 0,
+            "efficient_tutors": 1
+          },
+          "axis_caps_at_tier": {
+            "game_changers": null,
+            "mass_land_denial": null,
+            "extra_turns": null,
+            "efficient_tutors": null
+          },
+          "contributing": {
+            "game_changers": [
+              "Mox Diamond",
+              "Chrome Mox",
+              "Mana Vault",
+              "Enlightened Tutor"
+            ],
+            "mass_land_denial": [],
+            "extra_turns": [],
+            "efficient_tutors": [
+              "Enlightened Tutor"
+            ]
+          },
+          "violations": {
+            "game_changers": {
+              "axis": "game_changers",
+              "count": 4,
+              "prior_cap": 3,
+              "forced_floor": "optimized"
+            },
+            "efficient_tutors": {
+              "axis": "efficient_tutors",
+              "count": 1,
+              "prior_cap": 0,
+              "forced_floor": "core"
+            }
+          },
+          "data_version": "2025-09-24-wotc"
+        }
+      }
     }
   ]
 }
