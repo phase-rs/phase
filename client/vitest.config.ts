@@ -126,7 +126,9 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "lcov"],
       include: ["src/**/*.{ts,tsx}"],
-      exclude: ["src/**/__tests__/**", "src/**/*.test.*", "src/wasm/**"],
+      // Stories are documentation rendered by Storybook, not app code, so
+      // they neither add nor owe coverage.
+      exclude: ["src/**/__tests__/**", "src/**/*.test.*", "src/**/*.stories.*", "src/wasm/**"],
       thresholds: {
         lines: 10,
         functions: 10,
