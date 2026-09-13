@@ -1394,7 +1394,9 @@
       "exileCount": "Wygnaj ({{selected}}/{{count}})",
       "discardCount": "Odrzuć ({{selected}}/{{count}})",
       "collectCount": "Zbierz ({{total}}/{{minimum}})",
-      "labelCount": "{{label}} ({{selected}}/{{count}})"
+      "labelCount": "{{label}} ({{selected}}/{{count}})",
+      "moveEarlier": "Przesuń wcześniej",
+      "moveLater": "Przesuń później"
     },
     "ringBearer": {
       "title": "Wybierz Nosiciela Pierścienia",
@@ -1406,7 +1408,7 @@
       "labelRummage": "Discard & draw",
       "labelSkip": "Skip"
     },
-    "reorderHint": "Przeciągnij, aby zmienić kolejność · karta na wierzchu jest dobierana pierwsza",
+    "reorderHint": "Przeciągnij lub użyj strzałek, aby zmienić kolejność · karta na wierzchu jest dobierana pierwsza",
     "scry": {
       "title": "Scry",
       "subtitle_one": "Spójrz na {{count}} kartę z wierzchu swojej biblioteki",
