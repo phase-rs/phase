@@ -24,7 +24,9 @@
 use super::rules::{GameScenario, Phase, P0, P1};
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::GameRunner;
-use engine::types::ability::{TargetRef, TriggerDefinition};
+use engine::types::ability::{
+    AbilityDefinition, Effect, TargetFilter, TargetRef, TriggerDefinition,
+};
 use engine::types::actions::GameAction;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -391,8 +393,6 @@ fn delayed_destroy_does_not_affect_a_blinked_and_returned_recipient() {
 /// ordering and fails the other.
 #[test]
 fn a_mixed_event_subject_delayed_chain_destroys_both_dealer_and_recipient() {
-    use engine::types::ability::{AbilityDefinition, Effect, TargetFilter};
-
     /// Ohran Viper's parsed trigger, with a second delayed clause appended that
     /// names the opposite anaphor. `root_anaphor` becomes the delayed payload's
     /// ROOT clause and the other becomes its sub-clause.
