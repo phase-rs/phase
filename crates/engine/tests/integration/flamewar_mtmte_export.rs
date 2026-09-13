@@ -92,57 +92,74 @@ fn flamewar_mtmte_from_production_export_casts_back_face() {
     assert_eq!(permanent.name, "Flamewar, Streetwise Operative");
 }
 
-/// CR 603.4: the real Pack Tactics trigger fires only when this declaration's
-/// snapshot has total power six or more.
+const WEREWOLF_PACK_LEADER_ORACLE: &str =
+    "Pack tactics — Whenever this creature attacks, if you attacked with creatures with total power 6 or greater this combat, draw a card.\n{3}{G}: Until end of turn, this creature has base power and toughness 5/3, gains trample, and isn't a Human.";
+
+const HOBGOBLIN_CAPTAIN_ORACLE: &str =
+    "Pack tactics — Whenever this creature attacks, if you attacked with creatures with total power 6 or greater this combat, this creature gains first strike until end of turn.";
+
+/// CR 603.4 + CR 508.1a: real Pack Tactics Oracle text only fires when the
+/// declaration snapshot's combined power reaches six.
 #[test]
-fn battle_cry_goblin_pack_tactics_uses_the_declared_attack_batch() {
-    let db = shared_card_db().expect("integration card fixture must load");
+fn pack_tactics_uses_the_declared_attack_batch() {
+    for (name, source_power, oracle) in [
+        ("Werewolf Pack Leader", 3, WEREWOLF_PACK_LEADER_ORACLE),
+        ("Hobgoblin Captain", 3, HOBGOBLIN_CAPTAIN_ORACLE),
+    ] {
+        for (other_power, should_trigger) in [(2, false), (3, true)] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario
+                .add_creature_from_oracle(P0, name, source_power, 3, oracle)
+                .id();
+            let other = scenario
+                .add_creature(P0, "Pack Tactics witness", other_power, 1)
+                .id();
+            let mut runner = scenario.build();
+            runner.advance_to_combat();
 
-    for (other_power, should_trigger) in [(3, false), (4, true), (5, true)] {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        let goblin = scenario.add_real_card(P0, "Battle Cry Goblin", Zone::Battlefield, db);
-        let other = scenario
-            .add_creature(P0, "Pack Tactics witness", other_power, 1)
-            .id();
-        let mut runner = scenario.build();
-        engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-        runner.advance_to_combat();
-
-        runner
-            .declare_attackers(&[
-                (goblin, AttackTarget::Player(P1)),
-                (other, AttackTarget::Player(P1)),
-            ])
-            .expect("attack declaration accepted");
-        assert_eq!(
-            !runner.state().stack.is_empty(),
-            should_trigger,
-            "2 + {other_power} declaration must {} trigger Pack Tactics",
-            if should_trigger { "" } else { "not" }
-        );
+            runner
+                .declare_attackers(&[
+                    (source, AttackTarget::Player(P1)),
+                    (other, AttackTarget::Player(P1)),
+                ])
+                .expect("attack declaration accepted");
+            assert_eq!(
+                !runner.state().stack.is_empty(),
+                should_trigger,
+                "{name}: {source_power} + {other_power} declaration must {} trigger Pack Tactics",
+                if should_trigger { "" } else { "not" }
+            );
+        }
     }
 }
 
 /// CR 603.4 + CR 508.1a: the resolution-time intervening-if recheck reads the
-/// original declaration records after an attacker changes characteristics and
+/// original declaration records after a co-attacker changes characteristics and
 /// leaves the battlefield.
 #[test]
-fn battle_cry_goblin_pack_tactics_rechecks_declaration_snapshot_after_departure() {
-    let db = shared_card_db().expect("integration card fixture must load");
+fn pack_tactics_rechecks_declaration_snapshot_after_departure() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let goblin = scenario.add_real_card(P0, "Battle Cry Goblin", Zone::Battlefield, db);
+    scenario.with_library_top(P0, &["Pack Tactics Draw"]);
+    let source = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Werewolf Pack Leader",
+            3,
+            3,
+            WEREWOLF_PACK_LEADER_ORACLE,
+        )
+        .id();
     let other = scenario
-        .add_creature(P0, "Departing Pack Tactics witness", 4, 1)
+        .add_creature(P0, "Departing Pack Tactics witness", 3, 1)
         .id();
     let mut runner = scenario.build();
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
     runner.advance_to_combat();
 
     runner
         .declare_attackers(&[
-            (goblin, AttackTarget::Player(P1)),
+            (source, AttackTarget::Player(P1)),
             (other, AttackTarget::Player(P1)),
         ])
         .expect("six-power attack declaration accepted");
@@ -155,9 +172,13 @@ fn battle_cry_goblin_pack_tactics_rechecks_declaration_snapshot_after_departure(
     runner.advance_until_stack_empty();
 
     assert!(
-        runner.state().objects.values().any(|object| {
-            object.zone == Zone::Battlefield && object.controller == P0 && object.name == "Goblin"
+        runner.state().players[P0.0 as usize].hand.iter().any(|id| {
+            runner
+                .state()
+                .objects
+                .get(id)
+                .is_some_and(|object| object.name == "Pack Tactics Draw")
         }),
-        "the snapshot-qualified trigger resolves after its attacker departs"
+        "the snapshot-qualified trigger must draw after its co-attacker departs"
     );
 }
