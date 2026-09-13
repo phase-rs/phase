@@ -950,20 +950,19 @@ fn dev_fixture_enabled() -> bool {
     matches!(std::env::var("PHASE_DEV_FIXTURE"), Ok(value) if value == "1")
 }
 
-fn select_card_data_source(data_dir: &Path, dev_fixture: bool) -> Result<CardDataSource, String> {
+/// An absent export selects the export anyway: one authority decides whether a
+/// bootstrapped file can be provided, and it is `load_data_file`, which holds
+/// the directory lock across the whole replacement. A file that is absent for
+/// the instant another start holds it aside is not a reason to exit.
+fn select_card_data_source(data_dir: &Path, dev_fixture: bool) -> CardDataSource {
     let export_path = data_dir.join(data_bootstrap::CARD_DATA_FILE);
     if export_path.is_file() {
-        return Ok(CardDataSource::Export(export_path));
+        return CardDataSource::Export(export_path);
     }
     if dev_fixture {
-        return Ok(CardDataSource::DevFixture(
-            data_dir.join("mtgjson/test_fixture.json"),
-        ));
+        return CardDataSource::DevFixture(data_dir.join("mtgjson/test_fixture.json"));
     }
-    Err(format!(
-        "card-data.json is missing from {}; startup data bootstrap did not provide it",
-        data_dir.display()
-    ))
+    CardDataSource::Export(export_path)
 }
 
 fn bootstrap_required(data_dir: &Path, dev_fixture: bool) -> bool {
@@ -2061,8 +2060,7 @@ async fn serve() {
         Some((options, identity)) => (Some(options), identity.as_ref()),
         None => (None, None),
     };
-    let card_data_source = select_card_data_source(data_path, dev_fixture)
-        .unwrap_or_else(|message| fatal_startup(message));
+    let card_data_source = select_card_data_source(data_path, dev_fixture);
     let card_db = match card_data_source {
         // The payload goes unread: the authority builds the path from the data
         // directory and the file name, exactly as this arm's payload was built.
@@ -3009,11 +3007,27 @@ mod lifecycle_tests {
         let temp = tempfile::tempdir().expect("temp dir");
 
         assert!(bootstrap_required(temp.path(), false));
-        assert!(select_card_data_source(temp.path(), false).is_err());
+        assert_eq!(
+            select_card_data_source(temp.path(), false),
+            CardDataSource::Export(temp.path().join("card-data.json"))
+        );
         assert!(!bootstrap_required(temp.path(), true));
         assert_eq!(
-            select_card_data_source(temp.path(), true).expect("explicit fixture source"),
+            select_card_data_source(temp.path(), true),
             CardDataSource::DevFixture(temp.path().join("mtgjson/test_fixture.json"))
+        );
+    }
+
+    /// The state a concurrent start's move-aside leaves for the instant between
+    /// the rename and the refill, both under its lock.
+    #[test]
+    fn an_export_held_aside_by_another_start_selects_the_export() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join("card-data.json.replacing"), "{}").expect("held copy");
+
+        assert_eq!(
+            select_card_data_source(temp.path(), false),
+            CardDataSource::Export(temp.path().join("card-data.json"))
         );
     }
 

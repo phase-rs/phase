@@ -25,6 +25,12 @@ const BEST_EFFORT_DATA_FILES: [&str; 1] = [DRAFT_POOLS_FILE];
 const HELD_SUFFIX: &str = ".replacing";
 /// A copy that a usable file superseded, kept for the operator to inspect.
 const RETIRED_SUFFIX: &str = ".unusable";
+/// The lock one process holds for the whole of one replacement transaction. One
+/// lock for the directory, not one per file: a refill installs every managed
+/// file that is missing, so a per-file lock leaves every file it does not name
+/// open to the race it exists to stop. Left in place when it is released:
+/// removing it would hand the next process a lock on a file nothing else can see.
+const DATA_LOCK_NAME: &str = ".data.lock";
 
 #[derive(Debug)]
 pub struct BootstrapError(String);
@@ -312,6 +318,22 @@ pub async fn bootstrap_missing_data(
     options: &BootstrapOptions,
     identity: Option<&ChannelIdentity>,
 ) -> Result<(), BootstrapError> {
+    // A start that is missing nothing writes nothing, so it neither needs the
+    // lock nor should create it: every managed file present on a read-only data
+    // directory is a working start, and opening the lock would fail it.
+    if missing_data_files(data_dir, &REQUIRED_DATA_FILES).is_empty()
+        && missing_data_files(data_dir, &BEST_EFFORT_DATA_FILES).is_empty()
+    {
+        return Ok(());
+    }
+    // The one acquisition on this path. `bootstrap_missing_data_with_key` takes
+    // no lock, because its other caller reaches it holding this one.
+    let _lock = lock_data_dir(data_dir).await.map_err(|detail| {
+        BootstrapError::new(format!(
+            "data files in {} could not be bootstrapped{detail}",
+            data_dir.display()
+        ))
+    })?;
     bootstrap_missing_data_with_key(data_dir, options, identity, PINNED_DATA_MANIFEST_PUBLIC_KEY)
         .await
 }
@@ -446,9 +468,9 @@ async fn load_data_file_with_key<T, E: fmt::Display>(
         Ok(value) => {
             // A usable file at the live path supersedes any copy held aside for
             // it, so an ordinary healthy start finishes a replacement an earlier
-            // start could not.
+            // start could not — unless a start still owns that one.
             if options.is_some() {
-                retire_held_copy(data_dir, name);
+                retire_unowned_held_copy(data_dir, name);
             }
             return Ok(value);
         }
@@ -499,6 +521,19 @@ async fn load_data_file_with_key<T, E: fmt::Display>(
             }));
         }
     };
+
+    // Held for the whole transaction, through the refill, the reload, and the
+    // retire or restore that ends it.
+    let _lock = lock_data_dir(data_dir)
+        .await
+        .map_err(|detail| unusable(&detail))?;
+
+    // The wait may have been another process replacing this very file, which
+    // leaves an ordinary usable file here rather than a replacement to start.
+    if let Ok(value) = load(&path) {
+        retire_held_copy(data_dir, name);
+        return Ok(value);
+    }
 
     let held = hold_unusable_file(data_dir, name, &reason).map_err(|detail| unusable(&detail))?;
 
@@ -611,6 +646,23 @@ fn verify_sha256(
     }
 }
 
+/// Makes a directory entry durable. A rename or an atomic install reaches the
+/// page cache first, and every entry a resumed replacement looks for is one of
+/// these. Never fatal at any of its four call sites: the entry is already in
+/// place and returning an error would not make it durable, so failing here
+/// would only fail a start whose step succeeded.
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::File::open(parent)?.sync_all()
+}
+
+/// Windows offers no directory handle to force: `File::open` refuses a directory.
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 async fn write_verified_data_file(
     data_dir: &Path,
     name: &str,
@@ -664,7 +716,62 @@ fn write_verified_data_file_blocking(
             error.error
         ))
     })?;
+    if let Err(error) = sync_parent_dir(&destination) {
+        warn!(
+            file = %destination.display(),
+            error = %error,
+            "the data directory could not be synced after installing that file; the install may not survive a crash"
+        );
+    }
     Ok(())
+}
+
+fn open_data_lock(data_dir: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(data_dir.join(DATA_LOCK_NAME))
+}
+
+/// Takes the lock that serializes this data directory's replacements against
+/// every other process sharing it. Overlapping starts otherwise adopt each
+/// other's held copy, and the one whose refill fails puts a stale copy back over
+/// the file the other installed. Blocking, because the holder may be
+/// mid-download and waiting for it is what this start wants. The kernel drops
+/// the lock when the process exits, so a start that dies holding it cannot wedge
+/// the next one. Taken at one level only: the locks are per open file
+/// description, so a second acquisition inside one process waits on the first
+/// forever.
+/// The error is the detail clause for the caller's message, not a full message.
+async fn lock_data_dir(data_dir: &Path) -> Result<std::fs::File, String> {
+    let data_dir = data_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || lock_data_dir_blocking(&data_dir))
+        .await
+        .map_err(|error| format!("; the replacement lock task failed: {error}"))?
+}
+
+fn lock_data_dir_blocking(data_dir: &Path) -> Result<std::fs::File, String> {
+    // The refill creates the data directory, and the lock is taken before it.
+    std::fs::create_dir_all(data_dir).map_err(|error| {
+        format!(
+            "; the data directory {} could not be created: {error}",
+            data_dir.display()
+        )
+    })?;
+    let file = open_data_lock(data_dir).map_err(|error| {
+        format!(
+            "; the replacement lock {} could not be opened: {error}",
+            data_dir.join(DATA_LOCK_NAME).display()
+        )
+    })?;
+    file.lock().map_err(|error| {
+        format!(
+            "; the replacement lock {} could not be taken: {error}",
+            data_dir.join(DATA_LOCK_NAME).display()
+        )
+    })?;
+    Ok(file)
 }
 
 /// Moves a data file this binary cannot use out of the way so the bootstrap can
@@ -711,6 +818,16 @@ fn hold_unusable_file(
                 reason = reason,
                 "data file is unusable by this server; moving it aside to replace it from the data manifest"
             );
+            // The only copy of this file is now reachable through that entry
+            // alone, so a crash before it is on disk loses it.
+            if let Err(error) = sync_parent_dir(&held) {
+                warn!(
+                    file = %path.display(),
+                    held = %held.display(),
+                    error = %error,
+                    "the data directory could not be synced after moving that file aside; the move may not survive a crash"
+                );
+            }
             Ok(Some(held))
         }
         // The loader failed because the file is absent, and the refill that
@@ -723,6 +840,30 @@ fn hold_unusable_file(
             "; nothing could be moved aside to {}: {error}",
             held.display()
         )),
+    }
+}
+
+/// Sets aside a held copy on behalf of a start that owns no transaction, which
+/// is what an ordinary healthy start is. A copy under another start's lock is
+/// that attempt's rollback: retiring it strands the restore, which then leaves
+/// nothing at the live path and reports a copy at a name it no longer occupies.
+/// This start is already serving, so it never waits for that lock — whoever
+/// holds it retires or restores that copy itself.
+fn retire_unowned_held_copy(data_dir: &Path, name: &str) {
+    // Nothing held is the ordinary case, and it needs no lock file to say so.
+    if matches!(
+        data_dir.join(format!("{name}{HELD_SUFFIX}")).try_exists(),
+        Ok(false)
+    ) {
+        return;
+    }
+    // A lock that cannot be opened, or that someone holds, leaves the copy to
+    // the start that can deal with it.
+    let Ok(lock) = open_data_lock(data_dir) else {
+        return;
+    };
+    if lock.try_lock().is_ok() {
+        retire_held_copy(data_dir, name);
     }
 }
 
@@ -740,11 +881,20 @@ fn retire_held_copy(data_dir: &Path, name: &str) {
     }
     let retired = data_dir.join(format!("{name}{RETIRED_SUFFIX}"));
     match std::fs::rename(&held, &retired) {
-        Ok(()) => warn!(
-            file = name,
-            retired = %retired.display(),
-            "a copy of this data file that this server could not use was set aside for inspection, replacing any previous copy there"
-        ),
+        Ok(()) => {
+            warn!(
+                file = name,
+                retired = %retired.display(),
+                "a copy of this data file that this server could not use was set aside for inspection, replacing any previous copy there"
+            );
+            if let Err(error) = sync_parent_dir(&retired) {
+                warn!(
+                    file = name,
+                    error = %error,
+                    "the data directory could not be synced after setting that copy aside; the move may not survive a crash"
+                );
+            }
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => warn!(
             file = name,
@@ -760,7 +910,16 @@ fn retire_held_copy(data_dir: &Path, name: &str) {
 /// message stays true when the rename fails.
 fn restore_held_copy(held: &Path, path: &Path) -> String {
     match std::fs::rename(held, path) {
-        Ok(()) => format!("; {} was put back", path.display()),
+        Ok(()) => {
+            if let Err(error) = sync_parent_dir(path) {
+                warn!(
+                    file = %path.display(),
+                    error = %error,
+                    "the data directory could not be synced after putting the previous copy back; the move may not survive a crash"
+                );
+            }
+            format!("; {} was put back", path.display())
+        }
         Err(error) => format!(
             "; the previous copy could not be put back and remains at {}: {error}",
             held.display()
@@ -771,16 +930,20 @@ fn restore_held_copy(held: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::fs::TryLockError;
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::{
-        bootstrap_missing_data_with_key, hold_unusable_file, identity_from_markers,
-        load_data_file_with_key, parse_manifest_data, resolve_manifest, restore_held_copy,
-        retire_held_copy, verify_manifest_signature, verify_sha256, write_verified_data_file,
-        BootstrapOptions, ChannelIdentity, CARD_DATA_FILE, DRAFT_POOLS_FILE,
+        bootstrap_missing_data, bootstrap_missing_data_with_key, hold_unusable_file,
+        identity_from_markers, load_data_file_with_key, lock_data_dir_blocking, missing_data_files,
+        open_data_lock, parse_manifest_data, resolve_manifest, restore_held_copy, retire_held_copy,
+        sync_parent_dir, verify_manifest_signature, verify_sha256, write_verified_data_file,
+        write_verified_data_file_blocking, BootstrapOptions, ChannelIdentity, CARD_DATA_FILE,
+        DRAFT_POOLS_FILE, REQUIRED_DATA_FILES,
     };
     use sha2::{Digest, Sha256};
     use url::Url;
@@ -799,10 +962,12 @@ mod tests {
         std::fs::read_to_string(path).expect("read file")
     }
 
-    const TEST_PUBLIC_KEY: &str = "RWSRzbuJXEhfwLu1bCNndDifYla7GFbotc6t1tcuytze2q5NjXbWEmG5";
+    const TEST_PUBLIC_KEY: &str = "RWT7WjyrPe/JOO3Coiypogmvx3fDPgC4Umm/YuaSmjvvNQwXdlFmPgDu";
+    /// The bytes the signed manifest below names, by name and by sha256.
+    const SIGNED_TEST_CARD_DATA: &[u8] = br#"{"cards":[]}"#;
     const SIGNED_TEST_MANIFEST: &[u8] =
-        br#"{"schema":1,"channel":"release","version":"test","data":[]}"#;
-    const SIGNED_TEST_SIGNATURE: &str = "untrusted comment: signature from minisign secret key\nRUSRzbuJXEhfwAxxkkM8a0M+p0N9xX6VelN8cNVVk9DmUmIUAK7Ga87HN5vjnQn7R4VP1/Lb2DwG8kOI6dj99fNMqYqkpT5DTwM=\ntrusted comment: timestamp:1784645957\tfile:manifest.json\thashed\no9B8aeyirZqbDD1N2/k4voUfPunqsm7iWKqMm6kCOLGrZlx+s5ePOk8m7DejRy/Vg0KsTAsRsg4MNt7ICyICDA==\n";
+        br#"{"schema":1,"channel":"release","version":"test","data":[{"name":"card-data.json","sha256":"6bffeba331b3891aa4e0b369cd5d7d22a9a827ba6213ae772ae275c754f9570e","url":"https://example.test/card-data.json"}]}"#;
+    const SIGNED_TEST_SIGNATURE: &str = "untrusted comment: signature from minisign secret key\nRUT7WjyrPe/JOP8s1mMzCor1VC6LVqqbsxTrFaMfUX1zrh7hLuJ+kSzm6IxGxpNBXf2FLKQxpd+2TFB1HXR/hDBRu9F1ip5JWwk=\ntrusted comment: timestamp:1789000000\tfile:manifest.json\thashed\nOXz0w8XA3aONcLUmZNVMFVa/+7iNcyQY5jtEr5HMwmaEDnjaLJDDGYldGbhewOXmV6dYGwHl39uDD01YkflECg==\n";
 
     #[test]
     fn parses_release_manifest_and_ignores_unknown_fields() {
@@ -1343,7 +1508,8 @@ mod tests {
         assert_eq!(read(&temp.path().join(CARD_DATA_FILE)), "ORIGINAL");
         assert_eq!(read(&retired(temp.path(), CARD_DATA_FILE)), "OLDER");
         assert!(!held(temp.path(), CARD_DATA_FILE).exists());
-        assert_eq!(calls.get(), 1);
+        // The load that failed, and the one the lock holder repeats.
+        assert_eq!(calls.get(), 2);
         // A second refill raises this; nothing but a real refill raises it at all.
         assert_eq!(accepts.load(Ordering::SeqCst), 1);
     }
@@ -1447,7 +1613,7 @@ mod tests {
         );
         assert_eq!(read(&held(temp.path(), DRAFT_POOLS_FILE)), "ORIGINAL");
         assert_eq!(read(&temp.path().join(DRAFT_POOLS_FILE)), "REFILLED");
-        assert_eq!(calls.get(), 1);
+        assert_eq!(calls.get(), 2);
     }
 
     /// A name outside the manifest-managed set is what makes the refill a no-op
@@ -1477,7 +1643,7 @@ mod tests {
             |_: &Path| -> Result<(), String> {
                 calls.set(calls.get() + 1);
                 match calls.get() {
-                    1 => Err("stale shape".to_string()),
+                    1 | 2 => Err("stale shape".to_string()),
                     _ => Ok(()),
                 }
             },
@@ -1485,7 +1651,7 @@ mod tests {
         .await
         .expect("the refill finishes the interrupted replacement");
 
-        assert_eq!(calls.get(), 2);
+        assert_eq!(calls.get(), 3);
         assert_eq!(read(&retired(temp.path(), name)), "ORIGINAL");
         assert!(!held(temp.path(), name).exists());
         assert!(!temp.path().join(name).exists());
@@ -1520,6 +1686,368 @@ mod tests {
         assert!(message.contains("was put back"), "{message}");
         assert_eq!(read(&temp.path().join(DRAFT_POOLS_FILE)), "ORIGINAL");
         assert!(!held(temp.path(), DRAFT_POOLS_FILE).exists());
+    }
+
+    /// The primitives a replacement is built from, composed here in the order it
+    /// composes them: signature, manifest, hash, hold, atomic install, retire.
+    /// The composition is this test's own — `load_data_file_with_key`,
+    /// `bootstrap_missing_data_with_key` and `download_data_file` are what
+    /// compose them in production, and none of the three is entered here. What
+    /// ties this to them is the refill's own selection input and success
+    /// re-check, asserted below.
+    #[test]
+    fn the_verified_install_primitives_compose_from_signed_manifest_to_retired_copy() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join(CARD_DATA_FILE);
+        std::fs::write(&path, "STALE").expect("write stale card data");
+        let load = |path: &Path| -> Result<Vec<u8>, String> {
+            match std::fs::read(path) {
+                Ok(bytes) if bytes == SIGNED_TEST_CARD_DATA => Ok(bytes),
+                Ok(_) => Err("unknown variant `Typed`".to_string()),
+                Err(error) => Err(error.to_string()),
+            }
+        };
+
+        load(&path).expect_err("the provisioned copy is not usable by this binary");
+        assert!(missing_data_files(temp.path(), &REQUIRED_DATA_FILES).is_empty());
+        let held_path = hold_unusable_file(temp.path(), CARD_DATA_FILE, "unknown variant `Typed`")
+            .expect("the stale copy is held")
+            .expect("a present file leaves a copy to put back");
+        // What the hold buys the refill: the file it must install is now the one
+        // the refill selects, by the refill's own reckoning.
+        assert_eq!(
+            missing_data_files(temp.path(), &REQUIRED_DATA_FILES),
+            [CARD_DATA_FILE]
+        );
+
+        verify_manifest_signature(
+            SIGNED_TEST_MANIFEST,
+            SIGNED_TEST_SIGNATURE.as_bytes(),
+            TEST_PUBLIC_KEY,
+        )
+        .expect("the signed manifest verifies");
+        let data = parse_manifest_data(SIGNED_TEST_MANIFEST, None).expect("the manifest parses");
+        let file = data
+            .iter()
+            .find(|file| file.name == CARD_DATA_FILE)
+            .expect("the manifest names the required file");
+        let url = Url::parse(&file.url).expect("URL");
+        verify_sha256(SIGNED_TEST_CARD_DATA, &file.sha256, &file.name, &url)
+            .expect("the bytes match the signed hash");
+        write_verified_data_file_blocking(temp.path(), &file.name, SIGNED_TEST_CARD_DATA)
+            .expect("the replacement installs atomically");
+
+        // The refill's own success re-check, which is what lets it return.
+        assert!(missing_data_files(temp.path(), &REQUIRED_DATA_FILES).is_empty());
+        assert_eq!(
+            load(&path).expect("the replacement loads"),
+            SIGNED_TEST_CARD_DATA
+        );
+        retire_held_copy(temp.path(), CARD_DATA_FILE);
+
+        assert!(!held_path.exists());
+        assert_eq!(read(&retired(temp.path(), CARD_DATA_FILE)), "STALE");
+        assert_eq!(
+            std::fs::read(&path).expect("read the installed file"),
+            SIGNED_TEST_CARD_DATA
+        );
+    }
+
+    /// Two starts sharing a data directory, overlapping where only the lock
+    /// separates them: the second would otherwise adopt the first's held copy
+    /// and put that stale copy back over the file the first installed. Separate
+    /// handles on one lock file contend as two processes do.
+    #[tokio::test]
+    async fn an_overlapping_start_waits_instead_of_putting_a_stale_copy_back() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join(CARD_DATA_FILE), "STALE").expect("write stale card data");
+
+        // The second start's manifest fetch, accepted and then held open until
+        // the first start has installed, so its failure lands where the
+        // corruption would.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local address").port();
+        let (connected_tx, connected_rx) = std::sync::mpsc::channel();
+        let (installed_tx, installed_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let _ = connected_tx.send(());
+                let _ = installed_rx.recv();
+                drop(stream);
+            }
+        });
+
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let dir = temp.path().to_path_buf();
+        let first = std::thread::spawn(move || {
+            let lock = lock_data_dir_blocking(&dir).expect("the first start locks");
+            hold_unusable_file(&dir, CARD_DATA_FILE, "unknown variant `Typed`")
+                .expect("the first start holds the stale copy");
+            held_tx.send(()).expect("release the second start");
+            // Times out when the lock keeps the second start out of the fetch.
+            let _ = connected_rx.recv_timeout(Duration::from_secs(1));
+            write_verified_data_file_blocking(&dir, CARD_DATA_FILE, b"GOOD")
+                .expect("the first start installs its replacement");
+            let _ = installed_tx.send(());
+            drop(lock);
+        });
+
+        held_rx
+            .recv()
+            .expect("the first start holds the stale copy");
+        let options = BootstrapOptions {
+            manifest_url_override: Some(
+                Url::parse(&format!("https://127.0.0.1:{port}/manifest.json")).expect("URL"),
+            ),
+            no_data_download: false,
+        };
+        let second = load_data_file_with_key(
+            temp.path(),
+            CARD_DATA_FILE,
+            Some(&options),
+            None,
+            TEST_PUBLIC_KEY,
+            |path: &Path| match std::fs::read_to_string(path) {
+                Ok(text) if text == "GOOD" => Ok(text),
+                Ok(_) => Err("unknown variant `Typed`".to_string()),
+                Err(error) => Err(error.to_string()),
+            },
+        )
+        .await;
+        first.join().expect("the first start finishes");
+
+        assert_eq!(read(&temp.path().join(CARD_DATA_FILE)), "GOOD");
+        assert_eq!(
+            second.expect("the second start serves the replaced file"),
+            "GOOD"
+        );
+        assert!(!held(temp.path(), CARD_DATA_FILE).exists());
+        assert_eq!(read(&retired(temp.path(), CARD_DATA_FILE)), "STALE");
+        // Released, not removed: removing it races the next start's open. One
+        // lock for the whole directory, so no per-file lock is ever taken.
+        assert!(temp.path().join(".data.lock").exists());
+        assert!(!temp.path().join(format!("{CARD_DATA_FILE}.lock")).exists());
+    }
+
+    /// A healthy start and a start that is replacing the same file, overlapping
+    /// where only the lock separates them: the healthy one reads the file just
+    /// before the other moves it aside, and retiring that copy would strand the
+    /// rollback the other is about to make.
+    #[tokio::test]
+    async fn a_healthy_start_leaves_a_held_copy_another_start_owns() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join(CARD_DATA_FILE);
+        std::fs::write(&path, "ORIGINAL").expect("write card data");
+
+        let (loaded_tx, loaded_rx) = std::sync::mpsc::channel();
+        let (aside_tx, aside_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let dir = temp.path().to_path_buf();
+        let replacing = std::thread::spawn(move || {
+            loaded_rx
+                .recv()
+                .expect("the healthy start has read the file");
+            let _lock = lock_data_dir_blocking(&dir).expect("the replacing start locks");
+            let held = hold_unusable_file(&dir, CARD_DATA_FILE, "unknown variant `Typed`")
+                .expect("the replacing start holds the original")
+                .expect("a present file leaves a copy to put back");
+            aside_tx.send(()).expect("release the healthy start");
+            finished_rx.recv().expect("the healthy start has finished");
+            restore_held_copy(&held, &dir.join(CARD_DATA_FILE))
+        });
+
+        let options = BootstrapOptions {
+            manifest_url_override: Some(
+                Url::parse("https://127.0.0.1:1/manifest.json").expect("URL"),
+            ),
+            no_data_download: false,
+        };
+        let healthy = load_data_file_with_key(
+            temp.path(),
+            CARD_DATA_FILE,
+            Some(&options),
+            None,
+            TEST_PUBLIC_KEY,
+            |path: &Path| -> Result<String, String> {
+                let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+                // The replacing start takes the lock and moves this file aside
+                // between the read and the retire that follows it.
+                loaded_tx.send(()).expect("release the replacing start");
+                aside_rx
+                    .recv()
+                    .expect("the replacing start holds the original");
+                Ok(text)
+            },
+        )
+        .await;
+        finished_tx.send(()).expect("release the replacing start");
+        let clause = replacing.join().expect("the replacing start finishes");
+
+        assert_eq!(
+            healthy.expect("the healthy start serves what it read"),
+            "ORIGINAL"
+        );
+        assert!(clause.contains("was put back"), "{clause}");
+        assert_eq!(read(&path), "ORIGINAL");
+        assert!(!retired(temp.path(), CARD_DATA_FILE).exists());
+    }
+
+    /// The refill installs every managed file that is missing, not only the one
+    /// its caller named, so the lock it waits on is the directory's: a start
+    /// bootstrapping `draft-pools.json` waits for a start that is inside a
+    /// `card-data.json` replacement, which a per-file lock would not have made
+    /// it do.
+    #[tokio::test]
+    async fn the_startup_bootstrap_waits_for_the_start_that_owns_the_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join(CARD_DATA_FILE), "STALE").expect("write stale card data");
+
+        // The bootstrap's manifest fetch, accepted and dropped, so the moment it
+        // reaches the network is observable from both threads.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local address").port();
+        let (connected_tx, connected_rx) = std::sync::mpsc::channel();
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let _ = connected_tx.send(());
+                let _ = reached_tx.send(());
+                drop(stream);
+            }
+        });
+
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (waited_tx, waited_rx) = std::sync::mpsc::channel();
+        let dir = temp.path().to_path_buf();
+        // A start inside a card-data.json replacement, which holds the lock
+        // across the double-check its loader is called for.
+        let owner = std::thread::spawn(move || {
+            let options = BootstrapOptions {
+                manifest_url_override: Some(
+                    Url::parse("https://127.0.0.1:1/manifest.json").expect("URL"),
+                ),
+                no_data_download: false,
+            };
+            let loads = Cell::new(0);
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(load_data_file_with_key(
+                    &dir,
+                    CARD_DATA_FILE,
+                    Some(&options),
+                    None,
+                    TEST_PUBLIC_KEY,
+                    |_: &Path| -> Result<String, String> {
+                        loads.set(loads.get() + 1);
+                        // The second call is the double-check, made under the lock.
+                        if loads.get() == 2 {
+                            locked_tx.send(()).expect("release the bootstrapping start");
+                            // Times out when the lock keeps the other start out
+                            // of the fetch.
+                            let reached = connected_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+                            waited_tx.send(reached).expect("report what the wait saw");
+                        }
+                        Err("unknown variant `Typed`".to_string())
+                    },
+                ))
+                .expect_err("an unreachable manifest replaces nothing");
+        });
+
+        locked_rx.recv().expect("the owning start holds the lock");
+        let options = BootstrapOptions {
+            manifest_url_override: Some(
+                Url::parse(&format!("https://127.0.0.1:{port}/manifest.json")).expect("URL"),
+            ),
+            no_data_download: false,
+        };
+        // The fetch fails either way; when it is reached is what this is about.
+        let _ = bootstrap_missing_data(temp.path(), &options, None).await;
+        owner.join().expect("the owning start finishes");
+
+        assert!(
+            !waited_rx.recv().expect("the wait reported"),
+            "the bootstrap reached the network while another start owned the directory"
+        );
+        // The same bootstrap does reach it once the lock is free, so the wait
+        // above is a wait and not a bootstrap that never ran.
+        reached_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the bootstrap reaches the network after the lock is released");
+        // The owning start's transaction ran to its end under that lock.
+        assert_eq!(read(&temp.path().join(CARD_DATA_FILE)), "STALE");
+    }
+
+    /// The data lock is taken at one level and only one. The locks are per open
+    /// file description, so a path that took it twice would wait on itself for
+    /// as long as the start lived: every path that takes it is driven here under
+    /// a deadline, and what a second acquisition inside one process does is
+    /// shown first, so completing is not vacuous.
+    #[tokio::test]
+    async fn the_data_lock_is_never_taken_twice_on_one_path() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join(CARD_DATA_FILE), "CARDS").expect("write card data");
+        std::fs::write(held(temp.path(), CARD_DATA_FILE), "OLD").expect("write held cards");
+        std::fs::write(held(temp.path(), DRAFT_POOLS_FILE), "POOLS").expect("write held pools");
+
+        let first = lock_data_dir_blocking(temp.path()).expect("the lock is taken");
+        let second = open_data_lock(temp.path()).expect("a second handle opens");
+        assert!(matches!(second.try_lock(), Err(TryLockError::WouldBlock)));
+        drop(first);
+
+        let options = BootstrapOptions {
+            manifest_url_override: Some(
+                Url::parse("https://127.0.0.1:1/manifest.json").expect("URL"),
+            ),
+            no_data_download: false,
+        };
+        let deadline = Duration::from_secs(10);
+
+        // The startup path: takes the lock around the refill. The unreachable
+        // manifest is what ends it; reaching the end is what is under test.
+        let _ = tokio::time::timeout(
+            deadline,
+            bootstrap_missing_data(temp.path(), &options, None),
+        )
+        .await
+        .expect("the startup bootstrap waits on no lock it already holds");
+
+        // The replacement path: takes the lock, then reaches the same refill
+        // under it, and ends by putting the held copy back.
+        tokio::time::timeout(
+            deadline,
+            load_data_file_with_key(
+                temp.path(),
+                DRAFT_POOLS_FILE,
+                Some(&options),
+                None,
+                TEST_PUBLIC_KEY,
+                |_: &Path| -> Result<(), String> { Err("stale pool shape".to_string()) },
+            ),
+        )
+        .await
+        .expect("the replacement waits on no lock it already holds")
+        .expect_err("an unreachable manifest leaves the pools unreplaced");
+
+        // The healthy path: takes the lock only to retire a copy no one owns.
+        tokio::time::timeout(
+            deadline,
+            load_data_file_with_key(
+                temp.path(),
+                CARD_DATA_FILE,
+                Some(&options),
+                None,
+                TEST_PUBLIC_KEY,
+                |path: &Path| std::fs::read_to_string(path).map_err(|error| error.to_string()),
+            ),
+        )
+        .await
+        .expect("the healthy start waits on no lock it already holds")
+        .expect("the card data is usable");
+
+        assert_eq!(read(&retired(temp.path(), CARD_DATA_FILE)), "OLD");
+        assert_eq!(read(&temp.path().join(DRAFT_POOLS_FILE)), "POOLS");
     }
 
     #[tokio::test]
@@ -1570,6 +2098,9 @@ mod tests {
             ),
             no_data_download: false,
         };
+        // Created before the directory is made unwritable, so the lock opens and
+        // the failure under test is the one the hold reports.
+        std::fs::write(temp.path().join(".data.lock"), b"").expect("create the replacement lock");
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o555))
             .expect("make the data directory unwritable");
 
@@ -1678,5 +2209,69 @@ mod tests {
             "{clause}"
         );
         assert_eq!(read(&held(blocked.path(), DRAFT_POOLS_FILE)), "HELD");
+    }
+
+    /// Durability is all the sync buys, so a directory that cannot be synced
+    /// fails no step that otherwise succeeded — all four sites, the install and
+    /// the move aside included. Requires a non-root user: as root the mode does
+    /// not stop the open.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_cannot_be_synced_fails_no_step_that_otherwise_succeeded() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(held(temp.path(), DRAFT_POOLS_FILE), "HELD").expect("write held pools");
+        std::fs::write(held(temp.path(), CARD_DATA_FILE), "ORIGINAL").expect("write held cards");
+        // Written to and traversed, but not opened: the renames below still work
+        // while the directory holding them cannot be synced.
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o300))
+            .expect("make the data directory unreadable");
+
+        let unsyncable = sync_parent_dir(&temp.path().join(DRAFT_POOLS_FILE)).is_err();
+        retire_held_copy(temp.path(), DRAFT_POOLS_FILE);
+        let clause = restore_held_copy(
+            &held(temp.path(), CARD_DATA_FILE),
+            &temp.path().join(CARD_DATA_FILE),
+        );
+
+        // Before any assertion, so no failing path leaves the directory unreadable.
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("restore the data directory mode");
+
+        assert!(unsyncable, "the sync must be what could not happen");
+        assert!(clause.contains("was put back"), "{clause}");
+        assert_eq!(read(&retired(temp.path(), DRAFT_POOLS_FILE)), "HELD");
+        assert_eq!(read(&temp.path().join(CARD_DATA_FILE)), "ORIGINAL");
+
+        // The two sites that provision a file, on a directory in the same state:
+        // the install has the file in place and the move aside has the refill
+        // that would repair it still to come, so neither is worth a failed start.
+        let provisioning = tempfile::tempdir().expect("temp dir");
+        std::fs::write(provisioning.path().join(CARD_DATA_FILE), "STALE")
+            .expect("write stale card data");
+        std::fs::set_permissions(provisioning.path(), std::fs::Permissions::from_mode(0o300))
+            .expect("make the data directory unreadable");
+
+        let unsyncable = sync_parent_dir(&provisioning.path().join(DRAFT_POOLS_FILE)).is_err();
+        let installed =
+            write_verified_data_file_blocking(provisioning.path(), DRAFT_POOLS_FILE, b"POOLS");
+        let moved = hold_unusable_file(
+            provisioning.path(),
+            CARD_DATA_FILE,
+            "unknown variant `Typed`",
+        );
+
+        std::fs::set_permissions(provisioning.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("restore the data directory mode");
+
+        assert!(unsyncable, "the sync must be what could not happen");
+        installed.expect("a verified install that is in place is not undone by a failed sync");
+        assert_eq!(read(&provisioning.path().join(DRAFT_POOLS_FILE)), "POOLS");
+        assert_eq!(
+            moved.expect("a file that was moved aside is not failed by a failed sync"),
+            Some(held(provisioning.path(), CARD_DATA_FILE))
+        );
+        assert_eq!(read(&held(provisioning.path(), CARD_DATA_FILE)), "STALE");
     }
 }
