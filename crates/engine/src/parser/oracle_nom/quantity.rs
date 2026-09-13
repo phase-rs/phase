@@ -3131,10 +3131,15 @@ fn parse_characteristic_set_source_list(
 /// per-population heads (`… among cards in <zone>`, `… among cards exiled with
 /// ~`, `… among <type phrase>`) that had drifted into a product form. Reads with
 /// [`TypePhraseGrammar::Legacy`], the grammar this head has always used.
+///
+/// CR 205.2a + CR 607.2a: the "they share with" separator is the cemetery-prowler
+/// reading — "for each card type they share with cards exiled with ~" counts the
+/// distinct card types among the linked-exile population exactly as "among" does,
+/// so it shares this head rather than growing a sibling.
 fn parse_distinct_card_types_among(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("card type").parse(input)?;
     let (rest, _) = opt(tag("s")).parse(rest)?;
-    let (rest, _) = tag(" among ").parse(rest)?;
+    let (rest, _) = alt((tag(" among "), tag(" they share with "))).parse(rest)?;
     let (rest, source) = parse_characteristic_set_source_list(rest, TypePhraseGrammar::Legacy)?;
     Ok((rest, QuantityRef::DistinctCardTypes { source }))
 }
@@ -10176,6 +10181,37 @@ mod tests {
         let (rest, q) =
             parse_quantity_ref("the number of card types among cards exiled with this creature")
                 .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::ExiledBySource,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_distinct_card_types_they_share_with_exiled_with_source() {
+        // Cemetery Prowler #6898: "they share with" is the "among" reading over
+        // the linked-exile population.
+        let (rest, q) =
+            parse_quantity_ref("the number of card types they share with cards exiled with ~")
+                .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::ExiledBySource,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_for_each_card_type_they_share_with_exiled_with_source() {
+        // Cemetery Prowler #6898: "for each card type they share with …" routes
+        // through the same head as "for each card type among …".
+        let (rest, q) =
+            parse_for_each_clause_ref("card type they share with cards exiled with ~").unwrap();
         assert_eq!(
             q,
             QuantityRef::DistinctCardTypes {

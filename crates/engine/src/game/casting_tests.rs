@@ -12379,6 +12379,98 @@ fn heliod_warped_eclipse_reduces_by_sum_of_opponents_draws() {
     }
 }
 
+/// CR 205.2a + CR 607.2a + CR 601.2f (#6898): Cemetery Prowler's "for each card
+/// type they share with cards exiled with ~" counts DISTINCT card types among the
+/// linked-exile population, not the number of exiled cards — two exiled creature
+/// cards must reduce a creature spell by {1}, not {2} (and never by the whole
+/// card count, which the ObjectCount misparse produced).
+#[test]
+fn cemetery_prowler_reduces_by_distinct_card_types_among_exiled() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+
+    // Cemetery Prowler on the battlefield with the parsed cost-reduction static.
+    let prowler = create_object(
+        &mut state,
+        CardId(850),
+        player,
+        "Cemetery Prowler".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&prowler)
+        .unwrap()
+        .static_definitions
+        .push(
+            StaticDefinition::new(StaticMode::ModifyCost {
+                mode: crate::types::statics::CostModifyMode::Reduce,
+                amount: ManaCost::generic(1),
+                spell_filter: None,
+                dynamic_count: Some(QuantityRef::DistinctCardTypes {
+                    source: crate::types::ability::CardTypeSetSource::ExiledBySource,
+                }),
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::card().controller(ControllerRef::You),
+            )),
+        );
+
+    // Two creature cards exiled with Cemetery Prowler → ONE distinct card type.
+    let exiled_a = add_exiled_card(&mut state, player, "Exiled Bear A");
+    let exiled_b = add_exiled_card(&mut state, player, "Exiled Bear B");
+    link_exiled_to_source(&mut state, exiled_a, prowler);
+    link_exiled_to_source(&mut state, exiled_b, prowler);
+
+    // A {3} creature spell in the controller's hand — matches the ruling's
+    // "creature spells you cast cost {1} less" example.
+    let spell = create_object(
+        &mut state,
+        CardId(851),
+        player,
+        "Generic Creature".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.mana_cost = ManaCost::Cost {
+            generic: 3,
+            shards: vec![],
+        };
+    }
+
+    let mut mana_cost = state.objects.get(&spell).unwrap().mana_cost.clone();
+    apply_battlefield_cost_modifiers(&state, player, spell, &mut mana_cost);
+
+    match mana_cost {
+        ManaCost::Cost { generic, .. } => assert_eq!(
+            generic, 2,
+            "two exiled creature cards are one distinct card type => {{1}} reduction, got {{generic}}"
+        ),
+        other => panic!("expected ManaCost::Cost, got {other:?}"),
+    }
+
+    // No exiled cards linked → zero distinct types → no reduction. The ObjectCount
+    // misparse would still over-reduce here, counting battlefield permanents.
+    let mut unlinked_state = state.clone();
+    unlinked_state.exile_links.clear();
+    let mut unlinked_cost = unlinked_state
+        .objects
+        .get(&spell)
+        .unwrap()
+        .mana_cost
+        .clone();
+    apply_battlefield_cost_modifiers(&unlinked_state, player, spell, &mut unlinked_cost);
+    match unlinked_cost {
+        ManaCost::Cost { generic, .. } => assert_eq!(
+            generic, 3,
+            "no linked exiled cards must leave the {{3}} spell unreduced, got {generic}"
+        ),
+        other => panic!("expected ManaCost::Cost, got {other:?}"),
+    }
+}
+
 #[test]
 fn activated_ability_cost_reduction_applies_to_matching_permanent_type() {
     let mut state = setup_game_at_main_phase();
