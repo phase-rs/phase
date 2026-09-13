@@ -83,12 +83,7 @@ fn run(
         rows.push(row);
     }
     for (deck_identifier, deck) in bundled_cedh {
-        let row = baseline_row(
-            deck_identifier,
-            BaselineDeckSource::BundledCedh,
-            deck,
-            &db,
-        );
+        let row = baseline_row(deck_identifier, BaselineDeckSource::BundledCedh, deck, &db);
         gate.record(&row)?;
         rows.push(row);
     }
@@ -369,13 +364,13 @@ impl GateAccumulator {
         source: BaselineDeckSource,
         estimate: &BracketEstimate,
     ) -> Result<(), String> {
-        let population = self
-            .designed_population
-            .entry(source)
-            .or_insert_with(|| DesignedPopulationReport {
-                deck_count: 0,
-                tier_histogram: BTreeMap::new(),
-            });
+        let population =
+            self.designed_population
+                .entry(source)
+                .or_insert_with(|| DesignedPopulationReport {
+                    deck_count: 0,
+                    tier_histogram: BTreeMap::new(),
+                });
         population.deck_count = population
             .deck_count
             .checked_add(1)
@@ -470,10 +465,7 @@ mod tests {
         }
     }
 
-    fn estimated_row(
-        source: BaselineDeckSource,
-        tier: CommanderBracketTier,
-    ) -> BracketBaselineRow {
+    fn estimated_row(source: BaselineDeckSource, tier: CommanderBracketTier) -> BracketBaselineRow {
         BracketBaselineRow {
             deck_identifier: "test".to_string(),
             source,
