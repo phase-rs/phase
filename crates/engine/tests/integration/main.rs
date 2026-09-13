@@ -1109,6 +1109,7 @@ mod riot_control_regression;
 mod ripples_of_undeath_regression;
 mod riptide_gearhulk_5994;
 mod rite_of_consumption_damage;
+mod rite_of_the_serpent;
 mod roots_of_wisdom_if_you_cant_draw;
 mod roughshod_mentor_green_trample_grant;
 mod rules;
@@ -1616,6 +1617,7 @@ mod yurlok_of_scorch_thrash;
 mod zhulodok_double_cascade;
 
 mod context_ref_slot_hygiene;
+mod dismantle;
 mod exchange_control_of_a_spell;
 mod exploit_ceased_exploiter_lki;
 mod extra_turn_quantity;

@@ -7651,6 +7651,28 @@ pub enum ObjectScope {
     /// the per-iteration id is absent (a condition/layer read) it reads null →
     /// 0, mirroring [`ObjectScope::Target`]'s fail-closed null read.
     BatchSource,
+    /// CR 601.2c + CR 608.2c: The **chain-root** spell/ability's declared object
+    /// target — the referent of a demonstrative back-reference ("that artifact",
+    /// "that creature") made by a LATER instruction in the same resolution, from
+    /// a nested sub-ability whose own `targets` name a different object (e.g. a
+    /// resolution-chosen recipient).
+    ///
+    /// The [`ObjectScope`] mirror of the [`TargetFilter::ParentTarget`] family,
+    /// but resolving to the chain **root**, not the immediate chain parent: for
+    /// Dismantle the immediate parent's `targets` hold the counter recipient (or
+    /// are empty), so `Target`/`Recipient` would read the wrong object. Identity
+    /// is ability-carried in `SpellContext::chain_root_targets` (stamped once at
+    /// `finalize_cast`, CR 601.2c fixes the target as the spell is put on the
+    /// stack), exactly as [`ObjectScope::CostPaidObject`] and
+    /// [`ObjectScope::AmassedArmy`] carry theirs on `ResolvedAbility`.
+    ///
+    /// Read hybrid live-or-LKI in `resolve_counters_on_scope`: live counters
+    /// while the target is still on the battlefield (an indestructible target
+    /// that was NOT destroyed — CR 702.12b), its LKI counter map once it has
+    /// left (CR 122.2 + CR 400.7 + CR 608.2h). Counter reads only today
+    /// (Dismantle, Rite of the Serpent); every object-characteristic reader
+    /// fail-closes to 0 and is marked `Unhandled` in `game/coverage.rs`.
+    ChainRootTarget,
 }
 
 /// CR 601.2a: A per-turn action journal — a chronological record of a kind of
@@ -25636,6 +25658,17 @@ pub struct SpellContext {
     /// conditions such as "if you cast this spell during your main phase".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_phase: Option<Phase>,
+    /// CR 601.2c + CR 608.2c: The resolving spell/ability's declared **object**
+    /// targets, stamped once at `finalize_cast` (after targets are chosen, before
+    /// resolution). Read by [`ObjectScope::ChainRootTarget`] from a nested
+    /// sub-ability whose own `targets` name a different object — e.g. Dismantle's
+    /// "put that many … counters on an artifact you control", where the sub's
+    /// target is the resolution-chosen recipient but "that artifact" still means
+    /// the spell's own target. Empty for every spell whose text makes no such
+    /// back-reference, and for activated/triggered abilities (which never reach
+    /// `finalize_cast`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain_root_targets: Vec<TargetRef>,
     /// CR 601.2 + CR 608.2c: Presence filters the controller matched as the
     /// spell was cast. Used by effects that say "if you controlled a [filter]
     /// as you cast this spell"; the resolver checks this snapshot instead of

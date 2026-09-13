@@ -1931,6 +1931,57 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
         }
     }
 
+    // CR 115.10a + CR 608.2d: a `ChooseOneOf` whose every branch was ALREADY
+    // stamped `Resolution` (by the producer that built it — the shared-
+    // recipient counter-choice reader's untargeted-recipient path, currently
+    // the only stamper) is a choice made entirely while the effect resolves —
+    // no cast-time slot for the outer wrapper either.
+    //
+    // Deliberately keyed on the branch's OWN `target_choice_timing`, not on
+    // `TargetFilter::is_context_ref()`: a `TypedFilter` can equally represent
+    // a literal "target creature" (kept `Stack` elsewhere in this file only
+    // because the shared-recipient reader retargets it to `ParentTarget`
+    // before it gets here) or a described, untargeted recipient — the filter
+    // SHAPE alone cannot tell those apart, so a structural
+    // `!target.is_context_ref()` check here would misclassify any OTHER
+    // `Effect::ChooseOneOf` producer (present or future) whose branches carry
+    // an unretargeted `Typed` filter for a genuinely literal target (e.g. an
+    // independently-parsed "A or B" inline choice — `try_parse_choose_one_of_
+    // inline` — never runs the shared-recipient lift/retarget pass at all).
+    // The `target_choice_timing == Resolution` stamp is authoritative
+    // precisely because nothing else ever writes it onto a `PutCounter`
+    // branch def today (`ability_definition_from_clause` does not propagate
+    // it, so every other producer's branches default to `Stack`); this arm
+    // therefore only ever CARRIES that upstream decision into the wrapper,
+    // never re-derives its own. Also gated on `Effect::PutCounter` so a
+    // hypothetical future stamp on some other branch effect kind does not
+    // silently widen this arm.
+    //
+    // A `scan_contains(fragment, "target ")` re-check on `clause_ir.source` is
+    // deliberately NOT used either: a `ChooseOneOf` clause synthesized by the
+    // shared-recipient reader has no distinct parse span of its own
+    // (`ParsedEffectClause` carries no `source` field), so its fragment
+    // resolves to the enclosing chunk / whole line ("Destroy **target**
+    // artifact.") — a fragment key here would wrongly suppress the arm and
+    // leave Dismantle's recipient a cast-time slot with no legal artifact,
+    // i.e. uncastable.
+    //
+    // Every shipping `ChooseOneOf`-of-`PutCounter` card (dwarven armorer,
+    // elspeth resplendent, invoke the ancients, owen grady, vivien monsters'
+    // advocate) is produced by the retarget-then-lift path, so none of their
+    // branches is ever stamped `Resolution` — `.all()` fails for all of them
+    // and they keep `Stack` unchanged.
+    if let Effect::ChooseOneOf { branches, .. } = &clause_ir.parsed.effect {
+        let all_branches_choose_recipient_at_resolution = !branches.is_empty()
+            && branches.iter().all(|branch| {
+                branch.target_choice_timing == TargetChoiceTiming::Resolution
+                    && matches!(&*branch.effect, Effect::PutCounter { .. })
+            });
+        if all_branches_choose_recipient_at_resolution {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
+
     // Mass `ChangeZoneAll` stays Stack here (pre-#6446). The TargetOnly wrap
     // may still stamp Resolution on ChangeZoneAll resolution-picks via the
     // shared helper; clause-IR timing must not silently reclassify every

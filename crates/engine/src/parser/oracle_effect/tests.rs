@@ -63348,3 +63348,561 @@ fn a_cast_this_way_gate_defers_a_consequence_but_never_a_casting_property() {
          (CR 601.2) and must not be deferred past it"
     );
 }
+
+/// P-shared-count probe (Dismantle, plan §3.5 / §5.2.2) — MEASURED, not
+/// reasoned.
+///
+/// Dismantle's counter clause is "put that many **+1/+1 counters or charge
+/// counters** on an artifact you control": the count is stated ONCE, up front,
+/// and distributes over both disjuncts. This test pins the facts the
+/// shared-leading-count design depends on, so a later change to any of them
+/// fails here rather than silently dropping Dismantle's second sentence.
+#[test]
+fn shared_leading_count_counter_disjunction_measured_baseline() {
+    use crate::parser::oracle_util::parse_count_expr;
+    use crate::types::ability::QuantityRef;
+    use crate::types::counter::CounterType;
+
+    // (1) The bare disjunction SPLITS today — no splitter change is needed.
+    assert_eq!(
+        split_bare_disjunctive_choice_list_items("+1/+1 counters or charge counters"),
+        Some(vec!["+1/+1 counters", "charge counters"]),
+        "the bare-disjunctive splitter already handles the shared-count form"
+    );
+
+    // (2) Positive control — the instrument fires: a disjunct that carries its
+    // OWN count parses, leaving the counter noun as the remainder.
+    let (count, rest) = parse_count_expr("two charge counters")
+        .expect("control: a self-counted disjunct must parse its own count");
+    assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+    assert_eq!(rest.trim_start(), "charge counters");
+
+    // (3) The measured decline: "+1/+1 counters" carries NO leading count, so
+    // `parse_count_expr` yields nothing at all (it does not partially consume
+    // the leading "+1"), and Attempt 1 of `parse_full_counter_noun` therefore
+    // declines the whole disjunct with no `shared_count` fallback (`None`).
+    // This is exactly why Dismantle's clause was dropped before the shared
+    // leading count was recognized.
+    assert_eq!(
+        parse_count_expr("+1/+1 counters"),
+        None,
+        "a counter noun with no leading count must not partially consume '+1'"
+    );
+    assert_eq!(
+        parse_full_counter_noun("+1/+1 counters", None),
+        None,
+        "with no shared count to fall back on, the reader still declines a \
+         disjunct that states no count of its own"
+    );
+    assert_eq!(
+        parse_full_counter_noun("charge counters", None),
+        None,
+        "same for the second disjunct"
+    );
+
+    // (4) Attempt 2 (CR 608.2h): given the shared leading count, both disjuncts
+    // now parse — the bare "<type> counter(s)" noun with the shared
+    // `QuantityExpr` substituted in as the count.
+    let shared = QuantityExpr::Ref {
+        qty: QuantityRef::EventContextAmount,
+    };
+    assert_eq!(
+        parse_full_counter_noun("+1/+1 counters", Some(&shared)),
+        Some((CounterType::Plus1Plus1, shared.clone())),
+        "Attempt 2 admits a bare counter noun once a shared count is supplied"
+    );
+    assert_eq!(
+        parse_full_counter_noun("charge counters", Some(&shared)),
+        Some((CounterType::Generic("charge".to_string()), shared.clone())),
+        "same for the second disjunct, with its own recognized counter type"
+    );
+
+    // (5) Existing callers still pass `None` and are byte-identical: a
+    // self-counted disjunct is unaffected by the new parameter either way.
+    assert_eq!(
+        parse_full_counter_noun("two charge counters", None),
+        Some((
+            CounterType::Generic("charge".to_string()),
+            QuantityExpr::Fixed { value: 2 }
+        )),
+        "a disjunct with its own count is unaffected by `shared_count`"
+    );
+}
+
+/// Dismantle (DST/2XM), verbatim Oracle text: "Destroy target artifact. If
+/// that artifact had counters on it, put that many +1/+1 counters or charge
+/// counters on an artifact you control." Asserts the full chain shape:
+/// `Destroy` -> `SequentialSibling` `ChooseOneOf` of two `PutCounter` branches,
+/// both counting `Ref(CountersOn{ChainRootTarget, None})`, both targeting
+/// `Typed{[Artifact], Some(You), []}` at `Resolution` timing, gated by
+/// `QuantityCheck{ CountersOn{ChainRootTarget, None}, GE, Fixed{1} }`, with
+/// NO `TargetOnly` wrapper (P3-B — a wrapper would make Dismantle uncastable
+/// with no other artifact).
+#[test]
+fn dismantle_chain_shape() {
+    let parsed = parse_oracle_text(
+        "Destroy target artifact. If that artifact had counters on it, put that many \
+         +1/+1 counters or charge counters on an artifact you control.",
+        "Dismantle",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Dismantle must produce a spell ability");
+    assert!(
+        matches!(
+            ability.effect.as_ref(),
+            Effect::Destroy { target, .. }
+                if matches!(
+                    target,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                        if type_filters == &vec![TypeFilter::Artifact]
+                )
+        ),
+        "expected Destroy{{target: Typed[Artifact]}}, got {:?}",
+        ability.effect
+    );
+    let sub = ability
+        .sub_ability
+        .as_deref()
+        .expect("Dismantle's second sentence must not be swallowed");
+    let expected_gate_qty = QuantityRef::CountersOn {
+        scope: ObjectScope::ChainRootTarget,
+        counter_type: None,
+    };
+    assert_eq!(
+        sub.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: expected_gate_qty.clone()
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }),
+        "the 'if that artifact had counters on it' gate must survive as a \
+         QuantityCheck over ChainRootTarget, not be swallowed"
+    );
+    assert_eq!(
+        sub.target_choice_timing,
+        crate::types::ability::TargetChoiceTiming::Resolution,
+        "the outer ChooseOneOf clause is ALSO stamped Resolution — the new \
+         lower.rs arm fires because every branch was already stamped \
+         Resolution below, and CARRIES that decision onto the wrapper rather \
+         than re-deriving it. Effect::ChooseOneOf is slot-less, so this has \
+         no cast-time-slot consequence of its own, but \
+         `sub_has_independent_object_target_slot`'s \
+         `choose_one_of_branches_own_object_choice` predicate keys on each \
+         branch's OWN target_choice_timing at runtime (asserted below)"
+    );
+    let Effect::ChooseOneOf { chooser, branches } = sub.effect.as_ref() else {
+        panic!(
+            "expected Effect::ChooseOneOf with NO TargetOnly wrapper, got {:?}",
+            sub.effect
+        );
+    };
+    assert_eq!(*chooser, PlayerFilter::Controller);
+    assert_eq!(
+        branches.len(),
+        2,
+        "kind choice must be exactly +1/+1 or charge"
+    );
+    let recipient_filter = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Artifact],
+        controller: Some(ControllerRef::You),
+        properties: vec![],
+    });
+    let mut saw_plus1plus1 = false;
+    let mut saw_charge = false;
+    for branch in branches {
+        assert_eq!(
+            branch.target_choice_timing,
+            crate::types::ability::TargetChoiceTiming::Resolution,
+            "each branch's recipient must be chosen at resolution, not cast time \
+             (this is what needs_resolution_object_choice / \
+             choose_one_of_branches_own_object_choice key on): {branch:#?}"
+        );
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = branch.effect.as_ref()
+        else {
+            panic!("expected PutCounter branch, got {:?}", branch.effect);
+        };
+        assert_eq!(
+            *target, recipient_filter,
+            "the recipient must stay the branch's own described Typed filter, \
+             never ParentTarget (which would aim counters at the destroyed \
+             artifact)"
+        );
+        assert_eq!(
+            *count,
+            QuantityExpr::Ref {
+                qty: expected_gate_qty.clone()
+            },
+            "'that many' must be rebound from EventContextAmount to the gate's \
+             own QuantityRef, for BOTH branches"
+        );
+        match counter_type {
+            CounterType::Plus1Plus1 => saw_plus1plus1 = true,
+            CounterType::Generic(name) if name == "charge" => saw_charge = true,
+            other => panic!("unexpected counter kind {other:?}"),
+        }
+    }
+    assert!(
+        saw_plus1plus1 && saw_charge,
+        "both kinds must be present: {branches:#?}"
+    );
+}
+
+/// Rite of the Serpent (BNG), verbatim: "Destroy target creature. If that
+/// creature had a +1/+1 counter on it, create a 1/1 green Snake creature
+/// token." Second in-corpus consumer of the leading demonstrative branch —
+/// exercises ONLY the condition-routing capability (its body is a token
+/// creation, not a counter placement, so it never touches the
+/// `ChooseOneOf`/shared-count machinery). The gate names `Some(Plus1Plus1)`
+/// specifically (ruling: "a +1/+1 counter"), not `None`.
+#[test]
+fn rite_of_the_serpent_chain_shape() {
+    let parsed = parse_oracle_text(
+        "Destroy target creature. If that creature had a +1/+1 counter on it, \
+         create a 1/1 green Snake creature token.",
+        "Rite of the Serpent",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Rite of the Serpent must produce a spell ability");
+    let sub = ability
+        .sub_ability
+        .as_deref()
+        .expect("Rite of the Serpent's second sentence must not be swallowed");
+    assert_eq!(
+        sub.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: ObjectScope::ChainRootTarget,
+                    counter_type: Some(CounterType::Plus1Plus1),
+                }
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }),
+        "the gate must name Plus1Plus1 specifically, not None (unlike Dismantle, \
+         which sums every kind)"
+    );
+    assert!(
+        matches!(sub.effect.as_ref(), Effect::Token { .. }),
+        "the body is unaffected by the counter-choice machinery: {:?}",
+        sub.effect
+    );
+}
+
+/// Blocker 1 regression: Lost Isle Calling (JUD) — "…If it had seven or more
+/// verse counters on it, take an extra turn after this one." — is an
+/// ACTIVATED ability whose "it" is the SOURCE (exiled as a cost), not a spell
+/// target. The leading demonstrative `alt` carries only the four explicit
+/// "if that <permanent> had " forms, never a bare "if it had ", so this
+/// sentence must stay exactly as swallowed as it is today: no
+/// `ChainRootTarget` anywhere, condition still absent on the extra-turn sub.
+#[test]
+fn lost_isle_calling_second_sentence_stays_swallowed() {
+    let parsed = parse_oracle_text(
+        "Whenever you scry, put a verse counter on this enchantment.\n\
+         {4}{U}{U}, Exile this enchantment: Draw a card for each verse counter on this \
+         enchantment. If it had seven or more verse counters on it, take an extra turn \
+         after this one. Activate only as a sorcery.",
+        "Lost Isle Calling",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let activated = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(a.kind, AbilityKind::Activated))
+        .expect("Lost Isle Calling must still produce its activated ability");
+    fn contains_chain_root_target(def: &AbilityDefinition) -> bool {
+        fn cond_refs_it(cond: &AbilityCondition) -> bool {
+            matches!(
+                cond,
+                AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::CountersOn {
+                            scope: ObjectScope::ChainRootTarget,
+                            ..
+                        }
+                    },
+                    ..
+                }
+            )
+        }
+        def.condition.as_ref().is_some_and(cond_refs_it)
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(contains_chain_root_target)
+    }
+    assert!(
+        !contains_chain_root_target(activated),
+        "the bare 'if it had ' form must NEVER route through \
+         ObjectScope::ChainRootTarget — it would gate the extra turn on an \
+         always-empty chain_root_targets (stamped only in finalize_cast, the \
+         spell path) and permanently suppress it: {activated:#?}"
+    );
+}
+
+/// Blocker 1 / Minor 5 replacement-collision regression: Bring Low —
+/// "Bring Low deals 3 damage to target creature. If that creature has a
+/// +1/+1 counter on it, Bring Low deals 5 damage to it instead." — present
+/// tense `has`, stays on the `TargetHasKeywordInstead` replacement path,
+/// untouched by the new PAST-tense `had` branch.
+#[test]
+fn bring_low_stays_on_replacement_path() {
+    let parsed = parse_oracle_text(
+        "Bring Low deals 3 damage to target creature. If that creature has a +1/+1 \
+         counter on it, Bring Low deals 5 damage to it instead.",
+        "Bring Low",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Bring Low must produce a spell ability");
+    let sub = ability
+        .sub_ability
+        .as_deref()
+        .expect("Bring Low's replacement rider must still be represented");
+    assert!(
+        matches!(
+            sub.condition,
+            Some(AbilityCondition::TargetHasKeywordInstead { .. })
+        ),
+        "present-tense 'has' must stay on the replacement-class condition, \
+         got {:?}",
+        sub.condition
+    );
+    fn tree_mentions_chain_root_target(def: &AbilityDefinition) -> bool {
+        let self_hit = matches!(
+            &def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::ChainRootTarget,
+                        ..
+                    }
+                },
+                ..
+            })
+        );
+        self_hit
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(tree_mentions_chain_root_target)
+    }
+    assert!(
+        !tree_mentions_chain_root_target(ability),
+        "Bring Low must never gain a ChainRootTarget condition: {ability:#?}"
+    );
+}
+
+/// Minor 5: a synthetic past-tense-AND-`instead` sentence must decline the
+/// new leading branch (the whole-body word-boundary `instead` scan), not be
+/// captured as a false-green additive effect. No corpus card exercises this
+/// today (the replacement class above is all present-tense), so this pins
+/// the guard directly.
+#[test]
+fn past_tense_had_with_instead_declines_the_new_branch() {
+    let parsed = parse_oracle_text(
+        "Destroy target creature. If that creature had a +1/+1 counter on it, ~ deals \
+         5 damage to it instead.",
+        "Synthetic Had Instead",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("must still produce a spell ability");
+    fn tree_mentions_chain_root_target(def: &AbilityDefinition) -> bool {
+        let self_hit = matches!(
+            &def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::ChainRootTarget,
+                        ..
+                    }
+                },
+                ..
+            })
+        );
+        self_hit
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(tree_mentions_chain_root_target)
+    }
+    assert!(
+        !tree_mentions_chain_root_target(ability),
+        "a past-tense 'had ... instead' sentence must decline the additive \
+         ChainRootTarget branch (word-boundary instead-guard): {ability:#?}"
+    );
+}
+
+/// P3-B Scope-Matrix census (Minor 6): the shipping `ChooseOneOf`-of-
+/// `PutCounter` grammar (Dwarven Armorer — targeted, `ParentTarget`
+/// recipient) must keep its cast-time `TargetOnly` lift and `Stack` timing
+/// unchanged. `is_context_ref() == true` on `ParentTarget` short-circuits the
+/// §5.2.2 lift-suppression decision, so no branch is ever stamped
+/// `target_choice_timing = Resolution` — which is what the §5.2.3(a)
+/// `lower.rs` arm keys on (never the filter's own shape).
+#[test]
+fn dwarven_armorer_keeps_the_cast_time_lift() {
+    let parsed = parse_oracle_text(
+        "{R}, {T}, Discard a card: Put a +0/+1 counter or a +1/+0 counter on target \
+         creature.",
+        "Dwarven Armorer",
+        &[],
+        &["Creature".to_string()],
+        &["Dwarf".to_string()],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Dwarven Armorer must produce an activated ability");
+    assert!(
+        matches!(ability.effect.as_ref(), Effect::TargetOnly { .. }),
+        "the shared recipient must still be lifted to a cast-time TargetOnly \
+         slot, got {:?}",
+        ability.effect
+    );
+    let choice = ability
+        .sub_ability
+        .as_deref()
+        .expect("the ChooseOneOf must still be chained under the lift");
+    assert_eq!(
+        choice.target_choice_timing,
+        crate::types::ability::TargetChoiceTiming::Stack,
+        "the recipient is a literal 'target creature' — it must keep Stack \
+         timing, not flip to Resolution"
+    );
+    let Effect::ChooseOneOf { branches, .. } = choice.effect.as_ref() else {
+        panic!("expected ChooseOneOf, got {:?}", choice.effect);
+    };
+    for branch in branches {
+        let Effect::PutCounter { target, .. } = branch.effect.as_ref() else {
+            panic!("expected PutCounter branch, got {:?}", branch.effect);
+        };
+        assert!(
+            target.is_context_ref(),
+            "every branch must still target ParentTarget/ParentTargetSlot, \
+             got {target:?}"
+        );
+        assert_eq!(
+            branch.target_choice_timing,
+            crate::types::ability::TargetChoiceTiming::Stack,
+            "an is_context_ref() recipient must never be stamped Resolution"
+        );
+    }
+}
+
+/// Synthetic hostile fixture (CR 115.10a): a recipient that says the literal
+/// word "target" AND has a "you control" constraint must stay a cast-time
+/// target — the literal word "target" over the recipient text is the
+/// discriminator, not the controller constraint (which is present on both
+/// Dismantle's actual recipient and this synthetic one).
+#[test]
+fn literal_target_word_wins_over_controller_constraint() {
+    let parsed = parse_oracle_text(
+        "Put a +1/+1 counter or a charge counter on target artifact you control.",
+        "Synthetic Targeted Recipient",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("must produce a spell ability");
+    assert!(
+        matches!(ability.effect.as_ref(), Effect::TargetOnly { .. }),
+        "the literal word 'target' must keep the cast-time TargetOnly lift \
+         even though the recipient also says 'you control': {:?}",
+        ability.effect
+    );
+}
+
+/// Scope-Matrix negative (§5.2.3(a)): a `ChooseOneOf` whose branches are NOT
+/// all `PutCounter` (inline binary-choice imperatives) must fall through to
+/// `Stack` unchanged — the new arm is keyed on `Effect::PutCounter` branches
+/// specifically.
+#[test]
+fn choose_one_of_non_put_counter_branches_stays_stack() {
+    let parsed = parse_oracle_text(
+        "You may draw a card or gain 2 life.",
+        "Synthetic Inline Choice",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("must produce a spell ability");
+    // Unconditional: if the inline "A or B" reader (try_parse_choose_one_of_inline)
+    // ever stops recognizing this fixture, the test must FAIL loudly rather
+    // than silently pass with the assertion skipped — a conditional `if let`
+    // here would let the claimed modal shape disappear without the
+    // regression noticing.
+    let Effect::ChooseOneOf { branches, .. } = ability.effect.as_ref() else {
+        panic!(
+            "expected 'You may draw a card or gain 2 life.' to parse as \
+             Effect::ChooseOneOf (try_parse_choose_one_of_inline); got {:?}. \
+             The lower.rs Resolution-timing arm this test guards against is \
+             untestable if this fixture stops producing a ChooseOneOf at all.",
+            ability.effect
+        );
+    };
+    assert_eq!(
+        branches.len(),
+        2,
+        "expected exactly 2 branches: {branches:#?}"
+    );
+    assert!(
+        matches!(&*branches[0].effect, Effect::Draw { .. }),
+        "branch 0 must be Draw, got {:?}",
+        branches[0].effect
+    );
+    assert!(
+        matches!(&*branches[1].effect, Effect::GainLife { .. }),
+        "branch 1 must be GainLife, got {:?}",
+        branches[1].effect
+    );
+    for branch in branches {
+        assert_eq!(
+            branch.target_choice_timing,
+            crate::types::ability::TargetChoiceTiming::Stack,
+            "neither branch is a PutCounter, so neither may ever be stamped \
+             Resolution: {branch:#?}"
+        );
+    }
+    assert_eq!(
+        ability.target_choice_timing,
+        crate::types::ability::TargetChoiceTiming::Stack,
+        "a non-PutCounter ChooseOneOf must fall through unchanged — the new \
+         lower.rs arm requires every branch's OWN target_choice_timing to \
+         already be Resolution, which neither Draw nor GainLife ever is"
+    );
+}

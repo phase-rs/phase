@@ -6282,16 +6282,42 @@ struct ClassifiedCounterChoiceList<'a> {
 /// a distributed item is valid only when that name is followed by the complete
 /// singular or plural counter noun. This keeps bare noun disjunctions from
 /// reaching the counter-choice branch builder.
-fn parse_full_counter_noun(input: &str) -> Option<(CounterType, QuantityExpr)> {
-    let (count, rest) = parse_count_expr(input.trim())?;
-    let (rest, counter_type) = nom_primitives::parse_counter_type_typed(rest.trim_start()).ok()?;
+fn parse_full_counter_noun(
+    input: &str,
+    shared_count: Option<&QuantityExpr>,
+) -> Option<(CounterType, QuantityExpr)> {
+    // Attempt 1: the disjunct carries its own count ("two charge counters", "a
+    // +1/+1 counter").
+    if let Some((count, rest)) = parse_count_expr(input.trim()) {
+        if let Ok((rest, counter_type)) =
+            nom_primitives::parse_counter_type_typed(rest.trim_start())
+        {
+            if all_consuming(alt((
+                tag::<_, _, OracleError<'_>>("counters"),
+                tag("counter"),
+            )))
+            .parse(rest.trim_start())
+            .is_ok()
+            {
+                return Some((counter_type, count));
+            }
+        }
+    }
+    // Attempt 2 (CR 608.2h): the disjunct names no count of its own, but the
+    // clause supplied a shared leading count up front ("put THAT MANY +1/+1
+    // counters or charge counters on …" — Dismantle). Parse the bare
+    // "<type> counter(s)" noun and use the shared count.
+    // `parse_counter_type_typed` still gates a real counter type, exactly as in
+    // Attempt 1.
+    let shared = shared_count?;
+    let (rest, counter_type) = nom_primitives::parse_counter_type_typed(input.trim()).ok()?;
     all_consuming(alt((
         tag::<_, _, OracleError<'_>>("counters"),
         tag("counter"),
     )))
     .parse(rest.trim_start())
     .ok()?;
-    Some((counter_type, count))
+    Some((counter_type, shared.clone()))
 }
 
 /// CR 122.1b: keyword counters distribute over a single shared noun. Recognize
@@ -6335,6 +6361,7 @@ fn recognize_shared_noun_counter_list(input: &str) -> Option<Vec<&str>> {
 fn parse_counter_choice_list_entries(
     shape: ChoiceListShape,
     items: &[&str],
+    shared_count: Option<&QuantityExpr>,
 ) -> Option<Vec<(CounterType, QuantityExpr)>> {
     if items.len() < 2 || items.iter().any(|item| item.trim().is_empty()) {
         return None;
@@ -6345,7 +6372,7 @@ fn parse_counter_choice_list_entries(
         .map(|item| match shape {
             // CR 122.1: full counter noun phrase ("a +1/+1 counter", "two
             // charge counters"). Parse count then counter type from the remainder.
-            ChoiceListShape::Distributed => parse_full_counter_noun(item.trim()),
+            ChoiceListShape::Distributed => parse_full_counter_noun(item.trim(), shared_count),
             // CR 122.1b: bare keyword name ("first strike"); count is one.
             ChoiceListShape::FromAmong | ChoiceListShape::SharedNoun => {
                 let (_rest, counter_type) =
@@ -6361,10 +6388,13 @@ fn parse_counter_choice_list_entries(
 /// Classify a counter-choice list and parse every member for the classified
 /// shape. This is the single authority for the priority order and guards shared
 /// by context-free callers and the branch-reparsing parser.
-fn classify_counter_choice_list(input: &str) -> Option<ClassifiedCounterChoiceList<'_>> {
+fn classify_counter_choice_list<'a>(
+    input: &'a str,
+    shared_count: Option<&QuantityExpr>,
+) -> Option<ClassifiedCounterChoiceList<'a>> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a counter from among ").parse(input) {
         let items = split_choice_list_items(rest)?;
-        let entries = parse_counter_choice_list_entries(ChoiceListShape::FromAmong, &items)?;
+        let entries = parse_counter_choice_list_entries(ChoiceListShape::FromAmong, &items, None)?;
         return Some(ClassifiedCounterChoiceList {
             shape: ChoiceListShape::FromAmong,
             items,
@@ -6377,7 +6407,7 @@ fn classify_counter_choice_list(input: &str) -> Option<ClassifiedCounterChoiceLi
     // recognized counter type; otherwise try the full-noun distributed grammar.
     if let Some(items) = recognize_shared_noun_counter_list(input) {
         if let Some(entries) =
-            parse_counter_choice_list_entries(ChoiceListShape::SharedNoun, &items)
+            parse_counter_choice_list_entries(ChoiceListShape::SharedNoun, &items, None)
         {
             return Some(ClassifiedCounterChoiceList {
                 shape: ChoiceListShape::SharedNoun,
@@ -6388,7 +6418,8 @@ fn classify_counter_choice_list(input: &str) -> Option<ClassifiedCounterChoiceLi
     }
 
     let items = split_choice_list_items(input)?;
-    let entries = parse_counter_choice_list_entries(ChoiceListShape::Distributed, &items)?;
+    let entries =
+        parse_counter_choice_list_entries(ChoiceListShape::Distributed, &items, shared_count)?;
     Some(ClassifiedCounterChoiceList {
         shape: ChoiceListShape::Distributed,
         items,
@@ -6465,7 +6496,7 @@ pub(crate) fn classify_and_parse_counter_choice_list(
     choices_text: &str,
 ) -> Option<Vec<(CounterType, QuantityExpr)>> {
     let lower = choices_text.to_lowercase();
-    Some(classify_counter_choice_list(&lower)?.entries)
+    Some(classify_counter_choice_list(&lower, None)?.entries)
 }
 
 /// CR 122.1b: Parse a bare "from among" counter list ("menace, deathtouch, and
@@ -6477,7 +6508,7 @@ pub(crate) fn classify_and_parse_from_among_counter_list(
 ) -> Option<Vec<(CounterType, QuantityExpr)>> {
     let lower = list_text.to_lowercase();
     let items = split_choice_list_items(&lower)?;
-    parse_counter_choice_list_entries(ChoiceListShape::FromAmong, &items)
+    parse_counter_choice_list_entries(ChoiceListShape::FromAmong, &items, None)
 }
 
 /// CR 122.1a + CR 122.1b: peel an unconditional counter conjunct off the front
@@ -6502,7 +6533,7 @@ fn peel_fixed_counter_conjunct(
     tag::<_, _, OracleError<'_>>("a counter from among ")
         .parse(rest.lower)
         .ok()?;
-    let fixed = parse_full_counter_noun(fixed_tp.lower)?;
+    let fixed = parse_full_counter_noun(fixed_tp.lower, None)?;
     Some((fixed, rest))
 }
 
@@ -6557,6 +6588,37 @@ fn try_parse_put_counter_choice(
 
     let consumed = tp.original.len() - after_choice_original.len();
     let after_choice = TextPair::new(after_choice_original, &tp.lower[consumed..]);
+
+    // CR 608.2h: "put THAT MANY <A> counters or <B> counters on …" — the count
+    // is stated once, up front, and distributes over every disjunct (Dismantle).
+    // Recognize its presence and strip it so classification sees "<A> counters
+    // or <B> counters"; the bare placeholder (EventContextAmount — no event
+    // context exists in a spell Destroy resolution) is rebound to the leading
+    // counter-threshold gate's own QuantityRef by the effect-clause loop once
+    // this clause's condition is known (see the `counter_gate_qty` rebind).
+    let (shared_count, after_choice) =
+        match nom_on_lower(after_choice.original, after_choice.lower, |i| {
+            value(
+                (),
+                (
+                    tag::<_, _, OracleError<'_>>("that many"),
+                    nom::character::complete::multispace1,
+                ),
+            )
+            .parse(i)
+        }) {
+            Some(((), rest_original)) => {
+                let consumed = after_choice.original.len() - rest_original.len();
+                (
+                    Some(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }),
+                    TextPair::new(rest_original, &after_choice.lower[consumed..]),
+                )
+            }
+            None => (None, after_choice),
+        };
+
     let (choices_tp, target_tp) = after_choice.split_around(" on ")?;
 
     // The conjoined form carries its own marker ("... and a counter from among
@@ -6580,7 +6642,7 @@ fn try_parse_put_counter_choice(
     // Distributed list (Dwarven Armorer's form); `from among` remains reserved
     // for the explicit choice grammar AND for the fixed-conjunct form guarded
     // just below.
-    let classified = classify_counter_choice_list(choices_tp.lower)?;
+    let classified = classify_counter_choice_list(choices_tp.lower, shared_count.as_ref())?;
     let shape = classified.shape;
     if !explicit_choice && fixed_conjunct.is_none() && matches!(shape, ChoiceListShape::FromAmong) {
         return None;
@@ -6605,21 +6667,36 @@ fn try_parse_put_counter_choice(
         Vec::with_capacity(choice_items.len());
     for item in &choice_items {
         // CR 122.1b: FromAmong and SharedNoun name bare keywords, so synthesize
-        // "a <keyword> counter"; Distributed items are already full noun phrases.
+        // "a <keyword> counter"; Distributed items are already full noun
+        // phrases. CR 608.2h: when a shared leading count was recognized above,
+        // a Distributed item carries no count of its own ("charge counters") —
+        // prefix "a " so the reparse below still succeeds via the ordinary
+        // single-count `PutCounter` grammar (a throwaway `Fixed{1}` count); the
+        // real shared `QuantityExpr` is substituted onto the parsed effect
+        // right after, so the dynamic quantity never round-trips through
+        // synthesized text.
         let choice_phrase = match shape {
+            ChoiceListShape::Distributed if shared_count.is_some() => {
+                format!("a {}", item.trim())
+            }
             ChoiceListShape::Distributed => item.trim().to_string(),
             ChoiceListShape::FromAmong | ChoiceListShape::SharedNoun => {
                 format!("a {} counter", item.trim())
             }
         };
         let branch_text = format!("put {choice_phrase} on {target_text}");
-        let clause = parse_effect_clause(&branch_text, ctx);
+        let mut clause = parse_effect_clause(&branch_text, ctx);
         if !matches!(clause.effect, Effect::PutCounter { .. })
             || matches!(clause.effect, Effect::Unimplemented { .. })
             || matches!(clause.effect, Effect::TargetOnly { .. })
         {
             ctx.diagnostics.truncate(diagnostics_snapshot);
             return None;
+        }
+        if let (Some(shared), Effect::PutCounter { count, .. }) =
+            (shared_count.as_ref(), &mut clause.effect)
+        {
+            *count = (*shared).clone();
         }
         branch_clauses.push((clause, format!("put {choice_phrase}")));
     }
@@ -6639,6 +6716,41 @@ fn try_parse_put_counter_choice(
         }
     };
     let shared_multi_target = branch_clauses[0].0.multi_target.take();
+
+    // CR 115.10a + CR 608.2d (P3-B): a recipient is a TARGET only if the text
+    // uses the literal word "target". An untargeted DESCRIBED recipient ("an
+    // artifact you control" — Dismantle) is chosen while the effect resolves,
+    // so it must NOT be lifted to a cast-time `TargetOnly` slot: doing so would
+    // make the spell uncastable whenever the controller has no matching
+    // permanent (ruling 1 — Dismantle targets only the destroyed artifact, not
+    // the recipient). A synthetic "…on target creature you control" DOES say
+    // "target" and keeps the lift; the controller constraint alone is not the
+    // discriminator.
+    //
+    // The positive check is deliberately narrow — `shared_target` must be a
+    // controller-constrained `Typed` filter, not merely "not a context ref".
+    // `!shared_target.is_context_ref()` alone is too broad: a name-based
+    // self-reference ("... on Aragorn") reparses each branch's own "on
+    // Aragorn" fragment to `TargetFilter::Any` in isolation (the per-branch
+    // reparse has no card-name context), and `Any` is not a context ref
+    // either — it would have wrongly suppressed the lift for that card
+    // (measured regression: `choose_one_of_detects_from_among_counter_choice`).
+    // Every shipping `ChooseOneOf`-of-`PutCounter` card's shared recipient is
+    // `ParentTarget`/`ParentTargetSlot` (from an earlier clause) or, for a
+    // name-based anaphor, `Any`/`SelfRef` — none of which is a
+    // controller-constrained `Typed` filter — so this positive check keeps the
+    // lift for all of them without needing to enumerate `is_context_ref()`'s
+    // full variant set.
+    let recipient_is_targeted = shared_multi_target.is_some()
+        || nom_primitives::scan_contains(target_tp.lower.trim(), "target");
+    let recipient_is_described_controller_scoped = matches!(
+        &shared_target,
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(_),
+            ..
+        })
+    );
+    let suppress_lift = !recipient_is_targeted && recipient_is_described_controller_scoped;
 
     // CR 115.6: "up to one target ..." may be announced with ZERO objects, so
     // nothing ever fills the referent (CR 601.2c fixes only WHEN that count is
@@ -6693,13 +6805,33 @@ fn try_parse_put_counter_choice(
     let mut branches: Vec<AbilityDefinition> = Vec::with_capacity(branch_clauses.len());
     for (mut clause, description) in branch_clauses {
         clause.multi_target = None;
-        if names_optional_slot {
-            retarget_put_counter_to_parent_slot(&mut clause.effect, 0);
-        } else {
-            retarget_put_counter_to_parent(&mut clause.effect);
+        // P3-B: an untargeted DESCRIBED recipient keeps its own parsed
+        // `Typed{…}` target — retargeting to `ParentTarget`/`ParentTargetSlot`
+        // is only correct when the recipient was lifted to a shared cast-time
+        // slot (`!suppress_lift`).
+        if !suppress_lift {
+            if names_optional_slot {
+                retarget_put_counter_to_parent_slot(&mut clause.effect, 0);
+            } else {
+                retarget_put_counter_to_parent(&mut clause.effect);
+            }
         }
         let mut def = ability_definition_from_clause(AbilityKind::Spell, clause);
         def.description = Some(description);
+        if suppress_lift {
+            // CR 115.10a + CR 608.2d: `ability_definition_from_clause` does not
+            // propagate `target_choice_timing` (it copies only effect /
+            // sub_ability / duration / condition / optional / multi_target /
+            // distribute), so a branch built here defaults to `Stack`. Stamp it
+            // explicitly — this is what drives the resolution-time recipient
+            // prompt for this branch's `PutCounter` (`needs_resolution_object_choice`
+            // in `game/effects/mod.rs`, gated on `target_choice_timing ==
+            // Resolution`) and what `sub_has_independent_object_target_slot`'s
+            // `choose_one_of_branches_own_object_choice` reads to keep this
+            // `ChooseOneOf` sub from inheriting the destroyed artifact as its
+            // recipient.
+            def.target_choice_timing = crate::types::ability::TargetChoiceTiming::Resolution;
+        }
         // The conjoined form's printed ruling (Elspeth Resplendent, 2022-04-29):
         // "its controller chooses …, then that counter and the +1/+1 counter are
         // placed on the target creature at the same time." The choice therefore
@@ -6728,6 +6860,21 @@ fn try_parse_put_counter_choice(
             def.sub_ability = Some(Box::new(fixed));
         }
         branches.push(def);
+    }
+
+    if suppress_lift {
+        // CR 115.10a + CR 608.2d: the recipient ("an artifact you control") is
+        // chosen while THIS `ChooseOneOf` resolves — return the choice clause
+        // directly, with no `TargetOnly` wrapper. Wrapping it would lift the
+        // recipient to a cast-time slot with no legal candidate when the
+        // controller has no matching permanent, making the whole spell
+        // uncastable (Dismantle ruling 1: it targets only the destroyed
+        // artifact). The leading counter-threshold gate (if any) attaches to
+        // this clause's `condition` in the caller's effect-clause loop.
+        return Some(parsed_clause(Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches,
+        }));
     }
 
     let mut choice = AbilityDefinition::new(
@@ -31635,6 +31782,54 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
     }
 }
 
+/// CR 608.2h: rebind a bare `EventContextAmount` "that many" count placeholder
+/// in a `PutCounter` effect — and, for `Effect::ChooseOneOf`, every branch's
+/// effect — to the concrete `QuantityRef` a leading counter-threshold gate
+/// measured. Sibling of `resolve_difference_anaphor_in_effect` above — same
+/// call site, same `effective_condition` read — but a ONE-operand counter-gate
+/// operand rather than a two-operand difference, and it must additionally
+/// descend into `ChooseOneOf` branches: Dismantle's "put that many +1/+1
+/// counters or charge counters …" lowers to a `ChooseOneOf` of two
+/// `PutCounter` branches, which `resolve_difference_anaphor_in_effect`'s
+/// narrower recursion (`CreateDrawReplacement` / `CreateDelayedTrigger` only)
+/// does not visit.
+fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRef) {
+    match effect {
+        Effect::PutCounter { count, .. } => {
+            if matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                }
+            ) {
+                *count = QuantityExpr::Ref {
+                    qty: gate_qty.clone(),
+                };
+            }
+        }
+        Effect::ChooseOneOf { branches, .. } => {
+            for branch in branches {
+                rebind_event_context_amount_counts_in_ability(branch, gate_qty);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `AbilityDefinition` counterpart of `rebind_event_context_amount_counts` —
+/// mirrors `resolve_difference_anaphor_in_ability`'s recursion into
+/// `sub_ability` (a `ChooseOneOf` branch may itself carry a chained
+/// sub-ability, e.g. the conjoined-counter form).
+fn rebind_event_context_amount_counts_in_ability(
+    def: &mut AbilityDefinition,
+    gate_qty: &QuantityRef,
+) {
+    rebind_event_context_amount_counts(&mut def.effect, gate_qty);
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        rebind_event_context_amount_counts_in_ability(sub, gate_qty);
+    }
+}
+
 /// True when a trigger's intervening-if references the controller gaining life
 /// this turn (Lathiel / Ocelot Pride class).
 pub(crate) fn trigger_condition_references_controller_life_gained(
@@ -37687,6 +37882,23 @@ pub(crate) fn parse_effect_chain_ir(
                 resolve_difference_anaphor_in_effect(&mut clause.effect, Some(&bound));
                 if let Some(sub) = clause.sub_ability.as_deref_mut() {
                     resolve_difference_anaphor_in_ability(sub, Some(&bound));
+                }
+            }
+            // CR 608.2h: sibling of the difference-anaphor bind directly above —
+            // same site, same `effective_condition` read, a one-operand
+            // counter-gate instead of a two-operand difference. "If <X> had <N>
+            // counters …, put THAT MANY … counters …" (Dismantle, Rite of the
+            // Serpent): the "that many" amount IS the quantity the leading
+            // counter-threshold gate just measured. `EventContextAmount` is the
+            // parser's placeholder for it (there is no live event context in a
+            // spell `Destroy` resolution, so left unbound it would resolve to
+            // 0) — rebind it to the gate's own `QuantityRef` so it reads the
+            // chain-root target's counter count instead (live-or-LKI, CR 400.7
+            // + CR 122.2).
+            if let Some(gate_qty) = effective_condition.and_then(conditions::counter_gate_qty) {
+                rebind_event_context_amount_counts(&mut clause.effect, gate_qty);
+                if let Some(sub) = clause.sub_ability.as_deref_mut() {
+                    rebind_event_context_amount_counts_in_ability(sub, gate_qty);
                 }
             }
         }

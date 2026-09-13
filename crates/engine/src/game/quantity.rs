@@ -1752,6 +1752,10 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             | ObjectScope::OwnedLinkedExileCard
             | ObjectScope::Demonstrative
             | ObjectScope::AmassedArmy
+            // CR 608.2h + CR 601.2c: the chain-root spell's target is read from
+            // the ability's own carried context during resolution, never as a
+            // static CDA read.
+            | ObjectScope::ChainRootTarget
             // CR 120.1: the per-iteration damage source of an
             // `EachSourceDealsDamage` batch is bound per batch member only at
             // resolution time, never as a static CDA read.
@@ -1769,6 +1773,13 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             | QuantityRef::ObjectNameWordCount { scope }
             | QuantityRef::ObjectTypelineComponentCount { scope }
             | QuantityRef::ManaSymbolsInManaCost { scope, .. } => scope_is_resolution_only(*scope),
+            // CR 608.2h: `QuantityRef::CountersOn` deliberately stays OUT of the
+            // list above. Its resolvers own their live-vs-LKI ladder, so a
+            // departed referent (a destroyed `ChainRootTarget`, an exiled
+            // `Source`) still reports a real recorded count; classifying it as a
+            // resolution-only object read would let
+            // `quantity_expr_missing_resolution_only_referent` gate that read
+            // `false` before the ladder ever runs.
             _ => false,
         },
         QuantityExpr::DivideRounded { inner, .. }
@@ -1912,6 +1923,16 @@ fn resolution_only_scope_referent_present(
             })
         }
         ObjectScope::AmassedArmy => ability.amassed_army_object.is_some(),
+        // CR 601.2c: referent presence mirrors the `Target` arm, but against the
+        // ability-carried chain-root list rather than this sub-ability's own
+        // targets. Unreachable for `QuantityRef::CountersOn` today (that variant
+        // is not in `quantity_expr_missing_resolution_only_referent`'s leaf
+        // list), but adjudicated rather than wildcarded.
+        ObjectScope::ChainRootTarget => ability
+            .context
+            .chain_root_targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Object(_))),
         // CR 120.1: the per-iteration batch member is bound only while the
         // per-source resolver runs; absent everywhere else.
         ObjectScope::BatchSource => ctx.damage_source.is_some(),
@@ -6761,6 +6782,11 @@ fn object_for_scope<'a>(
         | ObjectScope::OtherRevealedCard
         | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::Demonstrative
+        // CR 601.2c: `ChainRootTarget`'s identity is
+        // `ability.context.chain_root_targets`, carried by the resolving
+        // ability and therefore unavailable to this ability-free helper; it is
+        // resolved in `resolve_counters_on_scope`.
+        | ObjectScope::ChainRootTarget
         | ObjectScope::AmassedArmy => None,
         // CR 120.1: the per-iteration damage source of an `EachSourceDealsDamage`
         // batch is bound per batch member by the per-source resolver.
@@ -6839,6 +6865,9 @@ pub(crate) fn object_id_for_scope(
         | ObjectScope::OtherRevealedCard
         | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::Demonstrative
+        // CR 601.2c: identity is `ability.context.chain_root_targets` — see the
+        // matching arm in `object_for_scope`.
+        | ObjectScope::ChainRootTarget
         | ObjectScope::AmassedArmy => None,
         // CR 120.1: the per-iteration damage source of an `EachSourceDealsDamage`
         // batch is bound per batch member by the per-source resolver.
@@ -7128,6 +7157,42 @@ fn resolve_counters_on_scope(
                     .unwrap_or_else(|| {
                         counter_count_from_map(&snapshot.lki.counters, counter_type)
                     })
+            })
+            .unwrap_or(0),
+        // CR 608.2c + CR 122.2 + CR 400.7 + CR 608.2h: "that <permanent>" /
+        // "that many" back-reference to the chain-root spell's own target.
+        // LIVE counters while that target is still on the battlefield (an
+        // indestructible target that was NOT destroyed — CR 702.12b — still
+        // feeds the placement); its LKI counter map once it has left (CR 122.2:
+        // the counters ceased to exist; CR 400.7: it is a new object there).
+        // Identity is the ability-carried chain-root target list, NEVER this
+        // sub-ability's own (recipient) targets — mirrors the `CostPaidObject`
+        // and `AmassedArmy` arms above.
+        //
+        // This arm must stay EXPLICIT: the `_ =>` fall-through below would
+        // resolve `ChainRootTarget` through `object_for_scope`, which has no
+        // referent for it, and silently report 0.
+        ObjectScope::ChainRootTarget => ability
+            .and_then(|ability| {
+                ability
+                    .context
+                    .chain_root_targets
+                    .iter()
+                    .find_map(|target| match target {
+                        TargetRef::Object(id) => Some(*id),
+                        _ => None,
+                    })
+            })
+            .map(|id| {
+                let live = state.objects.get(&id);
+                let on_battlefield = live.is_some_and(|obj| obj.zone == Zone::Battlefield);
+                if !on_battlefield {
+                    if let Some(lki) = state.lki_cache.get(&id) {
+                        return counter_count_from_map(&lki.counters, counter_type);
+                    }
+                }
+                live.map(|obj| counter_count_from_map(&obj.counters, counter_type))
+                    .unwrap_or(0)
             })
             .unwrap_or(0),
         _ => object_for_scope(state, scope, ctx, targets)
@@ -7646,6 +7711,14 @@ where
         ObjectScope::OtherRevealedCard => 0,
         // MV-only referent; no P/T semantics.
         ObjectScope::OwnedLinkedExileCard => 0,
+        // CR 601.2c: `ChainRootTarget` is produced only for
+        // `QuantityRef::CountersOn` today (Dismantle / Rite of the Serpent). No
+        // card reads the chain-root target's P/T, so this is a fail-closed
+        // placeholder — never a silent wildcard. Extend by mirroring the
+        // `resolve_counters_on_scope` arm against
+        // `ability.context.chain_root_targets`; `game/coverage.rs` reports these
+        // characteristic readers as `Unhandled` until then.
+        ObjectScope::ChainRootTarget => 0,
         // CR 120.1 + CR 208.3 + CR 608.2h: the per-iteration damage source of an
         // `EachSourceDealsDamage` batch reads its OWN characteristic ("deals
         // damage equal to ITS power"). Guarded live-then-LKI read (a batch
@@ -7972,6 +8045,13 @@ fn resolve_object_mana_value(
                 current_mana_value.unwrap_or(0)
             }
         }
+        // CR 601.2c: `ChainRootTarget` is produced only for
+        // `QuantityRef::CountersOn` today (Dismantle / Rite of the Serpent). No
+        // card reads the chain-root target's mana value, so this is a
+        // fail-closed placeholder — never a silent wildcard. Extend by mirroring
+        // the `resolve_counters_on_scope` arm against
+        // `ability.context.chain_root_targets`.
+        ObjectScope::ChainRootTarget => 0,
         // CR 120.1 + CR 202.3 + CR 608.2h: the per-iteration damage source of an
         // `EachSourceDealsDamage` batch reads its OWN mana value. Live object
         // first, LKI fallback (mirrors the `EventSource` arm), so a batch member
@@ -20949,6 +21029,402 @@ mod tests {
         assert_eq!(
             got, 7,
             "an undeparted Army still reads its LIVE mana value (7), proving the negative above is not vacuous"
+        );
+    }
+
+    /// Build a spell whose chain-root target `T` is an artifact carrying
+    /// `{Plus1Plus1: 2, "oil": 1}`, plus the resolving ability that names it via
+    /// `SpellContext::chain_root_targets`.
+    fn chain_root_target_fixture() -> (GameState, ObjectId, ObjectId, ResolvedAbility) {
+        let mut state = GameState::new_two_player(7);
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dismantle".to_string(),
+            Zone::Stack,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Counter-Laden Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.counters.insert(CounterType::Plus1Plus1, 2);
+            obj.counters.insert(CounterType::Generic("oil".into()), 1);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: None,
+                    properties: vec![],
+                }),
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(target)],
+            spell,
+            PlayerId(0),
+        );
+        // The `finalize_cast` stamp, reproduced verbatim.
+        ability.context.chain_root_targets = vec![TargetRef::Object(target)];
+        (state, spell, target, ability)
+    }
+
+    fn chain_root_ctx(spell: ObjectId) -> QuantityContext {
+        QuantityContext {
+            entering: None,
+            source: spell,
+            trigger_source: None,
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+            event_amount: None,
+        }
+    }
+
+    /// P1a — CR 702.12b + CR 608.2h: an indestructible chain-root target that was
+    /// NOT destroyed is still on the battlefield, so "that many" reads its LIVE
+    /// counter map. (Dismantle ruling 2: "If the target is legal but not destroyed
+    /// … you do put counters on an artifact.")
+    #[test]
+    fn chain_root_target_counters_read_live_map_while_target_survives() {
+        let (state, spell, target, ability) = chain_root_target_fixture();
+
+        // Positive reach-guard: the live map really holds 3 counters of 2 kinds.
+        assert_eq!(
+            state.objects[&target]
+                .counters
+                .values()
+                .copied()
+                .sum::<u32>(),
+            3,
+            "reach-guard: the live target carries 3 counters before the read"
+        );
+        assert_eq!(state.objects[&target].zone, Zone::Battlefield);
+
+        // CR 122.1 (Dismantle ruling 3): kind is irrelevant, only the TOTAL.
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &[],
+                Some(&ability),
+                None,
+            ),
+            3,
+            "counter_type: None sums every kind on the surviving chain-root target"
+        );
+        // A typed read still selects one kind.
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &[],
+                Some(&ability),
+                Some(&CounterType::Plus1Plus1),
+            ),
+            2,
+            "Rite of the Serpent's typed gate reads only the +1/+1 counters"
+        );
+    }
+
+    /// P1b — CR 122.2 + CR 400.7 + CR 608.2h: once the chain-root target has been
+    /// destroyed its counters have ceased to exist, so the read falls to its LKI
+    /// counter map and still reports the pre-destruction total.
+    #[test]
+    fn chain_root_target_counters_fall_back_to_lki_once_target_is_destroyed() {
+        let (mut state, spell, target, ability) = chain_root_target_fixture();
+        let lki = state.objects[&target].snapshot_public_characteristics();
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.zone = Zone::Graveyard;
+            obj.counters.clear();
+        }
+        state.lki_cache.insert(target, lki);
+
+        // Positive reach-guards: the live map is now EMPTY and the LKI holds 3.
+        assert_eq!(
+            state.objects[&target]
+                .counters
+                .values()
+                .copied()
+                .sum::<u32>(),
+            0,
+            "reach-guard: the destroyed object's live counters are gone (CR 122.2)"
+        );
+        assert_eq!(
+            state.lki_cache[&target]
+                .counters
+                .values()
+                .copied()
+                .sum::<u32>(),
+            3,
+            "reach-guard: the LKI snapshot holds the pre-destruction total"
+        );
+
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &[],
+                Some(&ability),
+                None,
+            ),
+            3,
+            "a destroyed chain-root target reports its LKI counter total, not 0"
+        );
+    }
+
+    /// The arm is keyed off the ability-carried chain-root list, never off this
+    /// sub-ability's own targets and never off a turn-wide "what was destroyed"
+    /// ledger. With no chain-root target the read is a fail-closed 0, not a panic.
+    #[test]
+    fn chain_root_target_counters_ignore_sibling_targets_and_missing_referent() {
+        let (state, spell, target, ability) = chain_root_target_fixture();
+
+        let mut no_root = ability.clone();
+        no_root.context.chain_root_targets.clear();
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &[TargetRef::Object(target)],
+                Some(&no_root),
+                None,
+            ),
+            0,
+            "an empty chain_root_targets reads 0 even when `targets` names the artifact"
+        );
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &[],
+                None,
+                None,
+            ),
+            0,
+            "no ability at all is a fail-closed 0, never a panic"
+        );
+    }
+
+    /// P2 — CR 601.2c: the chain-root target is readable from a sub TWO levels
+    /// under the spell root, while that sub's OWN `targets` name a different
+    /// object (the resolution-chosen recipient). This is the whole point of the
+    /// scope: `ObjectScope::Target` would read the recipient.
+    #[test]
+    fn chain_root_target_survives_to_depth_two_while_sub_targets_differ() {
+        let (mut state, spell, target, root) = chain_root_target_fixture();
+        let recipient = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Recipient Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&recipient)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let leaf = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::ChainRootTarget,
+                        counter_type: None,
+                    },
+                },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }),
+            },
+            vec![TargetRef::Object(recipient)],
+            spell,
+            PlayerId(0),
+        );
+        let mid = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: crate::types::ability::PlayerFilter::Controller,
+                branches: vec![],
+            },
+            vec![],
+            spell,
+            PlayerId(0),
+        )
+        .sub_ability(leaf);
+        let mut chain = root.sub_ability(mid);
+        // Exactly what the cast pipeline does after `finalize_cast` stamps the
+        // context: one whole-struct copy down the entire chain.
+        chain.set_context_recursive(chain.context.clone());
+
+        let depth_two = chain
+            .sub_ability
+            .as_deref()
+            .and_then(|mid| mid.sub_ability.as_deref())
+            .expect("reach-guard: the depth-2 leaf exists");
+
+        // Positive reach-guard: the leaf carries the ROOT's chain-root target
+        // while its own `targets` name the recipient — two DIFFERENT ids.
+        assert_eq!(
+            depth_two.context.chain_root_targets,
+            vec![TargetRef::Object(target)],
+            "reach-guard: chain_root_targets rode the context clone to depth 2"
+        );
+        assert_eq!(depth_two.targets, vec![TargetRef::Object(recipient)]);
+        assert_ne!(target, recipient);
+
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &depth_two.targets,
+                Some(depth_two),
+                None,
+            ),
+            3,
+            "the depth-2 sub reads the ROOT's target counters, not its own recipient's"
+        );
+        // The discriminator: the recipient has no counters, so a `Target`-scoped
+        // read (the pre-fix binding) would report 0.
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::Target,
+                chain_root_ctx(spell),
+                &depth_two.targets,
+                Some(depth_two),
+                None,
+            ),
+            0,
+            "ObjectScope::Target reads the recipient (0) — this is the bug ChainRootTarget fixes"
+        );
+    }
+
+    /// Adjacent-sibling fail-closed contract: the object-characteristic readers
+    /// are deliberately NOT wired for `ChainRootTarget` (no card consumer). They
+    /// must return an explicit 0, never panic and never silently wildcard.
+    #[test]
+    fn chain_root_target_characteristic_reads_fail_closed_to_zero() {
+        let (state, spell, _target, ability) = chain_root_target_fixture();
+        let _ = spell;
+        assert_eq!(
+            resolve_quantity_with_targets(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::ChainRootTarget,
+                    },
+                },
+                &ability,
+            ),
+            0,
+            "no card reads the chain-root target's power; the arm fails closed"
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::ChainRootTarget,
+                    },
+                },
+                &ability,
+            ),
+            0,
+            "no card reads the chain-root target's mana value; the arm fails closed"
+        );
+    }
+
+    /// The counter gate must not be pre-empted by the resolution-only referent
+    /// check: `QuantityRef::CountersOn` owns its own live/LKI ladder, so a
+    /// DESTROYED chain-root target still reports a real recorded count.
+    #[test]
+    fn chain_root_target_counter_gate_is_not_gated_by_missing_referent_precheck() {
+        let (mut state, _spell, target, ability) = chain_root_target_fixture();
+        let lki = state.objects[&target].snapshot_public_characteristics();
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.zone = Zone::Graveyard;
+            obj.counters.clear();
+        }
+        state.lki_cache.insert(target, lki);
+
+        let gate = QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::ChainRootTarget,
+                counter_type: None,
+            },
+        };
+        assert!(
+            !quantity_expr_uses_resolution_only_object_scope(&gate),
+            "CountersOn stays out of the resolution-only object-scope list"
+        );
+        assert!(
+            !quantity_expr_missing_resolution_only_referent(&state, &gate, &ability),
+            "the counter gate must not be pre-gated false for a departed referent"
+        );
+        // Positive control: the same scope on a characteristic read IS classified
+        // resolution-only, so the negative above is not vacuous.
+        assert!(
+            quantity_expr_uses_resolution_only_object_scope(&QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::ChainRootTarget,
+                },
+            }),
+            "control: a characteristic read on the same scope IS resolution-only"
+        );
+    }
+
+    /// Serde round-trip for the new variant and the new `SpellContext` field.
+    #[test]
+    fn chain_root_target_scope_and_context_field_round_trip() {
+        let json = serde_json::to_string(&ObjectScope::ChainRootTarget).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ObjectScope>(&json).unwrap(),
+            ObjectScope::ChainRootTarget
+        );
+
+        let context = crate::types::ability::SpellContext {
+            chain_root_targets: vec![TargetRef::Object(ObjectId(1))],
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&context).unwrap();
+        assert!(
+            encoded.contains("chain_root_targets"),
+            "a populated chain-root list serializes: {encoded}"
+        );
+        assert_eq!(
+            serde_json::from_str::<crate::types::ability::SpellContext>(&encoded)
+                .unwrap()
+                .chain_root_targets,
+            vec![TargetRef::Object(ObjectId(1))]
+        );
+
+        // `skip_serializing_if = "Vec::is_empty"`: no other card's serialized
+        // SpellContext gains the field (card-data diff scope, plan gate G4).
+        let empty = serde_json::to_string(&crate::types::ability::SpellContext::default()).unwrap();
+        assert!(
+            !empty.contains("chain_root_targets"),
+            "an empty chain-root list is omitted: {empty}"
         );
     }
 }

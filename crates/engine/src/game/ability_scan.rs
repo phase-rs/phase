@@ -3393,6 +3393,10 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
         // CR 120.1: per-iteration batch source — a resolution-filtered object
         // with no event/sibling axis (mirrors Source/Target).
         ObjectScope::BatchSource => Axes::NONE,
+        // CR 601.2c: the chain-root spell's own declared target, carried on the
+        // resolving ability's context — no event/sibling projected axis
+        // (mirrors Target/Demonstrative).
+        ObjectScope::ChainRootTarget => Axes::NONE,
         ObjectScope::EventTarget => Axes {
             event: true,
             sibling: false,

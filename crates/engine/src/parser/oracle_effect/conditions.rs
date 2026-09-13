@@ -2878,7 +2878,7 @@ pub(super) fn strip_target_keyword_instead(text: &str) -> (Option<AbilityConditi
     (Some(condition), body.to_string())
 }
 
-fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, CounterType, usize)> {
+fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, Option<CounterType>, usize)> {
     let original_len = text.len();
 
     fn parse_counter_on_suffix(after_type: &str) -> Option<&str> {
@@ -2898,7 +2898,7 @@ fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, CounterType, 
         let after_type = after_type.trim_start();
         let after_on = parse_counter_on_suffix(after_type)?;
         let consumed = original_len - after_on.len();
-        return Some((Comparator::EQ, 0, counter_type, consumed));
+        return Some((Comparator::EQ, 0, Some(counter_type), consumed));
     }
 
     // CR 122.1 + CR 122.1a: an indefinite "a [type] counter" means one or more (>= 1).
@@ -2909,9 +2909,20 @@ fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, CounterType, 
             let after_type = after_type.trim_start();
             if let Some(after_on) = parse_counter_on_suffix(after_type) {
                 let consumed = original_len - after_on.len();
-                return Some((Comparator::GE, 1, counter_type, consumed));
+                return Some((Comparator::GE, 1, Some(counter_type), consumed));
             }
         }
+    }
+
+    // CR 122.1: "counters on it" with NO kind named — the gate is on the TOTAL
+    // count of counters, any kind (Dismantle ruling 3: "It doesn't matter what
+    // kind of counters ... had on it, only how many"). Tried before the typed
+    // branches would otherwise require a number/article; a bare plural/singular
+    // "counter(s)" noun with no leading quantifier means "one or more" (>= 1),
+    // mirroring the "a [type] counter" branch above but with no kind at all.
+    if let Some(after_on) = parse_counter_on_suffix(text) {
+        let consumed = original_len - after_on.len();
+        return Some((Comparator::GE, 1, None, consumed));
     }
 
     let (rest, threshold) = nom_primitives::parse_number.parse(text).ok()?;
@@ -2930,24 +2941,44 @@ fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, CounterType, 
     let after_type = after_type.trim_start();
     let after_on = parse_counter_on_suffix(after_type)?;
     let consumed = original_len - after_on.len();
-    Some((comparator, threshold as i32, counter_type, consumed))
+    Some((comparator, threshold as i32, Some(counter_type), consumed))
 }
 
 fn build_counter_condition(
     comparator: Comparator,
     threshold: i32,
-    counter_type: CounterType,
+    counter_type: Option<CounterType>,
     scope: ObjectScope,
 ) -> AbilityCondition {
     AbilityCondition::QuantityCheck {
         lhs: QuantityExpr::Ref {
             qty: QuantityRef::CountersOn {
                 scope,
-                counter_type: Some(counter_type),
+                counter_type,
             },
         },
         comparator,
         rhs: QuantityExpr::Fixed { value: threshold },
+    }
+}
+
+/// CR 608.2h: expose the `QuantityRef` a leading counter-threshold gate
+/// measures, so the effect-clause loop can bind a bare "that many" count
+/// placeholder to it (Dismantle: "If that artifact had counters on it, put
+/// THAT MANY ... counters ..."). Sibling of `difference_expr` (which extracts a
+/// two-operand difference) — this returns the single counter-gate operand.
+pub(super) fn counter_gate_qty(cond: &AbilityCondition) -> Option<&QuantityRef> {
+    match cond {
+        AbilityCondition::QuantityCheck {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: qty @ QuantityRef::CountersOn { .. },
+                },
+            ..
+        } => Some(qty),
+        AbilityCondition::Not { condition } => counter_gate_qty(condition),
+        AbilityCondition::ConditionInstead { inner } => counter_gate_qty(inner),
+        _ => None,
     }
 }
 
@@ -2989,9 +3020,80 @@ pub(super) fn strip_counter_conditional(
         }
     }
 
+    // CR 608.2c + CR 400.7: leading, PAST-tense EXPLICIT-DEMONSTRATIVE — "If that
+    // <permanent> had counter(s) on it, [additive effect]". Distinct from the
+    // present-tense "if that creature has ... counter ..., ... instead"
+    // REPLACEMENT class handled above (Bring Low, Strider, Urdnan): this branch
+    // fires only on past tense `had` AND only when the residual body is additive
+    // (carries no standalone "instead" token anywhere). The subject is the
+    // chain-root SPELL's target, read live-or-LKI at resolution
+    // (ObjectScope::ChainRootTarget) — CR 122.2 (counters cease to exist on zone
+    // change) + CR 400.7 (LKI) + CR 702.12b (an indestructible/undestroyed target
+    // still has its live counters read). Mirrors `strip_mana_value_conditional`'s
+    // leading past-tense branch.
+    //
+    // Deliberately carries ONLY the four explicit demonstratives — NOT a bare
+    // "if it had ". The only card the bare form reaches today is Lost Isle
+    // Calling (JUD), an ACTIVATED ability whose "it" is the exiled SOURCE
+    // enchantment (ObjectScope::Source + LKI, CR 113.7a), not a spell target;
+    // `chain_root_targets` is stamped only in `finalize_cast` (the spell path)
+    // and is empty for an activated ability, so routing that form here would
+    // gate its "take an extra turn" rider on an always-false `0 >= 7`. A future
+    // *spell* "Destroy target X. If it had counters…" (bare "it") would need
+    // "if it had " routed here ONLY under a spell-cast guard — out of scope now.
+    if !in_trigger {
+        let mut leading = alt((
+            tag::<_, _, OracleError<'_>>("if that artifact had "),
+            tag("if that permanent had "),
+            tag("if that creature had "),
+            tag("if that card had "),
+        ));
+        if let Ok((rest, _)) = leading.parse(lower.as_str()) {
+            if let Some((comparator, threshold, counter_type, consumed)) =
+                parse_counter_threshold(rest)
+            {
+                let after = rest[consumed..].trim_start();
+                // allow-noncombinator: comma cleanup on the already-parsed remainder (the condition is parsed; not dispatch)
+                let after = after.strip_prefix(',').unwrap_or(after).trim_start();
+                // Replacement-collision guard: scan the WHOLE residual body for a
+                // standalone `instead` token (word-boundary), not just a suffix
+                // match — a "... had a +1/+1 counter on it, ~ deals 5 damage to it
+                // instead" sentence must fall through to the replacement rider
+                // (`strip_target_keyword_instead`), not be captured here as a
+                // false-green additive effect. No corpus card needs the
+                // whole-body scan today (the replacement-class cards above are
+                // all present-tense `has`), but it removes a residual robustness
+                // assumption for free. Post-parse residue, not parsing dispatch.
+                let body_has_instead = nom_primitives::scan_at_word_boundaries(
+                    after.trim_end().trim_end_matches('.'),
+                    tag::<_, _, OracleError<'_>>("instead"),
+                )
+                .is_some();
+                if !body_has_instead {
+                    let offset = text.len() - after.len();
+                    return (
+                        Some(build_counter_condition(
+                            comparator,
+                            threshold,
+                            counter_type,
+                            ObjectScope::ChainRootTarget,
+                        )),
+                        text[offset..].to_string(),
+                    );
+                }
+            }
+        }
+    }
+
     // Trailing form: "[effect] if {subject} has [N] [type] counter[s] on it".
     // "it" is always offered; the demonstrative "that creature"/"that permanent"/
     // "that card" only in non-trigger context (CR 115.1: the spell's target).
+    // NOTE: the bare-untyped-noun branch added to `parse_counter_threshold`
+    // (above, for Dismantle's "counters on it" with no kind named) is a shared
+    // authority every caller below inherits too. Corpus swept: zero cards use an
+    // untyped present-tense "has counters on it" gate, so this widening's blast
+    // radius is empty in practice; a regression would surface as a THIRD card's
+    // `card-data.json` entry changing (see the card-data diff-scope check).
     let mut subjects: Vec<(&str, ObjectScope)> = vec![(" if it has ", ObjectScope::Source)];
     if !in_trigger {
         subjects.push((" if that creature has ", ObjectScope::Target));

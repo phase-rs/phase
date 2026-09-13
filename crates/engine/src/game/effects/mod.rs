@@ -3506,6 +3506,41 @@ fn sub_has_independent_object_target_slot(sub: &ResolvedAbility) -> bool {
             && !effect_requires_parent_target_object(&sub.effect))
         || (has_resolution_owned_zone_choice(sub)
             && !sub_ability_target_belongs_to_reflexive_context(sub))
+        || choose_one_of_branches_own_object_choice(sub)
+}
+
+/// CR 115.10a + CR 608.2d: whether a `ChooseOneOf` sub owns a fresh object
+/// choice made while the SELECTED BRANCH resolves.
+///
+/// `Effect::ChooseOneOf` is deliberately slot-less (see `Effect::target_filter`),
+/// so `extract_target_filter_from_effect` reports no filter for it and the
+/// caller would force the parent instruction's already-bound object onto the
+/// choice — and `choose_one_of::resolve_branch` then forwards that object to the
+/// selected branch as `parent_targets`. For a branch set that picks its OWN
+/// object at resolution ("Destroy target artifact. … put that many … counters on
+/// an artifact you control"), that inheritance is wrong twice over: it silently
+/// rebinds the recipient to the destroyed target (CR 122.2 — the object the
+/// earlier instruction consumed), and it suppresses the branch's own
+/// resolution-time recipient choice.
+///
+/// Narrow by construction — EVERY branch must be `Resolution`-timed AND name a
+/// described (non-context-ref) recipient. A branch produced by the counter-choice
+/// reader's shared-recipient LIFT carries `ParentTarget`/`ParentTargetSlot`
+/// (`is_context_ref() == true`) and `Stack` timing, so every shipping
+/// `ChooseOneOf`-of-`PutCounter` card fails both conjuncts and keeps today's
+/// inheritance.
+fn choose_one_of_branches_own_object_choice(sub: &ResolvedAbility) -> bool {
+    let Effect::ChooseOneOf { branches, .. } = &sub.effect else {
+        return false;
+    };
+    !branches.is_empty()
+        && branches.iter().all(|branch| {
+            branch.target_choice_timing == TargetChoiceTiming::Resolution
+                && branch
+                    .effect
+                    .target_filter()
+                    .is_some_and(|filter| !filter.is_context_ref())
+        })
 }
 
 /// CR 701.3a + CR 303.4f: `forward_result` ChangeZone nesting Attach→ParentTarget
@@ -13689,7 +13724,17 @@ fn resolve_chain_body(
     // fallback in `counters.rs`; routing them through an interactive prompt
     // here would be wrong (and untested against that resolver's semantics).
     let needs_resolution_object_choice = match &ability.effect {
-        Effect::PutCounter { .. } => ability.targets.is_empty(),
+        // CR 115.10a: "no recipient chosen yet" means "no OBJECT target", not
+        // "no targets at all". A `PutCounter` reached as a `ChooseOneOf` branch
+        // carries the `TargetRef::Player` that `choose_one_of::resolve_branch`
+        // injects for the branch chooser, which is not a recipient. This is a
+        // strict superset of the former `targets.is_empty()` test (an empty
+        // target list contains no `TargetRef::Object` either), so every
+        // pre-existing `PutCounter` caller is unaffected.
+        Effect::PutCounter { .. } => !ability
+            .targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Object(_))),
         Effect::ChooseCounterKind { target, .. } => {
             !matches!(target, TargetFilter::SpecificObject { .. })
         }
@@ -16309,6 +16354,7 @@ pub(crate) fn evaluate_condition(
             | crate::types::ability::ObjectScope::OwnedLinkedExileCard
             | crate::types::ability::ObjectScope::EventTarget
             | crate::types::ability::ObjectScope::AmassedArmy
+            | crate::types::ability::ObjectScope::ChainRootTarget
             | crate::types::ability::ObjectScope::BatchSource => false,
         },
         AbilityCondition::AlternativeManaCostPaid => ability.context.alternative_mana_cost_paid,
@@ -16562,6 +16608,7 @@ pub(crate) fn evaluate_condition(
                 | crate::types::ability::ObjectScope::OwnedLinkedExileCard
                 | crate::types::ability::ObjectScope::EventTarget
                 | crate::types::ability::ObjectScope::AmassedArmy
+                | crate::types::ability::ObjectScope::ChainRootTarget
                 | crate::types::ability::ObjectScope::BatchSource => None,
             };
             object_id
