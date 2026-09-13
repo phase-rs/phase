@@ -15777,6 +15777,14 @@ fn can_cast_prepared_now_with_probe(
                 return false;
             }
         }
+        // CR 601.2f + CR 601.2h: a REQUIRED additional cost the parser could not
+        // read is part of the total cost and has no payment procedure, so it
+        // can't be paid and the spell can't be cast. Gate enumeration here so
+        // the action never reaches `legal_actions_full`; the payment step in
+        // `casting_costs.rs` is the backstop for a directly submitted `CastSpell`.
+        if matches!(cost, AbilityCost::Unimplemented { .. }) {
+            return false;
+        }
     }
 
     // CR 118.3 + CR 601.2f-h: A mandatory choice of additional costs is
