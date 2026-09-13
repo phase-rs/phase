@@ -49,6 +49,7 @@ mod aspect_of_wolf_per_axis_xy;
 mod athreos_god_of_passage_targeted_opponent_unless_pay;
 mod atomic_mana_payment;
 mod attack_qualifier_stack_conditions;
+mod attacks_alone_targeted_trigger;
 mod attacks_while_saddled_trigger;
 mod auntie_ool_minus_one_counter_trigger;
 mod aura_graft_enchant_restriction;
