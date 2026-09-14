@@ -55,12 +55,16 @@
 //! - **Replacements**: NOT battlefield-scoped. Zone-of-function is a
 //!   per-replacement property on `ReplacementDefinition`, so
 //!   `active_replacements` scans every object and only applies the
-//!   phased-out / command-zone gate. Caller-side zone restriction still
-//!   lives in `find_applicable_replacements`, which today filters to
-//!   `[Battlefield, Command]` because no in-engine replacement functions
-//!   from hand / graveyard / exile. CR 903.9a commander redirection is
-//!   handled separately in `zones::move_to_zone` — it is not routed
-//!   through `ReplacementDefinition`.
+//!   phased-out / command-zone gate. The per-definition part of the gate is
+//!   `replacement_functions_in_zone`, the replacement-side twin of
+//!   `static_functions_in_zone`: a non-empty `active_zones` restricts the
+//!   definition to exactly those zones per CR 113.6b (CR 702.52a dredge —
+//!   graveyard only), and an empty one takes the `DEFAULT_REPLACEMENT_ZONES`
+//!   default. `find_applicable_replacements` consults that predicate and layers
+//!   the event-dependent CR 614.12 / CR 702.35a self-replacement carve-outs on
+//!   top of the default case. CR 903.9a commander redirection is handled
+//!   separately in `zones::move_to_zone` — it is not routed through
+//!   `ReplacementDefinition`.
 //!
 //! # Condition filtering
 //!
@@ -239,6 +243,39 @@ pub(crate) fn static_functions_in_zone(obj: &GameObject, def: &StaticDefinition)
         }
     }
 }
+
+/// CR 113.6b: does `def` function from the zone `obj` is currently in?
+///
+/// The replacement-side twin of [`static_functions_in_zone`], and the single
+/// authority for [`ReplacementDefinition::active_zones`]:
+///
+/// 1. **Declared off-zone replacement** (non-empty `active_zones`) — CR 113.6b,
+///    "an ability that states which zones it functions in functions only from
+///    those zones." Restricted to exactly the listed zones. CR 702.52a dredge
+///    ("functions only while the card with dredge is in a player's graveyard")
+///    is the shape this exists for.
+/// 2. **Plain replacement** (empty `active_zones`) — the CR 113.6 default,
+///    which for the replacement pipeline means the zones
+///    `replacement::object_replacement_candidate_applies` scans.
+///
+/// Deliberately NOT the whole zone-of-function answer for case 2: the caller
+/// layers the CR 614.12 (self-replacement as an object enters) and CR 702.35a
+/// (Madness self-replacement as an object is discarded) carve-outs on top,
+/// because those depend on the proposed event, not on the object's zone. A
+/// definition in case 1 gets no carve-outs — it has already said where it works.
+pub(crate) fn replacement_functions_in_zone(obj: &GameObject, def: &ReplacementDefinition) -> bool {
+    if def.active_zones.is_empty() {
+        DEFAULT_REPLACEMENT_ZONES.contains(&obj.zone)
+    } else {
+        def.active_zones.contains(&obj.zone)
+    }
+}
+
+/// CR 113.6: the zones a replacement with no declared `active_zones` is scanned
+/// from. The command zone joins the battlefield here because a command-zone
+/// object's replacements function (CR 113.6b via the emblem/opt-in gate that
+/// `object_functions` already applied).
+pub(crate) const DEFAULT_REPLACEMENT_ZONES: [Zone; 2] = [Zone::Battlefield, Zone::Command];
 
 /// Iterate `StaticDefinition`s on `obj` that are currently functioning, with
 /// the CR 702.26b / CR 114.4 gate, the full CR 113.6 zone-of-function gate,
@@ -509,10 +546,13 @@ pub fn battlefield_active_triggers(
 /// time evaluation remains in the replacement pipeline itself.
 ///
 /// Zones callers actually scan today:
-/// - `find_applicable_replacements` in `game/replacement.rs` restricts
-///   to `[Battlefield, Command]` plus the entering card (CR 614.12
-///   self-replacement on ETB) or the discarded card (CR 702.35a
-///   Madness self-replacement from hand).
+/// - `find_applicable_replacements` in `game/replacement.rs` delegates the
+///   per-definition zone question to `replacement_functions_in_zone`: the
+///   `DEFAULT_REPLACEMENT_ZONES` default plus the entering card (CR 614.12
+///   self-replacement on ETB), the discarded card (CR 702.35a Madness
+///   self-replacement from hand), or the spell leaving the stack (CR 608.2n);
+///   and, for a definition that declares `active_zones`, exactly those zones
+///   (CR 113.6b — CR 702.52a dredge, graveyard only).
 /// - **CR 903.9a commander redirection** is not routed through
 ///   `ReplacementDefinition` at all; it is a hard-coded redirect in
 ///   `game/zones.rs::move_to_zone`. The helper's scan is future-proofed

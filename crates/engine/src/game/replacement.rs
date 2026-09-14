@@ -7050,33 +7050,48 @@ fn object_replacement_candidate_applies(
         _ => None,
     };
 
-    let zones_to_scan = [Zone::Battlefield, Zone::Command];
     let is_liminal_source = state.liminal_entries.contains_key(&obj.id);
-    let in_scanned_zone = !is_liminal_source && zones_to_scan.contains(&obj.zone);
+    // CR 113.6b: the per-definition zone-of-function question, answered by the
+    // single authority. A definition that declares `active_zones` functions ONLY
+    // from those zones (CR 702.52a dredge: the graveyard, and nowhere else — a
+    // dredge creature on the battlefield must never offer its dredge); one that
+    // declares none takes the default scan zones plus the event-dependent
+    // carve-outs below.
+    let declares_zones = !repl_def.active_zones.is_empty();
+    let in_scanned_zone = !is_liminal_source
+        && crate::game::functioning_abilities::replacement_functions_in_zone(obj, repl_def);
     let is_entering = entering_object_id == Some(obj.id);
     let is_being_discarded = discarding_object_id == Some(obj.id);
     let is_stack_self_move = stack_self_moving_object_id == Some(obj.id);
     let replacement_player = replacement_source_player(obj);
-    // CR 702.52a + CR 702.52b: Dredge functions from the graveyard on that
-    // card's owner's draw while the library has enough cards.
-    let is_applicable_dredge = matches!(repl_def.event, ReplacementEvent::Draw)
-        && obj.zone == Zone::Graveyard
-        && matches!(event, ProposedEvent::Draw { player_id, .. } if *player_id == replacement_player)
-        && crate::game::keywords::effective_dredge_value(state, obj.id).is_some_and(|dredge| {
-            state
+
+    // CR 614.12 / CR 702.35a / CR 608.2n: an object outside the scanned zones
+    // still applies its OWN self-replacement as it enters, as it is discarded,
+    // or as it leaves the stack. These carve-outs extend the CR 113.6 DEFAULT
+    // only — a definition that has already stated its zones gets none of them.
+    if !in_scanned_zone
+        && (declares_zones || (!is_entering && !is_being_discarded && !is_stack_self_move))
+    {
+        return false;
+    }
+
+    // CR 702.52b: "A player with fewer cards in their library than the number
+    // required by a dredge ability can't mill any of them this way" — with too
+    // small a library the replacement is not applicable at all. The CR 702.52a
+    // zone half is declared on the definition (`active_zones = [Graveyard]`);
+    // only this threshold depends on live library size, so only this half is
+    // evaluated here.
+    if repl_def.event == ReplacementEvent::Draw && obj.zone == Zone::Graveyard {
+        if let Some(dredge) = crate::game::keywords::effective_dredge_value(state, obj.id) {
+            let library_size = state
                 .players
                 .iter()
                 .find(|p| p.id == replacement_player)
-                .is_some_and(|p| p.library.len() as u32 >= dredge)
-        });
-
-    if !in_scanned_zone
-        && !is_entering
-        && !is_being_discarded
-        && !is_applicable_dredge
-        && !is_stack_self_move
-    {
-        return false;
+                .map_or(0, |p| p.library.len() as u32);
+            if library_size < dredge {
+                return false;
+            }
+        }
     }
 
     // CR 701.19: skip consumed one-shot replacements such as used regeneration.
@@ -14339,8 +14354,11 @@ mod tests {
             },
         );
         mill.sub_ability = Some(Box::new(return_to_hand));
+        // CR 702.52a + CR 113.6b: mirrors `synthesize_dredge`'s declared
+        // graveyard-only zone of function.
         let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
-            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+            .active_zones(vec![Zone::Graveyard]);
         repl.mode = ReplacementMode::Optional { decline: None };
         repl.execute = Some(Box::new(mill));
         repl
@@ -14411,6 +14429,71 @@ mod tests {
         assert!(
             find_applicable_replacements(&state, &opponent_draw, &registry).is_empty(),
             "dredge must not apply to an opponent's draw"
+        );
+    }
+
+    /// CR 702.52a + CR 113.6b: "Dredge is a static ability that functions only
+    /// while the card with dredge is in a player's graveyard." A dredge creature
+    /// on the BATTLEFIELD must not offer dredge on its controller's draw — the
+    /// reported bug, and the reason `synthesize_dredge` declares `active_zones`.
+    /// Battlefield is the scanner's default zone, so without the declaration the
+    /// definition sails through the zone gate.
+    #[test]
+    fn dredge_does_not_apply_from_the_battlefield() {
+        let mut state = dredge_state(10);
+        state.objects.get_mut(&ObjectId(10)).unwrap().zone = Zone::Battlefield;
+        state.battlefield.push_back(ObjectId(10));
+        let registry = build_replacement_registry();
+        let owner_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &owner_draw, &registry).is_empty(),
+            "CR 702.52a: dredge functions only from the graveyard — a dredge \
+             creature in play must not replace its controller's draw"
+        );
+    }
+
+    /// CR 113.6b: the zone declaration is a general building block, not a dredge
+    /// special case — any replacement naming its zones functions only from them,
+    /// and gets none of the default scan zones. Same definition, same object,
+    /// only the declared zone differs.
+    #[test]
+    fn declared_active_zones_replace_the_default_scan_zones() {
+        use crate::game::functioning_abilities::replacement_functions_in_zone;
+
+        let obj = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            PlayerId(0),
+            "Zone Probe".to_string(),
+            Zone::Battlefield,
+        );
+        let mut undeclared = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+        assert!(
+            replacement_functions_in_zone(&obj, &undeclared),
+            "an undeclared replacement keeps the CR 113.6 battlefield default"
+        );
+
+        undeclared.active_zones = vec![Zone::Graveyard];
+        assert!(
+            !replacement_functions_in_zone(&obj, &undeclared),
+            "CR 113.6b: declaring [Graveyard] must REMOVE the battlefield default"
+        );
+
+        let graveyard_obj = GameObject::new(
+            ObjectId(11),
+            CardId(11),
+            PlayerId(0),
+            "Zone Probe".to_string(),
+            Zone::Graveyard,
+        );
+        assert!(
+            replacement_functions_in_zone(&graveyard_obj, &undeclared),
+            "CR 113.6b: a declared zone must admit the definition from that zone"
         );
     }
 
