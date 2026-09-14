@@ -1659,6 +1659,12 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 )
             }
         },
+        QuantityRef::SharedCardTypes { source } => {
+            format!(
+                "card types they share with {}",
+                fmt_characteristic_population_bounded(source)
+            )
+        }
         QuantityRef::DistinctSubtypes { source, exclude } => {
             let suffix = match exclude {
                 crate::types::ability::SubtypeExclusion::CreatureTypes => {
@@ -9684,6 +9690,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::PropertyAggregate(_) => ("PropertyAggregate", Handled),
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
         QuantityRef::DistinctCardTypes { .. } => ("DistinctCardTypes", Handled),
+        QuantityRef::SharedCardTypes { .. } => ("SharedCardTypes", Handled),
         QuantityRef::DistinctSubtypes { .. } => ("DistinctSubtypes", Handled),
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),

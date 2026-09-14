@@ -71,6 +71,12 @@ pub struct QuantityContext {
     /// (`resolve_quantity_with_targets_and_damage_source`); `None` in every
     /// non-batch context (a null read → 0, fail-closed).
     pub damage_source: Option<ObjectId>,
+    /// CR 205.2a + CR 607.2a: The spell being cost-modified, whose own card
+    /// types are intersected against a `QuantityRef::SharedCardTypes` population
+    /// (Cemetery Prowler: "for each card type they share with cards exiled with
+    /// ~"). `None` outside cast-time cost-modifier resolution, where the
+    /// quantity falls back to `source`.
+    pub spell: Option<ObjectId>,
     /// CR 121.2a + CR 614.1a: The amount carried by the proposed event a
     /// replacement condition is being evaluated against — the draw count a
     /// count-form antecedent ("would draw two or more cards") compares. Set
@@ -640,6 +646,7 @@ pub(crate) fn source_defending_player_for_context_for_test(
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         },
     )
 }
@@ -683,6 +690,7 @@ pub fn resolve_quantity(
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         },
     )
 }
@@ -1590,6 +1598,35 @@ pub fn resolve_quantity_with_recipient(
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
+        },
+    )
+}
+
+/// CR 205.2a + CR 607.2a: Resolve a quantity for a cast-time cost modifier,
+/// carrying the spell being cast as the `SharedCardTypes` intersection subject.
+/// `source_id` remains the static's source permanent (the exile link anchor),
+/// while `spell_id` supplies the spell-side card types.
+pub fn resolve_quantity_with_spell(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    source_id: ObjectId,
+    spell_id: ObjectId,
+) -> i32 {
+    resolve_quantity_with_ctx(
+        state,
+        expr,
+        controller,
+        QuantityContext {
+            entering: None,
+            source: source_id,
+            trigger_source: None,
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+            event_amount: None,
+            spell: Some(spell_id),
         },
     )
 }
@@ -1943,6 +1980,7 @@ pub(crate) fn quantity_expr_missing_resolution_only_referent(
             scoped_player: ability.scoped_player,
             damage_source: None,
             event_amount: None,
+            spell: None,
         };
         !resolution_only_scope_referent_present(state, scope, ctx, &ability.targets, ability)
     }
@@ -2083,6 +2121,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::DistinctCardTypes { .. }
+        | QuantityRef::SharedCardTypes { .. }
         | QuantityRef::DistinctSubtypes { .. }
         | QuantityRef::CardsExiledBySource
         | QuantityRef::ExiledCardPower { .. }
@@ -2381,6 +2420,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         // "does this entered object join the population?", which is what keeps
         // the two functions' `false` arms aligned.
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             characteristic_source_reads_object_count(source)
@@ -2628,6 +2668,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         // CR 205.2a / CR 205.3: the object-filter and journal-filter sources read
         // a live filter; the zone / linked-exile / tracked-set sources do not.
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. } => {
             CharacteristicKinds::CARD_TYPES.union(characteristic_source_reads_at(source, depth))
         }
@@ -2918,6 +2959,7 @@ fn entered_object_perturbs_quantity_ref(
             matches_target_filter(state, entered.id, filter, ctx)
         }
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             characteristic_source_perturbed_by_entry(state, entered, ctx, source)
@@ -3202,6 +3244,7 @@ pub(crate) fn resolve_quantity_for_trigger_check(
         scoped_player,
         damage_source: None,
         event_amount: None,
+        spell: None,
     };
 
     // Fast path: when current_trigger_event is already set (resolution-time
@@ -3301,6 +3344,7 @@ pub(crate) fn resolve_player_scope_for_trigger_check(
         scoped_player,
         damage_source: None,
         event_amount: None,
+        spell: None,
     };
 
     match event {
@@ -3606,6 +3650,7 @@ pub fn resolve_quantity_with_targets(
                 scoped_player: ability.scoped_player,
                 damage_source: None,
                 event_amount: None,
+                spell: None,
             },
             &ability.targets,
             ability.chosen_x,
@@ -3660,6 +3705,7 @@ pub(crate) fn resolve_quantity_with_targets_and_recipient(
                 scoped_player: ability.scoped_player,
                 damage_source: None,
                 event_amount: None,
+                spell: None,
             },
             &ability.targets,
             ability.chosen_x,
@@ -3698,6 +3744,7 @@ pub(crate) fn resolve_quantity_with_targets_and_damage_source(
                 scoped_player: ability.scoped_player,
                 damage_source: Some(damage_source),
                 event_amount: None,
+                spell: None,
             },
             &ability.targets,
             ability.chosen_x,
@@ -3735,6 +3782,7 @@ pub fn resolve_quantity_with_targets_slice(
                 scoped_player: None,
                 damage_source: None,
                 event_amount: None,
+                spell: None,
             },
             targets,
             None,
@@ -3818,6 +3866,7 @@ pub(crate) fn resolve_quantity_scoped_with_targets(
                 scoped_player: Some(scope_player),
                 damage_source: None,
                 event_amount: None,
+                spell: None,
             },
             targets,
             None,
@@ -5068,6 +5117,39 @@ fn resolve_ref(
                 },
             );
             usize_to_i32_saturating(seen.len())
+        }
+        // CR 205.2a + CR 607.2a: Count the distinct card types the source object
+        // (the spell being cost-modified, carried in `ctx.spell`) shares with the
+        // population — the intersection "they share with" requires, not the
+        // population's own distinct-type count (Cemetery Prowler #6898).
+        QuantityRef::SharedCardTypes { source } => {
+            let subject_id = ctx.spell.unwrap_or(ctx.source);
+            let subject_types: HashSet<CoreType> =
+                characteristic_view_for_object(state, subject_id)
+                    .map(|view| view.core_types().to_vec())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+            let mut shared = HashSet::new();
+            visit_characteristic_source(
+                state,
+                source,
+                ctx.clone(),
+                CharacteristicFilterContexts {
+                    base: &filter_ctx,
+                    scoped_owned_exile: None,
+                },
+                controller,
+                controller,
+                &mut |_, view, _| {
+                    for ct in view.core_types() {
+                        if subject_types.contains(ct) {
+                            shared.insert(*ct);
+                        }
+                    }
+                },
+            );
+            usize_to_i32_saturating(shared.len())
         }
         // CR 205.3 + CR 604.3: Count distinct subtype VALUES across the same
         // `CardTypeSetSource` scan as `DistinctCardTypes`, but reading
@@ -8290,6 +8372,7 @@ pub(crate) fn defending_player_for_quantity_context_for_test(
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         },
     )
 }
@@ -11020,6 +11103,7 @@ mod tests {
                     scoped_player: None,
                     damage_source: None,
                     event_amount: None,
+                    spell: None,
                 },
             ),
             1
@@ -17678,6 +17762,7 @@ mod tests {
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         };
         assert_eq!(
             resolve_ref(
@@ -17782,6 +17867,7 @@ mod tests {
                     scoped_player: None,
                     damage_source: None,
                     event_amount: None,
+                    spell: None,
                 },
                 &[],
                 None,
@@ -18147,6 +18233,7 @@ mod tests {
                     scoped_player: Some(scoped_player),
                     damage_source: None,
                     event_amount: None,
+                    spell: None,
                 },
             ),
             9,
@@ -20905,6 +20992,7 @@ mod tests {
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         };
         let got =
             resolve_object_mana_value(&state, ObjectScope::AmassedArmy, ctx, &[], Some(&ability));
@@ -20973,6 +21061,7 @@ mod tests {
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         };
         let got =
             resolve_object_mana_value(&state, ObjectScope::AmassedArmy, ctx, &[], Some(&ability));
@@ -21046,6 +21135,7 @@ mod tests {
             scoped_player: None,
             damage_source: None,
             event_amount: None,
+            spell: None,
         };
 
         assert!(

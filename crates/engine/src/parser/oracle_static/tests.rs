@@ -6586,10 +6586,10 @@ fn static_spells_cost_less() {
 }
 
 // Cemetery Prowler #6898: "for each card type they share with cards exiled with ~"
-// must lower to a DistinctCardTypes(ExiledBySource) multiplier, NOT an ObjectCount
-// over every card. Before the fix the "they share with" separator routed the whole
-// clause into an ObjectCount over a bare "Card" filter (no zone), reducing every
-// spell by the total card count.
+// must lower to a SharedCardTypes(ExiledBySource) multiplier (the spell/exile
+// intersection), NOT an ObjectCount over every card or a population-only
+// DistinctCardTypes. Before the fix the "they share with" separator routed the
+// whole clause into an ObjectCount over a bare "Card" filter (no zone).
 #[test]
 fn static_spells_cost_less_for_each_card_type_shared_with_exiled() {
     let def = parse_static_line(
@@ -6598,11 +6598,11 @@ fn static_spells_cost_less_for_each_card_type_shared_with_exiled() {
     .unwrap();
     let StaticMode::ModifyCost {
         mode: CostModifyMode::Reduce,
-        dynamic_count: Some(QuantityRef::DistinctCardTypes { source }),
+        dynamic_count: Some(QuantityRef::SharedCardTypes { source }),
         ..
     } = &def.mode
     else {
-        panic!("expected Reduce + DistinctCardTypes, got {:?}", def.mode);
+        panic!("expected Reduce + SharedCardTypes, got {:?}", def.mode);
     };
     assert_eq!(source, &CardTypeSetSource::ExiledBySource);
     assert!(matches!(

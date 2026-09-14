@@ -8491,6 +8491,14 @@ pub enum QuantityRef {
     /// source set. Covers zone cards, linked-exile cards, and matching objects
     /// without proliferating card-type-count siblings.
     DistinctCardTypes { source: CardTypeSetSource },
+    /// CR 205.2a + CR 607.2a: Count the distinct card types the SOURCE object
+    /// (for a cast-time cost modifier, the spell being cost-modified) shares
+    /// with the population named by `source`. Distinct from
+    /// [`QuantityRef::DistinctCardTypes`], which counts every distinct type in
+    /// the population regardless of the source's own types — this is the
+    /// intersection the "they share with" wording requires (Cemetery Prowler:
+    /// "for each card type they share with cards exiled with ~").
+    SharedCardTypes { source: CardTypeSetSource },
     /// CR 205.3: Count distinct subtype *values* across a
     /// parameterized source set (Subgoyf — "the number of different subtypes
     /// other than creature types among cards in all graveyards"). The subtype
@@ -9166,6 +9174,7 @@ impl QuantityRef {
             | QuantityRef::TargetZoneCardCount { .. }
             | QuantityRef::Devotion { .. }
             | QuantityRef::DistinctCardTypes { .. }
+            | QuantityRef::SharedCardTypes { .. }
             | QuantityRef::DistinctSubtypes { .. }
             | QuantityRef::CardsExiledBySource
             | QuantityRef::ExiledCardPower { .. }

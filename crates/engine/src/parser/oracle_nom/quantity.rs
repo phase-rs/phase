@@ -983,6 +983,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // `alt` within nom's tuple arity (nom 8.0 max: 21 items).
         alt((
             parse_distinct_card_types_among,
+            parse_shared_card_types_with,
             // CR 201.2 + CR 603.4: "different <power|mana value> among <type>"
             // distinct-by-quality count (nested here to stay within nom's
             // tuple arity).
@@ -1873,7 +1874,10 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_distinct_permanent_types_in_zone,
         // CR 205.2a: one population grammar for every "card type[s] among …"
         // reading (same ordering as `parse_quantity_ref`).
-        parse_distinct_card_types_among,
+        alt((
+            parse_distinct_card_types_among,
+            parse_shared_card_types_with,
+        )),
         // CR 205.3 + CR 500 + CR 604.3: counted CDA quantities that read live game
         // state — "different subtypes … among <source>" (Subgoyf) and "turns
         // you've taken this game" (Control Win Condition). Both must precede the
@@ -3131,17 +3135,28 @@ fn parse_characteristic_set_source_list(
 /// per-population heads (`… among cards in <zone>`, `… among cards exiled with
 /// ~`, `… among <type phrase>`) that had drifted into a product form. Reads with
 /// [`TypePhraseGrammar::Legacy`], the grammar this head has always used.
-///
-/// CR 205.2a + CR 607.2a: the "they share with" separator is the cemetery-prowler
-/// reading — "for each card type they share with cards exiled with ~" counts the
-/// distinct card types among the linked-exile population exactly as "among" does,
-/// so it shares this head rather than growing a sibling.
 fn parse_distinct_card_types_among(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("card type").parse(input)?;
     let (rest, _) = opt(tag("s")).parse(rest)?;
-    let (rest, _) = alt((tag(" among "), tag(" they share with "))).parse(rest)?;
+    let (rest, _) = tag(" among ").parse(rest)?;
     let (rest, source) = parse_characteristic_set_source_list(rest, TypePhraseGrammar::Legacy)?;
     Ok((rest, QuantityRef::DistinctCardTypes { source }))
+}
+
+/// CR 205.2a + CR 607.2a: "card type\[s\] they share with \<population\>" →
+/// [`QuantityRef::SharedCardTypes`].
+///
+/// The cemetery-prowler reading — "for each card type they share with cards
+/// exiled with ~" counts the intersection of the spell's own card types with the
+/// population's, NOT the population's distinct-type count. Shares the same
+/// population grammar as [`parse_distinct_card_types_among`] but lowers to the
+/// intersection variant, so the two separators are not collapsed.
+fn parse_shared_card_types_with(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("card type").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" they share with ").parse(rest)?;
+    let (rest, source) = parse_characteristic_set_source_list(rest, TypePhraseGrammar::Legacy)?;
+    Ok((rest, QuantityRef::SharedCardTypes { source }))
 }
 
 fn zone_ref_to_zone(zone: ZoneRef) -> Zone {
@@ -4893,9 +4908,13 @@ fn parse_for_each_clause_ref_with_they_controller(
             parse_object_name_word_count_for_each,
             parse_object_typeline_component_count_for_each,
             parse_mana_symbols_in_object_mana_cost_for_each,
-            // CR 205.2a: "for each card type among <population>" — the same
-            // population grammar the "the number of …" head uses.
-            parse_distinct_card_types_among,
+            // CR 205.2a: "for each card type among <population>" and "card type
+            // they share with <population>" share the population grammar; nested
+            // to keep the outer `alt` within nom's tuple arity (21 items).
+            alt((
+                parse_distinct_card_types_among,
+                parse_shared_card_types_with,
+            )),
             parse_foretold_cards_owned_in_exile,
             parse_zone_card_count,
             parse_for_each_attached_to_source,
@@ -10191,15 +10210,15 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_distinct_card_types_they_share_with_exiled_with_source() {
-        // Cemetery Prowler #6898: "they share with" is the "among" reading over
-        // the linked-exile population.
+    fn test_parse_shared_card_types_they_share_with_exiled_with_source() {
+        // Cemetery Prowler #6898: "they share with" lowers to the intersection
+        // variant, not the population-only `DistinctCardTypes`.
         let (rest, q) =
             parse_quantity_ref("the number of card types they share with cards exiled with ~")
                 .unwrap();
         assert_eq!(
             q,
-            QuantityRef::DistinctCardTypes {
+            QuantityRef::SharedCardTypes {
                 source: CardTypeSetSource::ExiledBySource,
             }
         );
@@ -10209,12 +10228,12 @@ mod tests {
     #[test]
     fn test_parse_for_each_card_type_they_share_with_exiled_with_source() {
         // Cemetery Prowler #6898: "for each card type they share with …" routes
-        // through the same head as "for each card type among …".
+        // to `SharedCardTypes`, distinct from the "among" head.
         let (rest, q) =
             parse_for_each_clause_ref("card type they share with cards exiled with ~").unwrap();
         assert_eq!(
             q,
-            QuantityRef::DistinctCardTypes {
+            QuantityRef::SharedCardTypes {
                 source: CardTypeSetSource::ExiledBySource,
             }
         );
