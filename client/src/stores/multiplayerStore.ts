@@ -1253,6 +1253,7 @@ interface MultiplayerState {
   // Action round-trip tracking (ephemeral — not persisted)
   actionPending: boolean;
   latencyMs: number | null;
+  playerLatencies: Record<number, number | null>;
   // Hosting session (ephemeral — not persisted)
   hostGameCode: string | null;
   hostIsPublic: boolean;
@@ -2401,6 +2402,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       disconnectedPlayers: new Set(),
       actionPending: false,
       latencyMs: null,
+      playerLatencies: {},
       hostGameCode: null,
       hostIsPublic: false,
       hostingStatus: "idle" as HostingStatus,

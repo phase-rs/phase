@@ -175,6 +175,8 @@
       "copied": "Estado do jogo copiado para a área de transferência.",
       "copyFailed": "Não foi possível copiar o estado do jogo.",
       "exported": "{{filename}} exportado.",
+      "exportedTo": "Exportado para {{path}}.",
+      "exportRequested": "Exportação solicitada: {{filename}}.",
       "exportFailed": "Não foi possível exportar o estado do jogo.",
       "replayExported": "Replay salvo como {{filename}}.",
       "replayExportUnavailable": "Nenhuma gravação de replay disponível para esta partida.",

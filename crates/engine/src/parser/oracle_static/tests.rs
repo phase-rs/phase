@@ -4264,7 +4264,7 @@ fn static_cant_be_blocked_by_more_than_two_creatures() {
 
 #[test]
 fn static_attach_only_restriction_power_ge_lowers_to_filter() {
-    // CR 301.5 + CR 303.4 + CR 701.3a: Strata Scythe class — a positive
+    // CR 301.5 + CR 303.4 + CR 701.3a: O-Naginata class — a positive
     // attachment restriction lowers to `AttachmentRestriction` whose `filter` is
     // the reused `TargetFilter` for "a creature with power 3 or greater".
     let def =

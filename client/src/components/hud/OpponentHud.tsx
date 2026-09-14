@@ -1,6 +1,7 @@
 import { type CSSProperties, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
+import { PlayerLatency } from "./PlayerLatency.tsx";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
@@ -314,6 +315,7 @@ export function OpponentHud({
               ))}
               {opponentCompanion ? <StatusBadge label={t("badges.companion")} /> : null}
               {isOnline ? <ConnectionDotInline disconnected={isDisconnected} /> : null}
+              <PlayerLatency playerId={opponentId} />
             </>
           }
         >
@@ -769,6 +771,7 @@ function OpponentTab({
         <UnboundedBadge key={u.family} family={u.family} state={u.state} />
       ))}
       {isOnline && <ConnectionDotInline disconnected={isDisconnected} />}
+      <PlayerLatency playerId={playerId} />
       {onKick && !isEliminated && (
         // Stop propagation so clicking the kick affordance doesn't also fire
         // the parent button's `onClick` (focus / target select).

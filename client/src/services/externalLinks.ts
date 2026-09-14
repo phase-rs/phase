@@ -2,8 +2,9 @@
 // handler covers nested content in every current and future anchor without
 // per-callsite handlers. Modifier clicks intentionally follow the same path:
 // "open in new tab" has no useful meaning inside a webview. Relative app links
-// remain with the router; explicit non-HTTP(S) schemes and protocol-relative
-// URLs are denied before they can reach the shell.
+// remain with the router; the page's own blob: download keeps the browser's
+// default action, while other non-HTTP(S) schemes and protocol-relative URLs
+// are denied before they can reach the shell.
 
 import { isOpenableExternalUrl } from "./openExternal";
 import { isBundledTauriOrigin, isTauri } from "./platform";
@@ -62,6 +63,24 @@ export function installTauriExternalLinkHandler(): void {
       ) {
         return;
       }
+      // A blob: href with a download attribute is a file save of the page's own
+      // bytes, never a link the shell could open, so leave it to the browser's
+      // default action. All three conditions are required: the attribute alone
+      // would admit javascript:, which browsers run rather than download; the
+      // scheme alone would admit a blob: document the deny path should handle;
+      // and a blob: URL carries the origin that created it, so without the
+      // origin check blob:https://evil.example/... would take the exemption
+      // while being nothing this page ever wrote.
+      if (
+        destination.protocol === "blob:" &&
+        destination.origin === window.location.origin &&
+        anchor.hasAttribute("download")
+      ) {
+        return;
+      }
+      // Other non-HTTP(S) schemes stay denied, data: among them -- the shell's
+      // navigation guard spares only blob:, so admitting data: here would let a
+      // download click abort the native-engine and LAN bridges.
       if (!isOpenableExternalUrl(destination.href)) {
         event.preventDefault();
         return;

@@ -333,8 +333,8 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "has ",
     "can't be blocked",
     // CR 301.5 + CR 303.4 + CR 701.3a: positive attachment restriction on an
-    // Aura/Equipment ("~ can be attached only to {filter}") — Strata Scythe,
-    // Brass Knuckles, Konda's Banner. Routes to parse_static_line so it lowers
+    // Aura/Equipment ("~ can be attached only to {filter}") — O-Naginata,
+    // Gate Smasher, Konda's Banner. Routes to parse_static_line so it lowers
     // to StaticMode::AttachmentRestriction instead of an effect.
     "can be attached only to",
     "can't attack",

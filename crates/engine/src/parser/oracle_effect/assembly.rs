@@ -18,12 +18,11 @@ use nom::Parser;
 
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::effect_chain::{
-    AbsorbKind, ClauseDisposition, ClauseId, ClausePlacement, EffectChainIr, OtherwiseKind,
-    PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind, ReplicateKind,
+    AbsorbKind, ClauseDisposition, ClauseId, ClauseIr, ClausePlacement, EffectChainIr,
+    OtherwiseKind, PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind, ReplicateKind,
 };
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
-use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     CastFromZoneDriver, CastingPermission, ChoiceType, Comparator, ControllerRef, DamageChannel,
@@ -1362,6 +1361,156 @@ fn is_oneshot_target_source_prevent_chain(defs: &[AbilityDefinition]) -> bool {
         })
 }
 
+/// CR 615.5 + CR 608.2c: true when this clause is a DISTRIBUTIVE rider on a
+/// preceding prevention — "For each 1 damage prevented this way, <effect>".
+/// Conjunct 2 is HEAD-ANCHORED as of #8849: it parses the same leading
+/// `"for each <clause>, "` phrase, in the same position, that produced
+/// conjunct 1's `repeat_for` — so the quantifier is BOUND to the prevention
+/// anaphor, not merely co-located with it (see conjunct 2's own paragraph
+/// below). Every card this predicate RETURNS TRUE for prints the clause
+/// leading — seven corpus cards print "for each 1 damage prevented this way"
+/// trailing (Vigor, Stormwild Capridor, Phyrexian Hydra, Immortal Coil,
+/// Hostility, Sacred Boon, Scars of the Veteran), and none of them ends up with
+/// a clause-level `repeat_for`, so conjunct 1 refuses every one before conjunct
+/// 2 is even consulted. Six absorb the for-each into the effect's or the
+/// delayed payload's own `count`; Immortal Coil instead DROPS it — its
+/// `ChangeZone` rider has no count axis at all, so it exiles exactly one card
+/// per prevention event regardless of the amount (a separate pre-existing
+/// defect, out of scope here).
+/// Three facts must hold, each read from the representation that owns it. (A
+/// fourth fact is supplied by the caller's pre-existing enclosing guard, not by
+/// this predicate: some PREVIOUSLY-EMITTED def's top-level effect must be
+/// `PreventDamage`. That is narrower than "the chain contains a prevention" —
+/// Gatta and Luzzu's prevention and its rider are lowered as ONE clause, with
+/// the rider a nested `sub_ability`, so no prior def carries the prevention and
+/// this predicate is never invoked for it at all.)
+///
+/// 1. CAPABILITY/SHAPE — the clause's own `repeat_for` reads
+///    `EventContextAmount`, i.e. the leading for-each grammar lowered a
+///    clause-level distributive quantifier over an event amount onto this
+///    clause. This is the encoding with the most committed runtime coverage:
+///    an identical `ContinuationStep` rider carrying
+///    `repeat_for: EventContextAmount` under a `PreventDamage` already resolves
+///    correctly from the resolver inward (Gatta and Luzzu —
+///    `parser::oracle_effect::try_parse_conditional_damage_prevention_with_followup`,
+///    green in `tests/integration/gatta_and_luzzu_regression.rs`, which builds
+///    its `ResolvedAbility` by hand), and this exact `repeat_for` + `Token`
+///    shape already aggregates correctly through the real `prevent_damage::resolve`
+///    and the real `resolve_combat_damage` batch
+///    (`game/combat_damage.rs::test_inkshield_aggregates_combat_damage_into_tokens`,
+///    likewise hand-built input). Neither drives it from a cast; the one
+///    cast-pipeline test is
+///    `tests/integration/inkshield_prevented_this_way_token_rider.rs`'s
+///    `inkshield_prevents_combat_damage_and_creates_one_inkling_per_damage`
+///    (combat, `Token`, `PreventionAmount::All`, untargeted floating shield). The
+///    TARGETED arm this gate also reaches — an object-hosted shield,
+///    `PreventionAmount::Next(N)` or `PreventionAmount::All` alike, carrying a
+///    `PutCounter { target: ParentTarget }` rider (Test of Faith and Temper
+///    are `Next(N)`; Brace for Impact is `All`) — now has cast-pipeline
+///    coverage too (`tests/integration/inkshield_prevented_this_way_token_rider.rs`'s
+///    `test_of_faith_puts_one_counter_per_damage_prevented` and
+///    `brace_for_impact_puts_one_counter_per_combat_damage_prevented`, #8777):
+///    `effects::bind_detached_continuation_to_parent` binds the rider's
+///    `targets` to the parent's selected referent at the same instant the
+///    rider is detached into `runtime_execute` (CR 608.2c + CR 615.5), so
+///    `TargetFilter::ParentTarget` now resolves to the chosen creature instead
+///    of an empty vector. It is deliberately NOT a scalar-vs-distributive semantic boundary: the
+///    `runtime_execute` slot implements both reads, and Awe Strike's SCALAR
+///    rider folds and works (`tests/integration/awe_strike_prevention.rs`,
+///    +3 through a real combat step). What this conjunct leaves out is the bare
+///    scalar rider, which is already owned by the adjacent
+///    `is_oneshot_target_source_prevent_chain` arm — whose coverage is narrower
+///    than the class: Reverse Damage's `ChosenDamageSource` chain root is
+///    refused there and the card consequently never pays off its CR 615.5 life
+///    gain (measured broken in
+///    `tests/integration/printed_damage_prevention_survives_turn.rs`, the
+///    assertion "the shield must prevent the chosen source's damage in its own
+///    turn"). Fixing that is separate work; this predicate must not change its
+///    behaviour. Deliberately NOT `damage_amount_reads_event_context`, which
+///    walks EFFECT quantities and would therefore admit Reverse Damage.
+/// 2. TEXTUAL — the quantifier is BOUND to the prevention anaphor, not merely
+///    co-located with it (#8849). Conjunct 1 reads a `repeat_for` that
+///    `lower::strip_for_each_prefix_with_difference` produced from a
+///    HEAD-ANCHORED `for each <clause>, ` prefix; this conjunct parses that
+///    SAME phrase in that SAME position
+///    (`oracle_nom::prevention::parse_leading_prevented_this_way_for_each`)
+///    and requires its inner clause to name the PREVENTED amount. Two
+///    independent reads — "some `repeat_for` reads `EventContextAmount`" and
+///    "the words `prevented this way` occur somewhere" — accepted a clause
+///    whose quantifier names a DIFFERENT event ("For each card drawn this
+///    way, gain life equal to the damage prevented this way":
+///    `parse_for_each_card_drawn_this_way` lowers to the SAME
+///    `EventContextAmount`), which would then have repeated on prevented
+///    damage rather than on cards drawn. MEASURED: the corpus has ZERO
+///    mixed-anaphor carriers (no card pairs a `drawn this way` quantifier with
+///    a `prevented this way` tail), so this is a latent-robustness /
+///    fail-closed repair, not a coverage win — pinned by the maintainer's
+///    synthetic example (`crates/engine/src/parser/oracle_tests.rs`'s
+///    `mixed_anaphor_for_each_drawn_this_way_rider_is_not_folded_onto_a_prevention`)
+///    and the predicate-level conjunct table in this module's tests.
+///
+///    CR 615.5: the additional effect refers to THE AMOUNT PREVENTED; the IR
+///    carries no divisor, so only the printed forms the `repeat_for` producer
+///    accepts may fold — a bare quantifier or `1`.
+///    `oracle_quantity::parse_for_each_clause` maps exactly "1 damage
+///    prevented this way" and "damage prevented this way" to
+///    `EventContextAmount`, so an N != 1 clause never reaches here (conjunct 1
+///    refuses it first, `repeat_for` being `None`). The `count != 1` refusal
+///    in the combinator's caller below is therefore FAIL-CLOSED INSURANCE for
+///    the day that producer is widened, not live coverage; it is pinned at the
+///    predicate level by the conjunct table, which is the only place it is
+///    reachable (CR 107.1a does NOT apply here — it is about fractional
+///    damage/life, not a distributive divisor).
+/// 3. CR 603.7a + CR 603.7b: a clause that carries a DELAYED trigger condition
+///    is categorically disqualified. A shield rider fires once per prevented
+///    damage event, but a delayed triggered ability is created exactly once
+///    during resolution. Folding one would be worse than a no-op: the delayed
+///    wrap below LIFTS `repeat_for` onto the `CreateDelayedTrigger` wrapper
+///    (see `lifted_repeat_for`), so the result would mint N delayed triggers
+///    for N prevented damage. Sacred Boon and Scars of the Veteran are that
+///    shape; they correctly stay `SequentialSibling` and need a shield-scoped
+///    accumulated prevented total (CR 615.7) read at the end step, which is a
+///    separate capability. No card in the current corpus is REFUSED by this
+///    conjunct — all four folded cards reach it and pass, and Sacred Boon and
+///    Scars of the Veteran are already refused by conjunct 1 (their trailing
+///    "for each" is absorbed into the delayed payload's own `count`, leaving
+///    the clause-level `repeat_for` empty). It is spelled out because it is the
+///    rules boundary, not an artifact of that lowering, and it is pinned by the
+///    predicate-level table.
+///
+/// The doc above numbers the conjuncts 1/2/3 so "which conjunct refuses card X"
+/// has one answer; the early-return guards below EVALUATE them 1, 3, 2 so the
+/// string allocation (conjunct 2's `to_lowercase()`) happens last. The
+/// conjunction is pure and order-independent, so this is a cost choice, not a
+/// semantic one.
+fn is_distributive_prevented_this_way_rider(clause_ir: &ClauseIr) -> bool {
+    // 1. CAPABILITY/SHAPE — unchanged: a clause-level distributive quantifier
+    //    over the event amount.
+    let shape = clause_ir.repeat_for.as_ref().is_some_and(|qty| {
+        qty.any_ref(&mut |reference| matches!(reference, QuantityRef::EventContextAmount))
+    });
+    if !shape {
+        return false;
+    }
+    // 3. CR 603.7a/603.7b — unchanged: not a delayed-trigger clause.
+    if clause_ir.delayed_condition.is_some() || clause_ir.prefix_delayed_condition.is_some() {
+        return false;
+    }
+    // 2. TEXTUAL — the quantifier is BOUND to the prevention anaphor; see the
+    //    doc above. Head-anchored parse of the SAME phrase conjunct 1's
+    //    `repeat_for` was produced from, with the numeral gate restricted to
+    //    the producer's own accepted language (`None | Some(1)`).
+    let fragment = clause_ir
+        .source
+        .fragment()
+        .unwrap_or_default()
+        .to_lowercase();
+    crate::parser::oracle_nom::prevention::parse_leading_prevented_this_way_for_each(
+        fragment.trim_start(),
+    )
+    .is_ok_and(|(_, count)| count.is_none_or(|n| n == 1))
+}
+
 /// The recipient of a single-recipient scalar instruction — the position a
 /// "… to them" / "… they lose" player anaphor occupies. Paired with
 /// [`scalar_amount_mut`], which reads the "that much" position of the same
@@ -2330,6 +2479,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // chain root (`ChosenDamageSource`) must NOT fold: its bare rider stays a
         // `SequentialSibling` (its "equal to the damage prevented this way"
         // quantity still resolves via `last_effect_count`).
+        //
+        // CR 615.5: INKSHIELD / BRACE FOR IMPACT / TEMPER / TEST OF FAITH — "For
+        // each 1 damage prevented this way, <effect>" is a DISTRIBUTIVE rider
+        // printed as its own sentence. Its `repeat_for` already reads
+        // `EventContextAmount` (the for-each grammar lowered a clause-level
+        // distributive quantifier), so it folds unconditionally —
+        // no source-type gate — via `is_distributive_prevented_this_way_rider`
+        // (#8777).
         let prevented_this_way_gate = if defs
             .iter()
             .any(|d| matches!(&*d.effect, Effect::PreventDamage { .. }))
@@ -2337,17 +2494,34 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             let fragment = clause_ir.source.fragment().unwrap_or_default();
             let gate =
                 crate::parser::oracle_replacement::prevented_this_way_rider_source_gate(fragment);
-            // Bare-rider arm (no when/whenever/if): recognized only for the
-            // one-shot target-source prevention chain root. The gate's explicit
-            // when/whenever/if forms are unchanged and shape-unrestricted.
-            if gate.is_none() && is_oneshot_target_source_prevent_chain(&defs) {
-                nom_primitives::scan_at_word_boundaries(
-                    fragment,
-                    tag::<_, _, OracleError<'_>>("prevented this way"),
-                )
-                .map(|_| None)
-            } else {
+            if gate.is_some() {
+                // Arm 1, unchanged: explicit when/whenever/if prelude,
+                // shape-unrestricted.
                 gate
+            } else if is_oneshot_target_source_prevent_chain(&defs) {
+                // Arm 2, unchanged verdict (Awe Strike's bare rider) — now
+                // consuming the extracted combinator instead of an open-coded
+                // scan. The combinator's name records that `fragment` is
+                // ORIGINAL-case; do not lower it here.
+                if crate::parser::oracle_nom::prevention::scan_original_case_prevented_this_way_back_reference(
+                    fragment,
+                ) {
+                    Some(None)
+                } else {
+                    None
+                }
+            } else if is_distributive_prevented_this_way_rider(clause_ir) {
+                // CR 615.5: Arm 3 — the distributive rider printed as its
+                // own sentence (Inkshield, Brace for Impact, Temper, Test of
+                // Faith). The Sentence boundary marks it `SequentialSibling`,
+                // which the prevention resolver never installs as the shield's
+                // `runtime_execute`, so the payoff silently does nothing
+                // (#8777). No source-type gate applies, so the value is
+                // `Some(None)` — the bare unconditional rider, consumed below
+                // without adding a `PostReplacementDamageSourceMatchesFilter`.
+                Some(None)
+            } else {
+                None
             }
         } else {
             None
@@ -3928,6 +4102,156 @@ mod arena_tests {
                 },
             )
             .push();
+    }
+
+    // Helper, sited beside the existing `emitted_clause` which cannot be
+    // reused because it exposes no `repeat_for` / delayed setters.
+    fn distributive_rider_clause(
+        fragment: &str,
+        repeat_for: Option<QuantityExpr>,
+        delayed: Option<DelayedTriggerCondition>,
+        prefix_delayed: Option<DelayedTriggerCondition>,
+    ) -> ClauseIr {
+        // Pass a chain text CONTAINING the fragment so `locate` resolves an
+        // honest span. `locate` falls back to a zero-width span rather than
+        // panicking when the fragment is not found, and
+        // `allocate_with_span(span, Some(&self.source_text))` carries the
+        // verbatim fragment either way, so this is about span honesty, not
+        // safety.
+        let mut builder = ClauseIrBuilder::new(fragment);
+        builder
+            .clause(
+                fragment,
+                parsed_clause(shuffle_effect()), // effect is irrelevant: the
+                Some(ClauseBoundary::Sentence),  // predicate is Effect-blind
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .repeat_for(repeat_for)
+            .delayed_condition(delayed)
+            .prefix_delayed_condition(prefix_delayed)
+            .push();
+        builder.finish().pop().expect("one clause pushed")
+    }
+
+    /// CR 615.5 + CR 603.7a: each conjunct of `is_distributive_prevented_this_way_rider`
+    /// is load-bearing. Row (a) is the paired positive reach-guard for (b)-(d)
+    /// and (c2)-(c5): every refusing row differs from a TRUE baseline in
+    /// exactly one field, so each row discriminates its own conjunct rather
+    /// than passing for any input. The DELAYED conjunct has no discriminating
+    /// card in the corpus; this is the only place it is pinned. Row (b2) pins
+    /// the SHAPE conjunct's specificity — that it reads `EventContextAmount`,
+    /// not merely that a `repeat_for` is present. Rows (c2)-(c5) (#8849) pin
+    /// the head-anchored TEXTUAL binding: (c2) MIXED ANAPHOR isolates the
+    /// binding itself, (c3) POSITION isolates head-anchoring, (c4) DIVISOR
+    /// isolates the numeral gate (fail-closed insurance, unreachable through
+    /// the real parser today — §P8), and (c5) BARE NUMERAL pins that the
+    /// accepted language equals the `repeat_for` producer's (M-9).
+    #[test]
+    fn distributive_prevented_this_way_rider_conjuncts_are_each_load_bearing() {
+        let event_amount = || QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        let end_step = || DelayedTriggerCondition::AtNextPhase { phase: Phase::End };
+        const WITH: &str = "for each 1 damage prevented this way, create a token";
+        const WITHOUT: &str = "for each card drawn this way, discard a card";
+
+        // (a) baseline — all three conjuncts hold.
+        assert!(
+            is_distributive_prevented_this_way_rider(&distributive_rider_clause(
+                WITH,
+                Some(event_amount()),
+                None,
+                None
+            )),
+            "baseline must fold; if this fails the negative rows below prove nothing"
+        );
+
+        // (b) not-SHAPE — no clause-level distributive quantifier (Reverse
+        // Damage's shape).
+        assert!(!is_distributive_prevented_this_way_rider(
+            &distributive_rider_clause(WITH, None, None, None)
+        ));
+
+        // (b2) not-SHAPE, specificity — a clause-level `repeat_for` that is
+        // present but does NOT read the event amount ("do this twice"). Without
+        // this row, weakening conjunct 1 to `repeat_for.is_some()` would keep
+        // the whole table green, so this is what pins `any_ref(…
+        // EventContextAmount)` rather than mere presence.
+        assert!(!is_distributive_prevented_this_way_rider(
+            &distributive_rider_clause(WITH, Some(QuantityExpr::Fixed { value: 2 }), None, None)
+        ));
+
+        // (c) not-TEXTUAL — the anaphor names a DRAW, not a prevention (Read
+        // the Runes' grammar). The only test that reaches this conjunct,
+        // because the caller's `PreventDamage` guard short-circuits the real
+        // card.
+        assert!(!is_distributive_prevented_this_way_rider(
+            &distributive_rider_clause(WITHOUT, Some(event_amount()), None, None)
+        ));
+
+        // (d) not-DELAYED — both carriers, CR 603.7a (Sacred Boon / Scars of
+        // the Veteran).
+        assert!(!is_distributive_prevented_this_way_rider(
+            &distributive_rider_clause(WITH, Some(event_amount()), Some(end_step()), None)
+        ));
+        assert!(!is_distributive_prevented_this_way_rider(
+            &distributive_rider_clause(WITH, Some(event_amount()), None, Some(end_step()))
+        ));
+
+        // (c2) MIXED ANAPHOR (#8849) — isolates conjunct 2's new BINDING (not
+        // mere co-occurrence): the leading quantifier names a DRAW, but the
+        // clause ALSO mentions "prevented this way" later. Green only with
+        // the head-anchored binding; under the old position-agnostic scan
+        // this was `true`.
+        assert!(!is_distributive_prevented_this_way_rider(&distributive_rider_clause(
+            "for each card drawn this way, you gain life equal to the damage prevented this way",
+            Some(event_amount()),
+            None,
+            None
+        )));
+
+        // (c3) POSITION (#8849) — isolates conjunct 2's head-anchoring: the
+        // phrase is present but not at the head of the clause (Immortal
+        // Coil's printed order).
+        assert!(!is_distributive_prevented_this_way_rider(
+            &distributive_rider_clause(
+                "exile a card from your graveyard for each 1 damage prevented this way",
+                Some(event_amount()),
+                None,
+                None
+            )
+        ));
+
+        // (c4) DIVISOR, CR 615.5 (#8849) — isolates conjunct 2's numeral gate.
+        // UNREACHABLE THROUGH THE REAL PARSER TODAY (§P8 of the plan):
+        // `oracle_quantity::parse_for_each_clause` lowers only "1 damage
+        // prevented this way" and "damage prevented this way", so a real
+        // "for each 2 …" clause gets `repeat_for: None` and conjunct 1
+        // refuses it first. This row is fail-closed insurance for the day
+        // that producer is widened, pinned only at the predicate level.
+        assert!(!is_distributive_prevented_this_way_rider(
+            &distributive_rider_clause(
+                "for each 2 damage prevented this way, create a token",
+                Some(event_amount()),
+                None,
+                None
+            )
+        ));
+
+        // (c5) BARE NUMERAL (#8849, M-9) — the accepted language equals the
+        // `repeat_for` producer's: a bare "damage prevented this way" (no
+        // numeral) must still fold.
+        assert!(is_distributive_prevented_this_way_rider(
+            &distributive_rider_clause(
+                "for each damage prevented this way, create a token",
+                Some(event_amount()),
+                None,
+                None
+            )
+        ));
     }
 
     fn chain_ir(clauses: Vec<ClauseIr>, kind: AbilityKind) -> EffectChainIr {

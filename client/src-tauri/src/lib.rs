@@ -1,5 +1,138 @@
 #[cfg(desktop)]
-use tauri::{Manager, WebviewWindowBuilder};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf, MAIN_SEPARATOR},
+    sync::Mutex,
+};
+
+#[cfg(desktop)]
+use tauri::{
+    webview::{DownloadEvent, PageLoadEvent},
+    Emitter, Manager, Url, WebviewWindowBuilder,
+};
+
+#[cfg(desktop)]
+use crate::native_engine_contract::{ShellDownload, ShellDownloadOutcome};
+
+/// Carries a finished download's outcome and destination to the page.
+#[cfg(desktop)]
+const DOWNLOAD_EVENT: &str = "shell-download";
+
+/// What a finished download should report: where it landed, and whether it
+/// worked. wry's failure flag lives on the `WebContext` — one per process — and
+/// is only ever set, never cleared, so every download after a single failure
+/// arrives here with `success = false` and no path even though the file was
+/// written. The destination wry named when it requested the download narrows
+/// that, but it cannot settle it: a write that dies mid-file (ENOSPC, EIO)
+/// leaves a truncated file at that same destination. Nothing here can tell the
+/// two apart, so they report `Unknown` rather than claim a corrupt file. A
+/// withheld attribution lands in the same place: it is a gap in this handler's
+/// bookkeeping, not evidence about the file.
+#[cfg(desktop)]
+fn finished_download_report(
+    wry_path: Option<PathBuf>,
+    wry_success: bool,
+    attribution: DownloadAttribution,
+) -> (Option<PathBuf>, ShellDownloadOutcome) {
+    use DownloadAttribution::{Ambiguous, Attributed, Unmatched};
+    use ShellDownloadOutcome::{Failed, Saved, Unknown};
+
+    match (wry_success, attribution) {
+        // wry's macOS handler reports no path, so the destination it named when
+        // it asked for the download is the only one there is.
+        (true, Attributed(destination)) => (wry_path.or(Some(destination)), Saved),
+        (true, Ambiguous | Unmatched) => (wry_path, Saved),
+        (false, Attributed(destination)) if destination.exists() => (Some(destination), Unknown),
+        // Nothing reached the destination the request named.
+        (false, Attributed(_)) => (wry_path, Failed),
+        // No destination was attributable, so there is nothing to check and no
+        // grounds to call the download failed.
+        (false, Ambiguous) => (wry_path, Unknown),
+        (false, Unmatched) => (wry_path, Failed),
+    }
+}
+
+/// Which request a `Finished` event belongs to, as far as this handler can
+/// tell. `Ambiguous` is a completion whose destination was withheld because
+/// more than one request for its url was in flight; `Unmatched` is a completion
+/// for a url with nothing outstanding at all.
+#[cfg(desktop)]
+#[derive(Debug, PartialEq, Eq)]
+enum DownloadAttribution {
+    Attributed(PathBuf),
+    Ambiguous,
+    Unmatched,
+}
+
+/// The downloads wry has requested for one URL and not yet finished. A second
+/// request for the same URL while the first is in flight leaves both
+/// destinations unattributable — wry uniquifies a destination before this
+/// handler sees it, so they name different files, and nothing in a `Finished`
+/// event says which request it belongs to. Only the count survives that, and
+/// no completion gets a fallback destination until the URL is idle again.
+#[cfg(desktop)]
+#[derive(Default)]
+struct OutstandingDownloads {
+    requests: usize,
+    destination: Option<PathBuf>,
+}
+
+#[cfg(desktop)]
+fn stash_download_destination(
+    outstanding: &mut HashMap<String, OutstandingDownloads>,
+    url: String,
+    destination: PathBuf,
+) {
+    let entry = outstanding.entry(url).or_default();
+    entry.requests += 1;
+    entry.destination = (entry.requests == 1).then_some(destination);
+}
+
+/// Consume one outstanding request for `url`, attributing its destination only
+/// when that request was the only one in flight. The last completion drops the
+/// URL, so the map holds live downloads and nothing else.
+#[cfg(desktop)]
+fn take_download_attribution(
+    outstanding: &mut HashMap<String, OutstandingDownloads>,
+    url: &str,
+) -> DownloadAttribution {
+    let Some(entry) = outstanding.get_mut(url) else {
+        return DownloadAttribution::Unmatched;
+    };
+    entry.requests -= 1;
+    let destination = entry.destination.take();
+    if entry.requests == 0 {
+        outstanding.remove(url);
+    }
+    destination.map_or(
+        DownloadAttribution::Ambiguous,
+        DownloadAttribution::Attributed,
+    )
+}
+
+/// Compress a leading home directory to `~`, or report nothing. The page is
+/// remotely served, so an absolute path hands that origin the user's account
+/// name and filesystem layout; home-relative still finds the file. A path
+/// outside home — `XDG_DOWNLOAD_DIR` elsewhere, wry's working-directory
+/// fallback — and an undeterminable home have nothing to compress, so the page
+/// is told no path at all, exactly as a browser download leaves it.
+#[cfg(desktop)]
+fn reportable_download_path(path: &Path, home: Option<&Path>) -> Option<String> {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(relative) if relative.as_os_str().is_empty() => Some("~".to_owned()),
+        Some(relative) => Some(format!("~{MAIN_SEPARATOR}{}", relative.display())),
+        None => None,
+    }
+}
+
+/// Whether a page load means the webview really left the page. The navigation
+/// guard has to spare `blob:`, since a file download arrives as a navigation to
+/// one; a committed load — wry's `Started` on every backend — is the proof a
+/// download never produces.
+#[cfg(desktop)]
+fn page_load_leaves_the_page(url: &Url, event: PageLoadEvent) -> bool {
+    url.scheme() == "blob" && event == PageLoadEvent::Started
+}
 
 mod audio_probe;
 mod host_platform;
@@ -119,6 +252,8 @@ pub fn run() {
                 // Kick off the audio-device probe before the webview exists so the
                 // verdict is usually cached by the time the page asks for it.
                 audio_probe::prewarm();
+                let download_destinations: Mutex<HashMap<String, OutstandingDownloads>> =
+                    Mutex::default();
                 // `create: false` on the "main" window in tauri.conf.json defers
                 // window creation to here so we can pin an explicit, always-writable
                 // `data_directory` on Windows. WebView2 otherwise derives its
@@ -136,10 +271,77 @@ pub fn run() {
                 // and force a one-time re-login, so we leave those platforms on their
                 // defaults and just build the window straight from config.
                 let main_config = &app.config().app.windows[0];
-                let builder =
-                    WebviewWindowBuilder::from_config(app, main_config)?.on_navigation(|_| {
-                        native_engine::abort_native_engine_bridges_on_navigation();
-                        native_bridge::abort_lan_bridges();
+                let builder = WebviewWindowBuilder::from_config(app, main_config)?
+                    .on_navigation(|url| {
+                        // An `<a download>` click arrives here as a navigation to its
+                        // `blob:` URL, and nothing at this point distinguishes it from
+                        // a real `blob:` page, so the live game's bridges have to
+                        // survive it and `on_page_load` settles the other case.
+                        if url.scheme() != "blob" {
+                            native_engine::abort_native_engine_bridges_on_navigation();
+                            native_bridge::abort_lan_bridges();
+                        }
+                        true
+                    })
+                    .on_page_load(|_window, payload| {
+                        if page_load_leaves_the_page(payload.url(), payload.event()) {
+                            native_engine::abort_native_engine_bridges_on_navigation();
+                            native_bridge::abort_lan_bridges();
+                        }
+                    })
+                    // wry already accepts downloads on its own; what it does not do is
+                    // tell anyone where the file went. The page only knows the name it
+                    // asked for, so report the destination from here, where it is
+                    // known: in full to the log, home-relative or not at all to the
+                    // page.
+                    .on_download(move |webview, event| {
+                        match event {
+                            DownloadEvent::Requested { url, destination } => {
+                                eprintln!(
+                                    "shell download requested: {url} -> {}",
+                                    destination.display()
+                                );
+                                if let Ok(mut destinations) = download_destinations.lock() {
+                                    stash_download_destination(
+                                        &mut destinations,
+                                        url.to_string(),
+                                        destination.clone(),
+                                    );
+                                }
+                            }
+                            DownloadEvent::Finished { url, path, success } => {
+                                // A record that cannot be read attributes
+                                // nothing, which is this handler's limitation
+                                // rather than evidence about the file.
+                                let attribution = download_destinations.lock().map_or(
+                                    DownloadAttribution::Ambiguous,
+                                    |mut destinations| {
+                                        take_download_attribution(&mut destinations, url.as_str())
+                                    },
+                                );
+                                let (path, outcome) =
+                                    finished_download_report(path, success, attribution);
+                                eprintln!(
+                                    "shell download finished: {url} -> {path:?} outcome={outcome:?}"
+                                );
+                                let _ = webview.emit(
+                                    DOWNLOAD_EVENT,
+                                    ShellDownload {
+                                        url: url.to_string(),
+                                        path: path.as_deref().and_then(|path| {
+                                            reportable_download_path(
+                                                path,
+                                                std::env::home_dir().as_deref(),
+                                            )
+                                        }),
+                                        outcome,
+                                    },
+                                );
+                            }
+                            // `DownloadEvent` is `#[non_exhaustive]`; a variant added
+                            // upstream needs no decision here.
+                            _ => {}
+                        }
                         true
                     });
                 #[cfg(target_os = "windows")]
@@ -326,6 +528,263 @@ mod tests {
                 "updater registration lost required invariant: {required}"
             );
         }
+    }
+
+    /// wry latches its per-`WebContext` failure flag on the first failed
+    /// download, so from then on a written file arrives as `(None, false)` —
+    /// and a write that died mid-file leaves a truncated file at that same
+    /// destination. Neither may be reported as saved.
+    #[cfg(desktop)]
+    #[test]
+    fn finished_download_report_never_calls_a_reported_failure_saved() {
+        use super::DownloadAttribution::{Ambiguous, Attributed, Unmatched};
+        use super::ShellDownloadOutcome::{Failed, Saved, Unknown};
+
+        let written = std::env::temp_dir().join(format!(
+            "phase-rs-finished-download-{}.tmp",
+            std::process::id()
+        ));
+        fs::write(&written, b"x").unwrap();
+        let missing = written.with_extension("absent");
+
+        assert_eq!(
+            super::finished_download_report(Some(written.clone()), true, Unmatched),
+            (Some(written.clone()), Saved)
+        );
+        // wry's macOS handler reports success with no path at all.
+        assert_eq!(
+            super::finished_download_report(None, true, Attributed(written.clone())),
+            (Some(written.clone()), Saved)
+        );
+        // Latched flag or truncated file: indistinguishable from here.
+        assert_eq!(
+            super::finished_download_report(None, false, Attributed(written.clone())),
+            (Some(written.clone()), Unknown)
+        );
+        // Genuine failure: nothing was written to the destination.
+        assert_eq!(
+            super::finished_download_report(None, false, Attributed(missing)),
+            (None, Failed)
+        );
+        // A `Finished` with no matching `Requested` at all.
+        assert_eq!(
+            super::finished_download_report(None, false, Unmatched),
+            (None, Failed)
+        );
+        // Attribution withheld between same-url requests: the latched flag may
+        // still be reporting a written file.
+        assert_eq!(
+            super::finished_download_report(None, false, Ambiguous),
+            (None, Unknown)
+        );
+
+        fs::remove_file(&written).unwrap();
+    }
+
+    /// Two downloads of one URL get different destinations from wry and arrive
+    /// here as two indistinguishable completions. Lending either completion the
+    /// other's destination would report a file the page never asked about, so
+    /// an ambiguous completion carries no destination at all.
+    #[cfg(desktop)]
+    #[test]
+    fn a_repeated_download_url_lends_no_completion_another_requests_destination() {
+        use std::{collections::HashMap, path::PathBuf};
+
+        use super::DownloadAttribution::{Ambiguous, Attributed, Unmatched};
+
+        let url = "blob:https://phase-rs.dev/a";
+        let other = "blob:https://phase-rs.dev/b";
+        let first = PathBuf::from("/downloads/game-state.zip");
+        let second = PathBuf::from("/downloads/game-state (1).zip");
+        let mut outstanding = HashMap::new();
+
+        // One in flight: the destination is this completion's, unambiguously.
+        super::stash_download_destination(&mut outstanding, url.to_owned(), first.clone());
+        assert_eq!(
+            super::take_download_attribution(&mut outstanding, url),
+            Attributed(first.clone())
+        );
+        assert!(outstanding.is_empty(), "a finished url must not be kept");
+
+        // Two in flight for one url: neither completion may claim a destination.
+        super::stash_download_destination(&mut outstanding, url.to_owned(), first.clone());
+        super::stash_download_destination(&mut outstanding, url.to_owned(), second.clone());
+        assert_eq!(
+            super::take_download_attribution(&mut outstanding, url),
+            Ambiguous
+        );
+        assert_eq!(
+            super::take_download_attribution(&mut outstanding, url),
+            Ambiguous
+        );
+        assert!(
+            outstanding.is_empty(),
+            "the last completion must drop the url"
+        );
+
+        // A third request arriving while those two are unresolved is ambiguous
+        // with them, and the url only becomes attributable again once idle.
+        super::stash_download_destination(&mut outstanding, url.to_owned(), first.clone());
+        super::stash_download_destination(&mut outstanding, url.to_owned(), second.clone());
+        super::take_download_attribution(&mut outstanding, url);
+        super::stash_download_destination(&mut outstanding, url.to_owned(), first.clone());
+        assert_eq!(
+            super::take_download_attribution(&mut outstanding, url),
+            Ambiguous
+        );
+        assert_eq!(
+            super::take_download_attribution(&mut outstanding, url),
+            Ambiguous
+        );
+        assert!(outstanding.is_empty());
+
+        // Distinct urls never borrow from each other.
+        super::stash_download_destination(&mut outstanding, url.to_owned(), first.clone());
+        super::stash_download_destination(&mut outstanding, other.to_owned(), second.clone());
+        assert_eq!(
+            super::take_download_attribution(&mut outstanding, other),
+            Attributed(second)
+        );
+        assert_eq!(
+            super::take_download_attribution(&mut outstanding, url),
+            Attributed(first)
+        );
+        assert!(outstanding.is_empty());
+
+        // A completion with nothing outstanding matches no request at all.
+        assert_eq!(
+            super::take_download_attribution(&mut outstanding, url),
+            Unmatched
+        );
+    }
+
+    /// Withholding a destination is a gap in the bookkeeping above, not a
+    /// verdict on the file: under wry's latched failure flag an ambiguous pair
+    /// may both have been written. Such a completion may therefore be reported
+    /// neither as a failed export nor with a destination it cannot claim.
+    #[cfg(desktop)]
+    #[test]
+    fn withheld_attribution_reports_neither_a_failure_nor_a_destination() {
+        use std::collections::HashMap;
+
+        use super::ShellDownloadOutcome::{Failed, Unknown};
+
+        let url = "blob:https://phase-rs.dev/export";
+        let written = std::env::temp_dir().join(format!(
+            "phase-rs-withheld-attribution-{}.tmp",
+            std::process::id()
+        ));
+        fs::write(&written, b"x").unwrap();
+        let missing = written.with_extension("absent");
+        let mut outstanding = HashMap::new();
+
+        // Two in flight for one url. The first destination is on disk, so a
+        // report of `Failed` here would be wrong about a file that exists, and
+        // a report of either destination would name a file this completion was
+        // never shown to be.
+        super::stash_download_destination(&mut outstanding, url.to_owned(), written.clone());
+        super::stash_download_destination(
+            &mut outstanding,
+            url.to_owned(),
+            written.with_extension("1.tmp"),
+        );
+        for _ in 0..2 {
+            let attribution = super::take_download_attribution(&mut outstanding, url);
+            assert_eq!(
+                super::finished_download_report(None, false, attribution),
+                (None, Unknown)
+            );
+        }
+
+        // One in flight and the file is there: the destination is reported.
+        super::stash_download_destination(&mut outstanding, url.to_owned(), written.clone());
+        let attribution = super::take_download_attribution(&mut outstanding, url);
+        assert_eq!(
+            super::finished_download_report(None, false, attribution),
+            (Some(written.clone()), Unknown)
+        );
+
+        // One in flight and nothing was written there: still a failure.
+        super::stash_download_destination(&mut outstanding, url.to_owned(), missing);
+        let attribution = super::take_download_attribution(&mut outstanding, url);
+        assert_eq!(
+            super::finished_download_report(None, false, attribution),
+            (None, Failed)
+        );
+
+        // The url is idle again, so this completion matches no request at all —
+        // the case withheld attribution must not be folded into.
+        assert!(outstanding.is_empty());
+        let attribution = super::take_download_attribution(&mut outstanding, url);
+        assert_eq!(
+            super::finished_download_report(None, false, attribution),
+            (None, Failed)
+        );
+
+        fs::remove_file(&written).unwrap();
+    }
+
+    /// The page is remotely served, so the destination it is handed must name
+    /// no part of the user's filesystem. Only a home-relative path qualifies;
+    /// anything else is withheld rather than handed over absolute.
+    #[cfg(desktop)]
+    #[test]
+    fn emitted_download_path_never_names_the_users_filesystem() {
+        let home = Path::new("/home/alice");
+        let inside = home.join("Downloads").join("game-state.zip");
+        assert_eq!(
+            super::reportable_download_path(&inside, Some(home)),
+            Some(format!(
+                "~{sep}Downloads{sep}game-state.zip",
+                sep = std::path::MAIN_SEPARATOR
+            ))
+        );
+        assert_eq!(
+            super::reportable_download_path(home, Some(home)).as_deref(),
+            Some("~")
+        );
+        // A neighbour whose name merely starts with the home path is outside it,
+        // as is any download directory pointed elsewhere.
+        for outside in [
+            Path::new("/home/alice-backup/game-state.zip"),
+            Path::new("/media/alice-usb/game-state.zip"),
+        ] {
+            assert_eq!(super::reportable_download_path(outside, Some(home)), None);
+        }
+        assert_eq!(super::reportable_download_path(&inside, None), None);
+    }
+
+    /// The navigation guard cannot see an `<a download>`, so it spares every
+    /// `blob:` navigation. A committed page load is the one signal that says
+    /// the webview left the page instead of saving a file.
+    #[cfg(desktop)]
+    #[test]
+    fn only_a_committed_blob_page_load_ends_the_session() {
+        use super::PageLoadEvent::{Finished, Started};
+        use tauri::Url;
+
+        let blob = Url::parse("blob:https://phase-rs.dev/0f8a4c21").unwrap();
+        let page = Url::parse("https://phase-rs.dev/play").unwrap();
+
+        assert!(super::page_load_leaves_the_page(&blob, Started));
+        // The navigation guard tore these down before the load began.
+        assert!(!super::page_load_leaves_the_page(&page, Started));
+        // `Started` is the commit, so `Finished` would only repeat it.
+        assert!(!super::page_load_leaves_the_page(&blob, Finished));
+    }
+
+    /// Nothing automated catches this grant going missing: no CI job builds the
+    /// Flatpak, and ci.yml's tauri-check job — the only runner of this crate's
+    /// tests — is disabled. This fires only under a local cargo test.
+    #[test]
+    fn flatpak_manifest_grants_the_download_directory() {
+        let manifest = include_str!("../../../packaging/flatpak/rs.phase.app.yml");
+        assert!(
+            manifest
+                .lines()
+                .any(|line| line.trim() == "- --filesystem=xdg-download:create"),
+            "packaging/flatpak/rs.phase.app.yml must grant --filesystem=xdg-download:create"
+        );
     }
 
     /// Flatpak keys the desktop entry, the icons and the AppStream component on

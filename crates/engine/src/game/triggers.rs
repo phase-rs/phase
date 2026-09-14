@@ -1390,6 +1390,7 @@ fn fires_once_per_batch(trig_def: &TriggerDefinition) -> bool {
 fn singleton_attack_events(
     defending_player: PlayerId,
     attacks: Vec<(ObjectId, crate::game::combat::AttackTarget)>,
+    declaration_records: Vec<crate::types::game_state::AttackDeclarationRecord>,
 ) -> Vec<GameEvent> {
     attacks
         .into_iter()
@@ -1397,7 +1398,34 @@ fn singleton_attack_events(
             attacker_ids: vec![attacker],
             defending_player,
             attacks: vec![(attacker, target)],
+            declaration_records: declaration_records
+                .iter()
+                .filter(|record| record.object_id == attacker)
+                .cloned()
+                .collect(),
         })
+        .collect()
+}
+
+/// CR 508.1a + CR 603.4: Preserve declaration-time LKI when an attack event is
+/// narrowed for a per-firing trigger context. Object IDs may recur across
+/// distinct declaration records, so filter the records themselves rather than
+/// rebuilding snapshots.
+fn declaration_records_for_attackers(
+    event: &GameEvent,
+    attackers: &[ObjectId],
+) -> Vec<crate::types::game_state::AttackDeclarationRecord> {
+    let GameEvent::AttackersDeclared {
+        declaration_records,
+        ..
+    } = event
+    else {
+        return Vec::new();
+    };
+    declaration_records
+        .iter()
+        .filter(|record| attackers.contains(&record.object_id))
+        .cloned()
         .collect()
 }
 
@@ -1406,11 +1434,12 @@ fn split_attack_event_into_singletons(event: &GameEvent) -> Option<Vec<GameEvent
         defending_player,
         attacker_ids,
         attacks,
+        ..
     } = event
     else {
         return None;
     };
-    let matching_attacks = attacker_ids
+    let matching_attacks: Vec<_> = attacker_ids
         .iter()
         .map(|attacker| {
             let target = attacks
@@ -1420,7 +1449,15 @@ fn split_attack_event_into_singletons(event: &GameEvent) -> Option<Vec<GameEvent
             (*attacker, target)
         })
         .collect();
-    Some(singleton_attack_events(*defending_player, matching_attacks))
+    let matching_attackers = matching_attacks
+        .iter()
+        .map(|(attacker, _)| *attacker)
+        .collect::<Vec<_>>();
+    Some(singleton_attack_events(
+        *defending_player,
+        matching_attacks,
+        declaration_records_for_attackers(event, &matching_attackers),
+    ))
 }
 
 fn contextual_batched_trigger_event(
@@ -1490,6 +1527,7 @@ fn contextual_batched_trigger_event(
     // once, but later "that many" text refers to the members of that matching
     // event subset, not every attacker in the declaration.
     Some(GameEvent::AttackersDeclared {
+        declaration_records: declaration_records_for_attackers(event, &matching_attackers),
         attacker_ids: matching_attackers,
         defending_player,
         attacks: matching_attacks,
@@ -2733,8 +2771,14 @@ fn collect_matching_triggers_inner(
                 );
                 match event {
                     GameEvent::AttackersDeclared {
-                        defending_player, ..
-                    } => singleton_attack_events(*defending_player, matching),
+                        defending_player,
+                        declaration_records,
+                        ..
+                    } => singleton_attack_events(
+                        *defending_player,
+                        matching,
+                        declaration_records.clone(),
+                    ),
                     _ => Vec::new(),
                 }
                 .into_iter()
@@ -11843,6 +11887,7 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         // `PlayerScope::DefendingPlayer` are adjudicated non-divergent under.
         | TargetFilter::TriggeringSource
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
@@ -11880,6 +11925,7 @@ fn controller_ref_binding_diverges(controller: &ControllerRef) -> bool {
         // CR 109.4 + CR 108.3: the parent target's controller / owner, read off
         // the same empty `ability.targets`.
         | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         // CR 608.2c: `ability.chosen_players`, populated BY the resolution that
         // ran the `Choose(Player)`.
@@ -18394,6 +18440,7 @@ pub mod tests {
             attacker_ids: vec![attacker],
             defending_player: PlayerId(1),
             attacks: vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+            declaration_records: Vec::new(),
         };
         state.combat = Some(CombatState {
             attackers: vec![AttackerInfo::new(
@@ -18454,6 +18501,7 @@ pub mod tests {
             attacker_ids: vec![matched_attacker],
             defending_player: PlayerId(1),
             attacks: vec![(matched_attacker, AttackTarget::Player(PlayerId(1)))],
+            declaration_records: Vec::new(),
         };
 
         state.combat = Some(CombatState {
@@ -18727,6 +18775,7 @@ pub mod tests {
             attacker_ids: vec![inactive_wolf],
             defending_player: PlayerId(1),
             attacks: vec![(inactive_wolf, AttackTarget::Player(PlayerId(1)))],
+            declaration_records: Vec::new(),
         };
         assert!(
             collect_pending_triggers(&mut no_tolsimir_attack, &[inactive_event]).is_empty(),
@@ -18768,6 +18817,7 @@ pub mod tests {
                 (wolf, AttackTarget::Player(PlayerId(1))),
                 (second_wolf, AttackTarget::Player(PlayerId(1))),
             ],
+            declaration_records: Vec::new(),
         };
         assert!(
             check_trigger_condition(
@@ -18790,6 +18840,7 @@ pub mod tests {
                 attacker_ids: vec![attacker],
                 defending_player: PlayerId(1),
                 attacks: vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+                declaration_records: Vec::new(),
             };
             process_triggers(&mut state, &[singleton_event]);
             let waiting = crate::game::engine::begin_pending_trigger_target_selection(&mut state)
@@ -19974,6 +20025,7 @@ pub mod tests {
                     firebender,
                     crate::game::combat::AttackTarget::Player(PlayerId(1)),
                 )],
+                declaration_records: Vec::new(),
             }],
         );
 
@@ -20067,6 +20119,7 @@ pub mod tests {
             attacker_ids: vec![attacker],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         };
         super::seed_batched_attack_parent_targets(&mut ability, Some(&event));
         assert_eq!(ability.targets, vec![TargetRef::Object(attacker)]);
@@ -30067,6 +30120,7 @@ pub mod tests {
                 attacker,
                 crate::game::combat::AttackTarget::Player(defender),
             )],
+            declaration_records: Vec::new(),
         }
     }
 
@@ -34264,6 +34318,7 @@ pub mod tests {
                 (a1, crate::game::combat::AttackTarget::Player(PlayerId(1))),
                 (a2, crate::game::combat::AttackTarget::Player(PlayerId(1))),
             ],
+            declaration_records: Vec::new(),
         };
         let cond = TriggerCondition::AttackersDeclaredCount {
             subject: AttackersDeclaredCountSubject::Controller {
@@ -34325,6 +34380,7 @@ pub mod tests {
                 (a1, crate::game::combat::AttackTarget::Player(PlayerId(1))),
                 (a2, crate::game::combat::AttackTarget::Player(PlayerId(1))),
             ],
+            declaration_records: Vec::new(),
         };
         let cond = TriggerCondition::AttackersDeclaredCount {
             subject: AttackersDeclaredCountSubject::Controller {
@@ -34398,6 +34454,7 @@ pub mod tests {
                 dino1,
                 crate::game::combat::AttackTarget::Player(PlayerId(1)),
             )],
+            declaration_records: Vec::new(),
         };
         assert!(
             !check_trigger_condition(&state, &cond, trigger_controller, None, Some(&lone_dino)),
@@ -34418,6 +34475,7 @@ pub mod tests {
                     crate::game::combat::AttackTarget::Player(PlayerId(1)),
                 ),
             ],
+            declaration_records: Vec::new(),
         };
         assert!(
             !check_trigger_condition(&state, &cond, trigger_controller, None, Some(&mixed)),
@@ -34438,6 +34496,7 @@ pub mod tests {
                     crate::game::combat::AttackTarget::Player(PlayerId(1)),
                 ),
             ],
+            declaration_records: Vec::new(),
         };
         assert!(
             check_trigger_condition(&state, &cond, trigger_controller, None, Some(&both_dinos)),
@@ -34496,6 +34555,7 @@ pub mod tests {
                     crate::game::combat::AttackTarget::Player(trigger_controller),
                 ),
             ],
+            declaration_records: Vec::new(),
         };
         assert!(
             !check_trigger_condition(&state, &cond, trigger_controller, None, Some(&opponent_two)),
@@ -34519,6 +34579,7 @@ pub mod tests {
                     crate::game::combat::AttackTarget::Player(trigger_controller),
                 ),
             ],
+            declaration_records: Vec::new(),
         };
         assert!(
             check_trigger_condition(
@@ -34539,6 +34600,7 @@ pub mod tests {
                 (self_a2, crate::game::combat::AttackTarget::Player(opponent)),
                 (self_a3, crate::game::combat::AttackTarget::Player(opponent)),
             ],
+            declaration_records: Vec::new(),
         };
         assert!(
             check_trigger_condition(&state, &cond, trigger_controller, None, Some(&self_three)),
@@ -34583,6 +34645,7 @@ pub mod tests {
                 (a1, crate::game::combat::AttackTarget::Planeswalker(pw)),
                 (a2, crate::game::combat::AttackTarget::Planeswalker(pw)),
             ],
+            declaration_records: Vec::new(),
         };
         let cond = TriggerCondition::AttackersDeclaredCount {
             subject: AttackersDeclaredCountSubject::AttackTarget {
@@ -34637,6 +34700,7 @@ pub mod tests {
                     crate::game::combat::AttackTarget::Player(trigger_controller),
                 ),
             ],
+            declaration_records: Vec::new(),
         };
         let cond = TriggerCondition::AttackersDeclaredCount {
             subject: AttackersDeclaredCountSubject::AttackTarget {
@@ -34694,6 +34758,7 @@ pub mod tests {
                     crate::game::combat::AttackTarget::Planeswalker(planeswalker),
                 ),
             ],
+            declaration_records: Vec::new(),
         };
         let cond = TriggerCondition::AttackersDeclaredCount {
             subject: AttackersDeclaredCountSubject::AttackTarget {
@@ -34751,6 +34816,7 @@ pub mod tests {
                     crate::game::combat::AttackTarget::Planeswalker(other_planeswalker),
                 ),
             ],
+            declaration_records: Vec::new(),
         };
         let cond = TriggerCondition::AttackersDeclaredCount {
             subject: AttackersDeclaredCountSubject::AttackTarget {
@@ -34825,6 +34891,7 @@ pub mod tests {
                     crate::game::combat::AttackTarget::Player(trigger_controller),
                 ),
             ],
+            declaration_records: Vec::new(),
         };
         assert!(!check_trigger_condition(
             &state,
@@ -34847,6 +34914,7 @@ pub mod tests {
                     crate::game::combat::AttackTarget::Player(trigger_controller),
                 ),
             ],
+            declaration_records: Vec::new(),
         };
         assert!(check_trigger_condition(
             &state,
@@ -36889,6 +36957,7 @@ pub mod tests {
                     commander,
                     crate::game::combat::AttackTarget::Player(PlayerId(1)),
                 )],
+                declaration_records: Vec::new(),
             }],
         );
 
@@ -38221,6 +38290,7 @@ pub mod tests {
                     attacker_ids: Vec::new(),
                     defending_player: PlayerId(1),
                     attacks: Vec::new(),
+                    declaration_records: Vec::new(),
                 });
             },
         ));
@@ -39499,6 +39569,7 @@ pub mod tests {
                 attacker,
                 crate::game::combat::AttackTarget::Player(PlayerId(1)),
             )],
+            declaration_records: Vec::new(),
         }
     }
 
@@ -39938,6 +40009,7 @@ pub mod tests {
                     (big_two, AttackTarget::Player(PlayerId(1))),
                     (small, AttackTarget::Player(PlayerId(1))),
                 ],
+                declaration_records: Vec::new(),
             }],
         );
 
@@ -40056,6 +40128,7 @@ pub mod tests {
                     ),
                     (small_attacks_player, AttackTarget::Player(PlayerId(1))),
                 ],
+                declaration_records: Vec::new(),
             }],
         );
 

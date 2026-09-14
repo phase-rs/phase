@@ -175,6 +175,8 @@
       "copied": "Skopiowano stan gry do schowka.",
       "copyFailed": "Nie można skopiować stanu gry.",
       "exported": "Wyeksportowano {{filename}}.",
+      "exportedTo": "Wyeksportowano do {{path}}.",
+      "exportRequested": "Zażądano eksportu: {{filename}}.",
       "exportFailed": "Nie można wyeksportować stanu gry.",
       "replayExported": "Powtórka zapisana jako {{filename}}.",
       "replayExportUnavailable": "Brak dostępnego nagrania powtórki dla tej rozgrywki.",

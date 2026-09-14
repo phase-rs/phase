@@ -37,22 +37,67 @@
 //! CR 615.7:  `Prevent the next N damage` is a depletion shield. (Distinct
 //!            from this card's `Prevent that damage` formulation.)
 //! CR 514.2:  "This turn" effects end at the cleanup step.
+//!
+//! ## PR #8849 — production-path coverage
+//!
+//! The two hand-built tests in this file pin the chained-ability shape and the runtime
+//! prevention/counter contracts directly, bypassing `parse_oracle_text`,
+//! `GameRunner::cast`, and the ETB target-selection prompt. Per code owner
+//! feedback on PR #8849, `gatta_and_luzzu_prevents_through_the_real_cast_pipeline`
+//! below drives Gatta's real parsed card through the production cast path
+//! (`GameRunner::cast` → `WaitingFor::TriggerTargetSelection`, CR 603.3d —
+//! the target is chosen when the triggered ability is put on the stack, not
+//! hand-picked), then deals damage through a real cast Lightning Bolt so the
+//! whole parser-to-runtime seam — including
+//! `effects::bind_detached_continuation_to_parent` — is exercised end to end.
 
 use engine::game::effects;
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
     Effect, PreventionAmount, PreventionScope, QuantityExpr, QuantityRef, ResolvedAbility,
     RestrictionExpiry, ShieldKind, TargetFilter, TargetRef,
 };
+use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::GameState;
-use engine::types::identifiers::CardId;
+use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
+/// Verbatim Oracle text (verified against Scryfall AND card-data on
+/// 2026-09-13) shared by the real-cast-pipeline test below.
+const GATTA_AND_LUZZU_ORACLE: &str = "Flash\nWhen Gatta and Luzzu enters, choose target creature \
+     you control. If damage would be dealt to that creature this turn, prevent that damage and \
+     put that many +1/+1 counters on it.";
+
+/// NOTE (#8777, PR #8849): this helper previously hand-filled the rider's `targets` with
+/// `vec![TargetRef::Object(chosen)]`. The real parse path never does — sub-abilities start with
+/// empty targets (`ability_utils::build_resolved_from_def_with_targets`) — so this fixture did
+/// NOT exercise the `runtime_execute` parent-target binding and was green for a reason the card
+/// does not enjoy. That binding is now performed by
+/// `effects::bind_detached_continuation_to_parent` and is covered end to end by
+/// `inkshield_prevented_this_way_token_rider.rs` and, for Gatta and Luzzu specifically, by
+/// `gatta_and_luzzu_prevents_through_the_real_cast_pipeline` below — the real cast (flash
+/// creature + ETB target choice through `WaitingFor::TriggerTargetSelection`) that this
+/// hand-built helper does not exercise.
+///
+/// MEASURED CONSEQUENCE OF THE HAND-FILL: leaving the old hand-fill in place actively breaks
+/// under the fix, not just masks it — `targeting::parent_chain_referents`' tier 2
+/// (`parent_chain_targets_from_root` → `flatten_targets_in_chain`) concatenates EVERY node's
+/// `targets` across the whole chain. With both `prevent.targets` and `counter_rider.targets` set
+/// to `[chosen]`, flattening returns `[chosen, chosen]`, and the binding (correctly) installs
+/// that duplicate, doubling every counter placement. The fix below — leaving `counter_rider`
+/// with NO pre-set `targets` — is what makes the fixture representative of a real parse (where
+/// only the resolving chain ROOT carries targets) instead of merely not-crashing.
+///
 /// Build the chained `PreventDamage → PutCounter` sub-ability that Gatta and
 /// Luzzu's parser produces, parameterized on `chosen` so each test can wire
-/// the parent target into both `ability.targets` propagation slots.
+/// the parent target into the root `ability.targets` slot only — the sub-ability's `targets`
+/// is left empty, matching what the real parse-and-build pipeline always produces, and is
+/// populated at install time by `bind_detached_continuation_to_parent`.
 fn build_gatta_prevention_chain(
     gatta: engine::types::identifiers::ObjectId,
     chosen: engine::types::identifiers::ObjectId,
@@ -64,7 +109,7 @@ fn build_gatta_prevention_chain(
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::ParentTarget,
         },
-        vec![TargetRef::Object(chosen)],
+        Vec::new(),
         gatta,
         controller,
     );
@@ -298,4 +343,216 @@ fn gatta_and_luzzu_pinwheel_one_event_vs_split_events_yield_same_total() {
         single_event, split_events,
         "per-event accumulation must yield the same total as one big event"
     );
+}
+
+/// #8777, PR #8849 — end-to-end production-path coverage: Gatta and Luzzu is
+/// parsed from verbatim Oracle text, cast through `GameRunner::cast` (real
+/// mana payment, real stack placement), its ETB trigger's target is chosen
+/// through the real `WaitingFor::TriggerTargetSelection` prompt (CR 603.3d —
+/// a triggered ability's target is chosen when the ability is put on the
+/// stack), and a real cast Lightning Bolt then deals the damage that the
+/// installed shield must prevent and convert into +1/+1 counters (CR 615.1a,
+/// CR 615.5). This is the row the hand-built tests in this file cannot cover:
+/// it is the only one that reaches
+/// `effects::bind_detached_continuation_to_parent` (defined in
+/// `crates/engine/src/game/effects/mod.rs`, called from
+/// `crates/engine/src/game/effects/prevent_damage.rs`) by way of the actual
+/// parser-to-runtime path — parse, cast, ETB target selection, damage,
+/// counters — rather than from a hand-constructed `ResolvedAbility`.
+#[test]
+fn gatta_and_luzzu_prevents_through_the_real_cast_pipeline() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let gatta = {
+        let mut builder = scenario.add_creature_to_hand_from_oracle(
+            P0,
+            "Gatta and Luzzu",
+            1,
+            1,
+            GATTA_AND_LUZZU_ORACLE,
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 2,
+        });
+        builder.id()
+    };
+    // Two creatures P0 controls: `bear` is the target we will explicitly
+    // choose; `decoy` is an equally legal alternative that we do NOT choose,
+    // so the eventual choice proves a real selection rather than "the only
+    // option available".
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let decoy = scenario.add_creature(P0, "Decoy Ox", 3, 3).id();
+    // An opponent's creature: must NOT appear in the trigger's legal target
+    // set, proving the parsed "creature you control" filter is doing real
+    // work rather than accepting any creature.
+    let hostile = scenario.add_creature(P1, "Hostile Goblin", 4, 4).id();
+    let bolt = scenario.add_bolt_to_hand(P1);
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    scenario.with_mana_pool(
+        P1,
+        vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+    );
+
+    let mut runner = scenario.build();
+
+    // --- Cast Gatta and Luzzu through the production cast pipeline. ---
+    let mut commit = runner.cast(gatta).commit();
+    for _ in 0..20 {
+        match commit.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection { .. } => break,
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                commit
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("ordering Gatta and Luzzu's lone ETB trigger should succeed");
+            }
+            WaitingFor::Priority { .. } => {
+                commit.act(GameAction::PassPriority).expect(
+                    "priority passes should resolve Gatta and Luzzu and put its ETB \
+                         trigger on the stack",
+                );
+            }
+            other => panic!("unexpected state before Gatta and Luzzu's target prompt: {other:?}"),
+        }
+    }
+
+    // Reach guard: the real TriggerTargetSelection prompt (CR 603.3d) was
+    // actually surfaced, naming exactly one slot whose legal set is the
+    // parsed "target creature you control" filter — both of P0's creatures,
+    // and NOT the opponent's. Without this the ChooseTarget action below
+    // would be answering a fabricated prompt, not Gatta's real one.
+    let WaitingFor::TriggerTargetSelection {
+        target_slots,
+        source_id,
+        ..
+    } = commit.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected Gatta and Luzzu's ETB trigger to reach TriggerTargetSelection, got {:?}",
+            commit.state().waiting_for
+        );
+    };
+    assert_eq!(
+        source_id,
+        Some(gatta),
+        "the surfaced prompt must belong to Gatta and Luzzu's own ETB trigger"
+    );
+    assert_eq!(
+        target_slots.len(),
+        1,
+        "the parsed trigger names exactly one target slot"
+    );
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(bear)),
+        "Bear (a creature P0 controls) must be a legal target: {:?}",
+        target_slots[0].legal_targets
+    );
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(decoy)),
+        "Decoy Ox must also be legal — this is what makes the explicit choice below \
+         non-vacuous: {:?}",
+        target_slots[0].legal_targets
+    );
+    assert!(
+        !target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(hostile)),
+        "CR 603.3d + the parsed 'creature you control' filter: an opponent's creature must \
+         not be a legal target: {:?}",
+        target_slots[0].legal_targets
+    );
+
+    // Answer the real prompt through the runner with an explicit choice of
+    // Bear over Decoy Ox — the production target-selection action, not a
+    // hand-picked target.
+    commit
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bear)),
+        })
+        .expect("choosing Bear as Gatta and Luzzu's target should succeed");
+
+    let cast_outcome = commit.resolve();
+    assert!(
+        matches!(
+            cast_outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ),
+        "Gatta and Luzzu's cast and ETB trigger must resolve to a clean priority window, got \
+         {:?}",
+        cast_outcome.final_waiting_for()
+    );
+
+    // Reach guard: the shield really did install on the CHOSEN creature —
+    // not on Gatta and Luzzu itself, and not on the unchosen Decoy Ox.
+    let bear_after_etb = &cast_outcome.state().objects[&bear];
+    assert_eq!(
+        bear_after_etb.replacement_definitions.len(),
+        1,
+        "the prevention shield must be installed on the chosen Bear: {:?}",
+        bear_after_etb.replacement_definitions
+    );
+    assert!(
+        matches!(
+            bear_after_etb.replacement_definitions[0].shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        ),
+        "the installed shield must be an All-damage prevention shield"
+    );
+    assert!(
+        cast_outcome.state().objects[&gatta]
+            .replacement_definitions
+            .is_empty(),
+        "the shield must NOT be installed on Gatta and Luzzu itself"
+    );
+    assert!(
+        cast_outcome.state().objects[&decoy]
+            .replacement_definitions
+            .is_empty(),
+        "the shield must NOT be installed on the unchosen Decoy Ox"
+    );
+
+    // --- Deal damage to Bear through a real cast Lightning Bolt. ---
+    // Hand P1 priority so it can cast. This is a harness shortcut, not a legal
+    // game transition — Bolt is an instant and would not need the active player
+    // to change at all; the reassignment only saves passing a full turn. It
+    // cannot affect what is under test: the shield's `UntilEndOfTurn` expiry is
+    // keyed to the turn, which this does not advance (CR 514.2), and the rider
+    // was already bound when the trigger resolved, above.
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
+    let bolt_outcome = runner.cast(bolt).target_object(bear).resolve();
+
+    assert_eq!(
+        bolt_outcome.damage_marked(bear),
+        0,
+        "CR 615.1a: Gatta and Luzzu's shield must prevent all 3 damage from the real cast \
+         Lightning Bolt"
+    );
+    bolt_outcome.assert_counters(bear, CounterType::Plus1Plus1, 3);
+    // CR 615.5's "put that many +1/+1 counters on it" names the parent's
+    // chosen target only — the unchosen Decoy Ox and Gatta and Luzzu itself
+    // must gain none.
+    bolt_outcome.assert_counters(decoy, CounterType::Plus1Plus1, 0);
+    bolt_outcome.assert_counters(gatta, CounterType::Plus1Plus1, 0);
 }

@@ -166,6 +166,20 @@ pub(crate) struct ParseContext {
     /// "choose one of them at random. You may cast IT" — "it" is the chosen card,
     /// not the pool).
     pub plural_object_pronoun_ref: Option<TargetFilter>,
+    /// CR 608.2k: Antecedent for a singular DEMONSTRATIVE ("that creature" /
+    /// "that permanent" / "that card" / "that token") in the current trigger
+    /// body. Deliberately separate from — and narrower than —
+    /// `object_pronoun_ref`, on the same principle that separates
+    /// `plural_object_pronoun_ref` from it: which references may capture a given
+    /// antecedent is a property of the surface grammar, not of the antecedent.
+    ///
+    /// Set only for the damage-RECIPIENT provenance (a demonstrative names an
+    /// object the condition acted upon), by
+    /// `oracle_trigger::trigger_demonstrative_object_ref_for_condition`. The
+    /// spell-cast provenance is excluded: "exile THAT CARD ... instead of putting
+    /// it into your graveyard as it resolves" is a replacement clause whose
+    /// demonstrative belongs to its own grammar.
+    pub demonstrative_object_ref: Option<TargetFilter>,
     /// Accumulated diagnostics for the current card parse (Phase 52, D-07).
     /// Replaces thread-local oracle_warnings accumulator.
     pub diagnostics: Vec<OracleDiagnostic>,

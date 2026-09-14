@@ -5778,6 +5778,7 @@ fn node_reads_mutable_resolution_local_state(node: &crate::types::ability::Targe
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::EventTarget
         // ── ADMITTED (4): crossings, judged by the layer-2 adapter, not here ──
         // CR 102.1: designates PLAYERS. The verdict lives on the boxed `PlayerFilter`, which
@@ -5903,6 +5904,7 @@ fn node_has_non_arrival_invariant_property(node: &crate::types::ability::TargetF
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::EventTarget
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
@@ -6154,6 +6156,7 @@ fn controller_ref_is_arrival_invariant(controller: &crate::types::ability::Contr
         | ControllerRef::TargetPlayer
         | ControllerRef::TargetOpponent
         | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::DefendingPlayer
         | ControllerRef::ChosenPlayer { .. }

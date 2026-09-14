@@ -37,11 +37,21 @@ pub(crate) fn split_additional_cost_trailing_spell_reduction<'a>(
 /// - "you may blight N" → `Optional(Blight { count: N })`
 /// - "blight N or pay {M}" → `Choice(Blight { count: N }, Mana { cost: M })`
 /// - General "X or Y" → `Choice(X, Y)` using `parse_single_cost` for each fragment
+/// - Anything no arm can read → an honest `Unimplemented` cost (`Optional` for a
+///   "you may" body, otherwise `Required`), NOT `None`. CR 601.2f + CR 601.2h:
+///   the cost is part of the total cost and cannot be silently dropped. Only a
+///   line whose "…to cast this spell, " prefix matched gets this treatment; a
+///   line imposing a cost on OTHER spells still answers `None`.
 pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCost> {
-    // Strip the standard additional-cost prefix.
-    let after_prefix = tag::<_, _, OracleError<'_>>("as an additional cost to cast this spell, ")
-        .parse(lower)
-        .map_or(lower, |(rest, _)| rest);
+    // Strip the standard additional-cost prefix. `names_this_spell` records
+    // whether that prefix actually matched, which the honest-decline tail below
+    // depends on: a line that instead imposes a cost on OTHER spells ("As an
+    // additional cost to cast creature spells, ..." — Chorus of the Conclave) is
+    // not a cost on this object at all, so no cost may be stapled to its face.
+    let (after_prefix, names_this_spell) =
+        tag::<_, _, OracleError<'_>>("as an additional cost to cast this spell, ")
+            .parse(lower)
+            .map_or((lower, false), |(rest, _)| (rest, true));
     // Use TextPair for case-preserving parallel slicing, then strip trailing period.
     let tp = TextPair::new(&raw[raw.len() - after_prefix.len()..], after_prefix);
     let tp = tp.trim_end_matches('.');
@@ -122,6 +132,42 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
     let cost = super::oracle_cost::parse_single_cost(body_raw);
     if !matches!(cost, AbilityCost::Unimplemented { .. }) {
         return Some(AdditionalCost::Required(cost));
+    }
+
+    // CR 601.2f + CR 601.2h: every arm above has declined, so this IS an
+    // additional-cost line the parser cannot read — not the absence of one. The
+    // sole production caller (`oracle.rs`, gated on the "as an additional cost"
+    // opener) consumes the line either way, so answering `None` here does not
+    // hand it to another arm; it erases the cost from the total cost the spell
+    // may never be cast without. Surface the unreadable cost honestly instead,
+    // exactly as the choose-behold guard above does: coverage names it, and the
+    // cast-time payment authority refuses a cost it has no procedure for
+    // ("Unpayable costs can't be paid").
+    //
+    // Gated on `names_this_spell` so only a cost this object itself must pay is
+    // surfaced; an unmatched prefix leaves the `None` untouched.
+    if names_this_spell {
+        // CR 601.2b: "you may <cost>" is an OPTIONAL additional cost the player
+        // announces an intention to pay. Surfacing it as `Required` would make
+        // the spell uncastable, which is wrong in the restrictive direction —
+        // declining an optional cost is always legal. This runs only after the
+        // "you may" arm above has already declined, so it steals no dispatch.
+        let (unreadable_raw, optional) = tag::<_, _, OracleError<'_>>("you may ")
+            .parse(body_lower)
+            .map_or((body_raw, false), |(rest, _)| {
+                (&body_raw[body_raw.len() - rest.len()..], true)
+            });
+        let unreadable = AbilityCost::Unimplemented {
+            description: unreadable_raw.to_string(),
+        };
+        return Some(if optional {
+            AdditionalCost::Optional {
+                cost: unreadable,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+            }
+        } else {
+            AdditionalCost::Required(unreadable)
+        });
     }
 
     None
@@ -2453,5 +2499,95 @@ Trample";
             restrictions, None,
             "trailing conjunct must not be swallowed into an unconditional turn restriction"
         );
+    }
+
+    /// CR 601.2f + CR 601.2h (#8701): an additional-cost line whose body no arm
+    /// can read must surface an honest `Unimplemented` cost, not vanish. The
+    /// old tail answered `None` — "this spell has NO additional cost" — which
+    /// erased a printed cost from the total cost and left the spell castable
+    /// without it. Three real corpus lines, one per unreadable shape.
+    #[test]
+    fn unreadable_required_additional_cost_is_surfaced_not_dropped() {
+        for (lower, raw, expected_description) in [
+            (
+                "as an additional cost to cast this spell, discard x cards at random.",
+                "As an additional cost to cast this spell, discard X cards at random.",
+                "discard X cards at random",
+            ),
+            (
+                "as an additional cost to cast this spell, gobble x.",
+                "As an additional cost to cast this spell, gobble X.",
+                "gobble X",
+            ),
+            (
+                "as an additional cost to cast this spell, choose a through m or n through z.",
+                "As an additional cost to cast this spell, choose A through M or N through Z.",
+                "choose A through M or N through Z",
+            ),
+        ] {
+            match parse_additional_cost_line(lower, raw) {
+                Some(AdditionalCost::Required(AbilityCost::Unimplemented { description })) => {
+                    assert_eq!(
+                        description, expected_description,
+                        "the description must be the prefix-stripped body, not the whole line"
+                    );
+                }
+                other => panic!("Expected Required(Unimplemented) for {raw:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// CR 601.2b: an unreadable "you may <cost>" additional cost is OPTIONAL.
+    /// Surfacing it as `Required` would make the spell uncastable, which is
+    /// wrong in the restrictive direction — declining an optional additional
+    /// cost is always legal (Myntasha, Honored One).
+    #[test]
+    fn unreadable_optional_additional_cost_stays_optional() {
+        let lower = "as an additional cost to cast this spell, you may open a sealed magic booster pack and put the cards on the bottom of your booster pile in a random order.";
+        let raw = "As an additional cost to cast this spell, you may open a sealed Magic booster pack and put the cards on the bottom of your booster pile in a random order.";
+        match parse_additional_cost_line(lower, raw) {
+            Some(AdditionalCost::Optional {
+                cost: AbilityCost::Unimplemented { description },
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+            }) => {
+                assert_eq!(
+                    description,
+                    "open a sealed Magic booster pack and put the cards on the bottom of your booster pile in a random order",
+                    "the \"you may \" opener is the optionality marker, not part of the cost"
+                );
+            }
+            other => panic!("Expected Optional(Unimplemented, Once), got {other:?}"),
+        }
+    }
+
+    /// CR 601.2b: "As an additional cost to cast creature SPELLS, ..." (Chorus
+    /// of the Conclave) is a static ability imposing a cost on OTHER spells —
+    /// it is not a cost on this object. The honest-decline tail is gated on the
+    /// "...to cast this spell, " prefix having actually matched precisely so
+    /// this line keeps answering `None` instead of stapling a required cost
+    /// onto Chorus's own face.
+    #[test]
+    fn additional_cost_imposed_on_other_spells_is_not_a_cost_on_this_face() {
+        let lower = "as an additional cost to cast creature spells, you may pay any amount of mana. if you do, that creature enters with that many additional +1/+1 counters on it";
+        let raw = "As an additional cost to cast creature spells, you may pay any amount of mana. If you do, that creature enters with that many additional +1/+1 counters on it";
+        assert_eq!(
+            parse_additional_cost_line(lower, raw),
+            None,
+            "a cost imposed on other spells must not become this object's own additional cost"
+        );
+    }
+
+    /// Anti-vacuity guard for the two tests above: a READABLE body must still
+    /// reach the typed single-cost fallback and never the new honest-decline
+    /// tail. If the tail ever started swallowing readable lines, the
+    /// `Unimplemented` assertions above would pass for the wrong reason.
+    #[test]
+    fn readable_additional_cost_still_parses_to_a_typed_cost() {
+        let lower = "as an additional cost to cast this spell, sacrifice a creature.";
+        let raw = "As an additional cost to cast this spell, sacrifice a creature.";
+        match parse_additional_cost_line(lower, raw) {
+            Some(AdditionalCost::Required(AbilityCost::Sacrifice(_))) => {}
+            other => panic!("a readable body must stay a typed cost, got {other:?}"),
+        }
     }
 }

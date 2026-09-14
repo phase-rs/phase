@@ -175,6 +175,8 @@
       "copied": "Spielzustand in die Zwischenablage kopiert.",
       "copyFailed": "Spielzustand konnte nicht kopiert werden.",
       "exported": "{{filename}} exportiert.",
+      "exportedTo": "Nach {{path}} exportiert.",
+      "exportRequested": "Export angefordert: {{filename}}.",
       "exportFailed": "Spielzustand konnte nicht exportiert werden.",
       "replayExported": "Wiederholung gespeichert als {{filename}}.",
       "replayExportUnavailable": "Für diese Partie ist keine Wiederholungsaufzeichnung verfügbar.",

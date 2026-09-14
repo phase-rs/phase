@@ -3,7 +3,7 @@ import { strToU8, zipSync } from "fflate";
 import type { EngineAdapter, GameState } from "../adapter/types.ts";
 import { canExportAuthoritativeState, useGameStore } from "../stores/gameStore.ts";
 import { copyText } from "./copyText";
-import { downloadBlob } from "./fileDownload";
+import { downloadBlob, type DownloadResult } from "./fileDownload";
 
 interface GameStateDebugSnapshot {
   gameState: GameState;
@@ -12,7 +12,10 @@ interface GameStateDebugSnapshot {
   turnCheckpoints: ReturnType<typeof useGameStore.getState>["turnCheckpoints"];
 }
 
-async function downloadZip(baseName: string, contents: Record<string, Uint8Array>): Promise<string> {
+async function downloadZip(
+  baseName: string,
+  contents: Record<string, Uint8Array>,
+): Promise<DownloadResult> {
   const zipFilename = `${baseName}.zip`;
   const zipped = zipSync(contents, { level: 9 });
   const blob = new Blob([zipped as BlobPart], { type: "application/zip" });
@@ -41,7 +44,7 @@ export async function copyGameStateDebugSnapshot(gameState: GameState): Promise<
   }
 }
 
-export async function exportGameStateDebugZip(gameState: GameState): Promise<string> {
+export async function exportGameStateDebugZip(gameState: GameState): Promise<DownloadResult> {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const baseName = `game-state-turn-${gameState.turn_number}-${stamp}`;
   const jsonFilename = `${baseName}.json`;
@@ -56,7 +59,9 @@ export async function exportGameStateDebugZip(gameState: GameState): Promise<str
  * rendered client snapshot, this retains private runtime state needed to
  * diagnose and restore the game accurately.
  */
-export async function exportAuthoritativeGameStateZip(adapter: EngineAdapter): Promise<string> {
+export async function exportAuthoritativeGameStateZip(
+  adapter: EngineAdapter,
+): Promise<DownloadResult> {
   if (!canExportAuthoritativeState(useGameStore.getState().gameMode)) {
     throw new Error("Authoritative state export is unavailable for shared games");
   }

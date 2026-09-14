@@ -982,6 +982,34 @@ pub fn parse_target_with_syntax<'a>(
             {
                 return (slot_filter, &text[lower.len() - slot_rest.len()..], syntax);
             }
+            // CR 608.2k: a pinned untargeted antecedent — "the specific
+            // untargeted object … previously referred to by that ability's …
+            // trigger condition" — outranks the generic `ParentTarget` lift
+            // below, exactly as it does for the bare-pronoun family in
+            // `resolve_pronoun_target` (which consults its own pin before its
+            // `ctx.subject` match). CR 608.2k draws no distinction between a
+            // demonstrative and a pronoun naming that object, so where both may
+            // name it, the two must not bind differently.
+            //
+            // This branch previously mirrored only `resolve_pronoun_target`'s
+            // `ctx.subject` consultation (the `CostPaidObject` arm below) and
+            // not its pin consultation, so one sentence could resolve the same
+            // referent two ways: the Kashi-Tribe cycle's "tap THAT CREATURE and
+            // IT doesn't untap during its controller's next untap step" bound
+            // "it" to the damaged creature and "that creature" to a parent
+            // target the untargeted trigger never had — leaving the tap with no
+            // subject at all. Completing the mirror unifies them.
+            //
+            // Reads the DEMONSTRATIVE-scoped pin, not the wider bare-pronoun
+            // pin. The two provenances are not interchangeable here: a
+            // spell-cast body's "exile THAT CARD ... instead of putting it into
+            // your graveyard as it resolves" (Gandalf of the Secret Fire,
+            // Goliath Daydreamer) is a replacement clause whose demonstrative is
+            // consumed by its own grammar, and binding it to the cast spell
+            // reclassifies the clause into a silently swallowed replacement.
+            if let Some(pinned) = ctx.demonstrative_object_ref.clone() {
+                return (pinned, rem, syntax);
+            }
             // CR 608.2c + CR 701.21a: a gated "If you do," clause whose
             // antecedent is a resolution-time choice with no target concept
             // of its own (`Effect::Sacrifice`) seeds `ctx.subject` with
@@ -3625,6 +3653,17 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     }
 
     if let Some((prop, consumed)) = parse_attacking_defender_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
+    // Bare reduced passive relative clause — "creature dealt damage this
+    // turn" (Inflame) with no "that was" at all. Tried after
+    // `parse_that_clause_suffix` (which already owns the "that was dealt damage
+    // this turn" full form) so a "that "-led clause is never double-consumed;
+    // this arm only fires on the participle-first surface `parse_that_clause_suffix`
+    // cannot see because it requires a leading "that ".
+    if let Some((prop, consumed)) = parse_bare_was_dealt_damage_suffix(&lower[pos..]) {
         properties.push(prop);
         pos += consumed;
     }
@@ -8369,6 +8408,41 @@ fn parse_dealt_damage_clause(input: &str) -> OracleResult<'_, FilterProp> {
     ))
 }
 
+/// The REDUCED passive relative clause — "dealt damage this turn" appearing
+/// directly after a target noun with no relative pronoun at all (Inflame:
+/// "each creature dealt damage this turn"). English drops
+/// "that was" before a past participle used attributively ("the car damaged in
+/// the accident" = "the car that was damaged in the accident"); "dealt" here is
+/// that participle; a bare past participle immediately after a noun therefore
+/// reads passively, never as the active "that dealt damage" form (which needs
+/// the relative pronoun to distinguish it from a finished sentence). Confirmed
+/// against Inflame's localized Oracle text, which is unanimously passive
+/// ("creature to which damage was inflicted"/"wurde ... Schaden zugefügt").
+///
+/// Maps to the same unparameterized `WasDealtDamageThisTurn` the full "that was
+/// dealt damage this turn" clause produces (see `VERB_PHRASES` below) — there is
+/// no printed reduced form carrying the kind/recipient axes, so none is parsed
+/// here. Distinct from [`parse_dealt_damage_clause`], which is only reached
+/// after the caller has already consumed a literal "that ".
+pub(crate) fn parse_bare_was_dealt_damage_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("dealt damage this turn")
+        .parse(trimmed)
+        .ok()?;
+    let next_char_is_boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    if !next_char_is_boundary {
+        return None;
+    }
+    Some((
+        FilterProp::WasDealtDamageThisTurn,
+        leading_ws + (trimmed.len() - rest.len()),
+    ))
+}
+
 /// Parse "that [verb phrase]" relative clause suffix on target noun phrases.
 ///
 /// Handles multiple pattern classes:
@@ -8619,10 +8693,20 @@ pub(crate) fn parse_that_clause_suffix<'a>(
     }
 
     // --- Verb-phrase patterns: match fixed phrases after "that " ---
-    // CR 120.6 + CR 120.9: "that was dealt damage this turn"
+    // "that was dealt damage this turn" — and its plural number-agreement
+    // form "that were dealt damage this turn" (Death-Rattle Oni: "destroy all
+    // other creatures that were dealt damage this turn"). Both rows produce
+    // the same unparameterized `WasDealtDamageThisTurn` — "was"/"were" is
+    // English subject-verb agreement on one passive construction, not a
+    // distinct predicate, so this is a phrase-table synonym, not a new
+    // FilterProp.
     static VERB_PHRASES: &[(&str, FilterProp)] = &[
         (
             "was dealt damage this turn",
+            FilterProp::WasDealtDamageThisTurn,
+        ),
+        (
+            "were dealt damage this turn",
             FilterProp::WasDealtDamageThisTurn,
         ),
         (
@@ -9191,6 +9275,7 @@ fn narrow_population_for_exclusion(
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
@@ -18061,6 +18146,58 @@ mod tests {
                 .properties
                 .iter()
                 .any(|p| matches!(p, FilterProp::WasDealtDamageThisTurn)));
+        } else {
+            panic!("expected Typed filter, got {filter:?}");
+        }
+        assert!(
+            rest.trim().is_empty(),
+            "expected empty remainder, got: {rest:?}"
+        );
+    }
+
+    /// Direct `parse_target` authority coverage for the BARE reduced relative
+    /// clause `parse_bare_was_dealt_damage_suffix` implements — no "that"/"was"
+    /// at all (Inflame: "each creature dealt damage this turn"). Sibling of
+    /// `that_was_dealt_damage_this_turn` above, exercising the arm that
+    /// combinator adds rather than the pre-existing "that was" arm.
+    #[test]
+    fn bare_dealt_damage_this_turn_no_relative_pronoun() {
+        let (filter, rest) = parse_target("each creature dealt damage this turn");
+        if let TargetFilter::Typed(ref tf) = filter {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert!(
+                tf.properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::WasDealtDamageThisTurn)),
+                "expected WasDealtDamageThisTurn in properties: {:?}",
+                tf.properties
+            );
+        } else {
+            panic!("expected Typed filter, got {filter:?}");
+        }
+        assert!(
+            rest.trim().is_empty(),
+            "expected empty remainder, got: {rest:?}"
+        );
+    }
+
+    /// Direct `parse_target` authority coverage for the plural number-agreement
+    /// `VERB_PHRASES` row ("were dealt damage this turn", Death-Rattle Oni's
+    /// "all other creatures that were dealt damage this turn"). Sibling of
+    /// `that_was_dealt_damage_this_turn` above, exercising the "were" row
+    /// rather than the pre-existing "was" row.
+    #[test]
+    fn that_were_dealt_damage_this_turn() {
+        let (filter, rest) = parse_target("all other creatures that were dealt damage this turn");
+        if let TargetFilter::Typed(ref tf) = filter {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert!(
+                tf.properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::WasDealtDamageThisTurn)),
+                "expected WasDealtDamageThisTurn in properties: {:?}",
+                tf.properties
+            );
         } else {
             panic!("expected Typed filter, got {filter:?}");
         }

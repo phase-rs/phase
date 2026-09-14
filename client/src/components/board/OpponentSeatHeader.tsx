@@ -27,6 +27,7 @@ import { AvatarHoverPreview } from "../hud/AvatarHoverPreview.tsx";
 import { EnchantmentsBadge } from "../hud/EnchantmentsBadge.tsx";
 import { KickConfirmDialog } from "../hud/KickConfirmDialog.tsx";
 import { NextUpBadge } from "../hud/NextUpBadge.tsx";
+import { PlayerLatency } from "../hud/PlayerLatency.tsx";
 
 interface OpponentSeatHeaderProps {
   playerId: PlayerId;
@@ -161,6 +162,7 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
             />
           )}
           <LifeTotal playerId={playerId} size="sm" hideLabel />
+          <PlayerLatency playerId={playerId} />
           {/* The enclosing identity block is pointer-events-none (so the
               header's full-area target button owns clicks while this seat is a
               legal target). Re-enable pointer events on the badge cluster so the

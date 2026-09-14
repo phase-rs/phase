@@ -144,6 +144,31 @@ function traceP2P(side: "Host" | "Guest", event: string, data?: Record<string, u
   console.debug(`[P2P ${side} Trace]`, performance.now().toFixed(1), event, data ?? {});
 }
 
+/** Restore signaling without tearing down established WebRTC connections.
+ * PeerJS retains those connections on `disconnected`; `destroy()` does not.
+ * Use its reconnect API with bounded backoff until recovery or owner teardown. */
+function maintainSignaling(peer: Peer): void {
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryDelay = 1000;
+  const clearRetry = () => {
+    if (retryTimer !== null) clearTimeout(retryTimer);
+    retryTimer = null;
+  };
+  peer.on("disconnected", () => {
+    if (peer.destroyed || retryTimer !== null) return;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      if (!peer.destroyed && peer.disconnected) peer.reconnect();
+    }, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 30_000);
+  });
+  peer.on("open", () => {
+    clearRetry();
+    retryDelay = 1000;
+  });
+  peer.on("close", clearRetry);
+}
+
 // ICE nomination typically settles within 1-2s of channel open; on slow links
 // nomination may take longer. The first stat may be a `prflx` that later
 // upgrades to `srflx`/`host`. 2000ms is a heuristic balance between accuracy
@@ -417,6 +442,7 @@ export async function hostRoom(
   // — fresh hosts generate random codes so the collision would be
   // unrecoverable anyway.
   const peer = await openHostPeer(peerId, roomCode, isResume, signal);
+  maintainSignaling(peer);
   traceP2P("Host", "peer-open-final", { peerId, roomCode });
 
   // Multi-fire connection handler: every guest gets wrapped on `open`.
@@ -459,26 +485,12 @@ export async function hostRoom(
     });
   });
 
-  // Top-level Peer errors: PeerJS surfaces transient issues here too. Only
-  // FATAL errors should trigger destroy — transient ones are recoverable.
+  // PeerJS owns error teardown. Once registered, its abort path disconnects
+  // signaling while preserving DataConnections. Calling destroy here would
+  // turn a signaling outage into a disconnect for every guest in the game.
   peer.on("error", (err: Error & { type?: string }) => {
-    const fatal = err.type === "browser-incompatible"
-      || err.type === "invalid-id"
-      || err.type === "invalid-key"
-      || err.type === "unavailable-id"
-      || err.type === "ssl-unavailable"
-      || err.type === "server-error"
-      || err.type === "socket-error"
-      || err.type === "socket-closed";
-    if (fatal) {
-      traceP2P("Host", "peer-fatal-error", { peerId, type: err.type, message: err.message });
-      console.error("[P2P Host] fatal Peer error, destroying:", err);
-      destroyed = true;
-      try { peer.destroy(); } catch { /* best-effort */ }
-    } else {
-      traceP2P("Host", "peer-nonfatal-error", { peerId, type: err.type, message: err.message });
-      console.warn("[P2P Host] non-fatal Peer error:", err);
-    }
+    traceP2P("Host", "peer-error", { peerId, type: err.type, message: err.message });
+    console.warn("[P2P Host] Peer error (existing connections preserved):", err);
   });
 
   return {
@@ -535,7 +547,9 @@ export async function joinRoom(
     };
     signal?.addEventListener("abort", onAbort, { once: true });
 
-    peer.on("open", () => {
+    // A signaling reconnect also emits open; only the initial registration
+    // should dial the host. The adapter owns subsequent game-channel dials.
+    peer.once("open", () => {
       if (signal?.aborted) {
         try { peer.destroy(); } catch { /* best-effort */ }
         return;
@@ -558,6 +572,7 @@ export async function joinRoom(
         clearTimeout(timeout);
         signal?.removeEventListener("abort", onAbort);
         opened = true;
+        maintainSignaling(peer);
         resolve({
           conn,
           peer,
@@ -587,17 +602,9 @@ export async function joinRoom(
     });
 
     // PeerJS emits connection failures on the peer, not the conn (issue #1281).
-    // Mirror the host's classifier: post-open, only fatal types destroy the
-    // Peer. The same fatal set applies on both sides of the signaling server.
+    // Before the initial game connection opens, reject a failed join. After
+    // that, preserve existing channels and let PeerJS manage signaling loss.
     peer.on("error", (err: Error & { type?: string }) => {
-      const fatal = err.type === "browser-incompatible"
-        || err.type === "invalid-id"
-        || err.type === "invalid-key"
-        || err.type === "unavailable-id"
-        || err.type === "ssl-unavailable"
-        || err.type === "server-error"
-        || err.type === "socket-error"
-        || err.type === "socket-closed";
       if (!opened) {
         traceP2P("Guest", "peer-preopen-error", { peerId, type: err.type, message: err.message });
         // Pre-open: any peer error means the initial connect failed — reject.
@@ -605,14 +612,8 @@ export async function joinRoom(
         try { peer.destroy(); } catch { /* best-effort */ }
         return;
       }
-      if (fatal) {
-        traceP2P("Guest", "peer-fatal-error", { peerId, type: err.type, message: err.message });
-        console.error("[P2P Guest] fatal Peer error, destroying:", err);
-        try { peer.destroy(); } catch { /* best-effort */ }
-      } else {
-        traceP2P("Guest", "peer-nonfatal-error", { peerId, type: err.type, message: err.message });
-        console.warn("[P2P Guest] non-fatal Peer error (Peer kept alive for reconnect):", err);
-      }
+      traceP2P("Guest", "peer-error", { peerId, type: err.type, message: err.message });
+      console.warn("[P2P Guest] Peer error (existing connections preserved):", err);
     });
   });
 }

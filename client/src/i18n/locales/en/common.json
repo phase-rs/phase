@@ -175,6 +175,8 @@
       "copied": "Copied game state to clipboard.",
       "copyFailed": "Could not copy game state.",
       "exported": "Exported {{filename}}.",
+      "exportedTo": "Exported to {{path}}.",
+      "exportRequested": "Export requested — {{filename}}.",
       "exportFailed": "Could not export game state.",
       "replayExported": "Replay saved as {{filename}}.",
       "replayExportUnavailable": "No replay recording is available for this game.",

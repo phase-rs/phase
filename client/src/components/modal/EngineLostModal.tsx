@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { TFunction } from "i18next";
 import { Trans, useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 
 import { onEngineLost, onEngineSlow } from "../../game/engineRecovery";
+import type { DownloadResult } from "../../services/fileDownload";
 import { exportGameStateDebugZip } from "../../services/gameStateExport";
 import { useGameStore } from "../../stores/gameStore";
 import type { GameState } from "../../adapter/types";
@@ -52,8 +53,15 @@ export function EngineLostModal() {
   const [snapshot, setSnapshot] = useState<EngineLostSnapshot | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [exported, setExported] = useState(false);
-  const [exportFailed, setExportFailed] = useState(false);
+  const [exportOutcome, setExportOutcome] = useState<DownloadResult["kind"] | null>(null);
+  // One export at a time: two in flight would resolve in either order.
+  const [isExporting, setIsExporting] = useState(false);
+  // A later click lands inside the previous one's clear window, so each label
+  // timer has to be cancelled rather than left to wipe the newer result.
+  const copyResetRef = useRef<number | null>(null);
+  const exportResetRef = useRef<number | null>(null);
+  // Invariant: nothing after an await touches state once unmounted.
+  const mountedRef = useRef(false);
 
   useEffect(() => {
     // External latch instead of a setState updater with a side effect.
@@ -90,6 +98,15 @@ export function EngineLostModal() {
     };
   }, []);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (copyResetRef.current !== null) window.clearTimeout(copyResetRef.current);
+      if (exportResetRef.current !== null) window.clearTimeout(exportResetRef.current);
+    };
+  }, []);
+
   if (!snapshot) return null;
 
   const { reason, panic } = snapshot;
@@ -119,22 +136,34 @@ export function EngineLostModal() {
       window.prompt(t("engineLost.copyPrompt"), diagnostic);
       return;
     }
+    if (!mountedRef.current) return;
     setCopied(true);
-    window.setTimeout(() => setCopied(false), 2000);
+    if (copyResetRef.current !== null) window.clearTimeout(copyResetRef.current);
+    copyResetRef.current = window.setTimeout(() => setCopied(false), 2000);
   };
 
   const handleExport = async () => {
     if (!snapshot.gameState) return;
-    setExported(false);
-    setExportFailed(false);
+    // "requested" keeps its own label: this is the recovery path, so a snapshot
+    // nothing has confirmed must not read as one the player can go find.
+    const show = (kind: DownloadResult["kind"]) => {
+      // The reachable case: under the shell the export waits up to ten seconds,
+      // so this can arm a timer past the cleanup that would have cleared it.
+      if (!mountedRef.current) return;
+      setExportOutcome(kind);
+      if (exportResetRef.current !== null) window.clearTimeout(exportResetRef.current);
+      exportResetRef.current = window.setTimeout(() => setExportOutcome(null), 2000);
+    };
+    setIsExporting(true);
+    setExportOutcome(null);
     try {
-      await exportGameStateDebugZip(snapshot.gameState);
-      setExported(true);
-      window.setTimeout(() => setExported(false), 2000);
+      const result = await exportGameStateDebugZip(snapshot.gameState);
+      show(result.kind);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      setExportFailed(true);
-      window.setTimeout(() => setExportFailed(false), 2000);
+      show("failed");
+    } finally {
+      if (mountedRef.current) setIsExporting(false);
     }
   };
 
@@ -199,14 +228,16 @@ export function EngineLostModal() {
           <button
             type="button"
             onClick={handleExport}
-            disabled={!snapshot.gameState}
+            disabled={isExporting || !snapshot.gameState}
             className="rounded-lg bg-gray-700 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {exportFailed
+            {exportOutcome === "failed"
               ? t("engineLost.exportFailed")
-              : exported
-                ? t("engineLost.exported")
-                : t("engineLost.exportClientSnapshot")}
+              : exportOutcome === "requested"
+                ? t("engineLost.exportRequested")
+                : exportOutcome === "saved"
+                  ? t("engineLost.exported")
+                  : t("engineLost.exportClientSnapshot")}
           </button>
           {isPanic && (
             <>

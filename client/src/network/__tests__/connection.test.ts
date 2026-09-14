@@ -5,24 +5,53 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // factory cannot close over ordinary module scope.
 const peerState = vi.hoisted(() => ({
   peersCreated: 0,
-  peerHandlers: new Map<string, (arg?: unknown) => void>(),
+  peerHandlers: new Map<string, Set<(arg?: unknown) => void>>(),
   connHandlers: new Map<string, (arg?: unknown) => void>(),
   dials: [] as Array<{ peerId: string; options: unknown }>,
+  destroyCalls: 0,
+  reconnectCalls: 0,
+  emitPeer: (_event: string, _arg?: unknown): void => {},
 }));
 
 vi.mock("peerjs", () => {
   class FakePeer {
+    destroyed = false;
+    disconnected = false;
+    private onceHandlers = new Map<(arg?: unknown) => void, (arg?: unknown) => void>();
     constructor() {
       peerState.peersCreated += 1;
+      peerState.emitPeer = (event, arg) => {
+        if (event === "disconnected") this.disconnected = true;
+        if (event === "open") this.disconnected = false;
+        for (const handler of [...(peerState.peerHandlers.get(event) ?? [])]) handler(arg);
+      };
     }
     on(event: string, handler: (arg?: unknown) => void): void {
-      peerState.peerHandlers.set(event, handler);
+      const handlers = peerState.peerHandlers.get(event) ?? new Set();
+      handlers.add(handler);
+      peerState.peerHandlers.set(event, handlers);
     }
     once(event: string, handler: (arg?: unknown) => void): void {
-      peerState.peerHandlers.set(event, handler);
+      const once = (arg?: unknown) => {
+        this.off(event, handler);
+        handler(arg);
+      };
+      this.onceHandlers.set(handler, once);
+      this.on(event, once);
     }
-    off(): void {}
-    destroy(): void {}
+    off(event: string, handler: (arg?: unknown) => void): void {
+      peerState.peerHandlers.get(event)?.delete(this.onceHandlers.get(handler) ?? handler);
+      this.onceHandlers.delete(handler);
+    }
+    destroy(): void {
+      this.destroyed = true;
+      peerState.destroyCalls += 1;
+      peerState.emitPeer("close");
+    }
+    reconnect(): void {
+      this.disconnected = false;
+      peerState.reconnectCalls += 1;
+    }
     connect(peerId: string, options: unknown): unknown {
       peerState.dials.push({ peerId, options });
       return {
@@ -36,7 +65,7 @@ vi.mock("peerjs", () => {
   return { default: FakePeer };
 });
 
-import { PEER_CONNECT_OPTIONS, joinRoom, logSelectedIceCandidate } from "../connection";
+import { PEER_CONNECT_OPTIONS, hostRoom, joinRoom, logSelectedIceCandidate } from "../connection";
 
 // Fake RTCStatsReport: a Map<string, {type, ...}> with a forEach that matches
 // the browser API shape.
@@ -165,6 +194,8 @@ describe("joinRoom", () => {
     peerState.peerHandlers.clear();
     peerState.connHandlers.clear();
     peerState.dials.length = 0;
+    peerState.destroyCalls = 0;
+    peerState.reconnectCalls = 0;
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "debug").mockImplementation(() => {});
@@ -175,6 +206,7 @@ describe("joinRoom", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -188,7 +220,7 @@ describe("joinRoom", () => {
     await flush();
 
     expect(peerState.peersCreated).toBe(1);
-    peerState.peerHandlers.get("open")!();
+    peerState.emitPeer("open");
 
     expect(peerState.dials).toEqual([
       { peerId: "phase2-ABCDE", options: PEER_CONNECT_OPTIONS },
@@ -197,5 +229,71 @@ describe("joinRoom", () => {
 
     peerState.connHandlers.get("open")!();
     await expect(joined).resolves.toMatchObject({ conn: { open: false } });
+  });
+
+  it.each(["socket-error", "socket-closed", "server-error", "unavailable-id"])(
+    "keeps an established guest alive after signaling %s",
+    async (type) => {
+      const joining = joinRoom("ABCDE");
+      await flush();
+      peerState.emitPeer("open");
+      peerState.connHandlers.get("open")!();
+      const joined = await joining;
+      peerState.emitPeer("error", Object.assign(new Error("signaling interrupted"), { type }));
+      expect(peerState.destroyCalls).toBe(0);
+      joined.destroyPeer();
+    },
+  );
+
+  it("still rejects and destroys a peer when the initial join fails", async () => {
+    const joining = joinRoom("ABCDE");
+    await flush();
+    peerState.emitPeer("error", Object.assign(new Error("not registered"), { type: "socket-error" }));
+    await expect(joining).rejects.toThrow("Failed to connect: not registered");
+    expect(peerState.destroyCalls).toBe(1);
+  });
+
+  it("recovers guest signaling with backoff without redialing the initial game connection", async () => {
+    vi.useFakeTimers();
+    const joining = joinRoom("ABCDE");
+    await vi.advanceTimersByTimeAsync(0);
+    peerState.emitPeer("open");
+    peerState.connHandlers.get("open")!();
+    const joined = await joining;
+    peerState.emitPeer("disconnected");
+    peerState.emitPeer("disconnected");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(peerState.reconnectCalls).toBe(1);
+    peerState.emitPeer("disconnected");
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(peerState.reconnectCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(peerState.reconnectCalls).toBe(2);
+    peerState.emitPeer("open");
+    expect(peerState.dials).toHaveLength(1);
+    peerState.emitPeer("disconnected");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(peerState.reconnectCalls).toBe(3);
+    peerState.emitPeer("disconnected");
+    joined.destroyPeer();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(peerState.reconnectCalls).toBe(3);
+  });
+
+  it("preserves a hosted room through signaling errors and cancels recovery on teardown", async () => {
+    vi.useFakeTimers();
+    const hosting = hostRoom(undefined, { preferredRoomCode: "ABCDE" });
+    await vi.advanceTimersByTimeAsync(0);
+    peerState.emitPeer("open");
+    const host = await hosting;
+    peerState.emitPeer("error", Object.assign(new Error("signaling interrupted"), { type: "socket-error" }));
+    expect(peerState.destroyCalls).toBe(0);
+    peerState.emitPeer("disconnected");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(peerState.reconnectCalls).toBe(1);
+    peerState.emitPeer("disconnected");
+    host.destroy();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(peerState.reconnectCalls).toBe(1);
   });
 });

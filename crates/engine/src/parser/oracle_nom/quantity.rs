@@ -2734,6 +2734,7 @@ fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
@@ -2869,6 +2870,7 @@ pub(crate) fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool 
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
@@ -6138,21 +6140,17 @@ fn creatures_died_this_turn_ref(controller: Option<ControllerRef>, nontoken: boo
     }
 }
 
-/// CR 301.5 + CR 303.4: Parse "<type> [and <type>]* attached to ~" — counts
-/// objects whose `attached_to` field references the source object. Used by
-/// "for each Aura and Equipment attached to ~" (Kellan, the Fae-Blooded) and
-/// any analogous boost that scales with attachments on the source. Also
-/// handles the PLAYER-referent pronouns "them"/"that player" (Curse of
-/// Thirst, Curse of Surveillance), reached both from the "for each" prefix
-/// and — via the same function — from the "the number of" prefix in
-/// `parse_number_of_inner`, so the two surface phrasings of an identical
-/// count share one authority instead of drifting apart.
+/// CR 301.5 + CR 303.4: the type-list head of an attachment noun phrase —
+/// `"<type> [and <type>]*"`. Lifted VERBATIM out of
+/// `parse_for_each_attached_to_source` so the threshold-condition grammar
+/// (`oracle_nom::condition::parse_attached_to_referent_count_ge`) parses the
+/// SAME type list instead of re-deriving one.
 ///
-/// Composes `parse_type_filter_word` for each type term, joined by " and ",
-/// then matches `" attached to <referent>"`. Returns a `QuantityRef::ObjectCount`
-/// over a `TypedFilter` whose type filters are the matched types and whose
-/// only property is the `FilterProp` the referent selects.
-fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRef> {
+/// Returns the RAW list. The single-vs-`AnyOf` collapse is a filter
+/// REPRESENTATION decision, not part of this grammar, and lives in
+/// [`attachment_object_count`]. Keeping them apart is what stops this function
+/// from sometimes returning a parsed list and sometimes a wrapper.
+pub(crate) fn parse_attachment_type_list(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
     let (mut rest, first) = parse_type_filter_word(input)?;
     let mut types = vec![first];
     while let Ok((after_and, _)) = tag::<_, _, OracleError<'_>>(" and ").parse(rest) {
@@ -6160,21 +6158,40 @@ fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRe
         types.push(next);
         rest = after_type;
     }
-    // CR 301.5 + CR 303.4 + CR 613.4c: Three referents share the "<type>
-    // [and <type>]* attached to <referent>" shape. The static parser already
-    // normalizes the source's printed name to `~`, so a literal `~` referent
-    // means "attached to the static's source object" (Kellan, the
-    // Fae-Blooded — `AttachedToSource`). The pronoun/noun phrase
-    // `it` / `that creature` is anaphoric on the affected subject of the
-    // surrounding effect — for
-    // "Enchanted creature gets +N/+M for each Aura and Equipment attached to
-    // it", "it" refers to the enchanted creature, the per-recipient host of
-    // the layer-evaluated boost (`AttachedToRecipient`). Baki's Curse uses the
-    // same recipient-relative grammar for damage: "each creature for each Aura
-    // attached to that creature." These literals are single-token leaves of
-    // the same combinator, so we dispatch with `alt` and select the matching
-    // `FilterProp` from a typed pair.
-    let (rest, prop) = alt((
+    Ok((rest, types))
+}
+
+/// CR 301.5 + CR 303.4 + CR 613.4c + CR 613.1f: SINGLE AUTHORITY for the
+/// `" attached to <referent>"` tail and its referent -> [`FilterProp`] map.
+/// Relocated here out of `parse_for_each_attached_to_source` so the
+/// noun-phrase form and the threshold-condition form share one map rather than
+/// two that can drift.
+///
+/// Two layers are named because this combinator's CONSUMERS land in two of
+/// them: layer 7c (CR 613.4c) for the `"for each ... attached to <referent>"` /
+/// `"the number of ... attached to <referent>"` power/toughness boosts that
+/// have always used it, and layer 6 (CR 613.1f) for
+/// `condition::parse_attached_to_referent_count_ge`, whose consumers are
+/// keyword GRANTS gated on an attachment threshold (Brass Knuckles; Balan,
+/// Wandering Knight). This function itself applies no effect in any layer — it
+/// only names WHICH OBJECT the count is taken against; the two citations record
+/// where its callers' effects land, not where it acts.
+///
+/// CR 301.5 + CR 303.4: Three referents share the `"<type> [and <type>]*
+/// attached to <referent>"` shape. The static parser already normalizes the
+/// source's printed name to `~`, so a literal `~` referent means "attached to
+/// the static's source object" (Kellan, the Fae-Blooded — `AttachedToSource`).
+/// The pronoun/noun phrase `it` / `that creature` is anaphoric on the affected
+/// subject of the surrounding effect — for "Enchanted creature gets +N/+M for
+/// each Aura and Equipment attached to it", "it" refers to the enchanted
+/// creature, the per-recipient host of the layer-evaluated boost
+/// (`AttachedToRecipient`). Baki's Curse uses the same recipient-relative
+/// grammar for damage: "each creature for each Aura attached to that
+/// creature." These literals are single-token leaves of the same combinator,
+/// so we dispatch with `alt` and select the matching `FilterProp` from a typed
+/// pair.
+pub(crate) fn parse_attachment_referent_prop(input: &str) -> OracleResult<'_, FilterProp> {
+    alt((
         value(FilterProp::AttachedToSource, tag(" attached to ~")),
         // CR 301.5a + CR 303.4: source-anaphoric gendered pronoun denotes the
         // ability source (same id as `~`) — Winter Soldier, Captain America
@@ -6209,22 +6226,57 @@ fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRe
             alt((tag(" attached to them"), tag(" attached to that player"))),
         ),
     ))
-    .parse(rest)?;
+    .parse(input)
+}
+
+/// Builds the attachment count from a parsed type list and a referent property.
+/// SINGLE CONSTRUCTOR shared by [`parse_for_each_attached_to_source`] and
+/// `condition::parse_attached_to_referent_count_ge`.
+///
+/// GUARANTEE: the two surface phrasings CANNOT produce divergent `TypedFilter`s
+/// — the single-type vs [`TypeFilter::AnyOf`] collapse, `controller: None`, and
+/// the one-element `properties` vec are decided here once, enforced by
+/// construction rather than by convention. No CR annotation: this is a
+/// representation constructor, not a rule implementation. The rule-bearing
+/// sites are [`parse_attachment_referent_prop`] (which object the count is
+/// taken against) and `game::quantity`'s `QuantityRef::ObjectCount` arm (which
+/// zone, and the count itself).
+pub(crate) fn attachment_object_count(types: Vec<TypeFilter>, prop: FilterProp) -> QuantityRef {
     let type_filters = if types.len() == 1 {
         types
     } else {
         vec![TypeFilter::AnyOf(types)]
     };
-    Ok((
-        rest,
-        QuantityRef::ObjectCount {
-            filter: TargetFilter::Typed(TypedFilter {
-                type_filters,
-                controller: None,
-                properties: vec![prop],
-            }),
-        },
-    ))
+    QuantityRef::ObjectCount {
+        filter: TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller: None,
+            properties: vec![prop],
+        }),
+    }
+}
+
+/// CR 301.5 + CR 303.4: Parse "<type> [and <type>]* attached to <referent>" —
+/// counts objects whose `attached_to` field references the referent. Used by
+/// "for each Aura and Equipment attached to ~" (Kellan, the Fae-Blooded) and
+/// any analogous boost that scales with attachments on the source. Also
+/// handles the PLAYER-referent pronouns "them"/"that player" (Curse of
+/// Thirst, Curse of Surveillance), reached both from the "for each" prefix
+/// and — via the same function — from the "the number of" prefix in
+/// `parse_number_of_inner`, so the two surface phrasings of an identical
+/// count share one authority instead of drifting apart.
+///
+/// Composed from [`parse_attachment_type_list`] +
+/// [`parse_attachment_referent_prop`] + [`attachment_object_count`]. Those three
+/// are `pub(crate)` because the count-threshold STATIC CONDITION form —
+/// "two or more Equipment are attached to it" — must interleave a required
+/// copula between the type list and the referent tail, which a single combined
+/// combinator could not express. Splitting them keeps ONE referent -> filter
+/// map for both surface forms; this function's accepted language is unchanged.
+fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, types) = parse_attachment_type_list(input)?;
+    let (rest, prop) = parse_attachment_referent_prop(rest)?;
+    Ok((rest, attachment_object_count(types, prop)))
 }
 
 fn parse_for_each_attacking_controller_type(input: &str) -> OracleResult<'_, QuantityRef> {

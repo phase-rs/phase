@@ -938,6 +938,17 @@ fn apply_pending_counter_post_action(
                             return false;
                         }
                     }
+                    // CR 305.1 + CR 603.2: a played land whose delivery-tail
+                    // counter-order choice paused this entry parked its
+                    // `LandPlayed` occurrence in `deferred_entry_events`. The
+                    // entry is now complete, so flush it into `events` for the
+                    // priority-time trigger scan (issue #8738).
+                    if to == Zone::Battlefield {
+                        crate::game::engine_replacement::flush_deferred_entry_events_into_priority_scan(
+                            state,
+                            events,
+                        );
+                    }
                     true
                 }
                 super::change_zone::ZoneDeliveryResult::NeedsChoice(_) => false,
@@ -1762,59 +1773,59 @@ pub fn resolve_add_all(
     // authority SKIPS empty sets, and here not skipping is the correct semantics
     // (a chained counter effect refers to the preceding effect's set even when it
     // affected no objects).
-    let target_filter = match crate::game::effects::resolved_object_filter(ability, &target_filter)
-    {
-        TargetFilter::TrackedSet {
-            id: crate::types::identifiers::TrackedSetId(0),
-        } => state
-            .chain_tracked_set_id
-            .map(|id| TargetFilter::TrackedSet { id })
-            .or_else(|| crate::game::targeting::current_combat_damage_source_filter(state))
-            .or_else(|| {
-                state
-                    .tracked_object_sets
-                    .iter()
-                    .max_by_key(|(id, _)| id.0)
-                    .map(|(id, _)| TargetFilter::TrackedSet { id: *id })
-            })
-            .unwrap_or(TargetFilter::TrackedSet {
+    let target_filter =
+        match crate::game::effects::resolved_object_filter(state, ability, &target_filter) {
+            TargetFilter::TrackedSet {
                 id: crate::types::identifiers::TrackedSetId(0),
-            }),
-        TargetFilter::TrackedSetFiltered {
-            id: crate::types::identifiers::TrackedSetId(0),
-            filter,
-            caused_by,
-        } => {
-            if let Some(id) = state.chain_tracked_set_id {
-                TargetFilter::TrackedSetFiltered {
-                    id,
-                    filter,
-                    caused_by,
-                }
-            } else if let Some(source_filter) =
-                crate::game::targeting::current_combat_damage_source_filter(state)
-            {
-                TargetFilter::And {
-                    filters: vec![source_filter, *filter],
-                }
-            } else if let Some((&id, _)) =
-                state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
-            {
-                TargetFilter::TrackedSetFiltered {
-                    id,
-                    filter,
-                    caused_by,
-                }
-            } else {
-                TargetFilter::TrackedSetFiltered {
+            } => state
+                .chain_tracked_set_id
+                .map(|id| TargetFilter::TrackedSet { id })
+                .or_else(|| crate::game::targeting::current_combat_damage_source_filter(state))
+                .or_else(|| {
+                    state
+                        .tracked_object_sets
+                        .iter()
+                        .max_by_key(|(id, _)| id.0)
+                        .map(|(id, _)| TargetFilter::TrackedSet { id: *id })
+                })
+                .unwrap_or(TargetFilter::TrackedSet {
                     id: crate::types::identifiers::TrackedSetId(0),
-                    filter,
-                    caused_by,
+                }),
+            TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(0),
+                filter,
+                caused_by,
+            } => {
+                if let Some(id) = state.chain_tracked_set_id {
+                    TargetFilter::TrackedSetFiltered {
+                        id,
+                        filter,
+                        caused_by,
+                    }
+                } else if let Some(source_filter) =
+                    crate::game::targeting::current_combat_damage_source_filter(state)
+                {
+                    TargetFilter::And {
+                        filters: vec![source_filter, *filter],
+                    }
+                } else if let Some((&id, _)) =
+                    state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
+                {
+                    TargetFilter::TrackedSetFiltered {
+                        id,
+                        filter,
+                        caused_by,
+                    }
+                } else {
+                    TargetFilter::TrackedSetFiltered {
+                        id: crate::types::identifiers::TrackedSetId(0),
+                        filter,
+                        caused_by,
+                    }
                 }
             }
-        }
-        filter => filter,
-    };
+            filter => filter,
+        };
 
     // Collect matching IDs first to avoid borrow conflict during mutation.
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
@@ -2095,7 +2106,7 @@ pub(super) fn nontargeted_counter_population_ids(
     {
         return None;
     }
-    let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
+    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
     Some(
         state
@@ -2592,7 +2603,8 @@ fn resolution_counter_move_destinations(
     target_filter: &TargetFilter,
     source_id: ObjectId,
 ) -> Vec<ObjectId> {
-    let effective_filter = crate::game::effects::resolved_object_filter(ability, target_filter);
+    let effective_filter =
+        crate::game::effects::resolved_object_filter(state, ability, target_filter);
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
     state
         .battlefield_phased_in_ids()

@@ -828,6 +828,9 @@ export function GameProvider({
           void Notification.requestPermission().catch(() => {});
         }
         p2pUnsubscribe = adapter.onEvent((event) => {
+          if (event.type === "playerLatencies") {
+            useMultiplayerStore.setState({ playerLatencies: event.latencies });
+          }
           if (event.type === "playerIdentity") {
             useMultiplayerStore.getState().setActivePlayerId(event.playerId);
             if (event.playerNames) {
@@ -1137,6 +1140,7 @@ export function GameProvider({
         ac.abort();
         if (controller) controller.dispose();
         if (p2pUnsubscribe) p2pUnsubscribe();
+        useMultiplayerStore.setState({ playerLatencies: {} });
         // `adapter.dispose()` is the SOLE tear-down path for the host/guest
         // Peer (see plan §4 "Peer ownership"). It also closes per-guest
         // sessions, clears timers, and disposes the WASM engine.

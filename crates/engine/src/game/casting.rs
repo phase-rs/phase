@@ -2741,6 +2741,7 @@ fn matches_via_origin_scoped_branch(
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
@@ -15777,6 +15778,14 @@ fn can_cast_prepared_now_with_probe(
                 return false;
             }
         }
+        // CR 601.2f + CR 601.2h: a REQUIRED additional cost the parser could not
+        // read is part of the total cost and has no payment procedure, so it
+        // can't be paid and the spell can't be cast. Gate enumeration here so
+        // the action never reaches `legal_actions_full`; the payment step in
+        // `casting_costs.rs` is the backstop for a directly submitted `CastSpell`.
+        if matches!(cost, AbilityCost::Unimplemented { .. }) {
+            return false;
+        }
     }
 
     // CR 118.3 + CR 601.2f-h: A mandatory choice of additional costs is
@@ -19381,23 +19390,69 @@ pub(super) fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> 
     }
 }
 
-/// CR 118.12a: Filter disjunctive activation-cost branches through the same
-/// affordability authority used by `can_activate_ability_now` and
-/// `handle_activate_ability`.
+/// CR 601.2h + CR 602.2b: Filter disjunctive activation-cost branches through the
+/// same affordability authority used by `can_activate_ability_now` and
+/// `handle_activate_ability`, each judged inside its `enclosing` total cost.
 pub(crate) fn payable_one_of_activation_branches(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
+    enclosing: &AbilityCost,
     costs: &[AbilityCost],
     ability_index: usize,
 ) -> Vec<AbilityCost> {
     costs
         .iter()
         .filter(|branch| {
-            can_pay_ability_cost_now(state, player, source_id, branch, Some(ability_index))
+            one_of_branch_payable_in(
+                state,
+                player,
+                source_id,
+                enclosing,
+                branch,
+                Some(ability_index),
+            )
         })
         .cloned()
         .collect()
+}
+
+/// CR 601.2h + CR 602.2b + CR 118.3: a disjunctive cost branch is payable iff the
+/// total activation cost, with that branch substituted for the first unresolved
+/// OneOf, passes the activation payability authority.
+pub(crate) fn one_of_branch_payable_in(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    enclosing: &AbilityCost,
+    branch: &AbilityCost,
+    ability_index: Option<usize>,
+) -> bool {
+    enclosing
+        .resolve_first_one_of(branch)
+        .is_some_and(|resolved| {
+            can_pay_ability_cost_now(state, player, source_id, &resolved, ability_index)
+        })
+}
+
+/// CR 601.2h: branch payability for a pending activation, judged against its
+/// current total cost.
+pub(crate) fn activation_one_of_branch_payable(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    branch: &AbilityCost,
+) -> bool {
+    pending.activation_cost.as_ref().is_some_and(|cost| {
+        one_of_branch_payable_in(
+            state,
+            player,
+            pending.object_id,
+            cost,
+            branch,
+            pending.activation_ability_index,
+        )
+    })
 }
 
 /// CR 601.2b early gate: disjunctive `OneOf` costs route through the activation
@@ -21159,12 +21214,13 @@ pub fn handle_activate_ability(
                 });
             }
 
-            // CR 118.12a: Pre-check for OneOf costs — detour to WaitingFor before any cost payment.
+            // CR 601.2h + CR 602.2b: Pre-check for OneOf costs — detour to WaitingFor before any cost payment.
             if let Some(costs) = find_one_of_cost(cost) {
                 let payable = payable_one_of_activation_branches(
                     state,
                     player,
                     source_id,
+                    cost,
                     costs,
                     ability_index,
                 );

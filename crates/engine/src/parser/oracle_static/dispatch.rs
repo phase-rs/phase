@@ -2591,7 +2591,7 @@ pub(crate) fn parse_static_line_inner(
     // --- "~ can be attached only to {filter}" ---
     // CR 301.5 + CR 303.4 + CR 701.3a: Positive attachment restriction on an
     // Aura/Equipment — the source can only attach to a host matching the parsed
-    // `TargetFilter` (Strata Scythe, Brass Knuckles, Konda's Banner). Enforced in
+    // `TargetFilter` (O-Naginata, Gate Smasher, Konda's Banner). Enforced in
     // game/effects/attach.rs::attachment_illegality.
     if let Some(def) = parse_attach_only_restriction(&tp, &text) {
         return Some(def);

@@ -247,7 +247,7 @@ pub(crate) fn parse_cant_be_countered_subject(tp: &TextPair) -> TargetFilter {
 /// entire remainder must be consumed; a non-empty tail means the filter phrase
 /// was only partially understood, so we bail to avoid a silently-wrong filter.
 ///
-/// Corpus: Strata Scythe ("a creature with power 3 or greater"), Brass Knuckles
+/// Corpus: O-Naginata ("a creature with power 3 or greater"), Gate Smasher
 /// ("a creature with toughness 4 or greater"), Konda's Banner ("a legendary
 /// creature").
 pub(crate) fn parse_attach_only_restriction(
@@ -2474,6 +2474,7 @@ fn usable_disjunctive_permission_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController

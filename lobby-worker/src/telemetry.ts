@@ -46,6 +46,10 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
   engine_panic: { blobs: ["reason", "panic", "game_mode"], doubles: ["fatal", "turn"] },
   stuck_decision: { blobs: ["waiting_for_kind", "game_mode", "phase"], doubles: [] },
   js_error: { blobs: ["name", "message", "top_frame", "source", "route"], doubles: [] },
+  p2p_disconnect: {
+    blobs: ["reason", "connection_state", "ice_state", "visibility", "last_message_type"],
+    doubles: ["pong_age_ms", "receive_age_ms", "pending_sends", "pending_decodes", "buffered_bytes", "channel_open"],
+  },
   // `probe_*` columns are appended (never inserted — AE columns are
   // positional) and populated only on `reason: "loop-abort"` events: the
   // client refetches the failing chunk and reports what it actually got.

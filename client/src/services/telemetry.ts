@@ -39,6 +39,7 @@ const PER_EVENT_CAPS: Record<string, number> = {
   js_error: 10,
   card_report: 10,
   route_view: 50,
+  p2p_disconnect: 10,
 };
 
 /** A queued event: the caller's fields plus the event name and a client
