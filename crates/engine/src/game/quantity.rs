@@ -1673,6 +1673,9 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::DistinctCardTypes {
                 source: CardTypeSetSource::Objects { filter },
             }
+            | QuantityRef::SharedCardTypes {
+                source: CardTypeSetSource::Objects { filter },
+            }
             | QuantityRef::DistinctSubtypes {
                 source: CardTypeSetSource::Objects { filter },
                 ..
@@ -11107,6 +11110,40 @@ mod tests {
                 },
             ),
             1
+        );
+    }
+
+    /// CR 205.2a + CR 611.3a: `SharedCardTypes` over an `Objects { filter }`
+    /// population is recipient-dependent when its filter reads the recipient
+    /// (e.g. `AttachedToRecipient`), mirroring its `DistinctCardTypes` sibling.
+    /// The wildcard `quantity_expr_uses_recipient` classifier must include it so
+    /// the layer evaluator re-resolves per recipient instead of reusing one
+    /// value for every affected object.
+    #[test]
+    fn shared_card_types_over_recipient_filter_uses_recipient() {
+        let recipient_relative = QuantityExpr::Ref {
+            qty: QuantityRef::SharedCardTypes {
+                source: CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![FilterProp::AttachedToRecipient]),
+                    ),
+                },
+            },
+        };
+        assert!(
+            quantity_expr_uses_recipient(&recipient_relative),
+            "SharedCardTypes over Objects{{AttachedToRecipient}} is recipient-dependent"
+        );
+
+        // Paired negative: ExiledBySource is fixed per source, never recipient-relative.
+        let source_fixed = QuantityExpr::Ref {
+            qty: QuantityRef::SharedCardTypes {
+                source: CardTypeSetSource::ExiledBySource,
+            },
+        };
+        assert!(
+            !quantity_expr_uses_recipient(&source_fixed),
+            "SharedCardTypes over ExiledBySource reads no recipient and must not force re-resolution"
         );
     }
 
