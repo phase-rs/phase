@@ -14432,6 +14432,106 @@ mod tests {
         );
     }
 
+    /// CR 113.6b + CR 114.4: RUNTIME regression for the declared-Command zone
+    /// of function, driven through the real `replace_event` pipeline rather
+    /// than the candidate scan alone.
+    ///
+    /// `ReplacementDefinition::active_zones` is a general per-definition axis,
+    /// so a definition naming `Zone::Command` must actually be offered and
+    /// applied from the command zone on a NON-emblem source. CR 114.4's
+    /// object-level "only emblems function" default used to swallow that source
+    /// whole inside `active_replacements`, one step before the declared-zone
+    /// branch could admit it — leaving the Command declaration inert with no
+    /// test able to see it.
+    ///
+    /// The negative half is the point of the pairing: the identical source and
+    /// definition WITHOUT the declaration must still be refused, so this proves
+    /// the opt-in is what admits it and that the emblem default is preserved.
+    #[test]
+    fn declared_command_zone_replacement_applies_through_the_real_pipeline() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
+
+        fn run(declare_command: bool) -> u32 {
+            let host = ObjectId(10);
+            let mut doubler = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .quantity_modification(QuantityModification::DOUBLE)
+                .token_owner_scope(ControllerRef::You);
+            if declare_command {
+                doubler = doubler.active_zones(vec![Zone::Command]);
+            }
+
+            let mut state = GameState::new_two_player(42);
+            let mut obj = GameObject::new(
+                host,
+                CardId(1),
+                PlayerId(0),
+                "Command Doubler".to_string(),
+                Zone::Command,
+            );
+            // The whole point: NOT an emblem. CR 114.4's default refuses this
+            // source, and only the per-definition opt-in lets it through.
+            assert!(!obj.is_emblem);
+            obj.replacement_definitions = vec![doubler].into();
+            state.objects.insert(host, obj);
+            state.command_zone.push_back(host);
+
+            let spec = TokenSpec {
+                characteristics: TokenCharacteristics {
+                    display_name: "Soldier".to_string(),
+                    power: Some(1),
+                    toughness: Some(1),
+                    core_types: vec![crate::types::card_type::CoreType::Creature],
+                    subtypes: vec!["Soldier".to_string()],
+                    supertypes: Vec::new(),
+                    colors: Vec::new(),
+                    keywords: Vec::new(),
+                },
+                script_name: "Soldier".to_string(),
+                static_abilities: Vec::new(),
+                enter_with_counters: Vec::new(),
+                tapped: false,
+                enters_attacking: false,
+                sacrifice_at: None,
+                source_id: ObjectId(0),
+                controller: PlayerId(0),
+                attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
+            };
+            let proposed = ProposedEvent::CreateToken {
+                owner: PlayerId(0),
+                spec: Box::new(spec),
+                copy: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                count: 3,
+                applied: HashSet::new(),
+            };
+
+            let mut events = Vec::new();
+            let result = replace_event(&mut state, proposed, &mut events);
+            let ReplacementResult::Execute(primary) = result else {
+                panic!("expected Execute, got {result:?}");
+            };
+            let ProposedEvent::CreateToken { count, .. } = primary else {
+                panic!("expected CreateToken");
+            };
+            count
+        }
+
+        assert_eq!(
+            run(true),
+            6,
+            "CR 113.6b: a replacement declaring Zone::Command must be offered and \
+             applied from the command zone — three tokens doubled to six"
+        );
+        assert_eq!(
+            run(false),
+            3,
+            "CR 114.4: the same definition without the declaration must NOT \
+             function from the command zone on a non-emblem source — the count \
+             is untouched"
+        );
+    }
+
     /// CR 702.52a + CR 113.6b: "Dredge is a static ability that functions only
     /// while the card with dredge is in a player's graveyard." A dredge creature
     /// on the BATTLEFIELD must not offer dredge on its controller's draw — the
