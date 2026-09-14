@@ -370,6 +370,7 @@ mod griffin_guide_ceased_token_co_departure;
 mod griffin_rider_conditional_self_buff;
 mod grimdancer_two_counter_entry_choice;
 mod grubs_command_tracked_set_filter;
+mod guardian_project_same_name_intervening_if;
 mod gwaihir_cda_off_zone_sibling_static;
 mod gwaihir_vigilance_zone_gate;
 mod hag_noxious_nightmares_menace_grant;

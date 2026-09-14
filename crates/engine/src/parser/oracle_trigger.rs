@@ -1439,6 +1439,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     card_name,
                     Some(&trigger_subject),
                     trigger_head_dies_zone_change(&cond_lower),
+                    trigger_head_enters_battlefield(&cond_lower),
                 );
                 (without_if, cond, None)
             }
@@ -6142,7 +6143,10 @@ fn parse_cast_and_condition_intervening_if(input: &str) -> OracleResult<'_, Trig
 /// `parse_trigger_line` with a full dies-head trigger line instead.
 #[cfg(test)]
 fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
-    extract_if_condition_with_card_name(text, "", None, None)
+    // No proven head shape: neither the dies zone-change pair nor an ETB head, so
+    // both shape-gated arms are unreachable here by construction. Exercise those
+    // through `parse_trigger_line` with a full trigger line instead.
+    extract_if_condition_with_card_name(text, "", None, None, false)
 }
 
 /// Extract an intervening-if condition from effect text.
@@ -6158,6 +6162,7 @@ fn extract_if_condition_with_card_name(
     card_name: &str,
     dying_subject: Option<&TargetFilter>,
     trigger_zone_change: Option<(Zone, Zone)>,
+    head_enters_battlefield: bool,
 ) -> (String, Option<TriggerCondition>) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
@@ -6860,6 +6865,18 @@ fn extract_if_condition_with_card_name(
         );
     }
 
+    // CR 603.4 + CR 603.6a + CR 201.2a: entering-object same-name intervening-if
+    // ("if it doesn't have the same name as ...", Guardian Project). Gated on a
+    // POSITIVELY proven enters-the-battlefield head and on leading position, so a
+    // phase / attacks / spell-cast head carrying the same clause is declined and
+    // left honestly swallowed rather than hoisted onto a condition that could
+    // never fire.
+    if head_enters_battlefield {
+        if let Some(result) = try_extract_entering_object_name_comparison(&lower, text) {
+            return result;
+        }
+    }
+
     if let Some(result) = try_extract_zone_change_object_filter_condition(
         &lower,
         text,
@@ -7123,6 +7140,103 @@ fn parse_dealt_damage_to_it_intervening_if(input: &str) -> OracleResult<'_, Trig
     };
     let (rest, _) = tag(" dealt damage to it this turn").parse(rest)?;
     Ok((rest, condition))
+}
+
+/// CR 603.4 + CR 603.6a + CR 201.2a: entering-object same-name intervening-if —
+/// "if it doesn't have the same name as &lt;reference&gt;" (Guardian Project).
+///
+/// CR 603.6a makes the entering permanent the subject of an enters-the-battlefield
+/// ability, so the anaphor "it" is the zone-change event object, NOT the permanent
+/// that owns the ability — hence `ZoneChangeObjectMatchesFilter` rather than
+/// `SourceMatchesFilter`. CR 201.2a is the authorizing rule for the name-equality
+/// test itself ("two or more objects have the same name if they have at least one
+/// name in common"), and its negation is what the printed "doesn't have the same
+/// name as" asks.
+///
+/// The relation and reference are parsed by the shared single authority
+/// `oracle_effect::parse_search_name_reference_suffix`, which already yields
+/// `FilterProp::SharesQuality { quality: Name, reference, relation }` and applies
+/// the CR 109.2 / CR 109.2a zone normalization per reference leg — so "another
+/// creature you control or a creature card in your graveyard" binds the
+/// battlefield default to the zone-less leg only.
+///
+/// "another" in that reference is relative to the ENTERING creature, not to the
+/// ability source (Guardian Project is a non-creature enchantment, so a
+/// source-relative exclusion would be a no-op and the entrant would always match
+/// itself under CR 201.2a). The parsed `FilterProp::Another` is therefore rewritten
+/// through the existing single authority `substitute_another_in_filter`, which is
+/// the same `Another` → `OtherThanTriggerObject` rewrite the intervening-if bridge
+/// already applies for Valakut-class count predicates.
+///
+/// Leading position is required (CR 603.4: the intervening "if" immediately follows
+/// the trigger event clause), mirroring the subtype arm's own leading-position gate.
+fn try_extract_entering_object_name_comparison(
+    lower: &str,
+    text: &str,
+) -> Option<(String, Option<TriggerCondition>)> {
+    let (before, condition, rest) = scan_preceded(lower, parse_entering_object_name_comparison)?;
+    if !before.trim_start().is_empty() {
+        return None;
+    }
+    let next_char_is_boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    if !next_char_is_boundary {
+        return None;
+    }
+    let consumed = lower.len() - before.len() - rest.len();
+    Some((
+        strip_condition_clause(text, before.len(), consumed),
+        Some(condition),
+    ))
+}
+
+/// CR 603.4 + CR 603.6a + CR 201.2a: the combinator behind
+/// `try_extract_entering_object_name_comparison`. See that function's doc.
+fn parse_entering_object_name_comparison(input: &str) -> OracleResult<'_, TriggerCondition> {
+    let (rest, _) = tag("if it ").parse(input)?;
+    let (rest, prop) = crate::parser::oracle_effect::parse_search_name_reference_suffix(rest)?;
+    let FilterProp::SharesQuality {
+        quality,
+        reference,
+        relation,
+    } = prop
+    else {
+        return Err(oracle_err(input));
+    };
+    // CR 201.2a: the comparison is only meaningful against a reference population;
+    // a bare "shares a name" with no referent has no subject to compare against here.
+    let Some(reference) = reference else {
+        return Err(oracle_err(input));
+    };
+    let reference = Box::new(substitute_another_in_filter(&reference));
+    Ok((
+        rest,
+        TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin: None,
+            destination: Zone::Battlefield,
+            // CR 201.2a: name sharing is type-INDEPENDENT ("two or more objects
+            // have the same name if they have at least one name in common"), so
+            // the entering object carries no type constraint of its own here.
+            // The trigger's own subject filter (parsed from the head) is what
+            // restricts WHICH entrants fire the ability; constraining the type a
+            // second time inside the condition would make this reusable grammar
+            // fail closed for a noncreature ETB head ("whenever a permanent
+            // enters, if it doesn't have the same name as ..."). Type-open
+            // mirrors the sibling event-object condition builders
+            // (`parse_gendered_dies_event_object_condition`,
+            // `build_event_object_subtype_condition`), which likewise derive any
+            // type constraint from the parsed text rather than hardcoding one.
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::SharesQuality {
+                    quality,
+                    reference: Some(reference),
+                    relation,
+                },
+            ])),
+        },
+    ))
 }
 
 fn try_extract_zone_change_object_filter_condition(
@@ -7583,6 +7697,53 @@ fn parse_dying_pt_comparison_tail(input: &str) -> OracleResult<'_, (Comparator, 
 /// (see `dies_lookback_condition`) must not activate. Strictly requiring an
 /// EMPTY tail after the verb keeps unsplit compound or qualified heads
 /// ("... dies during your turn") conservatively unproven.
+/// CR 603.6a + CR 700.4: Prove the trigger head is an enters-the-battlefield
+/// shape — its final verb phrase is "enters"/"enter", optionally followed by the
+/// spelled-out destination "the battlefield", with nothing after it.
+///
+/// Deliberately a SEPARATE scan from `trigger_head_dies_zone_change` rather than
+/// another arm of one `alt` inside it. `scan_preceded` returns at the FIRST word
+/// position where its combinator succeeds, so folding both verb families into a
+/// single scan would make a disjunctive head such as "when this creature enters
+/// or dies" match `enters` early, leave the non-empty tail " or dies", fail the
+/// empty-tail gate, and thereby LOSE the `Dies` proof that head has today
+/// (measured: 46 card faces / 12 distinct heads, including the Haunt cycle,
+/// Ichor Wellspring, Daxos, Acornelia and Pelt Collector). Two independent scans
+/// keep the dies verdict bit-identical and let a disjunctive head be declined
+/// here — which is correct, since such a head does not prove the triggering
+/// event was an ETB.
+///
+/// Requiring an EMPTY tail (after the optional destination phrase) keeps qualified
+/// heads ("... enters from your hand", Thousand-Faced Shadow) conservatively
+/// unproven, exactly as the dies prover does.
+fn trigger_head_enters_battlefield(condition_lower: &str) -> bool {
+    scan_preceded(condition_lower, parse_enters_verb_phrase)
+        .is_some_and(|(_before, (), rest)| rest.trim().is_empty())
+}
+
+/// CR 603.6a: the enters verb phrase, boundary-terminated so "enters" does not
+/// match inside a longer word. Mirrors `parse_dies_verb_phrase`.
+///
+/// The destination phrase is an OPTIONAL suffix of the verb, not a separate
+/// grammar: CR 603.6a names one event, and the corpus spells it both ways —
+/// current templating prints the bare "enters", while pre-2024 printings (and
+/// every card-data row that has not been re-Oracled) print "enters the
+/// battlefield". `parse_event_word` terminates on a `peek` boundary and so
+/// leaves " the battlefield" unconsumed; without this arm `trigger_head_enters_battlefield`
+/// sees a non-empty tail and declines the older spelling, making every grammar
+/// gated on that proof unreachable for it. Composed as verb × optional
+/// destination rather than enumerated as two whole-phrase tags.
+fn parse_enters_verb_phrase(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        pair(
+            alt((parse_event_word("enters"), parse_event_word("enter"))),
+            opt(preceded(space1, parse_event_word("the battlefield"))),
+        ),
+    )
+    .parse(input)
+}
+
 fn trigger_head_dies_zone_change(condition_lower: &str) -> Option<(Zone, Zone)> {
     let (_before, (), rest) = scan_preceded(condition_lower, parse_dies_verb_phrase)?;
     rest.trim()
