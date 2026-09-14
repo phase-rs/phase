@@ -131,6 +131,14 @@ pub struct PendingCoinFlip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lose_effect: Option<Box<AbilityDefinition>>,
     pub kind: PendingCoinFlipKind,
+    /// CR 608.2h: the creating ability's chain-root target list, carried
+    /// across the Krark's Thumb keep-choice suspension so a counter-gated
+    /// "that many" nested in `win_effect`/`lose_effect` still resolves
+    /// against the live chain-root target once the flip's branch runs.
+    /// `#[serde(default)]` for in-flight states serialized before this field
+    /// existed.
+    #[serde(default)]
+    pub chain_root_targets: Vec<TargetRef>,
 }
 
 /// CR 706.6 + CR 614.1a: Full resolution context for a die-roll resolver paused
@@ -217,6 +225,14 @@ pub struct PendingDieRoll {
     /// forced remainder so the resume path drops both halves together.
     #[serde(default)]
     pub forced_ignored: Vec<usize>,
+    /// CR 608.2h: the creating ability's chain-root target list, carried
+    /// across the CR 706.6 ignore choice AND any mid-loop results-branch
+    /// suspension so a counter-gated "that many" nested in a results-table
+    /// branch still resolves against the live chain-root target once that
+    /// branch actually runs. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub chain_root_targets: Vec<TargetRef>,
 }
 
 /// CR 706.1 + CR 616.1: A die-roll INSTRUCTION parked across a replacement
@@ -263,6 +279,12 @@ pub struct PendingDieRollInstruction {
     /// Which caller owns the completion of this roll (see the type docs).
     #[serde(default)]
     pub continuation: DieRollContinuation,
+    /// CR 608.2h: the creating ability's chain-root target list, carried
+    /// across the CR 616.1 replacement-ordering choice so it survives into
+    /// the `PendingDieRoll` this instruction produces. `#[serde(default)]`
+    /// for in-flight states serialized before this field existed.
+    #[serde(default)]
+    pub chain_root_targets: Vec<TargetRef>,
 }
 
 /// CR 706.1: Which caller finishes a parked die-roll instruction once a CR 616.1
@@ -6159,6 +6181,7 @@ mod tests {
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Single,
+            chain_root_targets: Vec::new(),
         });
         let mut stack = ResolutionStack::default();
         stack.push_inner(frame);
@@ -6219,6 +6242,7 @@ mod tests {
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Single,
+            chain_root_targets: Vec::new(),
         }));
         assert_eq!(
             optional_effect.validate(&WaitingFor::CoinFlipKeepChoice {
@@ -6529,6 +6553,7 @@ mod tests {
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Single,
+            chain_root_targets: Vec::new(),
         };
 
         let mut v1 = serde_json::to_value(&state).expect("legacy state serializes");
@@ -6939,6 +6964,7 @@ mod tests {
                 win_effect: None,
                 lose_effect: None,
                 kind: PendingCoinFlipKind::Single,
+                chain_root_targets: Vec::new(),
             },
         );
         apply_as_current(
@@ -7360,6 +7386,7 @@ mod tests {
                 remaining_voters: Vec::new(),
                 source_id: ObjectId(132),
                 controller: PlayerId(0),
+                chain_root_targets: Vec::new(),
             },
         );
         crate::game::effects::vote::drain_active_vote_ballot(&mut vote, &mut Vec::new());
@@ -8273,6 +8300,7 @@ mod tests {
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Single,
+            chain_root_targets: Vec::new(),
         };
         let mut multiple_direct = serde_json::to_value(multiple_direct).expect("v1 serializes");
         multiple_direct["pending_coin_flip"] =
@@ -8443,6 +8471,7 @@ mod tests {
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Single,
+            chain_root_targets: Vec::new(),
         }));
         assert!(
             serde_json::from_value::<ResolutionStateWire>(v2_fixture_with_frames(

@@ -5408,6 +5408,13 @@ pub struct PendingVoteBallotIteration {
     pub source_id: ObjectId,
     /// The controller of the vote spell/ability.
     pub controller: PlayerId,
+    /// CR 608.2h: the creating ability's chain-root target list, carried
+    /// across the per-ballot interactive suspension so a counter-gated "that
+    /// many" nested in `ability_template` still resolves against the live
+    /// chain-root target once the remaining ballots run. `#[serde(default)]`
+    /// for in-flight states serialized before this field existed.
+    #[serde(default)]
+    pub chain_root_targets: Vec<super::ability::TargetRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -14250,6 +14257,13 @@ pub enum WaitingFor {
         /// unchanged.
         #[serde(default)]
         visibility: super::ability::VoteVisibility,
+        /// CR 608.2h: the creating ability's chain-root target list, carried
+        /// across the whole interactive voting session so `resolve_tally`
+        /// can propagate it into each per-choice/outcome sub-effect once the
+        /// last ballot is cast. `#[serde(default)]` for in-flight states
+        /// serialized before this field existed.
+        #[serde(default)]
+        chain_root_targets: Vec<super::ability::TargetRef>,
     },
     /// CR 608.2d + CR 700.3: "An opponent separates" — in multiplayer the
     /// controller chooses which opponent will perform the partition. With a

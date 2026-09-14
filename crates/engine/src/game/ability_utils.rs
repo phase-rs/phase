@@ -74,7 +74,27 @@ pub fn build_resolved_from_def_with_chain_root(
     controller: PlayerId,
     chain_root_targets: Vec<TargetRef>,
 ) -> ResolvedAbility {
-    let mut resolved = build_resolved_from_def(def, source_id, controller);
+    build_resolved_from_def_with_targets_and_chain_root(
+        def,
+        source_id,
+        controller,
+        Vec::new(),
+        chain_root_targets,
+    )
+}
+
+/// `build_resolved_from_def_with_chain_root`, but also supplying the already
+/// selected root targets — the general case for a carrier whose payload has
+/// its own known recipient (`flip_coin`/`roll_die`'s branches, which reuse
+/// the CREATING ability's `targets`) as well as an inherited chain-root list.
+pub fn build_resolved_from_def_with_targets_and_chain_root(
+    def: &AbilityDefinition,
+    source_id: ObjectId,
+    controller: PlayerId,
+    targets: Vec<TargetRef>,
+    chain_root_targets: Vec<TargetRef>,
+) -> ResolvedAbility {
+    let mut resolved = build_resolved_from_def_with_targets(def, source_id, controller, targets);
     resolved.set_chain_root_targets_recursive(chain_root_targets);
     resolved
 }

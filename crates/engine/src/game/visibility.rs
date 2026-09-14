@@ -1449,7 +1449,8 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         ref candidate_objects,
         ref outcome_template,
         visibility,
-        ..
+        ref chain_root_targets,
+        ballots: _,
     } = state.waiting_for
     {
         if visibility == crate::types::ability::VoteVisibility::Secret {
@@ -1469,6 +1470,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 candidate_objects: candidate_objects.clone(),
                 outcome_template: outcome_template.clone(),
                 visibility,
+                chain_root_targets: chain_root_targets.clone(),
             };
         }
     }
