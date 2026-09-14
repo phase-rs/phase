@@ -17336,14 +17336,27 @@ fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
 /// Asked at the clause seam, which cannot see the body's final parent — so this is only
 /// the CANDIDACY half. The pairing verdict (which owner head, and whether it encodes this
 /// guard's reading) belongs to `parser::oracle::resolve_unlowered_guards`, on the
-/// assembled tree. A candidate is DEFERRED with an `UnloweredGuard` mark; everything else
-/// is gapped here.
+/// assembled tree.
+///
+/// **The reading is part of candidacy, not only of the pairing.** `graveyard_destination_rider`
+/// is the O1 recognizer, and `guard_owner`'s O1a arm already requires `GuardReading::Event`
+/// (CR 614.1a: an "instead" clause replaces an event that *would* happen). Without that
+/// conjunct here the seam consults a **spell-stack graveyard-replacement** classifier on
+/// bodies that have no spell and no graveyard — Life at Stake's `"exile that creature"`
+/// matches on `Exile` + `ParentTarget` alone — and mints a mark no owner arm can settle.
+/// Its own doc names its domain ("a sequential rider sub-ability on `CastFromZone`"), and
+/// its four other call sites all hand it such a head's sub-ability. The conjunct makes
+/// candidacy agree with the arm it feeds.
+///
+/// O2 needs no conjunct: `prevented_this_way_rider_source_gate` recognizes a CR 608.2c
+/// back-reference, and back-references read `State` by construction, so it is self-scoping.
 ///
 /// Both recognizers are the pre-existing authorities: O1's is the runtime rider
 /// classifier the resolver itself consumes, and O2's is the nom gate assembly uses for
 /// its own `PreventDamage` fold.
-fn is_ownership_candidate(effect: &Effect, clause_text: &str) -> bool {
-    crate::game::effects::cast_from_zone::graveyard_destination_rider(effect).is_some()
+fn is_ownership_candidate(reading: GuardReading, effect: &Effect, clause_text: &str) -> bool {
+    (reading == GuardReading::Event
+        && crate::game::effects::cast_from_zone::graveyard_destination_rider(effect).is_some())
         || super::oracle_replacement::prevented_this_way_rider_source_gate(clause_text).is_some()
 }
 
@@ -17448,24 +17461,42 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
                 // CR 608.2c: thread a lowered guard into the clause's condition field.
                 ConditionalGuard::Lowered(cond) => result.condition = Some(cond),
                 ConditionalGuard::Unlowered(reading) => {
-                    // CR 614.1a + CR 614.6 (Event) / CR 608.2c (State): a guard the single
-                    // condition authority refused gates its body, and emitting the body
-                    // unguarded runs an instruction the printed text does not.
-                    //
-                    // A body a typed owner could consume is DEFERRED rather than gapped
+                    // A body a typed owner could consume is DEFERRED rather than decided
                     // here: whether an owner carries the guard is a property of the
                     // assembled tree, and this seam cannot see the body's final parent.
-                    if is_ownership_candidate(&result.effect, &clause_text) {
+                    if is_ownership_candidate(reading, &result.effect, &clause_text) {
                         result.unlowered_guard = Some(UnloweredGuard {
                             reading,
                             clause_text,
                         });
-                    } else {
+                    } else if reading == GuardReading::Event {
+                        // CR 614.1: a replacement effect watches for an event that WOULD
+                        // happen and replaces it; CR 614.1a: such clauses are the "instead"
+                        // family; CR 614.6: a replaced event never happens. So emitting the
+                        // body as an immediate one-shot is neither the replacement the card
+                        // prints nor an honest record of the gap — it is a third behaviour
+                        // the printed text does not license.
+                        //
+                        // Gapping HERE rather than at the resolver is required, not
+                        // incidental. The `has_unimplemented`-keyed routing gates trial-parse
+                        // a line STANDALONE, so a mark is invisible to them where a gap is
+                        // not, and the charter's placement invariant exempts exactly this
+                        // population ("a guard gap over a body that was never an ownership
+                        // candidate is not constrained by this invariant"). Phyrexian
+                        // Vindicator is the measured witness: deferring this clause instead
+                        // re-routes its line and loses its `replacement_structure`.
                         return parsed_clause(gap_diagnosis::clause_gap_unimplemented_as(
                             reading.gap_kind(),
                             &clause_text,
                         ));
                     }
+                    // CR 608.2c: a STATE guard with no owner family falls through to the
+                    // behaviour this parser has always had — the guard is dropped, the body
+                    // is emitted, and the loss is reported by `swallow_check`'s Condition_If
+                    // detector, the channel six in-tree tests assert by name. A gap here
+                    // would suppress that detector for the whole unit
+                    // (`swallow_check.rs`'s `any_ability_has_unimplemented` early-`continue`),
+                    // trading a counted, visible loss for an uncounted one.
                 }
             }
             result

@@ -35,11 +35,8 @@ use std::ops::ControlFlow;
 // Fixtures. Every `real` fixture is the card's verbatim Oracle text.
 // ---------------------------------------------------------------------------
 
-/// V1 — Ajani's Aid, verbatim.
-const AJANIS_AID: &str = "When this enchantment enters, you may search your library and/or \
-graveyard for a card named Ajani, Valiant Protector, reveal it, and put it into your hand. If \
-you search your library this way, shuffle.\nSacrifice this enchantment: Prevent all combat \
-damage a creature of your choice would deal this turn.";
+// V1 (Ajani's Aid) is WITHDRAWN — see the "V1 — WITHDRAWN" block below, where the row
+// stood. Its fixture const is deleted with it.
 
 /// V3 — Torrential Gearhulk, verbatim.
 const TORRENTIAL_GEARHULK: &str = "Flash\nWhen this creature enters, you may cast target instant \
@@ -80,34 +77,11 @@ control this turn by sources you don't control. If damage from a creature source
 this way, Comeuppance deals that much damage to that creature. If damage from a noncreature \
 source is prevented this way, Comeuppance deals that much damage to the source's controller.";
 
-/// V10 / V10c — **declared synthetic**, shared verbatim with the venue-C companion
-/// `parser::oracle_effect::tests` row V10c.
-///
-/// The rider sentence is Acolyte's Reward's and Divine Deflection's printed rider
-/// exactly as the clause seam receives it, `~`-normalized. Only the hostile context —
-/// `"Draw a card"` standing in for the prevention that would normally precede it — is
-/// composed, and that composition *is* the row: it is the one arrangement the corpus
-/// never prints, an O2-shaped follow-up with no `PreventDamage` ancestor above it.
-///
-/// No terminating punctuation: `push_clause_chunk` consumes a trailing `.`/`,` before
-/// the seam sees the text, and this row's `description` comparand is the chunk.
-const O2_RIDER_WITH_NO_SHIELD: &str =
-    "Draw a card. If damage is prevented this way, ~ deals that much damage to any target";
+// V10's fixture const is deleted with the row (see the "V10 — WITHDRAWN" block below).
+// The venue-C companion V10c carries its own copy of the same synthetic text.
 
-/// V11 / V11c — **declared synthetic**, shared verbatim with the venue-C companion
-/// `parser::oracle_effect::tests` row V11c. Three real donors, one composed pairing:
-///
-/// - head clause — Torrential Gearhulk's printed sentence, minus its trigger prefix;
-/// - guard — Clockwork Servant's printed guard, verbatim, which carries no "would" and
-///   so reads STATE (CR 608.2c);
-/// - rider body — Torrential Gearhulk's printed `"exile it instead"`, verbatim.
-///
-/// Only the pairing is composed: no corpus text pairs a STATE guard with an O1a rider
-/// shape, which is exactly why this row exists — it forward-guards the `Event` conjunct
-/// on the O1a arm against a later widening.
-const O1A_SHAPE_UNDER_A_STATE_GUARD: &str = "You may cast target instant card from your \
-graveyard without paying its mana cost. If at least three mana of the same color was spent to \
-cast it, exile it instead";
+// V11's fixture const is deleted with the row (see the "V11 — WITHDRAWN" block below).
+// The claim's surviving venue-S row carries its own copy of the guard sentence.
 
 /// V12 — Hallowed Moonlight, verbatim.
 const HALLOWED_MOONLIGHT: &str =
@@ -195,8 +169,10 @@ fn has_exile_parent_target_rider(parsed: &ParsedAbilities) -> bool {
 /// `card-data.json` — so it cannot be satisfied by a walk that simply fails to look.
 ///
 /// Deliberately NOT applied to the venue-C rows: there the resolver has not run yet and
-/// an ownership candidate is *supposed* to carry a live mark, which is what V10c and
-/// V11c assert.
+/// an ownership candidate is *supposed* to carry a live mark, which is what V10c asserts
+/// (`parser::oracle_effect::tests::o2_rider_clause_is_marked_by_the_seam_even_with_no_shield`).
+/// Its former sibling V11c is withdrawn — under the reading-aware candidacy rule a STATE
+/// guard over an O1a shape is no longer a candidate at all, so there is no mark to assert.
 fn assert_no_live_guard_mark(parsed: &ParsedAbilities, row: &str) {
     fn holds(value: &serde_json::Value) -> bool {
         match value {
@@ -229,50 +205,27 @@ fn chain(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
 }
 
 // ---------------------------------------------------------------------------
-// V1 — a STATE guard over a non-candidate body gaps, and the body is emitted nowhere.
+// V1 — WITHDRAWN. Wrong on the card, and redundant with V13.
+//
+// V1 asserted that Ajani's Aid's `"If you search your library this way, shuffle."` gaps
+// with its body emitted nowhere. Both halves are wrong:
+//
+//   * The clause is a STATE guard (CR 608.2c — no "would"), and under the amended rule
+//     only the EVENT reading gaps, so it falls through to base behaviour by design.
+//   * The guard is VACUOUS, not merely unowned: its truth condition is entailed by the
+//     effect it gates. `Effect::SearchLibrary`'s own doc says the trailing sentence "is
+//     the effect's own Shuffle sub-ability and is always reached in the multi-zone case
+//     because Library is in the set", and `swallow_check`'s escape for it says "the
+//     engine's SearchLibrary effect auto-shuffles, so the 'if' gates nothing". Gapping it
+//     would DELETE a correctly-represented instruction, and two pre-existing rows assert
+//     that `Shuffle` on this very sentence:
+//     `oracle_effect::tests::hunger_tide_rises_chapter_iv_sacrifice_search_put_chain` and
+//     `oracle_effect::tests::claim_jumper_parses_repeat_once_while_opponent_lands`.
+//
+// The claim V1 was meant to carry — a non-candidate guard gaps at the seam with no body
+// emitted — is true of the EVENT reading, and V13 already carries exactly that claim at
+// venue C on a measured corpus guard body.
 // ---------------------------------------------------------------------------
-
-/// V1. Ajani's Aid's `"If you search your library this way, shuffle."` carries no
-/// "would", so it reads STATE (CR 608.2c), and `shuffle` is not an ownership candidate.
-/// At `PHASE_BASE_SHA` the guard was dropped and `Effect::Shuffle` was emitted
-/// unconditionally; that silent widening is what this row removes.
-#[test]
-fn v1_state_guard_over_a_non_candidate_body_gaps_and_emits_no_body() {
-    let parsed = parse(AJANIS_AID, "Ajani's Aid", &[], &["Enchantment"]);
-
-    // Reach-guard: the chain assembled and its first clause is untouched.
-    let execute = parsed.triggers[0]
-        .execute
-        .as_deref()
-        .expect("the ETB trigger must carry a payload");
-    assert!(
-        matches!(*execute.effect, Effect::SearchLibrary { .. }),
-        "V1 reach-guard: the search clause must still head the chain, got {:?}",
-        execute.effect
-    );
-
-    let gaps = gaps(&parsed);
-    assert_eq!(
-        gaps.len(),
-        1,
-        "V1: expected exactly one gap over the guarded clause, got {gaps:?}"
-    );
-    assert_eq!(gaps[0].0, "unparsed_condition");
-    assert_eq!(
-        gaps[0].1.as_deref(),
-        Some("If you search your library this way, shuffle"),
-        "V1: the gap is recorded over the whole clause, with the sentence's terminating \
-         period already consumed by the chunk loop"
-    );
-    assert!(
-        !all_effects(&parsed)
-            .iter()
-            .any(|effect| matches!(effect, Effect::Shuffle { .. })),
-        "V1: the guarded body must be emitted nowhere — an unconditional Shuffle is the \
-         pre-phase behaviour this row removes"
-    );
-    assert_no_live_guard_mark(&parsed, "V1");
-}
 
 // ---------------------------------------------------------------------------
 // V3 / V4 / V5 — O1a.
@@ -568,94 +521,44 @@ fn v9_o2_is_an_ancestor_test_so_the_second_rider_survives() {
     assert_no_live_guard_mark(&parsed, "V9");
 }
 
-/// V10 — the O2 hostile. The clause text passes the "prevented this way" source gate,
-/// so the seam **marks** it as an ownership candidate; only the resolver's ancestor
-/// test can then find no `PreventDamage` above it and gap it. An O2 arm keyed on the
-/// text gate alone keeps it.
-///
-/// Venue P is load-bearing here: `parse_effect_chain` never runs the ancestor test.
-/// Its venue-C companion (V10c, in `parser/oracle_effect/tests.rs`) proves the mark was
-/// minted, which is this row's reach evidence.
-#[test]
-fn v10_o2_rider_with_no_prevention_ancestor_gaps() {
-    let parsed = parse(
-        O2_RIDER_WITH_NO_SHIELD,
-        "Hostile Fixture",
-        &[],
-        &["Instant"],
-    );
-
-    // Reach-guard: the preceding clause lowered, so the chain is real.
-    assert!(
-        all_effects(&parsed)
-            .iter()
-            .any(|effect| matches!(effect, Effect::Draw { .. })),
-        "V10 reach-guard: the preceding clause must be present and lowered"
-    );
-    assert!(
-        !all_effects(&parsed)
-            .iter()
-            .any(|effect| matches!(effect, Effect::PreventDamage { .. })),
-        "V10: the hostile condition is that no shield exists anywhere in the tree"
-    );
-    assert!(
-        gap_names(&parsed).contains(&"unparsed_condition".to_string()),
-        "V10: with no PreventDamage ancestor the follow-up must gap, got {:?}",
-        gaps(&parsed)
-    );
-    assert!(
-        !all_effects(&parsed)
-            .iter()
-            .any(|effect| matches!(effect, Effect::DealDamage { .. })),
-        "V10: the follow-up body must be emitted nowhere"
-    );
-    assert_no_live_guard_mark(&parsed, "V10");
-}
+// V10 — WITHDRAWN. The gap it asserts fires on a card whose shield merely failed to parse.
+//
+// V10 asserted that an O2 back-reference rider with no `PreventDamage` ancestor gaps. An
+// O2 mark is always the STATE reading — `prevented_this_way_rider_source_gate` recognizes
+// a CR 608.2c back-reference, and back-references read STATE by construction — so under
+// the amended rule the resolver always clears it and this row's gap never fires.
+//
+// That is the right outcome, and Ria Ivor is the measured witness. Its rider is
+// `"If damage is prevented this way, create …"`, and its prevention sentence does NOT
+// parse at base: `oracle_replacement`'s own snapshot row
+// `ria_ivor_trigger_body_keeps_fall_through_shapes` documents that "the prevention
+// sentence stays an honest `Unimplemented` gap and the rider stays a `SequentialSibling`".
+// So the ancestor test finds no shield, and a V10-shaped rule gaps the `Token` body that
+// base emits correctly — deleting a correct instruction to punish an UNRELATED parse gap.
+// A CR 615.5 gap rule would first have to distinguish "no shield printed" from "the
+// printed shield did not parse"; no such rule exists here, so the row goes rather than the
+// behaviour.
+//
+// Its venue-C companion V10c (in `parser/oracle_effect/tests.rs`) STAYS: it asserts only
+// that the seam mints the mark, which is unchanged.
 
 // ---------------------------------------------------------------------------
-// V11 — the O1a `Event` conjunct.
+// V11 — WITHDRAWN at this venue. The claim moves to venue S, which has no absorber.
+//
+// V11 asserted that an O1a rider SHAPE under a STATE guard gaps here. It never reached
+// that assertion: it fails on its own reach-guard — "the CastFromZone head must be present
+// in the returned tree" — under the shipped candidate and under the amended rule alike.
+// The head is not in the assembled tree for this text, so venue P cannot host the claim.
+//
+// Venue C cannot host it either: on a chain the clause is absorbed by the pre-existing
+// `instead_condition` last resort in `parser::oracle_effect` before the seam sees it.
+// (That is how the original venue-C twin V11c failed — "the seam must DEFER this clause
+// rather than decide it".)
+//
+// The claim itself is retained, at venue S, by
+// `parser::oracle_effect::tests::an_o1a_rider_shape_under_a_state_guard_is_not_an_ownership_candidate`
+// — the only venue where the entry point IS the producer and no absorber sits between.
 // ---------------------------------------------------------------------------
-
-/// V11 — the `Event`-conjunct hazard. The body here *is* the O1a rider shape and its
-/// parent *is* a `CastFromZone`, so shape and parent both say "owned"; only the guard's
-/// reading refuses, because CR 614.1a's "would" is absent and the guard reads STATE.
-/// Owning O1a on shape alone would keep it.
-///
-/// A building-block row, not a card reproduction: no corpus text pairs a STATE guard
-/// with an O1a rider (see the fixture's doc comment for its three real donors).
-#[test]
-fn v11_o1a_shape_under_a_state_guard_gaps() {
-    let parsed = parse(
-        O1A_SHAPE_UNDER_A_STATE_GUARD,
-        "Hostile Fixture",
-        &[],
-        &["Instant"],
-    );
-
-    // Reach-guard: the head assembled and would have been available as the parent.
-    assert!(
-        all_effects(&parsed)
-            .iter()
-            .any(|effect| matches!(effect, Effect::CastFromZone { .. })),
-        "V11 reach-guard: the CastFromZone head must be present in the returned tree"
-    );
-    let gaps = gaps(&parsed);
-    assert!(
-        gaps.iter()
-            .any(|(name, description)| name == "unparsed_condition"
-                && description.as_deref()
-                    == Some(
-                        "If at least three mana of the same color was spent to cast it, exile it \
-                     instead"
-                    )),
-        "V11: the STATE guard's clause must gap over its full text, got {gaps:?}"
-    );
-    assert!(
-        !has_exile_parent_target_rider(&parsed),
-        "V11: the rider must be emitted nowhere — the Event conjunct refuses it"
-    );
-    assert_no_live_guard_mark(&parsed, "V11");
-}
 
 // ---------------------------------------------------------------------------
 // V12 — an unowned rider with no parent at all.

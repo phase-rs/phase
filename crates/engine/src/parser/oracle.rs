@@ -7913,6 +7913,21 @@ fn guard_owner(
         // O1b — CR 608.2c + CR 614.1a. Exile only: the counter path's library/hand
         // redirect rides `countered_spell_zone`, never a sub-ability.
         Some(Effect::Counter { .. }) => cast_from_zone::is_graveyard_exile_rider_subability(body),
+        // CR-neutral hygiene, not a rules claim: the parent already records this clause's
+        // unsupportedness, and a second gap over the same defect double-counts it — the
+        // same per-unit suppression rule `swallow_check` applies via its
+        // `any_ability_has_unimplemented` early-`continue`.
+        //
+        // The class is "a guard whose OWNER was itself refused". Invoke Calamity is the
+        // measured witness: when its printed cast cap is unrepresentable the head is
+        // refused to `unrepresentable_cast_cap`, the absorber that would fold
+        // "If those spells would be put into your graveyard, exile them instead" into the
+        // head's own typed `graveyard_replacement` field never runs, and the orphaned
+        // EVENT clause reaches this resolver with the refusal node as its direct parent.
+        // On the PRINTED card that clause is fully represented and never reaches here at
+        // all. Tree shape measured, not assumed: `abilities.len() == 1`, with the orphan
+        // as the refused head's direct `sub_ability`.
+        Some(Effect::Unimplemented { .. }) => true,
         // O2 — CR 615.5. An ANCESTOR test, mirroring assembly's own
         // `defs.iter().any(PreventDamage)`: Comeuppance's SECOND rider hangs under the
         // first, so its direct parent is a `DealDamage`, not the shield.
@@ -7981,16 +7996,31 @@ fn resolve_guards_in_ability(
         clause_text,
     }) = def.unlowered_guard.take()
     {
-        if !guard_owner(
-            &def.effect,
-            reading,
-            &clause_text,
-            parent,
-            ancestor_prevent_damage,
-        ) {
-            // CR 608.2c / CR 614.1a: nothing on the assembled tree consumes the body in the
-            // dropped guard's stead, so the whole "if <guard>, <body>" clause is recorded as
-            // one honest gap under the reading's own kind.
+        // CR 614.1 + CR 614.6: only the EVENT reading gaps. A guard naming an event that
+        // WOULD happen describes a replacement, and CR 614.6 makes the replaced event never
+        // happen — so a body emitted without its guard runs an instruction the card does not
+        // print. A STATE guard (CR 608.2c) has no such semantics: dropping it and emitting
+        // the body is what this parser has always done, and the loss is carried by
+        // `swallow_check`'s Condition_If detector rather than by an `Unimplemented` that
+        // would suppress that very detector (its `any_ability_has_unimplemented`
+        // early-`continue`).
+        //
+        // Measured consequence, recorded so it is not rediscovered: an O2 (CR 615.5) mark is
+        // always STATE, so it is now always cleared here. Ria Ivor is why that is right — its
+        // prevention sentence does not parse, so an ancestor test finds no shield and the O2
+        // gap would delete a correctly-lowered `Token` body to punish an unrelated parse gap.
+        if reading == GuardReading::Event
+            && !guard_owner(
+                &def.effect,
+                reading,
+                &clause_text,
+                parent,
+                ancestor_prevent_damage,
+            )
+        {
+            // CR 614.1a: nothing on the assembled tree consumes the body in the dropped
+            // guard's stead, so the whole "if <guard>, <body>" clause is recorded as one
+            // honest gap under the reading's own kind.
             *def.effect =
                 gap_diagnosis::clause_gap_unimplemented_as(reading.gap_kind(), &clause_text);
         }
