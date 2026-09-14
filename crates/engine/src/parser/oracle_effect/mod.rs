@@ -125,7 +125,7 @@ use crate::types::ability::{
     StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
     TargetFilter, TargetSelectionMode, ThisWayCause, TrackedAnaphorSource, TriggerCondition,
     TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
-    WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
+    VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
 };
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
@@ -24671,6 +24671,28 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
 /// opponent sacrifices …, discards …, and loses 3 life"; "that player loses 2
 /// life and draws two cards"). The chain parser carries it chunk to chunk and
 /// re-supplies it to each continuation exactly as if it had been printed there.
+///
+/// **Deliberately does NOT cover non-targeted MASS player scopes** ("each
+/// player"/"all players"/"each opponent"/"all opponents"). Those are peeled
+/// off the chunk's leading text before subject-application parsing ever runs
+/// (`clause_shell::peel_player_scope_subject` →
+/// `oracle_effect::lower::strip_each_player_subject`), which stamps the
+/// ability-level `AbilityDefinition.player_scope` instead of producing a
+/// `SubjectApplication` — so `from_leading_subject` never observes an "each
+/// player"/"each opponent" leading subject in practice for the plural forms
+/// that phrase recognizes. A separate, independent carry
+/// (`carried_player_scope` in the chunk loop) re-supplies THAT scope to a
+/// subjectless continuation, mirroring this type's job one layer up (see
+/// `plural_player_subject_scope_carries_across_conjugated_continuations` /
+/// `plural_player_subject_scope_carries_across_then_continuation` in
+/// `subject.rs`'s test module, which lock in that "each opponent sacrifices a creature,
+/// discards a card, and loses 3 life" and "each player loses 1 life and
+/// draws a card" already carry the mass scope end to end). Extending this
+/// enum with an untargeted-filter variant would therefore be dead code for
+/// those two phrases; if a future card's phrasing bypasses
+/// `strip_each_player_subject`'s recognized tags and reaches this type with
+/// an ambiguous mass filter, the fix belongs in the upstream player/opponent
+/// noun recognition that produces `SubjectApplication.affected`, not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CarriedPlayerSubject {
     /// CR 601.2c: a declared player target is chosen once, at announcement, for
@@ -31783,16 +31805,31 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
 }
 
 /// CR 608.2h: rebind a bare `EventContextAmount` "that many" count placeholder
-/// in a `PutCounter` effect — and, for `Effect::ChooseOneOf`, every branch's
-/// effect — to the concrete `QuantityRef` a leading counter-threshold gate
-/// measured. Sibling of `resolve_difference_anaphor_in_effect` above — same
-/// call site, same `effective_condition` read — but a ONE-operand counter-gate
-/// operand rather than a two-operand difference, and it must additionally
-/// descend into `ChooseOneOf` branches: Dismantle's "put that many +1/+1
-/// counters or charge counters …" lowers to a `ChooseOneOf` of two
-/// `PutCounter` branches, which `resolve_difference_anaphor_in_effect`'s
-/// narrower recursion (`CreateDrawReplacement` / `CreateDelayedTrigger` only)
-/// does not visit.
+/// in a `PutCounter` effect to the concrete `QuantityRef` a leading
+/// counter-threshold gate measured. Sibling of
+/// `resolve_difference_anaphor_in_effect` above — same call site, same
+/// `effective_condition` read — but a ONE-operand counter-gate operand rather
+/// than a two-operand difference.
+///
+/// The descent below is the UNION of `resolve_difference_anaphor_in_effect`'s
+/// carrier set (`CreateDrawReplacement` / `CreateDelayedTrigger`) and every
+/// other `Effect` variant that nests an `AbilityDefinition`/`Effect` payload
+/// (`ChooseOneOf`, `CreatePlaneswalkReplacement`, `Vote`, `SeparateIntoPiles`,
+/// `RevealFromHand`, `FlipCoin`/`FlipCoins`/`FlipCoinUntilLose`, `RollDie`) —
+/// mirroring the carrier classification `ability_visit::visit_effect_scoped`
+/// uses as the engine's single authority for "which variants own a nested
+/// ability/effect". A placeholder can land inside any of these, not only a
+/// direct `PutCounter` or a `ChooseOneOf` branch: Dismantle's "put that many
+/// +1/+1 counters or charge counters …" lowers to a `ChooseOneOf` of two
+/// `PutCounter` branches, but an equally-shaped counter-gated body nested
+/// inside e.g. a delayed trigger's payload needs the identical rebind before
+/// that payload is stored for later resolution — CR 603.7a fixes a delayed
+/// trigger's effect at creation time, using current game state, so "that
+/// many" must be baked in now or it resolves as zero with no triggering event
+/// amount live during a later, separate resolution.
+///
+/// Effect variants with no nested ability/effect carrier fall through to the
+/// wildcard and are left untouched.
 fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRef) {
     match effect {
         Effect::PutCounter { count, .. } => {
@@ -31812,14 +31849,82 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
                 rebind_event_context_amount_counts_in_ability(branch, gate_qty);
             }
         }
+        // CR 614.11 / CR 614.1a: a one-shot draw or planeswalk replacement
+        // nests its substitute `Effect` — bake the gate's count into it now,
+        // matching `resolve_difference_anaphor_in_effect`'s sibling rewrite.
+        Effect::CreateDrawReplacement { replacement_effect }
+        | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            rebind_event_context_amount_counts(replacement_effect, gate_qty);
+        }
+        // CR 603.7a: a delayed trigger's payload is fixed at creation time.
+        Effect::CreateDelayedTrigger { effect: inner, .. } => {
+            rebind_event_context_amount_counts_in_ability(inner, gate_qty);
+        }
+        Effect::Vote {
+            per_choice_effect,
+            subject,
+            ..
+        } => {
+            for sub in per_choice_effect {
+                rebind_event_context_amount_counts_in_ability(sub, gate_qty);
+            }
+            if let VoteSubject::Objects {
+                outcome_template, ..
+            } = subject
+            {
+                rebind_event_context_amount_counts_in_ability(outcome_template, gate_qty);
+            }
+        }
+        Effect::SeparateIntoPiles {
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        } => {
+            rebind_event_context_amount_counts_in_ability(chosen_pile_effect, gate_qty);
+            if let Some(unchosen) = unchosen_pile_effect {
+                rebind_event_context_amount_counts_in_ability(unchosen, gate_qty);
+            }
+        }
+        Effect::RevealFromHand {
+            on_decline: Some(sub),
+            ..
+        } => {
+            rebind_event_context_amount_counts_in_ability(sub, gate_qty);
+        }
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        }
+        | Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            if let Some(sub) = win_effect {
+                rebind_event_context_amount_counts_in_ability(sub, gate_qty);
+            }
+            if let Some(sub) = lose_effect {
+                rebind_event_context_amount_counts_in_ability(sub, gate_qty);
+            }
+        }
+        Effect::FlipCoinUntilLose { win_effect } => {
+            rebind_event_context_amount_counts_in_ability(win_effect, gate_qty);
+        }
+        Effect::RollDie { results, .. } => {
+            for branch in results {
+                rebind_event_context_amount_counts_in_ability(&mut branch.effect, gate_qty);
+            }
+        }
         _ => {}
     }
 }
 
 /// `AbilityDefinition` counterpart of `rebind_event_context_amount_counts` —
 /// mirrors `resolve_difference_anaphor_in_ability`'s recursion into
-/// `sub_ability` (a `ChooseOneOf` branch may itself carry a chained
-/// sub-ability, e.g. the conjoined-counter form).
+/// `sub_ability`/`else_ability`, plus `mode_abilities` (a `ChooseOneOf` branch
+/// or delayed-trigger payload may itself carry a chained sub-ability or a
+/// modal sibling, e.g. the conjoined-counter form).
 fn rebind_event_context_amount_counts_in_ability(
     def: &mut AbilityDefinition,
     gate_qty: &QuantityRef,
@@ -31827,6 +31932,12 @@ fn rebind_event_context_amount_counts_in_ability(
     rebind_event_context_amount_counts(&mut def.effect, gate_qty);
     if let Some(sub) = def.sub_ability.as_deref_mut() {
         rebind_event_context_amount_counts_in_ability(sub, gate_qty);
+    }
+    if let Some(els) = def.else_ability.as_deref_mut() {
+        rebind_event_context_amount_counts_in_ability(els, gate_qty);
+    }
+    for mode in &mut def.mode_abilities {
+        rebind_event_context_amount_counts_in_ability(mode, gate_qty);
     }
 }
 

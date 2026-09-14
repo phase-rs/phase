@@ -10889,4 +10889,81 @@ mod tests {
             "the gap must quote the WHOLE printed clause, subject included"
         );
     }
+
+    /// CR 608.2c: a non-targeted MASS player subject ("each opponent") stated
+    /// once at the head of a same-sentence verb list must govern every
+    /// subjectless conjugated continuation after it, exactly like the
+    /// targeted (`CarriedPlayerSubject::Targeted`) and phase-scoped
+    /// (`::Scoped`) cases already covered by
+    /// `targeted_player_subject_carries_to_conjugated_predicates` above. This
+    /// carry does NOT run through `CarriedPlayerSubject` — "each opponent " is
+    /// peeled off the chunk's leading text before subject-application parsing
+    /// ever sees it (`clause_shell::peel_player_scope_subject` →
+    /// `oracle_effect::lower::strip_each_player_subject`), stamping the
+    /// ability-level `AbilityDefinition.player_scope` instead; a separate
+    /// `carried_player_scope` re-supplies that scope to each subjectless
+    /// continuation. Regression-guards that separate carry so a future edit
+    /// can't silently drop the mass scope from the second/third sibling
+    /// (leaving them wrongly attributed to the ability's default caster).
+    #[test]
+    fn plural_player_subject_scope_carries_across_conjugated_continuations() {
+        let chain = super::super::parse_effect_chain(
+            "Each opponent sacrifices a creature, discards a card, and loses 3 life.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(chain.player_scope, Some(PlayerFilter::Opponent));
+        assert!(
+            matches!(&*chain.effect, Effect::Sacrifice { .. }),
+            "expected Sacrifice root, got {:?}",
+            chain.effect
+        );
+
+        let discard = chain.sub_ability.as_ref().expect("expected discard link");
+        assert!(
+            matches!(&*discard.effect, Effect::Discard { .. }),
+            "expected Discard link, got {:?}",
+            discard.effect
+        );
+        assert_eq!(
+            discard.player_scope,
+            Some(PlayerFilter::Opponent),
+            "the discard sibling must inherit the SAME each-opponent scope, not the default caster"
+        );
+
+        let lose_life = discard
+            .sub_ability
+            .as_ref()
+            .expect("expected lose-life link");
+        assert!(
+            matches!(&*lose_life.effect, Effect::LoseLife { .. }),
+            "expected LoseLife link, got {:?}",
+            lose_life.effect
+        );
+        assert_eq!(
+            lose_life.player_scope,
+            Some(PlayerFilter::Opponent),
+            "the lose-life sibling must inherit the SAME each-opponent scope, not the default caster"
+        );
+    }
+
+    /// Sibling of the "and"-joined regression above, covering the `then`
+    /// clause-boundary path through the SAME `carried_player_scope`
+    /// mechanism (a different boundary than a comma/"and" sibling split).
+    #[test]
+    fn plural_player_subject_scope_carries_across_then_continuation() {
+        let chain = super::super::parse_effect_chain(
+            "Each player discards a card, then draws a card.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(chain.player_scope, Some(PlayerFilter::All));
+        assert!(matches!(&*chain.effect, Effect::Discard { .. }));
+
+        let draw = chain.sub_ability.as_ref().expect("expected draw link");
+        assert!(matches!(&*draw.effect, Effect::Draw { .. }));
+        assert_eq!(
+            draw.player_scope,
+            Some(PlayerFilter::All),
+            "the draw sibling must inherit the SAME each-player scope across the `then` boundary"
+        );
+    }
 }
