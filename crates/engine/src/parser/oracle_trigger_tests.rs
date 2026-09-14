@@ -1,8 +1,9 @@
 use super::*;
 use crate::game::scenario::{GameScenario, P0, P1};
 use crate::parser::oracle::parse_oracle_text;
+use crate::parser::oracle_effect::gap_diagnosis::diagnose_clause_gap;
 use crate::parser::oracle_ir::context::ParseContext;
-use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind, OracleDiagnostic};
 use crate::parser::oracle_ir::doc::PrintedTriggerIndex;
 use crate::parser::oracle_ir::effect_chain::PlayerScopeRewrite;
 use crate::parser::test_support::assert_no_unimplemented;
@@ -31689,21 +31690,62 @@ fn the_mysterious_sphere_sweep_binds_to_pool_and_create_stays_red() {
         }
     }
 
-    // Coverage honesty: the create-copies clause stays Unimplemented (red).
-    fn chain_has_named_unimplemented(ability: &AbilityDefinition, name: &str) -> bool {
-        matches!(&*ability.effect, Effect::Unimplemented { name: n, .. } if n == name)
-            || ability
+    // Coverage honesty: the create-copies clause stays Unimplemented (red). The gap is
+    // identified by the clause it RECORDS and by the parser's verdict on it, not by the
+    // clause's first word: `create` is a known clause head, so the refusal is
+    // `VerbArguments` over "create copies of each nonland card among them".
+    const CREATE_CLAUSE: &str = "create copies of each nonland card among them";
+    fn chain_gap_fragments(ability: &AbilityDefinition, out: &mut Vec<String>) {
+        if let Some(fragment) = ability.effect.unimplemented_description() {
+            out.push(fragment.to_string());
+        }
+        if let Some(sub) = ability.sub_ability.as_deref() {
+            chain_gap_fragments(sub, out);
+        }
+        if let Some(els) = ability.else_ability.as_deref() {
+            chain_gap_fragments(els, out);
+        }
+    }
+    fn chain_gap_kind(ability: &AbilityDefinition, fragment: &str) -> Option<ClauseGapKind> {
+        let here = match &*ability.effect {
+            Effect::Unimplemented { name, description } => (description.as_deref()
+                == Some(fragment))
+            .then(|| ClauseGapKind::from_unimplemented_name(name))
+            .flatten(),
+            _ => None,
+        };
+        here.or_else(|| {
+            ability
                 .sub_ability
                 .as_deref()
-                .is_some_and(|s| chain_has_named_unimplemented(s, name))
-            || ability
+                .and_then(|s| chain_gap_kind(s, fragment))
+        })
+        .or_else(|| {
+            ability
                 .else_ability
                 .as_deref()
-                .is_some_and(|s| chain_has_named_unimplemented(s, name))
+                .and_then(|s| chain_gap_kind(s, fragment))
+        })
     }
+    let mut fragments = Vec::new();
+    chain_gap_fragments(execute, &mut fragments);
     assert!(
-        chain_has_named_unimplemented(execute, "create"),
+        fragments.iter().any(|f| f == CREATE_CLAUSE),
         "the create-copies gap must stay honestly Unimplemented: {execute:?}"
+    );
+    assert_eq!(
+        chain_gap_kind(execute, CREATE_CLAUSE),
+        Some(ClauseGapKind::VerbArguments),
+        "the recorded name must decode to the verdict this clause earns"
+    );
+    assert!(
+        matches!(
+            diagnose_clause_gap(CREATE_CLAUSE),
+            ClauseGap::VerbArguments { ref verb, .. } if verb == "create"
+        ),
+        "the refused clause head is still `create` — the fact the old literal carried \
+         that same spelling is a coincidence of this clause's first word, not what this \
+         assertion checks: the verdict must name the VERB the dispatcher recognised"
     );
 }
 
@@ -33003,4 +33045,101 @@ fn tawnos_the_toymaker_copy_is_an_artifact() {
         }]
     );
     assert_no_unimplemented(execute.as_ref());
+}
+
+// V10 — CR 121.1 + CR 603.4: the trigger-side "equal to the difference" rewrites
+// (`lower_trigger_ir`) discriminate on the gap node's recorded DESCRIPTION, never
+// on its name. Phase 1 names every fallback gap by the sub-grammar verdict that
+// refused it, so the pre-phase `name == "draw"` / `name == "lose"` guards can
+// never be true again — restoring either one makes the rewrite stop firing and
+// this test (and the `draw` arm's `parse_difference_draw_trigger_...` above) go
+// red.
+//
+// The `lose` arm additionally carries a DECLARED widening: the name compare was
+// the only thing refusing `"they lose life equal to the difference"` (a fallback
+// node whose first word was `they`). With the name gone, the exact-text compare is
+// the entire bound, so the negative half below pins it against a different
+// `Unimplemented` description that must NOT convert.
+#[test]
+fn difference_life_loss_rewrite_keys_on_the_description_not_the_gap_name() {
+    const OTHER_REVEALED_CLASS: &str =
+        "lose life equal to the mana value of the card revealed by the other player";
+
+    /// Parse the synthetic hosted-gate trigger whose "fewer than seven cards in
+    /// hand" gate is hoisted to the trigger condition, and assert the hoist
+    /// happened. Without a `QuantityComparison` condition `difference_count` is
+    /// `None` and BOTH rewrite arms are skipped entirely, which would make the
+    /// negative half pass for a reason unrelated to the description compare.
+    fn hosted_gate_trigger(body: &str) -> TriggerDefinition {
+        let text = format!(
+            "At the beginning of your end step, if you have fewer than seven cards in hand, {body}."
+        );
+        let defs = parse_trigger_lines(&text, "V10 Difference Fixture");
+        assert_eq!(defs.len(), 1, "expected one trigger for {text:?}: {defs:?}");
+        let def = defs.into_iter().next().expect("one trigger");
+        let condition = def
+            .condition
+            .as_ref()
+            .expect("the intervening-if gate must hoist to a trigger condition");
+        assert!(
+            quantity_comparison_operands(condition).is_some(),
+            "reach-guard: the hoisted condition must be a QuantityComparison, \
+             otherwise difference_count is None and neither rewrite arm runs; got {condition:?}"
+        );
+        def
+    }
+
+    // Positive: the migrated `lose` arm converts the anaphoric clause against the
+    // hoisted operands. This is the only test that reaches the arm at all — the two
+    // standing `parse_effect_chain` positives are satisfied by the effect layer and
+    // never enter `lower_trigger_ir`.
+    let def = hosted_gate_trigger("lose life equal to the difference");
+    let execute = def.execute.as_ref().expect("execute ability");
+    let Effect::LoseLife { amount, target } = execute.effect.as_ref() else {
+        panic!(
+            "expected the difference life-loss rewrite, got {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(
+        target,
+        &Some(TargetFilter::ParentTarget),
+        "the rewritten life loss is directed at the trigger's parent target"
+    );
+    let QuantityExpr::Difference { left, right } = amount else {
+        panic!("expected a Difference amount, got {amount:?}");
+    };
+    assert!(
+        matches!(
+            **left,
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize { .. }
+            }
+        ),
+        "expected the hoisted HandSize lhs, got {left:?}"
+    );
+    assert_eq!(**right, QuantityExpr::Fixed { value: 7 });
+
+    // Negative (multi-authority): a DIFFERENT gap node reaching the same arm with
+    // `difference_count` bound must be refused by the exact-text compare. The
+    // OtherRevealedCard class node is the neighbouring `lose`-flavoured producer
+    // renamed by P1.5 (`other_revealed_card_quantity`); under either name it is only
+    // the description that refuses it. `hosted_gate_trigger` proves the arm was
+    // reachable, so this is not a vacuous negative.
+    let def = hosted_gate_trigger(OTHER_REVEALED_CLASS);
+    let execute = def.execute.as_ref().expect("execute ability");
+    assert_eq!(
+        execute.effect.unimplemented_description(),
+        Some(OTHER_REVEALED_CLASS),
+        "reach-guard: the neighbouring class node must arrive as a gap carrying its \
+         own description, not as a lowered effect; got {:?}",
+        execute.effect
+    );
+    let Effect::Unimplemented { name, .. } = execute.effect.as_ref() else {
+        unreachable!("guarded by the description assertion above");
+    };
+    assert_eq!(
+        name, "other_revealed_card_quantity",
+        "the neighbouring node keeps its producer's category key"
+    );
 }

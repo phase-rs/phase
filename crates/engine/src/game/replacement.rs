@@ -2063,10 +2063,11 @@ fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> boo
         .is_some_and(rider_reflects_per_event_damage_source)
 }
 
-/// CR 614.9: Read back the captured chosen-object recipient stashed in the
-/// matched replacement's `redirect_target` field (set at resolution time for
-/// `DamageRedirectTarget::ChosenObjectTarget` — "to target creature").
-fn redirect_chosen_object_for_rid(state: &GameState, rid: ReplacementId) -> Option<ObjectId> {
+/// CR 614.9: Read back the captured chosen recipient (an object or a player)
+/// stashed in the matched replacement's `redirect_target` field (set at
+/// resolution time for `DamageRedirectTarget::ChosenTarget` — "to target
+/// creature" / "to any target").
+fn redirect_chosen_target_for_rid(state: &GameState, rid: ReplacementId) -> Option<TargetRef> {
     let repl = if rid.source == ObjectId(0) {
         state.pending_damage_replacements.get(rid.index)
     } else {
@@ -2076,7 +2077,8 @@ fn redirect_chosen_object_for_rid(state: &GameState, rid: ReplacementId) -> Opti
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
     match repl.and_then(|r| r.redirect_target.as_ref()) {
-        Some(TargetFilter::SpecificObject { id }) => Some(*id),
+        Some(TargetFilter::SpecificObject { id }) => Some(TargetRef::Object(*id)),
+        Some(TargetFilter::SpecificPlayer { id }) => Some(TargetRef::Player(*id)),
         _ => None,
     }
 }
@@ -2137,11 +2139,15 @@ fn durable_redirect_route_for_filter(filter: &TargetFilter) -> PreventionShieldR
         // CR 614.9: a concrete object recipient belongs exclusively to the
         // EFFECT-CREATED path — `create_damage_replacement::resolve` writes
         // `SpecificObject { id }` alongside a `ShieldKind::Redirection` (of
-        // either `RedirectionLifetime`), and `redirect_chosen_object_for_rid` is
+        // either `RedirectionLifetime`), and `redirect_chosen_target_for_rid` is
         // its reader. Such a shield is claimed by Branch 1b and never reaches
         // this Prevention-shield gate; routing it to `Redirect` here would
         // resurrect a consumed one-shot as a durable shield.
         TargetFilter::SpecificObject { .. } => PreventionShieldRoute::Prevent,
+        // CR 614.9: the same effect-created path latches a chosen PLAYER
+        // recipient ("…is dealt to any target instead") as `SpecificPlayer`;
+        // it is likewise claimed by Branch 1b and never reaches this gate.
+        TargetFilter::SpecificPlayer { .. } => PreventionShieldRoute::Prevent,
         _ => PreventionShieldRoute::Unmapped,
     }
 }
@@ -2252,7 +2258,7 @@ fn redirect_damage_event(
         });
     }
 
-    let chosen = redirect_chosen_object_for_rid(state, rid);
+    let chosen = redirect_chosen_target_for_rid(state, rid);
     let new_recipient = super::effects::create_damage_replacement::resolve_redirect_recipient(
         state, recipient, rid.source, source_id, chosen,
     )
@@ -11259,13 +11265,20 @@ mod tests {
             );
         }
 
-        // Owned by the ONE-SHOT path (`redirect_chosen_object_for_rid`), which
+        // Owned by the ONE-SHOT path (`redirect_chosen_target_for_rid`), which
         // reads it off a `ShieldKind::Redirection` shield — never this gate. Not
         // parser-producible here, so it is asserted directly.
         assert_eq!(
             durable_redirect_route_for_filter(&TargetFilter::SpecificObject { id: ObjectId(7) }),
             PreventionShieldRoute::Prevent,
             "a captured chosen object belongs to the one-shot redirection shield"
+        );
+        // CR 614.9: a captured chosen PLAYER ("…is dealt to any target instead")
+        // belongs to the same one-shot path.
+        assert_eq!(
+            durable_redirect_route_for_filter(&TargetFilter::SpecificPlayer { id: PlayerId(1) }),
+            PreventionShieldRoute::Prevent,
+            "a captured chosen player belongs to the one-shot redirection shield"
         );
 
         // The fail-closed residual arm, asserted rather than assumed: an
@@ -11308,7 +11321,7 @@ mod tests {
         state.pending_damage_replacements.push(
             ReplacementDefinition::new(ReplacementEvent::DamageDone)
                 .redirection_shield(
-                    DamageRedirectTarget::ChosenObjectTarget,
+                    DamageRedirectTarget::ChosenTarget,
                     PreventionAmount::Next(2),
                     RedirectionLifetime::Continuous,
                 )

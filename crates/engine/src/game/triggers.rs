@@ -5836,16 +5836,23 @@ fn collect_pending_triggers_with_collection(
                 .count();
                 let granted_start = u32::try_from(printed_count).unwrap_or(u32::MAX);
                 let granted_end = u32::try_from(effective_count).unwrap_or(u32::MAX);
-                let granted_ordinals: Vec<_> = obj
-                    .additional_cost_payments
-                    .iter()
-                    .filter(|payment| {
-                        payment.origin == AdditionalCostOrigin::Replicate
-                            && payment.count > 0
-                            && payment.origin_ordinal >= granted_start
-                            && payment.origin_ordinal < granted_end
+                // CR 702.56b: each granted Replicate keyword instance is a separate
+                // ability that triggers exactly once, however many times its
+                // repeatable cost was paid. The cast-time payment loop pushes one
+                // `AdditionalCostInstancePayment` row per payment, so enumerating
+                // rows here would enqueue one trigger PER PAYMENT while every
+                // trigger already copies once per payment of its instance
+                // (CR 702.56a, `repeat_for = AdditionalCostPaymentCountFor`) —
+                // N payments would produce N * N copies. Enumerate the granted
+                // keyword instances and read each instance's total payment count.
+                let granted_ordinals: Vec<_> = (granted_start..granted_end)
+                    .filter_map(|ordinal| {
+                        let count = obj.instance_payment_count_for_ordinal(
+                            AdditionalCostOrigin::Replicate,
+                            ordinal,
+                        );
+                        (count > 0).then_some((ordinal, count))
                     })
-                    .map(|payment| (payment.origin_ordinal, payment.count))
                     .collect();
                 (!granted_ordinals.is_empty()).then_some((obj.controller, granted_ordinals))
             });

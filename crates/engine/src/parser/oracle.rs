@@ -4698,13 +4698,23 @@ pub(crate) fn parse_oracle_ir(
 }
 
 /// The generic replacement priority cannot reconstruct the target ownership of
-/// these two one-shot spell forms. Every other one-shot effect must fall
-/// through to that priority, which preserves its established chains and
-/// replacement lowering.
+/// these one-shot spell forms. Every other one-shot effect must fall through to
+/// that priority, which preserves its established chains and replacement
+/// lowering.
+///
+/// A resolution-time chosen-source one-shot line (Harm's Way: "the next N
+/// damage that a source of your choice would deal … instead") contains "would
+/// deal … instead", which Priority 8's generic `DamageDone` stub would claim;
+/// the stub carries neither the CR 609.7a source choice nor the declared
+/// redirect slot.
 fn oneshot_damage_replacement_requires_direct_spell_route(effect: &Effect) -> bool {
     match effect {
         Effect::CreateDamageReplacement {
             redirect_to: Some(DamageRedirectTarget::DamageSourceController),
+            ..
+        } => true,
+        Effect::CreateDamageReplacement {
+            source_filter: Some(TargetFilter::ChosenDamageSource { .. }),
             ..
         } => true,
         Effect::PreventDamage {

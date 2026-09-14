@@ -1819,9 +1819,13 @@ pub enum DamageRedirectTarget {
     /// "...to ~ instead" / "...dealt to this creature instead" — the replacement
     /// source object itself (Beacon of Destiny).
     SourceObject,
-    /// "...to target creature instead" — an object chosen as a target of the
-    /// creating ability (Soltari Guerrillas).
-    ChosenObjectTarget,
+    /// CR 614.9: "...to any target / to target creature instead" — a battle,
+    /// creature, planeswalker or player chosen as a target of the creating spell
+    /// or ability (spell: CR 115.1a + CR 601.2c; activated ability: CR 115.1c +
+    /// CR 602.2b; "any target" domain CR 115.4); latched into the shield's
+    /// `redirect_target` at resolution (Soltari Guerrillas, Harm's Way).
+    #[serde(alias = "ChosenObjectTarget")]
+    ChosenTarget,
     /// CR 303.4b + CR 301.5a: "...to enchanted creature instead" / "...to
     /// equipped creature instead" — the permanent this replacement's source is
     /// attached to (Pariah, Pariah's Shield, With Great Power . . .).
@@ -17110,11 +17114,11 @@ pub enum Effect {
     /// its use (CR 614.5) and dropped at cleanup.
     ///
     /// Exactly one of `modification` / `redirect_to` is `Some`. When
-    /// `redirect_to == Some(ChosenObjectTarget)` ("to target creature" —
-    /// Soltari Guerrillas), `redirect_object_filter` carries the recipient's
-    /// `TargetFilter` so the targeting layer surfaces a standard object target
-    /// slot (`ability_utils::collect_target_slots`); the resolver captures the
-    /// chosen object into the shield. All other redirect forms host on the
+    /// `redirect_to == Some(ChosenTarget)` ("to target creature" — Soltari
+    /// Guerrillas; "to any target" — Harm's Way), `redirect_object_filter`
+    /// carries the recipient's `TargetFilter` so the targeting layer surfaces a
+    /// standard target slot (`ability_utils::collect_target_slots`); the
+    /// resolver captures the chosen object or player into the shield. All other redirect forms host on the
     /// controller / source with no declared target.
     CreateDamageReplacement {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -17134,8 +17138,9 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         redirect_amount: Option<PreventionAmount>,
         /// CR 115.1: The redirect recipient's target filter for the
-        /// `ChosenObjectTarget` form ("...deals that damage to target creature
-        /// instead" — Soltari Guerrillas). `None` for the `Controller` /
+        /// `ChosenTarget` form ("...deals that damage to target creature
+        /// instead" — Soltari Guerrillas; "...is dealt to any target instead" —
+        /// Harm's Way). `None` for the `Controller` /
         /// `SourceObject` redirect forms, which need no target slot.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         redirect_object_filter: Option<TargetFilter>,
@@ -20457,7 +20462,7 @@ impl Effect {
             | Effect::RevealFromHand { .. }
             // CR 614.9 + CR 115.1: CreateDamageReplacement has no `target:
             // TargetFilter` field. Its "to target creature" redirect recipient
-            // (Soltari Guerrillas — `redirect_to: ChosenObjectTarget`) is
+            // (Soltari Guerrillas — `redirect_to: ChosenTarget`) is
             // surfaced through dedicated branches in `ability_utils`
             // (`collect_target_slots` / `collect_target_slot_specs`), mirroring
             // `MoveCounters`/`Attach`; all other forms host on the controller or
@@ -37559,6 +37564,23 @@ mod damage_redirect_target_serde_tests {
                 .expect("legacy controller serializes"),
             r#"{"type":"Controller"}"#,
             "adding the source-controller authority must preserve existing card data"
+        );
+    }
+
+    /// CR 614.9: widening the chosen redirect recipient from object-only to
+    /// object-or-player renamed its tag; card data exported under the old tag
+    /// must still load, and new data serializes under the new tag.
+    #[test]
+    fn chosen_target_reads_legacy_chosen_object_target_tag() {
+        assert_eq!(
+            serde_json::from_str::<DamageRedirectTarget>(r#"{"type":"ChosenObjectTarget"}"#)
+                .expect("legacy tag deserializes"),
+            DamageRedirectTarget::ChosenTarget
+        );
+        assert_eq!(
+            serde_json::to_string(&DamageRedirectTarget::ChosenTarget)
+                .expect("chosen target serializes"),
+            r#"{"type":"ChosenTarget"}"#
         );
     }
 }

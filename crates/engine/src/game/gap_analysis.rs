@@ -1,68 +1,15 @@
 use crate::game::coverage::{CardCoverageResult, CoverageSummary};
+use crate::parser::oracle_effect::gap_diagnosis::is_clause_head_verb;
 use crate::parser::oracle_effect::normalize_verb_token;
-use crate::parser::oracle_effect::subject::{starts_with_subject_prefix, PREDICATE_VERBS};
+use crate::parser::oracle_effect::subject::starts_with_subject_prefix;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 
 // ── Recognized verbs ────────────────────────────────────────────────────────
 //
-// Union of three sources (see plan for rationale):
-// A) PREDICATE_VERBS from subject.rs (37 verbs used for subject-predicate splitting)
-// B) Additional first-word verbs from parse_imperative_family_ast match arms
-// C) Pre-dispatch verbs from parse_effect_clause and lower_imperative_clause
-//
-// NOTE: when adding verbs to parse_imperative_family_ast, also add them here.
-
-/// Additional verbs from `parse_imperative_family_ast` not in `PREDICATE_VERBS`.
-const IMPERATIVE_EXTRA_VERBS: &[&str] = &[
-    "spend",
-    "double",
-    "triple",
-    "destroy",
-    "prevent",
-    "attach",
-    "unattach",
-    "seek",
-    "amass",
-    "incubate",
-    "attacks",
-    "attack",
-    "monstrosity",
-    "flip",
-    "roll",
-    "note",
-    "manifest",
-    "investigate",
-    "proliferate",
-    "suspect",
-    "blight",
-    "forage",
-    "collect",
-    "endure",
-    "goad",
-    "detain",
-    "exchange",
-    "must",
-    "earthbend",
-    "airbend",
-    "bounce",
-    "support",
-    "equip",
-    "remove",
-    "switch",
-    "populate",
-    "clash",
-    "planeswalk",
-    "recruit",
-    "assimilate",
-];
-
-/// Pre-dispatch verbs handled in `parse_effect_clause` before imperative dispatch.
-const PRE_DISPATCH_VERBS: &[&str] = &[
-    "tempt",      // "the ring tempts you"
-    "discover",   // "discover N"
-    "distribute", // "distribute N counters among"
-];
+// The clause-head verb vocabulary MOVED to `parser/oracle_effect/gap_diagnosis.rs`,
+// beside the dispatch table it mirrors, leaving one definition in the workspace. This
+// module keeps only the aggregation that reads it.
 
 /// Keywords/mechanics known to be unimplemented in the engine.
 const NEW_MECHANIC_KEYWORDS: &[&str] = &[
@@ -81,14 +28,6 @@ const NEW_MECHANIC_KEYWORDS: &[&str] = &[
     "vanguard",
     "dungeon",
 ];
-
-fn is_recognized_verb(verb: &str) -> bool {
-    let normalized = normalize_verb_token(verb);
-    let n = normalized.as_str();
-    PREDICATE_VERBS.contains(&n)
-        || IMPERATIVE_EXTRA_VERBS.contains(&n)
-        || PRE_DISPATCH_VERBS.contains(&n)
-}
 
 fn contains_new_mechanic_keyword(text: &str) -> bool {
     let lower = text.to_lowercase();
@@ -251,7 +190,7 @@ fn classify_gap(
     // Category A: first word is a recognized verb
     if let Some(first_word) = lower.split_whitespace().next() {
         let normalized = normalize_verb_token(first_word);
-        if is_recognized_verb(&normalized) {
+        if is_clause_head_verb(&normalized) {
             return (GapCategory::VerbVariation, Some(normalized), Some(false));
         }
     }
@@ -262,7 +201,7 @@ fn classify_gap(
     if starts_with_subject_prefix(lower) {
         for word in lower.split_whitespace().skip(1) {
             let normalized = normalize_verb_token(word);
-            if is_recognized_verb(&normalized) {
+            if is_clause_head_verb(&normalized) {
                 return (GapCategory::SubjectStripping, Some(normalized), None);
             }
         }
@@ -271,7 +210,7 @@ fn classify_gap(
     // Category A (non-initial): text contains a recognized verb at non-initial position
     for word in lower.split_whitespace().skip(1) {
         let normalized = normalize_verb_token(word);
-        if is_recognized_verb(&normalized) {
+        if is_clause_head_verb(&normalized) {
             return (GapCategory::VerbVariation, Some(normalized), Some(true));
         }
     }
@@ -541,36 +480,9 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    #[test]
-    fn recognized_verbs_cover_predicate_verbs() {
-        for verb in PREDICATE_VERBS {
-            assert!(
-                is_recognized_verb(verb),
-                "PREDICATE_VERB '{}' not recognized",
-                verb
-            );
-        }
-    }
-
-    #[test]
-    fn recognized_verbs_cover_imperative_extras() {
-        for verb in IMPERATIVE_EXTRA_VERBS {
-            assert!(
-                is_recognized_verb(verb),
-                "IMPERATIVE_EXTRA_VERB '{}' not recognized",
-                verb
-            );
-        }
-    }
-
-    #[test]
-    fn deconjugated_verbs_recognized() {
-        assert!(is_recognized_verb("destroys"));
-        assert!(is_recognized_verb("draws"));
-        assert!(is_recognized_verb("creates"));
-        assert!(is_recognized_verb("has")); // → "have"
-        assert!(is_recognized_verb("copies")); // → "copy"
-    }
+    // The three vocabulary tests (`recognized_verbs_cover_predicate_verbs`,
+    // `recognized_verbs_cover_clause_head_verbs`, `deconjugated_verbs_recognized`) moved
+    // with the vocabulary into `parser/oracle_effect/gap_diagnosis.rs`.
 
     #[test]
     fn classify_verb_variation_first_word() {

@@ -2078,14 +2078,17 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         });
     if let Some(count) = difference_count.as_ref() {
         if let Some(execute) = def.execute.as_deref_mut() {
+            // The discriminator is the EXACT recorded description, not the gap's name:
+            // the name is the parser's verdict on which sub-grammar refused the clause
+            // (`unparsed_quantity` here), while the description is the clause itself and
+            // is byte-stable. `unimplemented_description()` is the single accessor for it.
             let is_difference_draw = matches!(
-                execute.effect.as_ref(),
-                Effect::Unimplemented { name, description: Some(desc) }
-                    if name == "draw"
-                        && desc
-                            .trim()
-                            .trim_end_matches('.')
-                            .eq_ignore_ascii_case("draw cards equal to the difference")
+                execute.effect.unimplemented_description(),
+                Some(desc)
+                    if desc
+                        .trim()
+                        .trim_end_matches('.')
+                        .eq_ignore_ascii_case("draw cards equal to the difference")
             );
             if is_difference_draw {
                 *execute.effect = Effect::Draw {
@@ -2093,17 +2096,22 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                     target: TargetFilter::Controller,
                 };
             }
+            // Same discriminator as the draw arm above: the exact description. Dropping
+            // the name guard WIDENS this arm by one text — a fallback node carrying
+            // "they lose life equal to the difference" used to be named `they` and was
+            // refused by the name compare alone. That subject-led text is already owned
+            // earlier by the name-blind effect-layer producer, so no corpus node reaches
+            // here; the exact-text compare is what bounds the widening.
             let is_difference_lose = matches!(
-                execute.effect.as_ref(),
-                Effect::Unimplemented { name, description: Some(desc) }
-                    if name == "lose"
-                        && {
-                            let clean = desc.trim().trim_end_matches('.');
-                            clean.eq_ignore_ascii_case("lose life equal to the difference")
-                                || clean.eq_ignore_ascii_case(
-                                    "they lose life equal to the difference",
-                                )
-                        }
+                execute.effect.unimplemented_description(),
+                Some(desc)
+                    if {
+                        let clean = desc.trim().trim_end_matches('.');
+                        clean.eq_ignore_ascii_case("lose life equal to the difference")
+                            || clean.eq_ignore_ascii_case(
+                                "they lose life equal to the difference",
+                            )
+                    }
             );
             if is_difference_lose {
                 *execute.effect = Effect::LoseLife {

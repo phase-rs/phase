@@ -2,8 +2,8 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
-use nom::character::complete::{multispace0, space1};
-use nom::combinator::{eof, map, not, opt, peek, success, value};
+use nom::character::complete::{multispace0, satisfy, space1};
+use nom::combinator::{eof, map, map_opt, not, opt, peek, success, value};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -3498,18 +3498,15 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     // omits the source permanent (Thundering Raiju: "modified creatures you
     // control other than this creature" — normalized to "~"). The trailing
     // self-reference is recognized via `nom_target::parse_self_reference`
-    // ("~"/"it"/"this creature"/"itself"/…).
+    // ("~"/"it"/"this creature"/"itself"/…). CR 303.4b + CR 301.5a: the
+    // attached host ("other than enchanted creature") excludes the object the
+    // source is attached to instead — see `parse_other_than_exclusion`.
     {
         let remaining_other_than = lower[pos..].trim_start();
         let other_than_offset = lower[pos..].len() - remaining_other_than.len();
-        if let Ok((rest, _)) = (
-            tag::<_, _, OracleError<'_>>("other than "),
-            nom_target::parse_self_reference,
-        )
-            .parse(remaining_other_than)
-        {
-            if !properties.contains(&FilterProp::Another) {
-                properties.push(FilterProp::Another);
+        if let Ok((rest, prop)) = parse_other_than_exclusion(remaining_other_than) {
+            if !properties.contains(&prop) {
+                properties.push(prop);
             }
             pos += other_than_offset + (remaining_other_than.len() - rest.len());
         }
@@ -8345,6 +8342,78 @@ pub(crate) fn parse_attachment_kind_disjunction(
         value(vec![AttachmentKind::Equipment], tag("equipped")),
     ))
     .parse(input)
+}
+
+/// CR 303.4b + CR 301.5a: "other than <referent>" exclusion suffix of a typed
+/// filter. A self-reference ("~", "this creature") excludes the ability source
+/// (`FilterProp::Another`). The attached host ("enchanted creature",
+/// "equipped creature") excludes the object the source is attached to —
+/// `Not { EnchantedBy | EquippedBy }`, evaluated source-relative in
+/// `game/filter.rs` (and against the latched trigger source once the
+/// Aura/Equipment has left, CR 608.2h + CR 113.7a). The adjective comes from
+/// `parse_attachment_kind_disjunction`; its compound "enchanted or equipped"
+/// forms are refused, leaving the suffix unconsumed. The host noun is the
+/// closed singular set of `parse_attached_host_noun`.
+fn parse_other_than_exclusion(input: &str) -> OracleResult<'_, FilterProp> {
+    preceded(
+        tag("other than "),
+        alt((
+            map(nom_target::parse_self_reference, |_| FilterProp::Another),
+            map_opt(
+                (
+                    parse_attachment_kind_disjunction,
+                    space1,
+                    parse_attached_host_noun,
+                ),
+                |(kinds, _, _)| match kinds.as_slice() {
+                    [kind] => Some(FilterProp::Not {
+                        prop: Box::new(attachment_host_filter_prop(kind)),
+                    }),
+                    _ => None,
+                },
+            ),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 303.4b + CR 301.5a: the noun of a source-relative attached host —
+/// "enchanted creature" names the one object THIS Aura enchants, so the noun
+/// adds no restriction beyond that identity and is not mapped. Only the
+/// SINGULAR nouns are accepted: the plural "enchanted creatures" means
+/// creatures that are enchanted by anything, not this source's host, and a
+/// possessive ("enchanted creature's controller") names a different referent.
+/// Both are refused by the boundary guard (mirrors
+/// `nom_primitives::parse_object_recipient_pronoun`), leaving the suffix
+/// unconsumed.
+fn parse_attached_host_noun(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        terminated(
+            alt((
+                tag("creature"),
+                tag("permanent"),
+                tag("land"),
+                tag("artifact"),
+            )),
+            peek(alt((
+                value((), eof),
+                value((), satisfy(|c: char| !c.is_alphanumeric() && c != '\'')),
+            ))),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 303.4b + CR 301.5a: the source-relative host predicate for one attachment
+/// kind — the object an Aura enchants / the creature an Equipment equips.
+/// Contrast `attachment_kinds_filter_prop`, which builds the attachment-PRESENCE
+/// predicate (`HasAttachment`) for the same kinds.
+fn attachment_host_filter_prop(kind: &AttachmentKind) -> FilterProp {
+    match kind {
+        AttachmentKind::Aura => FilterProp::EnchantedBy,
+        AttachmentKind::Equipment => FilterProp::EquippedBy,
+    }
 }
 
 pub(crate) fn attachment_kinds_filter_prop(
@@ -19704,6 +19773,163 @@ mod tests {
             "missing Another in {:?}",
             tf.properties
         );
+    }
+
+    /// CR 303.4b: "other than enchanted creature" (Sporogenic Infection) excludes
+    /// the object the source Aura enchants — `Not { EnchantedBy }`, not `Another`.
+    #[test]
+    fn parse_type_phrase_other_than_enchanted_creature() {
+        let (filter, rest) = parse_type_phrase_folding("creature other than enchanted creature");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::EnchantedBy)
+            }),
+            "missing Not(EnchantedBy) in {:?}",
+            tf.properties
+        );
+        assert!(
+            !tf.properties.contains(&FilterProp::Another),
+            "the attached host is not the source: {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 303.4b: the exclusion composes after a controller suffix
+    /// (Due Diligence: "target creature you control other than enchanted creature").
+    #[test]
+    fn parse_type_phrase_other_than_enchanted_creature_you_control() {
+        let (filter, rest) =
+            parse_type_phrase_folding("creature you control other than enchanted creature");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::EnchantedBy)
+            }),
+            "missing Not(EnchantedBy) in {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 301.5a: the Equipment twin — "other than equipped creature" maps to
+    /// `Not { EquippedBy }`. For an attached source both runtime arms coincide,
+    /// so this shape test is the guard on the kind mapping.
+    #[test]
+    fn parse_type_phrase_other_than_equipped_creature() {
+        let (filter, rest) = parse_type_phrase_folding("creature other than equipped creature");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::EquippedBy)
+            }),
+            "missing Not(EquippedBy) in {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 303.4b: the exclusion consumes only the host noun, leaving a trailing
+    /// duration for the caller (Secret Invasion: "... other than enchanted
+    /// creature until this Aura leaves the battlefield").
+    #[test]
+    fn parse_type_phrase_other_than_enchanted_creature_duration_remainder() {
+        let (filter, rest) = parse_type_phrase_folding(
+            "creature other than enchanted creature until this aura leaves the battlefield",
+        );
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::EnchantedBy)
+            }),
+            "missing Not(EnchantedBy) in {:?}",
+            tf.properties
+        );
+        assert_eq!(rest.trim_start(), "until this aura leaves the battlefield");
+    }
+
+    /// CR 303.4b + CR 301.5a: the accepted attached-host shapes. The adjective
+    /// picks the host predicate; the singular noun names the one host and adds
+    /// no restriction of its own, so every noun yields the same filter.
+    #[test]
+    fn parse_type_phrase_other_than_attached_host_noun_shapes() {
+        for (host_phrase, host_prop) in [
+            ("enchanted creature", FilterProp::EnchantedBy),
+            ("enchanted permanent", FilterProp::EnchantedBy),
+            ("enchanted land", FilterProp::EnchantedBy),
+            ("enchanted artifact", FilterProp::EnchantedBy),
+            ("equipped creature", FilterProp::EquippedBy),
+            ("equipped permanent", FilterProp::EquippedBy),
+            ("equipped land", FilterProp::EquippedBy),
+            ("equipped artifact", FilterProp::EquippedBy),
+        ] {
+            let exclusion = FilterProp::Not {
+                prop: Box::new(host_prop),
+            };
+            let suffix = format!("other than {host_phrase}");
+            assert_eq!(
+                parse_other_than_exclusion(&suffix).ok(),
+                Some(("", exclusion.clone())),
+                "arm result for {suffix:?}"
+            );
+            let input = format!("creature {suffix}");
+            assert_eq!(
+                parse_type_phrase_folding(&input),
+                (
+                    TargetFilter::Typed(TypedFilter::creature().properties(vec![exclusion])),
+                    ""
+                ),
+                "fold result for {input:?}"
+            );
+        }
+    }
+
+    /// Referents the exclusion does not model are refused by the arm and stay
+    /// unconsumed, exactly as before the arm existed: the plural "enchanted
+    /// creatures" (not this source's host), both compound adjectives (no single
+    /// attachment kind), an article or a non-attachment adjective, a bare
+    /// adjective with no noun, a possessive host ("…'s controller" names a
+    /// different referent), and "that creature" (no parsed referent). Paired
+    /// with `parse_type_phrase_other_than_attached_host_noun_shapes`, which
+    /// proves the arm is reachable through the same fold.
+    #[test]
+    fn parse_type_phrase_other_than_unsupported_referents_unchanged() {
+        for suffix in [
+            "other than enchanted creatures",
+            "other than enchanted or equipped creature",
+            "other than equipped or enchanted creature",
+            "other than the enchanted creature",
+            "other than attached creature",
+            "other than enchanted",
+            "other than enchanted creature's controller",
+            "other than that creature",
+        ] {
+            assert_eq!(
+                parse_other_than_exclusion(suffix).ok(),
+                None,
+                "the arm must decline {suffix:?}"
+            );
+            let input = format!("creature {suffix}");
+            let expected_rest = format!(" {suffix}");
+            assert_eq!(
+                parse_type_phrase_folding(&input),
+                (
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    expected_rest.as_str()
+                ),
+                "{input:?} must not gain an exclusion or consume the suffix"
+            );
+        }
     }
 
     /// CR 700.9 + CR 109.4: end-to-end quantity ref for Thundering Raiju —

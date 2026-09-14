@@ -76,7 +76,7 @@ expression: "&lowered"
       "kind": "Activated",
       "effect": {
         "type": "Unimplemented",
-        "name": "separate",
+        "name": "unrecognized_clause_head",
         "description": "Separate all permanents target player controls into two piles"
       },
       "cost": {
