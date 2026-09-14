@@ -9022,8 +9022,8 @@ mod tests {
         ChoiceValue, Comparator, ControllerRef, CountScope, DamageChannel, DamageKindFilter,
         DelayedTriggerCondition, DevotionColors, Duration, Effect, FilterProp, KickerVariant,
         ModalSelectionCondition, ModalSelectionConstraint, ObjectProperty, ObjectScope,
-        PlayerRelation, RepeatContinuation, SharedQuality, StaticCondition, TargetFilter,
-        TargetRef, ThisWayCause, TypeFilter, TypedFilter,
+        PlayerRelation, RepeatContinuation, SharedQuality, StaticCondition, TargetChoiceTiming,
+        TargetFilter, TargetRef, ThisWayCause, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -21460,70 +21460,75 @@ mod tests {
         );
     }
 
-    /// Resolver-path half of the nested-carrier rebind contract (AST-level
-    /// coverage for every new carrier lives in
-    /// `oracle_effect::tests::counter_gate_rebind_reaches_*`): once the rebind
-    /// substitutes the gate's own `QuantityRef` for a counter-gated
-    /// `PutCounter` nested inside a `CreateDelayedTrigger` payload, resolving
-    /// that quantity against the live chain-root target reports the REAL
-    /// counter total, not 0 — exactly like the direct (non-delayed) path
-    /// `chain_root_target_counters_read_live_map_while_target_survives`
-    /// above already proves.
-    ///
-    /// KNOWN GAP, deliberately NOT fixed by this test or by the counter-gate
-    /// rebind it covers: `ability_utils::build_resolved_from_def` — the
-    /// general "materialize a nested `AbilityDefinition` into a resolvable
-    /// `ResolvedAbility`" authority used by EVERY new carrier
-    /// (`CreateDelayedTrigger`, `RevealFromHand.on_decline`,
-    /// `Vote.per_choice_effect`, `FlipCoin`'s branches, …) — does not copy
-    /// the creating ability's `context.chain_root_targets` onto the
-    /// `ResolvedAbility` it builds. A REAL delayed trigger firing later would
-    /// therefore still read an empty chain-root list and resolve to 0,
-    /// regardless of this rebind. That is a pre-existing context-propagation
-    /// gap in `build_resolved_from_def` itself, orthogonal to and predating
-    /// the counter-gate traversal fix (it would affect ANY effect reading
-    /// `ObjectScope::ChainRootTarget` from inside any of these carriers, for
-    /// any card, not only counter-gated ones) — so this test stamps
-    /// `chain_root_targets` onto the built ability by hand, exactly what a
-    /// future propagation fix would do, to isolate what THIS PR is
-    /// responsible for: that the rebound quantity, once resolvable, reads
-    /// the right number.
+    /// Production-path regression for the CR 608.2h + CR 603.7a nested-carrier
+    /// chain-root propagation fix: `build_resolved_from_def_with_chain_root`
+    /// (the authority `delayed_trigger::resolve` materializes a delayed
+    /// payload through) must carry the creating ability's
+    /// `chain_root_targets` onto the delayed payload it installs — with NO
+    /// manual stamping anywhere in this test, unlike the fixture's own
+    /// depth-two sibling test above, which builds its chain by hand precisely
+    /// because there was previously no propagating authority to call. Firing
+    /// the STORED ability (exactly the entry point real trigger dispatch uses
+    /// once a delayed trigger goes on the stack and resolves, CR 603.3b) must
+    /// then place the correct number of REAL counters, not 0.
     #[test]
-    fn chain_root_target_counter_gate_rebinds_through_a_delayed_trigger_payload() {
-        let (state, spell, _target, root) = chain_root_target_fixture();
+    fn chain_root_target_counter_gate_survives_a_delayed_trigger_firing_in_production() {
+        let (mut state, spell, _target, root) = chain_root_target_fixture();
+        let expected_chain_root_targets = root.context.chain_root_targets.clone();
+        let recipient = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Recipient Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&recipient)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
 
         let gate_qty = QuantityRef::CountersOn {
             scope: ObjectScope::ChainRootTarget,
             counter_type: None,
         };
+        // CR 608.2d: an untargeted, controller-scoped recipient filter — same
+        // shape Dismantle itself prints — with exactly one legal candidate
+        // (`recipient`; the fixture's own `target` is opponent-controlled and
+        // does not match), so resolution auto-picks it with no prompt.
         let recipient_filter = TargetFilter::Typed(TypedFilter {
             type_filters: vec![TypeFilter::Artifact],
             controller: Some(ControllerRef::You),
             properties: vec![],
         });
 
+        // CR 608.2d: the recipient is a description, not a target (CR 115.10a —
+        // no literal "target" word), so it must be chosen AT RESOLUTION, not
+        // announced at stack time. Mirrors what `try_parse_put_counter_choice`
+        // stamps on the real parsed shape (`dismantle_chain_shape`'s
+        // `TargetChoiceTiming::Resolution` assertion above).
+        let mut inner_put_counter = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: recipient_filter,
+            },
+        );
+        inner_put_counter.target_choice_timing = TargetChoiceTiming::Resolution;
         let mut payload = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::CreateDelayedTrigger {
                 condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-                effect: Box::new(AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::PutCounter {
-                        counter_type: CounterType::Plus1Plus1,
-                        count: QuantityExpr::Ref {
-                            qty: QuantityRef::EventContextAmount,
-                        },
-                        target: recipient_filter.clone(),
-                    },
-                )),
+                effect: Box::new(inner_put_counter),
                 uses_tracked_set: false,
             },
         );
 
-        // Exactly the chunk loop's counter-gate call site
-        // (`oracle_effect::mod.rs`): rebind the deferred payload's
-        // placeholder to the gate's own QuantityRef before it is stored for
-        // later resolution.
         // Exactly the chunk loop's counter-gate call site
         // (`oracle_effect::mod.rs`): rebind the deferred payload's
         // placeholder to the gate's own QuantityRef before it is stored for
@@ -21533,45 +21538,62 @@ mod tests {
             &gate_qty,
         );
 
-        let Effect::CreateDelayedTrigger {
-            effect: inner_def, ..
-        } = payload.effect.as_ref()
-        else {
-            panic!("expected CreateDelayedTrigger, got {:?}", payload.effect);
-        };
-        // Positive reach-guard: the rebind actually changed the AST.
+        // Chain the (rebound) CreateDelayedTrigger effect under the SAME
+        // resolving Destroy ability the fixture built, exactly as the cast
+        // pipeline does after `finalize_cast` stamps `chain_root_targets`:
+        // one whole-struct context copy down the entire chain (same
+        // mechanism `chain_root_target_survives_to_depth_two_while_sub_
+        // targets_differ` above exercises).
+        let controller = root.controller;
+        let mut chain = root.sub_ability(crate::game::ability_utils::build_resolved_from_def(
+            &payload, spell, controller,
+        ));
+        chain.set_context_recursive(chain.context.clone());
+        let creating = chain.sub_ability.as_deref().expect("sub_ability present");
+
+        let mut events = Vec::new();
+        crate::game::effects::delayed_trigger::resolve(&mut state, creating, &mut events)
+            .expect("delayed trigger installation must not error");
+
+        let installed = state
+            .delayed_triggers
+            .first()
+            .expect("delayed trigger must install");
         assert_eq!(
-            *inner_def.effect,
-            Effect::PutCounter {
-                counter_type: CounterType::Plus1Plus1,
-                count: QuantityExpr::Ref {
-                    qty: gate_qty.clone()
-                },
-                target: recipient_filter,
+            installed.ability.context.chain_root_targets, expected_chain_root_targets,
+            "the installed delayed trigger's payload must inherit chain_root_targets \
+             automatically — no manual stamping anywhere in this test"
+        );
+        let Effect::PutCounter { count, .. } = &installed.ability.effect else {
+            panic!(
+                "expected PutCounter as the installed payload, got {:?}",
+                installed.ability.effect
+            );
+        };
+        assert_eq!(
+            *count,
+            QuantityExpr::Ref {
+                qty: gate_qty.clone()
             },
-            "the payload's EventContextAmount must already be the concrete gate \
-             QuantityRef before the delayed trigger is stored for later resolution"
+            "the installed payload must still carry the rebound (not EventContextAmount) count"
         );
 
-        // Materialize the deferred payload exactly as `delayed_trigger::resolve`
-        // does (`ability_utils::build_resolved_from_def`), then stamp the
-        // chain-root context by hand — see the KNOWN GAP note above.
-        let mut resolved_inner =
-            crate::game::ability_utils::build_resolved_from_def(inner_def, spell, root.controller);
-        resolved_inner.context.chain_root_targets = root.context.chain_root_targets.clone();
+        // Fire it: resolve the stored ability through the SAME entry point
+        // production trigger dispatch uses once a delayed trigger goes on the
+        // stack and resolves (CR 603.3b).
+        let stored_ability = (*installed.ability).clone();
+        crate::game::effects::resolve_ability_chain(&mut state, &stored_ability, &mut events, 0)
+            .expect("firing the delayed trigger must not error");
 
         assert_eq!(
-            resolve_counters_on_scope(
-                &state,
-                ObjectScope::ChainRootTarget,
-                chain_root_ctx(spell),
-                &resolved_inner.targets,
-                Some(&resolved_inner),
-                None,
-            ),
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
             3,
-            "the rebound quantity nested inside a CreateDelayedTrigger payload must read \
-             the live chain-root target's real counter total, not 0"
+            "firing the delayed trigger must place the chain-root target's real \
+             counter total (3) on the recipient, not 0"
         );
     }
 

@@ -30938,6 +30938,31 @@ impl ResolvedAbility {
         self.trigger_source.as_ref().map(|source| source.card_id)
     }
 
+    /// CR 608.2h + CR 603.7a: Propagate the creating ability's chain-root
+    /// target list to this ability and every continuation branch. A carrier
+    /// that materializes a nested `AbilityDefinition` payload WHILE STILL
+    /// WITHIN an active resolution chain (a delayed trigger's payload, a
+    /// vote's per-choice effect, a coin flip's win/lose branch, a die-roll
+    /// result branch, a reveal-from-hand decline) must carry the creating
+    /// ability's `chain_root_targets` onto the freshly-built `ResolvedAbility`
+    /// it produces — `build_resolved_from_def` gives that ability a BRAND NEW
+    /// `SpellContext`, so without this, any `ObjectScope::ChainRootTarget`
+    /// read nested inside the payload silently resolves against an empty
+    /// list (reads as 0) once the payload actually executes. Narrow single-field
+    /// analog of `set_context_recursive`, mirroring
+    /// `set_source_incarnation_recursive`'s shape rather than overwriting the
+    /// whole context (which would also clobber the freshly-built ability's own
+    /// `ability_tag`/`chosen_x`/other per-node context fields).
+    pub fn set_chain_root_targets_recursive(&mut self, chain_root_targets: Vec<TargetRef>) {
+        self.context.chain_root_targets = chain_root_targets.clone();
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_chain_root_targets_recursive(chain_root_targets.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_chain_root_targets_recursive(chain_root_targets);
+        }
+    }
+
     /// CR 400.7: Propagate the source's captured incarnation to this ability
     /// and every continuation branch. Used by self-transform guards that are
     /// intentionally distinct from full triggered-source provenance.

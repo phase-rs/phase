@@ -266,10 +266,15 @@ pub fn resolve(
         .and(ability.trigger_source.as_ref())
         .map(|source| source.identity.reference.object_id)
         .unwrap_or(ability.source_id);
-    let mut delayed_ability = crate::game::ability_utils::build_resolved_from_def(
+    // CR 608.2h: propagate the creating ability's chain-root target list so a
+    // counter-gated "that many" nested in the delayed payload still reads the
+    // live/LKI chain-root target once the trigger fires, instead of an empty
+    // list (see `build_resolved_from_def_with_chain_root`'s doc).
+    let mut delayed_ability = crate::game::ability_utils::build_resolved_from_def_with_chain_root(
         &effect_def,
         delayed_source_id,
         ability.controller,
+        ability.context.chain_root_targets.clone(),
     );
 
     // CR 603.7: Bind the most recent tracked set to the built ability chain's
