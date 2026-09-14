@@ -11581,6 +11581,7 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         // this change, so `DistinctColorsAmongPermanents { filter }` no longer
         // exists to sit alongside `ObjectCount`.
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             card_type_set_source_binding_diverges(source)
@@ -15828,6 +15829,7 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         // Card-type / subtype / colour counting all embed their `TargetFilter`s
         // through the shared population enum.
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             characteristic_source_references_cost_paid_object(source)

@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4599
-- **Total card appearances across root causes:** 4632 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4598
+- **Total card appearances across root causes:** 4631 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -49,7 +49,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 ## Full card lists per root cause
 
-### 1. Relative-clause / filter restriction on target dropped  (741 cards)
+### 1. Relative-clause / filter restriction on target dropped  (740 cards)
 
 **Signature.** TargetFilter/affected emitted with empty or missing properties; a trailing restrictive clause (type, subtype, color, mana value, zone, combat/temporal/control predicate, exclusion) is silently dropped, over-broadening the filter.
 
@@ -151,7 +151,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Captain America's Shield
 - Captain N'ghathrod
 - Cathedral Membrane
-- Cemetery Prowler
 - Cephalid Shrine
 - Challenger Troll
 - Champion's Victory
