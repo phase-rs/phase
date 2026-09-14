@@ -41517,6 +41517,74 @@ fn an_o1a_rider_shape_under_a_state_guard_is_not_an_ownership_candidate() {
     );
 }
 
+/// **Venue S: the precondition two venue-P rows rest on and neither can assert.**
+///
+/// `guard_ownership::v17_a_gap_this_pass_minted_does_not_pardon_the_guards_below_it` and
+/// `guard_ownership::v7s_o1b_event_guarded_exile_rider_under_counter_is_owned` both
+/// discriminate only while their rider clauses are DEFERRED at this seam — marked, and left
+/// for `oracle::resolve_unlowered_guards` to settle on the assembled tree. If either clause
+/// stopped being an ownership candidate, `lower_clause_ast` would gap it HERE instead, and
+/// the two gaps are byte-identical: the deferred path and the seam path both call
+/// `gap_diagnosis::clause_gap_unimplemented_as(ClauseGapKind::Replacement, &clause_text)` on
+/// the same clause text. Venue P therefore cannot tell them apart — same gap name, same
+/// description, same absent body, same chain shape — so V17 would go green with its claim
+/// unexercised, and V7s would go red for a reason that has nothing to do with the O1b arm.
+///
+/// The two clause texts are the two rider shapes `graveyard_destination_rider` classifies
+/// that the corpus actually prints: the `Exile` member (Torrential Gearhulk's printed rider,
+/// which is also V7s's rider and V17's first) and the `Library` member (V17's second). Both
+/// are written the way the other venue-S/C rows in this file write clause text — lowercase,
+/// no terminal period — since the seam's inputs are clause fragments, not printed sentences.
+///
+/// **Revert-to-red:** drop the `reading == GuardReading::Event` conjunct's partner, i.e. make
+/// `is_ownership_candidate` return `false` for these shapes (narrow `graveyard_destination_rider`,
+/// or add any further conjunct they fail), and both cases below fail on the final assertion
+/// while venue P stays green — which is exactly the silent-stop-discriminating mode this row
+/// exists to make loud.
+#[test]
+fn v17s_both_stacked_riders_are_ownership_candidates() {
+    for (label, clause_text) in [
+        (
+            "exile rider (V7s; V17's first)",
+            "if that spell would be put into your graveyard, exile it instead",
+        ),
+        (
+            "library rider (V17's second)",
+            "if that spell would be put into a graveyard, put it on the bottom of its owner's \
+             library instead",
+        ),
+    ] {
+        let ast = parse_clause_ast(clause_text, &mut ParseContext::default());
+        let ClauseAst::Conditional { guard, .. } = &ast else {
+            panic!("{label}: expected a Conditional, got {ast:?}")
+        };
+        // Reach-guard: the guard really carries the EVENT reading. Without this the final
+        // assertion could be satisfied by a future candidacy rule that ignores the reading.
+        assert_eq!(
+            *guard,
+            ConditionalGuard::Unlowered(GuardReading::Event),
+            "{label} reach-guard: the clause must reach the seam with the EVENT reading"
+        );
+
+        let clause = lower_clause_ast(ast, &mut ParseContext::default());
+        // The claim: DEFERRED, not decided here.
+        assert_eq!(
+            clause.unlowered_guard.as_ref().map(|mark| mark.reading),
+            Some(GuardReading::Event),
+            "{label}: the seam must defer this clause, not gap it — got effect {:?}, mark {:?}",
+            clause.effect,
+            clause.unlowered_guard
+        );
+        // Stated so the row is not purely white-box: a deferred clause keeps its body, where
+        // a seam gap would have replaced it. This is the half venue P cannot distinguish.
+        assert!(
+            !matches!(clause.effect, Effect::Unimplemented { .. }),
+            "{label}: a deferred clause keeps its body intact, got {:?}",
+            clause.effect
+        );
+    }
+}
+
 /// Every definition on a chain, following both the `sub_ability` continuation link and
 /// the `else_ability` branch that `parse_effect_chain` can produce.
 fn guard_chain_nodes(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {

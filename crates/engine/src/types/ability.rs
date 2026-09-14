@@ -24225,6 +24225,15 @@ pub enum GuardReading {
 /// It is NOT `None` on a tree produced by `parse_effect_chain` outside the pipeline: that
 /// entry has no resolver, so a mark there survives with the body intact — i.e. it fails
 /// open to base behaviour.
+///
+/// There is a SECOND fail-open path, and it fails open by DROPPING rather than by carrying:
+/// `oracle_effect::ability_definition_from_clause` (seven call sites) lifts a
+/// `ParsedEffectClause` onto a fresh `AbilityDefinition` field by field and does not copy this
+/// one. A clause marked at the seam therefore becomes an unmarked definition, the resolver
+/// never sees a verdict to settle, and the guard is dropped with the body emitted — the same
+/// base behaviour the `parse_effect_chain` path lands on, reached the other way round. Both
+/// paths are fail-OPEN in the same direction, which is why neither can strand a live mark in
+/// a shipped tree; see that function's own doc for why the field is not threaded instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnloweredGuard {
     pub reading: GuardReading,

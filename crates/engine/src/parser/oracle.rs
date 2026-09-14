@@ -8035,6 +8035,24 @@ fn resolve_guards_in_ability(def: &mut AbilityDefinition, parent: Option<&Effect
     // body is stripped upstream by that same
     // `strip_unrecognized_conditional_head_when_body_optional` (two live call sites) and
     // never arrives, so nothing here is an invariant over every printed leading guard.
+    //
+    // THE `reading == Event` CONJUNCT BELOW IS A FORWARD GUARD, NOT A LIVE DISCRIMINATOR.
+    // Measured, not assumed: `rg 'unlowered_guard\s*[:=]' crates/engine/src` finds exactly one
+    // site that writes a `Some` outside tests — `oracle_effect::lower_clause_ast`, gated on
+    // `is_ownership_candidate`, whose own first conjunct is `reading == GuardReading::Event`
+    // (`oracle_effect/mod.rs`). `assembly` only clones that field, and every other write is a
+    // literal `None`. So on a tree this pass walks, `reading` is `Event` on every mark it can
+    // see and this conjunct cannot currently be false.
+    //
+    // It stays, for two reasons, and is NOT to be read as a second live discriminator:
+    //   * `guard_owner`'s doc delegates the Event gating to this one call site precisely so no
+    //     arm there has to restate it — deleting the conjunct here would leave that gating
+    //     stated nowhere and silently widen every O1 arm to STATE marks;
+    //   * `UnloweredGuard` is `Deserialize`, so a hand-authored or externally produced tree can
+    //     carry a STATE mark this pass never minted. Falling through such a mark (guard dropped,
+    //     body emitted, loss counted by `swallow_check`'s Condition_If detector) is the intended
+    //     behaviour described above; consulting `guard_owner` for it is not.
+    // If a second mint site is ever added, this comment is the thing to re-measure.
     let guard_gap = def.unlowered_guard.take().and_then(
         |UnloweredGuard {
              reading,
@@ -8049,9 +8067,21 @@ fn resolve_guards_in_ability(def: &mut AbilityDefinition, parent: Option<&Effect
             })
         },
     );
-    resolve_guards_in_effect(&mut def.effect);
+    // Skipped when this node gaps: `*def.effect` is replaced wholesale below, so every node
+    // inside the old payload is discarded unread. Walking it settles marks on a subtree that
+    // never ships and emits `gap_diagnosis`' `tracing::debug!` for gaps nobody can observe,
+    // which misreports the debug stream. Outcome-identical either way — the payload and any
+    // mark in it are dropped by the assignment, so `resolve_unlowered_guards`' serialized
+    // no-live-mark `debug_assert!` cannot see them. The CHILDREN below are still walked
+    // unconditionally: `sub_ability` / `else_ability` / `mode_abilities` survive the rewrite
+    // and are not part of the discarded payload.
+    if guard_gap.is_none() {
+        resolve_guards_in_effect(&mut def.effect);
+    }
     {
-        // The PRE-rewrite owner (see this function's doc).
+        // The PRE-rewrite owner (see this function's doc). Unaffected by the skip above:
+        // `resolve_guards_in_effect` rewrites marks nested inside a payload and never changes
+        // the `Effect` variant, which is all `guard_owner` reads.
         let owner: &Effect = &def.effect;
         if let Some(sub) = def.sub_ability.as_deref_mut() {
             resolve_guards_in_ability(sub, Some(owner));
@@ -8119,6 +8149,25 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         // CR 603.7a: the delayed payload is a definition in its own right. Load-bearing for
         // the direct-parent fact — Power Pack's O1a owner sits inside one, so a walk that
         // stopped here would lose it.
+        //
+        // `..` DISCARDS ONE DEFINITION-BEARING FIELD, deliberately: `condition:
+        // DelayedTriggerCondition` holds up to three `Box<TriggerDefinition>`
+        // (`WheneverEvent.trigger`, `WhenNextEvent.trigger` / `.or_trigger`), each with its own
+        // `execute: Option<Box<AbilityDefinition>>`. `ExiledSpellRider::ReturnTo.timing` is the
+        // same type and is a leaf in the blanket arm below for the same reason.
+        //
+        // LATENT, NOT LIVE — measured rather than assumed. Those triggers are MATCHERS: the
+        // variant's own doc states "the embedded trigger's `execute` field should be `None` —
+        // the actual effect lives in `DelayedTrigger.ability`", `TriggerDefinition::new` (the
+        // constructor every parser site here uses) sets `execute: None`, and no parser
+        // construction site overrides it. With no `execute` there is no `AbilityDefinition`
+        // below the condition and so no clause that could carry a mark.
+        //
+        // If that ever stops holding, the failure is LOUD rather than silent:
+        // `resolve_unlowered_guards`' `debug_assert!` serializes the whole `ParsedAbilities`
+        // and asserts no `unlowered_guard` key survives anywhere, `condition` included. Adding
+        // a `resolve_guards_in_delayed_condition` arm here is the fix at that point; it is not
+        // written now because it would be dead code with no reachable input.
         Effect::CreateDelayedTrigger { effect, .. } => resolve_guards_in_ability(effect, None),
         Effect::FlipCoin {
             win_effect,
@@ -8232,7 +8281,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
                 resolve_guards_in_continuous_mod(modification);
             }
         }
-        // CR 611.2c: the seventh carrier is one level down — the granted permission's own
+        // CR 611.2: the seventh carrier is one level down — the granted permission's own
         // `enters_with_modifications`, the type-grant rider on a cast-this-way creature
         // (The Tomb of Aclazotz class; see that field's own doc).
         Effect::GrantCastingPermission { permission, .. } => {
@@ -8451,9 +8500,10 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
     }
 }
 
-/// CR 603.3: a trigger's payload is a definition; its `unless_pay` is a cost, which carries
-/// no mark (a mark is minted only on a clause's own `ParsedEffectClause` and copied onto the
-/// definition that clause assembles into, never onto a cost).
+/// CR 603.1: a triggered ability is "[trigger condition], [effect]", so its payload is a
+/// definition; its `unless_pay` is a cost, which carries no mark (a mark is minted only on a
+/// clause's own `ParsedEffectClause` and copied onto the definition that clause assembles
+/// into, never onto a cost).
 fn resolve_guards_in_trigger(trigger: &mut TriggerDefinition) {
     if let Some(execute) = trigger.execute.as_deref_mut() {
         resolve_guards_in_ability(execute, None);
@@ -8480,7 +8530,7 @@ fn resolve_guards_in_replacement(replacement: &mut ReplacementDefinition) {
 /// Wildcard-free for the same reason as `resolve_guards_in_effect`: a new
 /// `CastingPermission` variant must force a descend-or-leaf decision here.
 ///
-/// CR 611.2c: only `ExileWithAltCost` carries modifications — the type-grant rider on a
+/// CR 611.2: only `ExileWithAltCost` carries modifications — the type-grant rider on a
 /// cast-this-way permission (The Tomb of Aclazotz class). The remaining seven variants
 /// carry costs, zones and turn stamps, none of which is a definition carrier.
 fn resolve_guards_in_casting_permission(permission: &mut CastingPermission) {

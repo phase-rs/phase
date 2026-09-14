@@ -6,9 +6,24 @@
 //! then keep an EVENT-guarded body alive:
 //!
 //! - **O1a** — CR 614.1a + CR 608.2n: a graveyard-redirect rider that is the direct
-//!   `sub_ability` of an `Effect::CastFromZone`.
+//!   `sub_ability` of an `Effect::CastFromZone`. Corpus-backed: V3/V4/V5 are verbatim
+//!   Torrential Gearhulk / Mission Briefing / Power Pack.
 //! - **O1b** — CR 608.2c + CR 614.1a: an exile rider that is the direct `sub_ability`
-//!   of an `Effect::Counter`.
+//!   of an `Effect::Counter`. **A FORWARD GUARD WITH NO CORPUS MEMBER, and the arm's own
+//!   comment naming Force of Negation and No More Lies does not make it one.** Both print
+//!   `"If that spell is countered this way, exile it instead of putting it into its owner's
+//!   graveyard."` — no "would", so `condition_names_an_event` classifies them STATE, no mark
+//!   is minted and the O1b arm is never reached. Measured over the whole corpus, not inferred
+//!   from those two: no card pairing a counter with a sentence-leading `"if … would …"` guard
+//!   exists in `data/mtgjson/AtomicCards.json`. V6 (Delay) and V7n (Remand) are declared
+//!   CONTROLS for the same reason. The arm's only discriminator is therefore the declared
+//!   synthetic row **V7s**, on the same footing as the declared-synthetic rows V17 and
+//!   `oracle_effect::tests::an_o1a_rider_shape_under_a_state_guard_is_not_an_ownership_candidate`.
+//!
+//! O1b is NOT deleted the way O2 was, and the distinction is the point: O2 was
+//! LOGICALLY unreachable — its two conjuncts were mutually exclusive, so no input of any
+//! kind could reach it. O1b is reachable by any input of the shape V7s pins; it is only the
+//! printed corpus that has no member today.
 //!
 //! A third class, **O2** (CR 615.5, a "prevented this way" follow-up under an
 //! `Effect::PreventDamage` ancestor), was deleted as dead: a back-reference rider reads
@@ -71,6 +86,15 @@ has haste.)";
 /// V7n — Remand, verbatim.
 const REMAND: &str = "Counter target spell. If that spell is countered this way, put it into its \
 owner's hand instead of into that player's graveyard.\nDraw a card.";
+
+/// V7s — **DECLARED SYNTHETIC, two real donors, one composed pairing.** The head is the
+/// printed first sentence of Delay / Force of Negation / No More Lies ("Counter target
+/// spell."); the rider is Torrential Gearhulk's printed rider sentence, verbatim. Only the
+/// pairing is composed, and it is composed deliberately: no printed card pairs a counter with
+/// a sentence-leading EVENT ("would") guard, which is precisely why O1b needs a row of its own
+/// (see this module's header).
+const SYNTHETIC_EVENT_GUARDED_COUNTER_RIDER: &str = "Counter target spell. If that spell would \
+be put into your graveyard, exile it instead.";
 
 /// V8 — Deflecting Palm, verbatim.
 const DEFLECTING_PALM: &str = "The next time a source of your choice would deal damage to you \
@@ -199,11 +223,20 @@ fn has_exile_parent_target_rider(parsed: &ParsedAbilities) -> bool {
 /// serialized tree — the same predicate the corpus-wide gate applies to
 /// `card-data.json` — so it cannot be satisfied by a walk that simply fails to look.
 ///
-/// Deliberately NOT applied to the venue-C rows: there the resolver has not run yet and
-/// an ownership candidate is *supposed* to carry a live mark, which is what V10c asserts
-/// (`parser::oracle_effect::tests::o2_rider_clause_is_marked_by_the_seam_even_with_no_shield`).
-/// Its former sibling V11c is withdrawn — under the reading-aware candidacy rule a STATE
-/// guard over an O1a shape is no longer a candidate at all, so there is no mark to assert.
+/// Deliberately NOT applied to the venue-C/S rows: there the resolver has not run yet and an
+/// ownership candidate is *supposed* to carry a live mark. The row that used to be named here
+/// as the example — V10c,
+/// `parser::oracle_effect::tests::o2_rider_clause_is_marked_by_the_seam_even_with_no_shield` —
+/// is WITHDRAWN with the O2 apparatus, and its former sibling V11c with the reading-aware
+/// candidacy rule (a STATE guard over an O1a shape is no longer a candidate, so there is no
+/// mark to assert). The surviving positive is
+/// `parser::oracle_effect::tests::v17s_both_stacked_riders_are_ownership_candidates`.
+///
+/// That is the only test in the tree that asserts a mark is MINTED. Everywhere else the
+/// positive is carried behaviourally: V3 and V5 go red if the seam stops minting, because an
+/// unmarked EVENT clause is gapped on the spot by `lower_clause_ast` and their riders vanish.
+/// Stated here rather than left implicit, because this predicate is the negative half and a
+/// reader checking "who proves a mark is ever created?" arrives at this comment first.
 fn assert_no_live_guard_mark(parsed: &ParsedAbilities, row: &str) {
     fn holds(value: &serde_json::Value) -> bool {
         match value {
@@ -376,9 +409,20 @@ fn v5_o1a_owner_inside_a_delayed_trigger_is_found() {
 // V6 / V7n — O1b.
 // ---------------------------------------------------------------------------
 
-/// V6. CR 608.2c + CR 614.1a: Delay's back-reference guard ("if the spell is countered
-/// this way") carries no "would", so it reads STATE — and the exile rider is still
-/// owned, because its direct parent is the `Effect::Counter`.
+/// V6 — a **control**, not an O1b discriminator. CR 608.2c + CR 614.1a: Delay's
+/// back-reference guard ("if the spell is countered this way") carries no "would", so it
+/// reads STATE.
+///
+/// The rider therefore survives by FALL-THROUGH, and ownership is never consulted for it —
+/// the same correction V8 and V9 carry. A STATE guard is not an ownership candidate
+/// (`oracle_effect::is_ownership_candidate`'s first conjunct is `reading == Event`), so no
+/// mark is minted at the clause seam at all; `oracle::guard_owner`'s O1b arm is not reached,
+/// and `oracle.rs`'s `reading == GuardReading::Event` conjunct would short-circuit ahead of
+/// it even if one were. Deleting the O1b arm leaves this row green.
+///
+/// It stays because it pins the fall-through itself: a future widening of the EVENT reading
+/// that swept in "countered this way" would gap Delay's rider, and this row would say so.
+/// The O1b arm's own discriminator is `v7s_*` below.
 #[test]
 fn v6_o1b_exile_rider_under_counter_survives() {
     let parsed = parse(DELAY, "Delay", &[], &["Instant"]);
@@ -468,6 +512,73 @@ fn v7n_non_exile_counter_redirect_rides_the_head_and_mints_no_rider() {
         gaps(&parsed)
     );
     assert_no_live_guard_mark(&parsed, "V7n");
+}
+
+/// V7s — **the O1b arm's only discriminator.** CR 608.2c + CR 614.1a: an EVENT-reading guard
+/// over an exile rider whose direct parent is the `Effect::Counter` must NOT gap.
+///
+/// V6 and V7n cannot carry this claim and are declared controls: both print back-reference
+/// guards ("… is countered this way"), which carry no "would", read STATE, and so are never
+/// ownership candidates — the O1b arm is not reached on either. Deleting the arm leaves both
+/// green. This row is the one that goes red.
+///
+/// **Revert-to-red:** replace the `Some(Effect::Counter { .. })` arm in `oracle::guard_owner`
+/// with `false` (or delete it, falling through to the `_ => false` default) and the rider's
+/// EVENT guard finds no owner. `resolve_guards_in_ability` then rewrites the whole clause to
+/// an `unparsed_replacement` gap, so BOTH halves below flip: the exile rider disappears and a
+/// gap appears.
+///
+/// Its candidacy precondition — that the rider is DEFERRED at the seam rather than gapped
+/// there — is pinned at venue S by
+/// `parser::oracle_effect::tests::v17s_both_stacked_riders_are_ownership_candidates`, whose
+/// first case is this row's rider clause. It cannot be pinned here: the resolver has already
+/// cleared the mark by the time this venue sees the tree, and a clause gapped at the seam is
+/// byte-identical to one gapped by the resolver. Without that companion a red here would be
+/// ambiguous between "the O1b arm broke" and "the seam stopped deferring".
+#[test]
+fn v7s_o1b_event_guarded_exile_rider_under_counter_is_owned() {
+    let parsed = parse(
+        SYNTHETIC_EVENT_GUARDED_COUNTER_RIDER,
+        "Synthetic Event Guarded Counter Rider",
+        &[],
+        &["Instant"],
+    );
+
+    let head = &parsed.abilities[0];
+    // Reach-guard 1: the owner relation itself — the O1b arm reads the DIRECT parent, so a
+    // rider that landed anywhere else would not exercise it.
+    assert!(
+        matches!(*head.effect, Effect::Counter { .. }),
+        "V7s reach-guard: the head must be Counter, got {:?}",
+        head.effect
+    );
+    let rider = head
+        .sub_ability
+        .as_deref()
+        .expect("V7s reach-guard: the rider must be the head's direct sub_ability");
+    // Reach-guard 2: the rider is the exile shape `is_graveyard_exile_rider_subability`
+    // recognizes. Without this the row could be green on a rider the arm would refuse.
+    assert!(
+        is_exile_parent_target_rider(&rider.effect),
+        "V7s reach-guard: the rider must be the exile shape, got {:?}",
+        rider.effect
+    );
+    // Reach-guard 3: the guard was not absorbed into the head's own typed redirect field.
+    // If assembly folded it into `countered_spell_zone` there would be no guard left to own.
+    assert!(
+        rider.condition.is_none(),
+        "V7s reach-guard: the unlowerable guard must not have been lowered into the rider's \
+         condition slot, got {:?}",
+        rider.condition
+    );
+
+    // The claim: an owned EVENT-guarded body gaps nowhere.
+    assert!(
+        gaps(&parsed).is_empty(),
+        "V7s: the O1b owner must consume the guard, got {:?}",
+        gaps(&parsed)
+    );
+    assert_no_live_guard_mark(&parsed, "V7s");
 }
 
 // ---------------------------------------------------------------------------
@@ -575,8 +686,12 @@ fn v9_o2_is_an_ancestor_test_so_the_second_rider_survives() {
 // printed shield did not parse"; no such rule exists here, so the row goes rather than the
 // behaviour.
 //
-// Its venue-C companion V10c (in `parser/oracle_effect/tests.rs`) STAYS: it asserts only
-// that the seam mints the mark, which is unchanged.
+// Its venue-C companion V10c (in `parser/oracle_effect/tests.rs`) is WITHDRAWN with it. V10c
+// asserted that the seam DEFERS a CR 615.5 "prevented this way" rider, i.e. that
+// `is_ownership_candidate`'s `prevented_this_way_rider_source_gate` disjunct mints a mark for
+// it — and that disjunct is deleted, so there is no mark left to assert. The withdrawal note
+// at `parser::oracle_effect::tests`' V10c carries the full derivation; this file's header
+// records the same outcome.
 
 // ---------------------------------------------------------------------------
 // V11 — WITHDRAWN at this venue. The claim moves to venue S, which has no absorber.
@@ -677,6 +792,21 @@ fn v13p_dispatcher_named_gap_is_not_re_derived_as_a_guard_gap() {
 ///
 /// Neither V12 (no parent at all) nor V4 (a non-consuming, non-gapped parent) reaches this
 /// shape, which is why the defect survived them.
+///
+/// **PRECONDITION, pinned elsewhere because this venue cannot pin it.** Every assertion below
+/// discriminates only while BOTH riders are ownership candidates, i.e. DEFERRED at the clause
+/// seam and settled by the resolver. If either stopped being one, `lower_clause_ast` would gap
+/// it in place instead — and a seam gap and a resolver gap are byte-identical
+/// (`clause_gap_unimplemented_as(ClauseGapKind::Replacement, clause_text)` in both), so the
+/// same two `unparsed_replacement` names, the same absent bodies and the same ≥3-node chain
+/// would appear under EITHER ordering of the rewrite. The row would then be green at the base
+/// it was written to discriminate against, and would prove nothing. Neither reach-guard below
+/// excludes that: they check the tree's shape, and the tree's shape is identical either way.
+///
+/// So the candidacy half is asserted at venue S, at the producing seam, by
+/// `parser::oracle_effect::tests::v17s_both_stacked_riders_are_ownership_candidates`. That
+/// row goes red the moment either rider stops being deferred — which is the only way this one
+/// can silently stop discriminating.
 #[test]
 fn v17_a_gap_this_pass_minted_does_not_pardon_the_guards_below_it() {
     let parsed = parse(

@@ -7123,6 +7123,25 @@ fn parse_life_lost_villainous_choice_chooser(input: &str) -> OracleResult<'_, Pl
     ))
 }
 
+/// Field-by-field lift of a lowered clause onto a fresh definition, for the seven sites that
+/// need a `ParsedEffectClause` as a nested branch/sub-definition rather than as a chain link.
+///
+/// **It copies seven of `ParsedEffectClause`'s nine fields and DROPS two, deliberately
+/// recorded here rather than left to a reader's field-count:**
+///
+///   * `unlowered_guard` — this is the SECOND fail-open path for a deferred guard verdict,
+///     alongside the `parse_effect_chain` one named in [`UnloweredGuard`]'s own doc. A clause
+///     whose leading guard did not lower arrives here marked; the definition it becomes is
+///     unmarked, so `oracle::resolve_unlowered_guards` never settles it and the body is
+///     emitted with its guard dropped — the pre-existing base behaviour, and the same
+///     direction the other fail-open path takes. Transferring the mark instead would let the
+///     resolver gap bodies these seven sites currently emit, which is a behavioural change
+///     with its own measurement, not a tidy-up.
+///   * `unless_pay` (CR 118.12) — dropped the same way and for no stated reason. Three of the
+///     seven sites hand in a clause literally constructed with `unless_pay: None`, so the drop
+///     is inert there; the mode/branch sites (`ChooseOneOf` branches) build their clauses by
+///     parsing sub-text and could in principle carry one. Left as-is and recorded rather than
+///     threaded, for the same reason: it is a behavioural change needing its own measurement.
 fn ability_definition_from_clause(
     kind: AbilityKind,
     clause: ParsedEffectClause,
@@ -17204,6 +17223,22 @@ fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
         // one `split_leading_conditional` and `gap_diagnosis::diagnose_clause_gap` use, so
         // all three see one vocabulary ("then, if" / "then if" / "if" / "during any turn"
         // / "during a turn").
+        //
+        // WHY THE OFFSET IS HAND-WRITTEN HERE rather than going through `nom_on_lower`:
+        // the bridge's parameter is `FnMut(&str) -> OracleResult<'_, T>`, and the prefix
+        // authority `conditions::parse_leading_conditional_prefix` returns a bare
+        // `Option<&str>` remainder, not an `OracleResult`. Wrapping it at this call site
+        // would mean restating its five `tag()`s here, which is exactly the single-authority
+        // property the paragraph above depends on — so the bridge cannot express this
+        // without either widening the authority's signature (and its two other callers) or
+        // duplicating its vocabulary. `TextPair` cannot express it either: its
+        // `strip_prefix` takes a literal, so it would need the same five literals inlined.
+        //
+        // And the bridge would buy no safety if it could: `nom_on_lower` computes the
+        // identical `lower.len() - rest.len()` count and indexes the original-case string
+        // with it (`oracle_nom/bridge.rs`). The idiom difference is DRY, not soundness.
+        // Soundness here rests on the prefixes all being ASCII AND on nothing before the
+        // match point lowercasing to a different byte length, which holds for Oracle text.
         let condition_lower = condition_text.to_lowercase();
         let cond_body = conditions::parse_leading_conditional_prefix(&condition_lower)
             .map(|rest| &condition_text[condition_lower.len() - rest.len()..])
