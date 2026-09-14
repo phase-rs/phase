@@ -469,7 +469,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 70;
+export const PROTOCOL_VERSION = 71;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

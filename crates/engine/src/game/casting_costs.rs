@@ -11116,10 +11116,9 @@ fn handle_resolution_cast_success(
             controller,
             remaining_casts,
             remaining_mv_budget,
-            filter,
+            face_policy,
             zones,
             graveyard_replacement,
-            source,
             member_pool,
         } => {
             if let Some(destination) = graveyard_replacement.clone() {
@@ -11139,15 +11138,13 @@ fn handle_resolution_cast_success(
             }
             let mut candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
                 state,
-                controller,
-                source,
-                &filter,
                 &zones,
                 budget_left,
                 // CR 607.2a: the re-offer stays confined to THIS resolution's
                 // "exiled this way" batch (Plargg and Nassari) — see the
                 // window's `member_pool` docs; empty means no restriction.
                 &member_pool,
+                face_policy.as_ref(),
             );
             // CR 608.2g: Finalize runs before the chosen card is removed from
             // its origin zone; it cannot be offered again while already cast.
@@ -11161,10 +11158,9 @@ fn handle_resolution_cast_success(
                     candidates,
                     remaining_casts: casts_left,
                     remaining_mv_budget: budget_left,
-                    filter,
+                    face_policy: *face_policy,
                     zones,
                     graveyard_replacement,
-                    source,
                     member_pool,
                 },
             }))
@@ -20226,6 +20222,15 @@ mod tests {
                     granted_to: None,
                     resolution_cleanup: Some(ResolutionCastCleanup {
                         source_id: hit,
+                        face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                            crate::types::ability::TargetFilter::Any,
+                            hit,
+                            PlayerId(0),
+                            Some(CastPermissionConstraint::ManaValue {
+                                comparator: Comparator::LT,
+                                value: QuantityExpr::Fixed { value: source_mv as i32 },
+                            }),
+                        ),
                         exiled_misses: vec![miss_a, miss_b],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::BottomMisses,
@@ -20342,6 +20347,9 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: Some(ResolutionCastCleanup {
                         source_id: hit,
+                        face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                            crate::types::ability::TargetFilter::Any, hit, PlayerId(0), None,
+                        ),
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::RippleOfferRemaining {
@@ -20415,6 +20423,9 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: Some(ResolutionCastCleanup {
                         source_id: hit,
+                        face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                            crate::types::ability::TargetFilter::Any, hit, PlayerId(0), None,
+                        ),
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::RippleOfferRemaining {
@@ -20689,6 +20700,15 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: Some(ResolutionCastCleanup {
                         source_id: hit,
+                        face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                            crate::types::ability::TargetFilter::Any,
+                            hit,
+                            PlayerId(0),
+                            Some(CastPermissionConstraint::ManaValue {
+                                comparator: Comparator::LT,
+                                value: QuantityExpr::Fixed { value: 10 },
+                            }),
+                        ),
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::BottomMisses,
@@ -20749,6 +20769,15 @@ mod tests {
                     granted_to: Some(PlayerId(1)),
                     resolution_cleanup: Some(ResolutionCastCleanup {
                         source_id: hit,
+                        face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                            crate::types::ability::TargetFilter::Any,
+                            hit,
+                            PlayerId(1),
+                            Some(CastPermissionConstraint::ManaValue {
+                                comparator: Comparator::LT,
+                                value: QuantityExpr::Fixed { value: 1 },
+                            }),
+                        ),
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::BottomMisses,

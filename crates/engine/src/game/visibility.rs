@@ -1738,10 +1738,9 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 ref candidates,
                 remaining_casts,
                 remaining_mv_budget,
-                ref filter,
+                ref face_policy,
                 ref zones,
                 ref graveyard_replacement,
-                source,
                 ref member_pool,
             },
     } = state.waiting_for
@@ -1753,10 +1752,9 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                     candidates: candidates.iter().map(|_| ObjectId(0)).collect(),
                     remaining_casts,
                     remaining_mv_budget,
-                    filter: filter.clone(),
+                    face_policy: face_policy.clone(),
                     zones: zones.clone(),
                     graveyard_replacement: graveyard_replacement.clone(),
-                    source,
                     // CR 400.2: the member pool can reference the same private
                     // candidates (a hand/graveyard window would leak eligible
                     // ids through it); redact it to placeholders exactly like
@@ -6362,12 +6360,16 @@ mod tests {
                 candidates: vec![hand_candidate],
                 remaining_casts: Some(2),
                 remaining_mv_budget: Some(6),
-                filter: crate::types::ability::TargetFilter::Any,
+                face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                    crate::types::ability::TargetFilter::Any,
+                    crate::types::game_state::zero_object_id(),
+                    PlayerId(0),
+                    None,
+                ),
                 zones: vec![Zone::Graveyard, Zone::Hand],
                 graveyard_replacement: Some(
                     crate::types::ability::SpellStackToGraveyardReplacement::Exile,
                 ),
-                source: crate::types::game_state::zero_object_id(),
                 member_pool: vec![hand_candidate],
             },
         };
@@ -8451,6 +8453,12 @@ mod tests {
                 granted_to: Some(PlayerId(0)),
                 resolution_cleanup: Some(ResolutionCastCleanup {
                     source_id: ObjectId(998),
+                    face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                        crate::types::ability::TargetFilter::Any,
+                        ObjectId(998),
+                        PlayerId(0),
+                        None,
+                    ),
                     exiled_misses: Vec::new(),
                     reject_action: ResolutionMvRejectAction::BottomWithMisses,
                     success_action: Default::default(),

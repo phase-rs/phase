@@ -4910,6 +4910,40 @@ pub enum CastPermissionConstraint {
     },
 }
 
+/// The immutable, serialized authority for one cast made while an effect is
+/// resolving.  This is deliberately a required carrier rather than a legacy
+/// filter with optional side data: a saved interactive state must either carry
+/// the exact route that created it or fail to deserialize.
+///
+/// `filter` is normalized when the policy is constructed.  `source_id` and
+/// `controller` are the real resolution context used to interpret that filter;
+/// `constraint` is the fixed cast-time condition, including the explicit
+/// `None` case for a route with no additional condition.  None of these fields
+/// has a serde default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolutionCastFacePolicy {
+    pub filter: TargetFilter,
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    pub constraint: Option<CastPermissionConstraint>,
+}
+
+impl ResolutionCastFacePolicy {
+    pub fn new(
+        filter: TargetFilter,
+        source_id: ObjectId,
+        controller: PlayerId,
+        constraint: Option<CastPermissionConstraint>,
+    ) -> Self {
+        Self {
+            filter: filter.normalized(),
+            source_id,
+            controller,
+            constraint,
+        }
+    }
+}
+
 /// CR 608.2g: Rejection-cleanup state carried by a cast-during-resolution
 /// `ExileWithAltCost` permission. Its presence is the engine's marker that the
 /// cast happens *during the resolution* of its source ability (CR 608.2g —
@@ -4926,6 +4960,11 @@ pub struct ResolutionCastCleanup {
     /// post-offer library placement. The during-resolution cast can outlive the
     /// original `CastOffer`, so its cleanup payload is the typed source carrier.
     pub source_id: super::identifiers::ObjectId,
+    /// Exact policy from the window/request that elected this temporary
+    /// permission.  It remains mandatory after the original offer has been
+    /// consumed so cancellation, payment pauses, and cleanup cannot rebuild a
+    /// merely compatible route from current state.
+    pub face_policy: ResolutionCastFacePolicy,
     /// Cards exiled/revealed during the dig that were not the hit.
     /// Empty for Suspend's self-free-cast (no dig). For Ripple (CR 701.20b)
     /// these are still in the controller's library — the "exiled" name is
@@ -5017,7 +5056,9 @@ pub enum ResolutionCastSuccessAction {
         remaining_casts: Option<u8>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remaining_mv_budget: Option<u32>,
-        filter: TargetFilter,
+        /// The exact policy from the consumed `FreeCastWindow`.  This is a
+        /// required serialized field; a pre-bridge re-offer must fail closed.
+        face_policy: Box<ResolutionCastFacePolicy>,
         zones: Vec<Zone>,
         #[serde(
             default,
@@ -5026,13 +5067,6 @@ pub enum ResolutionCastSuccessAction {
             deserialize_with = "deserialize_graveyard_replacement_compat"
         )]
         graveyard_replacement: Option<SpellStackToGraveyardReplacement>,
-        /// CR 406.6: Source object of the granting ability, threaded so
-        /// `ExiledBySource`-style filters (Plargg and Nassari) can rebuild the
-        /// re-offer candidate set against the right exile links. Zero sentinel
-        /// for saved states predating the field (graveyard/hand windows never
-        /// read it).
-        #[serde(default = "super::game_state::zero_object_id")]
-        source: super::identifiers::ObjectId,
         /// CR 607.2a + CR 608.2g: THIS resolution's "exiled this way" batch,
         /// threaded from the window that offered the cast so the re-offer's
         /// candidate set stays confined to the current resolution's exile
@@ -5043,6 +5077,100 @@ pub enum ResolutionCastSuccessAction {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         member_pool: Vec<super::identifiers::ObjectId>,
     },
+}
+
+#[cfg(test)]
+mod resolution_cast_face_policy_serde_tests {
+    use super::*;
+    use crate::types::game_state::CastOfferKind;
+
+    fn policy() -> ResolutionCastFacePolicy {
+        ResolutionCastFacePolicy::new(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+            ObjectId(701),
+            PlayerId(1),
+            Some(CastPermissionConstraint::ManaValue {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 4 },
+            }),
+        )
+    }
+
+    fn window(policy: ResolutionCastFacePolicy) -> CastOfferKind {
+        CastOfferKind::FreeCastWindow {
+            candidates: vec![ObjectId(702)],
+            remaining_casts: Some(2),
+            remaining_mv_budget: Some(7),
+            face_policy: policy,
+            zones: vec![Zone::Exile],
+            graveyard_replacement: None,
+            member_pool: vec![ObjectId(702)],
+        }
+    }
+
+    #[test]
+    fn resolution_cast_face_policy_round_trips_exactly_through_every_window_carrier() {
+        let policy = policy();
+        let cleanup = ResolutionCastCleanup {
+            source_id: ObjectId(701),
+            face_policy: policy.clone(),
+            exiled_misses: Vec::new(),
+            reject_action: ResolutionMvRejectAction::RemainExiled,
+            success_action: ResolutionCastSuccessAction::FreeCastOfferRemaining {
+                controller: PlayerId(1),
+                remaining_casts: Some(2),
+                remaining_mv_budget: Some(7),
+                face_policy: Box::new(policy.clone()),
+                zones: vec![Zone::Exile],
+                graveyard_replacement: None,
+                member_pool: vec![ObjectId(702)],
+            },
+        };
+        let round_tripped_policy: ResolutionCastFacePolicy =
+            serde_json::from_value(serde_json::to_value(&policy).unwrap()).unwrap();
+        let round_tripped_window: CastOfferKind =
+            serde_json::from_value(serde_json::to_value(window(policy.clone())).unwrap()).unwrap();
+        let round_tripped_cleanup: ResolutionCastCleanup =
+            serde_json::from_value(serde_json::to_value(&cleanup).unwrap()).unwrap();
+
+        assert_eq!(round_tripped_policy, policy);
+        assert_eq!(round_tripped_window, window(policy.clone()));
+        assert_eq!(round_tripped_cleanup, cleanup);
+        let ResolutionCastSuccessAction::FreeCastOfferRemaining { face_policy, .. } =
+            round_tripped_cleanup.success_action
+        else {
+            panic!("fixture must carry the re-offer chain");
+        };
+        assert_eq!(*face_policy, policy);
+    }
+
+    #[test]
+    fn missing_or_malformed_window_face_policy_fails_closed() {
+        let mut old_shape = serde_json::to_value(window(policy())).unwrap();
+        old_shape
+            .as_object_mut()
+            .expect("enum serializes as object")
+            .remove("face_policy");
+        assert!(serde_json::from_value::<CastOfferKind>(old_shape).is_err());
+
+        let mut malformed = serde_json::to_value(window(policy())).unwrap();
+        malformed["face_policy"] = serde_json::json!({"filter": "not-a-filter"});
+        assert!(serde_json::from_value::<CastOfferKind>(malformed).is_err());
+
+        let mut cleanup = serde_json::to_value(ResolutionCastCleanup {
+            source_id: ObjectId(701),
+            face_policy: policy(),
+            exiled_misses: Vec::new(),
+            reject_action: ResolutionMvRejectAction::RemainExiled,
+            success_action: ResolutionCastSuccessAction::BottomMisses,
+        })
+        .unwrap();
+        cleanup
+            .as_object_mut()
+            .expect("struct serializes as object")
+            .remove("face_policy");
+        assert!(serde_json::from_value::<ResolutionCastCleanup>(cleanup).is_err());
+    }
 }
 
 /// CR 603.7b: lifetime of a one-shot `WhenNextEvent` delayed trigger. CR 603.7b

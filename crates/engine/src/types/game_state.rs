@@ -9354,6 +9354,7 @@ pub enum SpellCostSource {
 /// Serde default for offer-payload source fields added after the variant
 /// shipped: saved states predating the field deserialize to the `ObjectId(0)`
 /// sentinel (never a real object; such windows never read the source).
+#[cfg(test)]
 pub(crate) fn zero_object_id() -> ObjectId {
     ObjectId(0)
 }
@@ -9447,9 +9448,10 @@ pub enum CastOfferKind {
         /// no MV cap.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remaining_mv_budget: Option<u32>,
-        /// CR 601.2a: Filter the candidates must match. Carried so the handler
-        /// can rebuild the post-cast re-offer's candidate set.
-        filter: crate::types::ability::TargetFilter,
+        /// Exact normalized authority for every cast in this window.  Required
+        /// on the serialized pause state: an older window without it fails
+        /// closed rather than reconstructing policy from live state.
+        face_policy: crate::types::ability::ResolutionCastFacePolicy,
         /// CR 601.2a: Zones searched for candidates (controller's graveyard
         /// and/or hand).
         zones: Vec<crate::types::zones::Zone>,
@@ -9462,14 +9464,6 @@ pub enum CastOfferKind {
             deserialize_with = "crate::types::ability::deserialize_graveyard_replacement_compat"
         )]
         graveyard_replacement: Option<crate::types::ability::SpellStackToGraveyardReplacement>,
-        /// CR 406.6: Source object of the granting ability. `filter`s such as
-        /// `ExiledBySource` (Plargg and Nassari's "the other cards exiled this
-        /// way") resolve their exile links against this id, so the re-offer
-        /// loop must rebuild candidates with the real source rather than a
-        /// sentinel. Defaults to the zero sentinel for saved states predating
-        /// the field (graveyard/hand windows never read it).
-        #[serde(default = "zero_object_id")]
-        source: ObjectId,
         /// CR 607.2a + CR 608.2g: THIS resolution's "exiled this way" batch —
         /// the concrete member pool the preceding `ChooseFromZone` offered,
         /// captured when its answer settled. `ExiledBySource` alone reads the

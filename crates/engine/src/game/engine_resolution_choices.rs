@@ -2257,8 +2257,18 @@ pub(super) fn handle_resolution_choice(
                 // The MV check is re-evaluated at finalization (after X), and on
                 // rejection the hit goes to the discovering player's hand
                 // (`ToHand`) while the misses go to the library bottom.
+                let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+                    crate::types::ability::TargetFilter::Any,
+                    source_id,
+                    player,
+                    Some(crate::types::ability::CastPermissionConstraint::ManaValue {
+                        comparator: crate::types::ability::Comparator::LE,
+                        value: QuantityExpr::Fixed { value: discover_value as i32 },
+                    }),
+                );
                 let cleanup = crate::types::ability::ResolutionCastCleanup {
                     source_id,
+                    face_policy: face_policy.clone(),
                     exiled_misses,
                     reject_action: crate::types::ability::ResolutionMvRejectAction::ToHand,
                     success_action:
@@ -2269,14 +2279,7 @@ pub(super) fn handle_resolution_choice(
                     player,
                     hit_card,
                     casting::ResolutionCastRequest {
-                        constraint: Some(
-                            crate::types::ability::CastPermissionConstraint::ManaValue {
-                                comparator: crate::types::ability::Comparator::LE,
-                                value: QuantityExpr::Fixed {
-                                    value: discover_value as i32,
-                                },
-                            },
-                        ),
+                        face_policy,
                         cast_transformed: false,
                         cleanup,
                         graveyard_replacement: None,
@@ -2337,8 +2340,15 @@ pub(super) fn handle_resolution_choice(
             GameAction::GraveyardPaidCastChoice { choice },
         ) => {
             if matches!(choice, crate::types::actions::CastChoice::Cast) {
+                let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+                    crate::types::ability::TargetFilter::Any,
+                    hit_card,
+                    player,
+                    constraint,
+                );
                 let cleanup = crate::types::ability::ResolutionCastCleanup {
                     source_id: hit_card,
+                    face_policy: face_policy.clone(),
                     exiled_misses: Vec::new(),
                     reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                     success_action:
@@ -2349,7 +2359,7 @@ pub(super) fn handle_resolution_choice(
                     player,
                     hit_card,
                     casting::ResolutionCastRequest {
-                        constraint,
+                        face_policy,
                         cast_transformed,
                         cleanup,
                         graveyard_replacement,
@@ -2575,8 +2585,18 @@ pub(super) fn handle_resolution_choice(
                 // mana value". The MV check is re-evaluated at finalization
                 // (after X), and on rejection the hit joins the misses on the
                 // library bottom (`BottomWithMisses`).
+                let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+                    crate::types::ability::TargetFilter::Any,
+                    source_id,
+                    player,
+                    Some(crate::types::ability::CastPermissionConstraint::ManaValue {
+                        comparator: crate::types::ability::Comparator::LT,
+                        value: QuantityExpr::Fixed { value: source_mv as i32 },
+                    }),
+                );
                 let cleanup = crate::types::ability::ResolutionCastCleanup {
                     source_id,
+                    face_policy: face_policy.clone(),
                     exiled_misses,
                     reject_action:
                         crate::types::ability::ResolutionMvRejectAction::BottomWithMisses,
@@ -2588,14 +2608,7 @@ pub(super) fn handle_resolution_choice(
                     player,
                     hit_card,
                     casting::ResolutionCastRequest {
-                        constraint: Some(
-                            crate::types::ability::CastPermissionConstraint::ManaValue {
-                                comparator: crate::types::ability::Comparator::LT,
-                                value: QuantityExpr::Fixed {
-                                    value: source_mv as i32,
-                                },
-                            },
-                        ),
+                        face_policy,
                         cast_transformed: false,
                         cleanup,
                         graveyard_replacement: None,
@@ -2645,8 +2658,15 @@ pub(super) fn handle_resolution_choice(
                 // CR 702.60a + CR 608.2g: cast the same-named revealed card for
                 // free during resolution. No mana-value gate (unlike Cascade); on
                 // decline/rollback the hit joins the rest on the library bottom.
+                let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+                    crate::types::ability::TargetFilter::Any,
+                    source_id,
+                    player,
+                    None,
+                );
                 let cleanup = crate::types::ability::ResolutionCastCleanup {
                     source_id,
+                    face_policy: face_policy.clone(),
                     exiled_misses: revealed_misses,
                     reject_action:
                         crate::types::ability::ResolutionMvRejectAction::BottomWithMisses,
@@ -2660,7 +2680,7 @@ pub(super) fn handle_resolution_choice(
                     player,
                     hit_card,
                     casting::ResolutionCastRequest {
-                        constraint: None,
+                        face_policy,
                         cast_transformed: false,
                         cleanup,
                         graveyard_replacement: None,
@@ -2744,10 +2764,9 @@ pub(super) fn handle_resolution_choice(
                         candidates,
                         remaining_casts,
                         remaining_mv_budget,
-                        filter,
+                        face_policy,
                         zones,
                         graveyard_replacement,
-                        source,
                         member_pool,
                     },
             },
@@ -2792,6 +2811,7 @@ pub(super) fn handle_resolution_choice(
             // permission constraint).
             let cleanup = crate::types::ability::ResolutionCastCleanup {
                 source_id: chosen,
+                face_policy: face_policy.clone(),
                 exiled_misses: Vec::new(),
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action:
@@ -2799,10 +2819,9 @@ pub(super) fn handle_resolution_choice(
                         controller: player,
                         remaining_casts,
                         remaining_mv_budget,
-                        filter,
+                        face_policy: Box::new(face_policy.clone()),
                         zones,
                         graveyard_replacement: graveyard_replacement.clone(),
-                        source,
                         member_pool,
                     },
             };
@@ -2811,7 +2830,7 @@ pub(super) fn handle_resolution_choice(
                 player,
                 chosen,
                 casting::ResolutionCastRequest {
-                    constraint: None,
+                    face_policy,
                     cast_transformed: false,
                     cleanup,
                     // The window's success action installs this rider exactly
@@ -9216,10 +9235,10 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, CastingPermission, Duration, FilterProp,
-        ManaSpendPermission, PermissionGrantee, QuantityExpr, ReplacementDefinition,
-        ReplacementMode, ReplacementPlayerScope, SearchSelectionConstraint, StaticDefinition,
-        TargetFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, CastPermissionConstraint, CastingPermission, Comparator,
+        ControllerRef, Duration, FilterProp, ManaSpendPermission, PermissionGrantee, QuantityExpr,
+        ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, ResolutionCastFacePolicy,
+        SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -9264,6 +9283,180 @@ mod tests {
             context,
             crate::types::game_state::NamedChoiceSourceBinding::ResolutionContext,
         )
+    }
+
+    fn policy_bridge_exiled_instant(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        mana_value: u32,
+    ) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(state, card_id, owner, name.to_string(), Zone::Exile);
+        let object = state.objects.get_mut(&id).expect("created card exists");
+        object.card_types.core_types.push(CoreType::Instant);
+        object.mana_cost = crate::types::mana::ManaCost::generic(mana_value);
+        id
+    }
+
+    /// The full free-window path must carry one already-normalized, non-neutral
+    /// policy all the way through its temporary indexed permission and back to
+    /// the re-offer.  The controls make every field observable: source chooses
+    /// a linked exile batch, controller chooses whose instant survives, the
+    /// normalized filter narrows that batch, and the fixed constraint removes
+    /// the expensive member.  A pre-existing compatible permission has a
+    /// different cleanup; only the newly appended indexed permission may reopen
+    /// this window.
+    #[test]
+    fn free_cast_window_reoffer_preserves_exact_policy_and_elected_permission() {
+        let mut state = GameState::new_two_player(44);
+        let source = create_object(
+            &mut state,
+            CardId(90_100),
+            PlayerId(0),
+            "Exact policy source".to_string(),
+            Zone::Battlefield,
+        );
+        let sibling_source = create_object(
+            &mut state,
+            CardId(90_101),
+            PlayerId(0),
+            "Sibling policy source".to_string(),
+            Zone::Battlefield,
+        );
+        let chosen = policy_bridge_exiled_instant(&mut state, PlayerId(0), "Chosen", 0);
+        let retained = policy_bridge_exiled_instant(&mut state, PlayerId(0), "Retained", 0);
+        let wrong_source = policy_bridge_exiled_instant(&mut state, PlayerId(0), "Wrong source", 0);
+        let wrong_controller =
+            policy_bridge_exiled_instant(&mut state, PlayerId(1), "Wrong controller", 0);
+        let over_constraint =
+            policy_bridge_exiled_instant(&mut state, PlayerId(0), "Over constraint", 2);
+
+        // `ExiledBySource` deliberately reads the persistent link ledger, not
+        // the turn-local reporting cache.  Build both source batches through
+        // the production ledger helper so this fixture exercises that lookup.
+        for card in [chosen, retained, wrong_controller, over_constraint] {
+            crate::game::exile_links::push_tracked_by_source(&mut state, card, source);
+        }
+        crate::game::exile_links::push_tracked_by_source(&mut state, wrong_source, sibling_source);
+
+        let raw_filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::ExiledBySource,
+                        TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Instant).controller(ControllerRef::You),
+                        ),
+                    ],
+                },
+                TargetFilter::Any,
+            ],
+        };
+        let constraint = Some(CastPermissionConstraint::ManaValue {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Fixed { value: 0 },
+        });
+        let policy = ResolutionCastFacePolicy::new(
+            raw_filter.clone(),
+            source,
+            PlayerId(0),
+            constraint.clone(),
+        );
+        assert_eq!(policy.filter, raw_filter.clone().normalized());
+        assert_ne!(
+            policy.filter, raw_filter,
+            "fixture must exercise normalization"
+        );
+
+        let sibling_policy =
+            ResolutionCastFacePolicy::new(TargetFilter::Any, sibling_source, PlayerId(0), None);
+        state
+            .objects
+            .get_mut(&chosen)
+            .unwrap()
+            .casting_permissions
+            .push(CastingPermission::ExileWithAltCost {
+                source_id: None,
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+                cost: crate::types::mana::ManaCost::zero(),
+                cast_transformed: false,
+                constraint: None,
+                granted_to: Some(PlayerId(0)),
+                resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
+                    source_id: sibling_source,
+                    face_policy: sibling_policy,
+                    exiled_misses: Vec::new(),
+                    reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                    success_action:
+                        crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                }),
+                duration: None,
+                graveyard_replacement: None,
+                enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
+                mana_spend_permission: None,
+            });
+
+        let window = WaitingFor::CastOffer {
+            player: PlayerId(0),
+            kind: CastOfferKind::FreeCastWindow {
+                candidates: vec![chosen, retained],
+                remaining_casts: None,
+                remaining_mv_budget: None,
+                face_policy: policy.clone(),
+                zones: vec![Zone::Exile],
+                graveyard_replacement: None,
+                member_pool: Vec::new(),
+            },
+        };
+        let outcome = handle_resolution_choice(
+            &mut state,
+            window,
+            GameAction::FreeCastWindowChoice {
+                selection: Some(chosen),
+            },
+            &mut Vec::new(),
+        )
+        .expect("the exact free-cast window must accept its chosen card");
+        let ResolutionChoiceOutcome::WaitingFor(waiting_for) = outcome else {
+            panic!("the free-cast choice must return a waiting state");
+        };
+
+        let WaitingFor::CastOffer {
+            player: PlayerId(0),
+            kind:
+                CastOfferKind::FreeCastWindow {
+                    candidates,
+                    face_policy: reoffered_policy,
+                    remaining_casts: None,
+                    remaining_mv_budget: None,
+                    ..
+                },
+        } = waiting_for
+        else {
+            panic!(
+                "expected the elected permission to reopen the free-cast window, got {waiting_for:?}"
+            );
+        };
+
+        assert_eq!(
+            reoffered_policy, policy,
+            "all policy fields must survive FreeCastWindow -> request -> selected permission -> re-offer"
+        );
+        assert_eq!(candidates, vec![retained]);
+        assert!(
+            !candidates.contains(&wrong_source),
+            "the re-offer must retain the original source-relative exile link"
+        );
+        assert!(
+            !candidates.contains(&wrong_controller),
+            "the re-offer must retain the original controller context"
+        );
+        assert!(
+            !candidates.contains(&over_constraint),
+            "the re-offer must retain the original fixed constraint"
+        );
     }
 
     fn search_found_redirect(destination: Zone) -> ReplacementDefinition {

@@ -3,11 +3,16 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const EXPECTED_PROTOCOL_VERSION = 70;
+// Phase B changes the serialized GameState carrier. Keep the measured base
+// alongside the asserted value so this gate proves the bridge was exactly one
+// bump, rather than merely checking that its pins happen to agree.
+const PHASE_B_BASE_FULL_GAME_PROTOCOL_VERSION = 70;
+const EXPECTED_PROTOCOL_VERSION = PHASE_B_BASE_FULL_GAME_PROTOCOL_VERSION + 1;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
-const EXPECTED_LOBBY_PROTOCOL_VERSION = 8;
+const PHASE_B_BASE_LOBBY_PROTOCOL_VERSION = 8;
+const EXPECTED_LOBBY_PROTOCOL_VERSION = PHASE_B_BASE_LOBBY_PROTOCOL_VERSION;
 // The capability FLOOR for correlated tournament settlement — a different kind
 // of number from the other version constants here, and the reason it is pinned
 // separately. Those track a surface's current version; this one is frozen at the
@@ -30,7 +35,8 @@ const EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING = 6;
 // here, so a full-game bump could ship with an unbumped P2P version and CI
 // stayed green — a v(n-1) host and a v(n) guest would then complete a
 // handshake and only fail when the incompatible payload arrived.
-const EXPECTED_WIRE_PROTOCOL_VERSION = 53;
+const PHASE_B_BASE_WIRE_PROTOCOL_VERSION = 53;
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_B_BASE_WIRE_PROTOCOL_VERSION + 1;
 
 function extractVersion(source, pattern, label) {
   const match = source.match(pattern);

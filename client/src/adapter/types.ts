@@ -1246,9 +1246,32 @@ export interface DecisionGroupKey {
 
 // ── Casting Permission ───────────────────────────────────────────────────
 
+export interface ResolutionCastFacePolicy {
+  /** Normalized engine filter, preserved verbatim across resolution pauses. */
+  filter: TargetFilter;
+  /** Real resolving source used for source-relative filter evaluation. */
+  source_id: ObjectId;
+  /** Real controller of that resolving source. */
+  controller: PlayerId;
+  /** Fixed cast-time constraint; null is the explicit no-extra-constraint form. */
+  constraint: Record<string, unknown> | null;
+}
+
+export interface ResolutionCastCleanup {
+  source_id: ObjectId;
+  face_policy: ResolutionCastFacePolicy;
+  exiled_misses: ObjectId[];
+  reject_action: Record<string, unknown>;
+  success_action: Record<string, unknown>;
+}
+
 export type CastingPermission =
   | { type: "AdventureCreature" }
-  | { type: "ExileWithAltCost"; cost: ManaCost }
+  | {
+      type: "ExileWithAltCost";
+      cost: ManaCost;
+      resolution_cleanup?: ResolutionCastCleanup;
+    }
   | { type: "PlayFromExile"; duration: string }
   | { type: "ExileWithEnergyCost" }
   | { type: "WarpExile"; castable_after_turn: number };
@@ -2106,12 +2129,10 @@ export type CastOfferKind =
       // `None` omits the key rather than sending a sentinel cap.
       remaining_casts?: number;
       remaining_mv_budget?: number;
-      filter: TargetFilter;
+      /** Required bridge carrier; old filter-only windows fail closed. */
+      face_policy: ResolutionCastFacePolicy;
       zones: Zone[];
       exile_instead_of_graveyard?: boolean;
-      // CR 406.6: source of the granting ability (engine serde-default;
-      // absent in payloads predating the field).
-      source?: ObjectId;
       // CR 607.2a: THIS resolution's "exiled this way" batch (Plargg and
       // Nassari); omitted when empty (no batch restriction). Display-only
       // pass-through — the modal renders `candidates`.

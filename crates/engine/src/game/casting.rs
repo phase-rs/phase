@@ -12334,7 +12334,10 @@ pub fn handle_cast_spell_as_madness_with_payment_mode(
 }
 
 pub(super) struct ResolutionCastRequest {
-    pub(super) constraint: Option<crate::types::ability::CastPermissionConstraint>,
+    /// The exact serialized policy supplied by the offer that elected this
+    /// cast.  It is moved into the temporary indexed permission, never
+    /// reconstructed from the live game state here.
+    pub(super) face_policy: crate::types::ability::ResolutionCastFacePolicy,
     pub(super) cast_transformed: bool,
     pub(super) cleanup: crate::types::ability::ResolutionCastCleanup,
     pub(super) graveyard_replacement:
@@ -12386,7 +12389,7 @@ pub(super) fn initiate_cast_during_resolution(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let ResolutionCastRequest {
-        constraint,
+        face_policy,
         cast_transformed,
         cleanup,
         graveyard_replacement,
@@ -12457,9 +12460,12 @@ pub(super) fn initiate_cast_during_resolution(
                 cost: perm_cost,
                 cost_provenance,
                 cast_transformed,
-                constraint,
+                constraint: face_policy.constraint.clone(),
                 granted_to: Some(player),
-                resolution_cleanup: Some(cleanup),
+                resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
+                    face_policy: face_policy.clone(),
+                    ..cleanup
+                }),
                 duration: None,
                 // CR 611.2a: no duration, so no host to bind to.
                 source_id: None,
@@ -23138,6 +23144,12 @@ mod castable_zone_authority_tests {
             };
             *resolution_cleanup = Some(crate::types::ability::ResolutionCastCleanup {
                 source_id: ObjectId(2),
+                face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                    crate::types::ability::TargetFilter::Any,
+                    ObjectId(2),
+                    PlayerId(0),
+                    None,
+                ),
                 exiled_misses: Vec::new(),
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,

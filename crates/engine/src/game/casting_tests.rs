@@ -20467,6 +20467,9 @@ fn exact_permission_does_not_inherit_sibling_etb_counter() {
                     resolution_cleanup: (index == 1).then(|| {
                         crate::types::ability::ResolutionCastCleanup {
                             source_id: creature,
+                            face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                                TargetFilter::Any, creature, PlayerId(0), None,
+                            ),
                             exiled_misses: Vec::new(),
                             reject_action:
                                 crate::types::ability::ResolutionMvRejectAction::RemainExiled,
@@ -20553,6 +20556,9 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
                     resolution_cleanup: (index == 1).then(|| {
                         crate::types::ability::ResolutionCastCleanup {
                             source_id: creature,
+                            face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                                TargetFilter::Any, creature, PlayerId(0), None,
+                            ),
                             exiled_misses: Vec::new(),
                             reject_action:
                                 crate::types::ability::ResolutionMvRejectAction::RemainExiled,
@@ -46003,6 +46009,9 @@ fn resolution_offer_grant(
         granted_to: Some(player),
         resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
             source_id,
+            face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                TargetFilter::Any, source_id, player, None,
+            ),
             exiled_misses: vec![],
             reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
             success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
@@ -53169,6 +53178,9 @@ fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling(
             granted_to: Some(PlayerId(0)),
             resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
                 source_id: spell,
+                face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                    TargetFilter::Any, spell, PlayerId(0), None,
+                ),
                 exiled_misses: vec![hostile_miss],
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
@@ -53283,8 +53295,12 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
             },
         ));
     }
+    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        TargetFilter::Any, spell, PlayerId(0), None,
+    );
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: spell,
+        face_policy: face_policy.clone(),
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
@@ -53294,7 +53310,7 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
         PlayerId(0),
         spell,
         ResolutionCastRequest {
-            constraint: None,
+            face_policy,
             cast_transformed: false,
             cleanup,
             graveyard_replacement: None,
@@ -53571,8 +53587,12 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
                 mana_spend_permission: None,
             });
     }
+    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        TargetFilter::Any, spell, PlayerId(0), None,
+    );
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: spell,
+        face_policy: face_policy.clone(),
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
@@ -53582,7 +53602,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
         PlayerId(0),
         spell,
         ResolutionCastRequest {
-            constraint: None,
+            face_policy,
             cast_transformed: false,
             cleanup,
             graveyard_replacement: None,
@@ -53636,8 +53656,12 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
+    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        TargetFilter::Any, spell, PlayerId(0), None,
+    );
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: spell,
+        face_policy: face_policy.clone(),
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
@@ -53647,7 +53671,7 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
         PlayerId(0),
         spell,
         ResolutionCastRequest {
-            constraint: None,
+            face_policy,
             cast_transformed: false,
             cleanup,
             graveyard_replacement: None,
@@ -53702,6 +53726,9 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
                 granted_to: Some(PlayerId(0)),
                 resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
                     source_id: spell,
+                    face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                        TargetFilter::Any, spell, PlayerId(0), None,
+                    ),
                     exiled_misses: Vec::new(),
                     reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                     success_action:

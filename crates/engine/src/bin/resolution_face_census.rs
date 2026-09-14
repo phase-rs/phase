@@ -2431,6 +2431,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::types::ability::ResolutionCastFacePolicy;
 
     fn production_card_data() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json")
@@ -2568,10 +2569,14 @@ mod tests {
             candidates,
             remaining_casts: Some(1),
             remaining_mv_budget: None,
-            filter: TargetFilter::Any,
+            face_policy: ResolutionCastFacePolicy::new(
+                TargetFilter::Any,
+                ObjectId(900),
+                PlayerId(0),
+                None,
+            ),
             zones: vec![Zone::Hand],
             graveyard_replacement: None,
-            source: ObjectId(900),
             member_pool: Vec::new(),
         };
         let paid_graveyard = |hit_card| CastOfferKind::GraveyardPaidCast {

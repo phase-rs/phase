@@ -911,6 +911,14 @@ pub fn resolve(
         && is_per_opponent_fanout
         && !target_ids.is_empty()
     {
+        let count = u8::try_from(target_ids.len()).ok();
+        let zones = vec![Zone::Graveyard];
+        let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+            target_filter.clone(),
+            ability.source_id,
+            ability.controller,
+            freeze_cast_permission_constraint(state, ability, constraint.clone()),
+        );
         let mut window = ability.clone();
         window.effect = Effect::FreeCastFromZones {
             // CR 608.2c: one cast per surviving pair, as printed ("for each
@@ -921,20 +929,31 @@ pub fn resolve(
             // itself — exactly the intended "cast one from each opponent"
             // semantics. The old `unwrap_or(u8::MAX)` would instead have capped
             // such a fanout at 255 casts.
-            count: u8::try_from(target_ids.len()).ok(),
+            count,
             max_total_mv: None,
             filter: target_filter.clone(),
-            zones: vec![Zone::Graveyard],
+            zones: zones.clone(),
             // The CastFromZone rider is stored as a sequential ParentTarget
             // sub-ability; FreeCastWindow carries its exact destination as
             // per-cast metadata instead of installing a source-global effect.
-            graveyard_replacement: graveyard_destination,
+            graveyard_replacement: graveyard_destination.clone(),
         };
         // The rider has been translated into the window's per-cast metadata;
         // retaining it would run a second destination move after the window.
         window.sub_ability = None;
         window.targets = target_ids.drain(..).map(TargetRef::Object).collect();
-        return super::free_cast_from_zones::resolve(state, &window, events);
+        return super::free_cast_from_zones::resolve_with_face_policy(
+            state,
+            &window,
+            super::free_cast_from_zones::FreeCastWindowRequest {
+                count,
+                max_total_mv: None,
+                zones,
+                graveyard_replacement: graveyard_destination,
+                face_policy,
+            },
+            events,
+        );
     }
 
     if driver_free_cast || immediate_graveyard_free_cast {
@@ -1068,12 +1087,18 @@ fn open_resolution_cast_window(
     };
 
     let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
+    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        window_filter.clone(),
+        ability.source_id,
+        ability.controller,
+        frozen,
+    );
     let mut window = ability.clone();
     window.effect = Effect::FreeCastFromZones {
         count,
         max_total_mv: bounds.max_total_mv,
         filter: window_filter,
-        zones,
+        zones: zones.clone(),
         graveyard_replacement: graveyard_replacement.clone(),
     };
     // CR 614.1a: the stack-to-graveyard redirect rider is stored as a sequential
@@ -1087,7 +1112,18 @@ fn open_resolution_cast_window(
         window.sub_ability = None;
     }
     window.targets = pool.into_iter().map(TargetRef::Object).collect();
-    super::free_cast_from_zones::resolve(state, &window, events)
+    super::free_cast_from_zones::resolve_with_face_policy(
+        state,
+        &window,
+        super::free_cast_from_zones::FreeCastWindowRequest {
+            count,
+            max_total_mv: bounds.max_total_mv,
+            zones,
+            graveyard_replacement,
+            face_policy,
+        },
+        events,
+    )
 }
 
 /// CR 608.2g + CR 601.2a: After a resolution-time hand pick for a free
@@ -1390,8 +1426,18 @@ fn cast_single_target_during_resolution(
     } else {
         crate::types::ability::ResolutionMvRejectAction::BottomWithMisses
     };
+    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        match &ability.effect {
+            Effect::CastFromZone { target, .. } => target.clone(),
+            _ => TargetFilter::Any,
+        },
+        ability.source_id,
+        ability.controller,
+        constraint.clone(),
+    );
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: ability.source_id,
+        face_policy: face_policy.clone(),
         exiled_misses,
         reject_action,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
@@ -1402,7 +1448,7 @@ fn cast_single_target_during_resolution(
         ability.controller,
         card,
         crate::game::casting::ResolutionCastRequest {
-            constraint,
+            face_policy,
             cast_transformed,
             cleanup,
             graveyard_replacement,
