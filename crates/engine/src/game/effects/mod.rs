@@ -6528,6 +6528,9 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
             | QuantityRef::DistinctCardTypes {
                 source: CardTypeSetSource::TrackedSet { .. },
             }
+            | QuantityRef::SharedCardTypes {
+                source: CardTypeSetSource::TrackedSet { .. },
+            }
             | QuantityRef::DistinctSubtypes {
                 source: CardTypeSetSource::TrackedSet { .. },
                 ..
