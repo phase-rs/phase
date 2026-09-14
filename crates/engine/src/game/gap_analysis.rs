@@ -187,11 +187,22 @@ fn classify_gap(
         return (GapCategory::NewMechanic, None, None);
     }
 
-    // Category A: first word is a recognized verb
+    // Category A: first word is a recognized verb.
+    // Ask the vocabulary about the RAW token: `is_clause_head_verb` normalizes its
+    // own argument, and `normalize_verb_token` is not idempotent on a possessive.
+    // `gap_diagnosis` pins the counterexample -- "roll's" normalizes to "roll'",
+    // which the vocabulary accepts, while "roll's" itself it rejects. Normalizing
+    // here first therefore admitted a NOUN the clause never used as a verb ("target
+    // die roll's result") and reported the malformed intermediate "roll'" as the
+    // verb -- a token the vocabulary was never asked about, and a verdict
+    // `diagnose_clause_gap` refuses for the same text.
     if let Some(first_word) = lower.split_whitespace().next() {
-        let normalized = normalize_verb_token(first_word);
-        if is_clause_head_verb(&normalized) {
-            return (GapCategory::VerbVariation, Some(normalized), Some(false));
+        if is_clause_head_verb(first_word) {
+            return (
+                GapCategory::VerbVariation,
+                Some(normalize_verb_token(first_word)),
+                Some(false),
+            );
         }
     }
 
@@ -494,6 +505,44 @@ mod tests {
         assert_eq!(cat, GapCategory::VerbVariation);
         assert_eq!(verb.as_deref(), Some("destroy"));
         assert_eq!(non_initial, Some(false));
+    }
+
+    #[test]
+    fn classify_reports_a_first_word_verb_in_normal_form() {
+        // `is_clause_head_verb` normalizes its own argument, and `normalize_verb_token`
+        // is not idempotent on a possessive, so normalizing before the vocabulary check
+        // runs it twice: "roll's" → "roll'" → "roll", and the vocabulary accepts the
+        // last. That admitted a possessive NOUN as a clause head and reported the
+        // malformed intermediate "roll'" -- a verdict `diagnose_clause_gap` refuses for
+        // the same text.
+        //
+        // The invariant is that a reported first-word verb is in NORMAL FORM, i.e. it
+        // survives normalization unchanged. Note what cannot be used here:
+        // `is_clause_head_verb(reported)` accepts "roll'" for exactly the reason under
+        // test, so asserting with it agrees with the bug instead of catching it. Asking
+        // whether the token is a fixed point is independent of the vocabulary.
+        let (cat, verb, non_initial) =
+            classify_gap("Effect:unknown", Some("roll's result is doubled"), &[]);
+        if cat == GapCategory::VerbVariation && non_initial == Some(false) {
+            let reported = verb.as_deref().expect("VerbVariation carries its verb");
+            assert_eq!(
+                normalize_verb_token(reported),
+                reported,
+                "reported first-word verb {reported:?} is not in normal form, so it \
+                 reached the vocabulary through a second normalization pass"
+            );
+        }
+
+        // Positive control. The assertion above is guarded, so it would also pass if
+        // Category A simply stopped classifying anything. This pins that the path is
+        // live, and fails if first-word classification breaks for an ordinary verb.
+        let (cat, verb, non_initial) =
+            classify_gap("Effect:destroy", Some("destroy target creature"), &[]);
+        assert_eq!(
+            (cat, verb.as_deref(), non_initial),
+            (GapCategory::VerbVariation, Some("destroy"), Some(false)),
+            "first-word classification must still fire for a plain recognized verb"
+        );
     }
 
     #[test]
