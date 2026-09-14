@@ -4398,10 +4398,10 @@ fn split_inverted_instead_clause(text: &str) -> Option<(String, String)> {
 ///   caller replace a *working* rider encoding with `Effect::unimplemented`.
 ///   Which faces are genuinely owned is settled by `oracle::guard_owner`, not by
 ///   this predicate: it is the arbiter of whether the assembled tree actually
-///   places the body under a typed owner (CR 614.1a + CR 608.2n / CR 608.2c +
-///   CR 614.1a / CR 615.5), and a face whose rider has no such owner — a
-///   `GrantCastingPermission` carries no redirect, for one — gaps honestly
-///   instead of falling through.
+///   places the body under a typed owner (CR 614.1a + CR 608.2n for the
+///   `CastFromZone` head, CR 608.2c + CR 614.1a for the `Counter` head), and a
+///   face whose rider has no such owner — a `GrantCastingPermission` carries no
+///   redirect, for one — gaps honestly instead of falling through.
 ///
 /// - **CR 608.2c STATE override** — "If the creature had power 4 or greater,
 ///   create two of those tokens instead" (Anax, Hardened in the Forge). The

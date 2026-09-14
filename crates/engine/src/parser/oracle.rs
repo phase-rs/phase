@@ -13,12 +13,13 @@ use crate::game::effects::cast_from_zone;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CastTimingPermission,
-    CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-    CostReduction, CounterSourceRider, DamageRedirectTarget, DelayedTriggerCondition, Duration,
-    Effect, EffectScope, FilterProp, GuardReading, ManaProduction, ModalChoice, ParsedCondition,
-    PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
-    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter, UnloweredGuard, VoteSubject,
+    CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification,
+    ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, GuardReading,
+    ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ReplacementMode, SolveCondition, SpellCastingOption, StaticCondition,
+    StaticDefinition, TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition,
+    TypedFilter, UnloweredGuard, VoteSubject,
 };
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
 use crate::types::card::DraftEffect;
@@ -72,6 +73,7 @@ use super::oracle_effect::{
 };
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::diagnostic::ClauseGapKind;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
     stamp_printed_ability_slot, stamp_printed_trigger_slot, OracleDocBuilder, OracleDocIr,
@@ -103,7 +105,6 @@ use super::oracle_modal::{
     split_short_label_prefix, strip_ability_word, strip_ability_word_with_name,
     strip_flavor_word_with_name, AnchorModeIr, OracleBlockIr, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
-use super::oracle_replacement;
 use super::oracle_replacement::{
     find_copy_verb_present, lower_as_enters_becomes_choice_modal,
     lower_as_enters_or_face_up_counters, lower_replacement_ir,
@@ -7879,6 +7880,14 @@ pub fn parse_oracle_text(
 /// debug-build assertion, not parsing dispatch — no text is scanned. The `match` is
 /// wildcard-free so a future `Value` variant breaks the build instead of silently
 /// answering `false`.
+///
+/// Cost, measured rather than assumed, because "this serializes on every parse in every
+/// debug build" reads alarming: on Torrential Gearhulk's verbatim text, debug profile,
+/// n = 300, one `serde_json::to_value` of the finished `ParsedAbilities` is **37.6 µs**
+/// against **61.3 ms** for the parse that produced it. The pipeline runs this resolver at
+/// most twice per parse, so the assertion is ~0.12 % of the work it guards — and it never
+/// runs at all in the `tool`-profile builds that generate `card-data.json`. Both figures
+/// scale with tree size together, so the ratio is the stable quantity. Keep it.
 #[cfg(debug_assertions)]
 fn holds_unlowered_guard(value: &serde_json::Value) -> bool {
     match value {
@@ -7893,53 +7902,67 @@ fn holds_unlowered_guard(value: &serde_json::Value) -> bool {
     }
 }
 
-/// CR 614.1a + CR 608.2n (O1a) / CR 608.2c + CR 614.1a (O1b) / CR 615.5 (O2):
-/// does the assembled tree place this body under a typed owner that consumes it in the
-/// dropped guard's stead? Reads the owner head's `Effect` variant, the body's `Effect`
-/// shape and the guard's reading — no card names, no Oracle text for O1.
-fn guard_owner(
-    body: &Effect,
-    reading: GuardReading,
-    clause_text: &str,
-    parent: Option<&Effect>,
-    ancestor_prevent_damage: bool,
-) -> bool {
+/// CR 614.1a + CR 608.2n (O1a) / CR 608.2c + CR 614.1a (O1b): does the assembled tree
+/// place this body under a typed owner that consumes it in the dropped guard's stead?
+/// Reads the owner head's `Effect` variant and the body's `Effect` shape — no card names,
+/// no Oracle text.
+///
+/// The guard's READING is deliberately not a parameter. The sole caller settles a verdict
+/// only for `GuardReading::Event`, so a `reading == Event` conjunct in any arm here would
+/// be tautological; the Event gating is stated once, at that call site.
+fn guard_owner(body: &Effect, parent: Option<&Effect>) -> bool {
     match parent {
         // O1a — CR 614.1a + CR 608.2n.
         Some(Effect::CastFromZone { .. }) => {
-            reading == GuardReading::Event
-                && cast_from_zone::graveyard_destination_rider(body).is_some()
+            cast_from_zone::graveyard_destination_rider(body).is_some()
         }
         // O1b — CR 608.2c + CR 614.1a. Exile only: the counter path's library/hand
         // redirect rides `countered_spell_zone`, never a sub-ability.
         Some(Effect::Counter { .. }) => cast_from_zone::is_graveyard_exile_rider_subability(body),
-        // CR-neutral hygiene, not a rules claim: the parent already records this clause's
-        // unsupportedness, and a second gap over the same defect double-counts it — the
-        // same per-unit suppression rule `swallow_check` applies via its
+        // R-a. CR-neutral hygiene, not a rules claim: the parent already records this
+        // clause's unsupportedness, and a second gap over the same defect double-counts it
+        // — the same per-unit suppression rule `swallow_check` applies via its
         // `any_ability_has_unimplemented` early-`continue`.
         //
-        // The class is "a guard whose OWNER was itself refused". Invoke Calamity is the
-        // measured witness: when its printed cast cap is unrepresentable the head is
-        // refused to `unrepresentable_cast_cap`, the absorber that would fold
+        // The class is narrow and must stay narrow: "a guard whose owner was refused BY THE
+        // DISPATCHER", i.e. before this pass ran. Invoke Calamity is the measured witness:
+        // when its printed cast cap is unrepresentable the head is refused to
+        // `unrepresentable_cast_cap` during chain assembly, the absorber that would fold
         // "If those spells would be put into your graveyard, exile them instead" into the
-        // head's own typed `graveyard_replacement` field never runs, and the orphaned
-        // EVENT clause reaches this resolver with the refusal node as its direct parent.
-        // On the PRINTED card that clause is fully represented and never reaches here at
-        // all. Tree shape measured, not assumed: `abilities.len() == 1`, with the orphan
-        // as the refused head's direct `sub_ability`.
+        // head's own typed `graveyard_replacement` field never runs, and the orphaned EVENT
+        // clause reaches this resolver with the refusal node as its direct parent. On the
+        // PRINTED card that clause is fully represented and never reaches here at all. Tree
+        // shape measured, not assumed: `abilities.len() == 1`, with the orphan as the
+        // refused head's direct `sub_ability`.
+        //
+        // A gap this PASS mints is excluded by construction rather than by an arm here:
+        // `resolve_guards_in_ability` hands its children the owner effect as it stood
+        // BEFORE its own guard rewrite, so a node that gapped a moment ago cannot pardon
+        // the EVENT guards below it. Without that ordering this arm would make the verdict
+        // on a clause depend on whether an ancestor happened to gap first
+        // (`guard_ownership::v17_*` is the regression).
+        //
+        // Why suppressing the second gap is the honest answer, not a convenience. The
+        // orphaned clause is not an INDEPENDENT unrepresented clause — its unrepresentedness
+        // is DERIVED from the head's refusal, and repairing the head repairs it too. The
+        // in-tree measurement is the paired positive in
+        // `invoke_calamity_free_cast::a_free_cast_bound_the_window_cannot_represent_is_refused_not_fabricated`:
+        // the identical surface with a representable cap parses with ZERO gap nodes, rider
+        // included. Reporting two gaps would tell a maintainer to fix a rider that needs no
+        // fixing.
+        //
+        // Its cost, stated rather than hidden: the pardoned body stays on the tree ungated
+        // (an "exile it" sub-ability under an `Unimplemented` head). That is sound only
+        // because the head's own gap keeps the card `supported == false` and therefore out
+        // of the production-execution set — the same trade-off
+        // `conditions::strip_unrecognized_conditional_head_when_body_optional` records.
         Some(Effect::Unimplemented { .. }) => true,
-        // O2 — CR 615.5. An ANCESTOR test, mirroring assembly's own
-        // `defs.iter().any(PreventDamage)`: Comeuppance's SECOND rider hangs under the
-        // first, so its direct parent is a `DealDamage`, not the shield.
-        _ => {
-            ancestor_prevent_damage
-                && oracle_replacement::prevented_this_way_rider_source_gate(clause_text).is_some()
-        }
+        _ => false,
     }
 }
 
-/// CR 608.2c + CR 614.1a + CR 614.6 + CR 615.5: settle every deferred guard verdict on a
-/// finished parse.
+/// CR 608.2c + CR 614.1a + CR 614.6: settle every deferred guard verdict on a finished
+/// parse.
 ///
 /// Runs at the tail of `parse_oracle_pipeline`, i.e. AFTER every `has_unimplemented`-keyed
 /// routing gate. That placement is load-bearing, not cosmetic: those gates trial-parse a
@@ -7959,16 +7982,16 @@ fn guard_owner(
 /// serialized `debug_assert!` below polices that independently of this walk.
 fn resolve_unlowered_guards(out: &mut ParsedAbilities) {
     for def in &mut out.abilities {
-        resolve_guards_in_ability(def, None, false);
+        resolve_guards_in_ability(def, None);
     }
     for trigger in &mut out.triggers {
-        resolve_guards_in_trigger(trigger, false);
+        resolve_guards_in_trigger(trigger);
     }
     for static_def in &mut out.statics {
-        resolve_guards_in_static(static_def, false);
+        resolve_guards_in_static(static_def);
     }
     for replacement in &mut out.replacements {
-        resolve_guards_in_replacement(replacement, false);
+        resolve_guards_in_replacement(replacement);
     }
     #[cfg(debug_assertions)]
     debug_assert!(
@@ -7979,66 +8002,69 @@ fn resolve_unlowered_guards(out: &mut ParsedAbilities) {
 
 /// Settle one definition's deferred verdict, then descend into every carrier below it.
 ///
-/// Two facts ride the recursion, and only two. `parent` is the **direct** parent's
-/// `&Effect`, which is what O1a/O1b read; it is `None` at a chain root and at every
-/// definition nested inside an `Effect`'s own payload, which is exact rather than merely
-/// conservative — neither `Effect::CastFromZone` nor `Effect::Counter` holds a nested
-/// `AbilityDefinition` payload field (their riders are always `sub_ability`), so no O1 owner
-/// can be lost that way. `ancestor_prevent_damage` is the CR 615.5 shield fact, carried down
-/// every edge because O2 is an ANCESTOR test, not a direct-parent test.
-fn resolve_guards_in_ability(
-    def: &mut AbilityDefinition,
-    parent: Option<&Effect>,
-    ancestor_prevent_damage: bool,
-) {
-    if let Some(UnloweredGuard {
-        reading,
-        clause_text,
-    }) = def.unlowered_guard.take()
+/// One fact rides the recursion. `parent` is the **direct** parent's `&Effect`, which is
+/// what O1a/O1b read; it is `None` at a chain root and at every definition nested inside an
+/// `Effect`'s own payload, which is exact rather than merely conservative — neither
+/// `Effect::CastFromZone` nor `Effect::Counter` holds a nested `AbilityDefinition` payload
+/// field (their riders are always `sub_ability`), so no O1 owner can be lost that way.
+///
+/// **The guard rewrite is applied LAST, after the children have been settled.** Both
+/// orderings resolve the same set of nodes; only the `parent` the children observe differs.
+/// Deciding first and rewriting first would hand every child an `Effect::Unimplemented`
+/// parent whenever this node's own guard gapped, which `guard_owner`'s R-a arm reads as
+/// "owner refused" and pardons — so a clause's verdict would depend on whether an ancestor
+/// happened to gap before it. R-a's class is the DISPATCHER's refusals, which are already in
+/// the tree when this pass starts; a gap this pass mints is not one, and this ordering is
+/// what excludes it.
+fn resolve_guards_in_ability(def: &mut AbilityDefinition, parent: Option<&Effect>) {
+    // CR 614.1 + CR 614.6: only the EVENT reading gaps. A guard naming an event that WOULD
+    // happen describes a replacement, and CR 614.6 makes the replaced event never happen —
+    // so a body emitted without its guard runs an instruction the card does not print.
+    //
+    // The STATE reading falls through: the guard is dropped and the body emitted. No CR
+    // licenses that — it is a deliberate rules-fidelity regression at the AST layer, the
+    // same trade-off `conditions::strip_unrecognized_conditional_head_when_body_optional`
+    // documents for its own population, and it is sound only because the loss keeps the
+    // card `supported == false` through `swallow_check`'s Condition_If detector. Gapping it
+    // instead would suppress that very detector for the whole unit (its
+    // `any_ability_has_unimplemented` early-`continue`), trading a counted loss for an
+    // uncounted one. This change narrows nothing and widens nothing on that path; it is
+    // stated here so the EVENT arm above is not read as a general guard-discard rule.
+    //
+    // Scope: this seam sees only guards that REACH it. A leading guard over a `"you may …"`
+    // body is stripped upstream by that same
+    // `strip_unrecognized_conditional_head_when_body_optional` (two live call sites) and
+    // never arrives, so nothing here is an invariant over every printed leading guard.
+    let guard_gap = def.unlowered_guard.take().and_then(
+        |UnloweredGuard {
+             reading,
+             clause_text,
+         }| {
+            (reading == GuardReading::Event && !guard_owner(&def.effect, parent)).then(|| {
+                // CR 614.1a: nothing on the assembled tree consumes the body in the dropped
+                // guard's stead, so the whole "if <guard>, <body>" clause is recorded as one
+                // honest gap. The EVENT reading is the replacement reading, so the kind is
+                // `Replacement` — the only kind this seam can produce.
+                gap_diagnosis::clause_gap_unimplemented_as(ClauseGapKind::Replacement, &clause_text)
+            })
+        },
+    );
+    resolve_guards_in_effect(&mut def.effect);
     {
-        // CR 614.1 + CR 614.6: only the EVENT reading gaps. A guard naming an event that
-        // WOULD happen describes a replacement, and CR 614.6 makes the replaced event never
-        // happen — so a body emitted without its guard runs an instruction the card does not
-        // print. A STATE guard (CR 608.2c) has no such semantics: dropping it and emitting
-        // the body is what this parser has always done, and the loss is carried by
-        // `swallow_check`'s Condition_If detector rather than by an `Unimplemented` that
-        // would suppress that very detector (its `any_ability_has_unimplemented`
-        // early-`continue`).
-        //
-        // Measured consequence, recorded so it is not rediscovered: an O2 (CR 615.5) mark is
-        // always STATE, so it is now always cleared here. Ria Ivor is why that is right — its
-        // prevention sentence does not parse, so an ancestor test finds no shield and the O2
-        // gap would delete a correctly-lowered `Token` body to punish an unrelated parse gap.
-        if reading == GuardReading::Event
-            && !guard_owner(
-                &def.effect,
-                reading,
-                &clause_text,
-                parent,
-                ancestor_prevent_damage,
-            )
-        {
-            // CR 614.1a: nothing on the assembled tree consumes the body in the dropped
-            // guard's stead, so the whole "if <guard>, <body>" clause is recorded as one
-            // honest gap under the reading's own kind.
-            *def.effect =
-                gap_diagnosis::clause_gap_unimplemented_as(reading.gap_kind(), &clause_text);
+        // The PRE-rewrite owner (see this function's doc).
+        let owner: &Effect = &def.effect;
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            resolve_guards_in_ability(sub, Some(owner));
+        }
+        if let Some(else_ability) = def.else_ability.as_deref_mut() {
+            resolve_guards_in_ability(else_ability, Some(owner));
+        }
+        for mode in &mut def.mode_abilities {
+            resolve_guards_in_ability(mode, Some(owner));
         }
     }
-    // CR 615.5: a prevention shield is a continuous effect covering a later damage event, so
-    // every node below this one sits inside its scope — not only its direct child.
-    let ancestor_prevent_damage =
-        ancestor_prevent_damage || matches!(&*def.effect, Effect::PreventDamage { .. });
-    resolve_guards_in_effect(&mut def.effect, ancestor_prevent_damage);
-    let owner: &Effect = &def.effect;
-    if let Some(sub) = def.sub_ability.as_deref_mut() {
-        resolve_guards_in_ability(sub, Some(owner), ancestor_prevent_damage);
-    }
-    if let Some(else_ability) = def.else_ability.as_deref_mut() {
-        resolve_guards_in_ability(else_ability, Some(owner), ancestor_prevent_damage);
-    }
-    for mode in &mut def.mode_abilities {
-        resolve_guards_in_ability(mode, Some(owner), ancestor_prevent_damage);
+    if let Some(gap) = guard_gap {
+        *def.effect = gap;
     }
 }
 
@@ -8049,14 +8075,14 @@ fn resolve_guards_in_ability(
 /// reused for a rewrite.
 ///
 /// Every definition reached from a payload is entered with `parent: None` (see
-/// `resolve_guards_in_ability`), and `ancestor_prevent_damage` is propagated unchanged.
-fn resolve_guards_in_effect(effect: &mut Effect, ancestor_prevent_damage: bool) {
+/// `resolve_guards_in_ability`).
+fn resolve_guards_in_effect(effect: &mut Effect) {
     match effect {
         // CR 614.11 / CR 614.1a: a one-shot draw or planeswalk replacement nests a
         // substitute `Effect`, which may itself be a definition carrier.
         Effect::CreateDrawReplacement { replacement_effect }
         | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
-            resolve_guards_in_effect(replacement_effect, ancestor_prevent_damage)
+            resolve_guards_in_effect(replacement_effect)
         }
         Effect::Vote {
             per_choice_effect,
@@ -8064,7 +8090,7 @@ fn resolve_guards_in_effect(effect: &mut Effect, ancestor_prevent_damage: bool) 
             ..
         } => {
             for sub in per_choice_effect {
-                resolve_guards_in_ability(sub, None, ancestor_prevent_damage);
+                resolve_guards_in_ability(sub, None);
             }
             // CR 701.38b: object-pool votes leave `per_choice_effect` empty and carry the
             // sole nested definition in `outcome_template`.
@@ -8072,7 +8098,7 @@ fn resolve_guards_in_effect(effect: &mut Effect, ancestor_prevent_damage: bool) 
                 outcome_template, ..
             } = subject
             {
-                resolve_guards_in_ability(outcome_template, None, ancestor_prevent_damage);
+                resolve_guards_in_ability(outcome_template, None);
             }
         }
         Effect::SeparateIntoPiles {
@@ -8080,22 +8106,20 @@ fn resolve_guards_in_effect(effect: &mut Effect, ancestor_prevent_damage: bool) 
             unchosen_pile_effect,
             ..
         } => {
-            resolve_guards_in_ability(chosen_pile_effect, None, ancestor_prevent_damage);
+            resolve_guards_in_ability(chosen_pile_effect, None);
             if let Some(unchosen) = unchosen_pile_effect.as_deref_mut() {
-                resolve_guards_in_ability(unchosen, None, ancestor_prevent_damage);
+                resolve_guards_in_ability(unchosen, None);
             }
         }
         Effect::RevealFromHand { on_decline, .. } => {
             if let Some(sub) = on_decline.as_deref_mut() {
-                resolve_guards_in_ability(sub, None, ancestor_prevent_damage);
+                resolve_guards_in_ability(sub, None);
             }
         }
         // CR 603.7a: the delayed payload is a definition in its own right. Load-bearing for
         // the direct-parent fact — Power Pack's O1a owner sits inside one, so a walk that
         // stopped here would lose it.
-        Effect::CreateDelayedTrigger { effect, .. } => {
-            resolve_guards_in_ability(effect, None, ancestor_prevent_damage)
-        }
+        Effect::CreateDelayedTrigger { effect, .. } => resolve_guards_in_ability(effect, None),
         Effect::FlipCoin {
             win_effect,
             lose_effect,
@@ -8107,23 +8131,21 @@ fn resolve_guards_in_effect(effect: &mut Effect, ancestor_prevent_damage: bool) 
             ..
         } => {
             if let Some(sub) = win_effect.as_deref_mut() {
-                resolve_guards_in_ability(sub, None, ancestor_prevent_damage);
+                resolve_guards_in_ability(sub, None);
             }
             if let Some(sub) = lose_effect.as_deref_mut() {
-                resolve_guards_in_ability(sub, None, ancestor_prevent_damage);
+                resolve_guards_in_ability(sub, None);
             }
         }
-        Effect::FlipCoinUntilLose { win_effect } => {
-            resolve_guards_in_ability(win_effect, None, ancestor_prevent_damage)
-        }
+        Effect::FlipCoinUntilLose { win_effect } => resolve_guards_in_ability(win_effect, None),
         Effect::RollDie { results, .. } => {
             for branch in results {
-                resolve_guards_in_ability(&mut branch.effect, None, ancestor_prevent_damage);
+                resolve_guards_in_ability(&mut branch.effect, None);
             }
         }
         Effect::ChooseOneOf { branches, .. } => {
             for branch in branches {
-                resolve_guards_in_ability(branch, None, ancestor_prevent_damage);
+                resolve_guards_in_ability(branch, None);
             }
         }
         // CR 611.2: statics applied at resolution can grant abilities that carry a mark —
@@ -8136,27 +8158,27 @@ fn resolve_guards_in_effect(effect: &mut Effect, ancestor_prevent_damage: bool) 
             static_abilities, ..
         } => {
             for static_def in static_abilities {
-                resolve_guards_in_static(static_def, ancestor_prevent_damage);
+                resolve_guards_in_static(static_def);
             }
         }
         // CR 614.1: a registered replacement carries its own execute/decline definitions.
         Effect::AddTargetReplacement { replacement, .. } => {
-            resolve_guards_in_replacement(replacement, ancestor_prevent_damage)
+            resolve_guards_in_replacement(replacement)
         }
         // CR 611.2: only the `LosesAbilities` rider carries a static; `countered_spell_zone`
         // is a plain zone field, not a definition carrier.
         Effect::Counter { source_rider, .. } => {
             if let Some(CounterSourceRider::LosesAbilities { static_def, .. }) = source_rider {
-                resolve_guards_in_static(static_def, ancestor_prevent_damage);
+                resolve_guards_in_static(static_def);
             }
         }
         // CR 114.1: an emblem's granted statics and triggers are definitions too.
         Effect::CreateEmblem { statics, triggers } => {
             for static_def in statics {
-                resolve_guards_in_static(static_def, ancestor_prevent_damage);
+                resolve_guards_in_static(static_def);
             }
             for trigger in triggers {
-                resolve_guards_in_trigger(trigger, ancestor_prevent_damage);
+                resolve_guards_in_trigger(trigger);
             }
         }
         // CR 603.3: `TriggerOnSpend` hangs a full definition off produced mana. Descended
@@ -8165,9 +8187,56 @@ fn resolve_guards_in_effect(effect: &mut Effect, ancestor_prevent_damage: bool) 
         Effect::Mana { grants, .. } => {
             for grant in grants {
                 if let ManaSpellGrant::TriggerOnSpend { ability, .. } = grant {
-                    resolve_guards_in_ability(ability, None, ancestor_prevent_damage);
+                    resolve_guards_in_ability(ability, None);
                 }
             }
+        }
+        // CR 611.2: every `Effect` field typed `Vec<ContinuousModification>`. The vocabulary
+        // itself carries definitions (`GrantAbility` / `GrantTrigger` / `GrantReplacement` /
+        // `GrantStaticAbility`), so each of these is a definition carrier by TYPE — which is
+        // the only reachability this wildcard-free walk can police. A struct FIELD is field
+        // access rather than a match arm, so nothing makes the compiler ask; the census is
+        // `Vec<ContinuousModification>` over `types::ability::Effect`, and
+        // `tests::guard_walk_reaches_every_continuous_modification_carrier` plants a mark in
+        // each so a field added later cannot be dropped silently.
+        Effect::CopySpell {
+            additional_modifications,
+            ..
+        }
+        | Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        }
+        | Effect::BecomeCopy {
+            additional_modifications,
+            ..
+        } => {
+            for modification in additional_modifications {
+                resolve_guards_in_continuous_mod(modification);
+            }
+        }
+        Effect::ReturnAsAura { grants, .. } => {
+            for modification in grants {
+                resolve_guards_in_continuous_mod(modification);
+            }
+        }
+        Effect::AddPendingEntersModifications { modifications, .. } => {
+            for modification in modifications {
+                resolve_guards_in_continuous_mod(modification);
+            }
+        }
+        Effect::EachPlayerCopyChosen {
+            copy_modifications, ..
+        } => {
+            for modification in copy_modifications {
+                resolve_guards_in_continuous_mod(modification);
+            }
+        }
+        // CR 611.2c: the seventh carrier is one level down — the granted permission's own
+        // `enters_with_modifications`, the type-grant rider on a cast-this-way creature
+        // (The Tomb of Aclazotz class; see that field's own doc).
+        Effect::GrantCastingPermission { permission, .. } => {
+            resolve_guards_in_casting_permission(permission)
         }
         // Leaf effects: no nested definition carrier.
         Effect::StartYourEngines { .. }
@@ -8222,10 +8291,8 @@ fn resolve_guards_in_effect(effect: &mut Effect, ancestor_prevent_damage: bool) 
         | Effect::EndTheTurn
         | Effect::EndCombatPhase
         | Effect::SwitchPT { .. }
-        | Effect::CopySpell { .. }
         | Effect::EpicCopy { .. }
         | Effect::CastCopyOfCard { .. }
-        | Effect::CopyTokenOf { .. }
         | Effect::CreateTokenCopyFromPool { .. }
         | Effect::Myriad
         | Effect::Encore
@@ -8235,7 +8302,6 @@ fn resolve_guards_in_effect(effect: &mut Effect, ancestor_prevent_damage: bool) 
         | Effect::ExileHaunting { .. }
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
-        | Effect::BecomeCopy { .. }
         | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
@@ -8250,7 +8316,6 @@ fn resolve_guards_in_effect(effect: &mut Effect, ancestor_prevent_damage: bool) 
         | Effect::MoveCounters { .. }
         | Effect::ReproduceEventCounters { .. }
         | Effect::Animate { .. }
-        | Effect::ReturnAsAura { .. }
         | Effect::RegisterBending { .. }
         | Effect::Cleanup { .. }
         | Effect::Discard { .. }
@@ -8287,7 +8352,6 @@ fn resolve_guards_in_effect(effect: &mut Effect, ancestor_prevent_damage: bool) 
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
-        | Effect::AddPendingEntersModifications { .. }
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
         | Effect::FreeCastFromZones { .. }
@@ -8316,14 +8380,12 @@ fn resolve_guards_in_effect(effect: &mut Effect, ancestor_prevent_damage: bool) 
         | Effect::PutSticker { .. }
         | Effect::ApplySticker { .. }
         | Effect::ProcessRadCounters
-        | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
         | Effect::NoteManaSpent
         | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
-        | Effect::EachPlayerCopyChosen { .. }
         | Effect::Exploit { .. }
         | Effect::GainEnergy { .. }
         | Effect::GivePlayerCounter { .. }
@@ -8392,57 +8454,75 @@ fn resolve_guards_in_effect(effect: &mut Effect, ancestor_prevent_damage: bool) 
 /// CR 603.3: a trigger's payload is a definition; its `unless_pay` is a cost, which carries
 /// no mark (a mark is minted only on a clause's own `ParsedEffectClause` and copied onto the
 /// definition that clause assembles into, never onto a cost).
-fn resolve_guards_in_trigger(trigger: &mut TriggerDefinition, ancestor_prevent_damage: bool) {
+fn resolve_guards_in_trigger(trigger: &mut TriggerDefinition) {
     if let Some(execute) = trigger.execute.as_deref_mut() {
-        resolve_guards_in_ability(execute, None, ancestor_prevent_damage);
+        resolve_guards_in_ability(execute, None);
     }
 }
 
 /// CR 614.1: the replacement's own payload plus the decline continuation its mode carries.
 /// `runtime_execute` is a resolution-time continuation that is never present on a parsed
 /// face, so it holds no mark.
-fn resolve_guards_in_replacement(
-    replacement: &mut ReplacementDefinition,
-    ancestor_prevent_damage: bool,
-) {
+fn resolve_guards_in_replacement(replacement: &mut ReplacementDefinition) {
     if let Some(execute) = replacement.execute.as_deref_mut() {
-        resolve_guards_in_ability(execute, None, ancestor_prevent_damage);
+        resolve_guards_in_ability(execute, None);
     }
     match &mut replacement.mode {
         ReplacementMode::MayCost { decline, .. } | ReplacementMode::Optional { decline } => {
             if let Some(decline) = decline.as_deref_mut() {
-                resolve_guards_in_ability(decline, None, ancestor_prevent_damage);
+                resolve_guards_in_ability(decline, None);
             }
         }
         ReplacementMode::Mandatory => {}
     }
 }
 
+/// Wildcard-free for the same reason as `resolve_guards_in_effect`: a new
+/// `CastingPermission` variant must force a descend-or-leaf decision here.
+///
+/// CR 611.2c: only `ExileWithAltCost` carries modifications — the type-grant rider on a
+/// cast-this-way permission (The Tomb of Aclazotz class). The remaining seven variants
+/// carry costs, zones and turn stamps, none of which is a definition carrier.
+fn resolve_guards_in_casting_permission(permission: &mut CastingPermission) {
+    match permission {
+        CastingPermission::ExileWithAltCost {
+            enters_with_modifications,
+            ..
+        } => {
+            for modification in enters_with_modifications {
+                resolve_guards_in_continuous_mod(modification);
+            }
+        }
+        CastingPermission::AdventureCreature
+        | CastingPermission::PlayFromExile { .. }
+        | CastingPermission::ExileWithEnergyCost
+        | CastingPermission::ExileWithAltAbilityCost { .. }
+        | CastingPermission::WarpExile { .. }
+        | CastingPermission::Plotted { .. }
+        | CastingPermission::Foretold { .. } => {}
+    }
+}
+
 /// CR 611.2: a static's modifications are the only definition carriers it has.
-fn resolve_guards_in_static(static_def: &mut StaticDefinition, ancestor_prevent_damage: bool) {
+fn resolve_guards_in_static(static_def: &mut StaticDefinition) {
     for modification in &mut static_def.modifications {
-        resolve_guards_in_continuous_mod(modification, ancestor_prevent_damage);
+        resolve_guards_in_continuous_mod(modification);
     }
 }
 
 /// Wildcard-free for the same reason as `resolve_guards_in_effect`: a new
 /// `ContinuousModification` variant must force a descend-or-leaf decision here.
-fn resolve_guards_in_continuous_mod(
-    modification: &mut ContinuousModification,
-    ancestor_prevent_damage: bool,
-) {
+fn resolve_guards_in_continuous_mod(modification: &mut ContinuousModification) {
     match modification {
         ContinuousModification::GrantAbility { definition } => {
-            resolve_guards_in_ability(definition, None, ancestor_prevent_damage)
+            resolve_guards_in_ability(definition, None)
         }
-        ContinuousModification::GrantTrigger { trigger } => {
-            resolve_guards_in_trigger(trigger, ancestor_prevent_damage)
-        }
+        ContinuousModification::GrantTrigger { trigger } => resolve_guards_in_trigger(trigger),
         ContinuousModification::GrantReplacement { replacement } => {
-            resolve_guards_in_replacement(replacement, ancestor_prevent_damage)
+            resolve_guards_in_replacement(replacement)
         }
         ContinuousModification::GrantStaticAbility { definition } => {
-            resolve_guards_in_static(definition, ancestor_prevent_damage)
+            resolve_guards_in_static(definition)
         }
         // CR 707.2: `CopyValues` holds `Arc`-shared copies of an existing object's already
         // resolved definitions. It is parse-unreachable (no parser path constructs it), so

@@ -2,14 +2,20 @@
 //! owner on the assembled tree consumes it in the dropped guard's stead.
 //!
 //! CR 614.1 / CR 614.1a (the EVENT reading — "would") vs CR 608.2c (the STATE reading)
-//! decide which gap kind is recorded. Three owner classes keep a body alive:
+//! decide whether a gap is recorded at all: only the EVENT reading gaps. Two owner classes
+//! then keep an EVENT-guarded body alive:
 //!
 //! - **O1a** — CR 614.1a + CR 608.2n: a graveyard-redirect rider that is the direct
 //!   `sub_ability` of an `Effect::CastFromZone`.
 //! - **O1b** — CR 608.2c + CR 614.1a: an exile rider that is the direct `sub_ability`
 //!   of an `Effect::Counter`.
-//! - **O2** — CR 615.5: a "prevented this way" follow-up anywhere below an
-//!   `Effect::PreventDamage` ancestor.
+//!
+//! A third class, **O2** (CR 615.5, a "prevented this way" follow-up under an
+//! `Effect::PreventDamage` ancestor), was deleted as dead: a back-reference rider reads
+//! STATE by construction, so it never reached an owner test. V8 and V9 stay as CONTROLS —
+//! their riders survive because a STATE guard does not gap, which is the base behaviour O2
+//! was never needed to produce. See the withdrawal note beside
+//! `parser::oracle_effect::tests`' V10c.
 //!
 //! Every row here runs through `parse_oracle_text`, because the ownership verdict is
 //! settled at the tail of the parse pipeline — after line routing — and no
@@ -93,6 +99,19 @@ const PHYREXIAN_VINDICATOR: &str = "Flying\nIf damage would be dealt to this cre
 that damage. When damage is prevented this way, this creature deals that much damage to any \
 other target.";
 
+/// V17 — declared synthetic, two real donors, one composed pairing.
+///
+/// Sentence 1 is the hostile context (`"Draw a card."` standing where an owner head would
+/// normally be), the same device the venue-C rows use. Sentences 2 and 3 are Torrential
+/// Gearhulk's and Kylox's Voltstrider's printed riders verbatim — two members of the same
+/// `graveyard_destination_rider` class, so each is an ownership CANDIDATE and each carries
+/// the EVENT reading ("would"). Only the stacking is composed: no corpus face prints two
+/// such riders in sequence under a head that owns neither, which is exactly why the row
+/// exists.
+const STACKED_UNOWNED_RIDERS: &str = "Draw a card. If that spell would be put into your \
+graveyard, exile it instead. If that spell would be put into a graveyard, put it on the \
+bottom of its owner's library instead.";
+
 /// V14 — Torch the Tower, verbatim, all three lines.
 const TORCH_THE_TOWER: &str = "Bargain (You may sacrifice an artifact, enchantment, or token as \
 you cast this spell.)\nTorch the Tower deals 2 damage to target creature or planeswalker. If \
@@ -145,6 +164,18 @@ fn gaps(parsed: &ParsedAbilities) -> Vec<(String, Option<String>)> {
 
 fn gap_names(parsed: &ParsedAbilities) -> Vec<String> {
     gaps(parsed).into_iter().map(|(name, _)| name).collect()
+}
+
+/// The library-redirect member of the same `graveyard_destination_rider` class: "put the
+/// parent's target at a library position".
+fn is_library_parent_target_rider(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    )
 }
 
 /// The O1a/O1b rider shape: "exile the parent's target".
@@ -443,7 +474,10 @@ fn v7n_non_exile_counter_redirect_rides_the_head_and_mints_no_rider() {
 // V8 / V9 / V10 — O2.
 // ---------------------------------------------------------------------------
 
-/// V8. CR 615.5: the "prevented this way" follow-up is owned by the shield above it.
+/// V8 — a **control**. CR 615.5 + CR 608.2c: the "prevented this way" follow-up survives
+/// under its shield. It survives because its back-reference guard reads STATE and a STATE
+/// guard does not gap — not because an owner arm pardons it. This row held under the
+/// deleted O2 arm and holds without it, which is the evidence that the arm was dead.
 #[test]
 fn v8_o2_single_rider_under_the_shield_survives() {
     let parsed = parse(DEFLECTING_PALM, "Deflecting Palm", &[], &["Instant"]);
@@ -476,9 +510,11 @@ fn v8_o2_single_rider_under_the_shield_survives() {
     assert_no_live_guard_mark(&parsed, "V8");
 }
 
-/// V9. O2 is an **ancestor** test, not a direct-parent test. Comeuppance's second rider
-/// hangs under the *first* rider, so its direct parent is a `DealDamage`; a
-/// direct-parent predicate would gap it.
+/// V9 — a **control**, and the row that made the O2 arm look necessary. Comeuppance's
+/// second rider hangs under the *first*, so its direct parent is a `DealDamage`, which is
+/// why O2 was written as an ancestor test. Both riders in fact survive on the STATE reading
+/// alone: their guards are CR 608.2c back-references with no "would". The row stays because
+/// a future widening of the EVENT reading would gap them.
 #[test]
 fn v9_o2_is_an_ancestor_test_so_the_second_rider_survives() {
     let parsed = parse(COMEUPPANCE, "Comeuppance", &[], &["Instant"]);
@@ -623,6 +659,84 @@ fn v13p_dispatcher_named_gap_is_not_re_derived_as_a_guard_gap() {
         gaps(&parsed)
     );
     assert_no_live_guard_mark(&parsed, "V13p");
+}
+
+// ---------------------------------------------------------------------------
+// V17 — the resolver's own gap must not pardon the guards below it.
+// ---------------------------------------------------------------------------
+
+/// V17. Two stacked unowned EVENT riders. The second's direct parent is the first, and the
+/// first gaps — so if the resolver read the parent pointer AFTER rewriting it, the second
+/// would see an `Effect::Unimplemented` parent and be pardoned by `guard_owner`'s R-a arm,
+/// with its guard silently dropped and its body emitted.
+///
+/// R-a's class is the DISPATCHER's refusals (Invoke Calamity), which are already in the tree
+/// when the resolver starts. A gap the resolver itself just minted is not one of those, and
+/// admitting it makes a clause's verdict depend on whether an ancestor happened to gap first
+/// — the same clause, gapped or pardoned by position.
+///
+/// Neither V12 (no parent at all) nor V4 (a non-consuming, non-gapped parent) reaches this
+/// shape, which is why the defect survived them.
+#[test]
+fn v17_a_gap_this_pass_minted_does_not_pardon_the_guards_below_it() {
+    let parsed = parse(
+        STACKED_UNOWNED_RIDERS,
+        "Stacked Unowned Riders",
+        &[],
+        &["Instant"],
+    );
+
+    // Reach-guard 1: the hostile context assembled — the head is the printed draw, so
+    // neither rider has a `CastFromZone` or `Counter` owner anywhere above it.
+    let nodes = chain(&parsed.abilities[0]);
+    assert!(
+        matches!(*nodes[0].effect, Effect::Draw { .. }),
+        "V17 reach-guard: the chain must head with the printed draw, got {:?}",
+        nodes[0].effect
+    );
+    assert!(
+        !all_effects(&parsed)
+            .iter()
+            .any(|effect| matches!(effect, Effect::CastFromZone { .. } | Effect::Counter { .. })),
+        "V17 reach-guard: no O1a/O1b owner may exist in the tree, or the row proves nothing"
+    );
+    // Reach-guard 2: the riders really did stack — three nodes deep, not two siblings of the
+    // root. Without this the row could be green because the second rider never became the
+    // first's child at all.
+    assert!(
+        nodes.len() >= 3,
+        "V17 reach-guard: the two riders must stack below the head, got a chain of {} \
+         node(s): {:?}",
+        nodes.len(),
+        nodes.iter().map(|n| &n.effect).collect::<Vec<_>>()
+    );
+
+    // The claim: BOTH unowned EVENT guards gap. Before the ordering fix the second was
+    // pardoned and only one gap was recorded.
+    let names = gap_names(&parsed);
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| *name == "unparsed_replacement")
+            .count(),
+        2,
+        "V17: each unowned EVENT guard must gap on its own merits, got {:?}",
+        gaps(&parsed)
+    );
+    // …and neither body is emitted. This is the half that flips: a pardoned guard leaves its
+    // body running ungated, which is an instruction the card does not print.
+    assert!(
+        !has_exile_parent_target_rider(&parsed),
+        "V17: the first rider's body must be emitted nowhere"
+    );
+    assert!(
+        !all_effects(&parsed)
+            .iter()
+            .any(is_library_parent_target_rider),
+        "V17: the second rider's body must be emitted nowhere — it is no more owned than \
+         the first"
+    );
+    assert_no_live_guard_mark(&parsed, "V17");
 }
 
 // ---------------------------------------------------------------------------

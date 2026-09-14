@@ -105,7 +105,7 @@ use super::oracle_util::{
 };
 use crate::game::triggers;
 use crate::parser::oracle_effect::subject::parse_subject_application;
-use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
     BounceSelection, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, CastMechanism,
@@ -17212,7 +17212,7 @@ fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
         // CR 608.2c: lower through the SINGLE condition authority (the three-rung ladder),
         // not the nom rung alone.
         let guard = match conditions::lower_instead_condition(cond_body, ctx) {
-            Some(cond) => ConditionalGuard::Lowered(cond),
+            Some(cond) => ConditionalGuard::Lowered(Box::new(cond)),
             // CR 614.1a / CR 608.2c: the reading decides the remedy.
             None if conditions::condition_names_an_event(cond_body) => {
                 ConditionalGuard::Unlowered(GuardReading::Event)
@@ -17330,34 +17330,28 @@ fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
     input.is_empty().then_some(())
 }
 
-/// CR 614.1a + CR 608.2n (O1) / CR 615.5 (O2): could a typed owner consume this body in
-/// the dropped guard's stead?
+/// CR 614.1a + CR 608.2n: could a typed owner consume this body in the dropped guard's
+/// stead?
 ///
 /// Asked at the clause seam, which cannot see the body's final parent — so this is only
-/// the CANDIDACY half. The pairing verdict (which owner head, and whether it encodes this
-/// guard's reading) belongs to `parser::oracle::resolve_unlowered_guards`, on the
-/// assembled tree.
+/// the CANDIDACY half. The pairing verdict (which owner head consumes it) belongs to
+/// `parser::oracle::resolve_unlowered_guards`, on the assembled tree.
 ///
 /// **The reading is part of candidacy, not only of the pairing.** `graveyard_destination_rider`
-/// is the O1 recognizer, and `guard_owner`'s O1a arm already requires `GuardReading::Event`
-/// (CR 614.1a: an "instead" clause replaces an event that *would* happen). Without that
-/// conjunct here the seam consults a **spell-stack graveyard-replacement** classifier on
-/// bodies that have no spell and no graveyard — Life at Stake's `"exile that creature"`
-/// matches on `Exile` + `ParentTarget` alone — and mints a mark no owner arm can settle.
-/// Its own doc names its domain ("a sequential rider sub-ability on `CastFromZone`"), and
-/// its four other call sites all hand it such a head's sub-ability. The conjunct makes
-/// candidacy agree with the arm it feeds.
+/// is the recognizer, and it classifies a **spell-stack graveyard replacement** (CR 614.1a: an
+/// "instead" clause replaces an event that *would* happen). Without the `Event` conjunct the
+/// seam consults that classifier on bodies that have no spell and no graveyard — Life at
+/// Stake's `"exile that creature"` matches on `Exile` + `ParentTarget` alone — and mints a
+/// mark no owner arm can settle. Its own doc names its domain ("a sequential rider
+/// sub-ability on `CastFromZone`"), and its four other call sites all hand it such a head's
+/// sub-ability. The conjunct makes candidacy agree with the arms it feeds
+/// (`oracle::guard_owner`'s O1a/O1b), which are reached only under the EVENT reading.
 ///
-/// O2 needs no conjunct: `prevented_this_way_rider_source_gate` recognizes a CR 608.2c
-/// back-reference, and back-references read `State` by construction, so it is self-scoping.
-///
-/// Both recognizers are the pre-existing authorities: O1's is the runtime rider
-/// classifier the resolver itself consumes, and O2's is the nom gate assembly uses for
-/// its own `PreventDamage` fold.
-fn is_ownership_candidate(reading: GuardReading, effect: &Effect, clause_text: &str) -> bool {
-    (reading == GuardReading::Event
-        && crate::game::effects::cast_from_zone::graveyard_destination_rider(effect).is_some())
-        || super::oracle_replacement::prevented_this_way_rider_source_gate(clause_text).is_some()
+/// The recognizer is the pre-existing authority: it is the runtime rider classifier the
+/// resolver itself consumes.
+fn is_ownership_candidate(reading: GuardReading, effect: &Effect) -> bool {
+    reading == GuardReading::Event
+        && crate::game::effects::cast_from_zone::graveyard_destination_rider(effect).is_some()
 }
 
 fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClause {
@@ -17459,12 +17453,12 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
             let mut result = lower_clause_ast(*clause, ctx);
             match guard {
                 // CR 608.2c: thread a lowered guard into the clause's condition field.
-                ConditionalGuard::Lowered(cond) => result.condition = Some(cond),
+                ConditionalGuard::Lowered(cond) => result.condition = Some(*cond),
                 ConditionalGuard::Unlowered(reading) => {
                     // A body a typed owner could consume is DEFERRED rather than decided
                     // here: whether an owner carries the guard is a property of the
                     // assembled tree, and this seam cannot see the body's final parent.
-                    if is_ownership_candidate(reading, &result.effect, &clause_text) {
+                    if is_ownership_candidate(reading, &result.effect) {
                         result.unlowered_guard = Some(UnloweredGuard {
                             reading,
                             clause_text,
@@ -17485,18 +17479,29 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
                         // candidate is not constrained by this invariant"). Phyrexian
                         // Vindicator is the measured witness: deferring this clause instead
                         // re-routes its line and loses its `replacement_structure`.
+                        // CR 614.1a: the EVENT reading IS the replacement reading, so this
+                        // seam records only `Replacement`.
                         return parsed_clause(gap_diagnosis::clause_gap_unimplemented_as(
-                            reading.gap_kind(),
+                            ClauseGapKind::Replacement,
                             &clause_text,
                         ));
                     }
-                    // CR 608.2c: a STATE guard with no owner family falls through to the
-                    // behaviour this parser has always had — the guard is dropped, the body
-                    // is emitted, and the loss is reported by `swallow_check`'s Condition_If
-                    // detector, the channel six in-tree tests assert by name. A gap here
-                    // would suppress that detector for the whole unit
-                    // (`swallow_check.rs`'s `any_ability_has_unimplemented` early-`continue`),
-                    // trading a counted, visible loss for an uncounted one.
+                    // A STATE guard with no owner family falls through to the behaviour this
+                    // parser has always had — the guard is dropped, the body is emitted, and
+                    // the loss is reported by `swallow_check`'s Condition_If detector, the
+                    // channel six in-tree tests assert by name. A gap here would suppress
+                    // that detector for the whole unit (`swallow_check.rs`'s
+                    // `any_ability_has_unimplemented` early-`continue`), trading a counted,
+                    // visible loss for an uncounted one.
+                    //
+                    // Deliberately NOT cited to CR 608.2c. That rule says the controller
+                    // follows the printed instructions in the order written; it does not
+                    // license discarding a printed gate, and the reasons above are
+                    // engineering reasons. CR 608.2c is what the dropped guard WOULD have
+                    // been evaluated under, not authority for dropping it — the same honest
+                    // trade-off `conditions::strip_unrecognized_conditional_head_when_body_optional`
+                    // records for the `"you may …"` bodies it strips before this seam ever
+                    // sees them.
                 }
             }
             result

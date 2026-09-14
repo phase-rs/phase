@@ -41232,13 +41232,13 @@ fn leading_conditional_lowers_through_the_ladder_not_the_nom_rung_alone() {
     };
     assert_eq!(
         *guard,
-        ConditionalGuard::Lowered(AbilityCondition::QuantityCheck {
+        ConditionalGuard::Lowered(Box::new(AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::CostXPaid
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: 1 },
-        }),
+        })),
         "the ladder's lowered value, not merely that something lowered"
     );
     let clause = lower_clause_ast(ast, &mut ParseContext::default());
@@ -41249,9 +41249,22 @@ fn leading_conditional_lowers_through_the_ladder_not_the_nom_rung_alone() {
     );
 }
 
-/// V2c — production-path companion to V2s, on the nested-guard shape that is the only
-/// shape reaching the seam on a chain (an outer `"If you do,"` already occupies the
-/// definition's condition slot, so no upstream stripper can consume the inner guard).
+/// V2c — a **control**, not a discriminator for the §P2.3 ladder swap.
+///
+/// Stated plainly because the row's own shape forecloses the stronger reading: revert the
+/// swap and this fixture stays green. `"X is 1 or more"` would then fail to lower, and
+/// `condition_names_an_event` on it is false (no "would"), so the guard reads STATE and
+/// falls through with its body intact — no gap, which is exactly what the row asserts. The
+/// difference between "lowered" and "dropped" lives in the `condition` field, and this
+/// fixture cannot see it: the outer `"If you do,"` clobbers the slot (see the aliasing note
+/// below). **`leading_conditional_lowers_through_the_ladder_not_the_nom_rung_alone` (V2s) is
+/// the sole witness for the swap**, and it discriminates because it pins the ladder's
+/// lowered VALUE against a paired control proving the nom rung alone refuses the guard.
+///
+/// What V2c does carry: the production-path companion on the nested-guard shape that is the
+/// only shape reaching the seam on a chain (an outer `"If you do,"` already occupies the
+/// definition's condition slot, so no upstream stripper can consume the inner guard). It
+/// holds the chain path clean — the inner guard is not gapped and the body survives.
 ///
 /// The occupancy reach-guard is asserted on the node that CARRIES the guarded body, not on
 /// the chain root: `parse_effect_chain` puts `"You may pay {X}"` at node 0 as a `PayCost`
@@ -41317,9 +41330,9 @@ fn leading_conditional_accepts_the_then_if_connector() {
         matches!(
             ast,
             ClauseAst::Conditional {
-                guard: ConditionalGuard::Lowered(AbilityCondition::IsYourTurn),
+                guard: ConditionalGuard::Lowered(ref boxed),
                 ..
-            }
+            } if **boxed == AbilityCondition::IsYourTurn
         ),
         "expected the connector-prefixed guard to lower, got: {ast:?}"
     );
@@ -41397,63 +41410,30 @@ fn unlowerable_event_guard_re_records_over_the_full_clause() {
     );
 }
 
-/// V10c — the seam half of the O2 claim, and now the whole of it.
-///
-/// The mark IS minted here. Its venue-P companion `guard_ownership::v10_*` is WITHDRAWN
-/// (see the "V10 — WITHDRAWN" block in that file): an O2 mark is always the STATE reading,
-/// so the resolver now always clears it, and the gap that row asserted would fire on
-/// Ria Ivor — whose prevention shield merely failed to parse — deleting a correct `Token`
-/// body. What survives, and what this row states, is only that the seam DEFERS rather than
-/// decides.
-///
-/// Declared synthetic: only the hostile context (`"Draw a card"` where a prevention would
-/// normally stand) is composed — the rider sentence is Acolyte's Reward's and Divine
-/// Deflection's printed rider as the seam receives it.
-#[test]
-fn o2_rider_clause_is_marked_by_the_seam_even_with_no_shield() {
-    const RIDER: &str = "If damage is prevented this way, ~ deals that much damage to any target";
-    let def = parse_effect_chain(
-        "Draw a card. If damage is prevented this way, ~ deals that much damage to any target",
-        AbilityKind::Spell,
-    );
-
-    // Shape precondition: the clause is an ownership candidate by the parser's own gate.
-    assert!(
-        crate::parser::oracle_replacement::prevented_this_way_rider_source_gate(RIDER).is_some(),
-        "V10c precondition: the source gate must hold on this clause text"
-    );
-    let nodes = guard_chain_nodes(&def);
-    assert!(
-        nodes
-            .iter()
-            .any(|node| matches!(*node.effect, Effect::Draw { .. })),
-        "V10c reach-guard: the preceding clause must be present and lowered"
-    );
-    assert!(
-        !nodes
-            .iter()
-            .any(|node| matches!(*node.effect, Effect::PreventDamage { .. })),
-        "V10c: the hostile condition is that no shield exists in the chain"
-    );
-    assert!(
-        nodes.iter().any(|node| node.unlowered_guard
-            == Some(UnloweredGuard {
-                reading: GuardReading::State,
-                clause_text: RIDER.to_string(),
-            })),
-        "V10c: the seam must DEFER this clause, not decide it — marks: {:?}",
-        nodes
-            .iter()
-            .map(|node| node.unlowered_guard.clone())
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        nodes
-            .iter()
-            .any(|node| matches!(*node.effect, Effect::DealDamage { .. })),
-        "V10c: the deferred body is still present at this venue"
-    );
-}
+// V10c — WITHDRAWN with the O2 apparatus it was the last surviving half of.
+//
+// V10c asserted that the seam DEFERS a CR 615.5 "prevented this way" rider — i.e. that
+// `is_ownership_candidate`'s second disjunct (`prevented_this_way_rider_source_gate`) mints
+// a mark for it. That disjunct is deleted, because every mark it could mint was taken and
+// discarded unread:
+//
+//   * `oracle::guard_owner` is called only when `reading == GuardReading::Event`;
+//   * its O2 arm additionally required `prevented_this_way_rider_source_gate(clause_text)`,
+//     whose grammar is `("when "|"whenever "|"if ") "damage" [" from a[n] <type> source"]
+//     " is prevented this way,"` — a fixed prefix through the comma at which
+//     `split_leading_conditional` splits, so the guard body the reading is computed from is
+//     one of seven fixed strings, none containing "would";
+//   * `condition_names_an_event` IS `scan_contains(lower, "would")`, so such a clause reads
+//     `State` by construction and the two conjuncts were mutually exclusive.
+//
+// A `State` mark is `take()`n by the resolver and falls through to the base behaviour —
+// guard dropped, body emitted, loss counted by `swallow_check`'s Condition_If detector —
+// which is exactly what happens now that no mark is minted at all. The gate function itself
+// stays: `oracle_effect::assembly` is a live caller for its own `PreventDamage` fold, and
+// `oracle_replacement`'s own rows still cover its grammar.
+//
+// The venue-P companion `guard_ownership::v10_*` was already withdrawn for a different
+// reason (it would have fired on Ria Ivor, whose shield merely failed to parse).
 
 /// The `Event` conjunct on `is_ownership_candidate` (and on `guard_owner`'s O1a arm) is
 /// load-bearing: an O1a rider SHAPE under a STATE guard is not an ownership candidate.
@@ -41474,6 +41454,25 @@ fn o2_rider_clause_is_marked_by_the_seam_even_with_no_shield() {
 /// verbatim. Only the pairing is composed — no corpus text pairs a STATE guard with an O1a
 /// rider shape, which is exactly why the row exists: it forward-guards the `Event` conjunct
 /// against a later widening.
+///
+/// **What this row can and cannot claim.** Its predecessor V11 asserted a BEHAVIOURAL
+/// consequence (`!has_exile_parent_target_rider` — the body emitted nowhere). That claim is
+/// false under the amended rule and was withdrawn with the row: a STATE guard does not gap,
+/// so the body IS emitted. No behavioural venue replaces it, and none can — measured from
+/// the source, not assumed:
+///
+///   * the mark is written by `lower_clause_ast` and read only by
+///     `oracle::resolve_guards_in_ability` (plus `assembly`'s field copy and the exhaustive
+///     `unlowered_guard: _` destructurings in `ability_rw` / `ability_scan` / `quantity` /
+///     `shortcut_efficacy`); nothing between them branches on it;
+///   * that reader settles a verdict only for `GuardReading::Event`, and takes-and-discards
+///     a STATE mark;
+///   * so for a STATE guard, candidate and non-candidate produce the identical tree.
+///
+/// The conjunct's value is therefore hygiene, not behaviour: it stops the seam minting a
+/// mark no owner arm can settle, which would otherwise have to survive
+/// `resolve_unlowered_guards`' no-live-mark invariant on some future unrecursed key. The
+/// row asserts exactly that, plus the observable outcome, and claims nothing more.
 #[test]
 fn an_o1a_rider_shape_under_a_state_guard_is_not_an_ownership_candidate() {
     let ast = parse_clause_ast(
@@ -41501,6 +41500,20 @@ fn an_o1a_rider_shape_under_a_state_guard_is_not_an_ownership_candidate() {
         clause.unlowered_guard.is_none(),
         "a STATE guard over an O1a shape must not be marked, got {:?}",
         clause.unlowered_guard
+    );
+    // The observable outcome, stated so the row is not purely white-box: the STATE guard is
+    // dropped and the body emitted intact. This is the SAME outcome with or without the
+    // `Event` conjunct — which is the point of the doc above, not a second control.
+    assert!(
+        clause.condition.is_none(),
+        "the unlowerable STATE guard is dropped, not lowered into the condition slot, got \
+         {:?}",
+        clause.condition
+    );
+    assert!(
+        !matches!(clause.effect, Effect::Unimplemented { .. }),
+        "a STATE guard must not gap its body, got {:?}",
+        clause.effect
     );
 }
 

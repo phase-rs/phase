@@ -194,9 +194,15 @@ pub(crate) enum ClauseAst {
 /// in this variant — it exists only because the splitter fired) with "the condition
 /// authority refused the guard". Making the second representable is what lets
 /// `lower_clause_ast` stop emitting an unguarded body.
+///
+/// `Lowered` boxes its payload, as `AbilityCondition::ConditionInstead` does for the same
+/// type. Unboxed, `AbilityCondition` is ~200 bytes and `ClauseAst::Conditional` — which
+/// also gained `clause_text: String` — crossed clippy's `large_enum_variant` threshold
+/// (232-byte largest vs 24-byte second largest, limit 200), making `ClauseAst` 232 bytes
+/// at every node of a recursive tree whose other variants hold only pointers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ConditionalGuard {
-    Lowered(AbilityCondition),
+    Lowered(Box<AbilityCondition>),
     Unlowered(GuardReading),
 }
 

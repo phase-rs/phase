@@ -29506,6 +29506,164 @@ fn render_net_reaches_every_nested_description_carrier() {
     }
 }
 
+/// Carrier fixture for the GUARD walk (`resolve_guards_in_effect`), on the one carrier
+/// class the wildcard-free `match` over `Effect` cannot force a decision about.
+///
+/// A new `Effect` VARIANT is a compile error in that walk. A `Vec<ContinuousModification>`
+/// FIELD on an existing variant is field access, so nothing asks — and seven such fields sat
+/// in the blanket leaf arm unreached. `ContinuousModification`'s own vocabulary carries
+/// definitions (`GrantAbility` / `GrantTrigger` / `GrantReplacement` / `GrantStaticAbility`),
+/// so every one of them is a definition carrier by TYPE, which is the only reachability a
+/// structural walk can police.
+///
+/// The census is: every `Vec<ContinuousModification>`-typed field declared on
+/// `types::ability::Effect` (six — `CopySpell` / `CopyTokenOf` / `BecomeCopy`
+/// `.additional_modifications`, `ReturnAsAura.grants`,
+/// `AddPendingEntersModifications.modifications`, `EachPlayerCopyChosen.copy_modifications`),
+/// plus the one that is a level down through a payload enum
+/// (`GrantCastingPermission` → `CastingPermission::ExileWithAltCost.enters_with_modifications`).
+/// Regenerate it by grepping `Vec<ContinuousModification>` inside the `enum Effect` span of
+/// `types/ability.rs` and following each payload enum one level.
+///
+/// Revert-to-red: drop any single arm back into the leaf list and that carrier's row fails,
+/// naming it — which the blanket `debug_assert!` in `resolve_unlowered_guards` cannot do.
+#[test]
+fn guard_walk_reaches_every_continuous_modification_carrier() {
+    use crate::types::ability::{
+        CastingPermission, CopyChooseScope, CopyRecipient, CopyRetargetPermission, GuardReading,
+        PermissionGrantee, UnloweredGuard,
+    };
+
+    /// A real EVENT-reading clause, so `clause_gap_unimplemented_as`'s own
+    /// `debug_assert_eq!` against the context-free diagnosis holds (it diagnoses
+    /// `ClauseGap::Replacement`). Torrential Gearhulk's printed rider.
+    const CLAUSE: &str = "if that spell would be put into your graveyard, exile it instead";
+
+    /// A `ContinuousModification` nesting a definition that carries a live guard mark.
+    fn marked() -> ContinuousModification {
+        let mut def = AbilityDefinition::new(AbilityKind::Spell, Effect::Investigate);
+        def.unlowered_guard = Some(UnloweredGuard {
+            reading: GuardReading::Event,
+            clause_text: CLAUSE.to_string(),
+        });
+        ContinuousModification::GrantAbility {
+            definition: Box::new(def),
+        }
+    }
+
+    let carriers: Vec<(&str, Effect)> = vec![
+        (
+            "CopySpell.additional_modifications",
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+                additional_modifications: vec![marked()],
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+        ),
+        (
+            "CopyTokenOf.additional_modifications",
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![marked()],
+            },
+        ),
+        (
+            "BecomeCopy.additional_modifications",
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                recipient: CopyRecipient::Source,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![marked()],
+            },
+        ),
+        (
+            "ReturnAsAura.grants",
+            Effect::ReturnAsAura {
+                enchant_filter: TargetFilter::Any,
+                grants: vec![marked()],
+            },
+        ),
+        (
+            "AddPendingEntersModifications.modifications",
+            Effect::AddPendingEntersModifications {
+                modifications: vec![marked()],
+            },
+        ),
+        (
+            "EachPlayerCopyChosen.copy_modifications",
+            Effect::EachPlayerCopyChosen {
+                choose_filter: TargetFilter::Any,
+                min: 1,
+                max: 1,
+                copy_modifications: vec![marked()],
+                scale: None,
+                choose_scope: CopyChooseScope::Chooser,
+            },
+        ),
+        (
+            "GrantCastingPermission -> ExileWithAltCost.enters_with_modifications",
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::ExileWithAltCost {
+                    source_id: None,
+                    cost: crate::types::mana::ManaCost::default(),
+                    cost_provenance: Default::default(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: None,
+                    resolution_cleanup: None,
+                    duration: None,
+                    graveyard_replacement: None,
+                    enters_with_counter: None,
+                    enters_with_modifications: vec![marked()],
+                    mana_spend_permission: None,
+                },
+                target: TargetFilter::Any,
+                grantee: PermissionGrantee::AbilityController,
+            },
+        ),
+    ];
+
+    /// Does the serialized shape still hold a mark? Asked of the SERIALIZED tree rather
+    /// than by re-walking, because a re-walk would use the very recursion set under test.
+    fn holds_mark(effect: &Effect) -> bool {
+        fn scan(value: &serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::Object(map) => {
+                    map.contains_key("unlowered_guard") || map.values().any(scan)
+                }
+                serde_json::Value::Array(items) => items.iter().any(scan),
+                _ => false,
+            }
+        }
+        scan(&serde_json::to_value(effect).expect("Effect serializes"))
+    }
+
+    for (name, effect) in carriers {
+        let mut effect = effect;
+        // Reach-guard: the mark really is in there before the walk runs, so a green is
+        // never a green-on-nothing.
+        assert!(
+            holds_mark(&effect),
+            "reach-guard: carrier `{name}` must carry a planted mark before the walk"
+        );
+        super::resolve_guards_in_effect(&mut effect);
+        assert!(
+            !holds_mark(&effect),
+            "carrier `{name}` is not descended by `resolve_guards_in_effect` — a deferred \
+             guard verdict left under it would ship in `card-data.json`"
+        );
+    }
+}
+
 /// CR 611.2 + CR 201.5a — carrier fixture for `Effect::GenericEffect`, a
 /// resolution-time grant onto a target. This route is a PRE-EXISTING PARSER
 /// LEAK at BASE_SHA: `try_parse_gain_quoted_ability` sets the description

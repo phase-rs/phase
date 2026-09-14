@@ -24186,10 +24186,22 @@ pub enum IterationKindBinding {
 /// CR 614.1 + CR 614.1a / CR 608.2c: which reading a leading "if" guard has when the
 /// single condition authority (`lower_instead_condition`) cannot lower it.
 ///
-/// CR 614.1 makes the modal "would" the Comprehensive Rules' own marker for the EVENT
-/// reading of an "instead" clause, which is why the split is a rule boundary and not a
-/// heuristic: the two readings have different remedies (CR 614.1a + CR 614.6 vs
-/// CR 608.2c) and therefore different gap kinds.
+/// The two readings have genuinely different remedies (CR 614.1a + CR 614.6 vs CR 608.2c),
+/// so the split matters. **The parser's discriminator for it — the modal "would" — is a
+/// defensible PROXY, not the rule's own boundary, and this doc says so deliberately.**
+/// CR 614.1 uses "would" to describe the event a replacement effect *watches for* ("watch
+/// for a particular event that would happen"); the textual marker CR 614.1a names is
+/// "instead" ("Effects that use the word 'instead' are replacement effects"). This parser
+/// keys on "would" and never on "instead", so a printed replacement that omits the modal
+/// classifies STATE here — `"… put it on top of its owner's library instead"` is one, and
+/// CR 608.2c quotes that exact sentence as its own example. Both readings therefore have
+/// real members under either marker, and "would" is chosen because it is the reliable one
+/// for the population this seam sees: an unlowerable LEADING guard, where "instead" sits in
+/// the body rather than in the guard being classified.
+///
+/// Consequence to keep in view when extending: a misclassified EVENT guard reads STATE and
+/// falls through with its body emitted, which is the pre-existing behaviour rather than a
+/// new one — see `parser::oracle::resolve_guards_in_ability`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GuardReading {
     /// CR 614.1a: the guard names an EVENT ("... would ...").
