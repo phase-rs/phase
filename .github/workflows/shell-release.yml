@@ -410,6 +410,11 @@ jobs:
 
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
         if: steps.android-signing.outputs.available == 'true'
+        with:
+          # Same withdrawal as in ci.yml: the action's default `tools platform-tools`
+          # now fails on the legacy `tools` package. The pinned-SDK step below
+          # installs what this job needs.
+          packages: platform-tools
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         if: steps.android-signing.outputs.available == 'true'
