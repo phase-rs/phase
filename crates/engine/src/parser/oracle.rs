@@ -11,13 +11,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CastTimingPermission,
-    CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-    CostReduction, DamageRedirectTarget, DelayedTriggerCondition, Duration, Effect, EffectScope,
-    FilterProp, ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr,
-    QuantityRef, ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition,
-    StaticDefinition, TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypedFilter,
+    ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CardPlayMode,
+    CastTimingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind,
+    ContinuousModification, ControllerRef, CostReduction, DamageRedirectTarget,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, ManaProduction,
+    ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
 use crate::types::card::DraftEffect;
@@ -28,11 +28,11 @@ use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
-use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
+use super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_graveyard_keyword_grant_sentence;
 use super::oracle_nom::prevention::has_each_time_event_relative_prevention;
 use super::oracle_nom::primitives::{
@@ -2218,6 +2218,268 @@ fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinit
     }
 }
 
+// --- CR 116.2a + CR 611.2c: deliver a coordinated graveyard play/cast grant ---
+
+/// CR 116.2a + CR 601.2a + CR 611.2c: "Until end of turn, you may play lands
+/// **and** cast spells from your graveyard" (Yawgmoth's Will, Gaea's Will, Magus
+/// of the Will) is ONE permission naming two actions.
+///
+/// **The parse gap.** `"cast "` starts a bare-`and` clause, so the sequence
+/// splitter separates the halves. The CAST half keeps the zone clause and lowers
+/// to `Effect::CastFromZone`; the LAND half is left as the bare fragment
+/// `"play lands"`, which the cast-effect guard refuses -- correctly, in
+/// isolation, because a zone-less "play lands" is not a grant.
+///
+/// **The delivery gap, which is the bigger one.** `Effect::CastFromZone` is not a
+/// channel any land-permission consumer reads. MEASURED: resolving the real
+/// Oracle text left `casting::graveyard_lands_playable_by_permission` returning
+/// `[]`, because `cast_from_zone::resolve` derives its batch from
+/// `ability.live_object_targets()` and `build_resolved_from_def` supplies
+/// `Vec::new()`. The channel the runtime actually consults is
+/// `StaticMode::GraveyardCastPermission`, read by
+/// `casting::graveyard_permission_sources`.
+///
+/// So this pass replaces BOTH halves with one `Effect::GenericEffect` that
+/// installs that permission for the stated window.
+///
+/// **Why one grant for both halves, bound to the player.** CR 611.2c: a
+/// resolution-created continuous effect that does not modify characteristics
+/// "modifies the rules of the game, so it can affect objects that weren't
+/// affected when that continuous effect began." Playing a land is a special
+/// action (CR 116.2a), not a characteristic, so this is that kind -- and it MUST
+/// be, for this card: the second sentence of Yawgmoth's Will ("If a card would be
+/// put into your graveyard from anywhere this turn, exile that card instead")
+/// only makes sense if the permission covers cards that arrive in the graveyard
+/// AFTER it resolved. A per-object stamp would miss every card milled, discarded
+/// or cast later in the turn.
+///
+/// The `affected` filter therefore stays class-wide and is re-evaluated live by
+/// the consumer, and the grant is bound to the GRANTEE rather than the source --
+/// Magus of the Will exiles itself as an activation cost, so a
+/// source-presence-bound grant would never exist.
+/// CR 116.2a: the bare land-play fragment the cast-effect guard leaves behind when
+/// the sequence splitter separates a coordinated "play lands and cast spells from
+/// `<zone>`" sentence.
+///
+/// Composed from nom axes rather than matched as a literal sentence, so the
+/// recognizer covers the PHRASE CLASS and not one spelling: an optional
+/// permission head ("you may "), the verb, and the land noun in either number.
+/// `all_consuming` keeps it boundary-safe — a longer sentence that merely STARTS
+/// with these words is not this fragment and must stay refused, which is what
+/// preserves strict failure for forms outside the implemented class.
+fn parse_refused_land_play_fragment(input: &str) -> OracleResult<'_, ()> {
+    all_consuming(value(
+        (),
+        (
+            opt(tag("you may ")),
+            tag("play "),
+            alt((tag("lands"), tag("land"))),
+        ),
+    ))
+    .parse(input)
+}
+
+fn deliver_coordinated_graveyard_permission_in_ability(def: &mut AbilityDefinition) {
+    // The land half is what the cast-effect guard refused, so it arrives as an
+    // `Unimplemented` carrying the bare land-play phrase.
+    let head_is_refused_land_play = matches!(
+        &*def.effect,
+        Effect::Unimplemented { description, .. }
+            if description
+                .as_deref()
+                .is_some_and(|d| {
+                    // The fragment's case is not guaranteed, and the combinator
+                    // matches lowercase tags: normalize once here rather than
+                    // spelling every arm twice.
+                    nom_parse_lower(&d.to_lowercase(), parse_refused_land_play_fragment)
+                        .is_some()
+                })
+    );
+
+    if head_is_refused_land_play {
+        let recovered = def
+            .sub_ability
+            .as_deref()
+            .and_then(|sub| match &*sub.effect {
+                Effect::CastFromZone {
+                    target, duration, ..
+                } => duration
+                    .as_ref()
+                    // CR 611.2a: "If no duration is stated, it lasts until the end
+                    // of the game." A sibling that lowered WITHOUT a window did not
+                    // capture whatever the card printed, so copying that absence
+                    // would synthesize a PERMANENT permission -- strictly worse
+                    // than leaving the fragment refused. MEASURED: Shaman's Trance
+                    // prints "this turn" but its cast sibling carries
+                    // `duration: None`, and its filter is independently unfaithful
+                    // (`controller: You` against "other players' graveyards"), so
+                    // it declines here.
+                    .and_then(|window| {
+                        coordinated_graveyard_permission(target)
+                            .map(|permission| (window.clone(), permission))
+                    })
+                    .map(|(window, permission)| Effect::GenericEffect {
+                        static_abilities: vec![StaticDefinition::continuous()
+                            .affected(TargetFilter::Controller)
+                            .modifications(vec![ContinuousModification::GrantStaticAbility {
+                                definition: Box::new(permission),
+                            }])],
+                        // CR 611.2a: one stated window scopes both halves;
+                        // `layers::prune_end_of_turn_effects` ends it at cleanup
+                        // (CR 514.2).
+                        duration: Some(window),
+                        target: Some(TargetFilter::Controller),
+                        end_cost: None,
+                    }),
+                _ => None,
+            });
+
+        if let Some(effect) = recovered {
+            // Both halves are now carried by the single permission, so the cast
+            // sibling must not ALSO lower to its own `CastFromZone` -- that would
+            // leave two grants for one printed sentence.
+            //
+            // SPLICE, do not truncate. The cast node is removed and its OWN tail is
+            // reattached, because that tail can carry an INDEPENDENT printed clause.
+            //
+            // MEASURED on Magus of the Will, whose activated ability puts the whole
+            // card on one line: its cast sibling owns the following sentence's
+            // lowered replacement ("If a card would be put into your graveyard from
+            // anywhere this turn, exile that card instead") as its own
+            // `sub_ability`. Dropping the chain wholesale discarded that clause and
+            // raised two `swallowed-clause` warnings, while Yawgmoth's Will — which
+            // prints the same sentence on a SEPARATE line, so it lowers to a second
+            // top-level ability — was unaffected. The one-line arrival shape is the
+            // one that loses text, which is exactly the case a chain-truncating
+            // rewrite hides.
+            *def.effect = effect;
+            def.sub_ability = def
+                .sub_ability
+                .take()
+                .and_then(|cast_node| cast_node.sub_ability);
+            // CR 608.2d + CR 116.2a: the printed "you MAY play lands" is the
+            // permission being granted, NOT a choice the resolving spell offers.
+            //
+            // CR 608.2d scopes resolution-time optionality to choices a player
+            // "announces while applying the effect". This sorcery offers none: it
+            // unconditionally creates a continuous effect, and the "may" is
+            // exercised LATER, each time the player chooses to take the special
+            // action of playing a land (CR 116.2a) or to cast from the graveyard
+            // (CR 601.2a) while the window is open.
+            //
+            // The flag arrives here from the refused `"play lands"` head, whose
+            // upstream "you may ..." parse legitimately set it for a one-shot
+            // reading. Carrying it onto the recovered grant would make the engine
+            // prompt "do you want to do this?" as the spell resolves and, on a
+            // decline, install NO permission at all.
+            //
+            // MEASURED, and this is exactly how the whole delivery looked broken:
+            // `upfront_optional_gate` (`effects/mod.rs`) fired on `optional`,
+            // installed `WaitingFor::OptionalEffectChoice`, and returned BEFORE the
+            // effect dispatch — so the spell resolved to the graveyard with zero
+            // transient effects and `graveyard_lands_playable_by_permission`
+            // returned `[]`, while no error surfaced anywhere.
+            //
+            // All four CR 608.2d optionality fields are cleared together: leaving
+            // `optional_player` / `optional_for` set would re-route the same prompt
+            // to a different player rather than removing it.
+            def.optional = false;
+            def.optional_player = None;
+            def.optional_for = None;
+            def.optional_targeting = false;
+        }
+    }
+
+    if let Some(sub) = def.sub_ability.as_mut() {
+        deliver_coordinated_graveyard_permission_in_ability(sub);
+    }
+}
+
+/// CR 116.2a + CR 601.2a: build the two-part permission from the cast half of the
+/// sentence -- the land axis and the card axis under ONE grant, because the
+/// printed sentence is one permission naming two actions.
+///
+/// Returns `None` for any shape this pass does not model, so an unrecognized cast
+/// sibling leaves the refused fragment refused rather than inventing a grant.
+fn coordinated_graveyard_permission(cast_target: &TargetFilter) -> Option<StaticDefinition> {
+    let TargetFilter::Typed(typed) = cast_target else {
+        return None;
+    };
+    // A class-wide "cast spells from <zone>" lowers to the bare `Card` type axis.
+    // Anything narrower is a specific grant, not the sibling of a "play lands":
+    // permitting creature cards licenses nothing about playing LANDS from that
+    // zone (CR 115.1 -- a targeted permission names objects chosen on
+    // announcement and is not class-wide).
+    if typed.type_filters != vec![TypeFilter::Card] {
+        return None;
+    }
+    // CR 116.2a: the recovered half is a permission to PLAY A LAND, which without
+    // a zone anchor reads as "play lands from anywhere". Require the sibling to
+    // name the zone rather than copying an empty property list.
+    //
+    // FAILS CLOSED on any zone but the graveyard: this grant is delivered through
+    // `casting::graveyard_permission_sources`, which is graveyard-only. A
+    // Hand-anchored sibling (Sen Triplets, "that player's hand") has no consumer
+    // here, and its filter lowers with `controller: None` so it cannot express
+    // whose hand is meant even in principle -- emitting it would trade an honest
+    // unsupported gap for a grant the runtime ignores.
+    let graveyard_anchored = typed.properties.iter().any(|p| {
+        matches!(
+            p,
+            FilterProp::InZone {
+                zone: Zone::Graveyard,
+                ..
+            }
+        )
+    });
+    if !graveyard_anchored {
+        return None;
+    }
+
+    let mut land = typed.clone();
+    land.type_filters = vec![TypeFilter::Land];
+
+    Some(
+        StaticDefinition::new(StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::Unlimited,
+            // CR 116.2a + CR 601.2a: `Play` is the WIDER mode --
+            // `graveyard_permission_play_mode_matches` admits a `Play` grant for a
+            // `Cast` query but not the reverse -- so one grant serves the land
+            // half (a special action) and the spell half (casting), which is what
+            // the single printed permission says.
+            play_mode: CardPlayMode::Play,
+            graveyard_destination_replacement: None,
+            extra_cost: None,
+            enters_with_counter: None,
+        })
+        // CR 611.2c: class-wide and re-evaluated live, so cards that reach the
+        // graveyard later this turn are covered.
+        .affected(TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(land),
+                TargetFilter::Typed(typed.clone()),
+            ],
+        })
+        // CR 113.6: the grant is consulted while its source sits in the graveyard
+        // (a resolved sorcery), so an empty `active_zones` -- which defaults to
+        // battlefield-only -- would make it invisible.
+        .active_zones(vec![Zone::Graveyard]),
+    )
+}
+
+/// CR 116.2a + CR 611.2c: entry point for
+/// [`deliver_coordinated_graveyard_permission_in_ability`].
+fn deliver_coordinated_graveyard_permission(result: &mut ParsedAbilities) {
+    for ability in &mut result.abilities {
+        deliver_coordinated_graveyard_permission_in_ability(ability);
+    }
+    for trigger in &mut result.triggers {
+        if let Some(execute) = trigger.execute.as_mut() {
+            deliver_coordinated_graveyard_permission_in_ability(execute);
+        }
+    }
+}
+
 /// CR 702.26a + CR 603.7c: Upgrade bare one-shot `PhaseOut` ETB effects that
 /// carry a host-bound re-entry rider ("Tap that creature as it phases in this
 /// way", Oubliette) into PhaseOut + CantPhaseIn + delayed PhaseIn/Tap.
@@ -3712,6 +3974,10 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         &static_ids,
     );
     reconcile_host_bound_phase_outs(&mut result);
+    // CR 116.2a + CR 611.2c: deliver the coordinated "play lands and cast spells
+    // from your graveyard" grant through the permission channel the runtime
+    // actually reads.
+    deliver_coordinated_graveyard_permission(&mut result);
     apply_linked_choice_persisted_player(&mut result, &ir.relations, &ability_ids, &trigger_ids);
 
     // Architectural rule: the parser must never silently discard Oracle text. Run

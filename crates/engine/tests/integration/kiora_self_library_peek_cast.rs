@@ -11,8 +11,8 @@ use engine::game::visibility::filter_state_for_viewer;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, CastFromZoneDriver, CastPermissionConstraint, ChoiceType, Comparator,
-    ControllerRef, Duration, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
-    ResolutionCastWindow, ResolvedAbility, TargetFilter, TypeFilter, TypedFilter,
+    ContinuousModification, ControllerRef, Duration, Effect, FilterProp, ObjectScope, QuantityExpr,
+    QuantityRef, ResolutionCastWindow, ResolvedAbility, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -21,6 +21,7 @@ use engine::types::game_state::{CastOfferKind, ExileLinkKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 const KIORA: &str = "Vigilance, ward {3}\nWhenever you cast a Kraken, Leviathan, Octopus, or Serpent spell from your hand, look at the top X cards of your library, where X is that spell's mana value. You may cast a spell with mana value less than X from among them without paying its mana cost. Put the rest on the bottom of your library in a random order.";
@@ -366,11 +367,25 @@ fn ral_leyline_prodigy_mid_clause_duration_is_detected_but_not_yet_stamped() {
 #[test]
 fn coordinated_leading_durations_bind_to_the_cast_half() {
     for (name, oracle, types) in [
-        // "Until end of turn, you may play lands and cast spells from your
-        // graveyard." — the canonical coordinated pair.
-        ("Yawgmoth's Will", YAWGMOTHS_WILL, &["Sorcery"][..]),
-        ("Gaea's Will", GAEAS_WILL, &["Sorcery"][..]),
-        ("Magus of the Will", MAGUS_OF_THE_WILL, &["Creature"][..]),
+        // NOTE: the three Will-cycle cards that used to head this list
+        // ("Until end of turn, you may play lands and cast spells from your
+        // graveyard.") no longer lower to `Effect::CastFromZone` at all. The
+        // delivery seam lowers that whole coordinated sentence to ONE
+        // `Effect::GenericEffect` installing a `GraveyardCastPermission`,
+        // because `CastFromZone` was never a channel any land-permission
+        // consumer reads — it parsed green and delivered nothing.
+        //
+        // The guard this row exists for is NOT lost: the identical
+        // "an unbounded Yawgmoth's Will is the failure mode" assertion now lives
+        // in `will_cycle_delivery.rs`, which pins the window on the recovered
+        // grant AND proves at runtime that the permission ends at cleanup
+        // (CR 514.2) rather than only that a duration token was stamped.
+        //
+        // The remaining rows below are the ones that still lower to
+        // `CastFromZone`, and they are why this row stays: the sentence-grouping
+        // pass (`compute_sentence_leading_duration`) is SHARED, so a regression
+        // in it would still silently unbind their permissions.
+        //
         // The same shape with a three-way coordination and a top-of-library
         // pool instead of a graveyard.
         ("The Belligerent", THE_BELLIGERENT, &["Artifact"][..]),
@@ -395,6 +410,94 @@ fn coordinated_leading_durations_bind_to_the_cast_half() {
              graveyard/library cast permission is the failure mode"
         );
     }
+}
+
+/// CR 611.2a: the Will cycle's window, pinned where it now lives.
+///
+/// These three used to sit in `coordinated_leading_durations_bind_to_the_cast_half`
+/// above, asserting `Effect::CastFromZone { duration: Some(UntilEndOfTurn) }`.
+/// They no longer lower to a `CastFromZone` at all — the delivery seam lowers the
+/// whole coordinated sentence to one `Effect::GenericEffect` that installs a
+/// `GraveyardCastPermission`, because `CastFromZone` was never a channel any
+/// land-permission consumer reads.
+///
+/// The GUARD is unchanged and is the reason this row exists rather than being
+/// deleted with the fixtures: the sentence-leading "Until end of turn" must still
+/// reach the grant. CR 611.2a makes an unstated duration last until the end of the
+/// GAME, so an unbound Yawgmoth's Will is the failure mode — the same one the
+/// sibling row above protects for the cards that still lower to `CastFromZone`.
+///
+/// `will_cycle_delivery.rs` owns the runtime half (that the permission actually
+/// reaches a player, and that it ends at cleanup per CR 514.2). This row keeps the
+/// PARSE-side window assertion in the file whose shared sentence-grouping pass
+/// (`compute_sentence_leading_duration`) produces it.
+#[test]
+fn the_will_cycle_window_rides_the_delivered_permission() {
+    for (name, oracle, types) in [
+        ("Yawgmoth's Will", YAWGMOTHS_WILL, &["Sorcery"][..]),
+        ("Gaea's Will", GAEAS_WILL, &["Sorcery"][..]),
+        ("Magus of the Will", MAGUS_OF_THE_WILL, &["Creature"][..]),
+    ] {
+        let parsed = parse(oracle, name, types);
+        let duration = parsed
+            .abilities
+            .iter()
+            .filter_map(generic_effect_duration_in)
+            .chain(
+                parsed
+                    .triggers
+                    .iter()
+                    .filter_map(|trigger| trigger.execute.as_deref())
+                    .filter_map(generic_effect_duration_in),
+            )
+            .next()
+            .expect("the coordinated sentence must lower to a windowed GenericEffect");
+
+        assert_eq!(
+            duration,
+            Some(Duration::UntilEndOfTurn),
+            "{name}: the sentence-leading \"Until end of turn\" must reach the \
+             delivered permission — CR 611.2a makes an unstated duration last until \
+             end of GAME, so an unbound graveyard permission is the failure mode"
+        );
+    }
+}
+
+/// Depth-first search for the first `GenericEffect`'s duration in a chain.
+fn generic_effect_duration_in(definition: &AbilityDefinition) -> Option<Option<Duration>> {
+    // PIN THE GRANT BY ITS MODE, not by "the first `GenericEffect` in ability
+    // order". Every fixture on this row carries a second printed sentence, and
+    // Gaea's Will additionally carries a Suspend line, so an unrelated windowed
+    // `GenericEffect` can sit ahead of the one under test. Matching positionally
+    // would let this row stay green even if the delivery pass stopped emitting
+    // the `GraveyardCastPermission` entirely — the exact regression it exists to
+    // catch.
+    if let Effect::GenericEffect {
+        duration,
+        static_abilities,
+        ..
+    } = definition.effect.as_ref()
+    {
+        let grants_graveyard_permission = static_abilities.iter().any(|static_def| {
+            static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::GrantStaticAbility { definition }
+                        if matches!(
+                            definition.mode,
+                            StaticMode::GraveyardCastPermission { .. }
+                        )
+                )
+            })
+        });
+        if grants_graveyard_permission {
+            return Some(duration.clone());
+        }
+    }
+    definition
+        .sub_ability
+        .as_deref()
+        .and_then(generic_effect_duration_in)
 }
 
 /// The paired positive for the Magus of the Mind row above: Gix, Yawgmoth
