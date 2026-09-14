@@ -949,7 +949,13 @@ fn parse_trigger_actor(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-/// CR 122.1: the shared tail of every deferred "the difference" anaphor body.
+/// The shared tail of every deferred "the difference" anaphor body.
+///
+/// Deliberately uncited: this recognizes an Oracle *phrase*, and the rules that
+/// govern what the phrase computes belong to the effects it feeds, not to the
+/// tag. A first draft carried a counter-rule citation here, absorbed from the
+/// counter cites this file is dense with — describing the neighbourhood rather
+/// than the code beneath it. Nothing here touches a counter.
 ///
 /// The two discriminators below used to be `eq_ignore_ascii_case` compares against
 /// whole Oracle sentences — the one pattern `CLAUDE.md` prohibits outright, and one
