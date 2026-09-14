@@ -9020,10 +9020,10 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, ActivationRestriction, AggregateFunction,
         ChoiceValue, Comparator, ControllerRef, CountScope, DamageChannel, DamageKindFilter,
-        DevotionColors, Duration, Effect, FilterProp, KickerVariant, ModalSelectionCondition,
-        ModalSelectionConstraint, ObjectProperty, ObjectScope, PlayerRelation, RepeatContinuation,
-        SharedQuality, StaticCondition, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
-        TypedFilter,
+        DelayedTriggerCondition, DevotionColors, Duration, Effect, FilterProp, KickerVariant,
+        ModalSelectionCondition, ModalSelectionConstraint, ObjectProperty, ObjectScope,
+        PlayerRelation, RepeatContinuation, SharedQuality, StaticCondition, TargetFilter,
+        TargetRef, ThisWayCause, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -9034,6 +9034,7 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+    use crate::types::phase::Phase;
     use crate::types::zones::Zone;
     use crate::types::{LandPlayRecord, SpellCastRecord};
 
@@ -21456,6 +21457,121 @@ mod tests {
         assert!(
             !empty.contains("chain_root_targets"),
             "an empty chain-root list is omitted: {empty}"
+        );
+    }
+
+    /// Resolver-path half of the nested-carrier rebind contract (AST-level
+    /// coverage for every new carrier lives in
+    /// `oracle_effect::tests::counter_gate_rebind_reaches_*`): once the rebind
+    /// substitutes the gate's own `QuantityRef` for a counter-gated
+    /// `PutCounter` nested inside a `CreateDelayedTrigger` payload, resolving
+    /// that quantity against the live chain-root target reports the REAL
+    /// counter total, not 0 — exactly like the direct (non-delayed) path
+    /// `chain_root_target_counters_read_live_map_while_target_survives`
+    /// above already proves.
+    ///
+    /// KNOWN GAP, deliberately NOT fixed by this test or by the counter-gate
+    /// rebind it covers: `ability_utils::build_resolved_from_def` — the
+    /// general "materialize a nested `AbilityDefinition` into a resolvable
+    /// `ResolvedAbility`" authority used by EVERY new carrier
+    /// (`CreateDelayedTrigger`, `RevealFromHand.on_decline`,
+    /// `Vote.per_choice_effect`, `FlipCoin`'s branches, …) — does not copy
+    /// the creating ability's `context.chain_root_targets` onto the
+    /// `ResolvedAbility` it builds. A REAL delayed trigger firing later would
+    /// therefore still read an empty chain-root list and resolve to 0,
+    /// regardless of this rebind. That is a pre-existing context-propagation
+    /// gap in `build_resolved_from_def` itself, orthogonal to and predating
+    /// the counter-gate traversal fix (it would affect ANY effect reading
+    /// `ObjectScope::ChainRootTarget` from inside any of these carriers, for
+    /// any card, not only counter-gated ones) — so this test stamps
+    /// `chain_root_targets` onto the built ability by hand, exactly what a
+    /// future propagation fix would do, to isolate what THIS PR is
+    /// responsible for: that the rebound quantity, once resolvable, reads
+    /// the right number.
+    #[test]
+    fn chain_root_target_counter_gate_rebinds_through_a_delayed_trigger_payload() {
+        let (state, spell, _target, root) = chain_root_target_fixture();
+
+        let gate_qty = QuantityRef::CountersOn {
+            scope: ObjectScope::ChainRootTarget,
+            counter_type: None,
+        };
+        let recipient_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+
+        let mut payload = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount,
+                        },
+                        target: recipient_filter.clone(),
+                    },
+                )),
+                uses_tracked_set: false,
+            },
+        );
+
+        // Exactly the chunk loop's counter-gate call site
+        // (`oracle_effect::mod.rs`): rebind the deferred payload's
+        // placeholder to the gate's own QuantityRef before it is stored for
+        // later resolution.
+        // Exactly the chunk loop's counter-gate call site
+        // (`oracle_effect::mod.rs`): rebind the deferred payload's
+        // placeholder to the gate's own QuantityRef before it is stored for
+        // later resolution.
+        crate::parser::oracle_effect::rebind_event_context_amount_counts_in_ability(
+            &mut payload,
+            &gate_qty,
+        );
+
+        let Effect::CreateDelayedTrigger {
+            effect: inner_def, ..
+        } = payload.effect.as_ref()
+        else {
+            panic!("expected CreateDelayedTrigger, got {:?}", payload.effect);
+        };
+        // Positive reach-guard: the rebind actually changed the AST.
+        assert_eq!(
+            *inner_def.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: gate_qty.clone()
+                },
+                target: recipient_filter,
+            },
+            "the payload's EventContextAmount must already be the concrete gate \
+             QuantityRef before the delayed trigger is stored for later resolution"
+        );
+
+        // Materialize the deferred payload exactly as `delayed_trigger::resolve`
+        // does (`ability_utils::build_resolved_from_def`), then stamp the
+        // chain-root context by hand — see the KNOWN GAP note above.
+        let mut resolved_inner =
+            crate::game::ability_utils::build_resolved_from_def(inner_def, spell, root.controller);
+        resolved_inner.context.chain_root_targets = root.context.chain_root_targets.clone();
+
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &resolved_inner.targets,
+                Some(&resolved_inner),
+                None,
+            ),
+            3,
+            "the rebound quantity nested inside a CreateDelayedTrigger payload must read \
+             the live chain-root target's real counter total, not 0"
         );
     }
 

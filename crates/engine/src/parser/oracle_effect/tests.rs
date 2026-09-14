@@ -12,7 +12,8 @@ use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermi
 use crate::types::ability::{
     AbilityUseTally, AttachmentKind, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric,
     CommanderOwnership, DigRestOrder, ExcessRecipient, ForEachCategoryAction,
-    MassLibraryShuffleMode, ModalChoice, PerpetualModification, SeatDirection, TurnJournalKind,
+    MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource, SeatDirection,
+    TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -63970,4 +63971,296 @@ fn choose_one_of_non_put_counter_branches_stays_stack() {
          lower.rs arm requires every branch's OWN target_choice_timing to \
          already be Resolution, which neither Draw nor GainLife ever is"
     );
+}
+
+// CR 608.2h nested-carrier coverage for `rebind_event_context_amount_counts`.
+// `dismantle_chain_shape` above only exercises the direct `PutCounter` and
+// `ChooseOneOf` arms via real Oracle text. Each test below builds the
+// SMALLEST `Effect` shape for one of the OTHER carriers the traversal
+// descends into, with an `EventContextAmount` placeholder nested at the
+// bottom, calls the rebind directly, and asserts the placeholder became the
+// gate's own `QuantityRef`. Deleting any one arm (reverting it to the `_ =>
+// {}` wildcard) fails exactly the test named for it — a real card need not
+// print this shape for the traversal itself to be load-bearing: an unbound
+// placeholder resolves as zero with no live event context, silently placing
+// no counters (see `chain_root_target_*` in `game/quantity.rs` for the
+// resolver-path half of this contract: a real `ObjectScope::ChainRootTarget`
+// read backing the gate this fixture reuses).
+
+fn gate_qty_fixture() -> QuantityRef {
+    QuantityRef::CountersOn {
+        scope: ObjectScope::ChainRootTarget,
+        counter_type: None,
+    }
+}
+
+fn event_context_put_counter(target: TargetFilter) -> Effect {
+    Effect::PutCounter {
+        counter_type: CounterType::Plus1Plus1,
+        count: QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        },
+        target,
+    }
+}
+
+fn assert_put_counter_rebound(effect: &Effect, gate_qty: &QuantityRef, label: &str) {
+    let Effect::PutCounter { count, .. } = effect else {
+        panic!("{label}: expected PutCounter, got {effect:?}");
+    };
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: gate_qty.clone()
+        },
+        "{label}: EventContextAmount must be rebound to the gate's QuantityRef"
+    );
+}
+
+#[test]
+fn counter_gate_rebind_reaches_create_draw_replacement() {
+    let gate_qty = gate_qty_fixture();
+    let mut effect = Effect::CreateDrawReplacement {
+        replacement_effect: Box::new(event_context_put_counter(TargetFilter::Any)),
+    };
+    rebind_event_context_amount_counts(&mut effect, &gate_qty);
+    let Effect::CreateDrawReplacement { replacement_effect } = &effect else {
+        unreachable!()
+    };
+    assert_put_counter_rebound(replacement_effect, &gate_qty, "CreateDrawReplacement");
+}
+
+#[test]
+fn counter_gate_rebind_reaches_create_planeswalk_replacement() {
+    let gate_qty = gate_qty_fixture();
+    let mut effect = Effect::CreatePlaneswalkReplacement {
+        replacement_effect: Box::new(event_context_put_counter(TargetFilter::Any)),
+    };
+    rebind_event_context_amount_counts(&mut effect, &gate_qty);
+    let Effect::CreatePlaneswalkReplacement { replacement_effect } = &effect else {
+        unreachable!()
+    };
+    assert_put_counter_rebound(replacement_effect, &gate_qty, "CreatePlaneswalkReplacement");
+}
+
+#[test]
+fn counter_gate_rebind_reaches_create_delayed_trigger() {
+    let gate_qty = gate_qty_fixture();
+    let mut effect = Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+        effect: Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            event_context_put_counter(TargetFilter::Any),
+        )),
+        uses_tracked_set: false,
+    };
+    rebind_event_context_amount_counts(&mut effect, &gate_qty);
+    let Effect::CreateDelayedTrigger { effect: inner, .. } = &effect else {
+        unreachable!()
+    };
+    assert_put_counter_rebound(&inner.effect, &gate_qty, "CreateDelayedTrigger");
+}
+
+#[test]
+fn counter_gate_rebind_reaches_vote_per_choice_and_object_outcome() {
+    let gate_qty = gate_qty_fixture();
+    let mut effect = Effect::Vote {
+        choices: vec!["a".to_string()],
+        per_choice_effect: vec![Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            event_context_put_counter(TargetFilter::Any),
+        ))],
+        starting_with: ControllerRef::You,
+        voter_scope: VoterScope::AllPlayers,
+        tally_mode: VoteTally::PerVote,
+        subject: VoteSubject::Objects {
+            candidate_filter: TargetFilter::Any,
+            outcome_template: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                event_context_put_counter(TargetFilter::Any),
+            )),
+        },
+        visibility: VoteVisibility::Open,
+    };
+    rebind_event_context_amount_counts(&mut effect, &gate_qty);
+    let Effect::Vote {
+        per_choice_effect,
+        subject,
+        ..
+    } = &effect
+    else {
+        unreachable!()
+    };
+    assert_put_counter_rebound(
+        &per_choice_effect[0].effect,
+        &gate_qty,
+        "Vote::per_choice_effect",
+    );
+    let VoteSubject::Objects {
+        outcome_template, ..
+    } = subject
+    else {
+        unreachable!()
+    };
+    assert_put_counter_rebound(
+        &outcome_template.effect,
+        &gate_qty,
+        "Vote::outcome_template",
+    );
+}
+
+#[test]
+fn counter_gate_rebind_reaches_separate_into_piles_both_sides() {
+    let gate_qty = gate_qty_fixture();
+    let mut effect = Effect::SeparateIntoPiles {
+        partition_subject: VoterScope::EachOpponent,
+        object_filter: TargetFilter::Any,
+        chooser: PlayerScope::Controller,
+        chosen_pile_effect: Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            event_context_put_counter(TargetFilter::Any),
+        )),
+        pile_source: PileSource::Battlefield,
+        unchosen_pile_effect: Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            event_context_put_counter(TargetFilter::Any),
+        ))),
+    };
+    rebind_event_context_amount_counts(&mut effect, &gate_qty);
+    let Effect::SeparateIntoPiles {
+        chosen_pile_effect,
+        unchosen_pile_effect,
+        ..
+    } = &effect
+    else {
+        unreachable!()
+    };
+    assert_put_counter_rebound(
+        &chosen_pile_effect.effect,
+        &gate_qty,
+        "SeparateIntoPiles::chosen_pile_effect",
+    );
+    assert_put_counter_rebound(
+        &unchosen_pile_effect.as_ref().unwrap().effect,
+        &gate_qty,
+        "SeparateIntoPiles::unchosen_pile_effect",
+    );
+}
+
+#[test]
+fn counter_gate_rebind_reaches_reveal_from_hand_on_decline() {
+    let gate_qty = gate_qty_fixture();
+    let mut effect = Effect::RevealFromHand {
+        filter: TargetFilter::Any,
+        on_decline: Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            event_context_put_counter(TargetFilter::Any),
+        ))),
+    };
+    rebind_event_context_amount_counts(&mut effect, &gate_qty);
+    let Effect::RevealFromHand { on_decline, .. } = &effect else {
+        unreachable!()
+    };
+    assert_put_counter_rebound(
+        &on_decline.as_ref().unwrap().effect,
+        &gate_qty,
+        "RevealFromHand::on_decline",
+    );
+}
+
+#[test]
+fn counter_gate_rebind_reaches_flip_coin_and_flip_coins_both_branches() {
+    let gate_qty = gate_qty_fixture();
+    let mut coin = Effect::FlipCoin {
+        win_effect: Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            event_context_put_counter(TargetFilter::Any),
+        ))),
+        lose_effect: Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            event_context_put_counter(TargetFilter::Any),
+        ))),
+        flipper: TargetFilter::Controller,
+    };
+    rebind_event_context_amount_counts(&mut coin, &gate_qty);
+    let Effect::FlipCoin {
+        win_effect,
+        lose_effect,
+        ..
+    } = &coin
+    else {
+        unreachable!()
+    };
+    assert_put_counter_rebound(
+        &win_effect.as_ref().unwrap().effect,
+        &gate_qty,
+        "FlipCoin::win_effect",
+    );
+    assert_put_counter_rebound(
+        &lose_effect.as_ref().unwrap().effect,
+        &gate_qty,
+        "FlipCoin::lose_effect",
+    );
+
+    let mut coins = Effect::FlipCoins {
+        count: QuantityExpr::Fixed { value: 2 },
+        win_effect: Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            event_context_put_counter(TargetFilter::Any),
+        ))),
+        lose_effect: None,
+        flipper: TargetFilter::Controller,
+    };
+    rebind_event_context_amount_counts(&mut coins, &gate_qty);
+    let Effect::FlipCoins { win_effect, .. } = &coins else {
+        unreachable!()
+    };
+    assert_put_counter_rebound(
+        &win_effect.as_ref().unwrap().effect,
+        &gate_qty,
+        "FlipCoins::win_effect",
+    );
+}
+
+#[test]
+fn counter_gate_rebind_reaches_flip_coin_until_lose() {
+    let gate_qty = gate_qty_fixture();
+    let mut effect = Effect::FlipCoinUntilLose {
+        win_effect: Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            event_context_put_counter(TargetFilter::Any),
+        )),
+    };
+    rebind_event_context_amount_counts(&mut effect, &gate_qty);
+    let Effect::FlipCoinUntilLose { win_effect } = &effect else {
+        unreachable!()
+    };
+    assert_put_counter_rebound(
+        &win_effect.effect,
+        &gate_qty,
+        "FlipCoinUntilLose::win_effect",
+    );
+}
+
+#[test]
+fn counter_gate_rebind_reaches_roll_die_branches() {
+    let gate_qty = gate_qty_fixture();
+    let mut effect = Effect::RollDie {
+        count: QuantityExpr::Fixed { value: 1 },
+        sides: 6,
+        results: vec![DieResultBranch {
+            min: 1,
+            max: 6,
+            effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                event_context_put_counter(TargetFilter::Any),
+            )),
+        }],
+        modifier: None,
+    };
+    rebind_event_context_amount_counts(&mut effect, &gate_qty);
+    let Effect::RollDie { results, .. } = &effect else {
+        unreachable!()
+    };
+    assert_put_counter_rebound(&results[0].effect.effect, &gate_qty, "RollDie::results");
 }
