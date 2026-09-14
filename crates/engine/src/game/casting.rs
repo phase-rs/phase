@@ -10188,6 +10188,141 @@ fn split_spell_face_choice_available(obj: &crate::game::game_object::GameObject)
     is_castable_split_face(&obj.card_types) && is_castable_split_face(&back.card_types)
 }
 
+/// The during-resolution path intentionally differs from the ordinary hand
+/// menu: Fuse suppresses the normal face prompt only in hand.  A resolution
+/// permission never grants a fused spell, so its two independently castable
+/// halves remain prospective spell faces.
+fn resolution_spell_face_choice_available(obj: &crate::game::game_object::GameObject) -> bool {
+    !obj.cast_face_committed
+        && (modal_spell_face_choice_available(obj)
+            || obj.back_face.as_ref().is_some_and(|back| {
+                back.layout_kind == Some(LayoutKind::Split)
+                    && is_castable_split_face(&obj.card_types)
+                    && is_castable_split_face(&back.card_types)
+            }))
+}
+
+/// The legal spell faces of a card under one frozen resolution-time policy.
+/// `back` is false for single-face cards, spell/land MDFCs, and land/land
+/// cards; no land face can become a resolution cast candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolutionSpellFaceLegality {
+    pub(crate) front: bool,
+    pub(crate) back: bool,
+}
+
+impl ResolutionSpellFaceLegality {
+    pub(crate) const fn count(self) -> u8 {
+        self.front as u8 + self.back as u8
+    }
+
+    pub(crate) const fn only_back(self) -> bool {
+        !self.front && self.back
+    }
+}
+
+/// Project each independently castable spell face and evaluate it with the
+/// same normalized policy that will be copied into the selected temporary
+/// permission.  This is deliberately read-only: announcement state is not
+/// created until a real face has been elected.
+pub(crate) fn resolution_spell_face_legality(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+) -> ResolutionSpellFaceLegality {
+    let Some(original) = state.objects.get(&object_id) else {
+        return ResolutionSpellFaceLegality {
+            front: false,
+            back: false,
+        };
+    };
+    let may_choose_back = resolution_spell_face_choice_available(original);
+    let mut legality = ResolutionSpellFaceLegality {
+        front: false,
+        back: false,
+    };
+
+    for back_face in [false, true] {
+        if back_face && !may_choose_back {
+            continue;
+        }
+        let mut projected = state.clone();
+        let Some(object) = projected.objects.get_mut(&object_id) else {
+            return ResolutionSpellFaceLegality {
+                front: false,
+                back: false,
+            };
+        };
+        if back_face {
+            simulate_chosen_split_spell_back_face(object);
+        } else {
+            object.cast_face_committed = true;
+        }
+        let zone = object.zone;
+        if !object_may_enter_cast_path(object) {
+            continue;
+        }
+        let context = super::filter::FilterContext::from_source_with_controller(
+            policy.source_id,
+            policy.controller,
+        );
+        let matches = super::filter::matches_target_filter_for_zone(
+            &projected,
+            object_id,
+            zone,
+            &policy.filter,
+            &context,
+        );
+        let object = projected
+            .objects
+            .get(&object_id)
+            .expect("projected object persists");
+        let allowed = matches
+            && cast_permission_constraint_allows_cast(
+                &projected,
+                object,
+                &policy.constraint,
+                Some(object.spell_mana_value()),
+            )
+            && spell_has_legal_targets(&projected, object, player);
+        if back_face {
+            legality.back = allowed;
+        } else {
+            legality.front = allowed;
+        }
+    }
+
+    legality
+}
+
+/// The resolution-time permission is appended immediately before its face
+/// election.  No other action can intervene while `ModalFaceChoice` is live,
+/// so the tail slot is the serialized transaction key without widening that
+/// legacy prompt's wire shape.  A compatible older sibling is never accepted.
+pub(crate) fn current_resolution_cast_permission_index(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+) -> Option<CastingPermissionIndex> {
+    let object = state.objects.get(&object_id)?;
+    if object.card_id != card_id {
+        return None;
+    }
+    let index = object.casting_permissions.len().checked_sub(1)?;
+    matches!(
+        object.casting_permissions.get(index),
+        Some(CastingPermission::ExileWithAltCost {
+            granted_to: Some(grantee),
+            constraint,
+            resolution_cleanup: Some(cleanup),
+            ..
+        }) if *grantee == player && *constraint == cleanup.face_policy.constraint
+    )
+    .then_some(CastingPermissionIndex(index))
+}
+
 /// CR 709.3: A split-card face is independently castable when it is an
 /// instant/sorcery spell or a Room enchantment half (each Room door is a
 /// separately castable enchantment spell, CR 709.3 / CR 709.5c).
@@ -12478,30 +12613,178 @@ pub(super) fn initiate_cast_during_resolution(
     } else {
         return Err(EngineError::InvalidAction("Object not found".to_string()));
     };
-    // CR 614.1a + CR 608.2n: apply the graveyard-redirect rider HERE — this is
-    // CR 614.1a + CR 608.2n: apply the graveyard-redirect rider HERE — this is
-    // the sole application point for during-resolution casts. The pushed
-    // permission carries `resolution_cleanup: Some(_)`, so
-    // `evaluate_cascade_constraint_with_resulting_mv` (casting_costs.rs) strips
-    // it during `finalize_cast_with_phyrexian_choices` BEFORE the finalize
-    // graveyard-replacement read runs, re-homing only a concession-only
-    // permission without the rider. The finalize read therefore returns `None`
-    // for these casts, so applying here does NOT double-install: the finalize
-    // read (normal exile/graveyard casts) and this read (during-resolution
-    // casts) are mutually exclusive per cast.
-    if let Some(dest) = graveyard_replacement {
-        crate::game::casting_costs::apply_spell_graveyard_replacement_rider(state, hit_card, dest);
+    let legality = resolution_spell_face_legality(state, player, hit_card, &face_policy);
+    if legality.count() == 0 {
+        state
+            .objects
+            .get_mut(&hit_card)
+            .expect("resolution cast card remains present")
+            .casting_permissions
+            .remove(casting_permission_index.0);
+        return Err(EngineError::ActionNotAllowed(
+            "No legal resolution spell face for this offer".to_string(),
+        ));
+    }
+
+    let has_face_election = state
+        .objects
+        .get(&hit_card)
+        .is_some_and(resolution_spell_face_choice_available);
+    if legality.count() == 2 {
+        return Ok(WaitingFor::ModalFaceChoice {
+            player,
+            object_id: hit_card,
+            card_id: state.objects[&hit_card].card_id,
+            payment_mode,
+        });
+    }
+
+    // One legal face is not a player decision.  Commit that exact projected
+    // face before preparation; on a failure below restore the pre-election
+    // object so neither an announced face nor the temporary permission leaks.
+    let object_before = state.objects.get(&hit_card).cloned();
+    if has_face_election {
+        let object = state
+            .objects
+            .get_mut(&hit_card)
+            .expect("resolution cast card remains present");
+        if legality.only_back() {
+            simulate_chosen_split_spell_back_face(object);
+            object.modal_back_face = true;
+        }
+        object.cast_face_committed = true;
+    }
+    let result = continue_resolution_modal_face_choice(
+        state,
+        player,
+        hit_card,
+        ResolutionModalFaceChoice {
+            permission_index: casting_permission_index,
+            back_face: legality.only_back(),
+            payment_mode,
+            full_cost_front_face,
+        },
+        events,
+    );
+    if result.is_err() {
+        if let Some(object) = object_before {
+            state.objects.insert(hit_card, object);
+        }
+    }
+    result
+}
+
+/// Check the already-elected active face against the policy held by the exact
+/// appended permission slot.  This intentionally does not search for a
+/// compatible permission: the index is the transaction authority.
+fn selected_resolution_spell_face_is_allowed(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    permission_index: CastingPermissionIndex,
+) -> bool {
+    let Some(object) = state.objects.get(&object_id) else {
+        return false;
+    };
+    let Some(policy) = object
+        .casting_permissions
+        .get(permission_index.0)
+        .and_then(|permission| match permission {
+            CastingPermission::ExileWithAltCost {
+                granted_to: Some(grantee),
+                constraint,
+                resolution_cleanup: Some(cleanup),
+                ..
+            } if *grantee == player && *constraint == cleanup.face_policy.constraint => {
+                Some(cleanup.face_policy.clone())
+            }
+            _ => None,
+        })
+    else {
+        return false;
+    };
+    if !object_may_enter_cast_path(object) {
+        return false;
+    }
+    let context = super::filter::FilterContext::from_source_with_controller(
+        policy.source_id,
+        policy.controller,
+    );
+    super::filter::matches_target_filter_for_zone(
+        state,
+        object_id,
+        object.zone,
+        &policy.filter,
+        &context,
+    ) && cast_permission_constraint_allows_cast(
+        state,
+        object,
+        &policy.constraint,
+        Some(object.spell_mana_value()),
+    ) && spell_has_legal_targets(state, object, player)
+}
+
+/// Finish a resolution-owned face election.  The optional graveyard rider is
+/// installed only after this exact face passes its indexed permission policy,
+/// so a forged/rejected choice is transactionally inert.
+pub(super) struct ResolutionModalFaceChoice {
+    pub(super) permission_index: CastingPermissionIndex,
+    pub(super) back_face: bool,
+    pub(super) payment_mode: CastPaymentMode,
+    pub(super) full_cost_front_face: bool,
+}
+
+pub(super) fn continue_resolution_modal_face_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    choice: ResolutionModalFaceChoice,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let graveyard_replacement = state
+        .objects
+        .get(&object_id)
+        .and_then(|object| object.casting_permissions.get(choice.permission_index.0))
+        .and_then(|permission| match permission {
+            CastingPermission::ExileWithAltCost {
+                granted_to: Some(grantee),
+                resolution_cleanup: Some(_),
+                graveyard_replacement,
+                ..
+            } if *grantee == player => Some(graveyard_replacement.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            EngineError::InvalidAction(
+                "Resolution face choice permission provenance is stale or mismatched".to_string(),
+            )
+        })?;
+    if !selected_resolution_spell_face_is_allowed(state, player, object_id, choice.permission_index)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "Selected resolution spell face is not legal for this offer".to_string(),
+        ));
+    }
+    // CR 614.1a + CR 608.2n: a rider applies after legal face election and
+    // before preparation.  The temporary permission's cleanup makes the
+    // ordinary finalize-time rider read mutually exclusive with this one.
+    if let Some(destination) = graveyard_replacement {
+        crate::game::casting_costs::apply_spell_graveyard_replacement_rider(
+            state,
+            object_id,
+            destination,
+        );
     }
     let mut prepared = prepare_spell_cast_with_variant_override_inner(
         state,
         player,
-        hit_card,
-        full_cost_front_face.then_some(CastingVariant::Normal),
+        object_id,
+        (!choice.back_face && choice.full_cost_front_face).then_some(CastingVariant::Normal),
         None,
-        Some(casting_permission_index),
+        Some(choice.permission_index),
         CastingMode::Actual,
     )?;
-    prepared.payment_mode = payment_mode;
+    prepared.payment_mode = choice.payment_mode;
     continue_with_prepared(state, player, prepared, events)
 }
 

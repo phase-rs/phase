@@ -212,17 +212,24 @@ fn compute_hand_pick_eligible(
             ..
         }
     );
+    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        freeze_resolution_cast_filter(state, ability, target_filter.clone(), None),
+        ability.source_id,
+        ability.controller,
+        constraint.clone(),
+    );
     cards
         .into_iter()
         .filter(|id| {
-            if cast_mode_excludes_lands
-                && state.objects.get(id).is_some_and(|obj| {
-                    obj.card_types
-                        .core_types
-                        .contains(&crate::types::card_type::CoreType::Land)
-                })
-            {
-                return false;
+            if cast_mode_excludes_lands {
+                return crate::game::casting::resolution_spell_face_legality(
+                    state,
+                    ability.controller,
+                    *id,
+                    &face_policy,
+                )
+                .count()
+                    != 0;
             }
             crate::game::filter::matches_target_filter(state, *id, target_filter, &ctx)
                 && state.objects.get(id).is_some_and(|object| {
@@ -625,13 +632,25 @@ pub fn resolve(
         // *but* the anaphor (Hellcarver Demon, Improvisation Capstone, and every
         // other bare-`ExiledBySource` row) — those keep the full forwarded set.
         if let Some(own_filter) = target_filter.without_exile_anaphor() {
-            // Bind the residual's object-scope reads to exactly the
-            // forwarded set, mirroring the no-target fallback's scoped context.
-            let mut scoped_ability = ability.clone();
-            scoped_ability.targets = target_ids.iter().copied().map(TargetRef::Object).collect();
-            let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
+            // The residual applies to the spell that will be cast, not its
+            // unchosen front.  Projecting through this same policy admits a
+            // back-only member while keeping a front-only or zero-face sibling
+            // observable to the gate.
+            let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+                freeze_resolution_cast_filter(state, ability, own_filter, None),
+                ability.source_id,
+                ability.controller,
+                freeze_cast_permission_constraint(state, ability, constraint.clone()),
+            );
             target_ids.retain(|id| {
-                crate::game::filter::matches_target_filter(state, *id, &own_filter, &ctx)
+                crate::game::casting::resolution_spell_face_legality(
+                    state,
+                    ability.controller,
+                    *id,
+                    &face_policy,
+                )
+                .count()
+                    != 0
             });
         }
     }
@@ -914,7 +933,7 @@ pub fn resolve(
         let count = u8::try_from(target_ids.len()).ok();
         let zones = vec![Zone::Graveyard];
         let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
-            target_filter.clone(),
+            freeze_resolution_cast_filter(state, ability, target_filter.clone(), None),
             ability.source_id,
             ability.controller,
             freeze_cast_permission_constraint(state, ability, constraint.clone()),
@@ -1039,15 +1058,39 @@ fn open_resolution_cast_window(
 ) -> Result<(), EffectError> {
     // CR 608.2h: freeze the dynamic per-spell ceiling now, then apply it.
     let frozen = freeze_cast_permission_constraint(state, ability, constraint.cloned());
+    // The anaphor leg is discharged before the public window is persisted: the
+    // concrete member pool already proves it, while re-evaluating it later
+    // would read a different linked-exile snapshot.  The residual filter and
+    // fixed constraint are the one policy every projected face must satisfy.
+    let window_filter = if target_filter.references_exiled_by_source() {
+        target_filter
+            .without_exile_anaphor()
+            .unwrap_or(TargetFilter::Any)
+    } else {
+        target_filter.clone()
+    };
+    let window_filter = freeze_resolution_cast_filter(state, ability, window_filter, None);
+    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        window_filter.clone(),
+        ability.source_id,
+        ability.controller,
+        frozen,
+    );
     let mut pool: Vec<ObjectId> = pool
         .into_iter()
         .filter(|id| {
-            state.objects.get(id).is_some_and(|obj| {
-                RESOLUTION_WINDOW_ORIGIN_ZONES.contains(&obj.zone)
-                    && crate::game::casting::cast_permission_constraint_allows_cast(
-                        state, obj, &frozen, None,
-                    )
-            })
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| RESOLUTION_WINDOW_ORIGIN_ZONES.contains(&obj.zone))
+                && crate::game::casting::resolution_spell_face_legality(
+                    state,
+                    ability.controller,
+                    *id,
+                    &face_policy,
+                )
+                .count()
+                    != 0
         })
         .collect();
     // CR 607.2a: `publish`-style forwarding can repeat an id; a duplicated pool
@@ -1076,23 +1119,7 @@ fn open_resolution_cast_window(
     // exhaustion, which `eligible_candidates` enforces on every re-offer.
     let count = bounds.max_casts;
 
-    // The anaphor leg is discharged (see the doc comment); what remains is the
-    // clause's own type gate, which `eligible_candidates` re-applies to the pool.
-    let window_filter = if target_filter.references_exiled_by_source() {
-        target_filter
-            .without_exile_anaphor()
-            .unwrap_or(TargetFilter::Any)
-    } else {
-        target_filter.clone()
-    };
-
     let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
-    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
-        window_filter.clone(),
-        ability.source_id,
-        ability.controller,
-        frozen,
-    );
     let mut window = ability.clone();
     window.effect = Effect::FreeCastFromZones {
         count,
@@ -1244,6 +1271,105 @@ fn snapshot_cast_from_zone_constraint_into_effect(
     }
     if let Effect::CastFromZone { constraint, .. } = &mut stash.effect {
         *constraint = frozen;
+    }
+}
+
+/// Persist only a concrete policy while an interactive resolution cast is
+/// pending.  The resumed choice cannot depend on an expired trigger context:
+/// resolve controller references and dynamic mana-value filter properties at
+/// the boundary, and bind a direct contextual target to the selected card.
+///
+/// A window with no selected card retains its contextual object filter only
+/// where the concrete member pool already supplies that scope.  Controller and
+/// quantity references, however, are always made concrete because the
+/// serialized policy is evaluated with only its fixed source/controller pair.
+pub(crate) fn freeze_resolution_cast_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: TargetFilter,
+    selected_card: Option<ObjectId>,
+) -> TargetFilter {
+    match filter {
+        contextual @ (TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }) => selected_card
+            .map(|id| TargetFilter::SpecificObject { id })
+            .unwrap_or(contextual),
+        TargetFilter::Typed(mut typed) => {
+            typed.controller = typed
+                .controller
+                .map(|controller| freeze_resolution_controller_ref(state, ability, controller));
+            typed.properties = typed
+                .properties
+                .into_iter()
+                .map(|prop| freeze_resolution_filter_prop(state, ability, prop))
+                .collect();
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(freeze_resolution_cast_filter(
+                state,
+                ability,
+                *filter,
+                selected_card,
+            )),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| freeze_resolution_cast_filter(state, ability, filter, selected_card))
+                .collect(),
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| freeze_resolution_cast_filter(state, ability, filter, selected_card))
+                .collect(),
+        },
+        filter => filter,
+    }
+}
+
+fn freeze_resolution_controller_ref(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    controller: crate::types::ability::ControllerRef,
+) -> crate::types::ability::ControllerRef {
+    if matches!(controller, crate::types::ability::ControllerRef::Opponent) {
+        return controller;
+    }
+    crate::game::filter::controller_ref_player(
+        state,
+        ability.source_id,
+        Some(ability.controller),
+        Some(ability),
+        &controller,
+    )
+    .map(|id| crate::types::ability::ControllerRef::SpecificPlayer { id })
+    .unwrap_or(controller)
+}
+
+fn freeze_resolution_filter_prop(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    prop: crate::types::ability::FilterProp,
+) -> crate::types::ability::FilterProp {
+    use crate::types::ability::FilterProp;
+
+    match prop {
+        FilterProp::Cmc { comparator, value } => FilterProp::Cmc {
+            comparator,
+            value: QuantityExpr::Fixed {
+                value: crate::game::quantity::resolve_quantity_with_targets(state, &value, ability)
+                    .max(0),
+            },
+        },
+        prop => prop,
     }
 }
 
@@ -1427,13 +1553,18 @@ fn cast_single_target_during_resolution(
         crate::types::ability::ResolutionMvRejectAction::BottomWithMisses
     };
     let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
-        match &ability.effect {
-            Effect::CastFromZone { target, .. } => target.clone(),
-            _ => TargetFilter::Any,
-        },
+        freeze_resolution_cast_filter(
+            state,
+            ability,
+            match &ability.effect {
+                Effect::CastFromZone { target, .. } => target.clone(),
+                _ => TargetFilter::Any,
+            },
+            Some(card),
+        ),
         ability.source_id,
         ability.controller,
-        constraint.clone(),
+        freeze_cast_permission_constraint(state, ability, constraint),
     );
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: ability.source_id,

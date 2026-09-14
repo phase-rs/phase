@@ -1,4 +1,3 @@
-use crate::game::filter::{matches_target_filter_in_owner_zone, FilterContext};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CastOfferKind, GameState, WaitingFor};
@@ -15,7 +14,8 @@ pub(crate) struct FreeCastWindowRequest {
     pub(crate) count: Option<u8>,
     pub(crate) max_total_mv: Option<u32>,
     pub(crate) zones: Vec<Zone>,
-    pub(crate) graveyard_replacement: Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+    pub(crate) graveyard_replacement:
+        Option<crate::types::ability::SpellStackToGraveyardReplacement>,
     pub(crate) face_policy: crate::types::ability::ResolutionCastFacePolicy,
 }
 
@@ -61,7 +61,9 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("FreeCastFromZones".to_string())),
     };
     let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
-        filter,
+        crate::game::effects::cast_from_zone::freeze_resolution_cast_filter(
+            state, ability, filter, None,
+        ),
         ability.source_id,
         ability.controller,
         None,
@@ -123,13 +125,22 @@ pub(crate) fn resolve_with_face_policy(
         })
         .collect();
 
-    let candidates = eligible_candidates(
-        state,
-        &zones,
-        max_total_mv,
-        &member_pool,
-        &face_policy,
-    );
+    // A member pool has already consumed any player-target leg from its parent
+    // resolution.  Freeze that residual form into the one policy carried by
+    // this window so initial enumeration and every re-offer evaluate exactly
+    // the same authority.
+    let face_policy = if member_pool.is_empty() {
+        face_policy
+    } else {
+        crate::types::ability::ResolutionCastFacePolicy::new(
+            member_pool_filter(&face_policy.filter),
+            face_policy.source_id,
+            face_policy.controller,
+            face_policy.constraint,
+        )
+    };
+
+    let candidates = eligible_candidates(state, &zones, max_total_mv, &member_pool, &face_policy);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::FreeCastFromZones,
@@ -192,15 +203,25 @@ pub(crate) fn eligible_candidates(
     member_pool: &[ObjectId],
     face_policy: &crate::types::ability::ResolutionCastFacePolicy,
 ) -> Vec<ObjectId> {
+    // Callers that originate a pooled window normalize this already, but this
+    // public-to-the-module enumerator is also used directly by the re-offer
+    // tests and by future callers.  Keep the exact-pool rule at the authority:
+    // consuming a paired player target must not make a pool member disappear
+    // merely because the persisted policy is evaluated without that target.
+    let pooled_policy = (!member_pool.is_empty()).then(|| {
+        crate::types::ability::ResolutionCastFacePolicy::new(
+            member_pool_filter(&face_policy.filter),
+            face_policy.source_id,
+            face_policy.controller,
+            face_policy.constraint.clone(),
+        )
+    });
+    let face_policy = pooled_policy.as_ref().unwrap_or(face_policy);
     let controller = face_policy.controller;
-    let source = face_policy.source_id;
-    let filter = &face_policy.filter;
     let Some(player) = state.players.iter().find(|p| p.id == controller) else {
         return Vec::new();
     };
 
-    let ctx = FilterContext::from_source_with_controller(source, controller);
-    let member_pool_filter = member_pool_filter(filter);
     let mut candidates = Vec::new();
     let candidate_ids: Vec<ObjectId> = if member_pool.is_empty() {
         let mut ids = Vec::new();
@@ -234,38 +255,13 @@ pub(crate) fn eligible_candidates(
         {
             continue;
         }
-        // CR 305.1: a land card can never be cast — this window is a cast
-        // grant, so lands are excluded from the offer outright (mirrors
-        // `cast_from_zone`'s cast-mode land guard).
-        if state.objects.get(&id).is_some_and(|obj| {
-            obj.card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Land)
-        }) {
-            continue;
-        }
-        let candidate_filter = if member_pool.is_empty() {
-            filter
-        } else {
-            &member_pool_filter
-        };
-        if !matches_target_filter_in_owner_zone(state, id, candidate_filter, &ctx) {
-            continue;
-        }
-        // CR 601.2c + CR 608.2g: A spell cast during resolution still
-        // needs every required target to be legal before it can be offered.
-        let Some(obj) = state.objects.get(&id) else {
-            continue;
-        };
-        if !crate::game::casting::cast_permission_constraint_allows_cast(
-            state,
-            obj,
-            &face_policy.constraint,
-            None,
-        ) {
-            continue;
-        }
-        if !crate::game::casting::spell_has_legal_targets(state, obj, controller) {
+        // CR 601.2b-c + CR 608.2g: discover candidates by projecting each
+        // spell face under the exact frozen policy.  A live-front check here
+        // would erase a legal back-only spell before it could be elected.
+        if crate::game::casting::resolution_spell_face_legality(state, controller, id, face_policy)
+            .count()
+            == 0
+        {
             continue;
         }
         // CR 202.3 + CR 107.3b + CR 601.2b: Respect the running MV budget.

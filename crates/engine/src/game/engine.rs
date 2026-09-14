@@ -11000,6 +11000,19 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
+            let resolution_permission = casting::current_resolution_cast_permission_index(
+                state,
+                *player,
+                *object_id,
+                *card_id,
+            );
+            // A resolution-owned election has not announced anything yet.  If
+            // the selected face later fails its exact permission policy, put
+            // the object (including the appended temporary permission) back
+            // exactly as the public prompt exposed it.
+            let resolution_object_before = resolution_permission
+                .as_ref()
+                .and_then(|_| state.objects.get(object_id).cloned());
             if let Some(obj) = state.objects.get_mut(object_id) {
                 if back_face {
                     // Swap to back face — the shared swap preserves the stored
@@ -11018,6 +11031,30 @@ fn apply_non_priority_pass_action(
                 // blind. Cleared on any zone change off the stack and on
                 // cancel.
                 obj.cast_face_committed = true;
+            }
+            if let Some(permission_index) = resolution_permission {
+                let result = casting::continue_resolution_modal_face_choice(
+                    state,
+                    *player,
+                    *object_id,
+                    casting::ResolutionModalFaceChoice {
+                        permission_index,
+                        back_face,
+                        payment_mode: *payment_mode,
+                        full_cost_front_face: false,
+                    },
+                    &mut events,
+                );
+                if result.is_err() {
+                    if let Some(object) = resolution_object_before {
+                        state.objects.insert(*object_id, object);
+                    }
+                }
+                return result.map(|waiting_for| ActionResult {
+                    events: std::mem::take(&mut events),
+                    waiting_for,
+                    log_entries: Vec::new(),
+                });
             }
             // CR 712.12 / CR 712.11b: Route the re-entry by the now-active face's
             // type. A land face is put onto the battlefield via the play-land
