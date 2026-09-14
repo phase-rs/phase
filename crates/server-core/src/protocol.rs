@@ -3230,18 +3230,18 @@ mod tests {
         }
     }
 
-    /// The bump this number is at: `OutsideGameChoiceSource::BoosterPack`
-    /// replaced `set_code` with a required `origin: PackOrigin`, so an opened
-    /// pack's `WaitingFor::OutsideGameChoice` is a shape a v69 peer cannot
-    /// decode and must be refused before it receives one.
+    /// The bump this number is at: `GameEvent::PermanentTapped.caused_by` was
+    /// replaced by required `cause: TapCause`, and `ProposedEvent::Tap` gained
+    /// required `source_id`, so a v70 peer cannot decode a v71 event or
+    /// replacement-paused tap payload and must be refused before it receives one.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_70_for_booster_pack_origin() {
-        assert_eq!(PROTOCOL_VERSION, 70);
+    fn protocol_version_is_71_for_tap_cause() {
+        assert_eq!(PROTOCOL_VERSION, 71);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3252,7 +3252,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_70_for_booster_pack_origin` stays
+    /// `protocol_version_is_71_for_tap_cause` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

@@ -209,6 +209,12 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 71 — GameEvent.PermanentTapped retyped caused_by: Option<ObjectId> to
+ *      cause: TapCause, and ProposedEvent.Tap gained required source_id so a
+ *      replacement-paused tap can stamp TapCause.Effect. Neither field carries
+ *      a serde default or alias; a v70 peer cannot decode a v71 GameEvent or
+ *      PendingReplacement.proposed payload. P2P moves in lockstep; lobby
+ *      messages are unchanged.
  * 70 — OutsideGameChoiceSource.BoosterPack replaced set_code with a required
  *      origin: PackOrigin ({ type: "Set", data } or { type: "Cube" }), so an
  *      opened pack's OutsideGameChoice no longer decodes on a v69 peer and a
@@ -469,7 +475,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 70;
+export const PROTOCOL_VERSION = 71;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

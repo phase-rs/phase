@@ -17,7 +17,7 @@ use crate::types::SpellCastRecord;
 
 use super::engine::EngineError;
 use crate::game::functioning_abilities::{active_static_definitions, static_kind_present};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, TapCause};
 use crate::types::identifiers::ObjectId;
 
 /// CR 602.5b / CR 602.5d: loop-invariant existence gates for rare static modes
@@ -855,10 +855,21 @@ pub(crate) fn object_cant_tap(state: &crate::types::game_state::GameState, id: O
 /// crew/convoke/tap-for-cost); this error is the defensive backstop, mirroring
 /// how `CantAttack` filters at declaration time yet still errors on an illegal
 /// commit.
+/// C1.6 caller → `TapCostKind` (every non-test `tap_permanent_for_cost` site):
+/// `engine_combat::apply_attack_enlist` → `Enlist` (CR 702.154a);
+/// `engine_casting::handle_harmonize_tap_choice` → `Harmonize` (CR 702.180a);
+/// `costs::pay_ability_cost_inner` `{T}` → `TapSymbol` (CR 118.3 + CR 701.26a);
+/// `casting_costs::pay_tap_creatures_selection` → `TapCreatures { origin }`;
+/// `mana_abilities::tap_source` → `TapSymbol`;
+/// `mana_abilities::tap_selected_creature_for_mana_cost` → `TapCreatures { None }`
+/// (C1.6 named site — Springleaf Drum class);
+/// `engine.rs` convoke → `ManaShard(mode)` (`Delve` unreachable, CR 702.66a);
+/// `engine.rs` crew / station / saddle → `CrewFamily` (CR 702.122b / 702.184a / 702.171c).
 pub(crate) fn tap_permanent_for_cost(
     state: &mut crate::types::game_state::GameState,
     id: ObjectId,
     events: &mut Vec<GameEvent>,
+    cause: TapCause,
 ) -> Result<(), EngineError> {
     if object_cant_tap(state, id) {
         return Err(EngineError::ActionNotAllowed(
@@ -875,7 +886,7 @@ pub(crate) fn tap_permanent_for_cost(
     {
         events.push(GameEvent::PermanentTapped {
             object_id: id,
-            caused_by: None,
+            cause,
         });
     }
     Ok(())
@@ -2481,6 +2492,7 @@ mod tests {
     use crate::types::ability::{AbilityKind, Effect, ParsedCondition, QuantityExpr};
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
+    use crate::types::events::TapCostKind;
     use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
@@ -4922,7 +4934,12 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         let restricted = creature_with_cant_tap(&mut state);
         let mut events = Vec::new();
-        let result = tap_permanent_for_cost(&mut state, restricted, &mut events);
+        let result = tap_permanent_for_cost(
+            &mut state,
+            restricted,
+            &mut events,
+            TapCause::CostPayment(TapCostKind::TapSymbol),
+        );
         assert!(
             result.is_err(),
             "a can't-become-tapped creature can't pay a tap cost"
@@ -4955,9 +4972,25 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         let mut events = Vec::new();
-        assert!(tap_permanent_for_cost(&mut state, plain, &mut events).is_ok());
+        assert!(tap_permanent_for_cost(
+            &mut state,
+            plain,
+            &mut events,
+            TapCause::CostPayment(TapCostKind::TapSymbol),
+        )
+        .is_ok());
         assert!(state.objects.get(&plain).unwrap().tapped);
         assert_eq!(events.len(), 1, "unrestricted tap emits PermanentTapped");
+        assert!(
+            matches!(
+                events[0],
+                GameEvent::PermanentTapped {
+                    cause: TapCause::CostPayment(TapCostKind::TapSymbol),
+                    ..
+                }
+            ),
+            "C1.6: cost-tap tests stamp the cause they pass in"
+        );
     }
 
     #[test]

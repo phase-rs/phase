@@ -789,6 +789,9 @@ pub enum ProposedEvent {
     },
     Tap {
         object_id: ObjectId,
+        /// CR 701.26: effect source that instructed the tap. Threaded through
+        /// the replacement pause so resume can stamp `TapCause::Effect`.
+        source_id: ObjectId,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },

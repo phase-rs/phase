@@ -9,7 +9,7 @@ use crate::types::ability_visit::{
     visit_ability_def_costs_scoped, visit_ability_def_scoped, ResolutionScope,
 };
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::events::{GameEvent, ManaTapState};
+use crate::types::events::{GameEvent, ManaTapState, TapCause, TapCostKind};
 use crate::types::game_state::{
     CostResume, GameState, ManaAbilityCostCursor, ManaAbilityCostParent,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, ManaChoice,
@@ -4686,7 +4686,13 @@ fn tap_source(
     }
     // CR 701.26a + CR 508.1f: route the {T} mana-ability tap through the single
     // authority so a "can't become tapped" source is refused.
-    crate::game::restrictions::tap_permanent_for_cost(state, source_id, events)?;
+    crate::game::restrictions::tap_permanent_for_cost(
+        state,
+        source_id,
+        events,
+        // CR 118.3: `{T}` mana-ability tap.
+        TapCause::CostPayment(TapCostKind::TapSymbol),
+    )?;
     Ok(())
 }
 
@@ -4908,7 +4914,14 @@ fn tap_selected_creature_for_mana_cost(
 
     // CR 701.26a + CR 508.1f: route the tap-another-creature mana cost through the
     // single authority so a "can't become tapped" creature is refused.
-    crate::game::restrictions::tap_permanent_for_cost(state, chosen_id, events)?;
+    crate::game::restrictions::tap_permanent_for_cost(
+        state,
+        chosen_id,
+        events,
+        // CR 601.2b: C1.6 named site (Springleaf Drum class) — tap-creatures
+        // activation/mana cost, not a spell additional-cost origin.
+        TapCause::CostPayment(TapCostKind::TapCreatures { origin: None }),
+    )?;
     Ok(())
 }
 

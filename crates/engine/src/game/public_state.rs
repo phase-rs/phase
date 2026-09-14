@@ -1,6 +1,6 @@
 use crate::types::ability::{Effect, EffectKind, QuantityExpr, TargetRef};
 use crate::types::card_type::CoreType;
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, TapCause};
 use crate::types::game_state::{GameState, PublicStateDirty, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
@@ -300,13 +300,13 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 mark_object_dirty_with_mana(state, *object_id);
                 mark_battlefield_display_dirty(state);
             }
-            GameEvent::PermanentTapped {
-                object_id,
-                caused_by,
-            } => {
+            GameEvent::PermanentTapped { object_id, cause } => {
                 mark_public_state_object_dirty(state, *object_id);
-                if let Some(cause) = caused_by {
-                    mark_public_state_object_dirty(state, *cause);
+                match cause {
+                    TapCause::Effect { source } => {
+                        mark_public_state_object_dirty(state, *source);
+                    }
+                    TapCause::AttackDeclaration | TapCause::CostPayment(_) => {}
                 }
                 mark_mana_display_dirty(state);
             }
