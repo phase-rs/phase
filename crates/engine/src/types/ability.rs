@@ -6425,8 +6425,12 @@ pub enum FilterProp {
     /// count predicates like Valakut, the Molten Pinnacle's "if you control at
     /// least five other Mountains" — here "other" means "other than the newly-
     /// entered Mountain," not "other than Valakut." Resolves against
-    /// `FilterContext::triggering_object_id`, populated at trigger-condition
+    /// `FilterContext::triggering_object`, populated at trigger-condition
     /// evaluation from the current `GameEvent`.
+    ///
+    /// CR 400.7: the exclusion is keyed on the triggering object's exact IDENTITY
+    /// (id + incarnation), not on its storage id — an object that left and
+    /// returned is a new object and belongs back in the population.
     OtherThanTriggerObject,
     /// Matches objects with a specific color (for "white creature", "red spell", etc.).
     HasColor {

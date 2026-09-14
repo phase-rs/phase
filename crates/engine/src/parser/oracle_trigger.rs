@@ -7384,7 +7384,19 @@ fn parse_entering_object_name_comparison(input: &str) -> OracleResult<'_, Trigge
         TriggerCondition::ZoneChangeObjectMatchesFilter {
             origin: None,
             destination: Zone::Battlefield,
-            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            // CR 201.2a: name sharing is type-INDEPENDENT ("two or more objects
+            // have the same name if they have at least one name in common"), so
+            // the entering object carries no type constraint of its own here.
+            // The trigger's own subject filter (parsed from the head) is what
+            // restricts WHICH entrants fire the ability; constraining the type a
+            // second time inside the condition would make this reusable grammar
+            // fail closed for a noncreature ETB head ("whenever a permanent
+            // enters, if it doesn't have the same name as ..."). Type-open
+            // mirrors the sibling event-object condition builders
+            // (`parse_gendered_dies_event_object_condition`,
+            // `build_event_object_subtype_condition`), which likewise derive any
+            // type constraint from the parsed text rather than hardcoding one.
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
                 FilterProp::SharesQuality {
                     quality,
                     reference: Some(reference),
@@ -7854,7 +7866,8 @@ fn parse_dying_pt_comparison_tail(input: &str) -> OracleResult<'_, (Comparator, 
 /// EMPTY tail after the verb keeps unsplit compound or qualified heads
 /// ("... dies during your turn") conservatively unproven.
 /// CR 603.6a + CR 700.4: Prove the trigger head is an enters-the-battlefield
-/// shape — its final verb phrase is "enters"/"enter" with nothing after it.
+/// shape — its final verb phrase is "enters"/"enter", optionally followed by the
+/// spelled-out destination "the battlefield", with nothing after it.
 ///
 /// Deliberately a SEPARATE scan from `trigger_head_dies_zone_change` rather than
 /// another arm of one `alt` inside it. `scan_preceded` returns at the FIRST word
@@ -7868,17 +7881,35 @@ fn parse_dying_pt_comparison_tail(input: &str) -> OracleResult<'_, (Comparator, 
 /// here — which is correct, since such a head does not prove the triggering
 /// event was an ETB.
 ///
-/// Requiring an EMPTY tail keeps qualified heads ("... enters from your hand",
-/// Thousand-Faced Shadow) conservatively unproven, exactly as the dies prover does.
+/// Requiring an EMPTY tail (after the optional destination phrase) keeps qualified
+/// heads ("... enters from your hand", Thousand-Faced Shadow) conservatively
+/// unproven, exactly as the dies prover does.
 fn trigger_head_enters_battlefield(condition_lower: &str) -> bool {
     scan_preceded(condition_lower, parse_enters_verb_phrase)
         .is_some_and(|(_before, (), rest)| rest.trim().is_empty())
 }
 
-/// CR 603.6a: the bare enters verb phrase, boundary-terminated so "enters" does
-/// not match inside a longer word. Mirrors `parse_dies_verb_phrase`.
+/// CR 603.6a: the enters verb phrase, boundary-terminated so "enters" does not
+/// match inside a longer word. Mirrors `parse_dies_verb_phrase`.
+///
+/// The destination phrase is an OPTIONAL suffix of the verb, not a separate
+/// grammar: CR 603.6a names one event, and the corpus spells it both ways —
+/// current templating prints the bare "enters", while pre-2024 printings (and
+/// every card-data row that has not been re-Oracled) print "enters the
+/// battlefield". `parse_event_word` terminates on a `peek` boundary and so
+/// leaves " the battlefield" unconsumed; without this arm `trigger_head_enters_battlefield`
+/// sees a non-empty tail and declines the older spelling, making every grammar
+/// gated on that proof unreachable for it. Composed as verb × optional
+/// destination rather than enumerated as two whole-phrase tags.
 fn parse_enters_verb_phrase(input: &str) -> OracleResult<'_, ()> {
-    alt((parse_event_word("enters"), parse_event_word("enter"))).parse(input)
+    value(
+        (),
+        pair(
+            alt((parse_event_word("enters"), parse_event_word("enter"))),
+            opt(preceded(space1, parse_event_word("the battlefield"))),
+        ),
+    )
+    .parse(input)
 }
 
 fn trigger_head_dies_zone_change(condition_lower: &str) -> Option<(Zone, Zone)> {

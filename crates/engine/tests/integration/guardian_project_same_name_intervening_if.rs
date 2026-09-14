@@ -197,3 +197,62 @@ fn token_entering_does_not_draw() {
          does not trigger even with a unique name"
     );
 }
+
+/// CR 400.7 + CR 603.4: "an object that moves from one zone to another becomes a
+/// new object with no memory of, or relation to, its previous existence."
+///
+/// The engine REUSES the storage `ObjectId` across such a move and records the
+/// discontinuity as an incarnation bump, so an "another" exclusion keyed on the
+/// raw id also excludes whatever later occupies that slot. Blink the entrant
+/// before the CR 603.4 resolution recheck and the returning permanent — a
+/// DIFFERENT object that happens to share the id — was silently dropped from the
+/// reference pool, so a same-named board answered "no same name" and drew.
+///
+/// The re-entry's own Guardian Project trigger is deliberately NOT collected
+/// here (its events are never handed to `process_triggers`), so the measured
+/// delta is exactly the first trigger's recheck and nothing else.
+#[test]
+fn reentered_incarnation_counts_as_another_creature() {
+    let (mut runner, _project) = setup();
+
+    let entrant = place_creature(&mut runner, P0, "Grizzly Bears", Zone::Hand, false);
+    let mut events = Vec::new();
+    move_to_zone(runner.state_mut(), entrant, Zone::Battlefield, &mut events);
+    let before = runner.state().players[P0.0 as usize].hand.len() as i64;
+
+    // Put the ETB trigger on the stack; do NOT resolve it yet.
+    process_triggers(runner.state_mut(), &events);
+    drain_order_triggers_with_identity(runner.state_mut());
+
+    let entry_incarnation = runner.state().objects[&entrant].incarnation;
+
+    // CR 400.7: blink the entrant. Same storage id, new object.
+    let mut blink_events = Vec::new();
+    move_to_zone(runner.state_mut(), entrant, Zone::Exile, &mut blink_events);
+    move_to_zone(
+        runner.state_mut(),
+        entrant,
+        Zone::Battlefield,
+        &mut blink_events,
+    );
+    let returned = &runner.state().objects[&entrant];
+    assert_eq!(
+        returned.zone,
+        Zone::Battlefield,
+        "the blinked permanent must be back on the battlefield"
+    );
+    assert_ne!(
+        returned.incarnation, entry_incarnation,
+        "CR 400.7: a leave + re-entry must bump the incarnation, or this test \
+         cannot distinguish the two objects and proves nothing"
+    );
+
+    runner.advance_until_stack_empty();
+    let drawn = runner.state().players[P0.0 as usize].hand.len() as i64 - before;
+    assert_eq!(
+        drawn, 0,
+        "CR 400.7 + CR 603.4: at the resolution recheck the returned permanent is \
+         ANOTHER creature you control sharing the entrant's name, so the \
+         intervening-if is false and no card is drawn"
+    );
+}
