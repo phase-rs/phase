@@ -518,6 +518,21 @@ the format anyway — the flag is a *runtime resolution* concern, not a parse
 concern), no new effect, no new state, no new WaitingFor variant, and full reuse
 of the tested face-up-exile collector and mover.
 
+**SCOPE DECIDED 2026-09-14 (Phase 2cd review): the widening applies to EVERY
+outside-the-game search, not only Wish-class ones** — superseding the
+"Wish-class" framing above. Two narrower designs were tried in review and both
+failed on a proxy. Inferring eligibility from the declared pool widened Learn
+(CR 701.48a, 2021), which declares the same `Sideboard` pool. Inferring it from
+Oracle wording then widened *Wish* itself — a 2021 (AFR) card with the same "a
+card you own from outside the game" text as the 2002 Judgment wishes, because
+Oracle text is errata'd to modern templating for every card and cannot date
+one. A per-card era authority (first-printing date) would make one rule depend
+on print date while the engine plays current Oracle text everywhere else. So the
+flag is a whole-game zone-model choice — "removed from the game counts as
+outside it" — for all effects. The bundled presets that declare it have
+pre-2004 pools, where the distinction never arises; it matters only for
+lobby-saved formats with arbitrary pools.
+
 **Size: SMALL — and materially smaller than PLAN §4's current "Medium"
 estimate.** The Medium framing predated discovering that
 `SideboardAndFaceUpExile` + `collect_face_up_exile_candidates` already implement

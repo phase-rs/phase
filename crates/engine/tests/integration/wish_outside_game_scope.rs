@@ -15,6 +15,11 @@
 //! Every assertion is paired against the identical board under a modern custom
 //! format, so a failure to widen and a failure to set the board up are
 //! distinguishable.
+//!
+//! The scope is a whole-game zone-model choice, applied to every
+//! outside-the-game effect regardless of the card's age — Oracle wording
+//! cannot identify an era (a 2021 *Wish* and a 2002 *Burning Wish* share it).
+//! `a_modern_wish_follows_the_same_boundary` pins that down.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
@@ -162,5 +167,40 @@ fn a_cast_wish_never_reaches_a_card_the_caster_does_not_own() {
         "only the card the caster OWNS may be offered, whoever controls it — \
          got {:?}",
         runner.state().waiting_for
+    );
+}
+
+/// *Wish* (AFR, 2021), verified against Scryfall: "You may play a card you own
+/// from outside the game this turn." Post-M10 card, same generic wording as the
+/// Judgment wishes — so the zone-model scope treats it identically: it reaches
+/// owned face-up exile under the legacy scope and only the sideboard under the
+/// modern one. This is the case that shows eligibility is NOT inferred from
+/// wording or era.
+#[test]
+fn a_modern_wish_follows_the_same_boundary() {
+    const MODERN_WISH: &str = "You may play a card you own from outside the game this turn.";
+    let offered = |scope| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let wish = scenario
+            .add_spell_to_hand_from_oracle(P0, "Wish", false, MODERN_WISH)
+            .with_mana_cost(engine::types::mana::ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().format_config = format_with(scope);
+        let exiled = exile_sorcery(&mut runner, P0, "Removed Ritual");
+        cast_the_wish(&mut runner, wish);
+        (offered_exile_ids(&runner).contains(&exiled), runner.state().waiting_for.clone())
+    };
+
+    let (legacy, legacy_wait) = offered(WishOutsideGameScope::PreM10ReachesExile);
+    assert!(
+        legacy,
+        "the pre-M10 zone model applies to a 2021 card too — got {legacy_wait:?}"
+    );
+    let (modern, modern_wait) = offered(WishOutsideGameScope::PostM10SideboardOnly);
+    assert!(
+        !modern,
+        "CR 400.11: under the modern zone model exile is in the game — got {modern_wait:?}"
     );
 }

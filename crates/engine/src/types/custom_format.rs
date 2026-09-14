@@ -113,8 +113,11 @@ pub enum WishOutsideGameScope {
     /// replaced by exile.
     #[default]
     PostM10SideboardOnly,
-    /// Pre-M10: a Wish could retrieve an owned card that had been removed
-    /// from the game (today's exile).
+    /// Pre-M10 zone model: a card "removed from the game" (today's owned,
+    /// face-up exile) counts as outside the game, for EVERY effect that
+    /// reaches outside the game — Wish-class, Learn, or anything else. A
+    /// whole-game zone-model choice, not a per-card historical property:
+    /// Oracle wording cannot identify a card's era. See `game::wish_scope`.
     PreM10ReachesExile,
 }
 
