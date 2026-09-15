@@ -3234,7 +3234,12 @@ fn parse_trailing_where_x_quantity(tail: &str) -> Option<QuantityExpr> {
     if expr.is_empty() {
         return None;
     }
-    parse_event_context_quantity(expr).or_else(|| parse_cda_quantity(expr))
+    parse_event_context_quantity(expr).or_else(|| {
+        crate::parser::oracle_quantity::parse_cda_quantity_with_context(
+            expr,
+            &mut where_x_count_context(),
+        )
+    })
 }
 
 /// CR 611.2a/c + CR 603.7c + CR 111.2 + CR 707.2 + CR 701.36a: Rewrite token
@@ -12868,6 +12873,39 @@ mod tests {
                     name: "X".to_string(),
                 },
             }),
+        );
+    }
+
+    /// CR 107.3c + CR 608.2c: the count-bound where-X leaf shares the where-X
+    /// parse context, so its third-person "they control" names the scoped player
+    /// while a printed "you control" stays the controller. Each case is the
+    /// other's reach-guard: both must bind an `ObjectCount`.
+    #[test]
+    fn match_create_of_those_tokens_where_x_binds_they_to_scoped_player() {
+        let controller_of =
+            |text: &str| match match_create_of_those_tokens(&Effect::unimplemented("create", text))
+            {
+                Some(QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(typed),
+                        },
+                }) => typed.controller,
+                other => {
+                    panic!("expected an ObjectCount where-X binding for {text:?}, got {other:?}")
+                }
+            };
+        assert_eq!(
+            controller_of(
+                "create x of those tokens, where x is the number of creatures they control"
+            ),
+            Some(ControllerRef::ScopedPlayer),
+        );
+        assert_eq!(
+            controller_of(
+                "create x of those tokens, where x is the number of creatures you control"
+            ),
+            Some(ControllerRef::You),
         );
     }
 
