@@ -39,8 +39,10 @@ Originating discussion: [phase-rs/phase#5312](https://github.com/phase-rs/phase/
   sourced pre-M10 rule (Sixth Edition through M10, not "pre-6th-edition"),
   the `StackEntryKind::CombatDamage` object and its not-a-spell-or-ability
   classification, dealing semantics for sources and recipients that change
-  while damage is on the stack, and a three-phase implementation plan ending
-  in the Middle School / Classic Magic registration.
+  while damage is on the stack, incarnation-aware damage-source identity, and a
+  four-phase implementation plan ending in the Middle School / Classic Magic
+  registration. Reviewed over three architecture + rules rounds (final verdict
+  APPROVE WITH CHANGES, all applied).
 
 The design (`CONTEXT.md`/`RESEARCH.md`/`PLAN.md`) is merged as reviewed.
 Each implementation phase lands as its own PR, planned and reviewed
