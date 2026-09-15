@@ -1574,7 +1574,7 @@ fn cast_single_target_during_resolution(
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
     };
     let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
-    state.waiting_for = crate::game::casting::initiate_cast_during_resolution(
+    let initiation = crate::game::casting::initiate_cast_during_resolution(
         state,
         ability.controller,
         card,
@@ -1591,6 +1591,19 @@ fn cast_single_target_during_resolution(
         events,
     )
     .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+    state.waiting_for = match initiation {
+        crate::game::casting::ResolutionCastInitiation::WaitingFor(waiting_for) => *waiting_for,
+        crate::game::casting::ResolutionCastInitiation::Rejected(cleanup) => {
+            crate::game::engine_resolution_choices::abort_resolution_cast(
+                state,
+                ability.controller,
+                card,
+                *cleanup,
+                events,
+            )
+            .map_err(|e| EffectError::InvalidParam(e.to_string()))?
+        }
+    };
     Ok(())
 }
 
@@ -2270,10 +2283,9 @@ mod tests {
 
         let obj = state.objects.get(&obj_id).unwrap();
         assert!(
-            !obj.casting_permissions.iter().any(|p| matches!(
-                p,
-                CastingPermission::PlayFromExile { .. }
-            )),
+            !obj.casting_permissions
+                .iter()
+                .any(|p| matches!(p, CastingPermission::PlayFromExile { .. })),
             "play-mode with alt-ability cost is a spell-cost override; it must not accidentally grant PlayFromExile"
         );
         assert!(

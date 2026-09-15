@@ -10991,6 +10991,52 @@ fn apply_non_priority_pass_action(
                 player,
                 object_id,
                 card_id,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            let permission_index = casting::current_resolution_cast_permission_index(
+                state,
+                *player,
+                *object_id,
+                *card_id,
+            )
+            .ok_or_else(|| {
+                EngineError::ActionNotAllowed(
+                    "Only a resolution-owned modal face election may be cancelled".to_string(),
+                )
+            })?;
+            let cleanup = casting::take_resolution_cast_cleanup(
+                state,
+                *player,
+                *object_id,
+                *card_id,
+                permission_index,
+            )
+            .ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "Resolution face choice permission provenance is stale or mismatched"
+                        .to_string(),
+                )
+            })?;
+            crate::game::engine_resolution_choices::abort_resolution_cast(
+                state,
+                *player,
+                *object_id,
+                cleanup,
+                &mut events,
+            )?
+        }
+        (
+            WaitingFor::ModalFaceChoice {
+                player,
+                object_id,
+                card_id,
                 payment_mode,
             },
             GameAction::ChooseModalFace { back_face },

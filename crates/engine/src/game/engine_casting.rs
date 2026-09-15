@@ -25,7 +25,30 @@ pub(super) fn cancel_pending_cast(
             "Cannot cancel an activation after a cost is paid".to_string(),
         ));
     }
+    // Capture and consume the exact resolution-owned grant before generic
+    // rollback removes the placeholder stack entry.  A normal pending cast
+    // has no such cleanup and retains the historical Priority result; a
+    // resolution cast must instead dispose of its offered card/misses and
+    // resume the parked parent exactly once.
+    let resolution_cleanup = pending_cast.casting_permission_index.and_then(|index| {
+        casting::take_resolution_cast_cleanup(
+            state,
+            player,
+            pending_cast.object_id,
+            pending_cast.card_id,
+            index,
+        )
+    });
     casting::handle_cancel_cast(state, pending_cast, events);
+    if let Some(cleanup) = resolution_cleanup {
+        return super::engine_resolution_choices::abort_resolution_cast(
+            state,
+            player,
+            pending_cast.object_id,
+            cleanup,
+            events,
+        );
+    }
     Ok(WaitingFor::Priority { player })
 }
 

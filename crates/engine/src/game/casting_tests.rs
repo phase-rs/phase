@@ -1704,7 +1704,10 @@ fn worldsouls_rage_offered_x_is_payable_with_an_unchosen_citadel_copy() {
         WaitingFor::ChooseXValue { max, .. } => max,
         other => panic!("expected X choice before target selection, got {other:?}"),
     };
-    assert_eq!(max, 6, "the unchosen Citadel copy produces no mana, so eight basics must cap {{X}}{{R}}{{G}} at X=6");
+    assert_eq!(
+        max, 6,
+        "the unchosen Citadel copy produces no mana, so eight basics must cap {{X}}{{R}}{{G}} at X=6"
+    );
 
     let after_x = apply_as_current(&mut state, GameAction::ChooseX { value: max })
         .expect("the offered maximum X must remain castable");
@@ -20468,7 +20471,10 @@ fn exact_permission_does_not_inherit_sibling_etb_counter() {
                         crate::types::ability::ResolutionCastCleanup {
                             source_id: creature,
                             face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
-                                TargetFilter::Any, creature, PlayerId(0), None,
+                                TargetFilter::Any,
+                                creature,
+                                PlayerId(0),
+                                None,
                             ),
                             exiled_misses: Vec::new(),
                             reject_action:
@@ -20557,7 +20563,10 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
                         crate::types::ability::ResolutionCastCleanup {
                             source_id: creature,
                             face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
-                                TargetFilter::Any, creature, PlayerId(0), None,
+                                TargetFilter::Any,
+                                creature,
+                                PlayerId(0),
+                                None,
                             ),
                             exiled_misses: Vec::new(),
                             reject_action:
@@ -46010,7 +46019,10 @@ fn resolution_offer_grant(
         resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
             source_id,
             face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
-                TargetFilter::Any, source_id, player, None,
+                TargetFilter::Any,
+                source_id,
+                player,
+                None,
             ),
             exiled_misses: vec![],
             reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
@@ -53179,7 +53191,10 @@ fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling(
             resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
                 source_id: spell,
                 face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
-                    TargetFilter::Any, spell, PlayerId(0), None,
+                    TargetFilter::Any,
+                    spell,
+                    PlayerId(0),
+                    None,
                 ),
                 exiled_misses: vec![hostile_miss],
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
@@ -53296,7 +53311,10 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
         ));
     }
     let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
-        TargetFilter::Any, spell, PlayerId(0), None,
+        TargetFilter::Any,
+        spell,
+        PlayerId(0),
+        None,
     );
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: spell,
@@ -53305,7 +53323,7 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
     };
-    let wf = initiate_cast_during_resolution(
+    let initiation = initiate_cast_during_resolution(
         &mut state,
         PlayerId(0),
         spell,
@@ -53319,8 +53337,11 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
         &mut Vec::new(),
     )
     .expect("free during-resolution cast must begin");
+    let ResolutionCastInitiation::WaitingFor(wf) = initiation else {
+        panic!("a legal free cast must not take the resolution rejection path");
+    };
     assert!(
-        !matches!(wf, WaitingFor::ManaPayment { .. }),
+        !matches!(wf.as_ref(), WaitingFor::ManaPayment { .. }),
         "a Free during-resolution cast must NOT open a payment step, got {wf:?}"
     );
     assert!(
@@ -53399,6 +53420,15 @@ fn resolution_test_request(filter: TargetFilter) -> ResolutionCastRequest {
     }
 }
 
+fn mark_resolution_test_back_face_as_aftermath(state: &mut GameState, spell: ObjectId) {
+    let back_face = state.objects[&spell]
+        .back_face
+        .as_mut()
+        .expect("the resolution fixture has a spell back face");
+    back_face.layout_kind = Some(LayoutKind::Split);
+    back_face.keywords.push(Keyword::Aftermath);
+}
+
 /// A frozen resolution policy is applied to each face, rather than to the
 /// card's unchosen front.  Here the policy accepts only the instant back face,
 /// so no choice is issued and that face is announced automatically.
@@ -53416,14 +53446,40 @@ fn resolution_cast_auto_selects_its_only_legal_spell_face() {
             back: true,
         }
     );
-    let waiting_for =
+    let initiation =
         initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
             .expect("the legal back face must be cast during resolution");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("the legal back face must not be rejected");
+    };
 
-    assert!(matches!(waiting_for, WaitingFor::Priority { .. }));
+    assert!(matches!(waiting_for.as_ref(), WaitingFor::Priority { .. }));
     assert!(state.stack.iter().any(|entry| entry.source_id == spell));
     assert_eq!(state.objects[&spell].name, "Resolution Back");
     assert!(state.objects[&spell].modal_back_face);
+}
+
+/// An instruction to cast transformed elects the transformed face before the
+/// ordinary resolution face-election cardinality is considered.  It cannot
+/// leak a front action or a modal prompt.
+#[test]
+fn resolution_cast_transformed_precedes_modal_face_election() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    let mut request = resolution_test_request(TargetFilter::Any);
+    request.cast_transformed = true;
+
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("the transformed back face must be prepared");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("a legal transformed face must not reject");
+    };
+
+    assert!(matches!(waiting_for.as_ref(), WaitingFor::Priority { .. }));
+    assert_eq!(state.objects[&spell].name, "Resolution Back");
+    assert!(state.objects[&spell].modal_back_face);
+    assert!(state.stack.iter().any(|entry| entry.source_id == spell));
 }
 
 /// When both spell faces pass the same serialized policy, the legacy
@@ -53434,7 +53490,7 @@ fn resolution_cast_auto_selects_its_only_legal_spell_face() {
 fn resolution_cast_two_legal_faces_issues_and_completes_exact_face_choice() {
     let mut state = setup_game_at_main_phase();
     let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
-    let waiting_for = initiate_cast_during_resolution(
+    let initiation = initiate_cast_during_resolution(
         &mut state,
         PlayerId(0),
         spell,
@@ -53442,9 +53498,15 @@ fn resolution_cast_two_legal_faces_issues_and_completes_exact_face_choice() {
         &mut Vec::new(),
     )
     .expect("both spell faces must open a choice");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("two legal faces must open a choice rather than reject");
+    };
 
-    assert!(matches!(waiting_for, WaitingFor::ModalFaceChoice { .. }));
-    state.waiting_for = waiting_for;
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ModalFaceChoice { .. }
+    ));
+    state.waiting_for = *waiting_for;
     let actions = crate::ai_support::legal_actions(&state);
     assert!(actions.contains(&GameAction::ChooseModalFace { back_face: false }));
     assert!(actions.contains(&GameAction::ChooseModalFace { back_face: true }));
@@ -53476,25 +53538,181 @@ fn resolution_cast_two_legal_faces_issues_and_completes_exact_face_choice() {
     assert_eq!(state.objects[&spell].name, "Resolution Back");
 }
 
+/// A resolution-owned face prompt is intentionally pre-announcement (there is
+/// no `PendingCast` or placeholder stack entry), yet it is a cancellable
+/// transaction: the exact temporary permission is removed and the parent path
+/// receives the same cleanup as a declined cast.
+#[test]
+fn resolution_modal_face_choice_issues_cancel_and_removes_its_exact_permission() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    let initiation = initiate_cast_during_resolution(
+        &mut state,
+        PlayerId(0),
+        spell,
+        resolution_test_request(TargetFilter::Any),
+        &mut Vec::new(),
+    )
+    .expect("two legal faces must open a resolution-owned prompt");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("two legal faces must not reject");
+    };
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ModalFaceChoice { .. }
+    ));
+    assert!(state.pending_cast.is_none());
+    assert!(state.stack.iter().all(|entry| entry.source_id != spell));
+    state.waiting_for = *waiting_for;
+
+    let actions = crate::ai_support::legal_actions(&state);
+    assert!(actions.contains(&GameAction::CancelCast));
+    apply_as_current(&mut state, GameAction::CancelCast)
+        .expect("the issued resolution cancel must settle the transaction");
+
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.objects[&spell].casting_permissions.is_empty());
+    assert_eq!(state.objects[&spell].name, "Resolution Front");
+    assert!(!state.objects[&spell].cast_face_committed);
+}
+
+/// A legacy modal-face prompt retains its ordinary cast/land behavior.  Only
+/// the indexed resolution transaction authorizes cancellation.
+#[test]
+fn ordinary_modal_face_choice_neither_issues_nor_accepts_cancel() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    state.waiting_for = WaitingFor::ModalFaceChoice {
+        player: PlayerId(0),
+        object_id: spell,
+        card_id: state.objects[&spell].card_id,
+        payment_mode: CastPaymentMode::Auto,
+    };
+    let state_before = state.clone();
+
+    assert!(!crate::ai_support::legal_actions(&state).contains(&GameAction::CancelCast));
+    assert!(apply_as_current(&mut state, GameAction::CancelCast).is_err());
+    assert_eq!(state, state_before);
+}
+
+/// The same transaction authority remains live after automatic face election:
+/// a later cast-step cancellation must not strand the resolution permission,
+/// placeholder stack entry, or parent continuation.
+#[test]
+fn resolution_cast_cancel_after_auto_face_preparation_routes_through_cleanup() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::generic(1);
+    let mut request = resolution_test_request(TargetFilter::Any);
+    request.cost = crate::types::ability::ResolutionCastCost::FullCost {
+        mana_spend_permission: None,
+    };
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("the full-cost resolution offer must prepare its required front face");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("the legal full-cost front face must not reject");
+    };
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ManaPayment { .. }
+    ));
+    state.waiting_for = *waiting_for;
+    assert!(state.pending_cast.is_some());
+    assert!(state.stack.iter().any(|entry| entry.source_id == spell));
+
+    apply_as_current(&mut state, GameAction::CancelCast)
+        .expect("a later cast-step cancel must use the resolution cleanup authority");
+
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_cast.is_none());
+    assert!(state.stack.iter().all(|entry| entry.source_id != spell));
+    assert!(state.objects[&spell].casting_permissions.is_empty());
+    assert_eq!(state.objects[&spell].zone, Zone::Exile);
+    assert_eq!(state.objects[&spell].name, "Resolution Front");
+    assert!(!state.objects[&spell].cast_face_committed);
+}
+
 /// A resolution offer with no policy-legal spell face does not leave an
 /// announcement or temporary permission behind.
 #[test]
-fn resolution_cast_rejects_zero_legal_spell_faces_transactionally() {
+fn resolution_cast_routes_zero_legal_spell_faces_through_abort_cleanup() {
     let mut state = setup_game_at_main_phase();
     let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
-    let error = initiate_cast_during_resolution(
+    let initiation = initiate_cast_during_resolution(
         &mut state,
         PlayerId(0),
         spell,
         resolution_test_request(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
         &mut Vec::new(),
     )
-    .expect_err("a creature-only policy cannot cast either spell face");
+    .expect("zero legal faces are a resolution abort, not an invalid action");
+    let ResolutionCastInitiation::Rejected(cleanup) = initiation else {
+        panic!("a creature-only policy must reject both spell faces");
+    };
+    let waiting_for = crate::game::engine_resolution_choices::abort_resolution_cast(
+        &mut state,
+        PlayerId(0),
+        spell,
+        *cleanup,
+        &mut Vec::new(),
+    )
+    .expect("the resolution abort must settle");
 
-    assert!(matches!(error, EngineError::ActionNotAllowed(_)));
+    assert!(matches!(waiting_for, WaitingFor::Priority { .. }));
     assert_eq!(state.objects[&spell].zone, Zone::Exile);
     assert!(state.objects[&spell].casting_permissions.is_empty());
     assert!(state.stack.iter().all(|entry| entry.source_id != spell));
+}
+
+/// The prospective-face projector is not a second, partial castability model:
+/// zone admission and live prohibitions must be observed before the engine
+/// issues a face action or auto-elects a side.
+#[test]
+fn resolution_face_projection_rejects_a_zone_prohibited_cast_before_announcement() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    add_cant_cast_from_hand_only_permanent(&mut state, PlayerId(1), ProhibitionScope::AllPlayers);
+    let request = resolution_test_request(TargetFilter::Any);
+
+    assert_eq!(
+        resolution_spell_face_legality(&state, PlayerId(0), spell, &request.face_policy),
+        ResolutionSpellFaceLegality {
+            front: false,
+            back: false,
+        }
+    );
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("a blocked resolution cast must resolve as an abort, not an action error");
+    assert!(matches!(initiation, ResolutionCastInitiation::Rejected(_)));
+    assert!(state.objects[&spell].casting_permissions.is_empty());
+    assert!(state.stack.iter().all(|entry| entry.source_id != spell));
+}
+
+/// CR 702.127a: a broad resolution-cast grant still cannot offer the
+/// aftermath half outside the graveyard.  Its unrelated front half remains an
+/// independently evaluated spell face, while the graveyard row proves the
+/// aftermath half is not blanket-excluded.
+#[test]
+fn resolution_face_projection_limits_aftermath_half_to_graveyard() {
+    for zone in [Zone::Hand, Zone::Exile, Zone::Graveyard, Zone::Library] {
+        let mut state = setup_game_at_main_phase();
+        let spell =
+            resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+        state.objects.get_mut(&spell).unwrap().zone = zone;
+        mark_resolution_test_back_face_as_aftermath(&mut state, spell);
+        let policy = resolution_test_request(TargetFilter::Any).face_policy;
+
+        assert_eq!(
+            resolution_spell_face_legality(&state, PlayerId(0), spell, &policy),
+            ResolutionSpellFaceLegality {
+                front: true,
+                back: zone == Zone::Graveyard,
+            },
+            "the aftermath half must be legal only from the graveyard, not {zone:?}"
+        );
+    }
 }
 
 // --- Conduit of Worlds line-2 end-to-end (Steps 5/6/7) --------------------
@@ -53756,7 +53974,10 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
             });
     }
     let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
-        TargetFilter::Any, spell, PlayerId(0), None,
+        TargetFilter::Any,
+        spell,
+        PlayerId(0),
+        None,
     );
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: spell,
@@ -53825,7 +54046,10 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
             });
     }
     let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
-        TargetFilter::Any, spell, PlayerId(0), None,
+        TargetFilter::Any,
+        spell,
+        PlayerId(0),
+        None,
     );
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: spell,
@@ -53895,7 +54119,10 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
                 resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
                     source_id: spell,
                     face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
-                        TargetFilter::Any, spell, PlayerId(0), None,
+                        TargetFilter::Any,
+                        spell,
+                        PlayerId(0),
+                        None,
                     ),
                     exiled_misses: Vec::new(),
                     reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,

@@ -2487,10 +2487,11 @@ pub fn candidate_actions_broad_with_probe(
             card_id,
             ..
         } => {
-            let legal_faces = crate::game::casting::current_resolution_cast_permission_index(
-                state, *player, *object_id, *card_id,
-            )
-            .and_then(|index| {
+            let resolution_permission =
+                crate::game::casting::current_resolution_cast_permission_index(
+                    state, *player, *object_id, *card_id,
+                );
+            let legal_faces = resolution_permission.and_then(|index| {
                 state
                     .objects
                     .get(object_id)
@@ -2499,16 +2500,17 @@ pub fn candidate_actions_broad_with_probe(
                         crate::types::ability::CastingPermission::ExileWithAltCost {
                             resolution_cleanup: Some(cleanup),
                             ..
-                        } => Some(crate::game::casting::resolution_spell_face_legality(
+                        } => Some(crate::game::casting::resolution_spell_face_legality_for_current_permission(
                             state,
                             *player,
                             *object_id,
                             &cleanup.face_policy,
+                            index,
                         )),
                         _ => None,
                     })
             });
-            [false, true]
+            let mut actions: Vec<_> = [false, true]
                 .into_iter()
                 .filter(|back_face| {
                     legal_faces.is_none_or(
@@ -2528,7 +2530,19 @@ pub fn candidate_actions_broad_with_probe(
                         Some(*player),
                     )
                 })
-                .collect()
+                .collect();
+            // A resolution-owned face election is pre-announcement, but it is
+            // still an elected cast transaction.  Surface its exact CancelCast
+            // authority; ordinary modal land/spell prompts intentionally have
+            // no such permission and remain uncancellable here.
+            if resolution_permission.is_some() {
+                actions.push(candidate(
+                    GameAction::CancelCast,
+                    TacticalClass::Pass,
+                    Some(*player),
+                ));
+            }
+            actions
         }
         // CR 118.9: Alternative-cast prompt — surface both cost paths
         // uniformly across all keywords. The keyword discriminator lives on the

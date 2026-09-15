@@ -2263,7 +2263,9 @@ pub(super) fn handle_resolution_choice(
                     player,
                     Some(crate::types::ability::CastPermissionConstraint::ManaValue {
                         comparator: crate::types::ability::Comparator::LE,
-                        value: QuantityExpr::Fixed { value: discover_value as i32 },
+                        value: QuantityExpr::Fixed {
+                            value: discover_value as i32,
+                        },
                     }),
                 );
                 let cleanup = crate::types::ability::ResolutionCastCleanup {
@@ -2274,7 +2276,7 @@ pub(super) fn handle_resolution_choice(
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 };
-                let result = casting::initiate_cast_during_resolution(
+                let result = match casting::initiate_cast_during_resolution(
                     state,
                     player,
                     hit_card,
@@ -2286,7 +2288,14 @@ pub(super) fn handle_resolution_choice(
                         cost: crate::types::ability::ResolutionCastCost::Free,
                     },
                     events,
-                )?;
+                )? {
+                    casting::ResolutionCastInitiation::WaitingFor(result) => *result,
+                    casting::ResolutionCastInitiation::Rejected(cleanup) => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(abort_resolution_cast(
+                            state, player, hit_card, *cleanup, events,
+                        )?));
+                    }
+                };
                 state.waiting_for = result;
                 // CR 608.2g + CR 701.57c: casting the discovered card happens
                 // DURING this discover's resolution and no player gets priority
@@ -2354,7 +2363,7 @@ pub(super) fn handle_resolution_choice(
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 };
-                let result = casting::initiate_cast_during_resolution(
+                let result = match casting::initiate_cast_during_resolution(
                     state,
                     player,
                     hit_card,
@@ -2368,7 +2377,14 @@ pub(super) fn handle_resolution_choice(
                         },
                     },
                     events,
-                )?;
+                )? {
+                    casting::ResolutionCastInitiation::WaitingFor(result) => *result,
+                    casting::ResolutionCastInitiation::Rejected(cleanup) => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(abort_resolution_cast(
+                            state, player, hit_card, *cleanup, events,
+                        )?));
+                    }
+                };
                 ResolutionChoiceOutcome::WaitingFor(result)
             } else {
                 // CR 608.2g decline: card stays in the graveyard; nothing is cast.
@@ -2591,7 +2607,9 @@ pub(super) fn handle_resolution_choice(
                     player,
                     Some(crate::types::ability::CastPermissionConstraint::ManaValue {
                         comparator: crate::types::ability::Comparator::LT,
-                        value: QuantityExpr::Fixed { value: source_mv as i32 },
+                        value: QuantityExpr::Fixed {
+                            value: source_mv as i32,
+                        },
                     }),
                 );
                 let cleanup = crate::types::ability::ResolutionCastCleanup {
@@ -2603,7 +2621,7 @@ pub(super) fn handle_resolution_choice(
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 };
-                let result = casting::initiate_cast_during_resolution(
+                let result = match casting::initiate_cast_during_resolution(
                     state,
                     player,
                     hit_card,
@@ -2615,7 +2633,14 @@ pub(super) fn handle_resolution_choice(
                         cost: crate::types::ability::ResolutionCastCost::Free,
                     },
                     events,
-                )?;
+                )? {
+                    casting::ResolutionCastInitiation::WaitingFor(result) => *result,
+                    casting::ResolutionCastInitiation::Rejected(cleanup) => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(abort_resolution_cast(
+                            state, player, hit_card, *cleanup, events,
+                        )?));
+                    }
+                };
                 ResolutionChoiceOutcome::WaitingFor(result)
             } else {
                 // CR 702.85a: Caster declines — hit and misses all go to the
@@ -2675,7 +2700,7 @@ pub(super) fn handle_resolution_choice(
                             remaining_hits,
                         },
                 };
-                let result = casting::initiate_cast_during_resolution(
+                let result = match casting::initiate_cast_during_resolution(
                     state,
                     player,
                     hit_card,
@@ -2687,7 +2712,14 @@ pub(super) fn handle_resolution_choice(
                         cost: crate::types::ability::ResolutionCastCost::Free,
                     },
                     events,
-                )?;
+                )? {
+                    casting::ResolutionCastInitiation::WaitingFor(result) => *result,
+                    casting::ResolutionCastInitiation::Rejected(cleanup) => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(abort_resolution_cast(
+                            state, player, hit_card, *cleanup, events,
+                        )?));
+                    }
+                };
                 ResolutionChoiceOutcome::WaitingFor(result)
             } else {
                 // CR 702.60a: the free cast is declined — the hit and every
@@ -2825,7 +2857,7 @@ pub(super) fn handle_resolution_choice(
                         member_pool,
                     },
             };
-            let result = casting::initiate_cast_during_resolution(
+            let result = match casting::initiate_cast_during_resolution(
                 state,
                 player,
                 chosen,
@@ -2841,7 +2873,14 @@ pub(super) fn handle_resolution_choice(
                     cost: crate::types::ability::ResolutionCastCost::Free,
                 },
                 events,
-            )?;
+            )? {
+                casting::ResolutionCastInitiation::WaitingFor(result) => *result,
+                casting::ResolutionCastInitiation::Rejected(cleanup) => {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(abort_resolution_cast(
+                        state, player, chosen, *cleanup, events,
+                    )?));
+                }
+            };
             // CR 608.2g: when the final free cast is announced, finish the
             // parent spell (including Invoke's self-exile) before priority.
             if matches!(result, WaitingFor::Priority { .. }) {
@@ -2985,7 +3024,7 @@ pub(super) fn handle_resolution_choice(
                     other => {
                         return Err(EngineError::InvalidAction(format!(
                             "Unexpected pay-amount resource {other:?} for mana ability"
-                        )))
+                        )));
                     }
                 }
                 let waiting_for =
@@ -8345,6 +8384,117 @@ fn finish_effect_zone_put_at_library_position(
         subject: None,
     });
     finish_with_continuation(state, player, events);
+}
+
+/// Settle an elected resolution cast that never reaches successful
+/// announcement: no legal projected face, a pre-announcement modal cancel, or
+/// `CancelCast` from a later casting substep.  The exact serialized cleanup
+/// carrier selects the same disposition the surrounding offer would use for an
+/// explicit decline; no caller may return raw priority and strand the parent
+/// resolution or the temporary permission.
+pub(crate) fn abort_resolution_cast(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    hit_card: ObjectId,
+    cleanup: crate::types::ability::ResolutionCastCleanup,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    use crate::types::ability::{ResolutionCastSuccessAction, ResolutionMvRejectAction};
+
+    let crate::types::ability::ResolutionCastCleanup {
+        source_id,
+        face_policy: _,
+        exiled_misses,
+        reject_action,
+        success_action,
+    } = cleanup;
+
+    match success_action {
+        ResolutionCastSuccessAction::BottomMisses => match reject_action {
+            ResolutionMvRejectAction::BottomWithMisses => {
+                let mut all_to_bottom = exiled_misses;
+                all_to_bottom.push(hit_card);
+                crate::game::effects::cascade::shuffle_to_bottom(
+                    state,
+                    &all_to_bottom,
+                    source_id,
+                    Some(crate::types::game_state::BatchCompletion::TopOrBottomComplete { player }),
+                    events,
+                );
+                Ok(state.waiting_for.clone())
+            }
+            ResolutionMvRejectAction::ToHand => {
+                // The rejection is observably identical to declining a
+                // Discover hit: misses settle first, then the hit takes its
+                // independently replaceable hand delivery and continuation.
+                crate::game::effects::discover::shuffle_to_bottom(
+                    state,
+                    &exiled_misses,
+                    source_id,
+                    Some(
+                        crate::types::game_state::BatchCompletion::DiscoverDeclined {
+                            player,
+                            hit_card,
+                            source_id,
+                        },
+                    ),
+                    events,
+                );
+                Ok(state.waiting_for.clone())
+            }
+            ResolutionMvRejectAction::RemainExiled => {
+                Ok(finish_with_continuation(state, player, events))
+            }
+        },
+        ResolutionCastSuccessAction::RippleOfferRemaining { remaining_hits } => {
+            // A cancelled or rejected Ripple choice is a decline, not an
+            // accepted cast: all later offered copies remain uncast and join
+            // the reveal pile for the terminal bottom-order path.
+            let mut all_uncast = exiled_misses;
+            all_uncast.extend(remaining_hits);
+            all_uncast.push(hit_card);
+            effects::ripple::open_bottom_order_or_place(
+                state, source_id, player, all_uncast, None, events,
+            );
+            Ok(state.waiting_for.clone())
+        }
+        ResolutionCastSuccessAction::FreeCastOfferRemaining {
+            controller,
+            remaining_casts,
+            remaining_mv_budget,
+            face_policy,
+            zones,
+            graveyard_replacement,
+            member_pool,
+        } => {
+            // No spell was committed, so neither the cast count nor the mana
+            // value budget changes.  Recompute the exact same policy-backed
+            // window rather than retaining a stale chosen-card list.
+            let candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
+                state,
+                &zones,
+                remaining_mv_budget,
+                &member_pool,
+                &face_policy,
+            );
+            if candidates.is_empty() {
+                return Ok(finish_with_continuation(state, controller, events));
+            }
+            state.waiting_for = WaitingFor::CastOffer {
+                player: controller,
+                kind: CastOfferKind::FreeCastWindow {
+                    candidates,
+                    remaining_casts,
+                    remaining_mv_budget,
+                    face_policy: *face_policy,
+                    zones,
+                    graveyard_replacement,
+                    member_pool,
+                },
+            };
+            Ok(state.waiting_for.clone())
+        }
+    }
 }
 
 fn finish_with_continuation(

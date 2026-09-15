@@ -10231,35 +10231,139 @@ pub(crate) fn resolution_spell_face_legality(
     object_id: ObjectId,
     policy: &crate::types::ability::ResolutionCastFacePolicy,
 ) -> ResolutionSpellFaceLegality {
+    // Window construction happens before `initiate_cast_during_resolution` has
+    // appended its real permission.  Probe a clone with the same kind of
+    // temporary grant that the real path will elect, so the projector takes
+    // every zone-admission and casting-prohibition gate in preparation rather
+    // than approximating that path from card characteristics alone.
+    let mut projected = state.clone();
+    let Some(object) = projected.objects.get_mut(&object_id) else {
+        return ResolutionSpellFaceLegality {
+            front: false,
+            back: false,
+        };
+    };
+    let permission_index = CastingPermissionIndex(object.casting_permissions.len());
+    object
+        .casting_permissions
+        .push(CastingPermission::ExileWithAltCost {
+            cost: ManaCost::zero(),
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+            cast_transformed: false,
+            constraint: policy.constraint.clone(),
+            granted_to: Some(player),
+            resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
+                source_id: policy.source_id,
+                face_policy: policy.clone(),
+                exiled_misses: Vec::new(),
+                reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+            }),
+            duration: None,
+            source_id: None,
+            graveyard_replacement: None,
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission: None,
+        });
+    resolution_spell_face_legality_for_permission(
+        &projected,
+        player,
+        object_id,
+        policy,
+        permission_index,
+        false,
+    )
+}
+
+/// Project each independently castable spell face against the exact temporary
+/// permission selected for this resolution cast.  Policy matching is explicit,
+/// while the clone runs the ordinary preparation path for every other
+/// admission, prohibition, target, and face-specific rule.  Keeping that
+/// preparation call in the projector is what prevents a legal action from
+/// being issued for a face that the real cast would reject before announcement.
+fn resolution_spell_face_legality_for_permission(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+    permission_index: CastingPermissionIndex,
+    full_cost_front_face: bool,
+) -> ResolutionSpellFaceLegality {
     let Some(original) = state.objects.get(&object_id) else {
         return ResolutionSpellFaceLegality {
             front: false,
             back: false,
         };
     };
+    let cast_transformed = matches!(
+        original.casting_permissions.get(permission_index.0),
+        Some(CastingPermission::ExileWithAltCost {
+            cast_transformed: true,
+            resolution_cleanup: Some(_),
+            ..
+        })
+    );
     let may_choose_back = resolution_spell_face_choice_available(original);
+    // Some established transformed-cast routes (including the minimal Siege
+    // fixture) carry the transformed permission before an alternative-face
+    // snapshot is available. Preserve their existing single-face cast path;
+    // when an alternative exists, the transformed instruction is authoritative
+    // and suppresses ordinary election.
+    let transformed_back_face = cast_transformed && original.back_face.is_some();
     let mut legality = ResolutionSpellFaceLegality {
         front: false,
         back: false,
     };
 
     for back_face in [false, true] {
-        if back_face && !may_choose_back {
+        // "Cast it transformed" elects the transformed face before any
+        // ordinary MDFC/split election.  When the card has that alternative
+        // face, it never exposes a competing front action.
+        if full_cost_front_face && back_face {
+            // CR 608.2g + CR 609.4b: a paid "cast that card" instruction
+            // uses the card's front characteristics.  Only an explicit
+            // transformed instruction may elect its other face.
+            continue;
+        } else if transformed_back_face {
+            if !back_face {
+                continue;
+            }
+        } else if back_face && !may_choose_back {
             continue;
         }
         let mut projected = state.clone();
-        let Some(object) = projected.objects.get_mut(&object_id) else {
-            return ResolutionSpellFaceLegality {
-                front: false,
-                back: false,
+        let zone = {
+            let Some(object) = projected.objects.get_mut(&object_id) else {
+                return ResolutionSpellFaceLegality {
+                    front: false,
+                    back: false,
+                };
             };
+            if back_face {
+                simulate_chosen_split_spell_back_face(object);
+            } else {
+                object.cast_face_committed = true;
+            }
+            object.zone
         };
-        if back_face {
-            simulate_chosen_split_spell_back_face(object);
-        } else {
-            object.cast_face_committed = true;
+        // CR 702.127a: a broad resolution-time permission does not make the
+        // aftermath half castable from Hand, Exile, or Library.  Ask after
+        // projecting the prospective face so the effective keyword belongs to
+        // that half (and so off-zone ability removal is still respected).
+        if zone != Zone::Graveyard
+            && super::keywords::object_has_effective_keyword_kind(
+                &projected,
+                object_id,
+                KeywordKind::Aftermath,
+            )
+        {
+            continue;
         }
-        let zone = object.zone;
+        let object = projected
+            .objects
+            .get(&object_id)
+            .expect("projected object persists");
         if !object_may_enter_cast_path(object) {
             continue;
         }
@@ -10285,7 +10389,20 @@ pub(crate) fn resolution_spell_face_legality(
                 &policy.constraint,
                 Some(object.spell_mana_value()),
             )
-            && spell_has_legal_targets(&projected, object, player);
+            && spell_has_legal_targets(&projected, object, player)
+            // Preparation owns zone admission and every live "can't cast"
+            // rule.  It is intentionally run on this clone after the exact
+            // indexed grant and prospective face have been installed.
+            && prepare_spell_cast_with_variant_override_inner(
+                &projected,
+                player,
+                object_id,
+                (!back_face && full_cost_front_face).then_some(CastingVariant::Normal),
+                None,
+                Some(permission_index),
+                CastingMode::Actual,
+            )
+            .is_ok();
         if back_face {
             legality.back = allowed;
         } else {
@@ -10294,6 +10411,26 @@ pub(crate) fn resolution_spell_face_legality(
     }
 
     legality
+}
+
+/// Public-to-the-engine indexed form for an already-issued modal choice.  The
+/// legal-action projector must read the same permission (including its
+/// transformed-cast bit) that the eventual reducer will consume.
+pub(crate) fn resolution_spell_face_legality_for_current_permission(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+    permission_index: CastingPermissionIndex,
+) -> ResolutionSpellFaceLegality {
+    resolution_spell_face_legality_for_permission(
+        state,
+        player,
+        object_id,
+        policy,
+        permission_index,
+        false,
+    )
 }
 
 /// The resolution-time permission is appended immediately before its face
@@ -10321,6 +10458,34 @@ pub(crate) fn current_resolution_cast_permission_index(
         }) if *grantee == player && *constraint == cleanup.face_policy.constraint
     )
     .then_some(CastingPermissionIndex(index))
+}
+
+/// Consume exactly the resolution-owned permission that authenticated a
+/// pre-announcement modal choice or an in-flight pending cast.  This is never
+/// a compatible-permission search: an index, card identity, grantee, and the
+/// cleanup/policy invariant must all still agree before the slot is removed.
+pub(crate) fn take_resolution_cast_cleanup(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    permission_index: CastingPermissionIndex,
+) -> Option<crate::types::ability::ResolutionCastCleanup> {
+    let object = state.objects.get_mut(&object_id)?;
+    if object.card_id != card_id {
+        return None;
+    }
+    let cleanup = match object.casting_permissions.get(permission_index.0)? {
+        CastingPermission::ExileWithAltCost {
+            granted_to: Some(grantee),
+            constraint,
+            resolution_cleanup: Some(cleanup),
+            ..
+        } if *grantee == player && *constraint == cleanup.face_policy.constraint => cleanup.clone(),
+        _ => return None,
+    };
+    object.casting_permissions.remove(permission_index.0);
+    Some(cleanup)
 }
 
 /// CR 709.3: A split-card face is independently castable when it is an
@@ -12486,6 +12651,15 @@ pub(super) struct ResolutionCastRequest {
     pub(super) cost: crate::types::ability::ResolutionCastCost,
 }
 
+/// The only two outcomes of beginning a resolution-owned cast before an
+/// announcement exists.  A rejected election is not an engine error: callers
+/// must dispose of the offered card and resume their own resolution through
+/// the same path as an explicit decline.
+pub(super) enum ResolutionCastInitiation {
+    WaitingFor(Box<WaitingFor>),
+    Rejected(Box<crate::types::ability::ResolutionCastCleanup>),
+}
+
 /// CR 608.2g: Cast a Cascade/Discover hit *during resolution* of its source
 /// spell, rather than granting a lingering permission that requires a separate
 /// later `CastSpell`. The single authority that constructs the
@@ -12522,7 +12696,7 @@ pub(super) fn initiate_cast_during_resolution(
     hit_card: ObjectId,
     request: ResolutionCastRequest,
     events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
+) -> Result<ResolutionCastInitiation, EngineError> {
     let ResolutionCastRequest {
         face_policy,
         cast_transformed,
@@ -12530,6 +12704,7 @@ pub(super) fn initiate_cast_during_resolution(
         graveyard_replacement,
         cost,
     } = request;
+    let cleanup_for_rejection = cleanup.clone();
     // CR 608.2g + CR 712.8a: a paid cast granted by an effect uses the
     // casting card's front face and printed mana cost unless that effect
     // explicitly says to cast it transformed. Intrinsic graveyard methods such
@@ -12613,7 +12788,14 @@ pub(super) fn initiate_cast_during_resolution(
     } else {
         return Err(EngineError::InvalidAction("Object not found".to_string()));
     };
-    let legality = resolution_spell_face_legality(state, player, hit_card, &face_policy);
+    let legality = resolution_spell_face_legality_for_permission(
+        state,
+        player,
+        hit_card,
+        &face_policy,
+        casting_permission_index,
+        full_cost_front_face,
+    );
     if legality.count() == 0 {
         state
             .objects
@@ -12621,29 +12803,36 @@ pub(super) fn initiate_cast_during_resolution(
             .expect("resolution cast card remains present")
             .casting_permissions
             .remove(casting_permission_index.0);
-        return Err(EngineError::ActionNotAllowed(
-            "No legal resolution spell face for this offer".to_string(),
-        ));
+        return Ok(ResolutionCastInitiation::Rejected(Box::new(
+            cleanup_for_rejection,
+        )));
     }
 
     let has_face_election = state
         .objects
         .get(&hit_card)
         .is_some_and(resolution_spell_face_choice_available);
+    let transformed_back_face = cast_transformed
+        && state
+            .objects
+            .get(&hit_card)
+            .is_some_and(|object| object.back_face.is_some());
     if legality.count() == 2 {
-        return Ok(WaitingFor::ModalFaceChoice {
-            player,
-            object_id: hit_card,
-            card_id: state.objects[&hit_card].card_id,
-            payment_mode,
-        });
+        return Ok(ResolutionCastInitiation::WaitingFor(Box::new(
+            WaitingFor::ModalFaceChoice {
+                player,
+                object_id: hit_card,
+                card_id: state.objects[&hit_card].card_id,
+                payment_mode,
+            },
+        )));
     }
 
     // One legal face is not a player decision.  Commit that exact projected
     // face before preparation; on a failure below restore the pre-election
     // object so neither an announced face nor the temporary permission leaks.
     let object_before = state.objects.get(&hit_card).cloned();
-    if has_face_election {
+    if has_face_election || transformed_back_face {
         let object = state
             .objects
             .get_mut(&hit_card)
@@ -12671,7 +12860,7 @@ pub(super) fn initiate_cast_during_resolution(
             state.objects.insert(hit_card, object);
         }
     }
-    result
+    result.map(|waiting_for| ResolutionCastInitiation::WaitingFor(Box::new(waiting_for)))
 }
 
 /// Check the already-elected active face against the policy held by the exact
@@ -20882,7 +21071,7 @@ pub fn handle_activate_ability(
     match activation_structural_eligibility(state, player, source_id, &ability_def) {
         ActivationStructuralEligibility::Eligible => {}
         ActivationStructuralEligibility::WrongActivator => {
-            return Err(EngineError::NotYourPriority)
+            return Err(EngineError::NotYourPriority);
         }
         ActivationStructuralEligibility::NinjutsuFamily => {
             return Err(EngineError::InvalidAction(
