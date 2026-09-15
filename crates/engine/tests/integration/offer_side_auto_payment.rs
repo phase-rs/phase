@@ -418,6 +418,7 @@ fn cost_static_with_filter(
         amount: ManaCost::generic(1),
         spell_filter: Some(spell_filter),
         dynamic_count: None,
+        reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
     })
     .affected(TargetFilter::Typed(
         TypedFilter::card().controller(caster_scope),

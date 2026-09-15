@@ -13527,6 +13527,15 @@ pub enum WaitingFor {
         life_cost: u32,
         /// Mana cost reduction if life is paid (e.g. {G})
         mana_reduction: ManaCost,
+        /// CR 118.7b/c/d + CR 601.2f: the reach the Defiler's reduction was
+        /// printed with ("This effect reduces only the amount of [color] mana
+        /// you pay"), captured at announcement so the answer applies the value
+        /// that was locked in rather than re-deriving it from the board.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::statics::CostReductionReach::is_spills_to_generic"
+        )]
+        reach: crate::types::statics::CostReductionReach,
         pending_cast: Box<PendingCast>,
     },
     /// CR 715.3a + CR 702.94a + CR 702.35a + CR 702.85a + CR 701.57a + CR 702.xxx:
@@ -35856,6 +35865,7 @@ mod tests {
             player: PlayerId(0),
             life_cost: 2,
             mana_reduction: ManaCost::zero(),
+            reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
             pending_cast: dummy_pending(),
         }));
         assert_eq!(variants.len(), 39);

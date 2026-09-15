@@ -31,8 +31,8 @@ use crate::types::player::PlayerId;
 use crate::types::resolved_commands::ManaPaymentRecipient;
 use crate::types::statics::{
     ActivationExemption, AdditionalCostTaxAction, CastFreeOrigin, CastFrequency,
-    CastingProhibitionCondition, CostModifyMode, ExileCardPool, ExileCastCost, ExileCastTiming,
-    ProhibitionScope, StaticMode, StaticModeKind,
+    CastingProhibitionCondition, CostModifyMode, CostReductionReach, ExileCardPool, ExileCastCost,
+    ExileCastTiming, ProhibitionScope, StaticMode, StaticModeKind,
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -8813,6 +8813,9 @@ struct CostModification {
     is_raise: bool,
     amount: ManaCost,
     multiplier: u32,
+    /// CR 118.7b/c/d: carried from the producing static so the arithmetic below
+    /// knows whether an unmatched colored unit may spill into generic mana.
+    reach: CostReductionReach,
 }
 
 fn self_spell_cost_condition_matches(
@@ -8872,19 +8875,21 @@ fn collect_self_spell_cost_modifiers(
             continue;
         }
 
-        let (amount, spell_filter, dynamic_count, is_raise) = match &def.mode {
+        let (amount, spell_filter, dynamic_count, is_raise, reach) = match &def.mode {
             StaticMode::ModifyCost {
                 mode: CostModifyMode::Reduce,
                 amount,
                 spell_filter,
                 dynamic_count,
-            } => (amount, spell_filter, dynamic_count, false),
+                reach,
+            } => (amount, spell_filter, dynamic_count, false, *reach),
             StaticMode::ModifyCost {
                 mode: CostModifyMode::Raise,
                 amount,
                 spell_filter,
                 dynamic_count,
-            } => (amount, spell_filter, dynamic_count, true),
+                reach,
+            } => (amount, spell_filter, dynamic_count, true, *reach),
             _ => continue,
         };
 
@@ -8938,6 +8943,7 @@ fn collect_self_spell_cost_modifiers(
             is_raise,
             amount: amount.clone(),
             multiplier,
+            reach,
         });
     }
 
@@ -9438,6 +9444,7 @@ fn collect_battlefield_cost_modifiers(
                 dynamic_count,
                 caster_scope: _,
                 condition: _,
+                reach,
             } = modifier;
             let is_raise = matches!(mode, CostModifyMode::Raise);
 
@@ -9487,6 +9494,7 @@ fn collect_battlefield_cost_modifiers(
                 is_raise,
                 amount: base_amount,
                 multiplier,
+                reach,
             });
         }
     }
@@ -9596,6 +9604,7 @@ fn apply_cost_modifications_in_order(mana_cost: &mut ManaCost, collected: &[Cost
             &modification.amount,
             modification.multiplier,
             true,
+            modification.reach,
         );
     }
     for modification in collected.iter().filter(|m| !m.is_raise) {
@@ -9604,6 +9613,7 @@ fn apply_cost_modifications_in_order(mana_cost: &mut ManaCost, collected: &[Cost
             &modification.amount,
             modification.multiplier,
             false,
+            modification.reach,
         );
     }
 }
@@ -9898,17 +9908,25 @@ pub(super) fn cost_shard_matches_reduction(
 /// reduction can never touch a mismatched color's pip, and each unit reduces
 /// exactly one cost component (colored/colorless match XOR generic
 /// spillover), never both.
+///
+/// `reach` is the card-level override of that spillover: a reduction printed
+/// with "This effect reduces only the amount of colored mana you pay"
+/// (`CostReductionReach::ColoredManaOnly` — Morophon, Edgewalker, Ragemonger,
+/// the Defiler cycle) discards an unmatched unit instead of spending it on
+/// generic mana. Morophon's ruling is the worked example: {4}{R}{W}{W} becomes
+/// {4}{W}, not {2}{W}.
 pub(super) fn apply_shard_reduction(
     shards: &mut Vec<ManaCostShard>,
     generic: &mut u32,
     reduction: ManaCostShard,
+    reach: CostReductionReach,
 ) {
     if let Some(index) = shards
         .iter()
         .position(|shard| cost_shard_matches_reduction(*shard, reduction))
     {
         shards.remove(index);
-    } else {
+    } else if matches!(reach, CostReductionReach::SpillsToGeneric) {
         *generic = generic.saturating_sub(1);
     }
 }
@@ -9917,12 +9935,18 @@ pub(super) fn apply_shard_reduction(
 /// mana cost. ReduceCost removes matching mana symbols, spilling any unmatched
 /// or excess colored/colorless reduction over to generic mana (CR 118.7b/c/d)
 /// in addition to reducing generic mana directly (CR 118.7a), floored at zero.
-/// RaiseCost adds the specified symbols and generic mana.
+/// A `ColoredManaOnly` `reach` confines the WHOLE reduction to the cost's
+/// colored component: it suppresses the CR 118.7b/c/d spillover AND the
+/// explicit generic component of the reduction amount (CR 118.7a), because the
+/// printed rider says the effect reduces only the colored mana you pay.
+/// RaiseCost adds the specified symbols and generic mana; `reach` is inert for
+/// a raise, which never strands a unit.
 fn apply_cost_mod_to_mana(
     mana_cost: &mut ManaCost,
     base_amount: &ManaCost,
     multiplier: u32,
     is_raise: bool,
+    reach: CostReductionReach,
 ) {
     let (mod_shards, mod_generic) = match base_amount {
         ManaCost::Cost { shards, generic } => (shards, *generic * multiplier),
@@ -9952,10 +9976,21 @@ fn apply_cost_mod_to_mana(
     } else {
         for _ in 0..multiplier {
             for shard in mod_shards {
-                apply_shard_reduction(shards, generic, *shard);
+                apply_shard_reduction(shards, generic, *shard, reach);
             }
         }
-        *generic = generic.saturating_sub(mod_generic);
+        // CR 118.7a: a generic component of the reduction reduces generic mana —
+        // UNLESS the printed effect says it "reduces only the amount of colored
+        // mana you pay", which confines the whole effect to the cost's colored
+        // component. Under that rider a `{1}{W}` reduction cancels a white pip
+        // and the `{1}` does nothing: CR 118.7a already bars it from touching
+        // colored mana, and the rider bars it from touching generic mana.
+        // (No printed card in the class pairs the rider with a generic
+        // component today, so this arm is about keeping the axis honest rather
+        // than about a live card.)
+        if matches!(reach, CostReductionReach::SpillsToGeneric) {
+            *generic = generic.saturating_sub(mod_generic);
+        }
     }
 }
 
@@ -9995,7 +10030,15 @@ fn apply_affinity_reduction(
                         && super::filter::matches_target_filter(state, id, &filter, &ctx)
                 })
                 .count() as u32;
-            apply_cost_mod_to_mana(mana_cost, &ManaCost::generic(1), count, false);
+            // CR 702.41a: Affinity reduces generic mana only, so the CR 118.7b
+            // spillover axis is inert here — a `{1}` amount has no shards.
+            apply_cost_mod_to_mana(
+                mana_cost,
+                &ManaCost::generic(1),
+                count,
+                false,
+                CostReductionReach::SpillsToGeneric,
+            );
         }
     }
 }
@@ -10028,11 +10071,14 @@ fn apply_undaunted_reduction(
         .count() as u32;
     if instances > 0 {
         let opponents = super::players::opponents(state, caster).len() as u32;
+        // CR 702.125a: Undaunted reduces generic mana only — no shards, so the
+        // CR 118.7b spillover axis never engages.
         apply_cost_mod_to_mana(
             mana_cost,
             &ManaCost::generic(1),
             opponents * instances,
             false,
+            CostReductionReach::SpillsToGeneric,
         );
     }
 }
@@ -10062,7 +10108,15 @@ fn apply_pending_spell_cost_reductions(
             }
         };
         if matches {
-            apply_cost_mod_to_mana(mana_cost, &ManaCost::generic(1), r.amount, false);
+            // CR 601.2f: pending reductions are stored as a generic amount, so
+            // the CR 118.7b spillover axis is inert.
+            apply_cost_mod_to_mana(
+                mana_cost,
+                &ManaCost::generic(1),
+                r.amount,
+                false,
+                CostReductionReach::SpillsToGeneric,
+            );
             break; // Only apply the first matching reduction
         }
     }

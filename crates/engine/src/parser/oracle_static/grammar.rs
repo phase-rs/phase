@@ -2631,6 +2631,11 @@ pub(crate) fn try_parse_cost_floor(text: &str, lower: &str) -> Option<StaticDefi
         amount,
         spell_filter: None,
         dynamic_count: None,
+        // CR 601.2f: the cost floor is applied after every Reduce/Raise settles
+        // and only ever ADDS generic mana, so the CR 118.7b reach axis — which
+        // governs where an unmatched colored REDUCTION unit may go — never
+        // engages here. Present only because the field is shared with Reduce.
+        reach: CostReductionReach::SpillsToGeneric,
     })
     .description(text.to_string());
 

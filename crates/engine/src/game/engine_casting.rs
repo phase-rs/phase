@@ -58,12 +58,14 @@ pub(super) fn handle_optional_cost_choice(
     casting_costs::handle_decide_additional_cost(state, player, pending_cast, cost, pay, events)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_defiler_payment(
     state: &mut GameState,
     player: PlayerId,
     pending_cast: PendingCast,
     life_cost: u32,
     mana_reduction: &crate::types::mana::ManaCost,
+    reach: crate::types::statics::CostReductionReach,
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -73,6 +75,7 @@ pub(super) fn handle_defiler_payment(
         pending_cast,
         life_cost,
         mana_reduction,
+        reach,
         pay,
         events,
     )

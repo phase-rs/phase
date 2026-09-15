@@ -189,7 +189,8 @@ expression: "&lowered"
                 "value": "Legendary"
               }
             ]
-          }
+          },
+          "reach": "ColoredManaOnly"
         }
       },
       "affected": {

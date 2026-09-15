@@ -28,7 +28,7 @@ use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::resolution::OptionalEffectFrame;
 use crate::types::resolved_commands::ResolvedStackEntryFinalizeCommand;
-use crate::types::statics::{CostModifyMode, StaticMode, StaticModeKind};
+use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode, StaticModeKind};
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::casting::emit_targeting_events;
@@ -7457,7 +7457,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
 
     // CR 601.2b: Check for Defiler cost reduction — optional life payment for colored mana
     // reduction on matching-color permanent spells.
-    if let Some((life_cost, mana_reduction)) = find_defiler_reduction(state, player, object_id) {
+    if let Some(defiler) = find_defiler_reduction(state, player, object_id) {
         let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
@@ -7469,8 +7469,9 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         pending.additional_cost_flow = imposed_required_cost.clone().map(AdditionalCost::Required);
         return Ok(WaitingFor::DefilerPayment {
             player,
-            life_cost,
-            mana_reduction,
+            life_cost: defiler.life_cost,
+            mana_reduction: defiler.mana_reduction,
+            reach: defiler.reach,
             pending_cast: Box::new(pending),
         });
     }
@@ -7548,14 +7549,27 @@ fn flash_timing_non_mana_additional_cost(
         })
 }
 
-/// CR 601.2b: Find the first applicable Defiler cost reduction for a spell being cast.
-/// Returns `Some((life_cost, mana_reduction))` if a controlled Defiler permanent has
-/// `DefilerCostReduction` matching one of the spell's colors and the spell is a permanent spell.
-fn find_defiler_reduction(
+/// CR 601.2b + CR 118.7b: The matched Defiler static's payable parameters — its
+/// life cost, its mana reduction, and the reach that reduction was printed with
+/// ("This effect reduces only the amount of [color] mana you pay").
+///
+/// Single authority for locating the applicable Defiler, so the offer path and
+/// the apply path cannot disagree about which static is in play.
+struct DefilerReduction {
+    life_cost: u32,
+    mana_reduction: crate::types::mana::ManaCost,
+    reach: CostReductionReach,
+}
+
+/// CR 601.2b: Find the first applicable Defiler cost reduction for a spell being
+/// cast, WITHOUT the life-affordability gate. `Some` when a controlled Defiler
+/// permanent has `DefilerCostReduction` matching one of the spell's colors and
+/// the spell is a permanent spell.
+fn find_defiler_static(
     state: &GameState,
     caster: PlayerId,
     spell_id: ObjectId,
-) -> Option<(u32, crate::types::mana::ManaCost)> {
+) -> Option<DefilerReduction> {
     use crate::types::statics::StaticMode;
 
     let spell = state.objects.get(&spell_id)?;
@@ -7589,29 +7603,48 @@ fn find_defiler_reduction(
         if bf_obj.controller != caster {
             continue;
         }
+        if let StaticMode::DefilerCostReduction {
+            color,
+            life_cost,
+            mana_reduction,
+            reach,
+        } = &def.mode
         {
-            if let StaticMode::DefilerCostReduction {
-                color,
-                life_cost,
-                mana_reduction,
-            } = &def.mode
-            {
-                if spell_colors.contains(color) {
-                    // CR 118.3 + CR 119.4b + CR 119.8: Don't offer the Defiler
-                    // prompt when the caster can't actually pay the life — this
-                    // keeps the UI from presenting an impossible choice.
-                    if !super::life_costs::can_pay_life_cast_or_activation_cost(
-                        state, caster, *life_cost,
-                    ) {
-                        return None;
-                    }
-                    return Some((*life_cost, mana_reduction.clone()));
-                }
+            if spell_colors.contains(color) {
+                return Some(DefilerReduction {
+                    life_cost: *life_cost,
+                    mana_reduction: mana_reduction.clone(),
+                    reach: *reach,
+                });
             }
         }
     }
 
     None
+}
+
+/// CR 118.7b/c/d: The reach the applicable Defiler's reduction was printed with.
+/// Read once, at announcement, and carried on the prompt — re-deriving it when
+/// the answer comes back would silently fall back to the rules default if the
+/// source were no longer locatable (CR 601.2f locks cost modification at
+/// announcement, so the announced value is the correct one to apply).
+/// CR 601.2b: Find the first applicable Defiler cost reduction for a spell being cast.
+/// `Some` if a controlled Defiler permanent has `DefilerCostReduction` matching one of
+/// the spell's colors, the spell is a permanent spell, and the life is payable.
+fn find_defiler_reduction(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+) -> Option<DefilerReduction> {
+    let reduction = find_defiler_static(state, caster, spell_id)?;
+    // CR 118.3 + CR 119.4b + CR 119.8: Don't offer the Defiler prompt when the
+    // caster can't actually pay the life — this keeps the UI from presenting an
+    // impossible choice.
+    if !super::life_costs::can_pay_life_cast_or_activation_cost(state, caster, reduction.life_cost)
+    {
+        return None;
+    }
+    Some(reduction)
 }
 
 /// CR 601.2f + CR 118.7: Preview the locked mana obligation after an
@@ -7623,21 +7656,23 @@ pub(crate) fn defiler_reduced_cost(
     spell_id: ObjectId,
     cost: &ManaCost,
 ) -> Option<ManaCost> {
-    let (_, reduction) = find_defiler_reduction(state, caster, spell_id)?;
+    let reduction = find_defiler_reduction(state, caster, spell_id)?;
     let mut reduced = cost.clone();
-    apply_defiler_mana_reduction(&mut reduced, &reduction);
+    apply_defiler_mana_reduction(&mut reduced, &reduction.mana_reduction, reduction.reach);
     Some(reduced)
 }
 
 /// CR 601.2b: Handle the player's decision on Defiler life payment.
 /// If accepted, pays life and reduces the spell's mana cost, then continues to mana payment.
 /// If declined, continues with the original cost.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_defiler_payment(
     state: &mut GameState,
     player: PlayerId,
     pending: PendingCast,
     life_cost: u32,
     mana_reduction: &crate::types::mana::ManaCost,
+    reach: CostReductionReach,
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -7664,7 +7699,7 @@ pub(crate) fn handle_defiler_payment(
             PayLifeCostResult::Paid { .. } => {}
             PayLifeCostResult::PaidWithDeferredSubstitution { .. }
             | PayLifeCostResult::DeferredReplacementChoice { .. } => {
-                apply_defiler_mana_reduction(&mut cost, mana_reduction);
+                apply_defiler_mana_reduction(&mut cost, mana_reduction, reach);
                 let mut pending = pending;
                 pending.cost = cost;
                 state.pending_deferred_life_cost_resume =
@@ -7698,7 +7733,7 @@ pub(crate) fn handle_defiler_payment(
             }
         }
 
-        apply_defiler_mana_reduction(&mut cost, mana_reduction);
+        apply_defiler_mana_reduction(&mut cost, mana_reduction, reach);
     }
 
     let base_cost = pending.base_cost.clone();
@@ -7723,6 +7758,7 @@ pub(crate) fn handle_defiler_payment(
 fn apply_defiler_mana_reduction(
     spell_cost: &mut crate::types::mana::ManaCost,
     reduction: &crate::types::mana::ManaCost,
+    reach: CostReductionReach,
 ) {
     let crate::types::mana::ManaCost::Cost {
         shards: spell_shards,
@@ -7739,12 +7775,22 @@ fn apply_defiler_mana_reduction(
         return;
     };
 
-    // CR 118.7b/c/d: unmatched or excess colored reduction spills over to
-    // generic, same as any other cost reduction (`apply_shard_reduction`).
+    // CR 118.7b/c/d + card text: every printed Defiler reads "This effect
+    // reduces only the amount of [color] mana you pay", which overrides the
+    // default spillover — a reduction unit with no matching pip in the spell's
+    // cost is lost rather than shaved off the generic component. (A white
+    // permanent spell whose cost carries no {W} — a color-indicator card or an
+    // MDFC back face — is exactly the case this protects.) `reach` is read off
+    // the static rather than assumed, so a Defiler-shaped ability parsed
+    // without that rider still gets the CR 118.7b default.
     for shard in reduction_shards {
-        super::casting::apply_shard_reduction(spell_shards, spell_generic, *shard);
+        super::casting::apply_shard_reduction(spell_shards, spell_generic, *shard, reach);
     }
-    *spell_generic = spell_generic.saturating_sub(*reduction_generic);
+    // CR 118.7a: the same rider confines the reduction to colored mana, so an
+    // explicit generic component may only apply under the default reach.
+    if matches!(reach, CostReductionReach::SpillsToGeneric) {
+        *spell_generic = spell_generic.saturating_sub(*reduction_generic);
+    }
 }
 
 /// CR 601.2b: Pay an additional cost, returning a WaitingFor if interactive input is needed
@@ -19590,6 +19636,7 @@ mod tests {
                 color: ManaColor::Green,
                 life_cost: 2,
                 mana_reduction: reduction.clone(),
+                reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
             }));
 
         let result = find_defiler_reduction(&state, PlayerId(0), spell_id);
@@ -19597,9 +19644,15 @@ mod tests {
             result.is_some(),
             "Should find Defiler reduction for green spell"
         );
-        let (life, mana_red) = result.unwrap();
-        assert_eq!(life, 2);
-        assert_eq!(mana_red, reduction);
+        let found = result.unwrap();
+        assert_eq!(found.life_cost, 2);
+        assert_eq!(found.mana_reduction, reduction);
+        // CR 118.7b/c/d: the reach printed on the static must survive the lookup
+        // so the apply path can honor "reduces only the amount of green mana".
+        assert_eq!(
+            found.reach,
+            crate::types::statics::CostReductionReach::ColoredManaOnly
+        );
     }
 
     #[test]
@@ -19647,6 +19700,7 @@ mod tests {
                     shards: vec![ManaCostShard::Green],
                     generic: 0,
                 },
+                reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
             }));
 
         let result = find_defiler_reduction(&state, PlayerId(0), spell_id);
@@ -19701,6 +19755,7 @@ mod tests {
                     shards: vec![ManaCostShard::Green],
                     generic: 0,
                 },
+                reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
             }));
 
         let result = find_defiler_reduction(&state, PlayerId(0), spell_id);
@@ -19757,6 +19812,7 @@ mod tests {
             pending,
             2,
             &mana_reduction,
+            CostReductionReach::ColoredManaOnly,
             true,
             &mut events,
         );
@@ -19777,14 +19833,16 @@ mod tests {
         );
     }
 
-    /// CR 118.7b: a Defiler reduction shard with no matching colored component
-    /// in the spell's cost must spill over to reduce generic mana instead of
-    /// being silently dropped. Regression coverage for `apply_defiler_mana_reduction`
-    /// through its actual consumer, `handle_defiler_payment` — a bare
-    /// matching-shard check on `apply_defiler_mana_reduction` alone would not
-    /// catch a future regression that decouples the two.
+    /// CR 118.7b + card text: every printed Defiler reads "This effect reduces
+    /// only the amount of [color] mana you pay", which OVERRIDES the CR 118.7b
+    /// default. A reduction unit with no matching colored component in the
+    /// spell's cost is therefore lost, not spilled onto generic mana — a green
+    /// Defiler must not shave {1} off a green permanent spell that happens to
+    /// have no {G} in its printed cost. Exercised through the actual consumer,
+    /// `handle_defiler_payment`, rather than the private helper, so a future
+    /// regression that decouples the two is still caught.
     #[test]
-    fn handle_defiler_payment_spills_unmatched_colored_shard_to_generic() {
+    fn handle_defiler_payment_does_not_spill_unmatched_colored_shard_to_generic() {
         use crate::types::mana::ManaCostShard;
 
         let mut state = GameState::new_two_player(42);
@@ -19836,6 +19894,7 @@ mod tests {
             pending,
             2,
             &mana_reduction,
+            CostReductionReach::ColoredManaOnly,
             true,
             &mut events,
         )
@@ -19849,18 +19908,19 @@ mod tests {
             pending_cast.cost,
             ManaCost::Cost {
                 shards: vec![],
-                generic: 2,
+                generic: 3,
             },
-            "the unmatched green reduction unit must spill over to generic (3 -> 2), not be dropped (3 -> 3)",
+            "the Defiler rider confines the reduction to colored mana, so an \
+             unmatched green unit leaves {{3}} alone (3 -> 3), not (3 -> 2)",
         );
     }
 
-    /// CR 118.7c: a Defiler reduction that exceeds the spell's matching
-    /// colored component reduces that color to nothing, then spills the
-    /// excess to generic — again exercised through `handle_defiler_payment`
-    /// rather than the private helper directly.
+    /// CR 118.7c + card text: the same rider also suppresses the "excess"
+    /// spillover. Once the spell's pips of that color are exhausted, a further
+    /// reduction unit has no colored mana left to reduce and is lost rather
+    /// than reaching the generic component.
     #[test]
-    fn handle_defiler_payment_spills_excess_beyond_matching_color_to_generic() {
+    fn handle_defiler_payment_does_not_spill_excess_beyond_matching_color_to_generic() {
         use crate::types::mana::ManaCostShard;
 
         let mut state = GameState::new_two_player(42);
@@ -19914,6 +19974,7 @@ mod tests {
             pending,
             2,
             &mana_reduction,
+            CostReductionReach::ColoredManaOnly,
             true,
             &mut events,
         )
@@ -19927,9 +19988,10 @@ mod tests {
             pending_cast.cost,
             ManaCost::Cost {
                 shards: vec![],
-                generic: 1,
+                generic: 2,
             },
-            "both green pips must be removed and the excess third unit must spill to generic (2 -> 1), not leave generic untouched (2 -> 2)",
+            "both green pips must be removed, but the excess third unit is lost \
+             rather than spilling to generic (2 -> 2), not (2 -> 1)",
         );
     }
 
@@ -23862,6 +23924,7 @@ its replicate cost was paid.)\nDraw a card.";
                 filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
                 caused_by: None,
             }),
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         })
         .affected(TargetFilter::SelfRef)
         .condition(StaticCondition::And {

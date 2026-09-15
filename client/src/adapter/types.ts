@@ -988,6 +988,15 @@ export type ManaCost =
   | { type: "SelfManaCost" }
   | { type: "SelfManaValue" };
 
+/**
+ * CR 118.7b/c/d: how far a mana cost reduction reaches when one of its colored
+ * units finds no matching pip. "SpillsToGeneric" is the rules default;
+ * "ColoredManaOnly" is the card-level override printed as "This effect reduces
+ * only the amount of colored mana you pay". Omitted by the engine when it is
+ * the default.
+ */
+export type CostReductionReach = "SpillsToGeneric" | "ColoredManaOnly";
+
 export type CastFrequency =
   | "Unlimited"
   | "OncePerTurn"
@@ -2230,7 +2239,7 @@ export type WaitingFor =
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; origin?: string; gift_kind?: { type: string }; pending_cast: PendingCast } }
   | { type: "CostTypeChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; pending_cast: PendingCast } }
   | { type: "SpliceOffer"; data: { player: PlayerId; pending_cast: PendingCast; eligible: ObjectId[] } }
-  | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
+  | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; reach?: CostReductionReach; pending_cast: PendingCast } }
   | { type: "CastOffer"; data: { player: PlayerId; kind: CastOfferKind } }
   | { type: "ModalFaceChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
   // `keyword.type` mirrors engine `AlternativeCastKeyword` (game_state.rs) 1:1.

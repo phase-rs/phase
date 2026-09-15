@@ -3421,6 +3421,7 @@ fn visions_of_ruin_flashback_commander_mv_reduces_flashback_cost() {
                 )
                 .expect("statically valid property aggregate"),
             )),
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         })
         .affected(TargetFilter::SelfRef)
         .condition(StaticCondition::CastingAsVariant {
@@ -3483,6 +3484,7 @@ fn avenge_cost_reduction_gated_on_attacked_you_last_turn() {
                 amount: ManaCost::generic(2),
                 spell_filter: None,
                 dynamic_count: None,
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
             })
             .affected(TargetFilter::SelfRef)
             .condition(StaticCondition::AnyPlayerAttackedYouLastTurn);
@@ -11055,6 +11057,7 @@ fn tolarian_terror_self_cost_reduction_applies_from_hand() {
                 filter: None,
                 scope: CountScope::Controller,
             }),
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         })
         .affected(TargetFilter::SelfRef);
         def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
@@ -12067,6 +12070,7 @@ fn self_cost_reduction_applies_from_command_zone() {
                 )
                 .expect("statically valid property aggregate"),
             )),
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         })
         .affected(TargetFilter::SelfRef);
         def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
@@ -12148,6 +12152,7 @@ fn self_cost_reduction_applies_from_graveyard() {
                 scope: CountScope::Controller,
                 filter: Some(instant_sorcery_filter),
             }),
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         })
         .affected(TargetFilter::SelfRef);
         def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
@@ -12242,6 +12247,13 @@ fn morophon_reduces_colored_mana_for_chosen_creature_type() {
                     TypedFilter::card().properties(vec![FilterProp::IsChosenCreatureType]),
                 )),
                 dynamic_count: None,
+                // CR 118.7b/c/d: the printed card carries "This effect reduces
+                // only the amount of colored mana you pay", so this fixture must
+                // mirror what the parser now emits for Morophon. Every pip in
+                // the spell below matches, so the assertion itself is
+                // reach-independent — the discriminating coverage lives in
+                // tests/integration/issue_8432_morophon_colored_only_reduction.rs.
+                reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::card().controller(ControllerRef::You),
@@ -12330,6 +12342,7 @@ fn heliod_warped_eclipse_reduces_by_sum_of_opponents_draws() {
                         aggregate: AggregateFunction::Sum,
                     },
                 }),
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::card().controller(ControllerRef::You),
@@ -13014,6 +13027,7 @@ fn target_gated_self_cost_reduction_applies_after_target_selection() {
                 },
             ]))),
             dynamic_count: None,
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         })
         .affected(TargetFilter::SelfRef);
         def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
@@ -13143,6 +13157,7 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
                 },
             ]))),
             dynamic_count: None,
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         })
         .affected(TargetFilter::SelfRef);
         def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
@@ -18254,6 +18269,7 @@ fn defiler_auto_cast_remains_offered_and_reaches_defiler_payment() {
                 shards: vec![ManaCostShard::Green],
                 generic: 0,
             },
+            reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
         }));
     let action = GameAction::CastSpell {
         object_id: spell,
@@ -24320,6 +24336,7 @@ fn install_first_kicked_spell_reducer(state: &mut GameState, player: PlayerId) -
                 amount: ManaCost::generic(1),
                 spell_filter: Some(kicked_filter.clone()),
                 dynamic_count: None,
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::card().controller(ControllerRef::You),
@@ -25211,6 +25228,7 @@ fn add_esior_style_tax(state: &mut GameState) -> ObjectId {
                 amount: ManaCost::generic(3),
                 spell_filter: Some(spell_filter),
                 dynamic_count: None,
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::card().controller(ControllerRef::Opponent),
@@ -28243,7 +28261,13 @@ fn cost_reduction_removes_matching_colored_symbols() {
         generic: 0,
         shards: vec![ManaCostShard::White, ManaCostShard::Blue],
     };
-    apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+    apply_cost_mod_to_mana(
+        &mut cost,
+        &reduction,
+        1,
+        false,
+        crate::types::statics::CostReductionReach::SpillsToGeneric,
+    );
     assert_eq!(
         cost,
         ManaCost::Cost {
@@ -28263,7 +28287,13 @@ fn colored_cost_reduction_can_remove_hybrid_symbol_once() {
         generic: 0,
         shards: vec![ManaCostShard::White, ManaCostShard::Blue],
     };
-    apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+    apply_cost_mod_to_mana(
+        &mut cost,
+        &reduction,
+        1,
+        false,
+        crate::types::statics::CostReductionReach::SpillsToGeneric,
+    );
     assert_eq!(
         cost,
         ManaCost::Cost {
@@ -28294,7 +28324,13 @@ fn colored_cost_reduction_spills_to_generic_when_cost_has_no_matching_color() {
             ManaCostShard::Green,
         ],
     };
-    apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+    apply_cost_mod_to_mana(
+        &mut cost,
+        &reduction,
+        1,
+        false,
+        crate::types::statics::CostReductionReach::SpillsToGeneric,
+    );
     assert_eq!(
         cost,
         ManaCost::Cost {
@@ -28324,7 +28360,13 @@ fn colored_cost_reduction_spills_excess_beyond_matching_color_to_generic() {
             ManaCostShard::Green,
         ],
     };
-    apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+    apply_cost_mod_to_mana(
+        &mut cost,
+        &reduction,
+        1,
+        false,
+        crate::types::statics::CostReductionReach::SpillsToGeneric,
+    );
     assert_eq!(
         cost,
         ManaCost::Cost {
@@ -28347,7 +28389,13 @@ fn colored_cost_reduction_never_touches_mismatched_color_pip() {
         generic: 0,
         shards: vec![ManaCostShard::White],
     };
-    apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+    apply_cost_mod_to_mana(
+        &mut cost,
+        &reduction,
+        1,
+        false,
+        crate::types::statics::CostReductionReach::SpillsToGeneric,
+    );
     assert_eq!(
         cost,
         ManaCost::Cost {
@@ -28405,6 +28453,7 @@ fn battlefield_cost_increase_applies_before_reduction_floor() {
                 amount: ManaCost::generic(2),
                 spell_filter: None,
                 dynamic_count: None,
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
             })
             .affected(you_spells()),
         );
@@ -28428,6 +28477,7 @@ fn battlefield_cost_increase_applies_before_reduction_floor() {
                 amount: ManaCost::generic(1),
                 spell_filter: None,
                 dynamic_count: None,
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
             })
             .affected(you_spells()),
         );
@@ -28756,6 +28806,7 @@ fn self_cost_reduction_applies_after_battlefield_increase_floor() {
             amount: ManaCost::generic(2),
             spell_filter: None,
             dynamic_count: None,
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         })
         .affected(TargetFilter::SelfRef);
         reduction.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
@@ -28780,6 +28831,7 @@ fn self_cost_reduction_applies_after_battlefield_increase_floor() {
                 amount: ManaCost::generic(1),
                 spell_filter: None,
                 dynamic_count: None,
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::card().controller(ControllerRef::You),
@@ -38037,6 +38089,7 @@ mod alt_cost_reduction_509 {
             amount: ManaCost::generic(generic),
             spell_filter: None,
             dynamic_count: None,
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         })
         .affected(TargetFilter::SelfRef);
         def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
@@ -44403,6 +44456,7 @@ fn add_trinisphere(state: &mut GameState, owner: PlayerId) -> ObjectId {
             amount: ManaCost::generic(3),
             spell_filter: None,
             dynamic_count: None,
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         })
         .condition(StaticCondition::Not {
             condition: Box::new(StaticCondition::SourceIsTapped),
@@ -44774,6 +44828,7 @@ fn cost_floor_building_block_tops_up_generic_to_floor() {
                 amount: ManaCost::generic(5),
                 spell_filter: None,
                 dynamic_count: None,
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
             }));
     }
     let spell = create_stack_spell(&mut state, PlayerId(0), ManaCost::generic(2));

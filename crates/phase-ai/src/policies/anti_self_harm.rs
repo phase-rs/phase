@@ -1990,6 +1990,7 @@ mod tests {
                     shards: vec![ManaCostShard::Green],
                     generic: 0,
                 },
+                reach: engine::types::statics::CostReductionReach::ColoredManaOnly,
             }));
 
         engine::game::apply_as_current(

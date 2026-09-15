@@ -1977,6 +1977,9 @@ impl GameObject {
                         amount: amount.clone(),
                         spell_filter: None,
                         dynamic_count: None,
+                        // CR 118.7b: no printed perpetual modifier carries the
+                        // colored-only rider, so the rules default applies.
+                        reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
                     })
                     .affected(TargetFilter::SelfRef)
                     .active_zones(crate::types::zones::self_spell_cost_mod_active_zones());
