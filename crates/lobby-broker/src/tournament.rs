@@ -284,10 +284,21 @@ impl TournamentCredential {
                 let expires_at_ms = now_ms + TOURNAMENT_CREDENTIAL_TTL_MS;
                 let superseded = std::mem::replace(&mut self.secret, secret.clone());
                 self.expires_at_ms = expires_at_ms;
-                self.last_rotation = Some(RotationRecord {
-                    superseded_secret: superseded,
-                    nonce: nonce.to_owned(),
-                });
+                // Only a NON-EMPTY nonce yields a replayable record. An empty
+                // nonce (an omitted/`#[serde(default)]` field, or a nonce-less
+                // client) mints but records nothing — otherwise the record would
+                // be `(superseded, "")` and anyone holding the superseded secret
+                // could recover the new one by omitting the nonce, which is the
+                // very takeover the nonce exists to prevent. A prior record is
+                // cleared so a superseded secret cannot replay across this mint.
+                self.last_rotation = if nonce.is_empty() {
+                    None
+                } else {
+                    Some(RotationRecord {
+                        superseded_secret: superseded,
+                        nonce: nonce.to_owned(),
+                    })
+                };
                 RenewOutcome::Minted(MintedCredential {
                     secret,
                     expires_at_ms,
@@ -322,15 +333,22 @@ impl TournamentCredential {
             // Not the current secret — consider the replay record.
             CredentialVerdict::Mismatch => {}
         }
-        if let Some(record) = &self.last_rotation {
-            if constant_time_eq(record.superseded_secret.as_bytes(), presented.as_bytes())
-                && constant_time_eq(record.nonce.as_bytes(), nonce.as_bytes())
-            {
-                return if now_ms >= self.expires_at_ms {
-                    RenewKind::Expired
-                } else {
-                    RenewKind::Replayable
-                };
+        // An empty nonce never replays. A non-empty-nonce mint is the only thing
+        // that records a replay record (see `renew`), so `record.nonce` is always
+        // non-empty; this guard is the belt-and-suspenders half that makes the
+        // "empty nonce cannot recover a bearer" invariant hold at BOTH the record
+        // and the match, independent of how the record was written.
+        if !nonce.is_empty() {
+            if let Some(record) = &self.last_rotation {
+                if constant_time_eq(record.superseded_secret.as_bytes(), presented.as_bytes())
+                    && constant_time_eq(record.nonce.as_bytes(), nonce.as_bytes())
+                {
+                    return if now_ms >= self.expires_at_ms {
+                        RenewKind::Expired
+                    } else {
+                        RenewKind::Replayable
+                    };
+                }
             }
         }
         RenewKind::Mismatch
@@ -5751,6 +5769,47 @@ mod tests {
         assert_eq!(
             cred.renew("never-issued", "nonce-1", &env),
             RenewOutcome::Mismatch
+        );
+    }
+
+    /// Maintainer [HIGH] #2: an EMPTY nonce must never be replayable. An
+    /// omitted/`#[serde(default)]` nonce would otherwise record `(superseded, "")`
+    /// and let anyone holding the superseded secret recover the new one by
+    /// omitting the nonce. An empty-nonce rotation still mints, but records no
+    /// replay record, and an empty nonce never replays.
+    #[test]
+    fn an_empty_nonce_mints_but_leaves_nothing_replayable() {
+        let env = FakeEnv::new();
+        let (mut cred, first) = TournamentCredential::mint(&env);
+
+        // Minting with an EMPTY nonce succeeds (a nonce-less client can still
+        // rotate) but must leave no replayable record.
+        let minted = match cred.renew(&first.secret, "", &env) {
+            RenewOutcome::Minted(m) => m,
+            other => panic!("expected Minted, got {other:?}"),
+        };
+        let now = env.now_ms();
+
+        // The superseded secret with an empty nonce CANNOT replay — this is the
+        // takeover path the guard closes.
+        assert_eq!(
+            cred.renew(&first.secret, "", &env),
+            RenewOutcome::Mismatch,
+            "a superseded secret + empty nonce must not recover the new secret"
+        );
+        // Nor with any other nonce (no record was kept at all).
+        assert_eq!(
+            cred.renew(&first.secret, "guessed", &env),
+            RenewOutcome::Mismatch
+        );
+        // The minted secret is the sole authority.
+        assert_eq!(
+            cred.verdict(&minted.secret, now),
+            CredentialVerdict::Accepted
+        );
+        assert_eq!(
+            cred.verdict(&first.secret, now),
+            CredentialVerdict::Mismatch
         );
     }
 

@@ -3063,4 +3063,80 @@ describe("proactive credential rotation", () => {
         ?.organizerToken,
     ).toBe("fresh");
   });
+
+  // Maintainer [HIGH] #1: a renewal in flight against broker A must not, when it
+  // completes after an A->B host switch, clobber the credential B has since
+  // stored under the same code. The compare-and-swap adoption checks the stored
+  // token is still the one this rotation started from.
+  it("does not clobber another broker's credential when a renewal completes after a host switch", async () => {
+    // On broker A: credential near expiry.
+    useMultiplayerStore.setState({
+      hostingServer: "wss://a.example/ws",
+      tournamentCredentials: {
+        TOUR01: {
+          organizerToken: "A-old",
+          organizerTokenExpiresAtMs: NOW + 1000,
+          updatedAt: 0,
+        },
+      },
+    });
+    // A renewal we resolve by hand, so we can switch hosts mid-flight.
+    let resolveRenew!: (r: {
+      ok: true;
+      value: {
+        code: string;
+        role: "Organizer" | "Player";
+        token: string;
+        expires_at_ms: number;
+      };
+    }) => void;
+    vi.mocked(renewTournamentCredentialOver).mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveRenew = res;
+        }),
+    );
+
+    const controller = new AbortController();
+    const inflight = maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "TOUR01",
+      "organizer",
+      "A-old",
+      controller.signal,
+      NOW,
+    );
+
+    // Host switch to B; B's credential for the SAME code replaces the store.
+    useMultiplayerStore.setState({
+      hostingServer: "wss://b.example/ws",
+      tournamentCredentials: {
+        TOUR01: {
+          organizerToken: "B-token",
+          organizerTokenExpiresAtMs: NOW + 5000,
+          updatedAt: 1,
+        },
+      },
+    });
+
+    // A's renewal now lands with a fresh A token — a stale completion.
+    resolveRenew({
+      ok: true,
+      value: {
+        code: "TOUR01",
+        role: "Organizer",
+        token: "A-fresh",
+        expires_at_ms: NOW + 999,
+      },
+    });
+    await inflight;
+
+    // B's credential is intact: A's stale completion did NOT overwrite it.
+    expect(
+      useMultiplayerStore.getState().tournamentCredentials.TOUR01
+        ?.organizerToken,
+    ).toBe("B-token");
+  });
 });

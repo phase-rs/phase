@@ -1148,7 +1148,11 @@ export function shouldRenewCredential(
  *
  * Concurrent near-expiry actions on the same authority share a single rotation
  * (see {@link credentialRenewalsInFlight}), so two actions firing at once can
- * never rotate twice and strand the first on a superseded secret.
+ * never rotate twice and strand the first on a superseded secret. That sharing
+ * is scoped to the BROKER ORIGIN — an A->B host switch can never make a B action
+ * await an A renewal — and the adopted result is compare-and-swapped against the
+ * token this rotation started from, so a renewal that completes after a switch
+ * cannot clobber the credential B has since stored under the same code.
  *
  * Exported for direct testing of the version gate, the lost-reply recovery path
  * (the composed failure the #8782 review asked be covered), and the concurrent-
@@ -1183,9 +1187,16 @@ export async function maybeRenewNearExpiry(
   // BOTH rotate: the second's fresh secret supersedes the first's, so the first
   // action proceeds with a token that is now a mismatch and fails despite a
   // successful renewal. Sharing one in-flight renewal makes both actions settle
-  // on the same surviving secret. Keyed on (code, role); the entry is cleared
-  // when the renewal settles so a later, non-concurrent action starts fresh.
-  const key = `${code}:${role}`;
+  // on the same surviving secret. The entry is cleared when the renewal settles
+  // so a later, non-concurrent action starts fresh.
+  //
+  // Keyed on (BROKER ORIGIN, code, role), not just (code, role): the origin is
+  // the broker this tournament's RPCs run against. Without it, an action against
+  // broker B after an A→B host switch could await broker A's still-in-flight
+  // renewal and send A's bearer token to B. A NUL joins the parts so no origin,
+  // code, or role can be spelled to collide with another triple.
+  const origin = tournamentBroadcastUrl(get) ?? "";
+  const key = `${origin} ${code} ${role}`;
   const existing = credentialRenewalsInFlight.get(key);
   if (existing !== undefined) return existing;
 
@@ -1283,13 +1294,27 @@ async function performCredentialRotation(
     return heldToken;
   }
 
-  set((state) => ({
-    tournamentCredentials: rememberTournamentCredential(
-      state.tournamentCredentials,
-      code,
-      adoptRotatedPatch(role, result.value.token, result.value.expires_at_ms),
-    ),
-  }));
+  // Compare-and-swap before adopting: only overwrite the stored credential if it
+  // is STILL the token this rotation started from. While the renewal was in
+  // flight a host switch may have replaced the code-keyed credential with a
+  // different broker's bearer (codes are only unique per broker), or a
+  // concurrent path may have already rotated it. Adopting unconditionally would
+  // clobber that newer authority with this (possibly other-broker) secret. The
+  // returned token is still correct for THIS RPC's own socket; we simply do not
+  // persist it over a credential that is no longer the one we rotated.
+  const stillOurs =
+    role === "organizer"
+      ? get().tournamentCredentials[code]?.organizerToken === heldToken
+      : get().tournamentCredentials[code]?.playerToken === heldToken;
+  if (stillOurs) {
+    set((state) => ({
+      tournamentCredentials: rememberTournamentCredential(
+        state.tournamentCredentials,
+        code,
+        adoptRotatedPatch(role, result.value.token, result.value.expires_at_ms),
+      ),
+    }));
+  }
   return result.value.token;
 }
 
