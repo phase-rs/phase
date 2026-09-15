@@ -1430,6 +1430,7 @@ mod issue_4948_samwise_gamgee_sacrifice_target_order;
 mod issue_5263_chaos_warp;
 mod issue_6367_thassas_oracle;
 mod issue_6508_citadel_of_pain_each_players_end_step;
+mod issue_6508_create_of_those_tokens_where_x_scope;
 mod issue_7467_manifest_dread_tracked_set;
 mod issue_7552_role_token_image_ref;
 mod issue_7591_room_copy_doors;
