@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-09-12T00:00:00Z",
+  "updated": "2026-09-14T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -19,16 +19,8 @@
       ],
       "main": [
         {
-          "count": 4,
+          "count": 3,
           "name": "Earthbender Ascension"
-        },
-        {
-          "count": 1,
-          "name": "Demolition Field"
-        },
-        {
-          "count": 4,
-          "name": "Esper Origins"
         },
         {
           "count": 4,
@@ -36,47 +28,19 @@
         },
         {
           "count": 4,
-          "name": "Icetill Explorer"
+          "name": "Esper Origins"
         },
         {
-          "count": 14,
-          "name": "Forest"
+          "count": 2,
+          "name": "Ba Sing Se"
         },
         {
-          "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 1,
-          "name": "Keen-Eyed Curator"
-        },
-        {
-          "count": 4,
+          "count": 3,
           "name": "Mightform Harmonizer"
         },
         {
-          "count": 1,
-          "name": "Lumbering Worldwagon"
-        },
-        {
-          "count": 2,
-          "name": "Meltstrider's Resolve"
-        },
-        {
-          "count": 2,
+          "count": 3,
           "name": "Sapling Nursery"
-        },
-        {
-          "count": 1,
-          "name": "Surrak, Elusive Hunter"
-        },
-        {
-          "count": 1,
-          "name": "Snakeskin Veil"
-        },
-        {
-          "count": 2,
-          "name": "Shared Roots"
         },
         {
           "count": 4,
@@ -84,49 +48,65 @@
         },
         {
           "count": 3,
-          "name": "Ba Sing Se"
+          "name": "Shared Roots"
         },
-        {
-          "count": 4,
-          "name": "Fabled Passage"
-        }
-      ],
-      "sideboard": [
         {
           "count": 4,
           "name": "Mossborn Hydra"
         },
         {
-          "count": 1,
+          "count": 15,
+          "name": "Forest"
+        },
+        {
+          "count": 4,
+          "name": "Fabled Passage"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 2,
           "name": "Keen-Eyed Curator"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Meltstrider's Resolve"
         },
         {
-          "count": 2,
-          "name": "Torpor Orb"
+          "count": 4,
+          "name": "Icetill Explorer"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 3,
+          "name": "Meltstrider's Resolve"
         },
         {
           "count": 1,
           "name": "Sapling Nursery"
         },
         {
-          "count": 1,
-          "name": "Snakeskin Veil"
+          "count": 4,
+          "name": "Soul-Guide Lantern"
         },
         {
-          "count": 1,
-          "name": "Surrak, Elusive Hunter"
-        },
-        {
-          "count": 1,
+          "count": 2,
           "name": "Warg Tactics"
         },
         {
           "count": 2,
-          "name": "Gigantic Big Bear"
+          "name": "Surrak, Elusive Hunter"
+        },
+        {
+          "count": 1,
+          "name": "Lumbering Worldwagon"
+        },
+        {
+          "count": 2,
+          "name": "Torpor Orb"
         }
       ]
     },
@@ -582,6 +562,137 @@
       ]
     },
     {
+      "name": "Boros Dwarves",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R",
+        "W"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 2,
+          "name": "Cavern of Souls"
+        },
+        {
+          "count": 2,
+          "name": "Dain's Company"
+        },
+        {
+          "count": 2,
+          "name": "Dain's Company"
+        },
+        {
+          "count": 4,
+          "name": "Inspiring Vantage"
+        },
+        {
+          "count": 4,
+          "name": "Dragonfire Blade"
+        },
+        {
+          "count": 4,
+          "name": "Dwarven Mauler"
+        },
+        {
+          "count": 4,
+          "name": "Leyline Axe"
+        },
+        {
+          "count": 4,
+          "name": "Kili the Resourceful"
+        },
+        {
+          "count": 4,
+          "name": "Lavaspur Boots"
+        },
+        {
+          "count": 4,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 3,
+          "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Raubahn, Bull of Ala Mhigo"
+        },
+        {
+          "count": 4,
+          "name": "Sunbillow Verge"
+        },
+        {
+          "count": 4,
+          "name": "Thorin, Mountain-king"
+        },
+        {
+          "count": 4,
+          "name": "The Lonely Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 3,
+          "name": "Doc Ock's Tentacles"
+        },
+        {
+          "count": 2,
+          "name": "Dwalin, Weaponmaster"
+        },
+        {
+          "count": 2,
+          "name": "Giott, King of the Dwarves"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Erode"
+        },
+        {
+          "count": 2,
+          "name": "Bofur, Reliable Guardian"
+        },
+        {
+          "count": 2,
+          "name": "Shattered Acolyte"
+        },
+        {
+          "count": 1,
+          "name": "Fili the Pathfinder"
+        },
+        {
+          "count": 2,
+          "name": "The Queen of Dale"
+        },
+        {
+          "count": 2,
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 1,
+          "name": "Basilisk Collar"
+        },
+        {
+          "count": 2,
+          "name": "Chainsaw"
+        },
+        {
+          "count": 1,
+          "name": "Chainsaw"
+        }
+      ]
+    },
+    {
       "name": "Dimir Excruciator",
       "author": "MTGGoldfish",
       "colors": [
@@ -713,137 +824,6 @@
         {
           "count": 2,
           "name": "Flashfreeze"
-        }
-      ]
-    },
-    {
-      "name": "Boros Dwarves",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R",
-        "W"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 2,
-          "name": "Cavern of Souls"
-        },
-        {
-          "count": 2,
-          "name": "Dain's Company"
-        },
-        {
-          "count": 2,
-          "name": "Dain's Company"
-        },
-        {
-          "count": 4,
-          "name": "Inspiring Vantage"
-        },
-        {
-          "count": 4,
-          "name": "Dragonfire Blade"
-        },
-        {
-          "count": 4,
-          "name": "Dwarven Mauler"
-        },
-        {
-          "count": 4,
-          "name": "Leyline Axe"
-        },
-        {
-          "count": 4,
-          "name": "Kili the Resourceful"
-        },
-        {
-          "count": 4,
-          "name": "Lavaspur Boots"
-        },
-        {
-          "count": 4,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 3,
-          "name": "Plains"
-        },
-        {
-          "count": 2,
-          "name": "Raubahn, Bull of Ala Mhigo"
-        },
-        {
-          "count": 4,
-          "name": "Sunbillow Verge"
-        },
-        {
-          "count": 4,
-          "name": "Thorin, Mountain-king"
-        },
-        {
-          "count": 4,
-          "name": "The Lonely Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 3,
-          "name": "Doc Ock's Tentacles"
-        },
-        {
-          "count": 2,
-          "name": "Dwalin, Weaponmaster"
-        },
-        {
-          "count": 2,
-          "name": "Giott, King of the Dwarves"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Erode"
-        },
-        {
-          "count": 2,
-          "name": "Bofur, Reliable Guardian"
-        },
-        {
-          "count": 2,
-          "name": "Shattered Acolyte"
-        },
-        {
-          "count": 1,
-          "name": "Fili the Pathfinder"
-        },
-        {
-          "count": 2,
-          "name": "The Queen of Dale"
-        },
-        {
-          "count": 2,
-          "name": "Rest in Peace"
-        },
-        {
-          "count": 1,
-          "name": "Basilisk Collar"
-        },
-        {
-          "count": 2,
-          "name": "Chainsaw"
-        },
-        {
-          "count": 1,
-          "name": "Chainsaw"
         }
       ]
     },

@@ -611,6 +611,8 @@ pub(crate) fn apply_zone_exit_cleanup(
         super::effects::ring::clear_ring_bearer_if_object(state, object_id);
     }
 
+    prune_object_bound_effects_on_exit(state, object_id, from, to);
+
     // Prune host-bound transient effects and clean up mana-tap tracking
     // when a permanent leaves the battlefield.
     if from == Zone::Battlefield {
@@ -636,7 +638,6 @@ pub(crate) fn apply_zone_exit_cleanup(
         // that card for as long as [this permanent] remains on the battlefield"
         // stays playable after its host is gone.
         super::layers::prune_host_left_casting_permissions(state, object_id);
-        super::layers::prune_affected_object_left_effects(state, object_id);
         // CR 611.2b + CR 400.7: the captured source leaving play, OR the host
         // leaving and re-entering as a new object (same storage ObjectId), ends
         // the "can't become untapped for as long as you control [source]"
@@ -999,6 +1000,45 @@ fn clear_hand_or_graveyard_casting_permissions_on_exit(
     }
 }
 
+/// CR 400.7: an object that moves to a new zone is a new object, so a
+/// continuous effect a resolved spell or ability bound to THIS object
+/// (`SpecificObject`) ends with it on every zone exit (issue #8795: Delay's
+/// suspend grant on the exiled card followed the storage id into the
+/// graveyard after the card was cast). Two moves are excepted:
+/// - a move TO the stack: CR 400.7g, an ability granted to a card that
+///   allows it to be cast (suspend) "will continue to apply to the new
+///   object that card became after it moved to the stack". The clause is
+///   wider than the rule — every grant, every way onto the stack — because
+///   the engine's cast move is deferred: a mana-spent keyword grant
+///   (`ManaSpellGrant::AddKeywordUntilEndOfTurn`, Hall of the Bandit Lord's
+///   haste; 6 corpus cards) is installed during payment while the object's
+///   zone still reads hand, and by CR 601.2a / CR 601.2h the card is on the
+///   stack by then, so no object change intervenes and that grant must
+///   survive this move (the cast move is the engine's only production move
+///   onto the stack);
+/// - a permanent spell's move from the stack to the battlefield:
+///   CR 400.7a, its grants "continue to apply to the permanent that spell
+///   becomes".
+///
+/// ONE authority shared by the live transition cleanup
+/// (`apply_zone_exit_cleanup`) and the resolved-zone-change replay applier,
+/// so replay equivalence holds by construction — the way
+/// `clear_hand_or_graveyard_casting_permissions_on_exit` and
+/// `clear_cast_origin_off_provenance_zones` are shared. A battlefield exit is
+/// covered here too; the live battlefield branch keeps its host-lifetime
+/// prunes (`prune_host_left_effects`), which replay does not reproduce.
+pub(crate) fn prune_object_bound_effects_on_exit(
+    state: &mut GameState,
+    object_id: ObjectId,
+    from: Zone,
+    to: Zone,
+) {
+    if to == Zone::Stack || (from == Zone::Stack && to == Zone::Battlefield) {
+        return;
+    }
+    super::layers::prune_affected_object_left_effects(state, object_id);
+}
+
 pub fn apply_resolved_zone_change(
     state: &mut GameState,
     command: &ResolvedZoneChangeCommand,
@@ -1100,6 +1140,13 @@ pub fn apply_resolved_zone_change(
         object.cast_occurrence = None;
         object.prepared_copy_source = None;
     }
+    // CR 400.7: the same object-bound grant lifetime as the live cleanup
+    // (issue #8795), through the shared authority.
+    prune_object_bound_effects_on_exit(state, command.object.object_id, command.from, command.to);
+    let object = state
+        .objects
+        .get_mut(&command.object.object_id)
+        .expect("validated zone command object remains live");
     if command.to == Zone::Battlefield {
         object.reset_for_battlefield_entry(
             turn_number,

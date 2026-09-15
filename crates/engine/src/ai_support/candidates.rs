@@ -2377,7 +2377,7 @@ pub fn candidate_actions_broad_with_probe(
             count,
             ..
         } => bounded_select_card_candidates(*player, choices, [*count]),
-        // CR 118.12a: AI selects a branch of a disjunctive activation cost.
+        // CR 601.2h: AI selects a branch of a disjunctive activation cost.
         WaitingFor::ActivationCostOneOfChoice {
             player,
             costs,
@@ -2386,13 +2386,7 @@ pub fn candidate_actions_broad_with_probe(
             .iter()
             .enumerate()
             .filter(|(_, cost)| {
-                casting::can_pay_ability_cost_now(
-                    state,
-                    *player,
-                    pending_cast.object_id,
-                    cost,
-                    pending_cast.activation_ability_index,
-                )
+                casting::activation_one_of_branch_payable(state, *player, pending_cast, cost)
             })
             .map(|(i, _)| {
                 candidate(

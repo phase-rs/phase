@@ -25,8 +25,10 @@
 //! Corpus (`client/public/card-data.json`): 20 counter heads carry the exile
 //! rider, 6 of them a tail — Spelljack, Thranduil's Decree, Kheru Spellsnatcher
 //! (`CastFromZone`, one family in two modes), No Escape (`Scry`), Delay (`GenericEffect`),
-//! Devious Cover-Up (`ChangeZone` → `Shuffle`). The first four change here; the
-//! last two are out of scope with measured reasons, pinned below as unchanged.
+//! Devious Cover-Up (`ChangeZone` → `Shuffle`). The first four change here; Delay's
+//! tail and its rider's time counters are issue #8795
+//! (`counter_rider_time_counters_8795`); Devious Cover-Up is out of scope with a
+//! measured reason, pinned below as unchanged.
 
 use engine::ai_support::legal_actions;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -57,12 +59,6 @@ const THRANDUILS_DECREE: &str = "Counter target spell. If a permanent spell is c
 const NO_ESCAPE: &str = "Counter target creature or planeswalker spell. If that spell is \
                          countered this way, exile it instead of putting it into its owner's \
                          graveyard.\nScry 1.";
-const DELAY: &str = "Counter target spell. If the spell is countered this way, exile it with \
-                     three time counters on it instead of putting it into its owner's \
-                     graveyard. If it doesn't have suspend, it gains suspend. (At the \
-                     beginning of its owner's upkeep, they remove a time counter. When the \
-                     last is removed, they may play it without paying its mana cost. If it's \
-                     a creature, it has haste.)";
 const DEVIOUS_COVER_UP: &str = "Counter target spell. If that spell is countered this way, \
                                 exile it instead of putting it into its owner's graveyard. You \
                                 may shuffle up to four target cards from your graveyard into \
@@ -471,42 +467,21 @@ fn rider_tail(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
     walk(def)
 }
 
-/// Characterisation, not a pin of this change: Delay's tail is a
-/// `GenericEffect` and Devious Cover-Up's a two-link `ChangeZone` → `Shuffle`,
-/// both outside the allowlist. Under a probe that ran them anyway, with the
-/// parent context supplied, the exiled card had no suspend after layer
-/// evaluation, and Devious Cover-Up's own target slots were never announced so
-/// its shuffle moved nothing — so this test is green with the change, without
-/// it, and with the allowlist opened. What it does pin is the PARSE: each chain carries the tail
-/// as a `SequentialSibling` under the rider, so their exclusion is a decision
-/// about a tail that exists. The allowlist itself is pinned by
-/// `counter_tail_family_has_runtime_evidence`'s unit test.
+/// Characterisation, not a pin of this change: Devious Cover-Up's tail is a
+/// two-link `ChangeZone` → `Shuffle`, outside the allowlist. Under a probe that
+/// ran it anyway, with the parent context supplied, its own target slots were
+/// never announced so its shuffle moved nothing — so this test is green with
+/// the change, without it, and with the allowlist opened. What it does pin is
+/// the PARSE: the chain carries the tail as a `SequentialSibling` under the
+/// rider, so its exclusion is a decision about a tail that exists. The
+/// allowlist itself is pinned by `counter_tail_family_has_runtime_evidence`'s
+/// unit test. (Delay's `GenericEffect` tail was pinned here as inert until
+/// issue #8795 — measured with `has_keyword_kind`, the printed keywords of the
+/// raw object, which cannot see a grant on a card in exile; it is admitted and
+/// driven in `counter_rider_time_counters_8795`.)
 #[test]
-fn delay_and_devious_cover_up_tails_are_parsed_but_inert() {
-    // Delay: the parse carries the tail; the exiled card gains nothing.
-    let parsed = parse_oracle_text(DELAY, "Delay", &[], &["Instant".to_string()], &[]);
-    let tail = parsed
-        .abilities
-        .iter()
-        .find_map(rider_tail)
-        .expect("reach guard: Delay's chain must carry a tail under the rider");
-    assert!(
-        matches!(*tail.effect, Effect::GenericEffect { .. }),
-        "Delay's tail is the suspend grant, got {:?}",
-        tail.effect
-    );
-    let (mut runner, countered, _) = counter_with("Delay", DELAY, CoreType::Creature, |_| {});
-    assert_countered_into_exile(&runner, countered);
-    engine::game::layers::evaluate_layers(runner.state_mut());
-    assert!(
-        !engine::game::keywords::has_keyword_kind(
-            &runner.state().objects[&countered],
-            engine::types::keywords::KeywordKind::Suspend
-        ),
-        "Delay's suspend grant is inert today (and outside the allowlist)"
-    );
-
-    // Devious Cover-Up: the parse carries a two-link tail; the graveyard is untouched.
+fn devious_cover_up_tail_is_parsed_but_inert() {
+    // The parse carries a two-link tail; the graveyard is untouched.
     let parsed = parse_oracle_text(
         DEVIOUS_COVER_UP,
         "Devious Cover-Up",

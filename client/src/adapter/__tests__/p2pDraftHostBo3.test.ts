@@ -5,7 +5,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // (the vitest config only stubs `@wasm/engine`). The seat-gate tests below
 // drive the real P2PDraftHost but overwrite its `adapter` field per-test, so
 // a no-op constructor mock is sufficient.
-vi.mock("../draft-adapter", () => ({
+// Spreads the real module: `draft-adapter` exports the `DRAFT_KINDS` tuple
+// that `draftPersistence`'s kind guard folds, and a total factory would leave
+// that export undefined for every module in this graph. Only the wasm-touching
+// class is overridden. The real module's top level is types plus a DYNAMIC
+// `import("@wasm/draft")`, so importing it loads no wasm.
+vi.mock("../draft-adapter", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../draft-adapter")>()),
   DraftAdapter: vi.fn().mockImplementation(function () {
     return { boosterPackPoolForGame: vi.fn(async () => null) };
   }),

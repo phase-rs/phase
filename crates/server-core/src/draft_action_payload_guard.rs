@@ -6,7 +6,9 @@
 
 use std::collections::HashSet;
 
-use draft_core::types::{DraftAction, MAX_CARDS_PER_PICK, MAX_COMMANDER_DESIGNATIONS};
+use draft_core::types::{
+    DraftAction, MAX_CARDS_PER_PICK, MAX_COMMANDER_DESIGNATIONS, MAX_SHARED_STACK_PILES,
+};
 use lobby_broker::inbound_guard::{validate_deck_list, MAX_MAIN_DECK_ENTRIES};
 use lobby_broker::validation::{
     validate_required_label, validate_token, MAX_DISPLAY_NAME_LEN, MAX_TOKEN_LEN,
@@ -97,6 +99,20 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
                 }
             }
         }
+        // A shared-stack decision names a pile index. This function receives
+        // only the action and can never consult the session, so the EXACT check
+        // -- is this the ACTIVE pile for this seat? -- is
+        // `draft_core::shared_stack::refusal_for`'s; what is bounded here is
+        // what an action alone can state. Named rather than left to the
+        // compiler because falling into the no-op group below compiles and
+        // leaves the index unbounded at the wire.
+        DraftAction::SharedStackDecision { pile, .. } => {
+            if usize::from(*pile) >= MAX_SHARED_STACK_PILES {
+                return Err(format!(
+                    "SharedStackDecision.pile must be below {MAX_SHARED_STACK_PILES}"
+                ));
+            }
+        }
         DraftAction::StartDraft
         | DraftAction::AdvanceRound
         | DraftAction::GeneratePairings
@@ -109,6 +125,38 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
 mod tests {
     use super::*;
     use lobby_broker::inbound_guard::MAX_MAIN_DECK_ENTRIES;
+
+    /// V21. The bound is `MAX_SHARED_STACK_PILES`, which draft-core DERIVES
+    /// from the procedure table -- not a literal repeated here.
+    #[test]
+    fn shared_stack_decision_rejects_out_of_range_pile() {
+        use draft_core::types::SharedStackPileDecision;
+
+        let decision = |pile: u8| DraftAction::SharedStackDecision {
+            seat: 0,
+            pile,
+            decision: SharedStackPileDecision::Take,
+        };
+        let error = guard_draft_action_payload(&decision(MAX_SHARED_STACK_PILES as u8))
+            .expect_err("a pile at the bound is out of range");
+        assert!(error.contains("SharedStackDecision.pile"), "{error}");
+        assert!(guard_draft_action_payload(&decision(u8::MAX)).is_err());
+
+        // Paired positive: the last legal index is ACCEPTED, so the rejection
+        // is not a blanket refusal of the variant.
+        guard_draft_action_payload(&decision(MAX_SHARED_STACK_PILES as u8 - 1))
+            .expect("the last in-range pile is accepted");
+        guard_draft_action_payload(&decision(0)).expect("pile 0 is accepted");
+        // Both decisions pass the payload bound; legality is not this layer's.
+        for value in SharedStackPileDecision::ALL {
+            guard_draft_action_payload(&DraftAction::SharedStackDecision {
+                seat: 0,
+                pile: 0,
+                decision: value,
+            })
+            .expect("the payload guard bounds shape, not legality");
+        }
+    }
 
     #[test]
     fn pick_accepts_valid_instance_id() {

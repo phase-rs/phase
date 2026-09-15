@@ -5778,6 +5778,7 @@ fn node_reads_mutable_resolution_local_state(node: &crate::types::ability::Targe
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::EventTarget
         // ── ADMITTED (4): crossings, judged by the layer-2 adapter, not here ──
         // CR 102.1: designates PLAYERS. The verdict lives on the boxed `PlayerFilter`, which
@@ -5903,6 +5904,7 @@ fn node_has_non_arrival_invariant_property(node: &crate::types::ability::TargetF
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::EventTarget
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
@@ -6154,6 +6156,7 @@ fn controller_ref_is_arrival_invariant(controller: &crate::types::ability::Contr
         | ControllerRef::TargetPlayer
         | ControllerRef::TargetOpponent
         | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::DefendingPlayer
         | ControllerRef::ChosenPlayer { .. }
@@ -7582,7 +7585,13 @@ fn board_has_keyed_trigger(
 /// [`token_growth_is_observed`] asks a differently-FILTERED question of the same walk than
 /// [`board_has_event_observer`] does. The zone narrowing is this walk's whole contribution:
 /// `active_replacements` is all-zones, and dropping it would let a graveyard-resident
-/// replacement route loops.
+/// replacement route loops. The host-zone test is paired with the per-definition
+/// CR 113.6b authority (`replacement_functions_in_zone`): a host CAN sit on the battlefield
+/// while its definition declares `active_zones = [Graveyard]` and therefore cannot apply,
+/// and counting that as an observer is a false veto. Both halves are needed — the host test
+/// alone admits the declared-out-of-zone def, and the authority alone would admit a
+/// graveyard host carrying an undeclared def (whose default answer covers the command zone
+/// too).
 ///
 /// IT YIELDS THE HOST OBJECT, AND NARROWING THE ITEM BACK TO THE BARE DEF IS A CAPABILITY
 /// DELETION, NOT A TIDY-UP. Nothing else can supply what `obj` supplies: `ReplacementDefinition`
@@ -7620,7 +7629,21 @@ fn functioning_board_replacement_defs(
 > {
     crate::game::functioning_abilities::active_replacements(state)
         .filter(|(_, obj, def)| {
-            matches!(obj.zone, Zone::Battlefield | Zone::Command) && replacement_def_is_live(def)
+            matches!(obj.zone, Zone::Battlefield | Zone::Command)
+                // CR 113.6b: the HOST's zone is not the whole zone question — a
+                // definition that declares `active_zones` functions only from
+                // the zones it names, so a battlefield host carrying a
+                // `[Graveyard]`-declared definition cannot apply in the
+                // pipeline at all. Asking the same authority the pipeline asks
+                // (`object_replacement_candidate_applies` → this predicate)
+                // keeps the firewall from counting a definition that provably
+                // can never observe the loop, which would route an otherwise
+                // batchable loop to the safe O(N) discrete path for nothing.
+                // NARROWING, NOT LOOSENING: an undeclared definition answers
+                // `true` for both battlefield and command hosts, so every
+                // pre-existing observer is still counted.
+                && crate::game::functioning_abilities::replacement_functions_in_zone(obj, def)
+                && replacement_def_is_live(def)
         })
         .map(|(idx, obj, def)| (obj, idx, def))
 }
@@ -19922,6 +19945,78 @@ mod tests {
             "DOUBLER-TRUE: the same board plus one unfiltered `CreateToken` doubler DOES observe \
              token growth — so the negative half above is the filter's verdict, not an artifact \
              of the predicate being unable to say `true` on this board"
+        );
+    }
+
+    /// CR 113.6b: a definition that DECLARES `active_zones` functions only from the zones it
+    /// names, so a battlefield HOST carrying a `[Graveyard]`-declared definition cannot apply
+    /// in the replacement pipeline at all. Counting it as an observer is a false veto: it
+    /// routes an otherwise batchable loop to the safe O(N) discrete path for a definition that
+    /// provably can never observe the growing class.
+    ///
+    /// The host-zone test alone cannot see this — `obj.zone` is `Battlefield` in every arm
+    /// below. Only the per-definition authority
+    /// (`functioning_abilities::replacement_functions_in_zone`, the same one
+    /// `game::replacement`'s `object_replacement_candidate_applies` consults) separates them,
+    /// which is why the seam asks it.
+    ///
+    /// Three arms on the SAME fixture, one field apart, so the `false` is the DECLARATION's
+    /// verdict and not an empty board: undeclared ⇒ observed; declared `[Battlefield]` ⇒
+    /// observed; declared `[Graveyard]` ⇒ NOT observed.
+    ///
+    /// REVERT PROBE: drop the `replacement_functions_in_zone` term from
+    /// [`functioning_board_replacement_defs`] ⇒ the `[Graveyard]` arm flips to `true` ⇒ RED,
+    /// while the other two arms stay green (neither ever depended on the term).
+    #[test]
+    fn a_declared_out_of_zone_definition_does_not_observe_token_growth() {
+        use crate::types::ability::{
+            ControllerRef, QuantityModification, ReplacementDefinition, TargetFilter,
+        };
+
+        fn board_with_token_doubler(active_zones: Option<Vec<Zone>>) -> GameState {
+            let mut state = GameState::new_two_player(7);
+            let mut def = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .token_owner_scope(ControllerRef::You)
+                .quantity_modification(QuantityModification::DOUBLE);
+            if let Some(zones) = active_zones {
+                def = def.active_zones(zones);
+            }
+            // Unfiltered on purpose: `board_has_active_replacement_among` excludes
+            // `valid_card: SelfRef` defs, so a self-scoped one would read `false` for a
+            // reason that has nothing to do with zones.
+            assert!(def.valid_card.is_none() || def.valid_card == Some(TargetFilter::SelfRef));
+            install_board_replacement(&mut state, 300, def);
+            state
+        }
+
+        let undeclared = board_with_token_doubler(None);
+        assert!(
+            token_growth_is_observed(&undeclared),
+            "BASELINE: an undeclared battlefield `CreateToken` doubler observes token growth —              the seam's new zone term must not touch the definitions that always counted"
+        );
+
+        let declared_battlefield = board_with_token_doubler(Some(vec![Zone::Battlefield]));
+        assert!(
+            token_growth_is_observed(&declared_battlefield),
+            "CR 113.6b: declaring the zone the host is actually IN keeps the definition an              observer — the term narrows by DECLARATION, not by the presence of one"
+        );
+
+        let declared_graveyard = board_with_token_doubler(Some(vec![Zone::Graveyard]));
+        // Reach-guard: the definition really is installed and functioning at the iterator
+        // level, so the `false` below is the zone authority's verdict and not an empty board.
+        assert_eq!(
+            crate::game::functioning_abilities::active_replacements(&declared_graveyard).count(),
+            1,
+            "reach-guard: the `[Graveyard]`-declared def IS installed on a battlefield host and              IS yielded by the all-zones iterator — the seam is what declines it"
+        );
+        assert_eq!(
+            functioning_board_replacement_defs(&declared_graveyard).count(),
+            0,
+            "CR 113.6b: a battlefield host whose definition declares only [Graveyard] cannot              apply in the pipeline, so the observer walk must not yield it"
+        );
+        assert!(
+            !token_growth_is_observed(&declared_graveyard),
+            "CR 113.6b: a definition that cannot apply must not veto batching — an              out-of-zone declaration does not observe the resource loop"
         );
     }
 

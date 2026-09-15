@@ -2888,6 +2888,9 @@ mod tests {
                 },
             },
             launch_capability: DraftLaunchCapability::None,
+            // Read off the same procedure the kind above names, so the fixture
+            // stays a view the engine could actually have built.
+            distribution: DraftKind::Sealed.procedure().distribution,
             commanders_required: 0,
             current_pack_number: 0,
             pick_number: 2,
@@ -2921,6 +2924,13 @@ mod tests {
             pod_policy: PodPolicy::Competitive,
             pairings: Vec::new(),
             match_config: DraftKind::Sealed.match_config(),
+            // Sealed has no shared stack and no Winston play/draw election, so
+            // both are `None` -- which makes this round trip a free
+            // byte-compatibility assertion: with `skip_serializing_if` on both
+            // fields, this message's JSON is byte-identical to the pre-Winston
+            // wire shape.
+            shared_stack: None,
+            play_first_chooser: None,
         };
         let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
         let json = serde_json::to_string(&msg).unwrap();
@@ -3216,6 +3226,9 @@ mod tests {
             match_config: DraftKind::Premier.match_config(),
             pools: None,
             current_packs: None,
+            // Premier has no shared stack; `skip_serializing_if` keeps this
+            // frame byte-identical to the pre-Winston wire shape.
+            shared_stack: None,
         };
         let msg = ServerMessage::DraftSpectatorView { view };
         let json = serde_json::to_string(&msg).unwrap();
@@ -3230,17 +3243,18 @@ mod tests {
         }
     }
 
-    /// The bridge replaced `FreeCastWindow.filter` with mandatory serialized
-    /// `ResolutionCastFacePolicy`, so v70 cannot decode a paused free-cast
-    /// window and must be refused before it receives one.
+    /// `CastingVariantChoiceOption` now serializes a required `face`, on top
+    /// of v71's Winston draft frames and v72's `ResolutionCastFacePolicy`.
+    /// A v72 peer cannot bind a paused Fuse menu to the right-half cast, so it
+    /// must be refused before it receives the v73 state.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_72_for_casting_variant_face() {
-        assert_eq!(PROTOCOL_VERSION, 72);
+    fn protocol_version_is_73_for_casting_variant_face() {
+        assert_eq!(PROTOCOL_VERSION, 73);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3251,7 +3265,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_72_for_casting_variant_face` stays
+    /// `protocol_version_is_73_for_casting_variant_face` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

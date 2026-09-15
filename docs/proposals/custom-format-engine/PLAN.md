@@ -672,7 +672,9 @@ LegendRuleScope {                       // RESEARCH §10: legend-rule controller
                                         // DEFAULT — all four EC presets use this.
     PreM14AnyController,                // pre-M14: same-named legends across ALL
                                         // controllers all go to owners' graveyards,
-                                        // choiceless (Sixth-Edition "both die" form).
+                                        // choiceless (the Champions of Kamigawa
+                                        // 2004 "nullification" form, in force
+                                        // until M14 — see RESEARCH 10a).
 }
 
 AntePolicy {                            // CR 407 (CONTEXT.md Open item 5)

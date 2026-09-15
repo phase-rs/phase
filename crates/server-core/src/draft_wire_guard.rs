@@ -52,6 +52,26 @@ pub fn guard_create_draft_with_settings(
     Ok(())
 }
 
+/// Refuse a Chaos set layout for a kind whose procedure cannot carry one.
+///
+/// Asked at admission, BEFORE the OS entropy draw and before the pod is
+/// registered and broadcast. The reducer asks the same question again at
+/// `StartDraft` via `DraftProcedure::validate_source`, but its answer would
+/// arrive on a lobby players have already joined and which can never start.
+///
+/// The engine owns both the verdict and its wording — this is a call to
+/// `allows_chaos_layout` and a clone of `CHAOS_LAYOUT_REFUSAL`, never a second
+/// opinion about which kinds take a Chaos layout. Deliberately its own function
+/// rather than a leg of `guard_create_draft_with_settings`: that guard's job is
+/// bounding client-supplied strings and sizes before clone-heavy work, and
+/// `draft_session.rs` records the decision that it does not grow kind policy.
+pub fn guard_chaos_layout_for_kind(kind: DraftKind) -> Result<(), String> {
+    if kind.procedure().allows_chaos_layout() {
+        return Ok(());
+    }
+    Err(draft_core::types::CHAOS_LAYOUT_REFUSAL.to_string())
+}
+
 /// Validate `JoinDraftWithPassword` wire fields before draft session mutation.
 pub fn guard_join_draft_with_password(
     draft_code: &str,
@@ -82,8 +102,8 @@ mod tests {
     use lobby_broker::validation::{MAX_DRAFT_SET_CODE_LEN, MAX_GAME_CODE_LEN};
 
     use super::{
-        guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,
-        guard_reconnect_draft,
+        guard_chaos_layout_for_kind, guard_create_draft_with_settings, guard_draft_action,
+        guard_join_draft_with_password, guard_reconnect_draft,
     };
 
     #[test]
@@ -327,5 +347,39 @@ mod tests {
     fn draft_action_rejects_oversized_code() {
         let err = guard_draft_action(&"x".repeat(MAX_GAME_CODE_LEN + 1)).unwrap_err();
         assert!(err.contains("draft_code"));
+    }
+    /// A Winston pod opens every booster into ONE face-down stack, so there is
+    /// no per-seat, per-round slot for a Chaos assignment to fill. Refused here
+    /// so the refusal lands before the entropy draw and before the lobby is
+    /// registered and broadcast -- not at `StartDraft`, on a full pod.
+    #[test]
+    fn a_shared_stack_kind_is_refused_a_chaos_layout_before_the_entropy_draw() {
+        let err = guard_chaos_layout_for_kind(DraftKind::Winston)
+            .expect_err("Winston cannot carry a Chaos layout");
+        // The engine owns the wording; this boundary only asks earlier.
+        assert_eq!(err, draft_core::types::CHAOS_LAYOUT_REFUSAL);
+    }
+
+    /// Paired positive, and the reach guard for the refusal above: every kind
+    /// that deals a pack per seat still takes a Chaos layout, so the test above
+    /// is demonstrably about the shared stack and not about the guard refusing
+    /// everything.
+    #[test]
+    fn every_pack_dealing_kind_still_takes_a_chaos_layout() {
+        let mut refused = 0;
+        for kind in DraftKind::ALL {
+            match guard_chaos_layout_for_kind(kind) {
+                Ok(()) => assert!(
+                    kind.procedure().allows_chaos_layout(),
+                    "{kind:?} was admitted but its procedure says otherwise"
+                ),
+                Err(_) => refused += 1,
+            }
+        }
+        assert!(refused > 0, "no kind was refused, so the guard is inert");
+        assert!(
+            refused < DraftKind::ALL.len(),
+            "every kind was refused, so the guard is not discriminating"
+        );
     }
 }

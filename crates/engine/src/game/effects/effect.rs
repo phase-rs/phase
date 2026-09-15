@@ -809,7 +809,7 @@ fn register_transient_effect(
             if generic_effect_affected_uses_inherited_targets(filter) {
                 return;
             }
-            let filter = crate::game::effects::resolved_object_filter(ability, filter);
+            let filter = crate::game::effects::resolved_object_filter(state, ability, filter);
             let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter);
             // Broadcast filter: find matching objects at resolution time and bind each.
             // CR 107.3a + CR 601.2b: ability-context filter evaluation.

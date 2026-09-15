@@ -400,7 +400,13 @@ networkPolicy:
   ingressNamespaceLabels:
     kubernetes.io/metadata.name: kube-system
   # Allow HTTPS egress to the public internet for the card-data bootstrap
-  # (and nothing else besides DNS). Set false once data is on the PVC.
+  # (and nothing else besides DNS). The bootstrap connects out only when a
+  # data file is missing or this binary cannot load the copy on the PVC,
+  # which an upgrade can cause: a newer server may not read an export
+  # written for an older one. With this false and server.announceTo empty
+  # there is no route to replace it — a server that cannot read
+  # card-data.json puts the old copy back and exits instead of starting —
+  # so closing it makes re-provisioning the PVC a manual job.
   allowBootstrapEgress: true
 
 # The binary is static musl; musl's resolver fails on search-list expansion

@@ -3070,13 +3070,16 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
 /// replacement whose execute mills N then returns this card from the graveyard
 /// to hand.
 ///
-/// The replacement functions while the card is in the graveyard. Two pieces make
-/// that work: (1) the draw-replacement default player-scope follows the dredge
-/// card's effective source player (CR 109.4 + CR 108.4a), so a graveyard card
-/// applies on its owner's draw — no `valid_player`/`valid_card` needed (and
+/// CR 113.6b: the replacement functions from the graveyard and ONLY from the
+/// graveyard, which the definition states via `active_zones = [Graveyard]` —
+/// without it the card would keep offering dredge from the battlefield, where
+/// CR 702.52a says the ability doesn't function. Two more pieces complete it:
+/// (1) the draw-replacement default player-scope follows the dredge card's
+/// effective source player (CR 109.4 + CR 108.4a), so a graveyard card applies
+/// on its owner's draw — no `valid_player`/`valid_card` needed (and
 /// `valid_card: SelfRef` would not match a `Draw`, which has no affected object);
-/// (2) `find_applicable_replacements` includes graveyard dredge cards on that
-/// player's draw, gated on library size >= N (CR 702.52b enforced at offer time).
+/// (2) `find_applicable_replacements` gates the offer on library size >= N
+/// (CR 702.52b), the one half that depends on live game state.
 pub fn synthesize_dredge(face: &mut CardFace) {
     let Some(n) = face.keywords.iter().find_map(|k| match k {
         Keyword::Dredge(n) => Some(*n),
@@ -3121,9 +3124,14 @@ pub fn synthesize_dredge(face: &mut CardFace) {
     mill.sub_ability = Some(Box::new(return_to_hand));
 
     // CR 702.52a + CR 121.6b: Dredge replaces a single individual card draw
-    // ("if you would draw a card, you may instead mill N"), not the instruction count.
+    // ("if you would draw a card, you may instead mill N"), not the instruction
+    // count — and CR 702.52a + CR 113.6b, it "functions only while the card with
+    // dredge is in a player's graveyard." Declaring that zone on the definition
+    // is what keeps a dredge creature on the BATTLEFIELD, where the ability does
+    // not function, from offering its dredge on your draws.
     let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
-        .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
+        .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+        .active_zones(vec![Zone::Graveyard]);
     replacement.mode = crate::types::ability::ReplacementMode::Optional { decline: None };
     replacement.description = Some(
         "CR 702.52a: Dredge — instead of drawing, you may mill N cards and return this \
@@ -11848,6 +11856,14 @@ mod madness_synthesis_tests {
             }
         ));
         assert!(is_dredge_draw_replacement(repl));
+        // CR 702.52a + CR 113.6b: dredge "functions only while the card with
+        // dredge is in a player's graveyard" — the definition must SAY so, or
+        // the pipeline's default battlefield/command scan offers it in play.
+        assert_eq!(
+            repl.active_zones,
+            vec![Zone::Graveyard],
+            "dredge must declare graveyard-only zone of function"
+        );
     }
 
     #[test]
@@ -16009,6 +16025,7 @@ mod annihilator_runtime_tests {
             attacker_ids: vec![attacker_id],
             defending_player,
             attacks: vec![(attacker_id, AttackTarget::Player(defending_player))],
+            declaration_records: Vec::new(),
         }
     }
 

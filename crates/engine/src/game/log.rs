@@ -1255,6 +1255,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             attacker_ids,
             defending_player,
             attacks,
+            ..
         } => {
             // The legacy fallback keeps pre-`attacks` snapshots legible. New
             // declarations preserve each attacker's actual target, which may be
@@ -2127,11 +2128,13 @@ mod tests {
             attacker_ids: vec![],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         };
         let attacker = GameEvent::AttackersDeclared {
             attacker_ids: vec![ObjectId(7)],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         };
 
         assert!(should_exclude_event(&no_attackers, &state));
@@ -2169,6 +2172,7 @@ mod tests {
                 (bear, AttackTarget::Player(PlayerId(1))),
                 (wolf, AttackTarget::Planeswalker(gideon)),
             ],
+            declaration_records: Vec::new(),
         };
 
         assert_eq!(

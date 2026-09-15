@@ -1797,7 +1797,7 @@ pub enum StaticMode {
     /// into one attach gate, so a single typed variant covers both Equipment
     /// (CR 301.5) and Aura (CR 303.4) — the `filter` (a reused `TargetFilter`)
     /// expresses "a creature with power N or greater", "a legendary creature",
-    /// "an {type}", etc. Corpus: Strata Scythe, Brass Knuckles ("a creature with
+    /// "an {type}", etc. Corpus: O-Naginata, Gate Smasher ("a creature with
     /// power/toughness N or greater"), Konda's Banner ("a legendary creature").
     ///
     /// Data-carrying variant (holds `TargetFilter`) — not registry-registered

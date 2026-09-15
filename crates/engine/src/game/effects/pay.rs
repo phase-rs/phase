@@ -2880,6 +2880,7 @@ mod tests {
             attacker_ids: vec![ObjectId(99)],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         });
         assert_eq!(
             trigger_event_amount_for_x_payment(&state),

@@ -168,7 +168,7 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // CR 509.1b: BlockRestriction carries the allowed-attacker filter.
             | StaticMode::BlockRestriction { .. }
             // CR 301.5 + CR 303.4 + CR 701.3a: AttachmentRestriction carries the
-            // `TargetFilter` of legal hosts (Strata Scythe, Konda's Banner).
+            // `TargetFilter` of legal hosts (O-Naginata, Konda's Banner).
             // Enforced via active static definitions in effects/attach.rs::attachment_illegality.
             | StaticMode::AttachmentRestriction { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
@@ -664,6 +664,9 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::TriggeringPlayer => "triggering player".into(),
         TargetFilter::TriggeringSource => "triggering source".into(),
         TargetFilter::EventTarget => "object targeted by the triggering event".into(),
+        TargetFilter::EventTargetController => {
+            "controller of the object targeted by the triggering event".into()
+        }
         TargetFilter::DefendingPlayer => "defending player".into(),
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
@@ -961,6 +964,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::TargetPlayer => "target player's",
                     ControllerRef::TargetOpponent => "target opponent's",
                     ControllerRef::ParentTargetController => "parent target's",
+                    ControllerRef::EventTargetController => "the damaged object's controller's",
                     ControllerRef::ParentTargetOwner => "parent target owner's",
                     ControllerRef::DefendingPlayer => "defending player's",
                     ControllerRef::SourceChosenPlayer => "the chosen player's",
@@ -1151,6 +1155,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::TargetPlayer => "target player",
                 ControllerRef::TargetOpponent => "target opponent",
                 ControllerRef::ParentTargetController => "parent target's controller",
+                ControllerRef::EventTargetController => {
+                    "controller of the object the triggering event targeted"
+                }
                 ControllerRef::ParentTargetOwner => "parent target's owner",
                 ControllerRef::DefendingPlayer => "defending player",
                 ControllerRef::SourceChosenPlayer => "the chosen player",
@@ -1228,6 +1235,9 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::TargetPlayer => "target player controls",
         ControllerRef::TargetOpponent => "target opponent controls",
         ControllerRef::ParentTargetController => "parent target's controller controls",
+        ControllerRef::EventTargetController => {
+            "the controller of the object the triggering event targeted controls"
+        }
         ControllerRef::ParentTargetOwner => "parent target's owner controls",
         ControllerRef::DefendingPlayer => "defending player controls",
         ControllerRef::SourceChosenPlayer => "the chosen player controls",
@@ -1467,6 +1477,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card",
                 ObjectScope::AmassedArmy => "amassed Army",
                 ObjectScope::BatchSource => "batch source",
+                ObjectScope::ChainRootTarget => "chain-root target",
             };
             match counter_type {
                 Some(ct) => format!("{} counters on {scope_str}", ct.as_str()),
@@ -1495,6 +1506,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's power".into(),
             ObjectScope::AmassedArmy => "amassed Army's power".into(),
             ObjectScope::BatchSource => "batch source's power".into(),
+            ObjectScope::ChainRootTarget => "chain-root target's power".into(),
         },
         QuantityRef::BasePower { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1509,6 +1521,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's base power".into(),
             ObjectScope::AmassedArmy => "amassed Army's base power".into(),
             ObjectScope::BatchSource => "batch source's base power".into(),
+            ObjectScope::ChainRootTarget => "chain-root target's base power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1523,6 +1536,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's toughness".into(),
             ObjectScope::AmassedArmy => "amassed Army's toughness".into(),
             ObjectScope::BatchSource => "batch source's toughness".into(),
+            ObjectScope::ChainRootTarget => "chain-root target's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1537,6 +1551,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's mana value".into(),
             ObjectScope::AmassedArmy => "amassed Army's mana value".into(),
             ObjectScope::BatchSource => "batch source's mana value".into(),
+            ObjectScope::ChainRootTarget => "chain-root target's mana value".into(),
         },
         QuantityRef::TargetObjectManaValue { .. } => "target object's mana value".into(),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -1552,6 +1567,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's colors".into(),
             ObjectScope::AmassedArmy => "amassed Army's colors".into(),
             ObjectScope::BatchSource => "batch source's colors".into(),
+            ObjectScope::ChainRootTarget => "chain-root target's colors".into(),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1568,6 +1584,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             }
             ObjectScope::AmassedArmy => "typeline components on amassed Army".into(),
             ObjectScope::BatchSource => "typeline components on batch source".into(),
+            ObjectScope::ChainRootTarget => "typeline components on chain-root target".into(),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1582,6 +1599,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OwnedLinkedExileCard => "words in owned linked-exiled card's name".into(),
             ObjectScope::AmassedArmy => "words in amassed Army's name".into(),
             ObjectScope::BatchSource => "words in batch source's name".into(),
+            ObjectScope::ChainRootTarget => "words in chain-root target's name".into(),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             let scope_str = match scope {
@@ -1595,6 +1613,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card",
                 ObjectScope::AmassedArmy => "amassed Army",
                 ObjectScope::BatchSource => "batch source",
+                ObjectScope::ChainRootTarget => "chain-root target",
             };
             match color {
                 Some(c) => format!("{c:?} mana symbols in {scope_str}'s mana cost"),
@@ -9563,6 +9582,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardPower", Unhandled),
             ObjectScope::AmassedArmy => ("AmassedArmyPower", Handled),
             ObjectScope::BatchSource => ("BatchSourcePower", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => ("ChainRootTargetPower", Unhandled),
         },
         QuantityRef::BasePower { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9577,6 +9600,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardBasePower", Unhandled),
             ObjectScope::AmassedArmy => ("AmassedArmyBasePower", Handled),
             ObjectScope::BatchSource => ("BatchSourceBasePower", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => ("ChainRootTargetBasePower", Unhandled),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9591,6 +9618,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardToughness", Unhandled),
             ObjectScope::AmassedArmy => ("AmassedArmyToughness", Handled),
             ObjectScope::BatchSource => ("BatchSourceToughness", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => ("ChainRootTargetToughness", Unhandled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9605,6 +9636,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardManaValue", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyManaValue", Handled),
             ObjectScope::BatchSource => ("BatchSourceManaValue", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => ("ChainRootTargetManaValue", Unhandled),
         },
         QuantityRef::TargetObjectManaValue { .. } => ("TargetObjectManaValue", Handled),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -9623,6 +9658,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardColorCount", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyObjectColorCount", Handled),
             ObjectScope::BatchSource => ("BatchSourceObjectColorCount", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => ("ChainRootTargetObjectColorCount", Unhandled),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9637,6 +9676,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardNameWordCount", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyObjectNameWordCount", Handled),
             ObjectScope::BatchSource => ("BatchSourceObjectNameWordCount", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => ("ChainRootTargetObjectNameWordCount", Unhandled),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9653,6 +9696,12 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             }
             ObjectScope::AmassedArmy => ("AmassedArmyObjectTypelineComponentCount", Handled),
             ObjectScope::BatchSource => ("BatchSourceObjectTypelineComponentCount", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => {
+                ("ChainRootTargetObjectTypelineComponentCount", Unhandled)
+            }
         },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -9669,6 +9718,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             }
             ObjectScope::AmassedArmy => ("AmassedArmyManaSymbolsInManaCost", Handled),
             ObjectScope::BatchSource => ("BatchSourceManaSymbolsInManaCost", Handled),
+            // Fail-closed `=> 0` in `game/quantity.rs`: no card reads a
+            // chain-root target's characteristics yet (CR 601.2c referent is
+            // wired for `CountersOn` only).
+            ObjectScope::ChainRootTarget => ("ChainRootTargetManaSymbolsInManaCost", Unhandled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::PropertyAggregate(_) => ("PropertyAggregate", Handled),

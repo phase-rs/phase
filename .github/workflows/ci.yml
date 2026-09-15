@@ -840,6 +840,15 @@ jobs:
           java-version: 17
 
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          # The action's default is `tools platform-tools`, and it installs each
+          # package with its own `sdkmanager <pkg>` call. Google has withdrawn the
+          # legacy `tools` package from the SDK repository, so that call now fails
+          # with "Failed to find package 'tools'" and takes the whole job with it.
+          # Nothing here uses it: the pinned-SDK step below installs the platform,
+          # build-tools and NDK this job actually needs. Overriding the default is
+          # the fix rather than a version bump — v4.0.1 ships the same default.
+          packages: platform-tools
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:

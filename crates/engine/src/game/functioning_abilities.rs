@@ -55,12 +55,16 @@
 //! - **Replacements**: NOT battlefield-scoped. Zone-of-function is a
 //!   per-replacement property on `ReplacementDefinition`, so
 //!   `active_replacements` scans every object and only applies the
-//!   phased-out / command-zone gate. Caller-side zone restriction still
-//!   lives in `find_applicable_replacements`, which today filters to
-//!   `[Battlefield, Command]` because no in-engine replacement functions
-//!   from hand / graveyard / exile. CR 903.9a commander redirection is
-//!   handled separately in `zones::move_to_zone` — it is not routed
-//!   through `ReplacementDefinition`.
+//!   phased-out / command-zone gate. The per-definition part of the gate is
+//!   `replacement_functions_in_zone`, the replacement-side twin of
+//!   `static_functions_in_zone`: a non-empty `active_zones` restricts the
+//!   definition to exactly those zones per CR 113.6b (CR 702.52a dredge —
+//!   graveyard only), and an empty one takes the `DEFAULT_REPLACEMENT_ZONES`
+//!   default. `find_applicable_replacements` consults that predicate and layers
+//!   the event-dependent CR 614.12 / CR 702.35a self-replacement carve-outs on
+//!   top of the default case. CR 903.9a commander redirection is handled
+//!   separately in `zones::move_to_zone` — it is not routed through
+//!   `ReplacementDefinition`.
 //!
 //! # Condition filtering
 //!
@@ -112,8 +116,15 @@ pub(crate) fn non_emblem_command_zone_trigger_functions(
 /// CR 114.4: In the command zone, only emblems' abilities function by default.
 /// Non-emblem command-zone objects can still contribute individual definitions
 /// that explicitly opt in per CR 113.6b. The per-definition `active_zones` /
-/// `trigger_zones` overrides are enforced by the static/trigger iterators; this
-/// helper only captures the object-level default.
+/// `trigger_zones` overrides are enforced by the static, trigger, and
+/// replacement iterators; this helper only captures the object-level default.
+///
+/// NOT usable as a whole-object pre-filter by any iterator that honours a
+/// per-definition command-zone opt-in — it answers only the default, so
+/// applying it first would reject the opted-in definition before the iterator
+/// ever read it. `active_replacements` applies
+/// `non_emblem_command_zone_replacement_functions` per definition for exactly
+/// that reason, the same way `active_trigger_definitions` does.
 fn object_functions(obj: &GameObject) -> bool {
     if obj.is_phased_out() {
         return false;
@@ -140,6 +151,33 @@ pub fn static_opts_in_to_command_zone(def: &StaticDefinition) -> bool {
 /// from their intervening-if source-zone condition.
 pub fn trigger_opts_in_to_command_zone(def: &TriggerDefinition) -> bool {
     def.trigger_zones.contains(&Zone::Command)
+}
+
+/// CR 113.6b + CR 114.4: True when a replacement on a command-zone object opts
+/// in to function from the command zone via its `active_zones` list. The
+/// replacement-side twin of [`static_opts_in_to_command_zone`] /
+/// [`trigger_opts_in_to_command_zone`].
+///
+/// Without this, CR 114.4's object-level "only emblems function" default would
+/// swallow a non-emblem command-zone source WHOLE, before any per-definition
+/// opt-in could be read — making the declared-zone branch of
+/// [`replacement_functions_in_zone`] unreachable for `Zone::Command` and
+/// silently breaking the `active_zones` contract for that one zone.
+pub fn replacement_opts_in_to_command_zone(def: &ReplacementDefinition) -> bool {
+    def.active_zones.contains(&Zone::Command)
+}
+
+/// CR 905.4a + CR 113.6b: Replacement-side mirror of
+/// `non_emblem_command_zone_static_functions`.
+pub(crate) fn non_emblem_command_zone_replacement_functions(
+    obj: &GameObject,
+    def: &ReplacementDefinition,
+) -> bool {
+    if crate::game::conspiracy::is_conspiracy(obj) {
+        return crate::game::conspiracy::functions_from_command_zone(obj)
+            && replacement_opts_in_to_command_zone(def);
+    }
+    replacement_opts_in_to_command_zone(def)
 }
 
 /// CR 113.6b + CR 114.4 + CR 311.2 / CR 312.2: object-level command-zone
@@ -239,6 +277,60 @@ pub(crate) fn static_functions_in_zone(obj: &GameObject, def: &StaticDefinition)
         }
     }
 }
+
+/// CR 113.6b: does `def` function from the zone `obj` is currently in?
+///
+/// The replacement-side twin of [`static_functions_in_zone`], and the single
+/// authority for [`ReplacementDefinition::active_zones`]:
+///
+/// 1. **Declared off-zone replacement** (non-empty `active_zones`) — CR 113.6b,
+///    "an ability that states which zones it functions in functions only from
+///    those zones." Restricted to exactly the listed zones. CR 702.52a dredge
+///    ("functions only while the card with dredge is in a player's graveyard")
+///    is the shape this exists for.
+/// 2. **Plain replacement** (empty `active_zones`) — the CR 113.6 default,
+///    which for the replacement pipeline means the zones
+///    `replacement::object_replacement_candidate_applies` scans.
+///
+/// `Zone::Command` in case 1 is a real, reachable declaration, not a dead
+/// branch: `active_replacements` admits a non-emblem command-zone source for
+/// precisely the definitions that name `Zone::Command`, so CR 114.4's
+/// object-level emblem default never gets to swallow the opt-in first.
+///
+/// Deliberately NOT the whole zone-of-function answer for case 2: the caller
+/// layers the CR 614.12 (self-replacement as an object enters) and CR 702.35a
+/// (Madness self-replacement as an object is discarded) carve-outs on top,
+/// because those depend on the proposed event, not on the object's zone. A
+/// definition in case 1 gets no carve-outs — it has already said where it works.
+pub(crate) fn replacement_functions_in_zone(obj: &GameObject, def: &ReplacementDefinition) -> bool {
+    replacement_functions_from_zone(def, obj.zone)
+}
+
+/// CR 113.6b: [`replacement_functions_in_zone`] against an EXPLICIT zone rather
+/// than the source's current one.
+///
+/// Exists for CR 113.6h + CR 614.12: "an object's ability that modifies how that
+/// particular object enters the battlefield functions as that object is entering
+/// the battlefield," and CR 614.12 directs the check at "the characteristics of
+/// the permanent as it would exist ON THE BATTLEFIELD." At that moment the
+/// object still sits in the zone it is LEAVING (hand, library, graveyard, stack),
+/// so asking where it is would reject a definition that declares the zone it is
+/// entering. `replacement::object_replacement_candidate_applies` passes the
+/// destination for that one case and the source's own zone for every other.
+pub(crate) fn replacement_functions_from_zone(def: &ReplacementDefinition, zone: Zone) -> bool {
+    if def.active_zones.is_empty() {
+        DEFAULT_REPLACEMENT_ZONES.contains(&zone)
+    } else {
+        def.active_zones.contains(&zone)
+    }
+}
+
+/// CR 113.6: the zones a replacement with no declared `active_zones` is scanned
+/// from. The command zone joins the battlefield here for CR 114.4 emblems,
+/// whose abilities function from it; a non-emblem command-zone object never
+/// reaches this default, because `active_replacements` already required its
+/// definition to opt in via `replacement_opts_in_to_command_zone`.
+pub(crate) const DEFAULT_REPLACEMENT_ZONES: [Zone; 2] = [Zone::Battlefield, Zone::Command];
 
 /// Iterate `StaticDefinition`s on `obj` that are currently functioning, with
 /// the CR 702.26b / CR 114.4 gate, the full CR 113.6 zone-of-function gate,
@@ -509,10 +601,13 @@ pub fn battlefield_active_triggers(
 /// time evaluation remains in the replacement pipeline itself.
 ///
 /// Zones callers actually scan today:
-/// - `find_applicable_replacements` in `game/replacement.rs` restricts
-///   to `[Battlefield, Command]` plus the entering card (CR 614.12
-///   self-replacement on ETB) or the discarded card (CR 702.35a
-///   Madness self-replacement from hand).
+/// - `find_applicable_replacements` in `game/replacement.rs` delegates the
+///   per-definition zone question to `replacement_functions_in_zone`: the
+///   `DEFAULT_REPLACEMENT_ZONES` default plus the entering card (CR 614.12
+///   self-replacement on ETB), the discarded card (CR 702.35a Madness
+///   self-replacement from hand), or the spell leaving the stack (CR 608.2n);
+///   and, for a definition that declares `active_zones`, exactly those zones
+///   (CR 113.6b — CR 702.52a dredge, graveyard only).
 /// - **CR 903.9a commander redirection** is not routed through
 ///   `ReplacementDefinition` at all; it is a hard-coded redirect in
 ///   `game/zones.rs::move_to_zone`. The helper's scan is future-proofed
@@ -521,13 +616,31 @@ pub fn active_replacements(
     state: &GameState,
 ) -> impl Iterator<Item = (usize, &GameObject, &ReplacementDefinition)> {
     state.objects.values().flat_map(move |obj| {
-        // Phased-out / command-zone gate still applies even though
-        // replacements are not battlefield-scoped.
-        let functioning = object_functions(obj);
+        // CR 702.26b: phased-out permanents' abilities never function. Purely
+        // object-level, so it short-circuits every definition on the object.
+        let phased_out = obj.is_phased_out();
+        // CR 114.4 + CR 113.6b: the command-zone gate is PER DEFINITION, not
+        // per object. Only emblems function from the command zone by default,
+        // but a definition that explicitly names `Zone::Command` in its
+        // `active_zones` has opted in and functions from there — the same
+        // shape `active_trigger_definitions` applies to `trigger_zones`.
+        // Reading it per definition is what keeps `ReplacementDefinition::
+        // active_zones` a real general axis: an object-level pre-filter here
+        // would drop the opted-in definition before the declared-zone branch
+        // of `replacement_functions_in_zone` could ever admit it.
+        let command_zone_non_emblem = obj.zone == Zone::Command && !obj.is_emblem;
         obj.replacement_definitions
             .iter_all()
             .enumerate()
-            .filter(move |_| functioning)
+            .filter(move |(_, def)| {
+                if phased_out {
+                    return false;
+                }
+                if command_zone_non_emblem {
+                    return non_emblem_command_zone_replacement_functions(obj, def);
+                }
+                true
+            })
             .map(move |(idx, def)| (idx, obj, def))
     })
 }
@@ -1079,6 +1192,95 @@ mod tests {
             .collect();
         assert!(ids.contains(&1));
         assert!(ids.contains(&2));
+    }
+
+    /// CR 114.4 + CR 113.6b: the object-level "only emblems function from the
+    /// command zone" default must NOT swallow a replacement that explicitly
+    /// names `Zone::Command`. Before the opt-in existed, `active_replacements`
+    /// applied `object_functions` to the whole object, so a declared-Command
+    /// replacement on a non-emblem source was dropped here — one step before
+    /// `replacement_functions_in_zone` could admit it, making the declared-zone
+    /// branch unreachable for that zone.
+    #[test]
+    fn active_replacements_admits_declared_command_zone_on_non_emblem_source() {
+        let mut state = new_state();
+
+        // Non-emblem command-zone source, definition opts in to Command.
+        let mut opted_in = make_obj(1, Zone::Command);
+        opted_in.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .active_zones(vec![Zone::Command])]
+            .into();
+
+        // Same source shape, but the definition takes the CR 113.6 default —
+        // CR 114.4 still refuses it, so the emblem policy is preserved.
+        let mut defaulted = make_obj(2, Zone::Command);
+        defaulted.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)].into();
+
+        // A definition naming some OTHER zone must not smuggle itself in on
+        // the strength of having declared something.
+        let mut other_zone = make_obj(3, Zone::Command);
+        other_zone.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .active_zones(vec![Zone::Graveyard])]
+            .into();
+
+        // CR 114.4: an emblem needs no opt-in.
+        let mut emblem = make_obj(4, Zone::Command);
+        emblem.is_emblem = true;
+        emblem.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)].into();
+
+        for obj in [opted_in, defaulted, other_zone, emblem] {
+            state.objects.insert(obj.id, obj);
+        }
+
+        let ids: Vec<u64> = active_replacements(&state)
+            .map(|(_, obj, _)| obj.id.0)
+            .collect();
+        assert!(
+            ids.contains(&1),
+            "CR 113.6b: a replacement declaring Zone::Command must function from \
+             the command zone even on a non-emblem source"
+        );
+        assert!(
+            !ids.contains(&2),
+            "CR 114.4: a default (empty active_zones) replacement on a non-emblem \
+             command-zone source must still be refused"
+        );
+        assert!(
+            !ids.contains(&3),
+            "CR 113.6b: declaring [Graveyard] must not admit the source from the \
+             command zone"
+        );
+        assert!(
+            ids.contains(&4),
+            "CR 114.4: an emblem's replacements function from the command zone \
+             without any opt-in"
+        );
+    }
+
+    /// CR 702.26b: phasing is object-level and outranks the per-definition
+    /// command-zone opt-in — the opt-in must not become a way back in for a
+    /// phased-out source.
+    #[test]
+    fn active_replacements_still_refuses_phased_out_declared_command_source() {
+        let mut state = new_state();
+        let mut obj = make_obj(1, Zone::Command);
+        obj.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .active_zones(vec![Zone::Command])]
+            .into();
+        obj.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
+            cause: crate::game::game_object::PhaseOutCause::Directly,
+        };
+        state.objects.insert(obj.id, obj);
+        assert_eq!(
+            active_replacements(&state).count(),
+            0,
+            "CR 702.26b: a phased-out source contributes nothing, opt-in or not"
+        );
     }
 
     // The phased-out Azusa test stays here because

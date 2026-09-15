@@ -435,7 +435,7 @@ expression: "&ir"
                 "parsed": {
                   "effect": {
                     "type": "Unimplemented",
-                    "name": "this",
+                    "name": "unrecognized_clause_head",
                     "description": "This ability costs {1} less to activate for each legendary creature you control"
                   },
                   "duration": null,

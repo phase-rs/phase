@@ -157,7 +157,10 @@ pub(crate) fn resolve_source_filter(
 /// `source_controller`, so a controller-relative gate on a player-scoped shield
 /// resolved against `state.active_player`. The authority latches it
 /// unconditionally (CR 113.8).
-fn push_player_scoped_shield(
+///
+/// Shared with `create_damage_replacement::resolve`, whose redirection shield
+/// for a PLAYER original recipient has the same storage shape.
+pub(crate) fn push_player_scoped_shield(
     state: &mut GameState,
     controller: PlayerId,
     source_id: ObjectId,
@@ -172,7 +175,7 @@ fn push_player_scoped_shield(
     );
 }
 
-fn player_damage_filter(player: PlayerId) -> DamageTargetFilter {
+pub(crate) fn player_damage_filter(player: PlayerId) -> DamageTargetFilter {
     DamageTargetFilter::Player {
         player: DamageTargetPlayerScope::Specific(player),
     }
@@ -577,18 +580,43 @@ pub fn resolve(
     // CR 615.5: A `ContinuationStep` rider ("prevent that damage and put that
     // many +1/+1 counters on it" — Gatta and Luzzu) fires per prevented event,
     // so it installs as the shield's `runtime_execute`. A `SequentialSibling`
-    // sub is an independent instruction (CR 700.2d — a separate chosen mode of a
-    // modal spell, e.g. Dromoka's Command mode 3), NOT a rider; it is resolved
-    // on its own by the chain walker and must not become the shield rider.
+    // sub is an independent instruction (CR 700.2 + CR 608.2c — each chosen mode
+    // of a modal spell is its own instruction, followed in the order written;
+    // e.g. Dromoka's Command mode 3), NOT a rider; it is resolved on its own by
+    // the chain walker and must not become the shield rider.
     //
-    // CR 615.5: AWE STRIKE — "You gain life equal to the damage prevented this
-    // way" is a bare prevented-this-way rider (no when/whenever/if prelude). It
-    // reaches this resolver as a `ContinuationStep` only for the one-shot
-    // shape: the assembly gate (assembly.rs) forces `ContinuationStep` for the
-    // bare rider only when the chain root's prevention carries the
+    // CR 615.5: which sentence-boundary riders arrive here as
+    // `ContinuationStep` is decided by `assembly.rs`'s `prevented_this_way_gate`,
+    // which has three arms. (1) An explicit `when|whenever|if … is prevented
+    // this way,` prelude — shape-unrestricted. (2) AWE STRIKE — "You gain life
+    // equal to the damage prevented this way" is a BARE rider (no prelude), and
+    // folds only when the chain root's prevention carries the
     // `And{[ParentTargetSlot, Typed(creature)]}` source filter; for every other
     // chain root (e.g. Reverse Damage's `ChosenDamageSource` shape) the bare
-    // rider stays a `SequentialSibling` and must NOT install here.
+    // rider stays a `SequentialSibling` and must NOT install here. (3) The
+    // DISTRIBUTIVE rider "For each 1 damage prevented this way, <effect>",
+    // recognized by its clause-level `repeat_for` reading `EventContextAmount`
+    // plus the anaphor (#8777). Arm 3 has NO shape gate whatsoever — not on the
+    // prevention amount, not on a source filter, not on whether the shield is
+    // targeted. It reaches BOTH the untargeted player-scoped
+    // `PreventionAmount::All` combat shield (Inkshield, which works end to end)
+    // AND object-hosted TARGETED shields, `PreventionAmount::All` or
+    // `PreventionAmount::Next(N)` alike (Brace for Impact, Test of Faith,
+    // Temper) and the nested-rider shape (Gatta and Luzzu), whose
+    // `PutCounter { target: ParentTarget }` rider is bound to the parent's
+    // chosen referent by `bind_detached_continuation_to_parent` below —
+    // CR 608.2c, at the one instant parent and rider coexist. A rider whose
+    // parent chain named NO referent (an untargeted parent with an anaphoric
+    // descendant — Clay Pigeon) keeps an empty `targets` and the anaphor
+    // resolves to nothing (CR 608.2b); it does NOT fall back to the creation
+    // event's source, which is CR 603.7c and belongs to the delayed-trigger
+    // seam alone. Corpus census (regenerate: see #8777's census command):
+    // 18 riders reach this install; 5 carry a parent anaphor and enter the
+    // binding; the other 13 keep an empty `targets` unchanged.
+    //
+    // A `SequentialSibling` still never installs here regardless of arm — that
+    // is the CR 700.2 + CR 608.2c boundary above, and widening it is what would
+    // capture an independent chosen mode.
     //
     // The rider is installed via the SAME `runtime_execute` slot as every other
     // prevention rider — the resolution-time `ResolvedAbility` payload. The
@@ -599,7 +627,16 @@ pub fn resolve(
     // `build_resolved_from_def` converter round-trips.
     if let Some(sub_ability) = &ability.sub_ability {
         if sub_ability.sub_link == SubAbilityLink::ContinuationStep {
-            shield = shield.runtime_execute(sub_ability.as_ref().clone());
+            let mut rider = sub_ability.as_ref().clone();
+            // CR 615.5 + CR 608.2c + CR 400.7: the rider leaves the resolution chain here, so
+            // bind its parent anaphor now — this is the last instant the parent's chosen
+            // referent and the rider coexist. Same discipline, same instant, as
+            // `resolve_source_filter` above applies to the damage-SOURCE axis
+            // (`TargetFilter::ChosenDamageSource`'s contract in `types/ability.rs`: resolve it
+            // to a concrete object when the shield is created so the shield does not depend on
+            // a live SOURCE — the same independence, applied here to the parent's referent).
+            crate::game::effects::bind_detached_continuation_to_parent(state, ability, &mut rider);
+            shield = shield.runtime_execute(rider);
         }
     }
 
@@ -3065,6 +3102,475 @@ mod tests {
             assert!(
                 shield.runtime_execute.is_none(),
                 "a SequentialSibling sub must NOT install as runtime_execute"
+            );
+        }
+    }
+
+    // ---- #8777 / PR #8849: bind_detached_continuation_to_parent (H-4/H-4b/H-5/H-6/H-9) ----
+
+    fn put_counter_parent_target_rider(source: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+    }
+
+    /// #8777 (H-4): a `ContinuationStep` rider whose effect targets `ParentTarget`
+    /// binds to EVERY referent the parent's chain selected — a single chosen
+    /// object for a one-target parent, and the WHOLE snapshot (not a per-host
+    /// split) for a multi-target parent. CR 608.2c + CR 615.5.
+    #[test]
+    fn continuation_rider_binds_every_parent_referent() {
+        // Single-target block.
+        {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Test Source".into(),
+                Zone::Battlefield,
+            );
+            let a = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Bear A".into(),
+                Zone::Battlefield,
+            );
+            let ability = ResolvedAbility::new(
+                Effect::PreventDamage {
+                    amount: PreventionAmount::All,
+                    amount_dynamic: None,
+                    target: TargetFilter::ParentTarget,
+                    scope: PreventionScope::AllDamage,
+                    damage_source_filter: None,
+                    prevention_duration: None,
+                },
+                vec![TargetRef::Object(a)],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(put_counter_parent_target_rider(source));
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            let shield = &state.objects[&a].replacement_definitions[0];
+            let rider = shield
+                .runtime_execute
+                .as_ref()
+                .expect("the rider must install as runtime_execute");
+            assert_eq!(
+                rider.targets,
+                vec![TargetRef::Object(a)],
+                "a single-target parent binds the rider to exactly that one referent"
+            );
+        }
+
+        // Two-target block: the multi-target semantics decision (bind the WHOLE
+        // snapshot, mirroring the sibling delayed-trigger authority) — recorded,
+        // not accidental: English cannot distinguish "on that creature"
+        // (per-host) from "on those creatures" (all) at AST level, and the
+        // corpus has zero multi-target carriers (§P2 of the plan), so this is a
+        // test-visible decision rather than a silent one.
+        {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Test Source".into(),
+                Zone::Battlefield,
+            );
+            let a = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Bear A".into(),
+                Zone::Battlefield,
+            );
+            let b = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(0),
+                "Bear B".into(),
+                Zone::Battlefield,
+            );
+            let ability = ResolvedAbility::new(
+                Effect::PreventDamage {
+                    amount: PreventionAmount::All,
+                    amount_dynamic: None,
+                    target: TargetFilter::ParentTarget,
+                    scope: PreventionScope::AllDamage,
+                    damage_source_filter: None,
+                    prevention_duration: None,
+                },
+                vec![TargetRef::Object(a), TargetRef::Object(b)],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(put_counter_parent_target_rider(source));
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            let shield = &state.objects[&a].replacement_definitions[0];
+            let rider = shield
+                .runtime_execute
+                .as_ref()
+                .expect("the rider must install as runtime_execute");
+            assert_eq!(
+                rider.targets,
+                vec![TargetRef::Object(a), TargetRef::Object(b)],
+                "a two-target parent binds the rider to the WHOLE selected snapshot"
+            );
+        }
+    }
+
+    /// #8777 (H-4b, MG2): the gate and the binding fire identically across the
+    /// `ParentTarget*` family — a `ParentTargetSlot { index: 0 }` rider under a
+    /// 1-target parent installs with the same referent as the bare `ParentTarget`
+    /// sibling. Scope note: this pins the INSTALL-TIME binding only; the
+    /// drain-time slot read goes through `resolve_live_parent_slot_from_root` →
+    /// `resolving_root_ability`'s self-fallback, whose same-source hazard has
+    /// zero corpus carriers (§P2 of the plan) and is documented, not tested,
+    /// on `bind_detached_continuation_to_parent`'s doc comment.
+    #[test]
+    fn continuation_rider_with_a_parent_target_slot_anaphor_is_bound() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Source".into(),
+            Zone::Battlefield,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear A".into(),
+            Zone::Battlefield,
+        );
+        let slot_rider = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTargetSlot { index: 0 },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::ParentTarget,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![TargetRef::Object(a)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(slot_rider);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let shield = &state.objects[&a].replacement_definitions[0];
+        let rider = shield
+            .runtime_execute
+            .as_ref()
+            .expect("the ParentTargetSlot rider must install as runtime_execute");
+        assert_eq!(
+            rider.targets,
+            vec![TargetRef::Object(a)],
+            "the gate must fire identically for ParentTargetSlot as for bare ParentTarget"
+        );
+    }
+
+    /// #8777 (H-5): a `ContinuationStep` rider whose effect carries NO parent
+    /// anaphor (Inkshield's `Token` / Awe Strike's `GainLife` shape) under a
+    /// TARGETED parent must keep an EMPTY `targets` — the row that catches the
+    /// naive unconditional `runtime.targets = ability.targets.clone()` patch.
+    #[test]
+    fn continuation_rider_without_a_parent_anaphor_keeps_empty_targets() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Source".into(),
+            Zone::Battlefield,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear A".into(),
+            Zone::Battlefield,
+        );
+        // A GainLife rider carries no TargetFilter that could ever read
+        // ParentTarget — the Awe Strike shape.
+        let gain_life_rider = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![TargetRef::Object(a)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(gain_life_rider);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let shield = &state.objects[&a].replacement_definitions[0];
+        assert!(
+            shield.runtime_execute.is_some(),
+            "reach guard: the rider must still install as runtime_execute"
+        );
+        assert!(
+            shield.runtime_execute.as_ref().unwrap().targets.is_empty(),
+            "a rider with no parent anaphor must keep an EMPTY targets vector, got {:?}",
+            shield.runtime_execute.as_ref().unwrap().targets
+        );
+    }
+
+    /// #8777 (H-6, CR 400.7): the installed rider's `target_incarnations` names
+    /// the chosen object at its current incarnation; after the referent leaves
+    /// and returns under the same id, `pinned_object_targets_all_stale` is true.
+    /// Mirrors the departed-and-returned pattern at
+    /// `parent_target_slot_source_is_not_captured_once_illegal_or_departed`.
+    #[test]
+    fn continuation_rider_pins_its_object_referent_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Source".into(),
+            Zone::Battlefield,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear A".into(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::ParentTarget,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![TargetRef::Object(a)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(put_counter_parent_target_rider(source));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let rider = state.objects[&a].replacement_definitions[0]
+            .runtime_execute
+            .clone()
+            .expect("the rider must install as runtime_execute");
+        assert!(
+            !rider.pinned_object_targets_all_stale(&state),
+            "reach guard: the pin must be current immediately after install"
+        );
+
+        // The referent leaves and returns under the same storage id — CR 400.7:
+        // a new incarnation.
+        for zone in [Zone::Graveyard, Zone::Battlefield] {
+            let _ = crate::game::zone_pipeline::move_object(
+                &mut state,
+                crate::game::zone_pipeline::ZoneMoveRequest::effect(a, zone, source),
+                &mut events,
+            );
+        }
+        assert!(
+            rider.pinned_object_targets_all_stale(&state),
+            "CR 400.7: a departed-and-returned referent must be a new incarnation, \
+             so the pin must now be stale"
+        );
+    }
+
+    /// #8777 (H-9, D1): the NEW scope quadrant Clay Pigeon exposes — an
+    /// UNTARGETED parent (`PreventDamage { target: Controller }`, empty
+    /// `ability.targets`) whose descendant STILL carries a parent anaphor
+    /// (`Sacrifice { target: ParentTarget }`, Clay Pigeon's exact rider shape:
+    /// `SetTapState { SelfRef }` → `Unimplemented("otherwise")` →
+    /// `Sacrifice { ParentTarget }`). The gate fires (the effect chain DOES
+    /// reference `ParentTarget`), but `parent_chain_referents` returns `None`
+    /// (no forwarded context, no root-chain slot, no node-local targets, no
+    /// declared-and-zero-chosen slot) — the referent set stays EMPTY, and it
+    /// does NOT fall back to tier 5 (`TriggeringSource`), because the
+    /// prevention seam consumes only `parent_chain_referents`, never
+    /// `delayed_trigger::parent_target_snapshot`'s tier-5 composition (§D1).
+    /// CR 608.2b: the anaphor has no referent, so this part of the effect
+    /// fails to determine any such information and doesn't happen.
+    #[test]
+    fn untargeted_parent_with_an_anaphoric_descendant_installs_an_empty_referent_set() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Clay Pigeon".into(),
+            Zone::Battlefield,
+        );
+
+        let sacrifice_rider = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::ParentTarget,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut otherwise_rider = ResolvedAbility::new(
+            Effect::unimplemented("otherwise", "Otherwise"),
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        otherwise_rider = otherwise_rider.sub_ability(sacrifice_rider);
+        let tap_rider = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
+                state: crate::types::ability::TapStateChange::Tap,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(otherwise_rider);
+
+        // Untargeted parent: target = Controller, ability.targets = [] — Clay
+        // Pigeon's exact activated-ability shape.
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Controller,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(tap_rider);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 113.7a: an untargeted (source-scoped) shield goes to the floating
+        // registry, not onto an object.
+        let shield = state
+            .pending_damage_replacements
+            .last()
+            .expect("reach guard 1: the shield must be installed");
+        let rider = shield
+            .runtime_execute
+            .as_ref()
+            .expect("reach guard 1: the rider must install as runtime_execute");
+
+        // Reach guard 2: the gate DID fire — the empty result below is the
+        // binding's answer, not the gate short-circuiting on a chain it never
+        // recognized as anaphoric. Without this the row would also pass on a
+        // build where the gate simply missed the nested `Sacrifice` node.
+        assert!(
+            crate::game::effects::ability_refs_parent_target(rider),
+            "reach guard 2: the gate must recognize the nested Sacrifice{{ParentTarget}} anaphor"
+        );
+
+        // The assertion under test: the referent set stays empty.
+        assert!(
+            rider.targets.is_empty(),
+            "an untargeted parent's chain names NO referent, so the anaphoric \
+             descendant must keep an empty targets vector, got {:?}",
+            rider.targets
+        );
+        assert!(
+            rider.target_incarnations.is_empty(),
+            "no referent means no pin either, got {:?}",
+            rider.target_incarnations
+        );
+
+        // Reach guard 3 (instrument sanity): the SAME instrument (this test
+        // binary) CAN produce a non-empty answer for a TARGETED parent's
+        // ParentTarget sibling — proving H-9's empty result is not an
+        // instrument artifact.
+        {
+            let mut state2 = GameState::new_two_player(42);
+            let source2 = create_object(
+                &mut state2,
+                CardId(1),
+                PlayerId(0),
+                "Targeted Source".into(),
+                Zone::Battlefield,
+            );
+            let a = create_object(
+                &mut state2,
+                CardId(2),
+                PlayerId(0),
+                "Bear A".into(),
+                Zone::Battlefield,
+            );
+            let ability2 = ResolvedAbility::new(
+                Effect::PreventDamage {
+                    amount: PreventionAmount::All,
+                    amount_dynamic: None,
+                    target: TargetFilter::ParentTarget,
+                    scope: PreventionScope::AllDamage,
+                    damage_source_filter: None,
+                    prevention_duration: None,
+                },
+                vec![TargetRef::Object(a)],
+                source2,
+                PlayerId(0),
+            )
+            .sub_ability(put_counter_parent_target_rider(source2));
+            let mut events2 = Vec::new();
+            resolve(&mut state2, &ability2, &mut events2).unwrap();
+            let rider2 = state2.objects[&a].replacement_definitions[0]
+                .runtime_execute
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                rider2.targets,
+                vec![TargetRef::Object(a)],
+                "sibling sanity check: a targeted parent's sibling MUST bind non-empty"
             );
         }
     }

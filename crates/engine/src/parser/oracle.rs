@@ -9,22 +9,27 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
 
+use crate::game::effects::cast_from_zone;
+use crate::game::filter::{
+    filter_contains_filter_prop, retarget_chosen_card_type_to_creature_type,
+};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CastTimingPermission,
-    CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-    CostReduction, DamageRedirectTarget, DelayedTriggerCondition, Duration, Effect, EffectScope,
-    FilterProp, ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr,
-    QuantityRef, ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition,
+    CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification,
+    ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, GuardReading,
+    ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ReplacementMode, SolveCondition, SpellCastingOption, StaticCondition,
     StaticDefinition, TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypedFilter,
+    TypedFilter, UnloweredGuard, VoteSubject,
 };
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
 use crate::types::card::DraftEffect;
 use crate::types::card_type::CoreType;
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
-use crate::types::mana::ManaCost;
+use crate::types::mana::{ManaCost, ManaSpellGrant};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
@@ -61,6 +66,7 @@ use super::oracle_classifier::{
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_reduction};
 use super::oracle_dispatch::{dispatch_line_nom, NomDispatchIr};
+use super::oracle_effect::gap_diagnosis;
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     ability_chain_grants_chosen_color_keyword, lower_ability_ir, parse_ability_ir_standalone,
@@ -70,6 +76,7 @@ use super::oracle_effect::{
 };
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::diagnostic::ClauseGapKind;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
     stamp_printed_ability_slot, stamp_printed_trigger_slot, OracleDocBuilder, OracleDocIr,
@@ -1836,14 +1843,7 @@ fn target_filter_uses_filter_prop(
     filter: &TargetFilter,
     pred: &impl Fn(&FilterProp) -> bool,
 ) -> bool {
-    match filter {
-        TargetFilter::Typed(tf) => tf.properties.iter().any(pred),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|inner| target_filter_uses_filter_prop(inner, pred)),
-        TargetFilter::Not { filter } => target_filter_uses_filter_prop(filter, pred),
-        _ => false,
-    }
+    filter_contains_filter_prop(filter, pred)
 }
 
 fn append_sub_ability(chain: &mut AbilityDefinition, tail: AbilityDefinition) {
@@ -2038,19 +2038,31 @@ fn detect_linked_choice_type_statics(
                 matches!(
                     &s.mode,
                     crate::types::statics::StaticMode::ModifyCost {
-                        spell_filter: Some(_),
+                        spell_filter: Some(filter),
                         ..
-                    }
+                    } if target_filter_uses_filter_prop(
+                        filter,
+                        &|prop| matches!(prop, FilterProp::IsChosenCardType),
+                    )
                 )
             });
-            let is_dig = item_ability(item).is_some_and(|def| ability_chain_has_dig(&def))
+            let is_dig = item_ability(item)
+                .is_some_and(|def| ability_chain_reads_chosen_card_type_in_dig(&def))
                 || item_trigger(item).is_some_and(|trigger| {
                     trigger
                         .execute
                         .as_deref()
-                        .is_some_and(ability_chain_has_dig)
+                        .is_some_and(ability_chain_reads_chosen_card_type_in_dig)
                 });
-            if is_cost_reducer || is_dig {
+            let is_spell_cast_valid_card = item_trigger(item).is_some_and(|trigger| {
+                trigger.mode == TriggerMode::SpellCast
+                    && trigger.valid_card.as_ref().is_some_and(|filter| {
+                        target_filter_uses_filter_prop(filter, &|prop| {
+                            matches!(prop, FilterProp::IsChosenCardType)
+                        })
+                    })
+            });
+            if is_cost_reducer || is_dig || is_spell_cast_valid_card {
                 retarget.push(item.id);
             }
         }
@@ -2108,13 +2120,20 @@ fn apply_linked_choice_type_statics(
                     ..
                 } = &mut result.statics[pos].mode
                 {
-                    retarget_chosen_card_type_to_creature_type(filter);
+                    if !retarget_chosen_card_type_to_creature_type(filter) {
+                        continue;
+                    }
                 }
-            } else if let Some(pos) = position_of(ability_ids, *id) {
-                retarget_creature_type_choice_dig_filters_in_ability(&mut result.abilities[pos]);
-            } else if let Some(pos) = position_of(trigger_ids, *id) {
-                if let Some(execute) = result.triggers[pos].execute.as_mut() {
-                    retarget_creature_type_choice_dig_filters_in_ability(execute);
+            }
+            if let Some(pos) = position_of(ability_ids, *id) {
+                if !retarget_creature_type_choice_dig_filters_in_ability(&mut result.abilities[pos])
+                {
+                    continue;
+                }
+            }
+            if let Some(pos) = position_of(trigger_ids, *id) {
+                if !retarget_creature_type_choice_trigger_filters(&mut result.triggers[pos]) {
+                    continue;
                 }
             }
         }
@@ -2130,14 +2149,21 @@ fn apply_linked_choice_type_statics(
     }
 }
 
-/// Whether an ability's effect chain (recursing the sub-ability chain) contains a
-/// `Dig` effect — a chosen-type dig-filter consumer surface.
-fn ability_chain_has_dig(def: &AbilityDefinition) -> bool {
-    matches!(*def.effect, Effect::Dig { .. })
-        || def
-            .sub_ability
-            .as_deref()
-            .is_some_and(ability_chain_has_dig)
+/// Whether an ability's effect chain contains a `Dig` filter that reads a
+/// chosen card type. The reader is kept exact so the relation binds only an
+/// actual consumer, not every unrelated Dig on a creature-type chooser.
+fn ability_chain_reads_chosen_card_type_in_dig(def: &AbilityDefinition) -> bool {
+    matches!(
+        &*def.effect,
+        Effect::Dig { filter, .. }
+            if target_filter_uses_filter_prop(
+                filter,
+                &|prop| matches!(prop, FilterProp::IsChosenCardType),
+            )
+    ) || def
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_chain_reads_chosen_card_type_in_dig)
 }
 
 /// Whether a static is a self-"~ is the chosen type" `AddChosenSubtype` surface.
@@ -2177,45 +2203,51 @@ fn chosen_subtype_kind_from_persisted_choice_items(
         })
 }
 
-/// CR 607.2d: Within a creature-type chooser's cost-modifier spell filter,
-/// rewrite the card-type chosen-discriminator (`IsChosenCardType`) to the
-/// creature-type one (`IsChosenCreatureType`) so "the chosen type" matches the
-/// linked creature-type choice. CR 205.3: the linked choice is a creature
-/// subtype, so it must be matched against subtypes. Recurses through every
-/// nested-filter `TargetFilter` variant (`And`/`Or`/`Not`/`TrackedSetFiltered`),
-/// e.g. a typed filter ANDed with `HasChosenName`.
-fn retarget_chosen_card_type_to_creature_type(filter: &mut TargetFilter) {
-    use crate::types::ability::FilterProp;
-    match filter {
-        TargetFilter::Typed(tf) => {
-            for prop in &mut tf.properties {
-                if matches!(prop, FilterProp::IsChosenCardType) {
-                    *prop = FilterProp::IsChosenCreatureType;
-                }
-            }
-        }
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
-            .iter_mut()
-            .for_each(retarget_chosen_card_type_to_creature_type),
-        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
-            retarget_chosen_card_type_to_creature_type(filter)
-        }
-        _ => {}
-    }
-}
-
 /// CR 608.2c: Dig/reveal continuations after "Choose a creature type" refer to
 /// creature subtypes ("cards of the chosen type", For the Ancestors). The bare
 /// "cards" base defaults to `IsChosenCardType`; realign a dig filter once the
 /// persisted choice is known to be creature-type. Applied per resolved consumer
 /// item by `apply_linked_choice_type_statics`.
-fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinition) {
+fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinition) -> bool {
+    let mut rewritten = def.clone();
+    let mut complete = true;
+    retarget_creature_type_choice_dig_filters_in_ability_in_place(&mut rewritten, &mut complete);
+    if complete {
+        *def = rewritten;
+    }
+    complete
+}
+
+/// In-place half of the ability-chain rewrite. The owning wrapper commits the
+/// cloned chain only when this traversal and every nested filter walk complete.
+fn retarget_creature_type_choice_dig_filters_in_ability_in_place(
+    def: &mut AbilityDefinition,
+    complete: &mut bool,
+) {
     if let Effect::Dig { filter, .. } = &mut *def.effect {
-        retarget_chosen_card_type_to_creature_type(filter);
+        *complete &= retarget_chosen_card_type_to_creature_type(filter);
     }
     if let Some(sub) = def.sub_ability.as_mut() {
-        retarget_creature_type_choice_dig_filters_in_ability(sub);
+        retarget_creature_type_choice_dig_filters_in_ability_in_place(sub, complete);
     }
+}
+
+/// Retarget both filters on a spell-cast trigger atomically. An incomplete
+/// union walk rejects the relation application instead of retaining a partially
+/// rewritten trigger.
+fn retarget_creature_type_choice_trigger_filters(trigger: &mut TriggerDefinition) -> bool {
+    let mut rewritten = trigger.clone();
+    let mut complete = true;
+    if let Some(valid_card) = rewritten.valid_card.as_mut() {
+        complete &= retarget_chosen_card_type_to_creature_type(valid_card);
+    }
+    if let Some(execute) = rewritten.execute.as_mut() {
+        complete &= retarget_creature_type_choice_dig_filters_in_ability(execute);
+    }
+    if complete {
+        *trigger = rewritten;
+    }
+    complete
 }
 
 /// CR 702.26a + CR 603.7c: Upgrade bare one-shot `PhaseOut` ETB effects that
@@ -4698,13 +4730,23 @@ pub(crate) fn parse_oracle_ir(
 }
 
 /// The generic replacement priority cannot reconstruct the target ownership of
-/// these two one-shot spell forms. Every other one-shot effect must fall
-/// through to that priority, which preserves its established chains and
-/// replacement lowering.
+/// these one-shot spell forms. Every other one-shot effect must fall through to
+/// that priority, which preserves its established chains and replacement
+/// lowering.
+///
+/// A resolution-time chosen-source one-shot line (Harm's Way: "the next N
+/// damage that a source of your choice would deal … instead") contains "would
+/// deal … instead", which Priority 8's generic `DamageDone` stub would claim;
+/// the stub carries neither the CR 609.7a source choice nor the declared
+/// redirect slot.
 fn oneshot_damage_replacement_requires_direct_spell_route(effect: &Effect) -> bool {
     match effect {
         Effect::CreateDamageReplacement {
             redirect_to: Some(DamageRedirectTarget::DamageSourceController),
+            ..
+        } => true,
+        Effect::CreateDamageReplacement {
+            source_filter: Some(TargetFilter::ChosenDamageSource { .. }),
             ..
         } => true,
         Effect::PreventDamage {
@@ -7855,6 +7897,772 @@ pub fn parse_oracle_text(
     .0
 }
 
+/// CR-neutral hygiene: `unlowered_guard` is parser scratch, so a finished parse must hold
+/// none. Asked of the SERIALIZED tree rather than by re-walking it, because a re-walk would
+/// use the same recursion set it is meant to police: a mark left under an unrecursed key is
+/// invisible to the walk that would assert its absence. This is the same predicate the
+/// corpus gate applies to `card-data.json`, so the in-process guard and the corpus guard are
+/// one claim measured at two scales rather than two claims that can drift apart.
+///
+/// `Map::contains_key` here is a map-key lookup over a `serde_json::Value` inside a
+/// debug-build assertion, not parsing dispatch — no text is scanned. The `match` is
+/// wildcard-free so a future `Value` variant breaks the build instead of silently
+/// answering `false`.
+///
+/// Cost, measured rather than assumed, because "this serializes on every parse in every
+/// debug build" reads alarming: on Torrential Gearhulk's verbatim text, debug profile,
+/// n = 300, one `serde_json::to_value` of the finished `ParsedAbilities` is **37.6 µs**
+/// against **61.3 ms** for the parse that produced it. The pipeline runs this resolver at
+/// most twice per parse, so the assertion is ~0.12 % of the work it guards — and it never
+/// runs at all in the `tool`-profile builds that generate `card-data.json`. Both figures
+/// scale with tree size together, so the ratio is the stable quantity. Keep it.
+#[cfg(debug_assertions)]
+fn holds_unlowered_guard(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.contains_key("unlowered_guard") || map.values().any(holds_unlowered_guard)
+        }
+        serde_json::Value::Array(items) => items.iter().any(holds_unlowered_guard),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => false,
+    }
+}
+
+/// CR 614.1a + CR 608.2n (O1a) / CR 608.2c + CR 614.1a (O1b): does the assembled tree
+/// place this body under a typed owner that consumes it in the dropped guard's stead?
+/// Reads the owner head's `Effect` variant and the body's `Effect` shape — no card names,
+/// no Oracle text.
+///
+/// The guard's READING is deliberately not a parameter. The sole caller settles a verdict
+/// only for `GuardReading::Event`, so a `reading == Event` conjunct in any arm here would
+/// be tautological; the Event gating is stated once, at that call site.
+fn guard_owner(body: &Effect, parent: Option<&Effect>) -> bool {
+    match parent {
+        // O1a — CR 614.1a + CR 608.2n.
+        Some(Effect::CastFromZone { .. }) => {
+            cast_from_zone::graveyard_destination_rider(body).is_some()
+        }
+        // O1b — CR 608.2c + CR 614.1a. Exile only: the counter path's library/hand
+        // redirect rides `countered_spell_zone`, never a sub-ability.
+        Some(Effect::Counter { .. }) => cast_from_zone::is_graveyard_exile_rider_subability(body),
+        // R-a. CR-neutral hygiene, not a rules claim: the parent already records this
+        // clause's unsupportedness, and a second gap over the same defect double-counts it
+        // — the same per-unit suppression rule `swallow_check` applies via its
+        // `any_ability_has_unimplemented` early-`continue`.
+        //
+        // The class is narrow and must stay narrow: "a guard whose owner was refused BY THE
+        // DISPATCHER", i.e. before this pass ran. Invoke Calamity is the measured witness:
+        // when its printed cast cap is unrepresentable the head is refused to
+        // `unrepresentable_cast_cap` during chain assembly, the absorber that would fold
+        // "If those spells would be put into your graveyard, exile them instead" into the
+        // head's own typed `graveyard_replacement` field never runs, and the orphaned EVENT
+        // clause reaches this resolver with the refusal node as its direct parent. On the
+        // PRINTED card that clause is fully represented and never reaches here at all. Tree
+        // shape measured, not assumed: `abilities.len() == 1`, with the orphan as the
+        // refused head's direct `sub_ability`.
+        //
+        // A gap this PASS mints is excluded by construction rather than by an arm here:
+        // `resolve_guards_in_ability` hands its children the owner effect as it stood
+        // BEFORE its own guard rewrite, so a node that gapped a moment ago cannot pardon
+        // the EVENT guards below it. Without that ordering this arm would make the verdict
+        // on a clause depend on whether an ancestor happened to gap first
+        // (`guard_ownership::v17_*` is the regression).
+        //
+        // Why suppressing the second gap is the honest answer, not a convenience. The
+        // orphaned clause is not an INDEPENDENT unrepresented clause — its unrepresentedness
+        // is DERIVED from the head's refusal, and repairing the head repairs it too. The
+        // in-tree measurement is the paired positive in
+        // `invoke_calamity_free_cast::a_free_cast_bound_the_window_cannot_represent_is_refused_not_fabricated`:
+        // the identical surface with a representable cap parses with ZERO gap nodes, rider
+        // included. Reporting two gaps would tell a maintainer to fix a rider that needs no
+        // fixing.
+        //
+        // Its cost, stated rather than hidden: the pardoned body stays on the tree ungated
+        // (an "exile it" sub-ability under an `Unimplemented` head). That is sound only
+        // because the head's own gap keeps the card `supported == false` and therefore out
+        // of the production-execution set — the same trade-off
+        // `conditions::strip_unrecognized_conditional_head_when_body_optional` records.
+        Some(Effect::Unimplemented { .. }) => true,
+        _ => false,
+    }
+}
+
+/// CR 608.2c + CR 614.1a + CR 614.6: settle every deferred guard verdict on a finished
+/// parse.
+///
+/// Runs at the tail of `parse_oracle_pipeline`, i.e. AFTER every `has_unimplemented`-keyed
+/// routing gate. That placement is load-bearing, not cosmetic: those gates trial-parse a
+/// candidate line STANDALONE, so when a rider sits on its own line its owner is absent from
+/// that parse by construction, and an ownership verdict reached inside one is an artifact of
+/// the context the parse is missing. Torch the Tower is the corpus witness — its rider is
+/// line 3 and its `DealDamage` owner line 2 — and deciding inside chain assembly loses its
+/// `AddTargetReplacement` (measured: 151 flips instead of 150, with Torch the Tower the
+/// extra card).
+///
+/// All four `ParsedAbilities` arrays that can hold a definition are walked. The struct's
+/// remaining eight fields hold none and are therefore not walked: `extracted_keywords`
+/// (`Keyword`), `modal` (`ModalChoice`), `additional_cost` (`AdditionalCost`),
+/// `casting_restrictions` (`CastingRestriction`), `casting_options` (`SpellCastingOption`),
+/// `solve_condition` (`SolveCondition`), `strive_cost` (`ManaCost`) and `parse_warnings`
+/// (`OracleDiagnostic`) — none of those types carries an `AbilityDefinition`, and the
+/// serialized `debug_assert!` below polices that independently of this walk.
+fn resolve_unlowered_guards(out: &mut ParsedAbilities) {
+    for def in &mut out.abilities {
+        resolve_guards_in_ability(def, None);
+    }
+    for trigger in &mut out.triggers {
+        resolve_guards_in_trigger(trigger);
+    }
+    for static_def in &mut out.statics {
+        resolve_guards_in_static(static_def);
+    }
+    for replacement in &mut out.replacements {
+        resolve_guards_in_replacement(replacement);
+    }
+    #[cfg(debug_assertions)]
+    debug_assert!(
+        !holds_unlowered_guard(&serde_json::to_value(&*out).expect("ParsedAbilities serializes")),
+        "an unlowered_guard mark survived resolve_unlowered_guards"
+    );
+}
+
+/// Settle one definition's deferred verdict, then descend into every carrier below it.
+///
+/// One fact rides the recursion. `parent` is the **direct** parent's `&Effect`, which is
+/// what O1a/O1b read; it is `None` at a chain root and at every definition nested inside an
+/// `Effect`'s own payload, which is exact rather than merely conservative — neither
+/// `Effect::CastFromZone` nor `Effect::Counter` holds a nested `AbilityDefinition` payload
+/// field (their riders are always `sub_ability`), so no O1 owner can be lost that way.
+///
+/// **The guard rewrite is applied LAST, after the children have been settled.** Both
+/// orderings resolve the same set of nodes; only the `parent` the children observe differs.
+/// Deciding first and rewriting first would hand every child an `Effect::Unimplemented`
+/// parent whenever this node's own guard gapped, which `guard_owner`'s R-a arm reads as
+/// "owner refused" and pardons — so a clause's verdict would depend on whether an ancestor
+/// happened to gap before it. R-a's class is the DISPATCHER's refusals, which are already in
+/// the tree when this pass starts; a gap this pass mints is not one, and this ordering is
+/// what excludes it.
+fn resolve_guards_in_ability(def: &mut AbilityDefinition, parent: Option<&Effect>) {
+    // CR 614.1 + CR 614.6: only the EVENT reading gaps. A guard naming an event that WOULD
+    // happen describes a replacement, and CR 614.6 makes the replaced event never happen —
+    // so a body emitted without its guard runs an instruction the card does not print.
+    //
+    // The STATE reading falls through: the guard is dropped and the body emitted. No CR
+    // licenses that — it is a deliberate rules-fidelity regression at the AST layer, the
+    // same trade-off `conditions::strip_unrecognized_conditional_head_when_body_optional`
+    // documents for its own population, and it is sound only because the loss keeps the
+    // card `supported == false` through `swallow_check`'s Condition_If detector. Gapping it
+    // instead would suppress that very detector for the whole unit (its
+    // `any_ability_has_unimplemented` early-`continue`), trading a counted loss for an
+    // uncounted one. This change narrows nothing and widens nothing on that path; it is
+    // stated here so the EVENT arm above is not read as a general guard-discard rule.
+    //
+    // Scope: this seam sees only guards that REACH it. A leading guard over a `"you may …"`
+    // body is stripped upstream by that same
+    // `strip_unrecognized_conditional_head_when_body_optional` (two live call sites) and
+    // never arrives, so nothing here is an invariant over every printed leading guard.
+    //
+    // THE `reading == Event` CONJUNCT BELOW IS A FORWARD GUARD, NOT A LIVE DISCRIMINATOR.
+    // Measured, not assumed: `rg 'unlowered_guard\s*[:=]' crates/engine/src` finds exactly one
+    // site that writes a `Some` outside tests — `oracle_effect::lower_clause_ast`, gated on
+    // `is_ownership_candidate`, whose own first conjunct is `reading == GuardReading::Event`
+    // (`oracle_effect/mod.rs`). `assembly` only clones that field, and every other write is a
+    // literal `None`. So on a tree this pass walks, `reading` is `Event` on every mark it can
+    // see and this conjunct cannot currently be false.
+    //
+    // It stays, for two reasons, and is NOT to be read as a second live discriminator:
+    //   * `guard_owner`'s doc delegates the Event gating to this one call site precisely so no
+    //     arm there has to restate it — deleting the conjunct here would leave that gating
+    //     stated nowhere and silently widen every O1 arm to STATE marks;
+    //   * `UnloweredGuard` is `Deserialize`, so a hand-authored or externally produced tree can
+    //     carry a STATE mark this pass never minted. Falling through such a mark (guard dropped,
+    //     body emitted, loss counted by `swallow_check`'s Condition_If detector) is the intended
+    //     behaviour described above; consulting `guard_owner` for it is not.
+    // If a second mint site is ever added, this comment is the thing to re-measure.
+    let guard_gap = def.unlowered_guard.take().and_then(
+        |UnloweredGuard {
+             reading,
+             clause_text,
+         }| {
+            (reading == GuardReading::Event && !guard_owner(&def.effect, parent)).then(|| {
+                // CR 614.1a: nothing on the assembled tree consumes the body in the dropped
+                // guard's stead, so the whole "if <guard>, <body>" clause is recorded as one
+                // honest gap. The EVENT reading is the replacement reading, so the kind is
+                // `Replacement` — the only kind this seam can produce.
+                gap_diagnosis::clause_gap_unimplemented_as(ClauseGapKind::Replacement, &clause_text)
+            })
+        },
+    );
+    // Skipped when this node gaps: `*def.effect` is replaced wholesale below, so every node
+    // inside the old payload is discarded unread. Walking it settles marks on a subtree that
+    // never ships and emits `gap_diagnosis`' `tracing::debug!` for gaps nobody can observe,
+    // which misreports the debug stream. Outcome-identical either way — the payload and any
+    // mark in it are dropped by the assignment, so `resolve_unlowered_guards`' serialized
+    // no-live-mark `debug_assert!` cannot see them. The CHILDREN below are still walked
+    // unconditionally: `sub_ability` / `else_ability` / `mode_abilities` survive the rewrite
+    // and are not part of the discarded payload.
+    if guard_gap.is_none() {
+        resolve_guards_in_effect(&mut def.effect);
+    }
+    {
+        // The PRE-rewrite owner (see this function's doc). Unaffected by the skip above:
+        // `resolve_guards_in_effect` rewrites marks nested inside a payload and never changes
+        // the `Effect` variant, which is all `guard_owner` reads.
+        let owner: &Effect = &def.effect;
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            resolve_guards_in_ability(sub, Some(owner));
+        }
+        if let Some(else_ability) = def.else_ability.as_deref_mut() {
+            resolve_guards_in_ability(else_ability, Some(owner));
+        }
+        for mode in &mut def.mode_abilities {
+            resolve_guards_in_ability(mode, Some(owner));
+        }
+    }
+    if let Some(gap) = guard_gap {
+        *def.effect = gap;
+    }
+}
+
+/// Descend an `Effect`'s own payload carriers. Wildcard-free on purpose: a new `Effect`
+/// variant is a compile error here, which forces a descend-or-leaf decision at the point
+/// that owns the answer — the same guarantee `types::ability_visit` relies on, restated here
+/// because that module's traversal is immutable and `FnMut(&Effect)`-shaped and so cannot be
+/// reused for a rewrite.
+///
+/// Every definition reached from a payload is entered with `parent: None` (see
+/// `resolve_guards_in_ability`).
+fn resolve_guards_in_effect(effect: &mut Effect) {
+    match effect {
+        // CR 614.11 / CR 614.1a: a one-shot draw or planeswalk replacement nests a
+        // substitute `Effect`, which may itself be a definition carrier.
+        Effect::CreateDrawReplacement { replacement_effect }
+        | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            resolve_guards_in_effect(replacement_effect)
+        }
+        Effect::Vote {
+            per_choice_effect,
+            subject,
+            ..
+        } => {
+            for sub in per_choice_effect {
+                resolve_guards_in_ability(sub, None);
+            }
+            // CR 701.38b: object-pool votes leave `per_choice_effect` empty and carry the
+            // sole nested definition in `outcome_template`.
+            if let VoteSubject::Objects {
+                outcome_template, ..
+            } = subject
+            {
+                resolve_guards_in_ability(outcome_template, None);
+            }
+        }
+        Effect::SeparateIntoPiles {
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        } => {
+            resolve_guards_in_ability(chosen_pile_effect, None);
+            if let Some(unchosen) = unchosen_pile_effect.as_deref_mut() {
+                resolve_guards_in_ability(unchosen, None);
+            }
+        }
+        Effect::RevealFromHand { on_decline, .. } => {
+            if let Some(sub) = on_decline.as_deref_mut() {
+                resolve_guards_in_ability(sub, None);
+            }
+        }
+        // CR 603.7a: the delayed payload is a definition in its own right. Load-bearing for
+        // the direct-parent fact — Power Pack's O1a owner sits inside one, so a walk that
+        // stopped here would lose it.
+        //
+        // `..` DISCARDS ONE DEFINITION-BEARING FIELD, deliberately: `condition:
+        // DelayedTriggerCondition` holds up to three `Box<TriggerDefinition>`
+        // (`WheneverEvent.trigger`, `WhenNextEvent.trigger` / `.or_trigger`), each with its own
+        // `execute: Option<Box<AbilityDefinition>>`. `ExiledSpellRider::ReturnTo.timing` is the
+        // same type and is a leaf in the blanket arm below for the same reason.
+        //
+        // LATENT, NOT LIVE — measured rather than assumed. Those triggers are MATCHERS: the
+        // variant's own doc states "the embedded trigger's `execute` field should be `None` —
+        // the actual effect lives in `DelayedTrigger.ability`", `TriggerDefinition::new` (the
+        // constructor every parser site here uses) sets `execute: None`, and no parser
+        // construction site overrides it. With no `execute` there is no `AbilityDefinition`
+        // below the condition and so no clause that could carry a mark.
+        //
+        // If that ever stops holding, the failure is LOUD rather than silent:
+        // `resolve_unlowered_guards`' `debug_assert!` serializes the whole `ParsedAbilities`
+        // and asserts no `unlowered_guard` key survives anywhere, `condition` included. Adding
+        // a `resolve_guards_in_delayed_condition` arm here is the fix at that point; it is not
+        // written now because it would be dead code with no reachable input.
+        Effect::CreateDelayedTrigger { effect, .. } => resolve_guards_in_ability(effect, None),
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        }
+        | Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            if let Some(sub) = win_effect.as_deref_mut() {
+                resolve_guards_in_ability(sub, None);
+            }
+            if let Some(sub) = lose_effect.as_deref_mut() {
+                resolve_guards_in_ability(sub, None);
+            }
+        }
+        Effect::FlipCoinUntilLose { win_effect } => resolve_guards_in_ability(win_effect, None),
+        Effect::RollDie { results, .. } => {
+            for branch in results {
+                resolve_guards_in_ability(&mut branch.effect, None);
+            }
+        }
+        Effect::ChooseOneOf { branches, .. } => {
+            for branch in branches {
+                resolve_guards_in_ability(branch, None);
+            }
+        }
+        // CR 611.2: statics applied at resolution can grant abilities that carry a mark —
+        // measured: four cards already hold a gap of this shape at
+        // `static_abilities[0].modifications[0]<GrantAbility>.definition`.
+        Effect::GenericEffect {
+            static_abilities, ..
+        }
+        | Effect::Token {
+            static_abilities, ..
+        } => {
+            for static_def in static_abilities {
+                resolve_guards_in_static(static_def);
+            }
+        }
+        // CR 614.1: a registered replacement carries its own execute/decline definitions.
+        Effect::AddTargetReplacement { replacement, .. } => {
+            resolve_guards_in_replacement(replacement)
+        }
+        // CR 611.2: only the `LosesAbilities` rider carries a static; `countered_spell_zone`
+        // is a plain zone field, not a definition carrier.
+        Effect::Counter { source_rider, .. } => {
+            if let Some(CounterSourceRider::LosesAbilities { static_def, .. }) = source_rider {
+                resolve_guards_in_static(static_def);
+            }
+        }
+        // CR 114.1: an emblem's granted statics and triggers are definitions too.
+        Effect::CreateEmblem { statics, triggers } => {
+            for static_def in statics {
+                resolve_guards_in_static(static_def);
+            }
+            for trigger in triggers {
+                resolve_guards_in_trigger(trigger);
+            }
+        }
+        // CR 603.3: `TriggerOnSpend` hangs a full definition off produced mana. Descended
+        // here even though `types::ability_visit` deliberately treats `Effect::Mana` as a
+        // leaf, because a mark left under it would be a live mark in a shipped tree.
+        Effect::Mana { grants, .. } => {
+            for grant in grants {
+                if let ManaSpellGrant::TriggerOnSpend { ability, .. } = grant {
+                    resolve_guards_in_ability(ability, None);
+                }
+            }
+        }
+        // CR 611.2: every `Effect` field typed `Vec<ContinuousModification>`. The vocabulary
+        // itself carries definitions (`GrantAbility` / `GrantTrigger` / `GrantReplacement` /
+        // `GrantStaticAbility`), so each of these is a definition carrier by TYPE — which is
+        // the only reachability this wildcard-free walk can police. A struct FIELD is field
+        // access rather than a match arm, so nothing makes the compiler ask; the census is
+        // `Vec<ContinuousModification>` over `types::ability::Effect`, and
+        // `tests::guard_walk_reaches_every_continuous_modification_carrier` plants a mark in
+        // each so a field added later cannot be dropped silently.
+        Effect::CopySpell {
+            additional_modifications,
+            ..
+        }
+        | Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        }
+        | Effect::BecomeCopy {
+            additional_modifications,
+            ..
+        } => {
+            for modification in additional_modifications {
+                resolve_guards_in_continuous_mod(modification);
+            }
+        }
+        Effect::ReturnAsAura { grants, .. } => {
+            for modification in grants {
+                resolve_guards_in_continuous_mod(modification);
+            }
+        }
+        Effect::AddPendingEntersModifications { modifications, .. } => {
+            for modification in modifications {
+                resolve_guards_in_continuous_mod(modification);
+            }
+        }
+        Effect::EachPlayerCopyChosen {
+            copy_modifications, ..
+        } => {
+            for modification in copy_modifications {
+                resolve_guards_in_continuous_mod(modification);
+            }
+        }
+        // CR 611.2: the seventh carrier is one level down — the granted permission's own
+        // `enters_with_modifications`, the type-grant rider on a cast-this-way creature
+        // (The Tomb of Aclazotz class; see that field's own doc).
+        Effect::GrantCastingPermission { permission, .. } => {
+            resolve_guards_in_casting_permission(permission)
+        }
+        // Leaf effects: no nested definition carrier.
+        Effect::StartYourEngines { .. }
+        | Effect::ChangeSpeed { .. }
+        | Effect::DealDamage { .. }
+        | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachSourceDealsDamage { .. }
+        | Effect::Draw { .. }
+        | Effect::Pump { .. }
+        | Effect::PairWith { .. }
+        | Effect::Destroy { .. }
+        | Effect::Regenerate { .. }
+        | Effect::RemoveAllDamage { .. }
+        | Effect::CounterAll { .. }
+        | Effect::GainLife { .. }
+        | Effect::LoseLife { .. }
+        | Effect::SetTapState { .. }
+        | Effect::RemoveCounter { .. }
+        | Effect::Sacrifice { .. }
+        | Effect::DiscardCard { .. }
+        | Effect::Mill { .. }
+        | Effect::Scry { .. }
+        | Effect::PumpAll { .. }
+        | Effect::DamageAll { .. }
+        | Effect::DamageEachPlayer { .. }
+        | Effect::DestroyAll { .. }
+        | Effect::ChangeZone { .. }
+        | Effect::ChangeZoneAll { .. }
+        | Effect::Dig { .. }
+        | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
+        | Effect::ControlNextTurn { .. }
+        | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
+        | Effect::Surveil { .. }
+        | Effect::Fight { .. }
+        | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
+        | Effect::Explore
+        | Effect::ExploreAll { .. }
+        | Effect::Investigate
+        | Effect::Tribute { .. }
+        | Effect::TimeTravel
+        | Effect::BecomeMonarch { .. }
+        | Effect::NoOp
+        | Effect::Proliferate
+        | Effect::ProliferateTarget { .. }
+        | Effect::Populate
+        | Effect::Clash
+        | Effect::Behold { .. }
+        | Effect::EndTheTurn
+        | Effect::EndCombatPhase
+        | Effect::SwitchPT { .. }
+        | Effect::EpicCopy { .. }
+        | Effect::CastCopyOfCard { .. }
+        | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::Myriad
+        | Effect::Encore
+        | Effect::CombineHost { .. }
+        | Effect::ChooseAugmentAndCombineWithHost { .. }
+        | Effect::Meld { .. }
+        | Effect::ExileHaunting { .. }
+        | Effect::HideawayConceal { .. }
+        | Effect::CopyTokenBlockingAttacker { .. }
+        | Effect::ChoosePermanent { .. }
+        | Effect::GainActivatedAbilitiesOfTarget { .. }
+        | Effect::ChooseCard { .. }
+        | Effect::PutCounter { .. }
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::ChooseCounterAdjustment { .. }
+        | Effect::DoublePT { .. }
+        | Effect::DoublePTAll { .. }
+        | Effect::MoveCounters { .. }
+        | Effect::ReproduceEventCounters { .. }
+        | Effect::Animate { .. }
+        | Effect::RegisterBending { .. }
+        | Effect::Cleanup { .. }
+        | Effect::Discard { .. }
+        | Effect::Shuffle { .. }
+        | Effect::Transform { .. }
+        | Effect::FlipPermanent { .. }
+        | Effect::SearchLibrary { .. }
+        | Effect::SearchOutsideGame { .. }
+        | Effect::OpenBoosterPack { .. }
+        | Effect::RevealHand { .. }
+        | Effect::Reveal { .. }
+        | Effect::RevealChosenNumbers { .. }
+        | Effect::RevealTop { .. }
+        | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
+        | Effect::TargetOnly { .. }
+        | Effect::Choose { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
+        | Effect::ChooseDamageSource { .. }
+        | Effect::Suspect { .. }
+        | Effect::Unsuspect { .. }
+        | Effect::Connive { .. }
+        | Effect::PhaseOut { .. }
+        | Effect::PhaseIn { .. }
+        | Effect::ForceBlock { .. }
+        | Effect::ForceAttack { .. }
+        | Effect::SolveCase
+        | Effect::BecomePrepared { .. }
+        | Effect::BecomeUnprepared { .. }
+        | Effect::BecomeSaddled { .. }
+        | Effect::SetClassLevel { .. }
+        | Effect::AddRestriction { .. }
+        | Effect::ReduceNextSpellCost { .. }
+        | Effect::GrantNextSpellAbility { .. }
+        | Effect::AddPendingETBCounters { .. }
+        | Effect::PayCost { .. }
+        | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+        | Effect::PreventDamage { .. }
+        | Effect::CreateDamageReplacement { .. }
+        | Effect::LoseTheGame { .. }
+        | Effect::WinTheGame { .. }
+        | Effect::RingTemptsYou
+        | Effect::VentureIntoDungeon
+        | Effect::VentureInto { .. }
+        | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
+        | Effect::Planeswalk
+        | Effect::ChaosEnsues
+        | Effect::ReverseTurnOrder
+        | Effect::RedistributeLifeTotals
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
+        | Effect::AssembleContraptions { .. }
+        | Effect::AssembleContraptionsFromRollDifference
+        | Effect::CrankContraptions { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. }
+        | Effect::PutSticker { .. }
+        | Effect::ApplySticker { .. }
+        | Effect::ProcessRadCounters
+        | Effect::ChooseFromZone { .. }
+        | Effect::RememberCard { .. }
+        | Effect::NoteManaSpent
+        | Effect::ForEachCategory { .. }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
+        | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::Exploit { .. }
+        | Effect::GainEnergy { .. }
+        | Effect::GivePlayerCounter { .. }
+        | Effect::LoseAllPlayerCounters { .. }
+        | Effect::ExileFromTopUntil { .. }
+        | Effect::RevealUntil { .. }
+        | Effect::Discover { .. }
+        | Effect::Heist { .. }
+        | Effect::HeistExile
+        | Effect::Cascade
+        | Effect::Ripple { .. }
+        | Effect::MiracleCast { .. }
+        | Effect::MadnessCast { .. }
+        | Effect::PutAtLibraryPosition { .. }
+        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+        | Effect::PutOnTopOrBottom { .. }
+        | Effect::GiftDelivery { .. }
+        | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
+        | Effect::Detain { .. }
+        | Effect::SetRoomDoorLock { .. }
+        | Effect::ExchangeControl { .. }
+        | Effect::ChangeTargets { .. }
+        | Effect::Manifest { .. }
+        | Effect::ManifestDread
+        | Effect::Cloak { .. }
+        | Effect::TurnFaceUp { .. }
+        | Effect::TurnFaceDown { .. }
+        | Effect::ExtraTurn { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
+        | Effect::SkipNextTurn { .. }
+        | Effect::SkipNextStep { .. }
+        | Effect::AdditionalPhase { .. }
+        | Effect::Double { .. }
+        | Effect::RuntimeHandled { .. }
+        | Effect::Incubate { .. }
+        | Effect::Amass { .. }
+        | Effect::Monstrosity { .. }
+        | Effect::Specialize
+        | Effect::Renown { .. }
+        | Effect::Bolster { .. }
+        | Effect::Adapt { .. }
+        | Effect::Learn
+        | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
+        | Effect::Harness
+        | Effect::CollectEvidence { .. }
+        | Effect::Endure { .. }
+        | Effect::BlightEffect { .. }
+        | Effect::Seek { .. }
+        | Effect::SetLifeTotal { .. }
+        | Effect::ExchangeLifeWithStat { .. }
+        | Effect::ExchangeLifeTotals { .. }
+        | Effect::SetDayNight { .. }
+        | Effect::GiveControl { .. }
+        | Effect::RemoveFromCombat { .. }
+        | Effect::BecomeBlocked { .. }
+        | Effect::Conjure { .. }
+        | Effect::ApplyPerpetual { .. }
+        | Effect::Intensify { .. }
+        | Effect::DraftFromSpellbook { .. }
+        | Effect::Unimplemented { .. } => {}
+    }
+}
+
+/// CR 603.1: a triggered ability is "[trigger condition], [effect]", so its payload is a
+/// definition; its `unless_pay` is a cost, which carries no mark (a mark is minted only on a
+/// clause's own `ParsedEffectClause` and copied onto the definition that clause assembles
+/// into, never onto a cost).
+fn resolve_guards_in_trigger(trigger: &mut TriggerDefinition) {
+    if let Some(execute) = trigger.execute.as_deref_mut() {
+        resolve_guards_in_ability(execute, None);
+    }
+}
+
+/// CR 614.1: the replacement's own payload plus the decline continuation its mode carries.
+/// `runtime_execute` is a resolution-time continuation that is never present on a parsed
+/// face, so it holds no mark.
+fn resolve_guards_in_replacement(replacement: &mut ReplacementDefinition) {
+    if let Some(execute) = replacement.execute.as_deref_mut() {
+        resolve_guards_in_ability(execute, None);
+    }
+    match &mut replacement.mode {
+        ReplacementMode::MayCost { decline, .. } | ReplacementMode::Optional { decline } => {
+            if let Some(decline) = decline.as_deref_mut() {
+                resolve_guards_in_ability(decline, None);
+            }
+        }
+        ReplacementMode::Mandatory => {}
+    }
+}
+
+/// Wildcard-free for the same reason as `resolve_guards_in_effect`: a new
+/// `CastingPermission` variant must force a descend-or-leaf decision here.
+///
+/// CR 611.2: only `ExileWithAltCost` carries modifications — the type-grant rider on a
+/// cast-this-way permission (The Tomb of Aclazotz class). The remaining seven variants
+/// carry costs, zones and turn stamps, none of which is a definition carrier.
+fn resolve_guards_in_casting_permission(permission: &mut CastingPermission) {
+    match permission {
+        CastingPermission::ExileWithAltCost {
+            enters_with_modifications,
+            ..
+        } => {
+            for modification in enters_with_modifications {
+                resolve_guards_in_continuous_mod(modification);
+            }
+        }
+        CastingPermission::AdventureCreature
+        | CastingPermission::PlayFromExile { .. }
+        | CastingPermission::ExileWithEnergyCost
+        | CastingPermission::ExileWithAltAbilityCost { .. }
+        | CastingPermission::WarpExile { .. }
+        | CastingPermission::Plotted { .. }
+        | CastingPermission::Foretold { .. } => {}
+    }
+}
+
+/// CR 611.2: a static's modifications are the only definition carriers it has.
+fn resolve_guards_in_static(static_def: &mut StaticDefinition) {
+    for modification in &mut static_def.modifications {
+        resolve_guards_in_continuous_mod(modification);
+    }
+}
+
+/// Wildcard-free for the same reason as `resolve_guards_in_effect`: a new
+/// `ContinuousModification` variant must force a descend-or-leaf decision here.
+fn resolve_guards_in_continuous_mod(modification: &mut ContinuousModification) {
+    match modification {
+        ContinuousModification::GrantAbility { definition } => {
+            resolve_guards_in_ability(definition, None)
+        }
+        ContinuousModification::GrantTrigger { trigger } => resolve_guards_in_trigger(trigger),
+        ContinuousModification::GrantReplacement { replacement } => {
+            resolve_guards_in_replacement(replacement)
+        }
+        ContinuousModification::GrantStaticAbility { definition } => {
+            resolve_guards_in_static(definition)
+        }
+        // CR 707.2: `CopyValues` holds `Arc`-shared copies of an existing object's already
+        // resolved definitions. It is parse-unreachable (no parser path constructs it), so
+        // it can hold no mark, and descending it would mean `Arc::make_mut`-cloning every
+        // copied definition on a path that never carries one.
+        ContinuousModification::CopyValues { .. } => {}
+        // Leaf modifications: no nested definition carrier.
+        ContinuousModification::CopyChosen
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::SetDynamicPower { .. }
+        | ContinuousModification::SetDynamicToughness { .. }
+        | ContinuousModification::SetPowerDynamic { .. }
+        | ContinuousModification::SetToughnessDynamic { .. }
+        | ContinuousModification::AddDynamicPower { .. }
+        | ContinuousModification::AddDynamicToughness { .. }
+        | ContinuousModification::AddDynamicKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor { .. }
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. }
+        | ContinuousModification::RemoveManaCost => {}
+    }
+}
+
 fn parse_oracle_pipeline(
     oracle_text: &str,
     card_name: &str,
@@ -7879,7 +8687,7 @@ fn parse_oracle_pipeline(
     );
     let document_ir = capture_stages.then(|| ir.clone());
     let mut parsed = lower_oracle_ir(&mut ir);
-    let raw_lowered = capture_stages.then(|| parsed.clone());
+    let mut raw_lowered = capture_stages.then(|| parsed.clone());
     render_granting_self_descriptions(&mut parsed, card_name);
     demote_unbound_delayed_sweeps(&mut parsed);
     demote_unenforceable_replacement_lifetimes(&mut parsed);
@@ -7887,6 +8695,13 @@ fn parse_oracle_pipeline(
     crate::parser::oracle_effect::debug_assert_exile_top_opponent_sentinel_lifted(
         &parsed, card_name,
     );
+    // CR 608.2c + CR 614.1a + CR 614.6 + CR 615.5: settle every deferred guard verdict.
+    resolve_unlowered_guards(&mut parsed);
+    // The report-only stage clone is settled by the same pass, so no tree this function
+    // hands out carries a live mark.
+    if let Some(raw) = raw_lowered.as_mut() {
+        resolve_unlowered_guards(raw);
+    }
     let stages = document_ir
         .zip(raw_lowered)
         .map(|(document, raw)| (document, raw, normalized));

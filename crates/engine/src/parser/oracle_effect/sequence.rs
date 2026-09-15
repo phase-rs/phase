@@ -12236,11 +12236,18 @@ mod tests {
             node = d.sub_ability.as_deref();
         }
 
-        // No Unimplemented{they're} anywhere in the chain.
+        // Rename-proof negative, keyed on the recorded CLAUSE rather than on the gap's
+        // name: once gaps are named by verdict, a name compare against the clause's old
+        // first word can never be true and the guard stops guarding silently. The paired
+        // positive reach-guard is the typed-effect lookup immediately below, which panics
+        // if the chain never produced it.
+        const THEYRE_PHRASE: &str = "they're 2/2 cyberman artifact creatures";
         for d in &effects {
             assert!(
-                !matches!(&*d.effect, Effect::Unimplemented { name, .. } if name == "they're"),
-                "the 'They're ...' clause must not produce Unimplemented, got {:?}",
+                !d.effect
+                    .unimplemented_description()
+                    .is_some_and(|desc| desc.to_lowercase().contains(THEYRE_PHRASE)),
+                "the 'They're ...' clause must not produce a gap node, got {:?}",
                 d.effect
             );
         }
@@ -12492,11 +12499,18 @@ mod tests {
             node = d.sub_ability.as_deref();
         }
 
-        // No Unimplemented{they're} anywhere in the chain.
+        // Rename-proof negative, keyed on the recorded CLAUSE rather than on the gap's
+        // name: once gaps are named by verdict, a name compare against the clause's old
+        // first word can never be true and the guard stops guarding silently. The paired
+        // positive reach-guard is the typed-effect lookup immediately below, which panics
+        // if the chain never produced it.
+        const THEYRE_PHRASE: &str = "they're 2/2 cyberman artifact creatures";
         for d in &effects {
             assert!(
-                !matches!(&*d.effect, Effect::Unimplemented { name, .. } if name == "they're"),
-                "the 'They're ...' clause must not produce Unimplemented, got {:?}",
+                !d.effect
+                    .unimplemented_description()
+                    .is_some_and(|desc| desc.to_lowercase().contains(THEYRE_PHRASE)),
+                "the 'They're ...' clause must not produce a gap node, got {:?}",
                 d.effect
             );
         }

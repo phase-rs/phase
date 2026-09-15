@@ -8,7 +8,8 @@ use crate::types::ability::{
     CounterCostSelection, Effect, KickerVariant, NotedManaPayment, ObjectProperty, QuantityExpr,
     QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost, SacrificeRequirement,
     SpellCastingOptionKind, SpellContext, SpellStackToGraveyardReplacement, StaticCondition,
-    TapCreaturesSelectionMode, TargetFilter, ThisWayCause, TypeFilter, TypedFilter, EXILE_COST_X,
+    TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TypeFilter, TypedFilter,
+    EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
@@ -323,6 +324,16 @@ pub(crate) fn additional_cost_declaration_is_offerable(
     pending: &PendingCast,
     cost: AbilityCost,
 ) -> Result<bool, EngineError> {
+    // CR 601.2h: "Unpayable costs can't be paid." A cost the parser could not
+    // read has no payment procedure at all, so it can never be declared — a
+    // required one makes the cast illegal (CR 601.2 + CR 733.1), and an optional
+    // one is simply never offered. `AbilityCost::is_payable` deliberately answers
+    // true for `Unimplemented` so unrelated fallback paths stay ungated (see the
+    // comment on that arm in `cost_payability.rs`), so the refusal belongs here,
+    // at the declaration authority, rather than in that shared predicate.
+    if matches!(cost, AbilityCost::Unimplemented { .. }) {
+        return Ok(false);
+    }
     let exile_this_way_cost = is_exile_any_number_effect_cost(&cost);
     let split = split_declared_mana_addition_and_residual(state, pending, cost)?;
     if let Some(residual) = split.residual.as_ref() {
@@ -2573,25 +2584,7 @@ pub(crate) fn resume_interrupted_cost_payment(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
-fn replace_first_one_of_cost(cost: &mut AbilityCost, chosen: AbilityCost) -> bool {
-    match cost {
-        AbilityCost::OneOf { .. } => {
-            *cost = chosen;
-            true
-        }
-        AbilityCost::Composite { costs } => {
-            for cost in costs {
-                if replace_first_one_of_cost(cost, chosen.clone()) {
-                    return true;
-                }
-            }
-            false
-        }
-        _ => false,
-    }
-}
-
-/// CR 118.12a + CR 602.2b: Complete disjunctive activation-cost branch selection.
+/// CR 601.2h + CR 602.2b: Complete disjunctive activation-cost branch selection.
 pub(crate) fn handle_activation_cost_one_of_choice(
     state: &mut GameState,
     player: PlayerId,
@@ -2608,27 +2601,22 @@ pub(crate) fn handle_activation_cost_one_of_choice(
     }
 
     let chosen_cost = &costs[index];
-    if !super::casting::can_pay_ability_cost_now(
-        state,
-        player,
-        pending.object_id,
-        chosen_cost,
-        pending.activation_ability_index,
-    ) {
+    if !super::casting::activation_one_of_branch_payable(state, player, &pending, chosen_cost) {
         return Err(EngineError::ActionNotAllowed(
             "Chosen cost branch is not payable".to_string(),
         ));
     }
 
-    let replaced = pending
+    let Some(resolved) = pending
         .activation_cost
-        .as_mut()
-        .is_some_and(|cost| replace_first_one_of_cost(cost, chosen_cost.clone()));
-    if !replaced {
+        .as_ref()
+        .and_then(|cost| cost.resolve_first_one_of(chosen_cost))
+    else {
         return Err(EngineError::InvalidAction(
             "Pending activation cost no longer has a OneOf branch".to_string(),
         ));
-    }
+    };
+    pending.activation_cost = Some(resolved);
 
     if let Some(waiting_for) =
         surface_next_unpaid_interactive_activation_cost(state, player, &mut pending, events)?
@@ -5362,6 +5350,7 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
             state,
             player,
             source_id,
+            cost,
             costs,
             pending
                 .activation_ability_index
@@ -7027,6 +7016,18 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 pending.cast_timing_permission = cast_timing_permission;
                 pending.origin_zone = origin_zone;
                 pending.payment_mode = payment_mode;
+                // CR 601.2f + CR 601.2h: a required additional cost the parser
+                // could not read is part of the total cost and has no payment
+                // procedure, so the cast is illegal. Refused here rather than by
+                // the generic check below only so the message names the cost, in
+                // the wording the activation-cost sibling in `costs.rs` and the
+                // payment-step backstop below both use.
+                if let AbilityCost::Unimplemented { description } = req_cost {
+                    super::casting::handle_cancel_cast(state, &pending, events);
+                    return Err(EngineError::ActionNotAllowed(format!(
+                        "Cost not implemented: {description}"
+                    )));
+                }
                 // CR 601.2b + CR 601.2f: Required additional cost whose
                 // residual object choice is unavailable or whose declared mana
                 // total is unaffordable makes the spell uncastable.
@@ -8489,6 +8490,39 @@ fn pay_additional_cost_with_source(
                     spell: Box::new(pending),
                 },
             });
+        }
+        AbilityCost::Unimplemented { description } => {
+            // CR 601.2f + CR 601.2h: an additional cost the parser could not read
+            // is part of the total cost and cannot be paid, so the payment step
+            // must refuse it. Without this arm it falls into the catch-all below,
+            // which does nothing and then continues to `finish_pending_cost_or_cast`
+            // — i.e. the unpayable cost is silently declared PAID and the spell is
+            // cast for free.
+            //
+            // BACKSTOP, AND DELIBERATELY UNCOVERED BY TEST. Every path a shipping
+            // card takes today is already refused upstream — enumeration by
+            // `can_cast_prepared_now_with_probe`, declaration by
+            // `additional_cost_declaration_is_offerable`, and a directly submitted
+            // announcement by the `Required` arm of
+            // `check_additional_cost_or_pay_with_distribute`. Deleting this arm
+            // breaks no test, and that is expected rather than a gap in the suite.
+            //
+            // It is not dead code: the `AdditionalCost::Required` arm of the
+            // additional-cost QUEUE walk calls this function directly, without
+            // re-consulting the offerable gate. No corpus card puts a
+            // `Required(Unimplemented)` on that queue today — a card's own single
+            // additional cost travels via `additional_cost_flow` — so the path is
+            // reachable in principle and unreached in practice. Removing the arm
+            // to satisfy coverage would restore the silent-satisfaction hole for
+            // the first card that does queue one.
+            //
+            // The wording matches the activation-cost sibling in `costs.rs`, which
+            // has always refused here (CR 602.2b extends CR 601.2h to an
+            // activation cost).
+            super::casting::handle_cancel_cast(state, &pending, events);
+            return Err(EngineError::ActionNotAllowed(format!(
+                "Cost not implemented: {description}"
+            )));
         }
         _ => {
             // Other cost types (Exile, etc.) — not yet interactive
@@ -10192,6 +10226,19 @@ fn finalize_cast_with_phyrexian_choices_inner(
     ability.context.cast_from_zone = Some(source_zone);
     ability.context.cast_controller = Some(player);
     ability.context.cast_phase = Some(state.phase);
+    // CR 601.2c + CR 608.2c: latch the declared object targets so a nested
+    // sub-ability — whose own `targets` may hold a resolution-chosen recipient
+    // instead — can still name the spell's own target with
+    // `ObjectScope::ChainRootTarget` ("If that artifact had counters on it, put
+    // that many … on an artifact you control"). Runs after target selection and
+    // before resolution, so `set_context_recursive` and every later
+    // `apply_parent_chain_context` carry it down the chain.
+    ability.context.chain_root_targets = ability
+        .targets
+        .iter()
+        .filter(|target| matches!(target, TargetRef::Object(_)))
+        .cloned()
+        .collect();
     stamp_controller_controlled_as_cast(state, &mut ability, player, object_id);
 
     // CR 107.3m: Stash the paid X value directly on the permanent so replacement
@@ -22972,6 +23019,14 @@ its replicate cost was paid.)\nDraw a card.";
         builder.from_oracle_text_with_keywords(&["replicate:{1}"], REPLICATE_DRAW_ORACLE);
         let spell_id = builder.id();
         let card_id = scenario.state.objects[&spell_id].card_id;
+        // CR 104.3c: stock the library so the copies' draws cannot deck the
+        // caster out mid-drain. A game that ends partway through resolution
+        // truncates `drain_counting_spell_copies`, which would hide an
+        // over-copying regression behind a correct-looking tally.
+        scenario.with_library_top(
+            PlayerId(0),
+            &["Filler A", "Filler B", "Filler C", "Filler D"],
+        );
         let runner = scenario.build();
         (runner, spell_id, card_id)
     }
@@ -23007,6 +23062,12 @@ its replicate cost was paid.)\nDraw a card.";
         builder.from_oracle_text("Draw a card.");
         let spell_id = builder.id();
         let card_id = scenario.state.objects[&spell_id].card_id;
+        // CR 104.3c: see `replicate_draw_scenario` — the library keeps the game
+        // alive through the whole drain so the copy tally cannot be truncated.
+        scenario.with_library_top(
+            PlayerId(0),
+            &["Filler A", "Filler B", "Filler C", "Filler D"],
+        );
         let runner = scenario.build();
         (runner, spell_id, card_id)
     }
@@ -23014,27 +23075,29 @@ its replicate cost was paid.)\nDraw a card.";
     /// Count `SpellCopied` events emitted while resolving the stack to empty.
     /// Each `Effect::CopySpell` iteration emits exactly one (CR 707.10), so the
     /// total equals the number of replicate copies created.
+    ///
+    /// Strict by design. Swallowing an `Err` (or leaving the stack unresolved)
+    /// stops the tally early, and an early stop reads as a LOWER copy count —
+    /// which is exactly the direction an over-copying regression needs in order
+    /// to look correct. Both replicate scenarios stock a library so the copied
+    /// draws cannot end the game mid-drain and reach these guards.
     fn drain_counting_spell_copies(runner: &mut crate::game::scenario::GameRunner) -> usize {
         use crate::types::actions::GameAction;
         let mut copies = 0usize;
         for _ in 0..40 {
             if runner.state().stack.is_empty() {
-                break;
+                return copies;
             }
-            match runner.act(GameAction::PassPriority) {
-                Ok(result) => {
-                    copies += result
-                        .events
-                        .iter()
-                        .filter(|e| {
-                            matches!(e, crate::types::events::GameEvent::SpellCopied { .. })
-                        })
-                        .count();
-                }
-                Err(_) => break,
-            }
+            let result = runner
+                .act(GameAction::PassPriority)
+                .expect("resolving the replicate stack must not error mid-drain");
+            copies += result
+                .events
+                .iter()
+                .filter(|e| matches!(e, crate::types::events::GameEvent::SpellCopied { .. }))
+                .count();
         }
-        copies
+        panic!("replicate stack never resolved to empty; the copy tally is not trustworthy");
     }
 
     /// CR 702.56a: Replicate paid twice copies the spell twice — two extra

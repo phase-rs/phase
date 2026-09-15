@@ -425,13 +425,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::ChooseActivationCostBranch { index },
         ) => costs.get(*index).is_none_or(|cost| {
-            !casting::can_pay_ability_cost_now(
-                state,
-                *player,
-                pending_cast.object_id,
-                cost,
-                pending_cast.activation_ability_index,
-            )
+            !casting::activation_one_of_branch_payable(state, *player, pending_cast, cost)
         }),
         (
             WaitingFor::DamageSourceChoice { options, .. },

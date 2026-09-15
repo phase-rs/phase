@@ -11,6 +11,24 @@ export const DRAFT_WORKSPACE_PACK_SCALE_DEFAULT = 1.65;
 export const DRAFT_WORKSPACE_PACK_SCALE_MIN = 0.4;
 export const DRAFT_WORKSPACE_PACK_SCALE_MAX = 2.9;
 export const DRAFT_WORKSPACE_PACK_SCALE_STEP = 0.01;
+/**
+ * Pile card scale for a shared-stack draft, on the same axis and the same base
+ * width as `packScale` but stored separately.
+ *
+ * A separate number rather than a reuse, because the two surfaces show
+ * different things at once: a pack is a grid of up to fifteen cards, while a
+ * Winston pile row is one pile's revealed run beside two face-down stacks. A
+ * player who has tuned one has said nothing about the other, and a shared
+ * value would move a setting they never touched the first time they draft the
+ * other format.
+ *
+ * The default is larger than `packScale`'s because the surface is one row wide
+ * rather than a filled grid — the cards being decided on get the whole width.
+ */
+export const DRAFT_WORKSPACE_PILE_SCALE_DEFAULT = 1.35;
+export const DRAFT_WORKSPACE_PILE_SCALE_MIN = 0.4;
+export const DRAFT_WORKSPACE_PILE_SCALE_MAX = 2.9;
+export const DRAFT_WORKSPACE_PILE_SCALE_STEP = 0.01;
 export const DRAFT_PACK_CARD_BASE_WIDTH_PX = 146;
 export const DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX
   = DRAFT_PACK_CARD_BASE_WIDTH_PX * DRAFT_WORKSPACE_PACK_SCALE_DEFAULT;
@@ -48,6 +66,8 @@ export interface DraftWorkspacePreferences {
   explicitView: DraftWorkspaceView | null;
   cardPreviewMode: DraftCardPreviewMode;
   packScale: number;
+  /** Shared-stack pile card scale. See `DRAFT_WORKSPACE_PILE_SCALE_DEFAULT`. */
+  pileScale: number;
   sideboardCollapsed: boolean | null;
   builderPhoneSideboardCollapsed: boolean;
   phoneDeckVisualColumnCaps: DraftPhoneDeckVisualColumnCaps;
@@ -118,6 +138,26 @@ export function repairDraftWorkspacePackScale(value: unknown): number {
   ) / 100;
 }
 
+/**
+ * The pile-scale half of the same repair, and the reason the schema version did
+ * NOT move for this field: every stored-shape branch below runs this, and it is
+ * total — a preferences blob written before `pileScale` existed has `undefined`
+ * here and gets the default, which is exactly the migration the field needs. A
+ * version bump would instead send every existing v3 blob down the
+ * unknown-version arm and discard the player's pack scale, columns and sort
+ * along with it.
+ */
+export function repairDraftWorkspacePileScale(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DRAFT_WORKSPACE_PILE_SCALE_DEFAULT;
+  }
+  const hundredths = Math.round(value * 100);
+  return Math.min(
+    DRAFT_WORKSPACE_PILE_SCALE_MAX * 100,
+    Math.max(DRAFT_WORKSPACE_PILE_SCALE_MIN * 100, hundredths),
+  ) / 100;
+}
+
 function repairBoardPreferences(
   value: unknown,
   defaults: Readonly<DraftBoardPreferences>,
@@ -169,6 +209,7 @@ function repairSchemaV1Preferences(value: Record<string, unknown>): DraftWorkspa
       : null,
     cardPreviewMode: isDraftCardPreviewMode(value.cardPreviewMode) ? value.cardPreviewMode : "none",
     packScale: repairDraftWorkspacePackScale(value.packScale),
+    pileScale: repairDraftWorkspacePileScale(value.pileScale),
     sideboardCollapsed: value.sideboardCollapsed === null || typeof value.sideboardCollapsed === "boolean"
       ? value.sideboardCollapsed
       : null,
@@ -186,6 +227,7 @@ export function createDefaultDraftWorkspacePreferences(): DraftWorkspacePreferen
     explicitView: null,
     cardPreviewMode: "none",
     packScale: DRAFT_WORKSPACE_PACK_SCALE_DEFAULT,
+    pileScale: DRAFT_WORKSPACE_PILE_SCALE_DEFAULT,
     sideboardCollapsed: null,
     builderPhoneSideboardCollapsed: true,
     phoneDeckVisualColumnCaps: { ...PHONE_DECK_VISUAL_COLUMN_CAPS_DEFAULTS },
@@ -209,6 +251,7 @@ export function repairDraftWorkspacePreferences(value: unknown): DraftWorkspaceP
         : null,
       cardPreviewMode: isDraftCardPreviewMode(value.cardPreviewMode) ? value.cardPreviewMode : "none",
       packScale: repairDraftWorkspacePackScale(value.packScale),
+      pileScale: repairDraftWorkspacePileScale(value.pileScale),
       sideboardCollapsed: value.sideboardCollapsed === null || typeof value.sideboardCollapsed === "boolean"
         ? value.sideboardCollapsed
         : null,
@@ -232,6 +275,7 @@ export function repairDraftWorkspacePreferences(value: unknown): DraftWorkspaceP
       : null,
     cardPreviewMode: isDraftCardPreviewMode(value.cardPreviewMode) ? value.cardPreviewMode : "none",
     packScale: repairDraftWorkspacePackScale(value.packScale),
+    pileScale: repairDraftWorkspacePileScale(value.pileScale),
     sideboardCollapsed: value.sideboardCollapsed === null || typeof value.sideboardCollapsed === "boolean"
       ? value.sideboardCollapsed
       : null,

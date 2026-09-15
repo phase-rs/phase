@@ -48,6 +48,7 @@ function view(): DraftPlayerView {
   return {
     status: "Deckbuilding", kind: "Traditional", pool: [card("twin-a"), card("twin-b")],
     launch_capability: "None",
+    distribution: "PickAndPass",
     commanders_required: 0,
     current_pack: null, draft_effects: [],
     pool_groups: {

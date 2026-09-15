@@ -753,6 +753,35 @@ fn player_matches_filter(
             trigger_controller,
             source_event_subject_id(source_context),
         ),
+        // CR 608.2b + CR 608.2c: the two leaves a delayed condition's slot
+        // binder writes into a player-axis filter slot
+        // (`effects::delayed_trigger::bind_parent_slots_from_root`): a declared
+        // player slot bound to that one player, and a slot with no referent —
+        // an illegal target, whose information "fails to determine" — bound to
+        // the leaf that matches nothing. Both are load-bearing for the same
+        // reason as the arm above — the fallback below is fail-OPEN, and
+        // without them a dead slot would match every player (PR #8881).
+        TargetFilter::SpecificPlayer { id } => *id == player_id,
+        TargetFilter::None => false,
+        // The binder leaves those leaves under the boolean shape the condition
+        // was written in (`Not { slot }`, `Or { slot, slot }`, `And { … }`), so
+        // the shape has to be evaluated here rather than fall through to the
+        // wildcard — `Not { SpecificPlayer }` is "every player but that one",
+        // not "every player". Each member is judged by this same function, so a
+        // member the fallback does not describe still reads as the wildcard it
+        // reads as at top level. No printed trigger carries a `Not` or `And`
+        // in a player-axis slot, and every member of the printed `Or`s there
+        // ("a player or planeswalker", "an opponent or a battle") is a `Player`
+        // leaf, an opponent leaf or a bare type leaf that reads as the
+        // wildcard, so they match exactly as they did through the fallback
+        // (PR #8881).
+        TargetFilter::Not { filter } => !player_matches_filter(filter, state, player_id, source_context),
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|filter| player_matches_filter(filter, state, player_id, source_context)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|filter| player_matches_filter(filter, state, player_id, source_context)),
         _ => true,
     }
 }
@@ -850,6 +879,7 @@ pub(super) fn target_filter_matches_object(
         TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::EventTarget
@@ -1821,6 +1851,7 @@ pub(super) fn matching_attack_events(
         attacker_ids,
         defending_player,
         attacks,
+        declaration_records,
         ..
     } = event
     {
@@ -1872,6 +1903,10 @@ pub(super) fn matching_attack_events(
                         attacker_ids: vec![*id],
                         defending_player: event_defending_player,
                         attacks: vec![(*id, target)],
+                        // The trigger source is narrowed to this attacker, but
+                        // event-scoped conditions such as Pack Tactics still
+                        // refer to the full declaration batch.
+                        declaration_records: declaration_records.clone(),
                     })
                 })
                 .collect();
@@ -1932,6 +1967,10 @@ pub(super) fn matching_attack_events(
                     attacker_ids: vec![*id],
                     defending_player: event_defending_player,
                     attacks: vec![(*id, target)],
+                    // Keep the complete declaration for event-scoped
+                    // conditions; `attacker_ids` remains the per-trigger
+                    // source identity.
+                    declaration_records: declaration_records.clone(),
                 })
             })
             .collect()
@@ -4400,7 +4439,9 @@ pub(super) fn matching_you_attack_events_by_attacked_player(
     state: &GameState,
 ) -> Vec<GameEvent> {
     let GameEvent::AttackersDeclared {
-        defending_player, ..
+        defending_player,
+        declaration_records,
+        ..
     } = event
     else {
         return Vec::new();
@@ -4426,6 +4467,7 @@ pub(super) fn matching_you_attack_events_by_attacked_player(
             attacker_ids: attacks.iter().map(|(id, _)| *id).collect(),
             defending_player: attacked,
             attacks,
+            declaration_records: declaration_records.clone(),
         })
         .collect()
 }
@@ -7686,6 +7728,7 @@ mod tests {
                     crate::game::combat::AttackTarget::Player(PlayerId(1)),
                 ),
             ],
+            declaration_records: Vec::new(),
         };
 
         let matched = matching_attack_events(
@@ -7740,6 +7783,7 @@ mod tests {
                 attacker,
                 crate::game::combat::AttackTarget::Player(PlayerId(1)),
             )],
+            declaration_records: Vec::new(),
         };
         assert!(match_attacks(
             &enchanted_player_event,
@@ -7755,6 +7799,7 @@ mod tests {
                 attacker,
                 crate::game::combat::AttackTarget::Player(PlayerId(0)),
             )],
+            declaration_records: Vec::new(),
         };
         assert!(!match_attacks(
             &other_player_event,
@@ -7809,6 +7854,7 @@ mod tests {
                 attacker,
                 crate::game::combat::AttackTarget::Player(PlayerId(1)),
             )],
+            declaration_records: Vec::new(),
         };
         assert!(match_attacks(
             &enchanted_player_event,
@@ -7825,6 +7871,7 @@ mod tests {
                 attacker,
                 crate::game::combat::AttackTarget::Player(PlayerId(0)),
             )],
+            declaration_records: Vec::new(),
         };
         assert!(!match_attacks(
             &other_player_event,
@@ -7862,6 +7909,7 @@ mod tests {
                     crate::game::combat::AttackTarget::Player(PlayerId(1)),
                 ),
             ],
+            declaration_records: Vec::new(),
         };
         let events = matching_attack_events(
             &two_attackers_event,
@@ -7891,6 +7939,7 @@ mod tests {
                 attacker,
                 crate::game::combat::AttackTarget::Planeswalker(pw),
             )],
+            declaration_records: Vec::new(),
         };
         assert!(
             !match_attacks(
@@ -15174,6 +15223,104 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    /// CR 608.2b + CR 608.2c: the player-axis leaves a delayed condition's
+    /// slot binder can write into `valid_target` — `SpecificPlayer` for a bound
+    /// player slot, `None` for a slot with no referent. The match ends in
+    /// `_ => true`, so without their arms a dead slot would admit every player.
+    ///
+    /// Revert-failing: delete either arm and its negative assertion flips.
+    #[test]
+    fn player_axis_specific_player_and_none_leaves_do_not_fall_open() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Graveyard,
+        );
+        let context = test_trigger_source_context(&state, source_id);
+        let mut specific = TriggerDefinition::new(TriggerMode::ChangesController);
+        specific.valid_target = Some(TargetFilter::SpecificPlayer { id: PlayerId(1) });
+        assert!(
+            valid_player_matches(&specific, &state, PlayerId(1), &context),
+            "a bound player slot matches that player"
+        );
+        assert!(
+            !valid_player_matches(&specific, &state, PlayerId(0), &context),
+            "a bound player slot matches no other player"
+        );
+        let mut dead = TriggerDefinition::new(TriggerMode::ChangesController);
+        dead.valid_target = Some(TargetFilter::None);
+        assert!(
+            !valid_player_matches(&dead, &state, PlayerId(0), &context)
+                && !valid_player_matches(&dead, &state, PlayerId(1), &context),
+            "a slot with no referent matches no player"
+        );
+    }
+
+    /// CR 608.2c ("read the whole text"): the slot binder keeps a bound leaf
+    /// under the boolean shape the condition was written in, so `Not`, `Or`
+    /// and `And` over bound leaves must be evaluated on the player axis — a
+    /// `Not { SpecificPlayer }` that fell through to the wildcard would admit
+    /// the one player it names. Three players, so a multi-live `Or` has a
+    /// player outside it.
+    ///
+    /// Revert-failing: drop any of the three arms and that shape's negative
+    /// assertion flips.
+    #[test]
+    fn player_axis_bound_leaves_keep_their_boolean_shape() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Graveyard,
+        );
+        let context = test_trigger_source_context(&state, source_id);
+        let matches = |filter: TargetFilter, player: PlayerId| {
+            let mut trigger = TriggerDefinition::new(TriggerMode::ChangesController);
+            trigger.valid_target = Some(filter);
+            valid_player_matches(&trigger, &state, player, &context)
+        };
+        let bound = |id: PlayerId| TargetFilter::SpecificPlayer { id };
+        let not_bound = TargetFilter::Not {
+            filter: Box::new(bound(PlayerId(1))),
+        };
+        assert!(
+            !matches(not_bound.clone(), PlayerId(1)),
+            "`Not` over a bound player slot excludes that player"
+        );
+        assert!(
+            matches(not_bound, PlayerId(0)),
+            "`Not` over a bound player slot admits every other player"
+        );
+        let either_bound = TargetFilter::Or {
+            filters: vec![bound(PlayerId(1)), bound(PlayerId(2))],
+        };
+        assert!(
+            matches(either_bound.clone(), PlayerId(1))
+                && matches(either_bound.clone(), PlayerId(2)),
+            "`Or` over two live bound slots admits both players"
+        );
+        assert!(
+            !matches(either_bound, PlayerId(0)),
+            "`Or` over two live bound slots admits no third player"
+        );
+        let bound_and_any_player = TargetFilter::And {
+            filters: vec![bound(PlayerId(1)), TargetFilter::Player],
+        };
+        assert!(
+            !matches(bound_and_any_player.clone(), PlayerId(0)),
+            "`And` over a bound slot excludes a player the slot does not name"
+        );
+        assert!(
+            matches(bound_and_any_player, PlayerId(1)),
+            "`And` over a bound slot admits the player every member admits"
+        );
+    }
+
     #[test]
     fn player_matches_target_filter_you() {
         let filter = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You));
@@ -16965,6 +17112,7 @@ mod tests {
             attacker_ids: vec![source, d2, d3, non],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         };
         let filter = TargetFilter::Typed(
             TypedFilter::card()
@@ -16989,6 +17137,7 @@ mod tests {
             attacker_ids: vec![ObjectId(1), ObjectId(2)],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         };
         let count = count_trigger_subjects_in_batch(
             &state,
@@ -17010,6 +17159,7 @@ mod tests {
             attacker_ids: vec![ObjectId(1)],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         };
         let count = count_trigger_subjects_in_batch(
             &state,

@@ -1356,6 +1356,7 @@ struct VoteRoundState {
     candidate_objects: crate::im::Vector<ObjectId>,
     outcome_template: Option<Box<crate::types::ability::AbilityDefinition>>,
     visibility: crate::types::ability::VoteVisibility,
+    chain_root_targets: Vec<crate::types::ability::TargetRef>,
 }
 
 /// CR 701.38 + CR 608.2c: The single ballot-tally authority. Records one
@@ -1394,6 +1395,7 @@ fn append_vote_ballot_and_advance(
         candidate_objects,
         outcome_template,
         visibility,
+        chain_root_targets,
     } = round;
 
     let mut new_tallies = tallies;
@@ -1431,6 +1433,7 @@ fn append_vote_ballot_and_advance(
             candidate_objects,
             outcome_template,
             visibility,
+            chain_root_targets,
         };
         ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
     } else if let Some(((next_player, next_votes), rest)) = remaining_voters.split_first() {
@@ -1451,6 +1454,7 @@ fn append_vote_ballot_and_advance(
             candidate_objects,
             outcome_template,
             visibility,
+            chain_root_targets,
         };
         ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
     } else {
@@ -1477,6 +1481,7 @@ fn append_vote_ballot_and_advance(
             tally_mode,
             &candidate_object_ids,
             outcome_template.as_deref(),
+            &chain_root_targets,
             events,
         );
         ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, controller, events))
@@ -3618,6 +3623,7 @@ pub(super) fn handle_resolution_choice(
                 candidate_objects,
                 outcome_template,
                 visibility,
+                chain_root_targets,
             },
             GameAction::ChooseOption { choice },
         ) => {
@@ -3661,6 +3667,7 @@ pub(super) fn handle_resolution_choice(
                     candidate_objects,
                     outcome_template,
                     visibility,
+                    chain_root_targets,
                 },
             )
         }
@@ -3685,6 +3692,7 @@ pub(super) fn handle_resolution_choice(
                 candidate_objects,
                 outcome_template,
                 visibility,
+                chain_root_targets,
             },
             GameAction::SubmitVoteCandidate { candidate_index },
         ) => {
@@ -3715,6 +3723,7 @@ pub(super) fn handle_resolution_choice(
                     candidate_objects,
                     outcome_template,
                     visibility,
+                    chain_root_targets,
                 },
             )
         }

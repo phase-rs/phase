@@ -311,6 +311,10 @@ fn find_legal_targets_with_context(
                     // chosen here — fail closed as a candidate-enumeration scope.
                     Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                     Some(ControllerRef::ParentTargetController) => false,
+                    // Engine constraint: resolving this reference needs a trigger event
+                    // window, which target-candidate matching does not have.
+                    // Fail closed, mirroring the parent-target refs above.
+                    Some(ControllerRef::EventTargetController) => false,
                     Some(ControllerRef::ParentTargetOwner) => false,
                     Some(ControllerRef::DefendingPlayer) => false,
                     // CR 613.1: a persisted chosen player isn't a target
@@ -1011,6 +1015,77 @@ pub fn resolved_targets(
     ability.targets.clone()
 }
 
+/// CR 608.2c + CR 601.2c + CR 115.6: the referent(s) the parent's resolution chain SELECTED,
+/// for an ability that can no longer rely on `resolve_ability_chain`'s parent-target
+/// propagation (`ability_utils::build_resolved_from_def_with_targets` gives only the ROOT its
+/// targets; sub-abilities start empty on purpose).
+///
+/// Tiers, in order:
+///   1. `context.forwarded_result_context` — a forward-result producer is the most recent
+///      antecedent. `Some([])` there is a real zero-result and must not fall through.
+///   2. `parent_chain_targets_from_root` — the flattened resolving-root chain, so a
+///      `ParentTargetSlot { index }` anaphor can index an earlier declared slot. NOTE the
+///      breadth this implies: the flatten is CHAIN-WIDE, concatenating every node's `targets`,
+///      because slot indexing needs the whole declared sequence. A caller that binds the result
+///      wholesale therefore hands a bare `ParentTarget` rider every sink in the chain, not just
+///      the prevention's own. Measured zero carriers today — all five in-class prevention riders
+///      sit in chains with exactly one target sink — but a future prevention printed as one
+///      clause of a multi-sink chain would inherit the sibling clause's referent. That breadth
+///      is inherited from the delayed-trigger authority this was extracted from; narrowing it
+///      would change that seam too, so it is recorded here rather than special-cased.
+///   3. the node's OWN propagated `targets` (phase#4767: a runtime-injected referent that was
+///      never a declared slot — Animate Dead / Dance of the Dead).
+///   4. `chain_declares_chooseable_target_slots` — a slot WAS declared and zero targets were
+///      chosen (CR 115.6 / CR 603.3d, issue #5901): the referent is the empty set.
+///
+/// Returns `None` when the chain names NO referent at all. That is a distinct fact from
+/// tier 4's `Some(vec![])`, and the two callers answer it differently:
+///   * `effects::delayed_trigger::parent_target_snapshot` falls back to the creation event's
+///     `TriggeringSource` (CR 603.7c — "exile it at end of turn" on a slotless dies trigger).
+///   * `effects::bind_detached_continuation_to_parent` does NOT: a `ParentTarget` anaphor in a
+///     prevention rider names the parent's CHOSEN target, and if nothing was chosen the anaphor
+///     has no referent (CR 608.2b — "if part of the effect requires information about an
+///     illegal target, it fails to determine any such information"). Binding the creation
+///     event's source there would apply a different rule to a clause that does not invoke it.
+pub(crate) fn parent_chain_referents(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<Vec<TargetRef>> {
+    if let Some(context) = &ability.context.forwarded_result_context {
+        return Some(context.targets.clone());
+    }
+    let root_chain = parent_chain_targets_from_root(state, ability);
+    if !root_chain.is_empty() {
+        return Some(root_chain);
+    }
+    if !ability.targets.is_empty() {
+        return Some(ability.targets.clone());
+    }
+    if chain_declares_chooseable_target_slots(resolving_root_ability(state, ability)) {
+        return Some(Vec::new());
+    }
+    None
+}
+
+/// True when any link of the chain declares a target slot whose selection may
+/// legally be empty: a `multi_target` bound ("any number of target ...") or
+/// `optional_targeting` ("up to one target ..."). CR 115.6 permits zero
+/// targets; CR 603.3d governs the target choice for triggered abilities. Used
+/// by [`parent_chain_referents`] to distinguish "slots were declared but zero
+/// were chosen" (referent = empty set) from "no slots exist at all".
+fn chain_declares_chooseable_target_slots(ability: &ResolvedAbility) -> bool {
+    ability.multi_target.is_some()
+        || ability.optional_targeting
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(chain_declares_chooseable_target_slots)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_declares_chooseable_target_slots)
+}
+
 /// CR 608.2c: The full flattened target chain from the resolving root stack
 /// entry, so a `ParentTargetSlot { index }` anaphor can index a specific earlier
 /// declared slot even after the current node's local `targets` were replaced by
@@ -1396,6 +1471,45 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                 })?;
             Some(TargetRef::Player(controller))
         }
+        // CR 120.1 + CR 109.4 + CR 608.2c: "that creature's controller" on an
+        // ACTIVE-voice damage trigger — the controller of the damage RECIPIENT.
+        // CR 120.1 puts the dealer in `DamageDealt.source_id` and the recipient
+        // in `.target`, so this reads the target through the same authority
+        // `EventTarget` uses, NOT `extract_source_from_event` (which is the
+        // dealer, and is what `ParentTargetController` below falls back to).
+        //
+        // CR 608.2h LKI fallback is load-bearing here, not defensive: lethal
+        // combat damage means the damaged creature is normally already in a
+        // graveyard (CR 704.5g state-based action) by the time this trigger
+        // resolves, at which point CR 109.4 says it no longer has a controller.
+        // The LKI snapshot holds the at-departure controller. Mirrors
+        // `TriggeringSourceController` directly above.
+        TargetFilter::EventTargetController => {
+            let event = event?;
+            let target_obj_id = extract_target_object_from_event(event)?;
+            let obj_opt = state.objects.get(&target_obj_id);
+            // CR 608.2h + CR 109.4: prefer the LKI snapshot once the recipient
+            // has LEFT the battlefield, rather than reading live first.
+            // `reset_for_battlefield_exit` reverts `controller` to the OWNER on
+            // exit, and the object row survives in the graveyard, so a
+            // live-first read silently returns the owner for exactly the case
+            // this variant must handle — lethal combat damage, where CR 704.5g
+            // has already moved the recipient before the trigger resolves.
+            // When owner and controller coincide that substitution is
+            // invisible, which is why the regressions deliberately diverge
+            // them. Mirrors `ability_utils::parent_target_controller`.
+            let off_battlefield = obj_opt.is_none_or(|obj| obj.zone != Zone::Battlefield);
+            let controller = if off_battlefield {
+                state
+                    .lki_cache
+                    .get(&target_obj_id)
+                    .map(|lki| lki.controller)
+                    .or_else(|| obj_opt.map(|obj| obj.controller))
+            } else {
+                obj_opt.map(|obj| obj.controller)
+            }?;
+            Some(TargetRef::Player(controller))
+        }
         TargetFilter::ParentTarget => {
             let event = event?;
             if let Some(id) = blocked_attacker_from_event(event, source_id) {
@@ -1728,6 +1842,24 @@ pub fn resolve_effect_player_ref(
                             .or_else(|| state.lki_cache.get(&id).map(|lki| lki.controller)),
                     }
                 })
+            })
+        }
+        // CR 120.1 + CR 109.4: The damage RECIPIENT's controller. Deliberately
+        // does NOT consult `parent_target_controller` first, unlike the arm
+        // above: this variant is emitted only where the trigger established the
+        // event target as the antecedent, so a parent-target slot (if the chain
+        // later acquired one) is a different referent, not a better source for
+        // this one. Single authority — the event-context resolver.
+        TargetFilter::EventTargetController => {
+            resolve_event_context_target(state, filter, ability.source_id).and_then(|target| {
+                match target {
+                    TargetRef::Player(player) => Some(player),
+                    TargetRef::Object(id) => state
+                        .objects
+                        .get(&id)
+                        .map(|obj| obj.controller)
+                        .or_else(|| state.lki_cache.get(&id).map(|lki| lki.controller)),
+                }
             })
         }
         // CR 108.3 + CR 608.2c: Parent target's *owner* — mirrors the controller
@@ -2364,6 +2496,7 @@ fn stack_entry_controller_matches(
         | ControllerRef::TargetPlayer
         | ControllerRef::TargetOpponent
         | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::DefendingPlayer
         | ControllerRef::SourceChosenPlayer
@@ -6028,6 +6161,7 @@ mod tests {
             attacker_ids: vec![attacker],
             defending_player: PlayerId(0),
             attacks: vec![(attacker, AttackTarget::Player(PlayerId(0)))],
+            declaration_records: Vec::new(),
         });
 
         let filter =
@@ -6091,6 +6225,7 @@ mod tests {
             attacker_ids: vec![a, b],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         };
 
         assert_eq!(
@@ -6111,6 +6246,7 @@ mod tests {
             attacker_ids: vec![a],
             defending_player: PlayerId(1),
             attacks: vec![],
+            declaration_records: Vec::new(),
         };
         assert_eq!(extract_source_from_event(&solo), Some(a));
         assert_eq!(extract_sources_from_event(&solo), vec![a]);
@@ -6268,6 +6404,7 @@ mod tests {
                 (a1, crate::game::combat::AttackTarget::Player(PlayerId(1))),
                 (a2, crate::game::combat::AttackTarget::Player(PlayerId(1))),
             ],
+            declaration_records: Vec::new(),
         });
         let ability = make_resolved_with_targets(vec![], a1);
 

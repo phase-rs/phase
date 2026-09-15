@@ -10,9 +10,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   draftPodScreen,
   isMultiplayerDraftPodLive,
+  setArrivingCardBoardPreferences,
   useMultiplayerDraftStore,
   type DraftPodScreen,
 } from "../multiplayerDraftStore";
+import { createDefaultDraftWorkspacePreferences } from "../../components/draft/workspace/workspacePreferences";
 import { DraftPodHostAdapter } from "../../adapter/draftPodHostAdapter";
 import { DraftPodGuestAdapter } from "../../adapter/draftPodGuestAdapter";
 import type { DraftPlayerView } from "../../adapter/draft-adapter";
@@ -48,6 +50,7 @@ const mockHostAdapter = {
   startDraft: vi.fn(async () => {}),
   submitPick: vi.fn(async () => mockView("Drafting")),
   submitPickWithDraftEffect: vi.fn(async () => mockView("Drafting")),
+  submitSharedStackDecision: vi.fn(async () => mockView("Drafting")),
   submitDeck: vi.fn(async () => mockView("Deckbuilding")),
   suggestLands: vi.fn(async () => ({})),
   updateWorkspace: vi.fn(async () => {}),
@@ -74,6 +77,7 @@ const mockGuestAdapter = {
   initialize: vi.fn(async () => {}),
   submitPick: vi.fn(async () => {}),
   submitPickWithDraftEffect: vi.fn(async () => {}),
+  submitSharedStackDecision: vi.fn(async () => {}),
   submitDeck: vi.fn(async () => {}),
   suggestLands: vi.fn(async () => ({})),
   updateWorkspace: vi.fn(async () => {}),
@@ -166,6 +170,7 @@ function mockView(status: string): DraftPlayerView {
     status: status as DraftPlayerView["status"],
     kind: "Premier",
     launch_capability: "None",
+    distribution: "PickAndPass",
     commanders_required: 0,
     current_pack_number: 1,
     pick_number: 1,
@@ -238,6 +243,7 @@ describe("multiplayerDraftStore", () => {
     guestRecovery.inspect.mockReturnValue({ type: "absent" });
     guestRecovery.loadSession.mockResolvedValue(null);
     useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
+    setArrivingCardBoardPreferences(createDefaultDraftWorkspacePreferences().deck);
     useMultiplayerDraftStore.getState().reset();
     useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
     wasmMatchAdapterMock.reset();
@@ -569,6 +575,49 @@ describe("multiplayerDraftStore", () => {
       expect(state.joined).toBe(3);
       expect(state.total).toBe(8);
       expect(state.seats).toHaveLength(1);
+    });
+
+    /**
+     * A BROADCAST MUST NOT BLANK THE CLOCK.
+     *
+     * `draft-core` publishes `timer_remaining_ms: None` on every view it builds
+     * — on the P2P path the countdown is a host-side JS timer delivered by
+     * `timerTick`. `startPickTimer` re-arms on each applied decision and is
+     * immediately followed by `broadcastViews()`, so coalescing the absent field
+     * to `null` here unmounted and remounted `PickTimer` once per turn, shifting
+     * the pile rows under the deciding player for exactly the window `timerTick`
+     * exists to cover.
+     *
+     * REVERT-FAILING: restore `timerRemainingMs: view.timer_remaining_ms ?? null`
+     * in `installEventView` and leg (i) reds.
+     */
+    it("leaves the pick clock alone when a broadcast view carries no timer", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+
+      // The host-side tick is the only thing that sets this on the P2P path.
+      capturedHostEventHandler!({ type: "timerTick", remainingMs: 55_000 });
+      expect(useMultiplayerDraftStore.getState().timerRemainingMs).toBe(55_000);
+
+      // (i) A view with NO timer field must leave the running clock standing.
+      const view = mockView("Drafting");
+      expect(view.timer_remaining_ms ?? null).toBeNull();
+      capturedHostEventHandler!({ type: "viewUpdated", view });
+      expect(useMultiplayerDraftStore.getState().timerRemainingMs).toBe(55_000);
+
+      // (ii) Paired positive: a view that DOES carry a number still wins, so
+      // leg (i) is about the absent field and not about ignoring views.
+      capturedHostEventHandler!({
+        type: "viewUpdated",
+        view: { ...mockView("Drafting"), timer_remaining_ms: 12_000 },
+      });
+      expect(useMultiplayerDraftStore.getState().timerRemainingMs).toBe(12_000);
     });
 
     it("projects restored MatchInProgress views into match phase", async () => {
@@ -1231,6 +1280,268 @@ describe("multiplayerDraftStore", () => {
       await useMultiplayerDraftStore.getState().leave();
       expect(mockGuestAdapter.dispose).toHaveBeenCalledTimes(2);
       expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
+    });
+  });
+
+  describe("shared-stack decisions", () => {
+    /**
+     * A Winston-shaped player view. `shared_stack.decisions` is the engine's
+     * monotone counter of APPLIED decisions and is the only acknowledgement
+     * signal a decline can produce — the pool does not move. `legality` is
+     * published by the engine and read, never computed here.
+     */
+    const winstonView = (decisions: number, pool: DraftPlayerView["pool"] = []): DraftPlayerView => ({
+      ...mockView("Drafting"),
+      kind: "Winston",
+      pool,
+      shared_stack: {
+        main_stack_remaining: 40,
+        total_cards: 42,
+        active_seat: 0,
+        active_pile: 0,
+        piles: [0, 1, 2].map((index) => ({
+          index,
+          total: 1,
+          revealed: [],
+          legality: [
+            { decision: "Take" as const, refusal: null },
+            { decision: "Decline" as const, refusal: null },
+          ],
+        })),
+        decisions,
+        // Empty: this fixture exercises the `decisions` acknowledgement path,
+        // and no client consumer reads the history yet.
+        history: [],
+        forced_draw: null,
+      },
+      play_first_chooser: 1,
+    });
+
+    const hostWinstonPod = async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Winston",
+        podSize: 2,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "workspaceRestored", workspaceState: null });
+      capturedHostEventHandler!({ type: "viewUpdated", view: winstonView(4) });
+    };
+
+    it.each([
+      ["Take", 1],
+      ["Decline", 2],
+    ] as const)("dispatches a %s on pile %i verbatim through the host adapter", async (decision, pile) => {
+      await hostWinstonPod();
+      mockHostAdapter.submitSharedStackDecision.mockResolvedValueOnce(winstonView(5));
+
+      await expect(useMultiplayerDraftStore.getState().submitSharedStackDecision(pile, decision))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      expect(mockHostAdapter.submitSharedStackDecision).toHaveBeenCalledWith(pile, decision);
+    });
+
+    // THE discriminating case for the sibling: a non-final decline adds ZERO
+    // cards to the pool, so `performPick`'s `exactAddedIds` predicate can never
+    // acknowledge it (and its zero-length id guard would refuse the call
+    // outright). Only the engine's decisions counter can.
+    it("acknowledges a decline that adds no card to the pool", async () => {
+      await hostWinstonPod();
+      mockHostAdapter.submitSharedStackDecision.mockResolvedValueOnce(winstonView(5));
+
+      await expect(useMultiplayerDraftStore.getState().submitSharedStackDecision(0, "Decline"))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      expect(useMultiplayerDraftStore.getState().view?.shared_stack?.decisions).toBe(5);
+      expect(useMultiplayerDraftStore.getState().view?.pool).toEqual([]);
+      expect(useMultiplayerDraftStore.getState().pickInteractionLocked).toBe(false);
+    });
+
+    // A take collects a WHOLE PILE the engine chose the contents of, so unlike a
+    // pick there is no card to resolve a placement for before dispatching. That
+    // is why these arrive at the workspace's default placement — column 0 —
+    // unless something places them, and why "every card I draft stacks in the
+    // first column" was the visible symptom.
+    it("sorts the cards a take collected into the board's own columns", async () => {
+      await hostWinstonPod();
+      const taken = [
+        { ...card("cheap"), cmc: 1 },
+        { ...card("costly"), cmc: 5 },
+      ];
+      mockHostAdapter.submitSharedStackDecision.mockResolvedValueOnce(winstonView(5, taken));
+
+      await expect(useMultiplayerDraftStore.getState().submitSharedStackDecision(0, "Take"))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      const placements = useMultiplayerDraftStore.getState().workspaceState!.placements;
+      // Two different columns at all is the regression guard; the ORDER is what
+      // says they were sorted rather than merely spread — the board's default
+      // sort is by mana value, so the five-drop belongs to the right of the
+      // one-drop.
+      expect(placements.costly.column).toBeGreaterThan(placements.cheap.column);
+    });
+
+    // The board's sort is a PLAYER setting, so the placement has to follow the
+    // one they actually chose rather than the module's seeded default. The two
+    // cards share a mana value and differ only in colour, so the default
+    // (sort by mana value) would put them in the SAME column — this row passes
+    // only if the "color" preference really reached the placement.
+    it("sorts arriving cards by the board preference the page published", () => {
+      setArrivingCardBoardPreferences({
+        sort: "color",
+        columnCount: 7,
+        rows: "one",
+        showHeaders: true,
+      });
+      const taken = [
+        { ...card("white-one"), cmc: 2, colors: ["W"] },
+        { ...card("black-one"), cmc: 2, colors: ["B"] },
+      ];
+
+      return (async () => {
+        await hostWinstonPod();
+        mockHostAdapter.submitSharedStackDecision.mockResolvedValueOnce(winstonView(5, taken));
+
+        await expect(useMultiplayerDraftStore.getState().submitSharedStackDecision(0, "Take"))
+          .resolves.toEqual({ status: "acknowledged" });
+
+        const placements = useMultiplayerDraftStore.getState().workspaceState!.placements;
+        expect(placements["white-one"].column).not.toBe(placements["black-one"].column);
+      })();
+    });
+
+    // The same claim for cards that arrive with no decision of this client's
+    // own behind them: the host deciding for a timed-out seat, or any broadcast
+    // a guest receives. A fix that lived only in the decision path would leave
+    // every timed-out Winston turn stacking in column 0.
+    it("sorts cards that arrive on a broadcast view with no decision of ours", async () => {
+      await hostWinstonPod();
+
+      capturedHostEventHandler!({
+        type: "viewUpdated",
+        view: winstonView(5, [
+          { ...card("cheap"), cmc: 1 },
+          { ...card("costly"), cmc: 5 },
+        ]),
+      });
+
+      const placements = useMultiplayerDraftStore.getState().workspaceState!.placements;
+      expect(placements.costly.column).toBeGreaterThan(placements.cheap.column);
+    });
+
+    /**
+     * A PREFERENCE CHANGE IS HONOURED BY THE VERY NEXT ARRIVAL.
+     *
+     * The page publishes board columns from `handlePreferencesChange` rather
+     * than from an effect keyed on the preference state. An effect runs after
+     * React commits, and a `viewUpdated` landing in that window placed the
+     * arrivals against the PREVIOUS columns -- cards sorted into the board the
+     * player had a moment ago.
+     *
+     * WHAT THIS PINS: the publish-then-arrive sequence, with no re-render in
+     * between -- the store half. The PAGE half, that the publish happens inside
+     * the handler rather than from an effect, is pinned separately by
+     * `DraftPodPage.winston.test.tsx`, which invokes the captured
+     * `onPreferencesChange` outside `act` so an effect provably has not flushed
+     * at its assertion. The two together cover the race; neither does alone.
+     */
+    it("places an arrival against the columns published just before it", async () => {
+      await hostWinstonPod();
+      // Two cards that share a mana value and differ only in colour: under the
+      // default (sort by mana value) they land in the SAME column, so a stale
+      // preference is visible as a collision rather than as a reordering.
+      const taken = [
+        { ...card("white-one"), cmc: 2, colors: ["W"] },
+        { ...card("black-one"), cmc: 2, colors: ["B"] },
+      ];
+
+      setArrivingCardBoardPreferences({
+        sort: "color",
+        columnCount: 7,
+        rows: "one",
+        showHeaders: true,
+      });
+      // No re-render between the publish and the arrival, which is the whole
+      // point: the arrival must not be waiting on one.
+      capturedHostEventHandler!({ type: "viewUpdated", view: winstonView(5, taken) });
+
+      const placements = useMultiplayerDraftStore.getState().workspaceState!.placements;
+      expect(placements["white-one"].column).not.toBe(placements["black-one"].column);
+    });
+
+    it("refuses to acknowledge a view whose decision counter did not advance", async () => {
+      await hostWinstonPod();
+      mockHostAdapter.submitSharedStackDecision.mockResolvedValueOnce(winstonView(4));
+
+      await expect(useMultiplayerDraftStore.getState().submitSharedStackDecision(0, "Take"))
+        .resolves.toEqual({ status: "rejected", reason: "unacknowledged" });
+      expect(useMultiplayerDraftStore.getState().pickInteractionLocked).toBe(false);
+    });
+
+    // The final decision empties the stack and ends the draft, and the engine
+    // status-gates `shared_stack` to `Drafting` — so there is no counter left
+    // to compare. A view still in `Drafting` with no shared stack stays a
+    // failure, which is what keeps this arm from being a blanket pass.
+    it("acknowledges the final decision, whose view has left Drafting", async () => {
+      await hostWinstonPod();
+      mockHostAdapter.submitSharedStackDecision.mockResolvedValueOnce({
+        ...mockView("Deckbuilding"),
+        kind: "Winston",
+        pool: [card("last-card")],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitSharedStackDecision(2, "Take"))
+        .resolves.toEqual({ status: "acknowledged" });
+    });
+
+    it("refuses a still-drafting view that published no shared stack", async () => {
+      await hostWinstonPod();
+      mockHostAdapter.submitSharedStackDecision.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        kind: "Winston",
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitSharedStackDecision(0, "Take"))
+        .resolves.toEqual({ status: "rejected", reason: "unacknowledged" });
+    });
+
+    it("refuses a decision when no pile turn is live", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "workspaceRestored", workspaceState: null });
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+      mockHostAdapter.submitSharedStackDecision.mockClear();
+
+      await expect(useMultiplayerDraftStore.getState().submitSharedStackDecision(0, "Take"))
+        .resolves.toEqual({ status: "rejected", reason: "invalid-request" });
+      expect(mockHostAdapter.submitSharedStackDecision).not.toHaveBeenCalled();
+    });
+
+    it("sends the guest decision and settles on the host's pick acknowledgement", async () => {
+      await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
+        roomCode: "ABCDE",
+        displayName: "Alice",
+      });
+      capturedGuestEventHandler!({ type: "workspaceRestored", workspaceState: null });
+      capturedGuestEventHandler!({ type: "viewUpdated", view: winstonView(7) });
+
+      const pending = useMultiplayerDraftStore.getState().submitSharedStackDecision(1, "Decline");
+      await vi.waitFor(() => {
+        expect(mockGuestAdapter.submitSharedStackDecision).toHaveBeenCalledWith(1, "Decline");
+      });
+      capturedGuestEventHandler!({ type: "pickAcknowledged", view: winstonView(8) });
+
+      await expect(pending).resolves.toEqual({ status: "acknowledged" });
+      expect(useMultiplayerDraftStore.getState().view?.shared_stack?.decisions).toBe(8);
     });
   });
 

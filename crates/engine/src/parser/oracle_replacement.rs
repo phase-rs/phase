@@ -7253,6 +7253,15 @@ pub(crate) fn parse_oneshot_damage_replacement(
         return Some(effect);
     }
 
+    // CR 614.9 + CR 609.7a: the ACTIVE-voice next-N form — "the next N damage
+    // that <a source of your choice> would deal to <victim> this turn is dealt
+    // to <destination> instead" (Harm's Way). Disjoint from both passive forms
+    // above: they require " damage that would be dealt to ", and this subject
+    // slot must parse as a chosen damage source.
+    if let Some(effect) = parse_oneshot_next_n_source_damage_redirect(norm_lower) {
+        return Some(effect);
+    }
+
     // CR 615.1a + CR 614.1a + CR 115.1: Awe-Strike-class one-shot target-source
     // prevention — "the next time [target creature | that creature] would deal
     // damage this turn, prevent that damage". The subject is a DECLARED TARGET
@@ -7349,9 +7358,7 @@ pub(crate) fn parse_oneshot_damage_replacement(
             return None;
         }
         let redirect_object_filter = match redirect_to {
-            DamageRedirectTarget::ChosenObjectTarget => {
-                parse_damage_to_target_filter(result_clause)
-            }
+            DamageRedirectTarget::ChosenTarget => parse_damage_to_target_filter(result_clause),
             // `redirect_object_filter` carries the filter for a CHOSEN object slot
             // the player must select. `AttachedToSource` joins the `None` arm
             // deliberately, not by default: like `SourceObject`, its recipient is
@@ -7859,9 +7866,9 @@ pub(crate) fn parse_planar_die_planeswalk_replacement(norm_lower: &str) -> Optio
 /// as `recipient_object_filter: SelfRef`: the resolver hosts the shield on the
 /// source with `valid_card: SelfRef` so it fires only on damage to it, and the
 /// targeting layer surfaces no slot for the self recipient. The redirect
-/// recipient is a chosen object target ("target creature you control"). The
-/// amount N is retained as a depletion-style redirection cap so only that much
-/// damage is moved to the chosen recipient.
+/// recipient is a chosen target ("target creature you control", or "any target"
+/// — Zhalfirin Crusader). The amount N is retained as a depletion-style
+/// redirection cap so only that much damage is moved to the chosen recipient.
 fn parse_oneshot_next_n_damage_to_self_redirect(norm_lower: &str) -> Option<Effect> {
     let (rest, (_, amount, _)) = (
         tag::<_, _, OracleError<'_>>("the next "),
@@ -7872,10 +7879,10 @@ fn parse_oneshot_next_n_damage_to_self_redirect(norm_lower: &str) -> Option<Effe
         .ok()?;
 
     // CR 115.1: redirect recipient — "target creature you control" (every en-Kor
-    // card) or the looser "target creature"; both become a chosen object target.
-    // (An "any target" redirect is intentionally NOT accepted here: it can be a
-    // player, but the CreateDamageReplacement resolver stores only object redirect
-    // targets, so a player choice would silently drop the redirect — fail closed.)
+    // card), the looser "target creature", or "any target" (Zhalfirin Crusader).
+    // CR 614.9 + CR 115.4: an "any target" recipient may be a player, creature,
+    // planeswalker or battle; the domain is enforced by the targeting authority
+    // (ability_utils::effect_slot_denotes_damage_any_target).
     let (rest, redirect_object_filter) = alt((
         value(
             inject_controller(
@@ -7888,6 +7895,7 @@ fn parse_oneshot_next_n_damage_to_self_redirect(norm_lower: &str) -> Option<Effe
             TargetFilter::Typed(TypedFilter::creature()),
             tag("target creature"),
         ),
+        value(TargetFilter::Any, tag("any target")),
     ))
     .parse(rest)
     .ok()?;
@@ -7903,7 +7911,7 @@ fn parse_oneshot_next_n_damage_to_self_redirect(norm_lower: &str) -> Option<Effe
         combat_scope: None,
         target_filter: None,
         modification: None,
-        redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+        redirect_to: Some(DamageRedirectTarget::ChosenTarget),
         redirect_amount: Some(PreventionAmount::Next(amount)),
         redirect_object_filter: Some(redirect_object_filter),
         recipient_object_filter: Some(TargetFilter::SelfRef),
@@ -7916,14 +7924,14 @@ fn parse_oneshot_next_n_damage_to_self_redirect(norm_lower: &str) -> Option<Effe
 /// "the next N damage that would be dealt to <target> this turn is dealt to
 /// <destination> instead", where the destination is the source itself
 /// (`~` → `SourceObject`), its controller (`you` → `Controller`), or a SECOND
-/// chosen *object* target (`another target creature` → `ChosenObjectTarget` with
+/// chosen target (`another target creature` / `any target` → `ChosenTarget` with
 /// its own redirect slot). Covers Daughter of Autumn / Vassal's Duty (→ ~ / you)
 /// and Razia, Boros Archangel (→ another target creature). The mirror of
 /// `parse_oneshot_next_n_damage_to_self_redirect` (recipient `~`); `Controller`/
-/// `SourceObject` need no chosen redirect slot, the chosen-object destination
-/// surfaces one (CR 115.1) alongside the recipient slot. An `any target` redirect
-/// is rejected (it can be a player, which the object-only redirect resolver can't
-/// store) — fail closed.
+/// `SourceObject` need no chosen redirect slot, the chosen destination surfaces
+/// one (CR 115.1) alongside the recipient slot. The destination grammar is
+/// shared with the active-voice sibling through
+/// [`parse_next_n_redirect_destination`].
 fn parse_oneshot_next_n_damage_to_target_redirect(norm_lower: &str) -> Option<Effect> {
     let (rest, (_, amount, _)) = (
         tag::<_, _, OracleError<'_>>("the next "),
@@ -7960,34 +7968,16 @@ fn parse_oneshot_next_n_damage_to_target_redirect(norm_lower: &str) -> Option<Ef
 
     // CR 614.9: redirect destination. `~` (the source object) and `you` (its
     // controller) need no chosen redirect slot; a second chosen target ("another
-    // target creature", "any target", "target creature ...") is a
-    // `ChosenObjectTarget` that surfaces its own redirect slot (Razia, Boros
-    // Archangel). Capture the recipient phrase up to the trailing " instead".
+    // target creature", "any target", "target creature ...") is a `ChosenTarget`
+    // that surfaces its own redirect slot (Razia, Boros Archangel). Capture the
+    // recipient phrase up to the trailing " instead".
     let (after_redirect, redirect_text) = take_until::<_, _, OracleError<'_>>(" instead")
         .parse(rest)
         .ok()?;
-    let (redirect_to, redirect_object_filter) = if all_consuming(tag::<_, _, OracleError<'_>>("~"))
-        .parse(redirect_text)
-        .is_ok()
-    {
-        (DamageRedirectTarget::SourceObject, None)
-    } else if all_consuming(tag::<_, _, OracleError<'_>>("you"))
-        .parse(redirect_text)
-        .is_ok()
-    {
-        (DamageRedirectTarget::Controller, None)
-    } else {
-        let (filter, leftover) = crate::parser::oracle_target::parse_target(redirect_text);
-        // CR 115.1: require a fully-consumed chosen *object* target. `TargetFilter::Any`
-        // is intentionally rejected: it can resolve to a player, but the
-        // CreateDamageReplacement resolver stores only object redirect targets
-        // (`chosen_redirect_object`), so a player choice would silently drop the
-        // redirect. Fail closed on `Any`, scopes, and unparsed remainders.
-        if !leftover.trim().is_empty() || !matches!(filter, TargetFilter::Typed(_)) {
-            return None;
-        }
-        (DamageRedirectTarget::ChosenObjectTarget, Some(filter))
-    };
+    let (_, (redirect_to, redirect_object_filter)) =
+        all_consuming(parse_next_n_redirect_destination)
+            .parse(redirect_text)
+            .ok()?;
 
     let (rest, _) = tag::<_, _, OracleError<'_>>(" instead")
         .parse(after_redirect)
@@ -8006,6 +7996,122 @@ fn parse_oneshot_next_n_damage_to_target_redirect(norm_lower: &str) -> Option<Ef
         redirect_amount: Some(PreventionAmount::Next(amount)),
         redirect_object_filter,
         recipient_object_filter: Some(recipient_filter),
+        redirect_lifetime: RedirectionLifetime::OneOpportunity,
+    })
+}
+
+/// CR 614.9 + CR 115.4: the redirect destination of the "the next N damage …
+/// is dealt to `<destination>` instead" productions, shared by the passive
+/// chosen-recipient form and the active chosen-source form. `~` (the source
+/// object) and `you` (its controller) surface no slot; a fully consumed chosen
+/// target — a typed object target or "any target" — is a `ChosenTarget` that
+/// surfaces its own redirect slot. An "any target" recipient may be a player,
+/// creature, planeswalker or battle; the domain is enforced by the targeting
+/// authority (`ability_utils::effect_slot_denotes_damage_any_target`). Scopes
+/// and unparsed remainders fail.
+fn parse_next_n_redirect_destination(
+    input: &str,
+) -> OracleResult<'_, (DamageRedirectTarget, Option<TargetFilter>)> {
+    alt((
+        value(
+            (DamageRedirectTarget::SourceObject, None),
+            all_consuming(tag::<_, _, OracleError<'_>>("~")),
+        ),
+        value(
+            (DamageRedirectTarget::Controller, None),
+            all_consuming(tag("you")),
+        ),
+        parse_chosen_redirect_target,
+    ))
+    .parse(input)
+}
+
+/// CR 115.1 + CR 115.4: a fully consumed chosen redirect target — a typed object
+/// target ("another target creature") or "any target" — surfacing its own
+/// `ChosenTarget` slot. Scopes and unparsed remainders fail.
+fn parse_chosen_redirect_target(
+    input: &str,
+) -> OracleResult<'_, (DamageRedirectTarget, Option<TargetFilter>)> {
+    let (filter, leftover) = crate::parser::oracle_target::parse_target(input);
+    if !leftover.trim().is_empty() || !matches!(filter, TargetFilter::Typed(_) | TargetFilter::Any)
+    {
+        return Err(oracle_err(input));
+    }
+    Ok((
+        &input[input.len()..],
+        (DamageRedirectTarget::ChosenTarget, Some(filter)),
+    ))
+}
+
+/// CR 614.1a + CR 614.9: "…is dealt to `<recipient>` instead" is a redirection
+/// effect that moves at most the stated N damage. CR 609.7a: the source is
+/// chosen as the effect is created. CR 611.2a + CR 514.2: the effect lasts as
+/// stated ("this turn"), ending at cleanup.
+///
+/// The ACTIVE-voice sibling of the two passive next-N productions above (Harm's
+/// Way):
+///
+/// ```text
+/// "the next " N " damage that " <chosen source> " would deal " <victim>
+///        " this turn is dealt to " <destination> " instead" ["."]  EOF
+/// ```
+///
+/// The subject must be a whole chosen-damage-source phrase
+/// ([`parse_chosen_damage_source_subject`]), the victim is the shared
+/// [`parse_damage_target_phrase`], and the destination is the shared
+/// [`parse_next_n_redirect_destination`]. A variable amount ("the next X
+/// damage" — Shining Shoal), a missing victim, a non-chosen subject, or any
+/// trailing residue declines the whole line.
+fn parse_oneshot_next_n_source_damage_redirect(norm_lower: &str) -> Option<Effect> {
+    let (rest, (_, amount, _)) = (
+        tag::<_, _, OracleError<'_>>("the next "),
+        nom_primitives::parse_number,
+        tag::<_, _, OracleError<'_>>(" damage that "),
+    )
+        .parse(norm_lower)
+        .ok()?;
+    let (rest, subject) = terminated(
+        take_until::<_, _, OracleError<'_>>(" would deal "),
+        peek(tag(" would deal ")),
+    )
+    .parse(rest)
+    .ok()?;
+    let source_filter = parse_chosen_damage_source_subject(subject)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" would deal ")
+        .parse(rest)
+        .ok()?;
+    let (rest, victim) = parse_damage_target_phrase(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" this turn is dealt to ")
+        .parse(rest)
+        .ok()?;
+    let (rest, destination) = terminated(
+        take_until::<_, _, OracleError<'_>>(" instead"),
+        peek(tag(" instead")),
+    )
+    .parse(rest)
+    .ok()?;
+    let (_, (redirect_to, redirect_object_filter)) =
+        all_consuming(parse_next_n_redirect_destination)
+            .parse(destination)
+            .ok()?;
+    let _ = (
+        tag::<_, _, OracleError<'_>>(" instead"),
+        opt(char('.')),
+        eof,
+    )
+        .parse(rest)
+        .ok()?;
+
+    Some(Effect::CreateDamageReplacement {
+        source_filter: Some(source_filter),
+        combat_scope: None,
+        target_filter: Some(victim),
+        modification: None,
+        redirect_to: Some(redirect_to),
+        redirect_amount: Some(PreventionAmount::Next(amount)),
+        redirect_object_filter,
+        recipient_object_filter: None,
+        // CR 614.5: a depleting "next N damage" redirection is spent as it depletes.
         redirect_lifetime: RedirectionLifetime::OneOpportunity,
     })
 }
@@ -8034,7 +8140,7 @@ fn parse_oneshot_next_n_damage_to_target_redirect(norm_lower: &str) -> Option<Ef
 fn parse_continuous_redirect_recipient(input: &str) -> OracleResult<'_, DamageRedirectTarget> {
     alt((
         value(
-            DamageRedirectTarget::ChosenObjectTarget,
+            DamageRedirectTarget::ChosenTarget,
             alt((
                 tag::<_, _, OracleError<'_>>("the chosen creature"),
                 tag("the chosen permanent"),
@@ -8201,22 +8307,30 @@ fn parse_oneshot_source_filter(body: &str) -> Option<TargetFilter> {
             return Some(TargetFilter::SelfRef);
         }
     }
-    if let Ok((rest, _)) = alt((
-        tag::<_, _, OracleError<'_>>("that source"),
-        tag("a source of your choice"),
-    ))
-    .parse(subject)
-    {
-        if rest.trim().is_empty() {
-            return Some(TargetFilter::ChosenDamageSource { filter: None });
-        }
-    }
-    // CR 609.7 + CR 609.7b: qualified form — "a red source of your choice",
-    // "a land source of your choice" (Circle/Rune of Protection cycles).
-    if let Some(filter) = parse_qualified_chosen_damage_source(subject) {
+    if let Some(filter) = parse_chosen_damage_source_subject(subject) {
         return Some(filter);
     }
     parse_damage_source_filter(body)
+}
+
+/// CR 609.7a: the single authority for a chosen damage-source subject — "that
+/// source" / "a source of your choice" (bare), or the CR 609.7b qualified form
+/// "a red source of your choice" / "a land source of your choice" (Circle/Rune of
+/// Protection cycles). The whole `subject` slice must be the phrase. Shared by
+/// the "the next time" spine ([`parse_oneshot_source_filter`]) and the active
+/// next-N production ([`parse_oneshot_next_n_source_damage_redirect`]).
+fn parse_chosen_damage_source_subject(subject: &str) -> Option<TargetFilter> {
+    value(
+        TargetFilter::ChosenDamageSource { filter: None },
+        all_consuming(alt((
+            tag::<_, _, OracleError<'_>>("that source"),
+            tag("a source of your choice"),
+        ))),
+    )
+    .parse(subject)
+    .ok()
+    .map(|(_, filter)| filter)
+    .or_else(|| parse_qualified_chosen_damage_source(subject))
 }
 
 /// CR 609.7 + CR 609.7b: "a <color/type> source of your choice" (Circle of
@@ -8280,7 +8394,7 @@ fn parse_redirect_recipient_phrase(
         parse_damage_source_controller_tail,
         value(DamageRedirectTarget::SourceObject, tag("~")),
         value(
-            DamageRedirectTarget::ChosenObjectTarget,
+            DamageRedirectTarget::ChosenTarget,
             alt((tag("target creature"), tag("target permanent"))),
         ),
     ))
@@ -22745,7 +22859,7 @@ mod tests {
         // creature you control" instruction already bound — no NEW target slot.
         assert_eq!(
             *redirect_to,
-            Some(DamageRedirectTarget::ChosenObjectTarget),
+            Some(DamageRedirectTarget::ChosenTarget),
             "\"the chosen creature\" must resolve to the parent's chosen object"
         );
         assert_eq!(
@@ -22825,7 +22939,7 @@ mod tests {
                 source_scope: SourceExclusion::Include,
             })
         );
-        assert_eq!(*redirect_to, Some(DamageRedirectTarget::ChosenObjectTarget));
+        assert_eq!(*redirect_to, Some(DamageRedirectTarget::ChosenTarget));
         assert_eq!(*redirect_lifetime, RedirectionLifetime::Continuous);
     }
 
@@ -22883,7 +22997,7 @@ mod tests {
         assert!(matches!(
             effect,
             Effect::CreateDamageReplacement {
-                redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                redirect_to: Some(DamageRedirectTarget::ChosenTarget),
                 redirect_lifetime: RedirectionLifetime::Continuous,
                 ..
             }
@@ -26136,7 +26250,7 @@ mod snapshot_tests {
         match effect {
             Effect::CreateDamageReplacement {
                 modification: None,
-                redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                redirect_to: Some(DamageRedirectTarget::ChosenTarget),
                 redirect_amount: None,
                 source_filter: Some(TargetFilter::SelfRef),
                 combat_scope: Some(CombatDamageScope::CombatOnly),
@@ -26166,7 +26280,7 @@ mod snapshot_tests {
         match effect {
             Effect::CreateDamageReplacement {
                 modification: None,
-                redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                redirect_to: Some(DamageRedirectTarget::ChosenTarget),
                 redirect_amount: Some(PreventionAmount::Next(1)),
                 // CR 614.9: the recipient is the source itself (`~`), encoded as
                 // SelfRef so the resolver hosts the shield on the source.
@@ -26688,7 +26802,7 @@ mod snapshot_tests {
                 effect,
                 Effect::CreateDamageReplacement {
                     recipient_object_filter: Some(TargetFilter::SelfRef),
-                    redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                    redirect_to: Some(DamageRedirectTarget::ChosenTarget),
                     ..
                 }
             ),
@@ -26709,7 +26823,7 @@ mod snapshot_tests {
         match effect {
             Effect::CreateDamageReplacement {
                 modification: None,
-                redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                redirect_to: Some(DamageRedirectTarget::ChosenTarget),
                 redirect_amount: Some(PreventionAmount::Next(3)),
                 recipient_object_filter: Some(TargetFilter::Typed(_)),
                 // CR 115.1: the "another target creature" redirect surfaces its
@@ -26725,25 +26839,121 @@ mod snapshot_tests {
     }
 
     #[test]
-    fn oneshot_redirect_to_any_target_fails_closed() {
-        // CR 115.1: an "any target" redirect can resolve to a player, but the
-        // CreateDamageReplacement resolver stores only OBJECT redirect targets, so
-        // a player choice would silently drop the redirect. Both the `~`-recipient
-        // (Zhalfirin Crusader) and chosen-target-recipient forms must therefore
-        // fail closed on "any target" rather than mis-model it.
+    fn oneshot_redirect_to_any_target_redirects_to_chosen_target() {
+        // CR 614.9 + CR 115.4: an "any target" redirect recipient may be a player,
+        // creature, planeswalker or battle. Both the `~`-recipient (Zhalfirin
+        // Crusader) and chosen-target-recipient forms surface it as a
+        // `ChosenTarget` redirect slot whose filter is `Any`.
+        for text in [
+            "the next 1 damage that would be dealt to ~ this turn is dealt to any target instead",
+            "the next 1 damage that would be dealt to target creature you control this turn is dealt to any target instead",
+        ] {
+            let effect = parse_oneshot_damage_replacement(text, &ParseContext::default())
+                .unwrap_or_else(|| panic!("'any target' redirect must parse: {text:?}"));
+            assert!(
+                matches!(
+                    effect,
+                    Effect::CreateDamageReplacement {
+                        redirect_to: Some(DamageRedirectTarget::ChosenTarget),
+                        redirect_amount: Some(PreventionAmount::Next(1)),
+                        redirect_object_filter: Some(TargetFilter::Any),
+                        ..
+                    }
+                ),
+                "{text:?} must redirect to a chosen any-target slot, got {effect:?}"
+            );
+        }
+        // The continuous "all damage … is dealt to any target instead" form has
+        // no corpus card and keeps declining at its recipient slot.
         assert!(
             parse_oneshot_damage_replacement(
-                "the next 1 damage that would be dealt to ~ this turn is dealt to any target instead",
-                &ParseContext::default())
+                "all damage that would be dealt this turn to you is dealt to any target instead",
+                &ParseContext::default()
+            )
             .is_none(),
-            "en-Kor 'any target' redirect must fail closed (object-only resolver)"
+            "continuous 'any target' redirect stays out of scope"
         );
+    }
+
+    /// CR 614.1a + CR 614.9 + CR 609.7a: the active-voice chosen-source next-N
+    /// redirection (Harm's Way). The positive guard pins every field, including
+    /// the "you and/or permanents you control" victim stopping before " this
+    /// turn"; each hostile declines at its own seam.
+    #[test]
+    fn oneshot_next_n_source_damage_redirect_parses_harms_way_and_declines_hostiles() {
+        let harms_way = parse_oneshot_damage_replacement(
+            "the next 2 damage that a source of your choice would deal to you and/or permanents you control this turn is dealt to any target instead.",
+            &ParseContext::default(),
+        )
+        .expect("verbatim Harm's Way must parse");
         assert!(
-            parse_oneshot_damage_replacement(
-                "the next 1 damage that would be dealt to target creature you control this turn is dealt to any target instead",
-                &ParseContext::default())
-            .is_none(),
-            "chosen-recipient 'any target' redirect must fail closed (object-only resolver)"
+            matches!(
+                &harms_way,
+                Effect::CreateDamageReplacement {
+                    source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                    combat_scope: None,
+                    target_filter: Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                        player: DamageTargetPlayerScope::Controller,
+                        permanent_type: None,
+                        ..
+                    }),
+                    modification: None,
+                    redirect_to: Some(DamageRedirectTarget::ChosenTarget),
+                    redirect_amount: Some(PreventionAmount::Next(2)),
+                    redirect_object_filter: Some(TargetFilter::Any),
+                    recipient_object_filter: None,
+                    redirect_lifetime: RedirectionLifetime::OneOpportunity,
+                }
+            ),
+            "Harm's Way parsed to the wrong shape: {harms_way:?}"
+        );
+
+        for (text, why) in [
+            (
+                "the next x damage that a source of your choice would deal to you and/or creatures you control this turn is dealt to any target instead.",
+                "variable amount (Shining Shoal) declines at parse_number",
+            ),
+            (
+                "the next 2 damage that a source you control would deal to you and/or permanents you control this turn is dealt to any target instead",
+                "a non-chosen subject declines at the subject combinator",
+            ),
+            (
+                "the next 2 damage that a source of your choice would deal this turn is dealt to any target instead",
+                "a missing victim declines",
+            ),
+            (
+                "the next 2 damage that a source of your choice would deal to you and/or permanents you control this turn is dealt to any target instead. draw a card.",
+                "a trailing sentence declines at eof",
+            ),
+        ] {
+            assert!(
+                parse_oneshot_damage_replacement(text, &ParseContext::default()).is_none(),
+                "{why}: {text:?}"
+            );
+        }
+
+        // Synthetic in-class variation: qualified chosen source, typed victim leg,
+        // typed object destination.
+        let synthetic = parse_oneshot_damage_replacement(
+            "the next 2 damage that a red source of your choice would deal to you and/or creatures you control this turn is dealt to target creature instead",
+            &ParseContext::default(),
+        )
+        .expect("in-class qualified variation must parse");
+        assert!(
+            matches!(
+                &synthetic,
+                Effect::CreateDamageReplacement {
+                    source_filter: Some(TargetFilter::ChosenDamageSource { filter: Some(_) }),
+                    target_filter: Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                        permanent_type: Some(_),
+                        ..
+                    }),
+                    redirect_to: Some(DamageRedirectTarget::ChosenTarget),
+                    redirect_object_filter: Some(TargetFilter::Typed(_)),
+                    ..
+                }
+            ),
+            "qualified in-class variation parsed to the wrong shape: {synthetic:?}"
         );
     }
 

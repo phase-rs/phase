@@ -51,6 +51,54 @@ pub fn build_resolved_from_def(
     build_resolved_from_def_with_targets(def, source_id, controller, Vec::new())
 }
 
+/// CR 608.2h + CR 603.7a: `build_resolved_from_def`, but propagating the
+/// CREATING ability's `chain_root_targets` onto the built chain (and every
+/// `sub_ability`/`else_ability` link) instead of leaving it at the default
+/// empty list `build_resolved_from_def` always produces.
+///
+/// Single authority for every carrier that materializes a nested
+/// `AbilityDefinition` payload WHILE STILL WITHIN an active resolution chain
+/// that may have stamped `chain_root_targets` — a delayed trigger's payload
+/// (`delayed_trigger::resolve`), a vote's per-choice/outcome effect
+/// (`vote::resolve` and friends), a coin flip's win/lose branch
+/// (`flip_coin::resolve`), and a die-roll result branch
+/// (`roll_die::resolve`). A fresh TOP-LEVEL ability instantiation — a
+/// triggered ability going on the stack, an activated/loyalty ability being
+/// activated, a dungeon room, an Evoke ETB sacrifice — has no ambient
+/// chain-root context to inherit and must keep using the plain
+/// `build_resolved_from_def` above; do not switch those call sites to this
+/// one.
+pub fn build_resolved_from_def_with_chain_root(
+    def: &AbilityDefinition,
+    source_id: ObjectId,
+    controller: PlayerId,
+    chain_root_targets: Vec<TargetRef>,
+) -> ResolvedAbility {
+    build_resolved_from_def_with_targets_and_chain_root(
+        def,
+        source_id,
+        controller,
+        Vec::new(),
+        chain_root_targets,
+    )
+}
+
+/// `build_resolved_from_def_with_chain_root`, but also supplying the already
+/// selected root targets — the general case for a carrier whose payload has
+/// its own known recipient (`flip_coin`/`roll_die`'s branches, which reuse
+/// the CREATING ability's `targets`) as well as an inherited chain-root list.
+pub fn build_resolved_from_def_with_targets_and_chain_root(
+    def: &AbilityDefinition,
+    source_id: ObjectId,
+    controller: PlayerId,
+    targets: Vec<TargetRef>,
+    chain_root_targets: Vec<TargetRef>,
+) -> ResolvedAbility {
+    let mut resolved = build_resolved_from_def_with_targets(def, source_id, controller, targets);
+    resolved.set_chain_root_targets_recursive(chain_root_targets);
+    resolved
+}
+
 /// CR 601.2b + CR 602.2b: publish an announce-time-locked X onto an ability being
 /// announced. **Single computation authority** for the announce-locked X channel.
 ///
@@ -1462,7 +1510,15 @@ pub fn simple_legal_target_assignment_exists_for_ability(
         || target_filter_has_another_target_marker(&spec.filter)
         || is_per_opponent_target_fanout(ability)
         || matches!(ability.effect, Effect::PairWith { .. })
-        || damage_any_target_legal_targets(state, ability, &spec.filter).is_some()
+        || damage_any_target_legal_targets(
+            state,
+            ability,
+            AbilityTargetSlot::Declared {
+                index: 0,
+                filter: &spec.filter,
+            },
+        )
+        .is_some()
     {
         return None;
     }
@@ -2235,7 +2291,28 @@ fn validate_pinned_targets(
     filter: &TargetFilter,
     ability: &ResolvedAbility,
 ) -> Vec<TargetRef> {
-    targeting::validate_targets_for_ability(state, targets, filter, ability)
+    validate_pinned_targets_for_slot(
+        state,
+        targets,
+        AbilityTargetSlot::Unpositioned(filter),
+        ability,
+    )
+}
+
+fn validate_pinned_targets_for_slot(
+    state: &GameState,
+    targets: &[TargetRef],
+    slot: AbilityTargetSlot<'_>,
+    ability: &ResolvedAbility,
+) -> Vec<TargetRef> {
+    // CR 608.2b + CR 115.4: a damage "any target" is rechecked against the same
+    // creature/player/planeswalker/battle domain it was chosen from, in addition
+    // to the ordinary ability-context legality check (narrowing only).
+    let mut legal = targeting::validate_targets_for_ability(state, targets, slot.filter(), ability);
+    if let Some(domain) = damage_any_target_legal_targets(state, ability, slot) {
+        legal.retain(|t| domain.contains(t));
+    }
+    legal
         .into_iter()
         .filter(|target| target_is_current(ability, target, state))
         .collect()
@@ -2600,16 +2677,30 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
         // (the spell lives on the STACK). Re-validate against the source leaf
         // (`InZone Stack`-aware) instead, preserving the spell target.
         validate_pinned_targets(state, &validated.targets, &src_leaf, &validated)
-    } else if matches!(
-        &validated.effect,
-        Effect::ChangeZoneAll { target, .. } if crate::game::effects::filter_refs_parent_target(target)
-    ) {
-        // CR 115.1 + CR 608.2b: `ChangeZoneAll` is a resolution-time mass
-        // instruction when its filter carries a delayed `ParentTarget` snapshot
-        // inside a tracked set. Treating that internal filter as a target would
-        // fizzle a valid Exile -> Battlefield return before the mass resolver
-        // can inspect the tracked member. Ordinary ChangeZoneAll player filters
-        // remain declared targets and follow the generic validation below.
+    } else if crate::game::effects::mass_population_target(&validated.effect)
+        .is_some_and(crate::game::effects::filter_refs_parent_or_event_subject)
+    {
+        // CR 115.1 + CR 608.2b: a MASS-POPULATION instruction whose filter
+        // carries a delayed anaphor snapshot (`ParentTarget` from a tracked set,
+        // or an `EVENT_SUBJECT_ANAPHORS` referent concretized at delayed-trigger
+        // creation) is a RESOLUTION-TIME population scan, not a declared target.
+        // CR 608.2b governs targets; treating the internal filter as one makes
+        // the stale-pin drop below empty `targets`, which then reads as "no
+        // legal choice" and removes the whole ability from the stack before the
+        // mass resolver ever runs.
+        //
+        // That is the wrong outcome for an EXCLUSION: when "destroy each
+        // creature OTHER than that one" loses its referent to a blink, only the
+        // exclusion expires (CR 400.7) — every other creature is still
+        // destroyed. Liveness is enforced where it belongs, in
+        // `effects::resolved_object_filter`, which pin-checks the referents it
+        // concretizes.
+        //
+        // Previously scoped to `ChangeZoneAll` alone. The whole family shares
+        // one `target_filter() == None` shape, so the narrow form silently left
+        // `DestroyAll`, `DamageAll`, `BounceAll` and the rest fizzling on a
+        // stale snapshot. Routed through the single `mass_population_target`
+        // authority so the two lists cannot drift apart again.
         validated.targets.clone()
     } else if matches!(
         mass_all_target_filter(&validated.effect),
@@ -2824,6 +2915,22 @@ impl<'a> DamageReplacementTargetRole<'a> {
             | Self::RedirectRecipient(filter) => filter,
         }
     }
+
+    /// CR 115.4 + CR 614.9: "any target" is a creature, player, planeswalker or
+    /// battle. Both damage-recipient roles of a redirection — the recipient the
+    /// damage would have been dealt to and the recipient it is redirected to —
+    /// name that domain when their filter is `Any`, so neither may admit a land
+    /// or a noncreature artifact at target selection or on the resolution
+    /// recheck. A declared source is not a damage recipient: its legal choices
+    /// are the CR 609.7a source domain, which `Any` must not narrow.
+    pub(crate) fn denotes_damage_any_target(self) -> bool {
+        match self {
+            Self::OriginalRecipient(filter) | Self::RedirectRecipient(filter) => {
+                matches!(filter, TargetFilter::Any)
+            }
+            Self::DeclaredSource(_) => false,
+        }
+    }
 }
 
 pub(crate) fn damage_replacement_target_roles(
@@ -2870,10 +2977,13 @@ pub(crate) fn damage_replacement_target_role_legality(
         .enumerate()
         .filter(|(index, role)| {
             ability.targets.get(*index).is_some_and(|target| {
-                !validate_pinned_targets(
+                !validate_pinned_targets_for_slot(
                     state,
                     std::slice::from_ref(target),
-                    role.filter(),
+                    AbilityTargetSlot::Declared {
+                        index: *index,
+                        filter: role.filter(),
+                    },
                     ability,
                 )
                 .is_empty()
@@ -3188,9 +3298,16 @@ fn collect_target_slots_inner(
     // source-scoped form `target == Any` so it adds nothing.
     if ability.target_choice_timing == TargetChoiceTiming::Stack {
         if let Some(roles) = damage_replacement_target_roles(&ability.effect) {
-            for role in roles {
-                let legal_targets =
-                    legal_targets_for_ability_filter(state, ability, role.filter(), &acc.slots);
+            for (index, role) in roles.into_iter().enumerate() {
+                let legal_targets = legal_targets_for_ability_slot(
+                    state,
+                    ability,
+                    AbilityTargetSlot::Declared {
+                        index,
+                        filter: role.filter(),
+                    },
+                    &acc.slots,
+                );
                 if legal_targets.is_empty() && !ability.optional_targeting {
                     return Err(no_legal_target_slots());
                 }
@@ -5137,6 +5254,18 @@ pub(crate) fn collect_player_targets(
                 // targets are resolved from ability.targets directly); fail closed.
                 Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
                 Some(ControllerRef::ParentTargetController) => false,
+                // CR 120.1 + CR 109.4 + CR 603.2: unlike the parent-target refs
+                // (which need a target slot this population expansion has no
+                // access to), the damage recipient's controller IS resolvable
+                // here — it comes off the firing event. Mirrors the
+                // `TriggeringPlayer` arm below rather than failing closed.
+                Some(ControllerRef::EventTargetController) => {
+                    targeting::resolve_effect_player_ref(
+                        state,
+                        ability,
+                        &TargetFilter::EventTargetController,
+                    ) == Some(p.id)
+                }
                 Some(ControllerRef::ParentTargetOwner) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 // CR 613.1: no card scopes this shape to a persisted chosen
@@ -6049,22 +6178,37 @@ fn legal_targets_for_ability_filter(
     filter: &TargetFilter,
     existing_slots: &[TargetSelectionSlot],
 ) -> Vec<TargetRef> {
+    legal_targets_for_ability_slot(
+        state,
+        ability,
+        AbilityTargetSlot::Unpositioned(filter),
+        existing_slots,
+    )
+}
+
+fn legal_targets_for_ability_slot(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    slot: AbilityTargetSlot<'_>,
+    existing_slots: &[TargetSelectionSlot],
+) -> Vec<TargetRef> {
     exclude_cost_paid_object_that_left_battlefield(
         state,
         ability,
-        legal_targets_for_ability_filter_uncapped(state, ability, filter, existing_slots),
+        legal_targets_for_ability_filter_uncapped(state, ability, slot, existing_slots),
     )
 }
 
 fn legal_targets_for_ability_filter_uncapped(
     state: &GameState,
     ability: &ResolvedAbility,
-    filter: &TargetFilter,
+    slot: AbilityTargetSlot<'_>,
     existing_slots: &[TargetSelectionSlot],
 ) -> Vec<TargetRef> {
-    if let Some(targets) = damage_any_target_legal_targets(state, ability, filter) {
+    if let Some(targets) = damage_any_target_legal_targets(state, ability, slot) {
         return targets;
     }
+    let filter = slot.filter();
 
     let needs_ability_context = target_filter_needs_ability_context(filter);
     let relative_kind = relative_controller_kind(filter);
@@ -6756,7 +6900,14 @@ fn legal_targets_for_selected_slot(
 
     let mut legal: Vec<TargetRef> = if matches!(ability.effect, Effect::PairWith { .. }) {
         pair_with_legal_choices(state, ability, &spec.filter)
-    } else if let Some(targets) = damage_any_target_legal_targets(state, ability, &spec.filter) {
+    } else if let Some(targets) = damage_any_target_legal_targets(
+        state,
+        ability,
+        AbilityTargetSlot::Declared {
+            index: prior_specs.len(),
+            filter: &spec.filter,
+        },
+    ) {
         targets
     } else if let Some(targets) = per_opponent_fanout_targets {
         targets
@@ -6875,24 +7026,61 @@ fn legal_targets_for_selected_slot(
     exclude_cost_paid_object_that_left_battlefield(state, ability, legal)
 }
 
+/// CR 601.2c: the target slot of an ability that a legality question is asked
+/// for. A damage replacement's role is a property of the slot's declaration
+/// position (`damage_replacement_target_roles` order), not of its filter: a
+/// declared source and a redirect recipient can both carry `Any`.
+#[derive(Clone, Copy)]
+enum AbilityTargetSlot<'a> {
+    /// The slot at `index` in the ability's own target declaration order.
+    Declared {
+        index: usize,
+        filter: &'a TargetFilter,
+    },
+    /// A filter checked by a caller that does not track slot positions. It
+    /// never selects a damage-replacement role; those roles are enumerated and
+    /// rechecked only by positioned callers.
+    Unpositioned(&'a TargetFilter),
+}
+
+impl<'a> AbilityTargetSlot<'a> {
+    fn filter(self) -> &'a TargetFilter {
+        match self {
+            Self::Declared { filter, .. } | Self::Unpositioned(filter) => filter,
+        }
+    }
+}
+
+/// CR 115.4: "any target" is a creature, player, planeswalker or battle.
+/// Single authority for which declared damage slots use that domain.
+fn effect_slot_denotes_damage_any_target(effect: &Effect, slot: AbilityTargetSlot<'_>) -> bool {
+    if !matches!(slot.filter(), TargetFilter::Any) {
+        return false;
+    }
+    match effect {
+        Effect::DealDamage { target, .. } => matches!(target, TargetFilter::Any),
+        // CR 609.7a + CR 614.9: only the role declared at THIS slot decides; a
+        // declared source is never narrowed because a sibling recipient is `Any`.
+        Effect::CreateDamageReplacement { .. } => match slot {
+            AbilityTargetSlot::Declared { index, .. } => damage_replacement_target_roles(effect)
+                .and_then(|roles| roles.get(index).copied())
+                .is_some_and(DamageReplacementTargetRole::denotes_damage_any_target),
+            AbilityTargetSlot::Unpositioned(_) => false,
+        },
+        _ => false,
+    }
+}
+
 fn damage_any_target_legal_targets(
     state: &GameState,
     ability: &ResolvedAbility,
-    filter: &TargetFilter,
+    slot: AbilityTargetSlot<'_>,
 ) -> Option<Vec<TargetRef>> {
-    if !matches!(
-        (&ability.effect, filter),
-        (
-            Effect::DealDamage {
-                target: TargetFilter::Any,
-                ..
-            },
-            TargetFilter::Any
-        )
-    ) {
+    if !effect_slot_denotes_damage_any_target(&ability.effect, slot) {
         return None;
     }
 
+    // CR 115.4: "any target" is a creature, player, planeswalker or battle
     let player_targets = targeting::find_legal_targets(
         state,
         &TargetFilter::Player,
@@ -19040,7 +19228,7 @@ mod tests {
                 combat_scope: None,
                 target_filter: None,
                 modification: None,
-                redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                redirect_to: Some(DamageRedirectTarget::ChosenTarget),
                 redirect_amount: None,
                 redirect_object_filter: Some(creature_filter()),
                 recipient_object_filter: None,
@@ -19122,7 +19310,8 @@ mod tests {
 
     /// Ordering contract (Nit 1): when BOTH filters are present the recipient
     /// slot is surfaced FIRST, then the redirect slot — matching the resolver's
-    /// `chosen_target_object(_, 0)` / `chosen_redirect_object` indexing.
+    /// `chosen_target_object(_, 0)` recipient read and its positional
+    /// `ability.targets.get(redirect_slot)` redirect-recipient read.
     #[test]
     fn build_target_slots_recipient_slot_precedes_redirect_slot() {
         use crate::types::ability::DamageRedirectTarget;
@@ -19152,7 +19341,7 @@ mod tests {
                 combat_scope: None,
                 target_filter: None,
                 modification: None,
-                redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                redirect_to: Some(DamageRedirectTarget::ChosenTarget),
                 redirect_amount: None,
                 redirect_object_filter: Some(creature_filter()),
                 recipient_object_filter: Some(creature_filter()),
@@ -19167,6 +19356,372 @@ mod tests {
             slots.len(),
             2,
             "recipient + redirect slots must both surface when both filters are set"
+        );
+    }
+
+    /// CR 608.2b + CR 115.4 (secondary seam — the shared resolution recheck):
+    /// `validate_pinned_targets` narrows a damage "any target" to the
+    /// creature/player/planeswalker/battle domain for BOTH declaring effects
+    /// that use it. A noncreature artifact still on the battlefield is dropped;
+    /// a creature (positive control) is kept. Reverting the domain intersection
+    /// in `validate_pinned_targets` keeps the artifact for both effects.
+    #[test]
+    fn validate_targets_in_chain_rechecks_damage_any_target_domain() {
+        use crate::types::ability::{
+            DamageRedirectTarget, PreventionAmount, QuantityExpr, RedirectionLifetime,
+        };
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let artifact = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Probe Rock".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Artifact];
+        let creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Bear".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let deal_damage = Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Any,
+            damage_source: None,
+            excess: None,
+        };
+        let redirect = Effect::CreateDamageReplacement {
+            redirect_lifetime: RedirectionLifetime::OneOpportunity,
+            source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+            combat_scope: None,
+            target_filter: None,
+            modification: None,
+            redirect_to: Some(DamageRedirectTarget::ChosenTarget),
+            redirect_amount: Some(PreventionAmount::Next(2)),
+            redirect_object_filter: Some(TargetFilter::Any),
+            recipient_object_filter: None,
+        };
+
+        for (label, effect) in [
+            ("DealDamage", deal_damage),
+            ("CreateDamageReplacement", redirect),
+        ] {
+            let kept = |target: TargetRef| {
+                validate_targets_in_chain(
+                    &state,
+                    &ResolvedAbility::new(effect.clone(), vec![target], source, PlayerId(0)),
+                )
+                .targets
+            };
+            assert_eq!(
+                kept(TargetRef::Object(creature)),
+                vec![TargetRef::Object(creature)],
+                "{label}: a creature stays a legal damage 'any target' on resolution"
+            );
+            assert!(
+                kept(TargetRef::Object(artifact)).is_empty(),
+                "{label}: CR 115.4 — a noncreature artifact is not a legal 'any target'"
+            );
+        }
+    }
+
+    /// Fixture for an "any target" ORIGINAL recipient paired with a typed
+    /// (creature) redirect recipient: a non-creature host plus one battlefield
+    /// object per CR 115.4 domain probe. Returns the state, the host, and
+    /// `[land, artifact, creature_a, creature_b, planeswalker]`.
+    fn original_recipient_any_fixture() -> (GameState, ObjectId, [ObjectId; 5]) {
+        let mut state = GameState::new_two_player(42);
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Redirector".into(),
+            Zone::Battlefield,
+        );
+        let mut probe = |cid: u64, name: &str, core_type: CoreType| {
+            let id = create_object(
+                &mut state,
+                CardId(cid),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![core_type];
+            id
+        };
+        let ids = [
+            probe(2, "Probe Land", CoreType::Land),
+            probe(3, "Probe Rock", CoreType::Artifact),
+            probe(4, "Bear A", CoreType::Creature),
+            probe(5, "Bear B", CoreType::Creature),
+            probe(6, "Probe Walker", CoreType::Planeswalker),
+        ];
+        (state, host, ids)
+    }
+
+    fn original_recipient_any_redirect() -> Effect {
+        use crate::types::ability::{DamageRedirectTarget, PreventionAmount, RedirectionLifetime};
+        Effect::CreateDamageReplacement {
+            redirect_lifetime: RedirectionLifetime::OneOpportunity,
+            source_filter: None,
+            combat_scope: None,
+            target_filter: None,
+            modification: None,
+            redirect_to: Some(DamageRedirectTarget::ChosenTarget),
+            redirect_amount: Some(PreventionAmount::Next(1)),
+            redirect_object_filter: Some(creature_filter()),
+            recipient_object_filter: Some(TargetFilter::Any),
+        }
+    }
+
+    /// CR 115.4 + CR 601.2c: an "any target" ORIGINAL recipient of a damage
+    /// redirection is chosen from the creature/player/planeswalker/battle
+    /// domain through the production slot builder — never a land or a
+    /// noncreature artifact — while its typed redirect sibling keeps its own
+    /// creature-only filter. Reverting `denotes_damage_any_target` to
+    /// redirect-only offers the land and the artifact for the recipient slot.
+    #[test]
+    fn build_target_slots_original_recipient_any_uses_damage_any_target_domain() {
+        let (state, host, [land, artifact, creature_a, creature_b, walker]) =
+            original_recipient_any_fixture();
+        let ability =
+            ResolvedAbility::new(original_recipient_any_redirect(), vec![], host, PlayerId(0));
+
+        let slots = build_target_slots(&state, &ability).expect("both role slots must build");
+        assert_eq!(
+            slots.len(),
+            2,
+            "original-recipient slot, then redirect slot"
+        );
+
+        let recipient = &slots[0].legal_targets;
+        for positive in [
+            TargetRef::Player(PlayerId(0)),
+            TargetRef::Player(PlayerId(1)),
+            TargetRef::Object(creature_a),
+            TargetRef::Object(creature_b),
+            TargetRef::Object(walker),
+        ] {
+            assert!(
+                recipient.contains(&positive),
+                "{positive:?} is a legal 'any target' original recipient: {recipient:?}"
+            );
+        }
+        for negative in [TargetRef::Object(land), TargetRef::Object(artifact)] {
+            assert!(
+                !recipient.contains(&negative),
+                "CR 115.4 — {negative:?} is not a legal 'any target': {recipient:?}"
+            );
+        }
+
+        // Typed sibling: the creature redirect slot is not widened to the domain.
+        let redirect = &slots[1].legal_targets;
+        assert!(redirect.contains(&TargetRef::Object(creature_a)));
+        for negative in [
+            TargetRef::Player(PlayerId(1)),
+            TargetRef::Object(walker),
+            TargetRef::Object(artifact),
+        ] {
+            assert!(
+                !redirect.contains(&negative),
+                "the typed creature redirect slot must not offer {negative:?}: {redirect:?}"
+            );
+        }
+    }
+
+    /// CR 608.2b + CR 115.4 + CR 614.9: on resolution an "any target" ORIGINAL
+    /// recipient is rechecked against the same domain. A noncreature artifact
+    /// recipient is an illegal role: with a legal creature redirect the role set
+    /// is partial (positions preserved, no shield installed); with an illegal
+    /// redirect too, every role is illegal and the targets are cleared. A
+    /// creature recipient (positive control) keeps every role legal and installs
+    /// the shield. The typed redirect sibling stays creature-only. Reverting
+    /// `denotes_damage_any_target` to redirect-only accepts the artifact.
+    #[test]
+    fn validate_targets_in_chain_rechecks_original_recipient_any_domain() {
+        let (state, host, [_land, artifact, creature_a, creature_b, walker]) =
+            original_recipient_any_fixture();
+        let ability = |targets: Vec<TargetRef>| {
+            ResolvedAbility::new(
+                original_recipient_any_redirect(),
+                targets,
+                host,
+                PlayerId(0),
+            )
+        };
+        let legality = |targets: Vec<TargetRef>| {
+            damage_replacement_target_role_legality(&state, &ability(targets))
+                .expect("a declared-role damage replacement")
+        };
+        let installed_shields = |targets: Vec<TargetRef>| {
+            let mut resolved_state = state.clone();
+            let validated = validate_targets_in_chain(&resolved_state, &ability(targets));
+            crate::game::effects::create_damage_replacement::resolve(
+                &mut resolved_state,
+                &validated,
+                &mut Vec::new(),
+            )
+            .expect("the damage replacement resolves");
+            resolved_state
+                .objects
+                .values()
+                .map(|obj| obj.replacement_definitions.len())
+                .sum::<usize>()
+                + resolved_state.pending_damage_replacements.len()
+        };
+
+        // Positive control: a creature recipient and a creature redirect.
+        let legal = vec![TargetRef::Object(creature_a), TargetRef::Object(creature_b)];
+        assert_eq!(
+            legality(legal.clone()),
+            DamageReplacementTargetRoleLegality::All
+        );
+        assert_eq!(
+            validate_targets_in_chain(&state, &ability(legal.clone())).targets,
+            legal
+        );
+        assert_eq!(
+            installed_shields(legal),
+            1,
+            "a fully legal redirection installs"
+        );
+
+        // A noncreature artifact recipient is not an "any target".
+        let artifact_recipient = vec![TargetRef::Object(artifact), TargetRef::Object(creature_b)];
+        assert_eq!(
+            legality(artifact_recipient.clone()),
+            DamageReplacementTargetRoleLegality::Partial,
+            "CR 115.4 — the artifact original recipient is an illegal role"
+        );
+        assert_eq!(
+            validate_targets_in_chain(&state, &ability(artifact_recipient.clone())).targets,
+            artifact_recipient,
+            "CR 608.2b — a remaining legal role preserves every role position"
+        );
+        assert_eq!(
+            installed_shields(artifact_recipient),
+            0,
+            "an illegal original recipient installs no shield"
+        );
+
+        // Both roles illegal: the artifact recipient and a planeswalker in the
+        // typed creature redirect slot.
+        assert!(
+            validate_targets_in_chain(
+                &state,
+                &ability(vec![TargetRef::Object(artifact), TargetRef::Object(walker)])
+            )
+            .targets
+            .is_empty(),
+            "CR 608.2b — every declared role illegal clears the targets"
+        );
+
+        // Typed sibling: a planeswalker is a legal 'any target' but not a legal
+        // creature redirect; the typed slot is not widened.
+        assert_eq!(
+            legality(vec![
+                TargetRef::Object(creature_a),
+                TargetRef::Object(walker)
+            ]),
+            DamageReplacementTargetRoleLegality::Partial,
+            "the creature redirect filter still rejects a planeswalker"
+        );
+    }
+
+    /// CR 609.7a + CR 115.4 + CR 614.9: the "any target" domain is decided per
+    /// declared SLOT. A damage replacement whose declared source leaf is `Any`
+    /// and whose redirect recipient is also `Any` narrows only the redirect
+    /// slot: the source slot keeps the generic `Any` enumeration (a land and a
+    /// noncreature artifact stay offered, and stay legal on the resolution
+    /// recheck), while the redirect slot and its recheck exclude them.
+    /// Reverting `effect_slot_denotes_damage_any_target` to "any role denotes
+    /// any target" narrows the source slot too.
+    #[test]
+    fn declared_source_any_slot_is_not_narrowed_by_redirect_any_sibling() {
+        use crate::types::ability::{DamageRedirectTarget, PreventionAmount, RedirectionLifetime};
+        let (state, host, [land, artifact, creature_a, _creature_b, walker]) =
+            original_recipient_any_fixture();
+        let effect = Effect::CreateDamageReplacement {
+            redirect_lifetime: RedirectionLifetime::OneOpportunity,
+            source_filter: Some(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ParentTargetSlot { index: 0 },
+                    TargetFilter::Any,
+                ],
+            }),
+            combat_scope: None,
+            target_filter: None,
+            modification: None,
+            redirect_to: Some(DamageRedirectTarget::ChosenTarget),
+            redirect_amount: Some(PreventionAmount::Next(1)),
+            redirect_object_filter: Some(TargetFilter::Any),
+            recipient_object_filter: None,
+        };
+        let ability = |targets: Vec<TargetRef>| {
+            ResolvedAbility::new(effect.clone(), targets, host, PlayerId(0))
+        };
+        assert!(matches!(
+            damage_replacement_target_roles(&effect).as_deref(),
+            Some([
+                DamageReplacementTargetRole::DeclaredSource(TargetFilter::Any),
+                DamageReplacementTargetRole::RedirectRecipient(TargetFilter::Any),
+            ])
+        ));
+
+        let slots = build_target_slots(&state, &ability(vec![])).expect("both role slots build");
+        assert_eq!(slots.len(), 2, "declared-source slot, then redirect slot");
+
+        let source = &slots[0].legal_targets;
+        for positive in [TargetRef::Object(land), TargetRef::Object(artifact)] {
+            assert!(
+                source.contains(&positive),
+                "CR 609.7a — the declared source slot keeps {positive:?}: {source:?}"
+            );
+        }
+        let redirect = &slots[1].legal_targets;
+        assert!(redirect.contains(&TargetRef::Object(walker)));
+        for negative in [TargetRef::Object(land), TargetRef::Object(artifact)] {
+            assert!(
+                !redirect.contains(&negative),
+                "CR 115.4 — the redirect slot must not offer {negative:?}: {redirect:?}"
+            );
+        }
+
+        // Resolution recheck, same per-slot decision.
+        let legality = |targets: Vec<TargetRef>| {
+            damage_replacement_target_role_legality(&state, &ability(targets))
+                .expect("a declared-role damage replacement")
+        };
+        assert_eq!(
+            legality(vec![TargetRef::Object(land), TargetRef::Object(creature_a)]),
+            DamageReplacementTargetRoleLegality::All,
+            "a land declared source stays legal"
+        );
+        assert_eq!(
+            legality(vec![TargetRef::Object(artifact), TargetRef::Object(land)]),
+            DamageReplacementTargetRoleLegality::Partial,
+            "only the land redirect recipient is illegal"
         );
     }
 
@@ -20648,7 +21203,12 @@ mod tests {
             PlayerId(0),
         );
         let bare = targeting::find_legal_targets(&state, &filter, PlayerId(0), ObjectId(100));
-        let via_ability = legal_targets_for_ability_filter_uncapped(&state, &ability, &filter, &[]);
+        let via_ability = legal_targets_for_ability_filter_uncapped(
+            &state,
+            &ability,
+            AbilityTargetSlot::Unpositioned(&filter),
+            &[],
+        );
         assert_eq!(
             bare, via_ability,
             "no prior object slot exists, so both doors must agree"
@@ -20865,7 +21425,12 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         );
-        let _ = legal_targets_for_ability_filter_uncapped(&state, &bare_ability, &filter, &[]);
+        let _ = legal_targets_for_ability_filter_uncapped(
+            &state,
+            &bare_ability,
+            AbilityTargetSlot::Unpositioned(&filter),
+            &[],
+        );
         assert_eq!(
             crate::game::perf_counters::prior_target_binding_snapshot().static_union_enumerations,
             0,

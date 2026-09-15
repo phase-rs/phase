@@ -12,6 +12,7 @@
 
 import { createStore, del, get, set } from "idb-keyval";
 
+import { DRAFT_KINDS } from "../adapter/draft-adapter";
 import type { DraftKind, DraftStatus, PoolInput } from "../adapter/draft-adapter";
 import {
   isPlainRecord,
@@ -447,7 +448,7 @@ function isActiveDraftPodMeta(value: unknown): value is ActiveDraftPodMeta {
   return (
     typeof value.id === "string" && value.id.length > 0 &&
     isCanonicalRoomCode(value.roomCode) &&
-    (value.kind === "Premier" || value.kind === "Traditional" || value.kind === "Sealed" || value.kind === "CommanderDraft") &&
+    isDraftKind(value.kind) &&
     isPositiveInteger(value.podSize) &&
     typeof value.hostDisplayName === "string" &&
     (value.tournamentFormat === "Swiss" || value.tournamentFormat === "SingleElimination") &&
@@ -507,8 +508,30 @@ function isPersistedDraftHostSession(value: unknown): value is PersistedDraftHos
   );
 }
 
+/**
+ * The kinds a persisted pod may carry, DERIVED from `DRAFT_KINDS` rather than
+ * restated beside it.
+ *
+ * `"Quick"` is excluded because a Quick draft is single-player against bots and
+ * is never persisted as a P2P host session; that exclusion is expressed once,
+ * here, as a filter over the authority.
+ */
+const PERSISTABLE_DRAFT_KINDS: readonly Exclude<DraftKind, "Quick">[] = DRAFT_KINDS.filter(
+  (kind): kind is Exclude<DraftKind, "Quick"> => kind !== "Quick",
+);
+
+/**
+ * IndexedDB is untrusted, so the kind is validated rather than asserted.
+ *
+ * Folds `PERSISTABLE_DRAFT_KINDS` instead of enumerating the kinds inline:
+ * TypeScript never checks a type-guard BODY against the union in its
+ * `value is …` clause, so a hand-written chain here would keep compiling —
+ * and keep refusing — after `DRAFT_KINDS` grew. The symptom is silent: a
+ * persisted host session of the new kind is classified corrupt and discarded
+ * on resume, with no error raised anywhere.
+ */
 function isDraftKind(value: unknown): value is Exclude<DraftKind, "Quick"> {
-  return value === "Premier" || value === "Traditional" || value === "Sealed" || value === "CommanderDraft";
+  return PERSISTABLE_DRAFT_KINDS.some((kind) => kind === value);
 }
 
 function isPoolInput(value: unknown): value is PoolInput {

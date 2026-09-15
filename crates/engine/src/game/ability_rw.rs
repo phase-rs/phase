@@ -1460,6 +1460,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::TriggeringPlayer
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -2272,6 +2273,9 @@ fn legacy_object_scope(s: &ObjectScope) -> bool {
         // CR 120.1: the per-iteration batch source is resolution-local, not one
         // of the retained legacy refs (mirrors EventTarget).
         | ObjectScope::BatchSource
+        // CR 601.2c: the chain-root spell's declared target is resolution-local,
+        // not one of the retained legacy refs (mirrors AmassedArmy).
+        | ObjectScope::ChainRootTarget
         | ObjectScope::EventTarget => false,
     }
 }
@@ -2322,6 +2326,11 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
 fn legacy_controller_ref(x: &ControllerRef) -> bool {
     match x {
         ControllerRef::ParentTargetController
+        // Engine classification: this reference is resolved from the firing
+        // event, so it belongs to the same event-context carrier class as
+        // `ParentTargetController` above. Not a rules decision — no CR governs
+        // how this crate partitions refs for read/write analysis.
+        | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::TriggeringPlayer => true,
         ControllerRef::You
@@ -2382,6 +2391,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
@@ -2615,6 +2625,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::SourceController
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
@@ -2696,6 +2707,10 @@ fn member_bound_controller_ref(x: &ControllerRef) -> bool {
         | ControllerRef::SourceChosenPlayer
         | ControllerRef::EnchantedPlayer => true,
         ControllerRef::ParentTargetController
+        // Engine classification: event-derived like `ParentTargetController`,
+        // so it is read from the firing event rather than from per-source
+        // member storage. Not a rules decision.
+        | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::TriggeringPlayer
         | ControllerRef::You
@@ -3717,6 +3732,9 @@ fn current_pt_scope(scope: &ObjectScope) -> CurrentPtReads {
         | ObjectScope::AmassedArmy
         | ObjectScope::EventTarget
         | ObjectScope::OtherRevealedCard
+        // CR 601.2c: no P/T read is wired for the chain-root target (fail-closed
+        // `=> 0` in `game/quantity.rs::resolve_object_pt`).
+        | ObjectScope::ChainRootTarget
         | ObjectScope::OwnedLinkedExileCard => CurrentPtReads::default(),
     }
 }
@@ -3983,6 +4001,11 @@ fn read_object_scope(scope: &ObjectScope, kind: StateKind) -> RwProfile {
         // member-bound so same-event ability ordering (`profiles_conflict` via
         // `reads_member_bound`) does not fail open. Mirrors `AmassedArmy`.
         ObjectScope::OwnedLinkedExileCard => member_bound_read(),
+        // CR 601.2c: an ability-carried object identity read across the
+        // resolution chain (`SpellContext::chain_root_targets`). Member-bound so
+        // a same-event sibling write does not make `profiles_conflict` fail
+        // open. Mirrors `AmassedArmy` / `OwnedLinkedExileCard`.
+        ObjectScope::ChainRootTarget => member_bound_read(),
         ObjectScope::EventSource | ObjectScope::EventTarget => reads_event_live(),
         // §L7 precedent (CR 608.2c): a per-resolution local surfaced by THIS
         // ability's own reveal within the same resolution — observed by no
@@ -4048,6 +4071,7 @@ fn target_recipient(f: &TargetFilter) -> (bool, bool) {
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
@@ -4265,6 +4289,14 @@ fn walk_definition(
         sub_link: _,
         iteration_kind_binding: _,
         sibling_condition: _,
+        // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
+        // deferred guard verdict before it hands a tree out, so this is `None` on
+        // every tree that pipeline produces — which is every tree a runtime walker
+        // sees — and creates no resolution-time dependency. (NOT a universal claim
+        // about the field: `parse_effect_chain` outside the pipeline leaves marks
+        // intact, and no runtime path reaches such a tree. See
+        // `types::ability::UnloweredGuard`.)
+        unlowered_guard: _,
     } = a;
 
     // §4.3.2: own `player_scope` overrides the inherited scope (Brink's Discard
@@ -6949,6 +6981,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
@@ -7146,6 +7179,10 @@ fn rw_controller_ref(x: &ControllerRef) -> RwProfile {
     match x {
         // D5 carriers.
         ControllerRef::ParentTargetController
+        // Engine classification: same event-context carrier class as
+        // `ParentTargetController` — it reads the firing event too. Not a
+        // rules decision.
+        | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::TriggeringPlayer => legacy_ref(),
         // CR 603.10a: per-source look-back referents (Vote anchored on the source's

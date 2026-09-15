@@ -31,7 +31,8 @@ use crate::types::ability::{
     CastManaSpentMetric, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel,
     DamageGroupKey, DamageKindFilter, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
     PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality,
-    SharedQualityRelation, StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    SharedQualityRelation, StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -120,6 +121,7 @@ fn parse_condition_connector(input: &str) -> OracleResult<'_, ConditionConnectiv
 
 fn parse_single_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        parse_you_attacked_with_total_power_this_combat,
         // CR 601.2h + CR 608.2c: whole-phrase "it wasn't cast or no mana was spent
         // to cast <self>" gate. MUST precede the event-history arm's
         // `parse_was_cast_condition`, which would otherwise claim the bare "it
@@ -132,6 +134,48 @@ fn parse_single_inner_condition(input: &str) -> OracleResult<'_, StaticCondition
         parse_resolution_context_conditions,
     ))
     .parse(input)
+}
+
+/// CR 508.1a + CR 603.4: "you attacked with creatures with total power N or
+/// greater this combat" compares declaration-time power from this trigger's
+/// attacker batch rather than the current battlefield or turn history.
+fn parse_you_attacked_with_total_power_this_combat(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you attacked with ").parse(input)?;
+    let (rest, condition) = parse_creatures_with_total_power_or_greater(rest)?;
+    let (rest, _) = tag(" this combat").parse(rest)?;
+    Ok((rest, condition))
+}
+
+/// Parse the shared attacker-total threshold phrase after its grammatical
+/// subject: "creatures with total power N or greater".
+fn parse_creatures_with_total_power_or_greater(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("creatures with total power ").parse(input)?;
+    let (rest, threshold) = parse_number(rest)?;
+    let (rest, comparator) = value(Comparator::GE, tag(" or greater")).parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TrackedSet {
+                            set: TrackedAnaphorSource::TriggeringBatch,
+                            caused_by: None,
+                        },
+                    )
+                    .expect("object property aggregate is valid"),
+                ),
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed {
+                value: threshold as i32,
+            },
+        },
+    ))
 }
 
 /// CR 601.2h + CR 608.2c: "it wasn't cast or no mana was spent to cast <self>" —
@@ -212,6 +256,15 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
 
 /// Keeps the top-level state-condition grammar below nom's tuple-arity limit
 /// while preserving the precedence of its control-related productions.
+///
+/// The group is an ARITY-MANAGEMENT device first. Besides the control-related
+/// productions it also hosts the THRESHOLD-COUNT family — the
+/// `parse_ge_threshold`-headed arms that compare an object count against a
+/// fixed number (`parse_creatures_are_attacking_count_ge`,
+/// `parse_attached_to_referent_count_ge`). The attacking-count arm lives here
+/// because it MUST precede `parse_control_conditions` (see its comment below);
+/// the attachment-threshold arm lives here for family proximity and to leave
+/// the parent `alt`'s remaining tuple headroom free.
 fn parse_control_presence_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         // CR 201.2: Named-control clauses MUST precede the generic compound
@@ -224,6 +277,14 @@ fn parse_control_presence_conditions(input: &str) -> OracleResult<'_, StaticCond
         // `parse_control_conditions` so the bare count phrase is not mis-read as
         // "you control N or more creatures".
         parse_creatures_are_attacking_count_ge,
+        // CR 301.5 + CR 303.4 + CR 611.3a: "N or more <type> are attached to
+        // <referent>" — the attachment-threshold sibling of the attacking-count
+        // arm above. Ordering relative to that arm is NOT load-bearing (its
+        // `tag("creatures are attacking")` and this arm's required
+        // `" attached to "` referent are mutually exclusive after the shared
+        // `parse_ge_threshold` head); they are adjacent so the threshold-count
+        // family is discoverable in one place.
+        parse_attached_to_referent_count_ge,
         parse_source_controlled_or_your_commander,
         parse_control_conditions,
     ))
@@ -4595,6 +4656,68 @@ fn parse_creatures_are_attacking_count_ge(input: &str) -> OracleResult<'_, Stati
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
+/// CR 301.5 + CR 303.4 + CR 611.3a: Parse
+/// "<N or more | at least N> <type>[ and <type>]* are attached to <referent>" →
+/// `QuantityComparison(ObjectCount(<types> + Attached*) >= N)`.
+///
+/// Brass Knuckles: "Equipped creature has double strike as long as two or more
+/// Equipment are attached to it." Here "it" is the EQUIPPED CREATURE — the
+/// static's per-recipient subject (CR 301.5a: "the creature an Equipment is
+/// attached to is called the equipped creature").
+/// Balan, Wandering Knight: "~ has double strike as long as two or more
+/// Equipment are attached to it." Here the static is `SelfRef`, so the
+/// recipient and the source are the same object and both bindings agree.
+///
+/// CR 611.3a is the AUTHORIZING rule: a continuous effect generated by a static
+/// ability isn't "locked in"; it applies at any given moment to whatever its
+/// text indicates. So the count is read live on every layer pass, never
+/// captured — attaching or unattaching an Equipment flips the grant with no
+/// event. The grant itself lands in layer 6 (CR 613.1f). CR 109.3 is why this
+/// is a GAME-STATE read rather than a characteristic read: characteristics
+/// "don't include ... what an Aura enchants".
+///
+/// NO CR 613.4c annotation appears here on purpose: 613.4c is layer 7c and
+/// governs the `"for each ... attached to"` POWER/TOUGHNESS consumers of the
+/// shared noun-phrase combinators, not this keyword-grant gate.
+///
+/// COMPOSITION, NOT DUPLICATION. The noun phrase is parsed by exactly the two
+/// combinators the "for each" / "the number of" forms use
+/// (`parse_attachment_type_list` + `parse_attachment_referent_prop`), and the
+/// count is built by their shared constructor (`attachment_object_count`), so
+/// all four referents (`~`, him/her, it/that creature, them/that player) and
+/// every multi-type list work here on day one. The ONLY things this combinator
+/// adds are the threshold head (`parse_ge_threshold`, shared with
+/// `parse_creatures_are_attacking_count_ge`) and the copula.
+///
+/// THE COPULA IS REQUIRED, NOT OPTIONAL. "two or more Equipment attached to it"
+/// is a NOUN PHRASE, not a condition; admitting it would let a bare noun phrase
+/// parse as a complete `StaticCondition`. `tag(" are")` lives here and ONLY
+/// here — the shared noun-phrase combinators accept no copula at all, exactly
+/// as before this change. The required copula also rejects the negated form:
+/// " aren't attached to it" leaves "n't attached to it", which no referent arm
+/// accepts, so negation fails closed instead of parsing as positive.
+///
+/// Singular "is" is deliberately not accepted: a `>= N` threshold with N >= 2
+/// always takes the plural, and no printed card uses the singular form
+/// (measured over `data/mtgjson/AtomicCards.json`: 0 cards). If one ever
+/// prints, this becomes a one-token `alt`.
+fn parse_attached_to_referent_count_ge(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, n) = parse_ge_threshold(input)?;
+    let (rest, types) = nom_quantity::parse_attachment_type_list(rest.trim_start())?;
+    let (rest, _) = tag(" are").parse(rest)?;
+    let (rest, prop) = nom_quantity::parse_attachment_referent_prop(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: nom_quantity::attachment_object_count(types, prop),
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: n as i32 },
@@ -13263,6 +13386,167 @@ mod tests {
         }
     }
 
+    /// Destructure an attachment-threshold condition into
+    /// `(threshold, type_filters, properties)`, or panic with the actual shape.
+    /// Shared by the `parse_attached_to_referent_count_ge` tests below.
+    fn attachment_threshold_parts(
+        input: &str,
+    ) -> (i32, Vec<TypeFilter>, Vec<crate::types::ability::FilterProp>) {
+        let (rest, c) = parse_inner_condition(input)
+            .unwrap_or_else(|e| panic!("expected {input:?} to parse, got {e:?}"));
+        assert_eq!(rest, "", "combinator must consume all of {input:?}");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value },
+            } => (value, tf.type_filters, tf.properties),
+            other => {
+                panic!("expected QuantityComparison(ObjectCount GE n) for {input:?}, got {other:?}")
+            }
+        }
+    }
+
+    /// CR 301.5 + CR 303.4 + CR 611.3a: the attachment-threshold condition is a
+    /// CLASS, not a card. These pin the three axes its doc comment claims —
+    /// threshold idiom, type list, and referent — so the class claim cannot
+    /// silently regress to the one printed surface form that motivated it.
+    ///
+    /// Brass Knuckles / Balan ("two or more Equipment are attached to it") are
+    /// covered end-to-end by `tests/integration/brass_knuckles_equipment_threshold.rs`;
+    /// these are the building-block-level counterparts.
+    #[test]
+    fn attachment_threshold_covers_both_ge_idioms() {
+        // "N or more" — the printed form.
+        let (n, types, props) =
+            attachment_threshold_parts("two or more equipment are attached to it");
+        assert_eq!(n, 2);
+        assert_eq!(types, vec![TypeFilter::Subtype("Equipment".into())]);
+        assert_eq!(props, vec![FilterProp::AttachedToRecipient]);
+
+        // "at least N" — the same condition via the other `parse_ge_threshold`
+        // arm; no second combinator arm exists for it, which is the point.
+        let (n, types, props) =
+            attachment_threshold_parts("at least three equipment are attached to it");
+        assert_eq!(n, 3);
+        assert_eq!(types, vec![TypeFilter::Subtype("Equipment".into())]);
+        assert_eq!(props, vec![FilterProp::AttachedToRecipient]);
+    }
+
+    /// Every referent the shared `parse_attachment_referent_prop` map knows is
+    /// reachable from the threshold form — the payoff of extracting that map
+    /// rather than duplicating it.
+    #[test]
+    fn attachment_threshold_covers_every_referent() {
+        for (input, expected) in [
+            (
+                "two or more equipment are attached to ~",
+                FilterProp::AttachedToSource,
+            ),
+            (
+                "two or more equipment are attached to him",
+                FilterProp::AttachedToSource,
+            ),
+            (
+                "two or more equipment are attached to that creature",
+                FilterProp::AttachedToRecipient,
+            ),
+            (
+                "two or more curses are attached to that player",
+                FilterProp::AttachedToPlayer {
+                    player: ControllerRef::EnchantedPlayer,
+                },
+            ),
+        ] {
+            let (_, _, props) = attachment_threshold_parts(input);
+            assert_eq!(props, vec![expected.clone()], "referent for {input:?}");
+        }
+    }
+
+    /// A multi-type list collapses to one `TypeFilter::AnyOf`, exactly as the
+    /// "for each Aura and Equipment attached to ~" noun-phrase form does —
+    /// both go through the shared `attachment_object_count` constructor, so
+    /// they cannot diverge.
+    #[test]
+    fn attachment_threshold_collapses_multi_type_list_to_any_of() {
+        let (n, types, props) =
+            attachment_threshold_parts("two or more auras and equipment are attached to ~");
+        assert_eq!(n, 2);
+        assert_eq!(
+            types,
+            vec![TypeFilter::AnyOf(vec![
+                TypeFilter::Subtype("Aura".into()),
+                TypeFilter::Subtype("Equipment".into()),
+            ])]
+        );
+        assert_eq!(props, vec![FilterProp::AttachedToSource]);
+    }
+
+    /// The copula is REQUIRED, and these are the two ways that matters.
+    ///
+    /// Each negative is paired with the positive it differs from by one token,
+    /// so neither can pass because the input failed to reach the combinator at
+    /// all: the bare noun phrase and the negated form are rejected while the
+    /// affirmative plural is accepted on otherwise identical text.
+    #[test]
+    fn attachment_threshold_requires_the_affirmative_plural_copula() {
+        // Positive control: the only difference from the two negatives below is
+        // the copula token itself.
+        let (n, _, props) = attachment_threshold_parts("two or more equipment are attached to it");
+        assert_eq!(n, 2);
+        assert_eq!(props, vec![FilterProp::AttachedToRecipient]);
+
+        // A bare NOUN PHRASE is not a condition. Admitting it would let
+        // "two or more Equipment attached to it" stand as a complete
+        // `StaticCondition`.
+        assert!(
+            parse_inner_condition("two or more equipment attached to it").is_err(),
+            "the copula is required: a bare noun phrase must not parse as a condition"
+        );
+
+        // CR 608.2c: the NEGATED form must fail closed rather than parse as the
+        // positive. `tag(" are")` leaves "n't attached to it", which no referent
+        // arm accepts.
+        assert!(
+            parse_inner_condition("two or more equipment aren't attached to it").is_err(),
+            "the negated form must fail closed, never parse as the affirmative"
+        );
+    }
+
+    /// Registering the attachment arm beside `parse_creatures_are_attacking_count_ge`
+    /// must not shadow it. Both share the `parse_ge_threshold` head, so a future
+    /// widening of either would surface here first.
+    #[test]
+    fn attachment_threshold_does_not_shadow_the_attacking_sibling() {
+        let (rest, c) = parse_inner_condition("three or more creatures are attacking").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } => assert!(
+                tf.properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                "the attacking sibling must still win its own input, got {tf:?}"
+            ),
+            other => panic!("attacking sibling was shadowed, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_control_count_ge_artifacts() {
         let (rest, c) = parse_inner_condition("you control two or more artifacts").unwrap();
@@ -21166,6 +21450,44 @@ mod tests {
     }
 
     // -- "have total {power|toughness|mana value} N or {greater|less}" predicate --
+
+    #[test]
+    fn pack_tactics_total_power_uses_triggering_batch() {
+        let (rest, condition) = parse_inner_condition(
+            "you attacked with creatures with total power 6 or greater this combat",
+        )
+        .expect("Pack Tactics condition should parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::PropertyAggregate(
+                        PropertyAggregate::new(
+                            AggregateFunction::Sum,
+                            ObjectProperty::Power,
+                            CardTypeSetSource::TrackedSet {
+                                set: TrackedAnaphorSource::TriggeringBatch,
+                                caused_by: None,
+                            },
+                        )
+                        .expect("valid aggregate"),
+                    ),
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 6 },
+            }
+        );
+    }
+
+    #[test]
+    fn pack_tactics_near_phrasing_does_not_parse_as_total_power_condition() {
+        assert!(parse_inner_condition(
+            "you attacked with creatures with combined power 6 or greater this combat"
+        )
+        .is_err());
+    }
+
     //
     // CR 107.3e + CR 208.1 + CR 202.3: Building-block predicate for
     // aggregate-property thresholds across a filter (Sum function). Single

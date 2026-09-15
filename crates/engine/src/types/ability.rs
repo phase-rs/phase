@@ -1819,9 +1819,13 @@ pub enum DamageRedirectTarget {
     /// "...to ~ instead" / "...dealt to this creature instead" — the replacement
     /// source object itself (Beacon of Destiny).
     SourceObject,
-    /// "...to target creature instead" — an object chosen as a target of the
-    /// creating ability (Soltari Guerrillas).
-    ChosenObjectTarget,
+    /// CR 614.9: "...to any target / to target creature instead" — a battle,
+    /// creature, planeswalker or player chosen as a target of the creating spell
+    /// or ability (spell: CR 115.1a + CR 601.2c; activated ability: CR 115.1c +
+    /// CR 602.2b; "any target" domain CR 115.4); latched into the shield's
+    /// `redirect_target` at resolution (Soltari Guerrillas, Harm's Way).
+    #[serde(alias = "ChosenObjectTarget")]
+    ChosenTarget,
     /// CR 303.4b + CR 301.5a: "...to enchanted creature instead" / "...to
     /// equipped creature instead" — the permanent this replacement's source is
     /// attached to (Pariah, Pariah's Shield, With Great Power . . .).
@@ -5767,6 +5771,17 @@ pub enum ControllerRef {
     /// object target inherited by this chained effect ("that permanent's
     /// controller may sacrifice a land").
     ParentTargetController,
+    /// CR 120.1 + CR 109.4 + CR 608.2c: Filter controller is the controller of
+    /// the triggering event's TARGET object — the `ControllerRef`-side analogue
+    /// of [`TargetFilter::EventTargetController`], used when the possessive
+    /// anaphor qualifies a population rather than naming a player outright
+    /// ("that creature's controller sacrifices a noncreature, nonland
+    /// permanent" — Maarika, Brutal Gladiator).
+    ///
+    /// Emitted only by the same `DamageDone` post-parse rebind that produces
+    /// `TargetFilter::EventTargetController`; resolved through it, so the two
+    /// can never disagree.
+    EventTargetController,
     /// CR 608.2c + CR 108.3: Filter owner is the owner of the parent object
     /// target inherited by this chained effect ("its owner's graveyard").
     ParentTargetOwner,
@@ -7300,6 +7315,36 @@ pub enum TargetFilter {
     /// ("Whenever you're dealt combat damage, the attacking player gains
     /// control of this artifact and untaps it.").
     TriggeringSourceController,
+    /// CR 120.1 + CR 109.4 + CR 608.2c: Resolves to the *controller* of the
+    /// triggering event's TARGET object — the player-level projection of
+    /// [`TargetFilter::EventTarget`], exactly as
+    /// [`TargetFilter::TriggeringSourceController`] is the player-level
+    /// projection of [`TargetFilter::TriggeringSource`].
+    ///
+    /// CR 120.1 makes the distinction load-bearing: "an object that deals damage
+    /// is the source of that damage", and the recipient is the object that
+    /// *receives* it. The two roles live in different fields of one
+    /// `GameEvent::DamageDealt`, so on an ACTIVE-voice damage trigger
+    /// ("Whenever ~ deals damage to a creature, that creature's controller …")
+    /// the possessive anaphor names the controller of the RECIPIENT, while
+    /// `TriggeringSourceController` / `ParentTargetController` both read the
+    /// DEALER's controller via `extract_source_from_event`.
+    ///
+    /// Emitted only by the post-parse rebind
+    /// `rebind_immediate_parent_target_controller_to_event_target_controller`
+    /// (parser/oracle_trigger.rs), which is gated on a `DamageDone` trigger
+    /// whose `valid_target` is an object-only recipient filter — mirroring how
+    /// `PostReplacementSourceController` is rewritten in from
+    /// `ParentTargetController` at the prevention follow-up call site, so the
+    /// surface phrase "that creature's controller" stays consolidated in
+    /// `parse_target` for every non-damage-trigger caller.
+    ///
+    /// Resolved via `extract_target_object_from_event` against
+    /// `state.current_trigger_event`, then that object's controller with an LKI
+    /// fallback (CR 608.2h) — load-bearing, because lethal combat damage means
+    /// the recipient is usually already in a graveyard (CR 704.5g) by the time
+    /// the trigger resolves. Matches no player outside a trigger window.
+    EventTargetController,
     /// Resolves to the same target(s) as the parent ability.
     /// Used for anaphoric "it"/"that creature"/"that player" in compound effects
     /// (e.g., "tap target creature and put a stun counter on it").
@@ -7779,6 +7824,28 @@ pub enum ObjectScope {
     /// the per-iteration id is absent (a condition/layer read) it reads null →
     /// 0, mirroring [`ObjectScope::Target`]'s fail-closed null read.
     BatchSource,
+    /// CR 601.2c + CR 608.2c: The **chain-root** spell/ability's declared object
+    /// target — the referent of a demonstrative back-reference ("that artifact",
+    /// "that creature") made by a LATER instruction in the same resolution, from
+    /// a nested sub-ability whose own `targets` name a different object (e.g. a
+    /// resolution-chosen recipient).
+    ///
+    /// The [`ObjectScope`] mirror of the [`TargetFilter::ParentTarget`] family,
+    /// but resolving to the chain **root**, not the immediate chain parent: for
+    /// Dismantle the immediate parent's `targets` hold the counter recipient (or
+    /// are empty), so `Target`/`Recipient` would read the wrong object. Identity
+    /// is ability-carried in `SpellContext::chain_root_targets` (stamped once at
+    /// `finalize_cast`, CR 601.2c fixes the target as the spell is put on the
+    /// stack), exactly as [`ObjectScope::CostPaidObject`] and
+    /// [`ObjectScope::AmassedArmy`] carry theirs on `ResolvedAbility`.
+    ///
+    /// Read hybrid live-or-LKI in `resolve_counters_on_scope`: live counters
+    /// while the target is still on the battlefield (an indestructible target
+    /// that was NOT destroyed — CR 702.12b), its LKI counter map once it has
+    /// left (CR 122.2 + CR 400.7 + CR 608.2h). Counter reads only today
+    /// (Dismantle, Rite of the Serpent); every object-characteristic reader
+    /// fail-closes to 0 and is marked `Unhandled` in `game/coverage.rs`.
+    ChainRootTarget,
 }
 
 /// CR 601.2a: A per-turn action journal — a chronological record of a kind of
@@ -12714,6 +12781,29 @@ impl AbilityCost {
         }
     }
 
+    /// CR 601.2h + CR 602.2b: a disjunctive cost leg is resolved to the chosen
+    /// instruction and the total cost is then paid as a whole.
+    ///
+    /// Returns this cost with its first unresolved `OneOf` (depth-first through
+    /// `Composite`) replaced by `branch`, or `None` when no `OneOf` exists. A
+    /// top-level `OneOf` resolves to exactly `branch`. Pure AST rewrite: the
+    /// payability of the result is the caller's business.
+    pub fn resolve_first_one_of(&self, branch: &AbilityCost) -> Option<AbilityCost> {
+        match self {
+            AbilityCost::OneOf { .. } => Some(branch.clone()),
+            AbilityCost::Composite { costs } => {
+                costs.iter().enumerate().find_map(|(index, child)| {
+                    child.resolve_first_one_of(branch).map(|resolved| {
+                        let mut costs = costs.clone();
+                        costs[index] = resolved;
+                        AbilityCost::Composite { costs }
+                    })
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// CR 605.1a (2026 amendment): does paying this cost move a card to or from
     /// a **library**?
     ///
@@ -17152,11 +17242,11 @@ pub enum Effect {
     /// its use (CR 614.5) and dropped at cleanup.
     ///
     /// Exactly one of `modification` / `redirect_to` is `Some`. When
-    /// `redirect_to == Some(ChosenObjectTarget)` ("to target creature" —
-    /// Soltari Guerrillas), `redirect_object_filter` carries the recipient's
-    /// `TargetFilter` so the targeting layer surfaces a standard object target
-    /// slot (`ability_utils::collect_target_slots`); the resolver captures the
-    /// chosen object into the shield. All other redirect forms host on the
+    /// `redirect_to == Some(ChosenTarget)` ("to target creature" — Soltari
+    /// Guerrillas; "to any target" — Harm's Way), `redirect_object_filter`
+    /// carries the recipient's `TargetFilter` so the targeting layer surfaces a
+    /// standard target slot (`ability_utils::collect_target_slots`); the
+    /// resolver captures the chosen object or player into the shield. All other redirect forms host on the
     /// controller / source with no declared target.
     CreateDamageReplacement {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -17176,8 +17266,9 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         redirect_amount: Option<PreventionAmount>,
         /// CR 115.1: The redirect recipient's target filter for the
-        /// `ChosenObjectTarget` form ("...deals that damage to target creature
-        /// instead" — Soltari Guerrillas). `None` for the `Controller` /
+        /// `ChosenTarget` form ("...deals that damage to target creature
+        /// instead" — Soltari Guerrillas; "...is dealt to any target instead" —
+        /// Harm's Way). `None` for the `Controller` /
         /// `SourceObject` redirect forms, which need no target slot.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         redirect_object_filter: Option<TargetFilter>,
@@ -19596,6 +19687,15 @@ impl TargetFilter {
                 | TargetFilter::ParentTarget
                 | TargetFilter::ParentTargetSlot { .. }
                 | TargetFilter::ParentTargetController
+                // CR 115.1: only something identified by the word "target" is a
+                // target, so this reference — read from the triggering event at
+                // resolution — is never announced and claims no target slot.
+                // Without this arm the targeting layer builds a slot for it,
+                // finds zero legal candidates (there is no such player to choose
+                // while the trigger goes on the stack) and removes the whole
+                // ability for lack of a legal target before it can resolve —
+                // exactly the failure `AmassedArmy` above documents.
+                | TargetFilter::EventTargetController
                 | TargetFilter::ParentTargetOwner
                 | TargetFilter::SourceChosenPlayer
                 | TargetFilter::PostReplacementSourceController
@@ -20490,7 +20590,7 @@ impl Effect {
             | Effect::RevealFromHand { .. }
             // CR 614.9 + CR 115.1: CreateDamageReplacement has no `target:
             // TargetFilter` field. Its "to target creature" redirect recipient
-            // (Soltari Guerrillas — `redirect_to: ChosenObjectTarget`) is
+            // (Soltari Guerrillas — `redirect_to: ChosenTarget`) is
             // surfaced through dedicated branches in `ability_utils`
             // (`collect_target_slots` / `collect_target_slot_specs`), mirroring
             // `MoveCounters`/`Attach`; all other forms host on the controller or
@@ -20557,6 +20657,7 @@ impl Effect {
                             Some(
                                 ControllerRef::ParentTargetOwner
                                     | ControllerRef::ParentTargetController
+                                    | ControllerRef::EventTargetController
                             )
                         ) =>
                 {
@@ -23751,6 +23852,8 @@ pub struct AbilityDefinition {
     /// false. See `SiblingCondition`. `Dependent` (default) preserves today's
     /// behavior; `ReplicatedOrBranch` marks per-item keyword-list replication.
     pub sibling_condition: SiblingCondition,
+    /// CR 608.2c + CR 614.1a: see [`UnloweredGuard`]. Always `None` on a finished parse.
+    pub unlowered_guard: Option<UnloweredGuard>,
 }
 
 /// Private serialization mirror for `AbilityDefinition`. Holds a borrowed view
@@ -23832,6 +23935,8 @@ struct AbilityDefinitionRepr<'a> {
     iteration_kind_binding: &'a Option<IterationKindBinding>,
     #[serde(skip_serializing_if = "SiblingCondition::is_default")]
     sibling_condition: SiblingCondition,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unlowered_guard: &'a Option<UnloweredGuard>,
 }
 
 impl Serialize for AbilityDefinition {
@@ -23879,6 +23984,7 @@ impl Serialize for AbilityDefinition {
             sub_link,
             iteration_kind_binding,
             sibling_condition,
+            unlowered_guard,
         } = self;
         let repr = AbilityDefinitionRepr {
             kind,
@@ -23921,6 +24027,7 @@ impl Serialize for AbilityDefinition {
             sub_link: *sub_link,
             iteration_kind_binding,
             sibling_condition: *sibling_condition,
+            unlowered_guard,
         };
         /// Flatten wrapper: the mirror carries the real field set;
         /// `consumes_source` (#506) and `is_mana_ability` (CR 605.1a) are
@@ -24035,6 +24142,8 @@ struct AbilityDefinitionDe {
     iteration_kind_binding: Option<IterationKindBinding>,
     #[serde(default)]
     sibling_condition: SiblingCondition,
+    #[serde(default)]
+    unlowered_guard: Option<UnloweredGuard>,
 }
 
 impl<'de> Deserialize<'de> for AbilityDefinition {
@@ -24087,6 +24196,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             sub_link: de.sub_link,
             iteration_kind_binding: de.iteration_kind_binding,
             sibling_condition: de.sibling_condition,
+            unlowered_guard: de.unlowered_guard,
         })
     }
 }
@@ -24223,6 +24333,64 @@ pub enum IterationKindBinding {
     RebindToIteratedKind,
 }
 
+/// CR 614.1 + CR 614.1a / CR 608.2c: which reading a leading "if" guard has when the
+/// single condition authority (`lower_instead_condition`) cannot lower it.
+///
+/// The two readings have genuinely different remedies (CR 614.1a + CR 614.6 vs CR 608.2c),
+/// so the split matters. **The parser's discriminator for it — the modal "would" — is a
+/// defensible PROXY, not the rule's own boundary, and this doc says so deliberately.**
+/// CR 614.1 uses "would" to describe the event a replacement effect *watches for* ("watch
+/// for a particular event that would happen"); the textual marker CR 614.1a names is
+/// "instead" ("Effects that use the word 'instead' are replacement effects"). This parser
+/// keys on "would" and never on "instead", so a printed replacement that omits the modal
+/// classifies STATE here — `"… put it on top of its owner's library instead"` is one, and
+/// CR 608.2c quotes that exact sentence as its own example. Both readings therefore have
+/// real members under either marker, and "would" is chosen because it is the reliable one
+/// for the population this seam sees: an unlowerable LEADING guard, where "instead" sits in
+/// the body rather than in the guard being classified.
+///
+/// Consequence to keep in view when extending: a misclassified EVENT guard reads STATE and
+/// falls through with its body emitted, which is the pre-existing behaviour rather than a
+/// new one — see `parser::oracle::resolve_guards_in_ability`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuardReading {
+    /// CR 614.1a: the guard names an EVENT ("... would ...").
+    Event,
+    /// CR 608.2c: the guard names a game STATE. Back-references ("... this way")
+    /// read State — CR 608.2c's own example is one.
+    State,
+}
+
+/// CR 608.2c + CR 614.1a: an unlowerable leading guard whose body is an ownership
+/// candidate, carried from the clause seam to `parser::oracle::resolve_unlowered_guards`
+/// — the post-routing chokepoint that can see the body's final parent.
+///
+/// `None` on every tree `parse_oracle_pipeline` HANDS OUT — the production
+/// `ParsedAbilities` it returns AND the report-only `RawLoweredIr` stage clone it
+/// captures for `parse_oracle_text_traced`, both settled by the same resolver pass (see
+/// `parser::oracle::parse_oracle_pipeline`'s tail). The resolver clears the mark on both
+/// of its branches. A `Some` reaching `card-data.json` means the resolver did not run,
+/// which is why this field serializes when set rather than being `skip`ped.
+///
+/// It is NOT `None` on a tree produced by `parse_effect_chain` outside the pipeline: that
+/// entry has no resolver, so a mark there survives with the body intact — i.e. it fails
+/// open to base behaviour.
+///
+/// There is a SECOND fail-open path, and it fails open by DROPPING rather than by carrying:
+/// `oracle_effect::ability_definition_from_clause` (seven call sites) lifts a
+/// `ParsedEffectClause` onto a fresh `AbilityDefinition` field by field and does not copy this
+/// one. A clause marked at the seam therefore becomes an unmarked definition, the resolver
+/// never sees a verdict to settle, and the guard is dropped with the body emitted — the same
+/// base behaviour the `parse_effect_chain` path lands on, reached the other way round. Both
+/// paths are fail-OPEN in the same direction, which is why neither can strand a live mark in
+/// a shipped tree; see that function's own doc for why the field is not threaded instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnloweredGuard {
+    pub reading: GuardReading,
+    /// The byte-unchanged `"if <guard>, <body>"` clause text the gap is recorded over.
+    pub clause_text: String,
+}
+
 impl fmt::Debug for AbilityDefinition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // JSON serialization instead of field-by-field Debug — avoids stack overflow
@@ -24287,6 +24455,7 @@ impl AbilityDefinition {
             sub_link: SubAbilityLink::ContinuationStep,
             iteration_kind_binding: None,
             sibling_condition: SiblingCondition::Dependent,
+            unlowered_guard: None,
         }
     }
 
@@ -25764,6 +25933,17 @@ pub struct SpellContext {
     /// conditions such as "if you cast this spell during your main phase".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_phase: Option<Phase>,
+    /// CR 601.2c + CR 608.2c: The resolving spell/ability's declared **object**
+    /// targets, stamped once at `finalize_cast` (after targets are chosen, before
+    /// resolution). Read by [`ObjectScope::ChainRootTarget`] from a nested
+    /// sub-ability whose own `targets` name a different object — e.g. Dismantle's
+    /// "put that many … counters on an artifact you control", where the sub's
+    /// target is the resolution-chosen recipient but "that artifact" still means
+    /// the spell's own target. Empty for every spell whose text makes no such
+    /// back-reference, and for activated/triggered abilities (which never reach
+    /// `finalize_cast`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain_root_targets: Vec<TargetRef>,
     /// CR 601.2 + CR 608.2c: Presence filters the controller matched as the
     /// spell was cast. Used by effects that say "if you controlled a [filter]
     /// as you cast this spell"; the resolver checks this snapshot instead of
@@ -28722,6 +28902,24 @@ pub struct ReplacementDefinition {
     /// E.g., `Some(Graveyard)` means "only replace zone changes TO the graveyard."
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_zone: Option<Zone>,
+    /// CR 113.6b: the zones this replacement functions FROM — "an ability that
+    /// states which zones it functions in functions only from those zones."
+    ///
+    /// The replacement-side twin of [`StaticDefinition::active_zones`], with
+    /// identical semantics and the same single-authority shape: empty means the
+    /// CR 113.6 default (the scanner's battlefield/command zones plus the
+    /// CR 614.12 / CR 702.35a self-replacement carve-outs for an object that is
+    /// entering, being discarded, or leaving the stack), and non-empty restricts
+    /// the definition to exactly the listed zones — the carve-outs included,
+    /// because a definition that names its zones has already said where it works.
+    ///
+    /// Read by `functioning_abilities::replacement_functions_in_zone`, the single
+    /// authority consulted by `replacement::object_replacement_candidate_applies`.
+    ///
+    /// Set by `synthesize_dredge` (CR 702.52a: dredge "functions only while the
+    /// card with dredge is in a player's graveyard").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_zones: Vec<Zone>,
     /// CR 614.1a: Damage modification formula (Double, Triple, Plus, Minus).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage_modification: Option<DamageModification>,
@@ -29006,6 +29204,14 @@ impl ReplacementDefinition {
         self
     }
 
+    /// CR 113.6b: declare the zones this replacement functions from, restricting
+    /// it to exactly those zones. Chainable, mirroring
+    /// [`StaticDefinition::active_zones`]. Omit for the CR 113.6 default.
+    pub fn active_zones(mut self, zones: Vec<Zone>) -> Self {
+        self.active_zones = zones;
+        self
+    }
+
     /// CR 121.2: `draw_scope` is `Some` exactly when `event` is `Draw`.
     ///
     /// A `Draw` definition with no scope would have to have one guessed for it at
@@ -29058,6 +29264,7 @@ impl ReplacementDefinition {
             description: None,
             condition: None,
             destination_zone: None,
+            active_zones: vec![],
             damage_modification: None,
             damage_source_filter: None,
             damage_target_filter: None,
@@ -30957,6 +31164,31 @@ impl ResolvedAbility {
 
     pub fn trigger_source_card_id(&self) -> Option<CardId> {
         self.trigger_source.as_ref().map(|source| source.card_id)
+    }
+
+    /// CR 608.2h + CR 603.7a: Propagate the creating ability's chain-root
+    /// target list to this ability and every continuation branch. A carrier
+    /// that materializes a nested `AbilityDefinition` payload WHILE STILL
+    /// WITHIN an active resolution chain (a delayed trigger's payload, a
+    /// vote's per-choice effect, a coin flip's win/lose branch, a die-roll
+    /// result branch, a reveal-from-hand decline) must carry the creating
+    /// ability's `chain_root_targets` onto the freshly-built `ResolvedAbility`
+    /// it produces — `build_resolved_from_def` gives that ability a BRAND NEW
+    /// `SpellContext`, so without this, any `ObjectScope::ChainRootTarget`
+    /// read nested inside the payload silently resolves against an empty
+    /// list (reads as 0) once the payload actually executes. Narrow single-field
+    /// analog of `set_context_recursive`, mirroring
+    /// `set_source_incarnation_recursive`'s shape rather than overwriting the
+    /// whole context (which would also clobber the freshly-built ability's own
+    /// `ability_tag`/`chosen_x`/other per-node context fields).
+    pub fn set_chain_root_targets_recursive(&mut self, chain_root_targets: Vec<TargetRef>) {
+        self.context.chain_root_targets = chain_root_targets.clone();
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_chain_root_targets_recursive(chain_root_targets.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_chain_root_targets_recursive(chain_root_targets);
+        }
     }
 
     /// CR 400.7: Propagate the source's captured incarnation to this ability
@@ -36367,6 +36599,75 @@ mod tests {
             );
         }
     }
+
+    fn generic_mana_cost(amount: u32) -> AbilityCost {
+        AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::generic(amount),
+        }
+    }
+
+    fn pay_life_cost(amount: i32) -> AbilityCost {
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: amount },
+        }
+    }
+
+    /// CR 601.2h + CR 602.2b: a cost with no disjunctive leg has nothing to
+    /// resolve.
+    #[test]
+    fn resolve_first_one_of_returns_none_without_one_of() {
+        let branch = pay_life_cost(2);
+        assert_eq!(generic_mana_cost(2).resolve_first_one_of(&branch), None);
+        let composite = AbilityCost::Composite {
+            costs: vec![generic_mana_cost(2), AbilityCost::Tap],
+        };
+        assert_eq!(composite.resolve_first_one_of(&branch), None);
+    }
+
+    /// CR 601.2h + CR 602.2b: a top-level disjunction resolves to exactly the
+    /// chosen branch.
+    #[test]
+    fn resolve_first_one_of_top_level_yields_the_branch() {
+        let branch = pay_life_cost(2);
+        let one_of = AbilityCost::OneOf {
+            costs: vec![generic_mana_cost(1), branch.clone()],
+        };
+        assert_eq!(one_of.resolve_first_one_of(&branch), Some(branch));
+    }
+
+    /// CR 601.2h + CR 602.2b: only the first disjunction inside a composite is
+    /// substituted; sibling legs and a later disjunction stay intact.
+    #[test]
+    fn resolve_first_one_of_substitutes_only_first_nested_one_of() {
+        let first_one_of = AbilityCost::OneOf {
+            costs: vec![generic_mana_cost(1), pay_life_cost(2)],
+        };
+        let second_one_of = AbilityCost::OneOf {
+            costs: vec![generic_mana_cost(3), pay_life_cost(4)],
+        };
+        let composite = AbilityCost::Composite {
+            costs: vec![
+                generic_mana_cost(2),
+                AbilityCost::Composite {
+                    costs: vec![AbilityCost::Tap, first_one_of],
+                },
+                second_one_of.clone(),
+            ],
+        };
+        let branch = pay_life_cost(2);
+        assert_eq!(
+            composite.resolve_first_one_of(&branch),
+            Some(AbilityCost::Composite {
+                costs: vec![
+                    generic_mana_cost(2),
+                    AbilityCost::Composite {
+                        costs: vec![AbilityCost::Tap, branch.clone()],
+                    },
+                    second_one_of,
+                ],
+            })
+        );
+    }
 }
 
 #[cfg(test)]
@@ -37486,6 +37787,23 @@ mod damage_redirect_target_serde_tests {
                 .expect("legacy controller serializes"),
             r#"{"type":"Controller"}"#,
             "adding the source-controller authority must preserve existing card data"
+        );
+    }
+
+    /// CR 614.9: widening the chosen redirect recipient from object-only to
+    /// object-or-player renamed its tag; card data exported under the old tag
+    /// must still load, and new data serializes under the new tag.
+    #[test]
+    fn chosen_target_reads_legacy_chosen_object_target_tag() {
+        assert_eq!(
+            serde_json::from_str::<DamageRedirectTarget>(r#"{"type":"ChosenObjectTarget"}"#)
+                .expect("legacy tag deserializes"),
+            DamageRedirectTarget::ChosenTarget
+        );
+        assert_eq!(
+            serde_json::to_string(&DamageRedirectTarget::ChosenTarget)
+                .expect("chosen target serializes"),
+            r#"{"type":"ChosenTarget"}"#
         );
     }
 }

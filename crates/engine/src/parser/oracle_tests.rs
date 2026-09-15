@@ -8,7 +8,7 @@ use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
 use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment,
-    DamageKindFilter, DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement,
+    DamageKindFilter, DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::triggers::AttackTargetFilter;
@@ -4638,6 +4638,64 @@ fn chosen_type_cost_reducer_links_to_card_choose_clause() {
     );
 }
 
+/// CR 607.2d + CR 205.3: a persisted creature-type choice must realign the
+/// `SpellCast` trigger's spell filter, not only static cost reducers and Dig
+/// filters. The three cards below share the complete printed relation class.
+#[test]
+fn chosen_creature_type_spell_cast_trigger_filters_are_retargeted() {
+    let cases = [
+        (
+            "Reflections of Littjara",
+            &["Enchantment"] as &[&str],
+            &[],
+            "As this enchantment enters, choose a creature type.\nWhenever you cast a spell of the chosen type, copy that spell. (A copy of a permanent spell becomes a token.)",
+        ),
+        (
+            "Door of Destinies",
+            &["Artifact"] as &[&str],
+            &[],
+            "As this artifact enters, choose a creature type.\nWhenever you cast a spell of the chosen type, put a charge counter on this artifact.\nCreatures you control of the chosen type get +1/+1 for each charge counter on this artifact.",
+        ),
+        (
+            "Chronicle of Victory",
+            &["Legendary", "Artifact"] as &[&str],
+            &[],
+            "As Chronicle of Victory enters, choose a creature type.\nCreatures you control of the chosen type get +2/+2 and have first strike and trample.\nWhenever you cast a spell of the chosen type, draw a card.",
+        ),
+    ];
+
+    for (name, types, subtypes, oracle) in cases {
+        let parsed = parse(oracle, name, &[], types, subtypes);
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.mode == TriggerMode::SpellCast)
+            .unwrap_or_else(|| panic!("{name} must parse its SpellCast trigger: {parsed:#?}"));
+        let valid_card = trigger
+            .valid_card
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name} SpellCast trigger must retain its spell filter"));
+
+        assert!(
+            crate::game::filter::filter_contains_filter_prop(valid_card, &|prop| {
+                matches!(prop, FilterProp::IsChosenCreatureType)
+            }),
+            "{name} trigger must match the persisted chosen creature type: {trigger:#?}"
+        );
+        assert!(
+            !crate::game::filter::filter_contains_filter_prop(valid_card, &|prop| {
+                matches!(prop, FilterProp::IsChosenCardType)
+            }),
+            "{name} trigger must not retain a card-type discriminator: {trigger:#?}"
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{name} must reach a complete parse, got warnings: {:?}",
+            parsed.parse_warnings
+        );
+    }
+}
+
 #[test]
 fn mindlock_orb_routes_to_static_search_prohibition() {
     let r = parse(
@@ -6500,11 +6558,36 @@ fn vazal_megalegendary_line_consumed_and_limit_extracted() {
         &["Creature"],
         &["Phyrexian", "Praetor"],
     );
+    // Rename-proof negative. The old form compared the gap's NAME against
+    // "megalegendary" — the clause's first word, which only the imperative fallback
+    // ever produced and which can never appear once gaps are named by verdict. Key on
+    // the recorded CLAUSE instead: this is strictly stronger, because it catches EVERY
+    // `Unimplemented`-minting route for a regressed copy-limit line (the fallback, the
+    // static producer, the whole-line marker), not just the fallback's spelling.
+    // Form (i) — "no `Unimplemented` at all" — is unavailable: Vazal's third line
+    // legitimately carries one.
+    // Pin the precondition the negative below depends on. Measured by mutation, not
+    // argued: break the recognizer alone and the negative goes RED (the line falls
+    // through to a `static_structure` gap, which carries the text). But break the
+    // recognizer AND let a sibling line rule swallow the bare keyword first, and the
+    // negative goes GREEN while the copy-limit path is entirely dead -- consumed by
+    // the wrong authority, with nothing reported either way. This assertion is what
+    // separates those two worlds, so this row's green means "the intended consumer
+    // ran", not merely "nothing was reported".
+    //
+    // `deck_construction_copy_limit_sentence_positive_cases` also covers the
+    // recognizer, so the suite was never blind to this; what was missing is that THIS
+    // row could not stand on its own evidence.
+    assert!(
+        is_deck_construction_copy_limit_sentence("Megalegendary"),
+        "the recognizer that consumes this line must still accept it"
+    );
+
+    const MEGALEGENDARY: &str = "megalegendary";
     let megalegendary_unimplemented = r.abilities.iter().any(|a| {
-        matches!(
-            &*a.effect,
-            Effect::Unimplemented { name, .. } if name.eq_ignore_ascii_case("megalegendary")
-        )
+        a.effect
+            .unimplemented_description()
+            .is_some_and(|d| d.to_lowercase().contains(MEGALEGENDARY))
     });
     assert!(
         !megalegendary_unimplemented,
@@ -7978,11 +8061,22 @@ fn activated_as_sorcery_constraint_sets_sorcery_speed() {
             ..
         }
     ));
-    let no_activate_tail = draw
-            .sub_ability
-            .as_ref()
-            .is_none_or(|tail| !matches!(*tail.effect, Effect::Unimplemented { ref name, .. } if name == "activate"));
-    assert!(no_activate_tail);
+    // Rename-proof negative: key on the CLAUSE the gap would record, not on the gap's
+    // name. A name compare against the old first word can never be true once gaps are
+    // named by verdict, so the guard would stop guarding silently. The paired positive
+    // reach-guard is the `Effect::Draw` assertion immediately above: it proves the
+    // activation restriction was absorbed rather than the sentence failing earlier.
+    const ACTIVATE_PHRASE: &str = "activate only as a sorcery";
+    let no_activate_tail = draw.sub_ability.as_ref().is_none_or(|tail| {
+        !tail
+            .effect
+            .unimplemented_description()
+            .is_some_and(|d| d.to_lowercase().contains(ACTIVATE_PHRASE))
+    });
+    assert!(
+        no_activate_tail,
+        "the {ACTIVATE_PHRASE} restriction must be absorbed, not left as a gap node"
+    );
 }
 
 #[test]
@@ -8091,10 +8185,17 @@ fn spell_cast_restrictions_parse_into_top_level_metadata() {
             CastingRestriction::DuringOpponentsTurn,
         ]
     );
-    assert!(!matches!(
-        *r.abilities[0].effect,
-        Effect::Unimplemented { ref name, .. } if name == "cast"
-    ));
+    // Rename-proof negative, keyed on the recorded CLAUSE rather than the gap's name.
+    // Paired positive reach-guard: the `casting_restrictions` assertion immediately
+    // above proves the restriction line was consumed into top-level metadata.
+    const CAST_PHRASE: &str = "cast this spell only during combat";
+    assert!(
+        !r.abilities[0]
+            .effect
+            .unimplemented_description()
+            .is_some_and(|d| d.to_lowercase().contains(CAST_PHRASE)),
+        "the {CAST_PHRASE} restriction must not leak back as a gap node"
+    );
 }
 
 // CR 118.9 + CR 701.59a: Conspiracy Unraveler — "You may collect evidence N
@@ -8454,10 +8555,17 @@ fn spell_casting_option_parses_trap_alternative_cost() {
         })
     );
     assert_eq!(r.abilities.len(), 1);
-    assert!(!matches!(
-        *r.abilities[0].effect,
-        Effect::Unimplemented { ref name, .. } if name == "pay"
-    ));
+    // Rename-proof negative, keyed on the recorded CLAUSE. Paired positive reach-guard:
+    // the `alternative_cost` assertion above proves the "you may pay {0} rather than
+    // ..." sentence was absorbed as an alternative cost.
+    const PAY_PHRASE: &str = "rather than pay this spell's mana cost";
+    assert!(
+        !r.abilities[0]
+            .effect
+            .unimplemented_description()
+            .is_some_and(|d| d.to_lowercase().contains(PAY_PHRASE)),
+        "the alternative-cost sentence must not leak back as a gap node"
+    );
 }
 
 // CR 118.9 + CR 601.2b + CR 404.1 + CR 109.5: Ravenous Trap — the leading
@@ -8525,12 +8633,16 @@ fn spell_casting_option_parses_ravenous_trap_alternative_cost() {
         "alt-cost must not leak into abilities as a PayCost effect, got {:?}",
         r.abilities[0].effect
     );
+    // Rename-proof negative, keyed on the recorded CLAUSE. Paired positive reach-guard:
+    // the opponent-graveyard `QuantityComparison` match above proves the alternative-cost
+    // sentence was decomposed rather than failing earlier.
+    const PAY_PHRASE: &str = "rather than pay this spell's mana cost";
     assert!(
-        !matches!(
-            *r.abilities[0].effect,
-            Effect::Unimplemented { ref name, .. } if name == "pay"
-        ),
-        "alt-cost must not leak into abilities as an unimplemented pay effect, got {:?}",
+        !r.abilities[0]
+            .effect
+            .unimplemented_description()
+            .is_some_and(|d| d.to_lowercase().contains(PAY_PHRASE)),
+        "alt-cost must not leak into abilities as an unimplemented pay gap, got {:?}",
         r.abilities[0].effect
     );
 }
@@ -14003,6 +14115,256 @@ fn prevention_rider_binding_keeps_spell_target_and_self_scoped_controls() {
             ..
         })
     ));
+}
+
+/// #8777 (VM-3) — SHAPE: all four class-A members fold their leading
+/// distributive "for each 1 damage prevented this way" rider to
+/// `ContinuationStep` on the ability path. Reach guard: a `PreventDamage`
+/// root, `sub_ability.is_some()`, and zero `Effect::Unimplemented` anywhere
+/// in the parse, so a parse failure cannot satisfy the link assertion.
+#[test]
+fn distributive_prevented_this_way_rider_folds_to_continuation_step() {
+    fn assert_no_unimplemented(effect: &Effect, label: &str) {
+        assert!(
+            !matches!(effect, Effect::Unimplemented { .. }),
+            "{label}: parse must not contain Effect::Unimplemented, got {effect:?}"
+        );
+    }
+
+    let cards: &[(&str, &str)] = &[
+        (
+            "Inkshield",
+            "Prevent all combat damage that would be dealt to you this turn. \
+             For each 1 damage prevented this way, create a 2/1 white and black \
+             Inkling creature token with flying.",
+        ),
+        (
+            "Brace for Impact",
+            "Prevent all damage that would be dealt to target multicolored creature \
+             this turn. For each 1 damage prevented this way, put a +1/+1 counter \
+             on that creature.",
+        ),
+        (
+            "Temper",
+            "Prevent the next X damage that would be dealt to target creature this \
+             turn. For each 1 damage prevented this way, put a +1/+1 counter on \
+             that creature.",
+        ),
+        (
+            "Test of Faith",
+            "Prevent the next 3 damage that would be dealt to target creature this \
+             turn. For each 1 damage prevented this way, put a +1/+1 counter on \
+             that creature.",
+        ),
+    ];
+
+    for (name, oracle) in cards {
+        let parsed = parse_oracle_text(oracle, name, &[], &["Instant".into()], &[]);
+        let root = parsed
+            .abilities
+            .iter()
+            .find(|a| matches!(a.effect.as_ref(), Effect::PreventDamage { .. }))
+            .unwrap_or_else(|| panic!("{name}: must have a PreventDamage root, got {parsed:?}"));
+        assert_no_unimplemented(&root.effect, name);
+        let sub = root
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name}: PreventDamage root must carry a sub_ability"));
+        assert_no_unimplemented(&sub.effect, name);
+        assert_eq!(
+            sub.sub_link,
+            SubAbilityLink::ContinuationStep,
+            "{name}: the leading distributive rider must fold to ContinuationStep, got {:?}",
+            sub.sub_link
+        );
+        assert!(
+            sub.repeat_for.as_ref().is_some_and(|qty| qty
+                .any_ref(&mut |reference| matches!(reference, QuantityRef::EventContextAmount))),
+            "{name}: the rider's repeat_for must read EventContextAmount, got {:?}",
+            sub.repeat_for
+        );
+    }
+}
+
+/// #8777 (VM-4) — GUARD: Read the Runes' "for each card **drawn** this way"
+/// rider is a different anaphor cohort over the same "for each ... this way"
+/// grammar and must not be folded as a prevention rider. Its chain is
+/// `[Draw, Discard]` (measured), so the enclosing `PreventDamage` guard
+/// short-circuits before the new predicate is ever invoked; this row does
+/// not pin conjunct (2) or (3) individually — the predicate-level table in
+/// `oracle_effect::assembly::arena_tests` pins conjunct (3) directly.
+#[test]
+fn for_each_drawn_this_way_sibling_is_not_folded_as_prevention_rider() {
+    // Verbatim (Instant, {X}{U}).
+    let oracle =
+        "Draw X cards. For each card drawn this way, discard a card unless you sacrifice a permanent.";
+    let parsed = parse_oracle_text(oracle, "Read the Runes", &[], &["Instant".into()], &[]);
+    // Positive shape: the chain must still parse cleanly with zero Unimplemented.
+    for ability in &parsed.abilities {
+        let mut current = Some(ability);
+        while let Some(a) = current {
+            assert!(
+                !matches!(a.effect.as_ref(), Effect::Unimplemented { .. }),
+                "Read the Runes: parse must not contain Effect::Unimplemented, got {:?}",
+                a.effect
+            );
+            current = a.sub_ability.as_deref();
+        }
+    }
+    let draw_root = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(a.effect.as_ref(), Effect::Draw { .. }))
+        .expect("Read the Runes: must have a Draw root");
+    let sub = draw_root
+        .sub_ability
+        .as_deref()
+        .expect("Read the Runes: Draw root must carry a sub_ability");
+    assert!(
+        matches!(sub.effect.as_ref(), Effect::Discard { .. }),
+        "Read the Runes: sub_ability must be the Discard sibling, got {:?}",
+        sub.effect
+    );
+    assert!(
+        sub.repeat_for.as_ref().is_some_and(|qty| qty
+            .any_ref(&mut |reference| matches!(reference, QuantityRef::EventContextAmount))),
+        "Read the Runes: sibling's repeat_for must still read EventContextAmount, got {:?}",
+        sub.repeat_for
+    );
+    assert_eq!(
+        sub.sub_link,
+        SubAbilityLink::SequentialSibling,
+        "Read the Runes: a DRAWN-this-way sibling over a non-prevention antecedent must \
+         stay SequentialSibling, got {:?}",
+        sub.sub_link
+    );
+}
+
+/// #8849 (MED) — GUARD, REAL PARSER PATH. A clause whose LEADING distributive
+/// quantifier names a DRAW must not fold onto a preceding prevention merely
+/// because the clause also contains the words "prevented this way".
+/// `parse_for_each_card_drawn_this_way` lowers to the same
+/// `QuantityRef::EventContextAmount` the prevention grammar does, so before
+/// the anaphor binding this clause folded and then repeated on PREVENTED
+/// DAMAGE rather than on cards drawn. Synthetic text (no printed carrier —
+/// measured: zero corpus cards pair the two anaphors), but it reaches
+/// `parse_oracle_text` -> `parse_effect_chain_ir` -> `lower_effect_chain_ir`
+/// exactly as a card would, not a synthetic predicate call.
+///
+/// SEPARATOR NOTE: the maintainer's example uses a literal `\n` between the
+/// two sentences. Measured this round: a `\n`-separated pair parses to TWO
+/// INDEPENDENT top-level abilities (no `sub_ability` link at all) — the
+/// newline is a harder ability boundary than a period, so that shape was
+/// never at risk of folding in the first place and cannot exercise conjunct
+/// 2. The period-space separator below (matching every real card's printed
+/// style, including Inkshield's own "...this turn. For each...") produces
+/// the actual `sub_ability` chain conjunct 2 gates, and is RED at base with
+/// `sub_link == ContinuationStep` (measured).
+/// CR 615.5 (the additional effect refers to the amount PREVENTED) + CR 608.2c.
+#[test]
+fn mixed_anaphor_for_each_drawn_this_way_rider_is_not_folded_onto_a_prevention() {
+    let oracle = "Prevent all combat damage that would be dealt to you this turn. \
+                   For each card drawn this way, you gain life equal to the damage \
+                   prevented this way.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Mixed Anaphor Test Card",
+        &[],
+        &["Instant".into()],
+        &[],
+    );
+
+    // Reach-guard 1: zero Effect::Unimplemented anywhere in the parse.
+    for ability in &parsed.abilities {
+        let mut current = Some(ability);
+        while let Some(a) = current {
+            assert!(
+                !matches!(a.effect.as_ref(), Effect::Unimplemented { .. }),
+                "Mixed Anaphor Test Card: parse must not contain Effect::Unimplemented, got {:?}",
+                a.effect
+            );
+            current = a.sub_ability.as_deref();
+        }
+    }
+
+    // Reach-guard 2: the root effect is PreventDamage, so the enclosing gate
+    // guard was satisfied and the predicate really ran.
+    let root = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(a.effect.as_ref(), Effect::PreventDamage { .. }))
+        .unwrap_or_else(|| {
+            panic!("Mixed Anaphor Test Card: must have a PreventDamage root, got {parsed:?}")
+        });
+    let sub = root
+        .sub_ability
+        .as_deref()
+        .expect("Mixed Anaphor Test Card: PreventDamage root must carry a sub_ability");
+
+    // Reach-guard 3: conjunct 1 (shape) passed — the rider's repeat_for IS
+    // EventContextAmount — so the refusal below is attributable to conjunct 2,
+    // not to a parse failure upstream.
+    assert!(
+        sub.repeat_for.as_ref().is_some_and(|qty| qty
+            .any_ref(&mut |reference| matches!(reference, QuantityRef::EventContextAmount))),
+        "Mixed Anaphor Test Card: rider's repeat_for must still read EventContextAmount, got {:?}",
+        sub.repeat_for
+    );
+
+    // The assertion under test: the mixed-anaphor rider must NOT fold to
+    // ContinuationStep — it must stay SequentialSibling.
+    assert_eq!(
+        sub.sub_link,
+        SubAbilityLink::SequentialSibling,
+        "Mixed Anaphor Test Card: a rider whose LEADING quantifier names a DRAW must not \
+         fold onto a preceding PreventDamage merely because it also mentions \
+         \"prevented this way\", got {:?}",
+        sub.sub_link
+    );
+}
+
+/// #8777 (VM-5) — HOSTILE / scalar sibling: Reverse Damage's rider stays
+/// `SequentialSibling` (charter constraint: this fix must not change its
+/// behaviour). Reverse Damage is measured BROKEN independent of this change
+/// — see `printed_damage_prevention_survives_turn.rs`'s assertion "the
+/// shield must prevent the chosen source's damage in its own turn" — so this
+/// row is not "protecting a working card".
+#[test]
+fn scalar_prevented_this_way_rider_is_not_folded() {
+    // Verbatim, matching printed_damage_prevention_survives_turn.rs's REVERSE_DAMAGE_TEXT.
+    let oracle = "The next time a source of your choice would deal damage to you this \
+                   turn, prevent that damage. You gain life equal to the damage \
+                   prevented this way.";
+    let parsed = parse_oracle_text(oracle, "Reverse Damage", &[], &["Instant".into()], &[]);
+    let root = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(a.effect.as_ref(), Effect::PreventDamage { .. }))
+        .unwrap_or_else(|| {
+            panic!("Reverse Damage: must have a PreventDamage root, got {parsed:?}")
+        });
+    let sub = root
+        .sub_ability
+        .as_deref()
+        .expect("Reverse Damage: PreventDamage root must carry a sub_ability");
+    assert!(
+        matches!(sub.effect.as_ref(), Effect::GainLife { .. }),
+        "Reverse Damage: sub_ability must be the GainLife rider, got {:?}",
+        sub.effect
+    );
+    assert!(
+        sub.repeat_for.is_none(),
+        "Reverse Damage: the GainLife rider's amount is a scalar effect quantity, not a \
+         clause-level repeat_for, got {:?}",
+        sub.repeat_for
+    );
+    assert_eq!(
+        sub.sub_link,
+        SubAbilityLink::SequentialSibling,
+        "Reverse Damage: bare scalar rider over a ChosenDamageSource root must stay \
+         SequentialSibling (this fix must not change Reverse Damage's behaviour), got {:?}",
+        sub.sub_link
+    );
 }
 
 #[test]
@@ -29219,6 +29581,164 @@ fn render_net_reaches_every_nested_description_carrier() {
     }
 }
 
+/// Carrier fixture for the GUARD walk (`resolve_guards_in_effect`), on the one carrier
+/// class the wildcard-free `match` over `Effect` cannot force a decision about.
+///
+/// A new `Effect` VARIANT is a compile error in that walk. A `Vec<ContinuousModification>`
+/// FIELD on an existing variant is field access, so nothing asks — and seven such fields sat
+/// in the blanket leaf arm unreached. `ContinuousModification`'s own vocabulary carries
+/// definitions (`GrantAbility` / `GrantTrigger` / `GrantReplacement` / `GrantStaticAbility`),
+/// so every one of them is a definition carrier by TYPE, which is the only reachability a
+/// structural walk can police.
+///
+/// The census is: every `Vec<ContinuousModification>`-typed field declared on
+/// `types::ability::Effect` (six — `CopySpell` / `CopyTokenOf` / `BecomeCopy`
+/// `.additional_modifications`, `ReturnAsAura.grants`,
+/// `AddPendingEntersModifications.modifications`, `EachPlayerCopyChosen.copy_modifications`),
+/// plus the one that is a level down through a payload enum
+/// (`GrantCastingPermission` → `CastingPermission::ExileWithAltCost.enters_with_modifications`).
+/// Regenerate it by grepping `Vec<ContinuousModification>` inside the `enum Effect` span of
+/// `types/ability.rs` and following each payload enum one level.
+///
+/// Revert-to-red: drop any single arm back into the leaf list and that carrier's row fails,
+/// naming it — which the blanket `debug_assert!` in `resolve_unlowered_guards` cannot do.
+#[test]
+fn guard_walk_reaches_every_continuous_modification_carrier() {
+    use crate::types::ability::{
+        CastingPermission, CopyChooseScope, CopyRecipient, CopyRetargetPermission, GuardReading,
+        PermissionGrantee, UnloweredGuard,
+    };
+
+    /// A real EVENT-reading clause, so `clause_gap_unimplemented_as`'s own
+    /// `debug_assert_eq!` against the context-free diagnosis holds (it diagnoses
+    /// `ClauseGap::Replacement`). Torrential Gearhulk's printed rider.
+    const CLAUSE: &str = "if that spell would be put into your graveyard, exile it instead";
+
+    /// A `ContinuousModification` nesting a definition that carries a live guard mark.
+    fn marked() -> ContinuousModification {
+        let mut def = AbilityDefinition::new(AbilityKind::Spell, Effect::Investigate);
+        def.unlowered_guard = Some(UnloweredGuard {
+            reading: GuardReading::Event,
+            clause_text: CLAUSE.to_string(),
+        });
+        ContinuousModification::GrantAbility {
+            definition: Box::new(def),
+        }
+    }
+
+    let carriers: Vec<(&str, Effect)> = vec![
+        (
+            "CopySpell.additional_modifications",
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+                additional_modifications: vec![marked()],
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+        ),
+        (
+            "CopyTokenOf.additional_modifications",
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![marked()],
+            },
+        ),
+        (
+            "BecomeCopy.additional_modifications",
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                recipient: CopyRecipient::Source,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![marked()],
+            },
+        ),
+        (
+            "ReturnAsAura.grants",
+            Effect::ReturnAsAura {
+                enchant_filter: TargetFilter::Any,
+                grants: vec![marked()],
+            },
+        ),
+        (
+            "AddPendingEntersModifications.modifications",
+            Effect::AddPendingEntersModifications {
+                modifications: vec![marked()],
+            },
+        ),
+        (
+            "EachPlayerCopyChosen.copy_modifications",
+            Effect::EachPlayerCopyChosen {
+                choose_filter: TargetFilter::Any,
+                min: 1,
+                max: 1,
+                copy_modifications: vec![marked()],
+                scale: None,
+                choose_scope: CopyChooseScope::Chooser,
+            },
+        ),
+        (
+            "GrantCastingPermission -> ExileWithAltCost.enters_with_modifications",
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::ExileWithAltCost {
+                    source_id: None,
+                    cost: crate::types::mana::ManaCost::default(),
+                    cost_provenance: Default::default(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: None,
+                    resolution_cleanup: None,
+                    duration: None,
+                    graveyard_replacement: None,
+                    enters_with_counter: None,
+                    enters_with_modifications: vec![marked()],
+                    mana_spend_permission: None,
+                },
+                target: TargetFilter::Any,
+                grantee: PermissionGrantee::AbilityController,
+            },
+        ),
+    ];
+
+    /// Does the serialized shape still hold a mark? Asked of the SERIALIZED tree rather
+    /// than by re-walking, because a re-walk would use the very recursion set under test.
+    fn holds_mark(effect: &Effect) -> bool {
+        fn scan(value: &serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::Object(map) => {
+                    map.contains_key("unlowered_guard") || map.values().any(scan)
+                }
+                serde_json::Value::Array(items) => items.iter().any(scan),
+                _ => false,
+            }
+        }
+        scan(&serde_json::to_value(effect).expect("Effect serializes"))
+    }
+
+    for (name, effect) in carriers {
+        let mut effect = effect;
+        // Reach-guard: the mark really is in there before the walk runs, so a green is
+        // never a green-on-nothing.
+        assert!(
+            holds_mark(&effect),
+            "reach-guard: carrier `{name}` must carry a planted mark before the walk"
+        );
+        super::resolve_guards_in_effect(&mut effect);
+        assert!(
+            !holds_mark(&effect),
+            "carrier `{name}` is not descended by `resolve_guards_in_effect` — a deferred \
+             guard verdict left under it would ship in `card-data.json`"
+        );
+    }
+}
+
 /// CR 611.2 + CR 201.5a — carrier fixture for `Effect::GenericEffect`, a
 /// resolution-time grant onto a target. This route is a PRE-EXISTING PARSER
 /// LEAK at BASE_SHA: `try_parse_gain_quoted_ability` sets the description
@@ -29908,4 +30428,104 @@ fn printed_subject_of_a_choosing_sentence_becomes_the_target_chooser() {
     // Keep the unused-import guard honest: `ControllerRef` names the axis the
     // normalization above reads off the subject's `Typed` shape.
     let _ = ControllerRef::Opponent;
+}
+
+/// CR 118.12 + CR 118.12a: an "unless [a player] pays [cost]" modifier riding a clause that
+/// becomes a `ChooseOneOf` BRANCH must survive the branch lift.
+/// `oracle_effect::ability_definition_from_clause` used to copy `ParsedEffectClause`'s fields
+/// one at a time and silently omitted `unless_pay`, so the modifier the clause parser had
+/// already recognised was dropped between clause and definition without a diagnostic.
+///
+/// **The fixture is SYNTHETIC and deliberately so.** Reaching the branch lift with a
+/// modifier-bearing clause needs a clause that carries its OWN "unless ... pays" INSIDE the
+/// default half of a "[default] unless that player [A] or [B]" three-branch choice — i.e. two
+/// "unless"es in one clause. A census of every distinct oracle text in
+/// `data/mtgjson/AtomicCards.json` (sha256 6b3d6262…22d5, 67184 text lines over all printings,
+/// not just the first per name) finds 20 lines matching `try_parse_unless_three_branch_choice`'s
+/// own text gate — its " unless that player " / " unless they " needle, a following " or ", and
+/// its rejection of a second " or " — and ZERO of those 20 have a second "unless" in the default
+/// or either alternative half. That line set is a SUPERSET of what actually routes to the
+/// splitter (a matching line can still fail to parse into three branches), which is the safe
+/// direction for a zero-result claim: nothing routes there that the superset omits. The other
+/// half of the argument is that `unless_pay` is only ever set by paths requiring the literal
+/// "unless " in the clause text (`parse_unless_payment`, `try_parse_unless_player_have_deal_damage`,
+/// and the `strip_unless_entered_suffix` deferral). The drop was therefore latent, not live, on
+/// today's corpus; this test pins the seam so it stays closed for the next clause shape routed
+/// through a branch site. The sibling counter-choice branch site cannot reach it at all:
+/// `parse_effect_clause` strips the unless-payment suffix into the PARENT clause before the
+/// counter-choice recognizer runs, so its synthesized branch text never contains "unless".
+#[test]
+fn unless_pay_survives_the_choose_one_of_branch_lift() {
+    let parsed = parse_oracle_text(
+        "Counter target spell unless its controller pays {2} unless that player sacrifices a creature or discards a card.",
+        "Synthetic Branch Unless Pay",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("the three-branch unless choice parses to one ability");
+    let Effect::ChooseOneOf { branches, .. } = ability.effect.as_ref() else {
+        panic!(
+            "expected a ChooseOneOf three-branch choice, got {:?}",
+            ability.effect
+        );
+    };
+    assert_eq!(
+        branches.len(),
+        3,
+        "default consequence plus two avoidance options"
+    );
+
+    // Reach guard: branch 0 really is the default consequence (the half that carried the
+    // inner "unless its controller pays {2}"), not an avoidance option. Without this the
+    // modifier assertion below could pass against the wrong branch.
+    assert!(
+        matches!(branches[0].effect.as_ref(), Effect::Counter { .. }),
+        "branch 0 must be the default consequence, got {:?}",
+        branches[0].effect
+    );
+
+    // THE discriminating assertion: reverting `def.unless_pay = unless_pay` in
+    // `ability_definition_from_clause` makes this `None`. Measured both ways.
+    let modifier = branches[0]
+        .unless_pay
+        .as_ref()
+        .expect("the default branch must carry its own CR 118.12a unless-payment modifier");
+    assert!(
+        matches!(
+            &modifier.cost,
+            AbilityCost::Mana { cost } if *cost == ManaCost::generic(2)
+        ),
+        "the {{2}} the default half named must survive the lift, got {:?}",
+        modifier.cost
+    );
+    // CR 118.12a: the payer is the countered spell's controller, bound through the branch's
+    // own parent target slot rather than rescanned at resolution.
+    assert_eq!(modifier.payer, TargetFilter::ParentTargetController);
+
+    // Siblings: the avoidance options are costs the player may take INSTEAD, so they carry no
+    // unless-payment of their own. This pins the lift to the clause that actually had one and
+    // would catch a fix that sprayed the parent's modifier onto every branch.
+    assert!(
+        branches[1].unless_pay.is_none() && branches[2].unless_pay.is_none(),
+        "avoidance branches must not acquire an unless-payment: {:?} / {:?}",
+        branches[1].unless_pay,
+        branches[2].unless_pay
+    );
+
+    // Non-vacuity: a threaded field that no runtime carrier reads would be inert. This is the
+    // exact hand-off `game::effects::choose_one_of::resolve_branch` performs on the chosen
+    // branch, and `resolve_chain_body`'s CR 118.12 intercept reads `ResolvedAbility.unless_pay`.
+    let resolved = crate::game::ability_utils::build_resolved_from_def(
+        &branches[0],
+        crate::types::identifiers::ObjectId(1),
+        crate::types::player::PlayerId(0),
+    );
+    assert!(
+        resolved.unless_pay.is_some(),
+        "the branch definition's modifier must reach the ResolvedAbility the runtime reads"
+    );
 }

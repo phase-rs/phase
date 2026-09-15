@@ -346,7 +346,12 @@ vi.mock("../../services/quickDraftPersistence", () => ({
   deleteQuickDraftRun: vi.fn(),
 }));
 
-vi.mock("../../adapter/draft-adapter", () => ({
+// Spreads the real module: `draft-adapter` exports the `DRAFT_KINDS` tuple
+// that `draftPersistence`'s kind guard folds at module scope, so a total
+// factory breaks every importer in this graph. Its top level is types plus a
+// DYNAMIC `import("@wasm/draft")`, so importing it loads no wasm.
+vi.mock("../../adapter/draft-adapter", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../adapter/draft-adapter")>()),
   createDraftAdapter: vi.fn(),
 }));
 
