@@ -50,7 +50,12 @@ vi.mock("../../stores/multiplayerDraftStore", async (importOriginal) => ({
 
 // The engine's per-kind procedure. `pod_size` is deliberately NOT 4 so a client
 // literal cannot coincide with the adopted value.
-vi.mock("../../adapter/draft-adapter", () => ({
+// Only the adapter CLASS is replaced. The module's shape helpers
+// (`setPackSequence`, `distinctJoined`, `isSharedStackDistribution`) are the
+// boundary's own logic and the store calls them while this page renders —
+// stubbing them away would make this suite answer questions about the mock.
+vi.mock("../../adapter/draft-adapter", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../adapter/draft-adapter")>()),
   DraftAdapter: class {
     draftProcedure = mocks.draftProcedure;
   },
@@ -94,11 +99,13 @@ function engineView(
     min_deck_size: number;
     launch_capability: "None" | "CommanderMultiplayer";
     commanders_required: number;
+    distribution: unknown;
   }> = {},
 ) {
   return {
     kind,
     launch_capability: "None",
+    distribution: "PickAndPass",
     commanders_required: 0,
     seats: Array.from({ length: seatCount }, (_, seat_index) => ({ seat_index })),
     pack_count: 4,
@@ -175,6 +182,51 @@ describe("DraftPodPage ?kind= mode entry", () => {
         "Each player drafts two cards at a time and builds a 60-card Commander deck, then the pod plays one multiplayer game.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("applies the deep-linked Winston kind through the same slug map", async () => {
+    renderAt("/draft-pod?kind=winston");
+
+    // REVERT-FAILING: with no `winston` entry in `DRAFT_KIND_ENTRIES` the slug
+    // resolves to `null` and the kind stays "Premier". `podSize: 6` is the
+    // fixture's, so a hardcoded client default fails the second half.
+    await waitFor(() =>
+      expect(useDraftPodStore.getState().config).toMatchObject({
+        kind: "Winston",
+        podSize: 6,
+      }),
+    );
+    expect(mocks.draftProcedure).toHaveBeenCalledWith("Winston", "Swiss");
+  });
+
+  it("offers Winston in the pod kind selector", async () => {
+    const user = userEvent.setup();
+    renderAt("/draft-pod?kind=winston");
+
+    await user.click(screen.getByRole("button", { name: /Host a Pod/ }));
+
+    // Reach guard: the pre-existing radios rendered.
+    expect(screen.getByRole("radio", { name: "Premier" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Winston" })).toBeChecked());
+    expect(
+      screen.getByText(
+        "Two to four players draft one shared face-down stack through three piles: on your turn, look at a pile and take it or decline and add a card to it.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("ignores an unknown ?kind= slug instead of failing the route", async () => {
+    const user = userEvent.setup();
+    renderAt("/draft-pod?kind=nonesuch");
+
+    await user.click(screen.getByRole("button", { name: /Host a Pod/ }));
+
+    expect(useDraftPodStore.getState().config.kind).toBe("Premier");
+    expect(screen.getByRole("radio", { name: "Winston" })).not.toBeChecked();
+    await waitFor(() => expect(mocks.draftProcedure).toHaveBeenCalledWith("Premier", "Swiss"));
+    // The witness that no kind-intent effect fired, as in the bare-route case:
+    // the store keeps its own default rather than adopting the fixture's 6.
+    expect(useDraftPodStore.getState().config.podSize).toBe(8);
   });
 
   it("leaves a bare /draft-pod on the Premier default", async () => {
@@ -477,6 +529,61 @@ describe("DraftPodPage ?kind= mode entry", () => {
         "After drafting, build a Commander deck of at least 63 cards and play one multiplayer game",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("describes a shared stack rather than passing packs, on the engine's distribution", () => {
+    // THE ORDERING CASE. A Winston pod's `launch_capability` is "None", exactly
+    // like an ordinary pod's, so a capability-first test falls through to the
+    // pod copy and tells the players to open packs and pass them — a procedure
+    // this format does not have. The fixture keeps the capability at its
+    // default so only the distribution can be doing the work, and the store is
+    // left on its "Premier" default so nothing can be reading a kind label.
+    mocks.multiplayerState.phase = "drafting";
+    mocks.multiplayerState.view = engineView("Winston", 2, {
+      pack_count: 3,
+      cards_per_pack: 15,
+      pack_sizes: [15, 15, 15],
+      min_deck_size: 40,
+      distribution: { SharedStackPiles: { pile_count: 3 } },
+    });
+    renderAt("/draft-pod");
+
+    expect(screen.getByText("Winston Draft")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Every player's 3 packs are opened without anyone looking, and every card is shuffled together into one face-down stack",
+      ),
+    ).toBeInTheDocument();
+    // The pile count comes from the engine's own `pile_count`, not a literal.
+    expect(
+      screen.getByText(
+        "3 one-card piles are dealt off the top. On your turn, look at the first pile: take it, or decline it and move to the next",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Turns alternate until no cards are left; then build a deck of at least 40 cards and play tournament matches",
+      ),
+    ).toBeInTheDocument();
+
+    // And none of the pack-passing copy survives — the actual complaint.
+    expect(screen.queryByText(/pick one, pass the rest/)).toBeNull();
+    expect(screen.queryByText(/passing direction/)).toBeNull();
+  });
+
+  it("still describes a pack-passing pod for every other distribution", () => {
+    // The paired negative, on the same helper: an ordinary pod keeps its copy,
+    // so the row above is the distribution doing the work rather than the
+    // Winston branch swallowing everything.
+    mocks.multiplayerState.phase = "drafting";
+    mocks.multiplayerState.view = engineView("Premier", 8, { min_deck_size: 40 });
+    renderAt("/draft-pod");
+
+    expect(screen.getByText("Pod Draft")).toBeInTheDocument();
+    expect(
+      screen.getByText("Open 4 packs; each pack contains 12 cards — pick one, pass the rest"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/face-down stack/)).toBeNull();
   });
 
   it("counts the pod from the ENGINE-published seats, not the local config", () => {

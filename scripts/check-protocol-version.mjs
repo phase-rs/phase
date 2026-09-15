@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const EXPECTED_PROTOCOL_VERSION = 70;
+const EXPECTED_PROTOCOL_VERSION = 71;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -31,6 +31,18 @@ const EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING = 6;
 // stayed green — a v(n-1) host and a v(n) guest would then complete a
 // handshake and only fail when the incompatible payload arrived.
 const EXPECTED_WIRE_PROTOCOL_VERSION = 53;
+// The P2P DRAFT wire version. A FIFTH independent surface, and the one this
+// script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
+// EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse
+// a mismatched peer before allocating a seat or consuming reconnect grace) —
+// the most consequential kind of version number to leave ungated, because the
+// dangerous direction is the one that stays GREEN. Adding a draft message or a
+// player-view field without bumping this number left `draftProtocol.test.ts`
+// pinning the old value, nothing compared the two, and two mismatched peers
+// would pair successfully and silently drop every frame of the new shape. The
+// leg below closes that: the source constant, the test's `toBe(...)` and the
+// test's TITLE now all move with this expectation or the gate reds.
+const EXPECTED_DRAFT_PROTOCOL_VERSION = 30;
 
 function extractVersion(source, pattern, label) {
   const match = source.match(pattern);
@@ -74,6 +86,18 @@ const p2pProtocolSource = readFileSync(
 );
 const p2pProtocolTestSource = readFileSync(
   resolve(root, "client/src/network/__tests__/protocol.test.ts"),
+  "utf8",
+);
+const draftProtocolSource = readFileSync(
+  resolve(root, "client/src/network/draftProtocol.ts"),
+  "utf8",
+);
+const draftProtocolTestSource = readFileSync(
+  resolve(root, "client/src/network/__tests__/draftProtocol.test.ts"),
+  "utf8",
+);
+const draftCoreTypesSource = readFileSync(
+  resolve(root, "crates/draft-core/src/types.rs"),
   "utf8",
 );
 const p2pAdapterTestSource = readFileSync(
@@ -220,6 +244,78 @@ if (wireProtocolVersion !== EXPECTED_WIRE_PROTOCOL_VERSION) {
       `A GameState shape change must bump this alongside PROTOCOL_VERSION, not instead of it.`,
   );
   process.exit(1);
+}
+
+// ── P2P draft wire: the FIFTH surface ──────────────────────────────────
+//
+// Independent of all four numbers above: the draft host/guest pair versions its
+// own message set and its own player-view shape, and refuses a mismatch at
+// first contact rather than at the frame that would have broken. The regex
+// requires a bare integer right-hand side, so a future
+// `DRAFT_PROTOCOL_VERSION = SOMETHING + 1` trips "Could not find protocol
+// version" instead of silently un-pinning the surface.
+
+const draftProtocolVersion = extractVersion(
+  draftProtocolSource,
+  /export\s+const\s+DRAFT_PROTOCOL_VERSION\s*=\s*(\d+)\s*as\s+const\s*;/,
+  "client/src/network/draftProtocol.ts",
+);
+
+if (draftProtocolVersion !== EXPECTED_DRAFT_PROTOCOL_VERSION) {
+  console.error(
+    `P2P draft protocol version must remain ${EXPECTED_DRAFT_PROTOCOL_VERSION}: got ${draftProtocolVersion}. ` +
+      `A new draft message type or player-view field must bump this number, and the test that pins it moves in the same commit.`,
+  );
+  process.exit(1);
+}
+
+
+// ── Draft payload BOUNDS: a sixth surface, and a different kind of number ──
+//
+// `draftProtocol.ts` mirrors three engine constants that bound what a draft
+// message may STATE, so the transport can refuse an over-long payload without a
+// session. Each carried a `@sync-with` comment and nothing that reads it, and
+// the pile bound additionally CLAIMED to be "pinned by this module's test
+// against the engine constant's published figure" — which it was not: that test
+// asserts pile 3 rejected and pile 2 accepted, which pins the constant against
+// itself and passes for any value the two sides happen to share.
+//
+// The dangerous direction is the silent one. Each Rust constant is DERIVED and
+// already pinned on its own side (`max_shared_stack_piles_matches_procedure_table`
+// folds `DraftKind::ALL`), so a future 4-pile procedure row moves the Rust value
+// and every Rust test stays green, while the unmoved TypeScript mirror rejects
+// legal pile-3 decisions at the transport — a rules-correct engine reachable
+// only by a message the client refuses to send. Comparing the two literals is
+// the only thing that reds on that edit, and this is the script that already
+// reads Rust constants for exactly this purpose.
+const DRAFT_PAYLOAD_BOUNDS = [
+  "MAX_CARDS_PER_PICK",
+  "MAX_COMMANDER_DESIGNATIONS",
+  "MAX_SHARED_STACK_PILES",
+];
+
+for (const name of DRAFT_PAYLOAD_BOUNDS) {
+  // Both sides require a bare integer right-hand side, for the same reason the
+  // version regexes do: re-deriving either mirror from the other would defeat
+  // the comparison, and an expression trips "Could not find" instead.
+  const rustBound = extractVersion(
+    draftCoreTypesSource,
+    new RegExp(`pub\\s+const\\s+${name}\\s*:\\s*usize\\s*=\\s*(\\d+)\\s*;`),
+    `crates/draft-core/src/types.rs ${name}`,
+  );
+  const clientBound = extractVersion(
+    draftProtocolSource,
+    new RegExp(`const\\s+${name}\\s*=\\s*(\\d+)\\s*;`),
+    `client/src/network/draftProtocol.ts ${name}`,
+  );
+  if (rustBound !== clientBound) {
+    console.error(
+      `Draft payload bound mismatch for ${name}: Rust=${rustBound}, client=${clientBound}. ` +
+        "The engine constant is derived from the procedure table; the transport mirror must move with it, " +
+        "or the client will refuse payloads the reducer accepts.",
+    );
+    process.exit(1);
+  }
 }
 
 // ── Lobby protocol: a SEPARATE surface with its own version ────────────────
@@ -410,11 +506,35 @@ if (rustDirectoryVersion !== EXPECTED_DIRECTORY_VERSION) {
 // bump leftover and is not guarded here.
 const P = EXPECTED_PROTOCOL_VERSION;
 const W = EXPECTED_WIRE_PROTOCOL_VERSION;
+const D = EXPECTED_DRAFT_PROTOCOL_VERSION;
 
 requirePattern(serverCoreSource, new RegExp(`fn protocol_version_is_${P}(?![0-9])`),
   `crates/server-core/src/protocol.rs fn protocol_version_is_${P}`);
 refusePattern(serverCoreSource, new RegExp(`protocol_version_is_${P - 1}(?![0-9])`),
   "crates/server-core/src/protocol.rs");
+
+// The draft wire's title pin, mirroring the device above. `toBe(<n>)` under
+// `it("is version <n-1>")` is green and misleading, and the title is the half
+// no type system and no assertion can check. Whole-file, not a title slice:
+// that test file holds exactly one `is version` phrase, so the narrowing the
+// p2p title legs need to stay admit-only buys nothing here, while reading the
+// whole file also catches the numeral in a nearby comment.
+requirePattern(draftProtocolTestSource, new RegExp(`is version ${D}(?![0-9])`),
+  `client/src/network/__tests__/draftProtocol.test.ts it("is version ${D}")`);
+refusePattern(draftProtocolTestSource, new RegExp(`is version ${D - 1}(?![0-9])`),
+  "client/src/network/__tests__/draftProtocol.test.ts");
+// And the assertion's own literal, so all three sites in the draft bump — the
+// source constant, this value and the title above — red THIS gate rather than
+// only the vitest run, which CI schedules separately from `type-check` and
+// `build`. Anchored on `expect(DRAFT_PROTOCOL_VERSION)` rather than on a bare
+// `toBe(<n>)`, so the refuse leg can never fire on an unrelated assertion that
+// happens to expect the superseded numeral.
+requirePattern(draftProtocolTestSource,
+  new RegExp(`expect\\(DRAFT_PROTOCOL_VERSION\\)\\.toBe\\(${D}\\)`),
+  `client/src/network/__tests__/draftProtocol.test.ts expect(DRAFT_PROTOCOL_VERSION).toBe(${D})`);
+refusePattern(draftProtocolTestSource,
+  new RegExp(`expect\\(DRAFT_PROTOCOL_VERSION\\)\\.toBe\\(${D - 1}\\)`),
+  "client/src/network/__tests__/draftProtocol.test.ts");
 
 // Both legs read the file's test TITLES, not its whole source, so coverage that legitimately
 // drives the superseded version in a body is not a bump leftover. Ceiling: double-quoted titles

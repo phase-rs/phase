@@ -450,7 +450,12 @@ export interface LobbyGame {
 export interface DraftLobbyMetadata {
   /** Three-letter set code (e.g. "MKM", "OTJ"). For cube drafts, "custom-cube". */
   setCode: string;
-  /** Draft kind: "Quick", "Premier", or "Traditional". */
+  /**
+   * Draft kind, as the serialized name of a `DraftKind`. Deliberately not
+   * enumerated here: `DRAFT_KINDS` in `adapter/draft-adapter.ts` is the single
+   * authority, and a second enumeration in a doc comment goes stale silently
+   * (this one already had, naming three of the then-five kinds).
+   */
   draftKind: string;
   /** Human-readable cube name when the pod is a cube draft. Absent for set drafts. */
   cubeName?: string;

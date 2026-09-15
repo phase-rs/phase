@@ -2,6 +2,7 @@
   "intro": {
     "quickTitle": "Quick Draft",
     "podTitle": "Pod Draft",
+    "winstonTitle": "Winston Draft",
     "commanderTitle": "Commander Draft",
     "subtitle": "So funktioniert es",
     "startDrafting": "Mit dem Draften beginnen",
@@ -21,7 +22,11 @@
       "minimumDeckCards_one": "{{count, number}} Karte",
       "minimumDeckCards_few": "{{count, number}} Karten",
       "minimumDeckCards_many": "{{count, number}} Karten",
-      "minimumDeckCards_other": "{{count, number}} Karten"
+      "minimumDeckCards_other": "{{count, number}} Karten",
+      "pilesDealt_one": "{{count, number}} Häufchen mit einer Karte",
+      "pilesDealt_few": "{{count, number}} Häufchen mit je einer Karte",
+      "pilesDealt_many": "{{count, number}} Häufchen mit je einer Karte",
+      "pilesDealt_other": "{{count, number}} Häufchen mit je einer Karte"
     },
     "packPassing_one": "Dieser Draft hat nur eine Boosterrunde, daher wechselt die Weitergaberichtung nicht",
     "packPassing_few": "Die Weitergaberichtung wechselt in jeder Runde",
@@ -38,6 +43,13 @@
       "step2": "Öffne {{packs}}; jeder Booster enthält {{cardsPerPack}} — wähle eine Karte, gib den Rest weiter",
       "step2Mixed": "Öffne {{packs}} unterschiedlicher Größe, in dieser Reihenfolge: {{packSizes, list}} — wähle eine Karte, gib den Rest weiter",
       "step4": "Baue nach dem Draften ein Deck mit mindestens {{minimumDeckCards}} und spiele Turnierpartien"
+    },
+    "winston": {
+      "step2": "Die {{packs}} jedes Spielers werden ungesehen geöffnet und alle Karten zu einem einzigen verdeckten Stapel gemischt",
+      "step2Mixed": "Die {{packs}} unterschiedlicher Größe jedes Spielers, in dieser Reihenfolge: {{packSizes, list}}, werden ungesehen geöffnet und zu einem einzigen verdeckten Stapel gemischt",
+      "step3": "{{piles}} werden von oben ausgeteilt. Sieh dir in deinem Zug das erste Häufchen an: nimm es, oder lehne es ab und geh zum nächsten",
+      "step4": "Ablehnen legt die oberste Karte des Stapels auf das abgelehnte Häufchen. Lehnst du alle ab, nimmst du stattdessen die oberste Karte des Stapels, ungesehen",
+      "step5": "Die Züge wechseln, bis keine Karten mehr übrig sind; baue danach ein Deck mit mindestens {{minimumDeckCards}} und spiele Turnierpartien"
     },
     "commander": {
       "step2": "Öffne {{packs}}; jeder Booster enthält {{cardsPerPack}} — wähle zwei Karten, gib den Rest weiter",
@@ -79,6 +91,13 @@
     "label": "Pick-Timer",
     "seconds": "{{count}}s"
   },
+  "pickStatus": {
+    "Pending": "Wählt",
+    "Picked": "Gewählt",
+    "Waiting": "Wartet",
+    "TimedOut": "Zeit abgelaufen",
+    "NotDrafting": "Draftet nicht"
+  },
   "scoreBadge": {
     "label": "Punktzahl: {{count}} Siege"
   },
@@ -92,7 +111,11 @@
     "activePackCount_one": "{{count}} Booster bei {{player}}",
     "activePackCount_few": "{{count}} Booster bei {{player}}",
     "activePackCount_many": "{{count}} Booster bei {{player}}",
-    "activePackCount_other": "{{count}} Booster bei {{player}}"
+    "activePackCount_other": "{{count}} Booster bei {{player}}",
+    "draftedCardCount_one": "{{count}} Karte von {{player}} gedraftet",
+    "draftedCardCount_few": "{{count}} Karten von {{player}} gedraftet",
+    "draftedCardCount_many": "{{count}} Karten von {{player}} gedraftet",
+    "draftedCardCount_other": "{{count}} Karten von {{player}} gedraftet"
   },
   "setSelector": {
     "botDifficulty": "Bot-Schwierigkeit",
@@ -366,6 +389,10 @@
       "title": "Commander Draft",
       "description": "Draftet zwei Karten gleichzeitig in einem Pod, baut ein Commander-Deck mit 60 Karten und spielt dann eine Mehrspielerpartie."
     },
+    "winstonDraft": {
+      "title": "Winston Draft",
+      "description": "Zwei Spieler teilen sich einen verdeckten Stapel in drei Häufchen — nehmt ein Häufchen oder lehnt es ab, dann baut und spielt."
+    },
     "podInProgress": "Pod Draft läuft",
     "guestPodInProgress": "Beigetretener Pod bereit zum Wiederverbinden",
     "podLabel": "{{kind}}-Pod",
@@ -515,6 +542,8 @@
     "kindSealedDesc": "Öffne sechs Booster direkt für den Pool jedes Spielers und baue dann ein Best-of-One-Turnierdeck.",
     "kindCommanderDraft": "Commander",
     "kindCommanderDraftDesc": "Jeder Spieler draftet zwei Karten gleichzeitig und baut ein Commander-Deck mit 60 Karten; danach spielt der Pod eine Mehrspielerpartie.",
+    "kindWinston": "Winston",
+    "kindWinstonDesc": "Zwei bis vier Spieler draften einen gemeinsamen verdeckten Stapel über drei Häufchen: Sieh dir in deinem Zug ein Häufchen an und nimm es oder lehne ab und lege eine Karte darauf.",
     "tournamentFormat": "Turnierformat",
     "tournamentSwiss": "Schweizer System",
     "tournamentSwissDesc": "Alle spielen drei Runden lang weiter, auch nach einer Niederlage.",
@@ -597,6 +626,51 @@
     "hostLeft": "Der Host hat den Draft verlassen",
     "connection": "Verbindungsfehler",
     "retry": "Erneut verbinden"
+  },
+  "winston": {
+    "heading": "Winston Draft",
+    "yourTurn": "Du bist dran — Häufchen {{index}}",
+    "otherSeatTurn": "{{name}} entscheidet",
+    "seatFallback": "Sitz {{index}}",
+    "turnHint": "Nimm das Häufchen oder lehne es ab. Beim Ablehnen wird eine Karte vom Hauptstapel darauf gelegt und du gehst zum nächsten Häufchen; lehnst du das letzte ab, ziehst du stattdessen die oberste Karte des Hauptstapels.",
+    "mainStackRemaining_one": "{{count, number}} Karte verdeckt im Hauptstapel",
+    "mainStackRemaining_few": "{{count, number}} Karten verdeckt im Hauptstapel",
+    "mainStackRemaining_many": "{{count, number}} Karten verdeckt im Hauptstapel",
+    "mainStackRemaining_other": "{{count, number}} Karten verdeckt im Hauptstapel",
+    "cardsLeft_one": "{{count, number}} Karte im Draft übrig",
+    "cardsLeft_few": "{{count, number}} Karten im Draft übrig",
+    "cardsLeft_many": "{{count, number}} Karten im Draft übrig",
+    "cardsLeft_other": "{{count, number}} Karten im Draft übrig",
+    "stackShare": "Anteil der verbleibenden Draft-Karten, die noch verdeckt im Hauptstapel liegen",
+    "pileLabel": "Häufchen {{index}}",
+    "pileTotal_one": "{{count, number}} Karte",
+    "pileTotal_few": "{{count, number}} Karten",
+    "pileTotal_many": "{{count, number}} Karten",
+    "pileTotal_other": "{{count, number}} Karten",
+    "pileFaceDown": "Verdeckt",
+    "deciding": "Entscheidung über dieses Häufchen",
+    "hiddenPiles": "Die Häufchen bleiben verdeckt, bis du an der Reihe bist.",
+    "take": "Nehmen",
+    "takeAria": "Häufchen {{index}} nehmen",
+    "decline": "Ablehnen",
+    "declineAria": "Häufchen {{index}} ablehnen",
+    "refusal": {
+      "PileNotActive": "Du entscheidest nicht über dieses Häufchen.",
+      "PileEmpty": "Dieses Häufchen ist leer, es gibt nichts zu nehmen.",
+      "NoGuaranteedCard": "Ablehnen kann dir in diesem Zug keine Karte mehr sichern, deshalb ist das Nehmen dieses Häufchens dein einziger legaler Zug."
+    },
+    "refusalUnpublished": "Der Draft hat für diese Entscheidung kein Urteil veröffentlicht.",
+    "playFirstChooser": "{{name}} entscheidet, wer in den Partien nach dem Draft beginnt.",
+    "scale": "Häufchengröße",
+    "scaleDecrease": "Häufchengröße verkleinern",
+    "scaleReset": "Häufchengröße zurücksetzen",
+    "scaleIncrease": "Häufchengröße vergrößern",
+    "faceDownStack_one": "{{count, number}} verdeckte Karte",
+    "faceDownStack_few": "{{count, number}} verdeckte Karten",
+    "faceDownStack_many": "{{count, number}} verdeckte Karten",
+    "faceDownStack_other": "{{count, number}} verdeckte Karten",
+    "forcedDraw": "Du hast jedes Häufchen abgelehnt und daher {{name}} von der Spitze des Hauptstapels gezogen.",
+    "forcedDrawLabel": "Vom Hauptstapel gezogen"
   },
   "lobby": {
     "title": "Draft-Pod-Lobby",

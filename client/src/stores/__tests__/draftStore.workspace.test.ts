@@ -102,6 +102,7 @@ function view(pool: DraftCardInstance[] = []): DraftPlayerView {
     status: "Drafting",
     kind: "Quick",
     launch_capability: "None",
+    distribution: "PickAndPass",
     commanders_required: 0,
     pool,
     current_pack: [],
@@ -1457,6 +1458,7 @@ describe("draft store workspace authority", () => {
       has_submitted_deck: true,
       pick_status: "NotDrafting",
       active_pack_count: 0,
+      drafted_card_count: 0,
       face_up_draft_cards: [],
     }];
     if (Array.isArray(pool)) {

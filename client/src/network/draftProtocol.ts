@@ -19,7 +19,14 @@ import type {
   DraftPlayerView,
   DraftRarityGroupKind,
   DraftSourceView,
+  PackDistribution,
   SeatPublicView,
+  SharedStackDecisionRecord,
+  SharedStackDecisionView,
+  SharedStackPileDecision,
+  SharedStackPileView,
+  SharedStackRefusal,
+  SharedStackView,
 } from "../adapter/draft-adapter";
 import type { DeckCardCount, MatchConfig, MatchScore } from "../adapter/types";
 import {
@@ -163,8 +170,62 @@ import type {
  *       entries as its in-game booster source; a guest authority and public
  *       draft views never receive them.
  *       Older hosts would silently discard the in-game booster source.
+ *  30 — shared-stack pile decisions. `draft_pile_decision` carries a pile
+ *       index and a typed `"Take"`/`"Decline"`, and player views carry
+ *       `shared_stack` (engine-published pile totals, the active seat's
+ *       revealed prefix, and the per-pile per-decision legality the reducer
+ *       enforces) plus the advisory `play_first_chooser`. A CAPABILITY
+ *       addition with a silent-drop hazard, like 27: a v29 host has no arm
+ *       for `draft_pile_decision` and would drop it, leaving the guest's turn
+ *       hung with no error, and a v29 guest reading a v30 view would render a
+ *       Winston pod with no piles. Both directions are refusable only at this
+ *       gate. Other kinds are unaffected: `shared_stack` and
+ *       `play_first_chooser` are absent from every non-Winston view, which is
+ *       also why their TypeScript mirrors are optional.
+ *
+ *       AMENDED IN PLACE, NOT BUMPED. `shared_stack.history` — a bounded,
+ *       oldest-first vector of `SharedStackDecisionRecord` (seat, pile,
+ *       decision, pile_size; no card, deliberately and permanently) — was
+ *       added after this entry was written. 30 is unreleased upstream
+ *       (upstream is 29), so no peer has ever spoken a 30 without it and there
+ *       is no version for a bump to separate. The Rust field carries
+ *       `#[serde(default)]` for locally persisted snapshots; this TypeScript
+ *       mirror is REQUIRED rather than optional, because `shared_stack` is
+ *       engine-built on every frame and a client never constructs one. Other
+ *       kinds stay unaffected for the reason above: no non-Winston view
+ *       carries a `shared_stack` at all.
+ *
+ *       AMENDED IN PLACE AGAIN, for the same reason and on the same evidence
+ *       (30 is unreleased upstream; upstream is 29, so no peer has ever spoken
+ *       a 30 without these):
+ *         • `shared_stack.forced_draw` — the card the VIEWER's own final-pile
+ *           decline drew, or null. The one private field on a `SharedStackView`
+ *           and the only one that names a card off the face-down stack; the
+ *           engine sends it to that seat alone, never to the opponent and never
+ *           to either spectator visibility.
+ *         • `seats[*].drafted_card_count` — how many cards each seat has
+ *           drafted. Unlike everything else in 30 this is NOT Winston-scoped:
+ *           it rides every kind's public seat list. It is a count and never an
+ *           identity, and it is already public in every kind (a pick-and-pass
+ *           seat's total follows from the pick number; a shared stack's is
+ *           visible across the table).
+ *         • `DraftPlayerView.distribution` — how the procedure delivers
+ *           boosters to seats. Like `drafted_card_count` this is NOT
+ *           Winston-scoped: it is a required field on every kind's player
+ *           view, which crosses this wire in `draft_welcome`,
+ *           `draft_reconnect_ack`, `draft_state_update` and `draft_pick_ack`.
+ *           Published for the same reason `launch_capability` is, and
+ *           deliberately not status-gated, so a surface that outlives the
+ *           drafting phase can still tell a pile pod from a passing one.
+ *       Of these, only `SharedStackState::forced_draws` carries
+ *       `#[serde(default)]` — it is the one that rides a persisted snapshot.
+ *       `drafted_card_count` and `distribution` carry no serde attribute and
+ *       need none: they live on view types the engine builds fresh for every
+ *       frame and never deserializes from an older snapshot. All three
+ *       TypeScript mirrors are REQUIRED rather than optional, for that same
+ *       reason — a client never constructs one of these views.
  */
-export const DRAFT_PROTOCOL_VERSION = 29 as const;
+export const DRAFT_PROTOCOL_VERSION = 30 as const;
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
@@ -355,7 +416,7 @@ export interface DraftCommanderLaunch {
  * Discriminated union of all draft-specific P2P messages.
  *
  * Flow:
- *   Guest → Host: `draft_join`, `draft_reconnect`, `draft_pick`, `draft_pick_with_draft_effect`, `draft_submit_deck`,
+ *   Guest → Host: `draft_join`, `draft_reconnect`, `draft_pick`, `draft_pick_with_draft_effect`, `draft_pile_decision`, `draft_submit_deck`,
  *                 `draft_request_advance`, `draft_workspace_update`, `draft_suggest_lands`, `draft_leave`
  *   Host → Guest: `draft_welcome`, `draft_reconnect_ack`, `draft_reconnect_rejected`,
  *                 `draft_state_update`, `draft_pick_ack`, `draft_suggest_lands_result`, `draft_suggest_lands_rejected`, `draft_error`,
@@ -385,6 +446,22 @@ export type DraftP2PMessage =
       type: "draft_pick_with_draft_effect";
       effectCardInstanceId: string;
       cardInstanceIds: string[];
+    }
+  | {
+      /**
+       * One whole shared-stack turn decision. Names NO cards: a decline adds
+       * nothing to any pool, which is exactly why the engine publishes
+       * `shared_stack.decisions` as the acknowledgement detector.
+       */
+      type: "draft_pile_decision";
+      /**
+       * The pile the guest believes it is deciding on. An
+       * optimistic-concurrency check against the ENGINE's cursor, not a
+       * selector: a duplicate frame naming a stale pile is refused
+       * `PileNotActive` rather than silently applied to the next pile.
+       */
+      pile: number;
+      decision: SharedStackPileDecision;
     }
   | {
       type: "draft_submit_deck";
@@ -636,6 +713,7 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_reconnect",
   "draft_pick",
   "draft_pick_with_draft_effect",
+  "draft_pile_decision",
   "draft_submit_deck",
   "draft_workspace_update",
   "draft_suggest_lands",
@@ -702,6 +780,37 @@ const MAX_CARDS_PER_PICK = 2;
  */
 // @sync-with: crates/draft-core/src/types.rs
 const MAX_COMMANDER_DESIGNATIONS = 2;
+
+/**
+ * The largest `PackDistribution::SharedStackPiles::pile_count` over every kind
+ * — the session-free half of a pile decision's bound, mirroring the engine's
+ * `MAX_SHARED_STACK_PILES`.
+ *
+ * A ceiling, not the live pile count: the EXACT pile a decision may name is
+ * the engine's cursor, and `shared_stack::refusal_for` is the single authority
+ * that judges it. What is bounded here is what a message ALONE can state.
+ *
+ * Pinned against the Rust constant by `scripts/check-protocol-version.mjs`,
+ * which reads BOTH literals and compares them. That is a real cross-language
+ * pin and it is the only one: this module's own test asserts pile 3 rejected
+ * and pile 2 accepted, which pins the constant against ITSELF and would pass at
+ * any value the two sides happened to share. The engine's figure is derived
+ * from the procedure table, so a future 4-pile row moves it with every Rust
+ * test still green — and without the script's comparison the transport would
+ * silently refuse legal pile-3 decisions.
+ */
+// @sync-with: crates/draft-core/src/types.rs `MAX_SHARED_STACK_PILES`
+const MAX_SHARED_STACK_PILES = 3;
+
+/**
+ * Every shared-stack decision a message may name.
+ *
+ * A tuple the type is checked against, so a decision added to
+ * `SharedStackPileDecision` cannot leave this bound silently narrow — the same
+ * device `DRAFT_KINDS` uses, for the same reason.
+ */
+// @sync-with: crates/draft-core/src/types.rs `SharedStackPileDecision::ALL`
+const SHARED_STACK_PILE_DECISIONS: readonly SharedStackPileDecision[] = ["Take", "Decline"];
 
 function requireDraftCardInstanceId(value: unknown, field: string, context: string): string {
   if (
@@ -821,6 +930,38 @@ function validatePick(raw: Record<string, unknown>): DraftP2PMessage {
   return { ...raw, type: "draft_pick", cardInstanceIds } as DraftP2PMessage;
 }
 
+/**
+ * Bound an untrusted `draft_pile_decision` payload.
+ *
+ * A TRANSPORT bound, not a legality check, and the distinction is the whole
+ * point: this function receives only the message and can never consult the
+ * session, so the EXACT check is `shared_stack::refusal_for`'s, inside the
+ * engine. All that is refused here is a payload no session could make
+ * meaningful — a pile index outside the mirrored ceiling, or a decision that
+ * is not one of the two the axis defines.
+ */
+function validatePileDecision(raw: Record<string, unknown>): DraftP2PMessage {
+  if (
+    typeof raw.pile !== "number"
+    || !Number.isInteger(raw.pile)
+    || raw.pile < 0
+    || raw.pile >= MAX_SHARED_STACK_PILES
+  ) {
+    throw new Error(
+      `Invalid pile decision: pile must be an integer in 0..${MAX_SHARED_STACK_PILES - 1}`,
+    );
+  }
+  if (
+    typeof raw.decision !== "string"
+    || !SHARED_STACK_PILE_DECISIONS.some((decision) => decision === raw.decision)
+  ) {
+    throw new Error(
+      `Invalid pile decision: decision must be one of ${SHARED_STACK_PILE_DECISIONS.join(", ")}`,
+    );
+  }
+  return { ...raw, type: "draft_pile_decision" } as DraftP2PMessage;
+}
+
 function validateSubmitDeck(raw: Record<string, unknown>): DraftP2PMessage {
   // v14 (idempotency) and v17 (CR 903.3 designation) both added a REQUIRED
   // field to this one message, blind to each other. They are orthogonal, so
@@ -898,20 +1039,53 @@ function normalizeArrayField<T>(record: Record<string, unknown>, field: string):
   return value as T[];
 }
 
-function normalizeSeatPublicView(raw: unknown): SeatPublicView {
+function normalizeSeatPublicView(raw: unknown, position: number): SeatPublicView {
   if (typeof raw !== "object" || raw === null) {
     throw new Error("Invalid draft message: malformed public seat");
   }
   const seat = raw as Record<string, unknown>;
+  // `seat_index` IS the position, exactly as a pile's `index` is: both engine
+  // builders write `seat_index: i as u8` off `.enumerate()`
+  // (`view.rs`), and `buildSeatPublicViews` counts `i` to `podSize`.
+  //
+  // This matters more than the pile rule, because `seat_index` is the address
+  // the CLIENT resolves seats through -- `seats.find(s => s.seat_index === n)`
+  // names whose turn it is, keys the React rows, tests for the local seat, and
+  // picks the kick target. Two seats sharing an index makes them answer to one
+  // address: the active player renders under a fallback name while another
+  // seat's name is drawn twice, and one lobby row's kick hits both.
+  if (seat.seat_index !== position) {
+    throw new Error(
+      `Invalid draft message: seats[${position}].seat_index must equal its position`,
+    );
+  }
   if (
     !Number.isInteger(seat.active_pack_count)
     || (seat.active_pack_count !== 0 && seat.active_pack_count !== 1)
   ) {
     throw new Error("Invalid draft message: active_pack_count must be an integer 0 or 1");
   }
+  // Bounded only as a non-negative integer, unlike `active_pack_count`'s exact
+  // 0-or-1: this is a real count with no product ceiling. A cube shared-stack
+  // pod's per-seat total rises with the host's own `cards_per_pack`, so any
+  // fixed bound written here would be a second, wrong authority on pool size.
+  if (!Number.isInteger(seat.drafted_card_count) || (seat.drafted_card_count as number) < 0) {
+    throw new Error("Invalid draft message: drafted_card_count must be a non-negative integer");
+  }
+  // A CLOSED SET, like `refusal` in `normalizeSharedStackDecisionView`. The
+  // dashboard now indexes a total `Record` with this value, so an out-of-union
+  // variant renders an EMPTY status rather than the raw key text it used to --
+  // failing silently instead of visibly. Unreachable while both transports
+  // refuse a protocol mismatch, which is exactly why it should be refused here
+  // rather than left to a renderer to absorb.
+  if (!PICK_STATUSES.includes(seat.pick_status as SeatPublicView["pick_status"])) {
+    throw new Error("Invalid draft message: pick_status must be a known status");
+  }
   return {
     ...seat,
+    seat_index: position,
     active_pack_count: seat.active_pack_count,
+    drafted_card_count: seat.drafted_card_count,
     face_up_draft_cards: normalizeArrayField(seat, "face_up_draft_cards"),
   } as SeatPublicView;
 }
@@ -1080,6 +1254,296 @@ function normalizeDraftSourceView(raw: unknown): DraftSourceView | undefined {
   };
 }
 
+// ---------------------------------------------------------------------------
+// v30 shared-stack wire validation.
+//
+// Everything below exists because `normalizeDraftPlayerView` used to validate a
+// handful of named fields and then spread the rest of the frame through
+// `as unknown as DraftPlayerView`. A cast is not a check: `distribution`,
+// `shared_stack` and `play_first_chooser` crossed the transport boundary
+// entirely unvalidated, so a malformed or hostile peer frame reached the store
+// and the renderer with its declared TypeScript shape and none of its content.
+// The draft protocol is compared for EXACT equality at the handshake
+// (`p2p-draft-guest.ts`), so a v30 peer that omits a v30 field is malformed
+// rather than old, and these validators are strict accordingly.
+//
+// They validate SHAPE and closed sets, never legality: `legality` entries carry
+// the engine's verdict and are checked for being well-formed, not for being
+// right. Nothing here recomputes a rule.
+// ---------------------------------------------------------------------------
+
+const PICK_STATUSES: readonly SeatPublicView["pick_status"][] = [
+  "Pending",
+  "Picked",
+  "Waiting",
+  "TimedOut",
+  "NotDrafting",
+];
+
+const SHARED_STACK_DECISIONS: readonly SharedStackPileDecision[] = ["Take", "Decline"];
+const SHARED_STACK_REFUSALS: readonly SharedStackRefusal[] = [
+  "PileNotActive",
+  "PileEmpty",
+  "NoGuaranteedCard",
+];
+
+function requireObject(raw: unknown, context: string): Record<string, unknown> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(`Invalid draft message: malformed ${context}`);
+  }
+  return raw as Record<string, unknown>;
+}
+
+/**
+ * A non-negative integer. The engine's `usize` counts -- `total_cards`,
+ * `main_stack_remaining`, a pile's `total`, a record's `pile_size` -- are this
+ * shape, and deliberately have no ceiling: a cube pod's card count is the
+ * host's to choose, so any bound written here would be a second, wrong
+ * authority on pool size.
+ */
+function requireCount(record: Record<string, unknown>, field: string, context: string): number {
+  const value = record[field];
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new Error(
+      `Invalid draft message: ${context}.${field} must be a non-negative integer`,
+    );
+  }
+  return value;
+}
+
+/**
+ * An integer inside `[min, max]`, for the fields the engine declares as sized.
+ *
+ * Seat and pile ADDRESSES are `u8` in `draft-core` (`SharedStackView.active_seat`
+ * and `.active_pile`, `SharedStackPileView.index`, `SharedStackDecisionRecord`'s
+ * `seat` and `pile`); `decisions` is a `u32`. A frame carrying a value outside
+ * those ranges is one the engine could not have produced, so it is refused here
+ * rather than trusted as frontend state.
+ */
+function requireBoundedInt(
+  record: Record<string, unknown>,
+  field: string,
+  context: string,
+  min: number,
+  max: number,
+): number {
+  const value = record[field];
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+    throw new Error(
+      `Invalid draft message: ${context}.${field} must be an integer in [${min}, ${max}]`,
+    );
+  }
+  return value;
+}
+
+const U8_MAX = 255;
+const U32_MAX = 4294967295;
+
+/**
+ * A field the engine ALWAYS serializes, refused when the frame omits it.
+ *
+ * `history` and `forced_draw` carry no `skip_serializing_if` in
+ * `draft-core::view`, so every real frame has both -- `forced_draw` as `null`
+ * when the viewer drew nothing. Defaulting them on absence turned a truncated
+ * or hostile frame into a plausible-looking one: a missing `history` read as
+ * "no decisions yet" rather than as a frame that should never have been
+ * accepted.
+ */
+function requirePresent(record: Record<string, unknown>, field: string, context: string): unknown {
+  if (!(field in record)) {
+    throw new Error(`Invalid draft message: ${context}.${field} is required`);
+  }
+  return record[field];
+}
+
+function normalizePackDistribution(raw: unknown): PackDistribution {
+  if (raw === "PickAndPass" || raw === "AllAtOnce") return raw;
+  const tagged = requireObject(raw, "distribution");
+  const shared = tagged.SharedStackPiles;
+  if (shared === undefined || Object.keys(tagged).length !== 1) {
+    throw new Error("Invalid draft message: distribution must be a known pack distribution");
+  }
+  const piles = requireObject(shared, "distribution.SharedStackPiles");
+  // NONZERO. `shared_stack::piles_needed` refuses a zero pile count outright --
+  // "a shared-stack distribution must deal at least one pile" -- so a frame
+  // declaring zero describes a session the reducer would never have built.
+  const pile_count = requireBoundedInt(
+    piles,
+    "pile_count",
+    "distribution.SharedStackPiles",
+    1,
+    U8_MAX,
+  );
+  return { SharedStackPiles: { pile_count } };
+}
+
+function normalizeSharedStackDecisionView(raw: unknown, context: string): SharedStackDecisionView {
+  const entry = requireObject(raw, context);
+  if (!SHARED_STACK_DECISIONS.includes(entry.decision as SharedStackPileDecision)) {
+    throw new Error(`Invalid draft message: ${context}.decision must be Take or Decline`);
+  }
+  if (
+    entry.refusal !== null
+    && !SHARED_STACK_REFUSALS.includes(entry.refusal as SharedStackRefusal)
+  ) {
+    throw new Error(`Invalid draft message: ${context}.refusal must be null or a known refusal`);
+  }
+  return {
+    decision: entry.decision as SharedStackPileDecision,
+    refusal: entry.refusal as SharedStackRefusal | null,
+  };
+}
+
+/**
+ * A drafted card, checked for the two fields every consumer dereferences.
+ *
+ * Deliberately NOT a full field-by-field check of `DraftCardInstance`: `pool`
+ * and `current_pack` have never been validated here either, so a complete one
+ * belongs in a change that covers all four rather than half of them. What this
+ * does buy is that the two v30 card-bearing payloads cannot deliver entries the
+ * pile table and the forced-draw notice will read `undefined` off -- `key` and
+ * the rendered name both come from these.
+ */
+function normalizeDraftCardInstance(raw: unknown, context: string): unknown {
+  const card = requireObject(raw, context);
+  if (typeof card.instance_id !== "string" || card.instance_id.length === 0) {
+    throw new Error(`Invalid draft message: ${context}.instance_id must be a non-empty string`);
+  }
+  if (typeof card.name !== "string") {
+    throw new Error(`Invalid draft message: ${context}.name must be a string`);
+  }
+  return card;
+}
+
+function normalizeSharedStackPileView(raw: unknown, position: number): SharedStackPileView {
+  const context = `shared_stack.piles[${position}]`;
+  const pile = requireObject(raw, context);
+  // `shared_stack_view` builds this vector with `.enumerate()` and
+  // `let index = i as u8`, so a pile's index IS its position -- always, on every
+  // path. A frame carrying a duplicate or shuffled index is describing a vector
+  // the engine never produced, and the client addresses piles BY index, so a
+  // duplicate would make two piles answer to the same address.
+  if (pile.index !== position) {
+    throw new Error(`Invalid draft message: ${context}.index must equal its position`);
+  }
+  const total = requireCount(pile, "total", context);
+  const revealed = normalizeArrayField<unknown>(pile, "revealed")
+    .map((card, i) => normalizeDraftCardInstance(card, `${context}.revealed[${i}]`)) as
+    SharedStackPileView["revealed"];
+  // The engine publishes a PREFIX of the pile, so more revealed cards than the
+  // pile is tall is a frame that contradicts itself. Not a legality check --
+  // this compares the frame against itself, and nothing here re-derives which
+  // cards a viewer may see.
+  if (revealed.length > total) {
+    throw new Error(`Invalid draft message: ${context}.revealed is longer than the pile`);
+  }
+  if (!Array.isArray(pile.legality)) {
+    throw new Error(`Invalid draft message: ${context}.legality must be an array`);
+  }
+  return {
+    index: position,
+    total,
+    revealed,
+    legality: pile.legality.map((entry, i) =>
+      normalizeSharedStackDecisionView(entry, `${context}.legality[${i}]`)),
+  };
+}
+
+function normalizeSharedStackDecisionRecord(
+  raw: unknown,
+  index: number,
+  seatCount: number,
+  pileCount: number,
+): SharedStackDecisionRecord {
+  const context = `shared_stack.history[${index}]`;
+  const record = requireObject(raw, context);
+  if (!SHARED_STACK_DECISIONS.includes(record.decision as SharedStackPileDecision)) {
+    throw new Error(`Invalid draft message: ${context}.decision must be Take or Decline`);
+  }
+  return {
+    seat: requireBoundedInt(record, "seat", context, 0, seatCount - 1),
+    pile: requireBoundedInt(record, "pile", context, 0, pileCount - 1),
+    decision: record.decision as SharedStackPileDecision,
+    pile_size: requireCount(record, "pile_size", context),
+  };
+}
+
+/**
+ * @param declaredPileCount the pile count the frame's own `distribution` names,
+ *   or `null` when the distribution is not a shared stack. The two are checked
+ *   against each other rather than each in isolation.
+ */
+function normalizeSharedStackView(
+  raw: unknown,
+  declaredPileCount: number | null,
+  seatCount: number,
+): SharedStackView | null {
+  if (raw === null || raw === undefined) return null;
+  const stack = requireObject(raw, "shared_stack");
+  if (!Array.isArray(stack.piles)) {
+    throw new Error("Invalid draft message: shared_stack.piles must be an array");
+  }
+  // CROSS-FIELD. `piles_needed(pile_count)` returns `usize::from(pile_count)`,
+  // so the reducer's pile vector is exactly as long as the distribution says --
+  // a frame where the two disagree is describing a session that cannot exist,
+  // and each half looks fine on its own.
+  //
+  // `null` cannot reach here: the caller refuses a `shared_stack` paired with
+  // any other distribution before calling. That refusal is what makes this
+  // check un-evadable -- without it, declaring `PickAndPass` alongside a
+  // shared stack skipped straight past this and still rendered the pile table,
+  // so a one-word edit defeated the whole guard.
+  if (declaredPileCount !== null && stack.piles.length !== declaredPileCount) {
+    throw new Error(
+      "Invalid draft message: shared_stack.piles length must equal the declared pile_count",
+    );
+  }
+  // The published length, which the cross-check above has already tied to the
+  // declared count -- so bounding a reference by either is bounding it by both.
+  const pileCount = stack.piles.length;
+  // REQUIRED, not defaulted: both are unconditionally serialized by the engine,
+  // so a frame omitting either is malformed rather than sparse.
+  const rawHistory = requirePresent(stack, "history", "shared_stack");
+  const rawForced = requirePresent(stack, "forced_draw", "shared_stack");
+  if (!Array.isArray(rawHistory)) {
+    throw new Error("Invalid draft message: shared_stack.history must be an array");
+  }
+  const forced = rawForced === null
+    ? null
+    : normalizeDraftCardInstance(rawForced, "shared_stack.forced_draw");
+  return {
+    main_stack_remaining: requireCount(stack, "main_stack_remaining", "shared_stack"),
+    total_cards: requireCount(stack, "total_cards", "shared_stack"),
+    // AGAINST THIS FRAME'S CARDINALITIES, not merely against `u8`. The engine
+    // copies the live seat and cursor out of a session that HAS those seats and
+    // those piles (`shared_stack_view`), so a two-seat, one-pile frame naming
+    // seat 2 or pile 1 is one it could not have emitted -- and every such value
+    // fits a `u8` perfectly well, which is why the integer bound alone admitted
+    // them.
+    active_seat: requireBoundedInt(stack, "active_seat", "shared_stack", 0, seatCount - 1),
+    active_pile: requireBoundedInt(stack, "active_pile", "shared_stack", 0, pileCount - 1),
+    piles: stack.piles.map(normalizeSharedStackPileView),
+    decisions: requireBoundedInt(stack, "decisions", "shared_stack", 0, U32_MAX),
+    history: rawHistory.map((record, i) =>
+      normalizeSharedStackDecisionRecord(record, i, seatCount, pileCount)),
+    forced_draw: forced as SharedStackView["forced_draw"],
+  };
+}
+
+/** The seat that chooses play/draw, or `null` when nobody has been designated. */
+function normalizePlayFirstChooser(raw: unknown, seatCount: number): number | null {
+  if (raw === null || raw === undefined) return null;
+  // A SEAT INDEX, so it is bounded by the seats this frame actually carries.
+  // `play_first_chooser` is produced only for a shared-stack session of exactly
+  // two seats, as `(starting_seat + 1) % 2` -- so the engine's own range is
+  // {0, 1}. Bounding by the frame's seat count is the general form of that and
+  // does not hard-code the two-seat rule here.
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0 || raw >= seatCount) {
+    throw new Error("Invalid draft message: play_first_chooser must be null or a seat index");
+  }
+  return raw;
+}
+
 function normalizeDraftPlayerView(raw: unknown): DraftPlayerView {
   if (raw === undefined) {
     throw new Error("Invalid draft message: launch_capability must be a known capability");
@@ -1102,6 +1566,34 @@ function normalizeDraftPlayerView(raw: unknown): DraftPlayerView {
   ) {
     throw new Error("Invalid draft message: commanders_required must be a u8 count");
   }
+  const distribution = normalizePackDistribution(view.distribution);
+  const declaredPileCount = typeof distribution === "object"
+    ? distribution.SharedStackPiles.pile_count
+    : null;
+  // SEATS FIRST, because the shared-stack references are validated against how
+  // many there are. Normalizing the stack before the seats meant the seat count
+  // was simply unavailable, which is why `active_seat` could only ever be
+  // checked against `u8`.
+  const seats = normalizeArrayField(view, "seats").map(normalizeSeatPublicView);
+  // The seat count is the new authority for those references, and unlike
+  // `pile_count` it carries no ceiling of its own -- `normalizeArrayField`
+  // caps nothing. Keeping the `u8` bound as well means a frame publishing 400
+  // seats still cannot name seat 300, a value the engine's own `u8` field could
+  // not hold and which the previous bound refused.
+  const seatBound = Math.min(seats.length, U8_MAX + 1);
+  // A LIVE PILE TURN IMPLIES THE DISTRIBUTION THAT DEALS PILES.
+  // `shared_stack_view_for` returns `Some` only for a session that HAS a shared
+  // stack and is drafting, so the engine cannot pair one with any other
+  // distribution. Refusing the pairing here is also what stops the pile-count
+  // cross-check below being sidestepped: the client renders the pile table on
+  // `view.shared_stack` alone, so a frame declaring `PickAndPass` beside an
+  // arbitrary pile vector used to render while skipping every shared-stack
+  // rule.
+  if (view.shared_stack !== undefined && view.shared_stack !== null && declaredPileCount === null) {
+    throw new Error(
+      "Invalid draft message: shared_stack requires a SharedStackPiles distribution",
+    );
+  }
   const pool_groups = normalizePoolGroups(view.pool_groups);
   const source = normalizeDraftSourceView(view.source);
   // A v28 peer may still send this former public-view field. Do not preserve
@@ -1113,7 +1605,29 @@ function normalizeDraftPlayerView(raw: unknown): DraftPlayerView {
     ...(pool_groups !== undefined ? { pool_groups } : {}),
     ...(source !== undefined ? { source } : {}),
     draft_effects: normalizeArrayField(view, "draft_effects"),
-    seats: normalizeArrayField(view, "seats").map(normalizeSeatPublicView),
+    seats,
+    // The v30 fields, validated rather than spread. Listed AFTER the spread so
+    // the checked value is the one that survives -- a raw `view.distribution`
+    // riding the spread would otherwise win.
+    //
+    // `distribution` is required: it is non-optional on `DraftPlayerView`, and
+    // the draft protocol is compared for EXACT equality at the handshake, so a
+    // peer that omits it is malformed rather than old.
+    distribution,
+    // The two OPTIONAL fields keep their absence rather than being materialized
+    // as `null`. Same conditional-spread idiom as `pool_groups` and `source`
+    // above, and for a concrete reason: turning an absent field into a present
+    // null changes the object's shape, which a wire round-trip can see.
+    //
+    // The stack is checked AGAINST the distribution, not merely beside it: the
+    // declared pile count and the published pile vector have to agree, and
+    // neither half looks wrong on its own.
+    ...(view.shared_stack !== undefined
+      ? { shared_stack: normalizeSharedStackView(view.shared_stack, declaredPileCount, seatBound) }
+      : {}),
+    ...(view.play_first_chooser !== undefined
+      ? { play_first_chooser: normalizePlayFirstChooser(view.play_first_chooser, seatBound) }
+      : {}),
   } as unknown as DraftPlayerView;
 }
 
@@ -1223,6 +1737,9 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   }
   if (msg.type === "draft_pick") {
     return validatePick(raw as Record<string, unknown>);
+  }
+  if (msg.type === "draft_pile_decision") {
+    return validatePileDecision(raw as Record<string, unknown>);
   }
   if (msg.type === "draft_submit_deck") {
     return validateSubmitDeck(raw as Record<string, unknown>);

@@ -209,6 +209,41 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 71 — DraftKind.Winston and DraftAction::SharedStackDecision are serialized
+ *      by draft WebSocket messages. A PARSE bump like 27 and 34, not a
+ *      capability bump like 24 — but a CONDITIONAL one: neither type carries
+ *      a serde fallback variant, so a v70 peer fails deserialization outright
+ *      on "Winston" or on the SharedStackDecision tag, and a v71 peer cannot
+ *      round-trip a frame a v70 peer would have to invent. The break runs in
+ *      BOTH directions, and for the types named so far only for a Winston
+ *      pod's frames.
+ *      DraftDelta::SharedStackDecisionApplied, the two shared-stack
+ *      DraftError variants (InvalidSharedStackConfiguration and
+ *      SharedStackDecisionRefused — a third, SharedStackRequiresHumanSeats,
+ *      existed while this entry was first written and was deleted when
+ *      shared-stack pods gained bot seats) and PickStatus.Waiting ride the
+ *      same condition.
+ *      TWO FIELDS DO NOT RIDE IT, and they are the exception to the sentence
+ *      above: SeatPublicView.drafted_card_count and
+ *      DraftPlayerView.distribution are REQUIRED, non-optional fields on
+ *      every kind's frames, so a v70 server's view fails to satisfy a v71
+ *      client's shape for Premier, Traditional, Sealed and CommanderDraft too
+ *      — not just Winston. That is what this version gate is for and it
+ *      already refuses the mismatch. drafted_card_count is a count and never
+ *      an identity, and is public in every kind (a pick-and-pass seat's total
+ *      follows from the pick number); distribution is a procedure fact
+ *      published for the same reason launch_capability is, and deliberately
+ *      NOT status-gated so a surface outliving the draft can still tell a pile
+ *      pod from a passing one.
+ *      DraftPlayerView.{shared_stack, play_first_chooser},
+ *      SpectatorDraftView.shared_stack and DraftSession.shared_stack are
+ *      additive and serde-optional, which is why their TypeScript mirrors are
+ *      declared optional — they are listed because 71 carries them, not
+ *      because they force it. play_first_chooser is ADVISORY: no engine path
+ *      enforces it, because game one's starting player still comes from
+ *      CR 103.1's contest. Lobby messages are unchanged: draftKind is a
+ *      length-bounded string. See PROTOCOL_VERSION in
+ *      crates/lobby-broker/src/protocol.rs for the full entry.
  * 70 — OutsideGameChoiceSource.BoosterPack replaced set_code with a required
  *      origin: PackOrigin ({ type: "Set", data } or { type: "Cube" }), so an
  *      opened pack's OutsideGameChoice no longer decodes on a v69 peer and a
@@ -469,7 +504,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 70;
+export const PROTOCOL_VERSION = 71;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

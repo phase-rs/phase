@@ -10,7 +10,7 @@
  * participates in an 8-seat draft pod instead of a game.
  */
 
-import type { DraftPlayerView, SeatPublicView } from "./draft-adapter";
+import type { DraftPlayerView, SeatPublicView, SharedStackPileDecision } from "./draft-adapter";
 import {
   P2PDraftGuest,
   type DraftGuestConnection,
@@ -443,6 +443,19 @@ export class DraftPodGuestAdapter {
   ): Promise<void> {
     if (!this.guest) throw new Error("Guest not initialized");
     await this.guest.submitPickWithDraftEffect(effectCardInstanceId, cardInstanceIds);
+  }
+
+  /**
+   * One whole shared-stack turn decision for this pod's local seat. Like
+   * `submitPick`, it returns nothing: the host answers out of band with
+   * `draft_pick_ack`, which the store awaits as `pickAcknowledged`.
+   */
+  async submitSharedStackDecision(
+    pile: number,
+    decision: SharedStackPileDecision,
+  ): Promise<void> {
+    if (!this.guest) throw new Error("Guest not initialized");
+    await this.guest.submitSharedStackDecision(pile, decision);
   }
 
   async submitDeck(mainDeck: string[], commanders: string[]): Promise<void> {

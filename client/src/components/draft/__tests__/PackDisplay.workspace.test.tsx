@@ -53,6 +53,7 @@ const effectCard = { instance_id: "effect", name: "Effect", set_code: "TST", col
 const view = {
   status: "Drafting", kind: "Premier", current_pack_number: 0, pick_number: 0, pass_direction: "Left",
   launch_capability: "None",
+  distribution: "PickAndPass",
   commanders_required: 0,
   current_pack: cards, pool: [], draft_effects: [], pool_groups: {
     color_groups: [], type_groups: [], cmc_groups: [], rarity_groups: [], type_filter_options: [], color_filter_options: [],

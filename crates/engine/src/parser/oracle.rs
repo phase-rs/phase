@@ -10,6 +10,9 @@ use nom::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::game::effects::cast_from_zone;
+use crate::game::filter::{
+    filter_contains_filter_prop, retarget_chosen_card_type_to_creature_type,
+};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CastTimingPermission,
@@ -1840,14 +1843,7 @@ fn target_filter_uses_filter_prop(
     filter: &TargetFilter,
     pred: &impl Fn(&FilterProp) -> bool,
 ) -> bool {
-    match filter {
-        TargetFilter::Typed(tf) => tf.properties.iter().any(pred),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|inner| target_filter_uses_filter_prop(inner, pred)),
-        TargetFilter::Not { filter } => target_filter_uses_filter_prop(filter, pred),
-        _ => false,
-    }
+    filter_contains_filter_prop(filter, pred)
 }
 
 fn append_sub_ability(chain: &mut AbilityDefinition, tail: AbilityDefinition) {
@@ -2042,19 +2038,31 @@ fn detect_linked_choice_type_statics(
                 matches!(
                     &s.mode,
                     crate::types::statics::StaticMode::ModifyCost {
-                        spell_filter: Some(_),
+                        spell_filter: Some(filter),
                         ..
-                    }
+                    } if target_filter_uses_filter_prop(
+                        filter,
+                        &|prop| matches!(prop, FilterProp::IsChosenCardType),
+                    )
                 )
             });
-            let is_dig = item_ability(item).is_some_and(|def| ability_chain_has_dig(&def))
+            let is_dig = item_ability(item)
+                .is_some_and(|def| ability_chain_reads_chosen_card_type_in_dig(&def))
                 || item_trigger(item).is_some_and(|trigger| {
                     trigger
                         .execute
                         .as_deref()
-                        .is_some_and(ability_chain_has_dig)
+                        .is_some_and(ability_chain_reads_chosen_card_type_in_dig)
                 });
-            if is_cost_reducer || is_dig {
+            let is_spell_cast_valid_card = item_trigger(item).is_some_and(|trigger| {
+                trigger.mode == TriggerMode::SpellCast
+                    && trigger.valid_card.as_ref().is_some_and(|filter| {
+                        target_filter_uses_filter_prop(filter, &|prop| {
+                            matches!(prop, FilterProp::IsChosenCardType)
+                        })
+                    })
+            });
+            if is_cost_reducer || is_dig || is_spell_cast_valid_card {
                 retarget.push(item.id);
             }
         }
@@ -2112,13 +2120,20 @@ fn apply_linked_choice_type_statics(
                     ..
                 } = &mut result.statics[pos].mode
                 {
-                    retarget_chosen_card_type_to_creature_type(filter);
+                    if !retarget_chosen_card_type_to_creature_type(filter) {
+                        continue;
+                    }
                 }
-            } else if let Some(pos) = position_of(ability_ids, *id) {
-                retarget_creature_type_choice_dig_filters_in_ability(&mut result.abilities[pos]);
-            } else if let Some(pos) = position_of(trigger_ids, *id) {
-                if let Some(execute) = result.triggers[pos].execute.as_mut() {
-                    retarget_creature_type_choice_dig_filters_in_ability(execute);
+            }
+            if let Some(pos) = position_of(ability_ids, *id) {
+                if !retarget_creature_type_choice_dig_filters_in_ability(&mut result.abilities[pos])
+                {
+                    continue;
+                }
+            }
+            if let Some(pos) = position_of(trigger_ids, *id) {
+                if !retarget_creature_type_choice_trigger_filters(&mut result.triggers[pos]) {
+                    continue;
                 }
             }
         }
@@ -2134,14 +2149,21 @@ fn apply_linked_choice_type_statics(
     }
 }
 
-/// Whether an ability's effect chain (recursing the sub-ability chain) contains a
-/// `Dig` effect — a chosen-type dig-filter consumer surface.
-fn ability_chain_has_dig(def: &AbilityDefinition) -> bool {
-    matches!(*def.effect, Effect::Dig { .. })
-        || def
-            .sub_ability
-            .as_deref()
-            .is_some_and(ability_chain_has_dig)
+/// Whether an ability's effect chain contains a `Dig` filter that reads a
+/// chosen card type. The reader is kept exact so the relation binds only an
+/// actual consumer, not every unrelated Dig on a creature-type chooser.
+fn ability_chain_reads_chosen_card_type_in_dig(def: &AbilityDefinition) -> bool {
+    matches!(
+        &*def.effect,
+        Effect::Dig { filter, .. }
+            if target_filter_uses_filter_prop(
+                filter,
+                &|prop| matches!(prop, FilterProp::IsChosenCardType),
+            )
+    ) || def
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_chain_reads_chosen_card_type_in_dig)
 }
 
 /// Whether a static is a self-"~ is the chosen type" `AddChosenSubtype` surface.
@@ -2181,45 +2203,51 @@ fn chosen_subtype_kind_from_persisted_choice_items(
         })
 }
 
-/// CR 607.2d: Within a creature-type chooser's cost-modifier spell filter,
-/// rewrite the card-type chosen-discriminator (`IsChosenCardType`) to the
-/// creature-type one (`IsChosenCreatureType`) so "the chosen type" matches the
-/// linked creature-type choice. CR 205.3: the linked choice is a creature
-/// subtype, so it must be matched against subtypes. Recurses through every
-/// nested-filter `TargetFilter` variant (`And`/`Or`/`Not`/`TrackedSetFiltered`),
-/// e.g. a typed filter ANDed with `HasChosenName`.
-fn retarget_chosen_card_type_to_creature_type(filter: &mut TargetFilter) {
-    use crate::types::ability::FilterProp;
-    match filter {
-        TargetFilter::Typed(tf) => {
-            for prop in &mut tf.properties {
-                if matches!(prop, FilterProp::IsChosenCardType) {
-                    *prop = FilterProp::IsChosenCreatureType;
-                }
-            }
-        }
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
-            .iter_mut()
-            .for_each(retarget_chosen_card_type_to_creature_type),
-        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
-            retarget_chosen_card_type_to_creature_type(filter)
-        }
-        _ => {}
-    }
-}
-
 /// CR 608.2c: Dig/reveal continuations after "Choose a creature type" refer to
 /// creature subtypes ("cards of the chosen type", For the Ancestors). The bare
 /// "cards" base defaults to `IsChosenCardType`; realign a dig filter once the
 /// persisted choice is known to be creature-type. Applied per resolved consumer
 /// item by `apply_linked_choice_type_statics`.
-fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinition) {
+fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinition) -> bool {
+    let mut rewritten = def.clone();
+    let mut complete = true;
+    retarget_creature_type_choice_dig_filters_in_ability_in_place(&mut rewritten, &mut complete);
+    if complete {
+        *def = rewritten;
+    }
+    complete
+}
+
+/// In-place half of the ability-chain rewrite. The owning wrapper commits the
+/// cloned chain only when this traversal and every nested filter walk complete.
+fn retarget_creature_type_choice_dig_filters_in_ability_in_place(
+    def: &mut AbilityDefinition,
+    complete: &mut bool,
+) {
     if let Effect::Dig { filter, .. } = &mut *def.effect {
-        retarget_chosen_card_type_to_creature_type(filter);
+        *complete &= retarget_chosen_card_type_to_creature_type(filter);
     }
     if let Some(sub) = def.sub_ability.as_mut() {
-        retarget_creature_type_choice_dig_filters_in_ability(sub);
+        retarget_creature_type_choice_dig_filters_in_ability_in_place(sub, complete);
     }
+}
+
+/// Retarget both filters on a spell-cast trigger atomically. An incomplete
+/// union walk rejects the relation application instead of retaining a partially
+/// rewritten trigger.
+fn retarget_creature_type_choice_trigger_filters(trigger: &mut TriggerDefinition) -> bool {
+    let mut rewritten = trigger.clone();
+    let mut complete = true;
+    if let Some(valid_card) = rewritten.valid_card.as_mut() {
+        complete &= retarget_chosen_card_type_to_creature_type(valid_card);
+    }
+    if let Some(execute) = rewritten.execute.as_mut() {
+        complete &= retarget_creature_type_choice_dig_filters_in_ability(execute);
+    }
+    if complete {
+        *trigger = rewritten;
+    }
+    complete
 }
 
 /// CR 702.26a + CR 603.7c: Upgrade bare one-shot `PhaseOut` ETB effects that

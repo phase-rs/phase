@@ -2,6 +2,7 @@
   "intro": {
     "quickTitle": "Szybki draft",
     "podTitle": "Draft w grupie",
+    "winstonTitle": "Winston Draft",
     "commanderTitle": "Commander Draft",
     "subtitle": "Oto jak to działa",
     "startDrafting": "Rozpocznij draft",
@@ -21,7 +22,11 @@
       "minimumDeckCards_one": "{{count, number}} karty",
       "minimumDeckCards_few": "{{count, number}} kart",
       "minimumDeckCards_many": "{{count, number}} kart",
-      "minimumDeckCards_other": "{{count, number}} karty"
+      "minimumDeckCards_other": "{{count, number}} karty",
+      "pilesDealt_one": "{{count, number}} jednokartowa kupka",
+      "pilesDealt_few": "{{count, number}} jednokartowe kupki",
+      "pilesDealt_many": "{{count, number}} jednokartowych kupek",
+      "pilesDealt_other": "{{count, number}} jednokartowych kupek"
     },
     "packPassing_one": "Ten draft ma tylko jedną rundę boosterów, więc kierunek przekazywania się nie zmienia",
     "packPassing_few": "Kierunek przekazywania zmienia się w każdej rundzie",
@@ -38,6 +43,13 @@
       "step2": "Otwórz {{packs}}; każdy booster zawiera {{cardsPerPack}} — wybierz jedną kartę, a resztę przekaż dalej",
       "step2Mixed": "Otwórz {{packs}} o różnych rozmiarach, w tej kolejności: {{packSizes, list}} — wybierz jedną kartę, a resztę przekaż dalej",
       "step4": "Po drafcie zbuduj talię z co najmniej {{minimumDeckCards}} i rozegraj mecze turniejowe"
+    },
+    "winston": {
+      "step2": "{{packs}} każdego gracza otwiera się bez podglądania, a wszystkie karty tasuje się w jeden zakryty stos",
+      "step2Mixed": "{{packs}} różnych rozmiarów każdego gracza, w tej kolejności: {{packSizes, list}}, otwiera się bez podglądania i tasuje w jeden zakryty stos",
+      "step3": "{{piles}} rozdaje się z wierzchu. W swojej turze zajrzyj na pierwszą kupkę: weź ją albo odrzuć i przejdź do następnej",
+      "step4": "Odrzucenie kładzie wierzchnią kartę stosu na odrzuconą kupkę. Odrzuć wszystkie, a weźmiesz wierzchnią kartę stosu, nie oglądając jej",
+      "step5": "Tury następują na przemian, aż zabraknie kart; potem zbuduj talię z co najmniej {{minimumDeckCards}} i rozegraj mecze turniejowe"
     },
     "commander": {
       "step2": "Otwórz {{packs}}; każdy booster zawiera {{cardsPerPack}} — wybierz dwie karty, a resztę przekaż dalej",
@@ -79,6 +91,13 @@
     "label": "Czas na wybór",
     "seconds": "{{count}}s"
   },
+  "pickStatus": {
+    "Pending": "Wybiera",
+    "Picked": "Wybrano",
+    "Waiting": "Czeka",
+    "TimedOut": "Czas minął",
+    "NotDrafting": "Poza draftem"
+  },
   "scoreBadge": {
     "label": "Wynik: {{count}} wygranych"
   },
@@ -92,7 +111,11 @@
     "activePackCount_one": "{{count}} booster przy {{player}}",
     "activePackCount_few": "{{count}} boostery przy {{player}}",
     "activePackCount_many": "{{count}} boosterów przy {{player}}",
-    "activePackCount_other": "{{count}} boostera przy {{player}}"
+    "activePackCount_other": "{{count}} boostera przy {{player}}",
+    "draftedCardCount_one": "{{count}} karta wybrana przez {{player}}",
+    "draftedCardCount_few": "{{count}} karty wybrane przez {{player}}",
+    "draftedCardCount_many": "{{count}} kart wybranych przez {{player}}",
+    "draftedCardCount_other": "{{count}} kart wybranych przez {{player}}"
   },
   "setSelector": {
     "botDifficulty": "Poziom trudności botów",
@@ -366,6 +389,10 @@
       "title": "Commander Draft",
       "description": "Draftuj po dwie karty naraz w grupie, zbuduj talię Commander z 60 kart, a potem rozegraj jedną grę wieloosobową."
     },
+    "winstonDraft": {
+      "title": "Winston Draft",
+      "description": "Dwóch graczy dzieli jeden zakryty stos na trzy kupki — weź kupkę albo ją odrzuć, a potem zbuduj talię i graj."
+    },
     "podInProgress": "Trwa draft w grupie",
     "guestPodInProgress": "Dołączony pod gotowy do ponownego połączenia",
     "podLabel": "Grupa {{kind}}",
@@ -515,6 +542,8 @@
     "kindSealedDesc": "Otwórz sześć boosterów bezpośrednio do puli każdego gracza, a następnie zbuduj talię turniejową do jednej wygranej.",
     "kindCommanderDraft": "Commander",
     "kindCommanderDraftDesc": "Każdy gracz draftuje po dwie karty naraz i buduje talię Commander z 60 kart, a potem grupa rozgrywa jedną grę wieloosobową.",
+    "kindWinston": "Winston",
+    "kindWinstonDesc": "Od dwóch do czterech graczy draftuje wspólny zakryty stos przez trzy kupki: w swojej turze obejrzyj kupkę i weź ją albo odmów i dołóż do niej kartę.",
     "tournamentFormat": "Format turnieju",
     "tournamentSwiss": "Szwajcarski",
     "tournamentSwissDesc": "Wszyscy grają przez trzy rundy, nawet po porażce.",
@@ -597,6 +626,51 @@
     "hostLeft": "Gospodarz opuścił draft",
     "connection": "Błąd połączenia",
     "retry": "Spróbuj połączyć ponownie"
+  },
+  "winston": {
+    "heading": "Winston Draft",
+    "yourTurn": "Twoja kolej — kupka {{index}}",
+    "otherSeatTurn": "{{name}} podejmuje decyzję",
+    "seatFallback": "Miejsce {{index}}",
+    "turnHint": "Weź kupkę albo ją odrzuć. Odrzucenie dokłada do niej jedną kartę ze stosu głównego i przechodzisz do następnej kupki; jeśli odrzucisz ostatnią, dobierasz wierzchnią kartę stosu głównego.",
+    "mainStackRemaining_one": "{{count, number}} karta zakryta w stosie głównym",
+    "mainStackRemaining_few": "{{count, number}} karty zakryte w stosie głównym",
+    "mainStackRemaining_many": "{{count, number}} kart zakrytych w stosie głównym",
+    "mainStackRemaining_other": "{{count, number}} karty zakryte w stosie głównym",
+    "cardsLeft_one": "{{count, number}} karta pozostała w drafcie",
+    "cardsLeft_few": "{{count, number}} karty pozostałe w drafcie",
+    "cardsLeft_many": "{{count, number}} kart pozostałych w drafcie",
+    "cardsLeft_other": "{{count, number}} karty pozostałe w drafcie",
+    "stackShare": "Udział kart pozostałych w drafcie, które wciąż leżą zakryte w stosie głównym",
+    "pileLabel": "Kupka {{index}}",
+    "pileTotal_one": "{{count, number}} karta",
+    "pileTotal_few": "{{count, number}} karty",
+    "pileTotal_many": "{{count, number}} kart",
+    "pileTotal_other": "{{count, number}} karty",
+    "pileFaceDown": "Zakryte",
+    "deciding": "Decyzja o tej kupce",
+    "hiddenPiles": "Kupki pozostają zakryte do twojej kolei.",
+    "take": "Weź",
+    "takeAria": "Weź kupkę {{index}}",
+    "decline": "Odrzuć",
+    "declineAria": "Odrzuć kupkę {{index}}",
+    "refusal": {
+      "PileNotActive": "Nie podejmujesz decyzji o tej kupce.",
+      "PileEmpty": "Ta kupka jest pusta, nie ma czego brać.",
+      "NoGuaranteedCard": "Odrzucenie nie może już zapewnić ci karty w tej turze, więc wzięcie tej kupki to twój jedyny legalny ruch."
+    },
+    "refusalUnpublished": "Draft nie opublikował werdyktu dla tej decyzji.",
+    "playFirstChooser": "{{name}} decyduje, kto zaczyna w partiach po drafcie.",
+    "scale": "Skala kupek",
+    "scaleDecrease": "Zmniejsz skalę kupek",
+    "scaleReset": "Przywróć domyślną skalę kupek",
+    "scaleIncrease": "Zwiększ skalę kupek",
+    "faceDownStack_one": "{{count, number}} zakryta karta",
+    "faceDownStack_few": "{{count, number}} zakryte karty",
+    "faceDownStack_many": "{{count, number}} zakrytych kart",
+    "faceDownStack_other": "{{count, number}} zakrytych kart",
+    "forcedDraw": "Odrzuciłeś każdą kupkę, więc dobrałeś {{name}} z wierzchu głównego stosu.",
+    "forcedDrawLabel": "Dobrana z głównego stosu"
   },
   "lobby": {
     "title": "Poczekalnia grupy draftu",

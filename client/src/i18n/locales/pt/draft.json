@@ -2,6 +2,7 @@
   "intro": {
     "quickTitle": "Quick Draft",
     "podTitle": "Pod Draft",
+    "winstonTitle": "Winston Draft",
     "commanderTitle": "Commander Draft",
     "subtitle": "Veja como funciona",
     "startDrafting": "Começar a Draftar",
@@ -21,7 +22,11 @@
       "minimumDeckCards_one": "{{count, number}} carta",
       "minimumDeckCards_few": "{{count, number}} cartas",
       "minimumDeckCards_many": "{{count, number}} cartas",
-      "minimumDeckCards_other": "{{count, number}} cartas"
+      "minimumDeckCards_other": "{{count, number}} cartas",
+      "pilesDealt_one": "{{count, number}} monte de uma carta",
+      "pilesDealt_few": "{{count, number}} montes de uma carta",
+      "pilesDealt_many": "{{count, number}} montes de uma carta",
+      "pilesDealt_other": "{{count, number}} montes de uma carta"
     },
     "packPassing_one": "Este draft tem apenas uma rodada de boosters, então a direção dos passes não muda",
     "packPassing_few": "A direção dos passes muda a cada rodada",
@@ -38,6 +43,13 @@
       "step2": "Abra {{packs}}; cada booster contém {{cardsPerPack}} — escolha uma carta e passe o restante",
       "step2Mixed": "Abra {{packs}} de tamanhos diferentes, nesta ordem: {{packSizes, list}} — escolha uma carta e passe o restante",
       "step4": "Após o draft, monte um deck de pelo menos {{minimumDeckCards}} e jogue as partidas do torneio"
+    },
+    "winston": {
+      "step2": "Os {{packs}} de cada jogador são abertos sem que ninguém olhe, e todas as cartas são embaralhadas em um único monte virado para baixo",
+      "step2Mixed": "Os {{packs}} de tamanhos diferentes de cada jogador, nesta ordem: {{packSizes, list}}, são abertos sem que ninguém olhe e embaralhados em um único monte virado para baixo",
+      "step3": "{{piles}} são distribuídos do topo. No seu turno, olhe o primeiro monte: pegue-o ou recuse-o e passe para o próximo",
+      "step4": "Recusar coloca a carta do topo do monte principal sobre o monte recusado. Recuse todos e você pega a carta do topo do monte principal sem vê-la",
+      "step5": "Os turnos se alternam até não restarem cartas; depois monte um deck de pelo menos {{minimumDeckCards}} e jogue as partidas do torneio"
     },
     "commander": {
       "step2": "Abra {{packs}}; cada booster contém {{cardsPerPack}} — escolha duas cartas e passe o restante",
@@ -79,6 +91,13 @@
     "label": "Cronômetro de Escolha",
     "seconds": "{{count}}s"
   },
+  "pickStatus": {
+    "Pending": "Escolhendo",
+    "Picked": "Escolhido",
+    "Waiting": "Aguardando",
+    "TimedOut": "Tempo esgotado",
+    "NotDrafting": "Fora do draft"
+  },
   "scoreBadge": {
     "label": "Pontuação: {{count}} vitórias"
   },
@@ -92,7 +111,11 @@
     "activePackCount_one": "{{count}} pacote com {{player}}",
     "activePackCount_few": "{{count}} pacotes com {{player}}",
     "activePackCount_many": "{{count}} pacotes com {{player}}",
-    "activePackCount_other": "{{count}} pacotes com {{player}}"
+    "activePackCount_other": "{{count}} pacotes com {{player}}",
+    "draftedCardCount_one": "{{count}} carta draftada por {{player}}",
+    "draftedCardCount_few": "{{count}} cartas draftadas por {{player}}",
+    "draftedCardCount_many": "{{count}} cartas draftadas por {{player}}",
+    "draftedCardCount_other": "{{count}} cartas draftadas por {{player}}"
   },
   "setSelector": {
     "botDifficulty": "Dificuldade dos Bots",
@@ -366,6 +389,10 @@
       "title": "Commander Draft",
       "description": "Drafte duas cartas de cada vez em um pod, monte um deck Commander de 60 cartas e depois jogue uma partida multijogador."
     },
+    "winstonDraft": {
+      "title": "Winston Draft",
+      "description": "Dois jogadores compartilham uma pilha virada para baixo em três montes: pegue um monte ou recuse-o, depois monte o deck e jogue."
+    },
     "podInProgress": "Pod Draft em Andamento",
     "guestPodInProgress": "Pod ingressado pronto para reconectar",
     "podLabel": "Pod {{kind}}",
@@ -515,6 +542,8 @@
     "kindSealedDesc": "Abra seis boosters diretamente no pool de cada jogador e depois monte um deck de torneio melhor de um.",
     "kindCommanderDraft": "Commander",
     "kindCommanderDraftDesc": "Cada jogador drafta duas cartas de cada vez e monta um deck Commander de 60 cartas; depois o pod joga uma partida multijogador.",
+    "kindWinston": "Winston",
+    "kindWinstonDesc": "De dois a quatro jogadores draftam uma pilha compartilhada virada para baixo através de três montes: no seu turno, olhe um monte e pegue-o ou recuse e adicione uma carta a ele.",
     "tournamentFormat": "Formato do Torneio",
     "tournamentSwiss": "Suíço",
     "tournamentSwissDesc": "Todos continuam jogando por três rodadas, mesmo após uma derrota.",
@@ -597,6 +626,51 @@
     "hostLeft": "O anfitrião saiu do draft",
     "connection": "Erro de Conexão",
     "retry": "Tentar reconectar"
+  },
+  "winston": {
+    "heading": "Winston Draft",
+    "yourTurn": "Sua vez — monte {{index}}",
+    "otherSeatTurn": "{{name}} está decidindo",
+    "seatFallback": "Assento {{index}}",
+    "turnHint": "Pegue o monte ou recuse-o. Recusar coloca nele uma carta da pilha principal e leva você ao monte seguinte; se recusar o último, você compra a carta do topo da pilha principal.",
+    "mainStackRemaining_one": "{{count, number}} carta virada para baixo na pilha principal",
+    "mainStackRemaining_few": "{{count, number}} cartas viradas para baixo na pilha principal",
+    "mainStackRemaining_many": "{{count, number}} cartas viradas para baixo na pilha principal",
+    "mainStackRemaining_other": "{{count, number}} cartas viradas para baixo na pilha principal",
+    "cardsLeft_one": "{{count, number}} carta restante no draft",
+    "cardsLeft_few": "{{count, number}} cartas restantes no draft",
+    "cardsLeft_many": "{{count, number}} cartas restantes no draft",
+    "cardsLeft_other": "{{count, number}} cartas restantes no draft",
+    "stackShare": "Proporção das cartas restantes do draft que ainda estão viradas para baixo na pilha principal",
+    "pileLabel": "Monte {{index}}",
+    "pileTotal_one": "{{count, number}} carta",
+    "pileTotal_few": "{{count, number}} cartas",
+    "pileTotal_many": "{{count, number}} cartas",
+    "pileTotal_other": "{{count, number}} cartas",
+    "pileFaceDown": "Virado para baixo",
+    "deciding": "Decidindo sobre este monte",
+    "hiddenPiles": "Os montes ficam virados para baixo até chegar a sua vez.",
+    "take": "Pegar",
+    "takeAria": "Pegar o monte {{index}}",
+    "decline": "Recusar",
+    "declineAria": "Recusar o monte {{index}}",
+    "refusal": {
+      "PileNotActive": "Você não está decidindo sobre este monte.",
+      "PileEmpty": "Este monte está vazio, não há nada para pegar.",
+      "NoGuaranteedCard": "Recusar não pode mais lhe garantir uma carta neste turno, então pegar este monte é sua única jogada legal."
+    },
+    "refusalUnpublished": "O draft não publicou nenhum veredito para esta decisão.",
+    "playFirstChooser": "{{name}} escolhe quem joga primeiro nas partidas após o draft.",
+    "scale": "Escala dos montes",
+    "scaleDecrease": "Diminuir a escala dos montes",
+    "scaleReset": "Redefinir a escala dos montes",
+    "scaleIncrease": "Aumentar a escala dos montes",
+    "faceDownStack_one": "{{count, number}} carta virada para baixo",
+    "faceDownStack_few": "{{count, number}} cartas viradas para baixo",
+    "faceDownStack_many": "{{count, number}} cartas viradas para baixo",
+    "faceDownStack_other": "{{count, number}} cartas viradas para baixo",
+    "forcedDraw": "Você recusou todos os montes, então comprou {{name}} do topo do monte principal.",
+    "forcedDrawLabel": "Comprada do monte principal"
   },
   "lobby": {
     "title": "Lobby do Pod de Draft",

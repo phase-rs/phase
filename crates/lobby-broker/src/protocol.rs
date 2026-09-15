@@ -56,6 +56,90 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 71 — `DraftKind::Winston` and `DraftAction::SharedStackDecision` are
+///      serialized by draft WebSocket messages. A PARSE bump like 27 and 34,
+///      not a capability bump like 24 — but a CONDITIONAL one, and the
+///      condition is worth naming: neither type carries `#[serde(other)]` or a
+///      fallback variant, so a v70 peer fails deserialization outright on
+///      `"Winston"` or on the `SharedStackDecision` tag, and a v71 peer
+///      likewise cannot round-trip a frame a v70 peer would have to invent.
+///      The break runs in BOTH directions and is unconditional **for a Winston
+///      pod's frames**; every other kind's draft frames are byte-identical to
+///      v70, so no existing Premier/Traditional/Sealed/CommanderDraft pod is
+///      affected. `DraftDelta::SharedStackDecisionApplied`,
+///      `DraftError::{SharedStackDecisionRefused,
+///      InvalidSharedStackConfiguration}` and `PickStatus::Waiting` ride the
+///      same condition.
+///      `DraftPlayerView::{shared_stack, play_first_chooser}`,
+///      `SpectatorDraftView::shared_stack` and `DraftSession::shared_stack`
+///      are additive: each is `Option` with `#[serde(default,
+///      skip_serializing_if = "Option::is_none")]`, so a v70 peer parses a v71
+///      non-Winston view and a v71 peer parses every v70 snapshot — exempt on
+///      their own, and listed because 71 carries them, not because they force
+///      it. The same `skip_serializing_if` is why no existing persisted draft
+///      snapshot changes shape, and why the TypeScript mirrors of those fields
+///      are declared optional. `play_first_chooser` is ADVISORY: it names the
+///      seat the format gives the play/draw choice to, and no engine path
+///      enforces it, because game one's starting player still comes from
+///      CR 103.1's contest. `PackDistribution::SharedStackPiles { pile_count }`
+///      forces nothing here: `DraftProcedure` is computed from `kind` and
+///      never persisted, and `DraftProcedureDto` crosses only the
+///      wasm-bindgen boundary, not this protocol. Lobby messages are
+///      unchanged: `DraftLobbyMetadata::draft_kind` is a length-bounded
+///      `String` whose producer is `format!("{:?}", …)`, so `"Winston"` needs
+///      no lobby version move — only its doc's label list.
+///
+///   AMENDED IN PLACE, NOT BUMPED (1/3). The `DraftError` list above lost
+///   `SharedStackRequiresHumanSeats`, which was the engine's refusal of a
+///   bot seat in a shared-stack pod: such a pod now admits bot seats, so the
+///   variant has no producer and is deleted rather than deprecated. Removing
+///   a variant is ordinarily a bump, and this one is not, for the reason the
+///   next paragraph gives at length: 71 is unreleased upstream (upstream is
+///   70), so no peer ever spoke a 71 that carried it, and a second number
+///   would announce a break between two shapes that never coexisted on the
+///   wire. No TypeScript mirror names it -- MEASURED,
+///   `grep -rn SharedStackRequiresHumanSeats client/` is empty.
+///
+///   AMENDED IN PLACE, NOT BUMPED (2/3). `SharedStackState::history` and
+///   `SharedStackView::history` — vectors of the new
+///   `SharedStackDecisionRecord` (seat, pile, decision, pile_size; no card,
+///   deliberately and permanently) — were added after this entry was
+///   written. 71 is unreleased upstream (upstream is 70), so no peer has
+///   ever spoken a 71 without them and there is no version for a bump to
+///   separate: a second number would announce a break between two shapes
+///   that never coexisted on the wire. Both carry `#[serde(default)]`, so a
+///   local snapshot persisted by an earlier 71 build loads with an empty
+///   history rather than failing `import_draft_session`; the TypeScript
+///   mirror is REQUIRED rather than optional (`SharedStackView.history` in
+///   `client/src/adapter/draft-adapter.ts`), because the view is built by
+///   the engine on every frame and never by a client. They ride the same
+///   Winston-pod condition as the rest of this entry: a non-Winston pod's
+///   frames stay byte-identical to v70.
+///
+///   AMENDED IN PLACE, NOT BUMPED (3/3), on the same evidence — 71 is
+///   unreleased upstream, so no peer has ever spoken a 71 without these:
+///     * `SharedStackState::forced_draws` and `SharedStackView::forced_draw`
+///       — the card a seat's final-pile decline drew off the top of the main
+///       stack, sight unseen. The state field is per seat with
+///       `#[serde(default)]`; the view field is the ONLY card-bearing
+///       private field on that view and is projected to the drawing seat
+///       alone, never to an opponent and never to either spectator
+///       visibility. Rides the Winston-pod condition like the rest.
+///     * `SeatPublicView::drafted_card_count` and
+///       `DraftPlayerView::distribution` — and THESE TWO BREAK THE
+///       CONDITION. They ride every kind's frames, so the sentence above
+///       ("every other kind's draft frames are byte-identical to v70") is
+///       true of everything named before this paragraph and false of these.
+///       Both are required (non-`Option`) engine-built fields, so a v70
+///       server's view fails to satisfy a v71 client's shape for EVERY kind,
+///       not just Winston — which is what the version gate is for, and it
+///       already refuses the mismatch. `drafted_card_count` is a count and
+///       never an identity, and it is public in every kind: a pick-and-pass
+///       seat's total follows from the pick number, and a shared stack's is
+///       visible across the table. `distribution` is a procedure fact
+///       published for the same reason `launch_capability` is, and
+///       deliberately NOT status-gated, so a surface that outlives the
+///       drafting phase can still tell a pile pod from a passing one.
 /// 70 — `OutsideGameChoiceSource::BoosterPack` replaced its `set_code: String`
 ///      with a required `origin: PackOrigin` (`Set(code)` or `Cube`), so a
 ///      `WaitingFor::OutsideGameChoice` for an opened pack no longer decodes
@@ -432,7 +516,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 70;
+pub const PROTOCOL_VERSION: u32 = 71;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -704,10 +788,18 @@ pub struct DraftLobbyMetadata {
     /// `"custom-cube"`; see [`DraftLobbyMetadata::cube_name`] for the
     /// human-readable cube name.
     pub set_code: String,
-    /// Draft kind label: "Quick", "Premier", "Traditional", "Sealed", or
-    /// "CommanderDraft". The field is a `String`, so adding a label is
-    /// documentation only — the wire shape is transparent to it and no
-    /// deserialization changes.
+    /// Draft kind label: "Quick", "Premier", "Traditional", "Sealed",
+    /// "CommanderDraft", or "Winston". The field is a `String`, so adding a
+    /// label is documentation only — the wire shape is transparent to it and
+    /// no deserialization changes.
+    ///
+    /// This doc IS the registration: the field is a length-bounded `String`
+    /// (`validation.rs`'s `MAX_DRAFT_KIND_LEN = 32`, no allowlist) whose
+    /// producers are `format!("{:?}", …)` over the engine's `DraftKind`
+    /// (`server-core/src/persist.rs`, `phase-server/src/main.rs`), so a new
+    /// kind owes no producer edit. For the same reason
+    /// [`LOBBY_PROTOCOL_VERSION`] correctly does NOT move for a new kind —
+    /// no lobby variant's wire shape observes the label.
     pub draft_kind: String,
     /// Human-readable cube name when the pod is a cube draft. Absent for
     /// set drafts. Backward-compatible: `#[serde(default)]` accepts
@@ -1508,12 +1600,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 70);
+        assert_eq!(PROTOCOL_VERSION, 71);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 69);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 70);
     }
 
     #[test]

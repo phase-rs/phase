@@ -1465,6 +1465,73 @@ describe("card pool board primitives", () => {
     )).toEqual({ column: 2, row: 0 });
   });
 
+  /**
+   * THE ENGINE OWNS THE ROW, FOR ANY CARD IT HAS CLASSIFIED.
+   *
+   * `workspace_row_classification` is the published answer; a regex over the
+   * printed type line is a second opinion. They part company on exactly the
+   * cards a two-row board most needs to get right -- an artifact creature, a
+   * Vehicle the engine is currently treating as a creature, a changeling. This
+   * pins the engine's answer winning even when the type line reads the other
+   * way, in BOTH directions, so the assertion cannot be satisfied by a rule
+   * that merely happens to agree.
+   *
+   * REVERT-FAILING: restore `/\bcreature\b/i.test(card.type_line) ? 0 : 1` as
+   * the unconditional rule and both legs red.
+   */
+  it("takes_the_row_from_engine_classification_not_the_printed_type_line", () => {
+    // Reads "Creature" but the engine has classified it as a noncreature.
+    const artifactCreature = {
+      ...card("artifact-creature"),
+      type_line: "Artifact Creature — Construct",
+    };
+    // Reads as no creature at all, but the engine says it is one.
+    const animatedVehicle = { ...card("animated-vehicle"), type_line: "Artifact — Vehicle" };
+    const pool = [artifactCreature, animatedVehicle];
+    const poolGroups: DraftPoolGroups = {
+      ...groups([artifactCreature.instance_id]),
+      workspace_row_classification: {
+        creature_instance_ids: [animatedVehicle.instance_id],
+        noncreature_instance_ids: [artifactCreature.instance_id],
+      },
+    };
+    const workspace: DraftWorkspaceState = { ...placedState([]), placements: {} };
+    const twoRow = { ...preferences, rows: "two" as const, columnCount: 4 };
+
+    // Type line says creature, engine says no -> spell row.
+    expect(resolveWorkspacePickPlacement(
+      artifactCreature, "deck", pool, poolGroups, workspace, twoRow,
+    ).row).toBe(1);
+    // Type line says no creature, engine says yes -> creature row.
+    expect(resolveWorkspacePickPlacement(
+      animatedVehicle, "deck", pool, poolGroups, workspace, twoRow,
+    ).row).toBe(0);
+  });
+
+  /**
+   * The paired case the engine CANNOT answer, and the reason the rule above is
+   * conditional rather than absolute. `handleConfirmPick` resolves a placement
+   * for a card out of `current_pack`, which is not in `pool` and so not in
+   * `pool_groups`: an id missing from `creature_instance_ids` there means "not
+   * classified yet", not "not a creature". Reading it as the latter sent every
+   * picked creature to the spell row.
+   */
+  it("falls_back_to_the_type_line_for_a_card_the_engine_has_not_published_yet", () => {
+    const poolCard = card("already-in-pool");
+    const packCreature = { ...card("still-in-pack"), type_line: "Creature — Goblin" };
+    const poolGroups = groups([poolCard.instance_id]);
+    const workspace: DraftWorkspaceState = { ...placedState([]), placements: {} };
+
+    expect(resolveWorkspacePickPlacement(
+      packCreature,
+      "deck",
+      [poolCard],
+      poolGroups,
+      workspace,
+      { ...preferences, rows: "two" as const, columnCount: 4 },
+    ).row).toBe(0);
+  });
+
   it("does_not_treat_a_mixed_shared_header_as_a_matching_color_column", () => {
     const whiteCreature = { ...card("white-creature"), colors: ["W"], type_line: "Creature — Human" };
     const redSpell = { ...card("red-spell"), colors: ["R"], type_line: "Instant" };

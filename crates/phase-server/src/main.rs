@@ -44,7 +44,7 @@ use lobby_broker::{
     BuildCommitCheck, ConnState, Outbound, RawAnnouncement, ServerAnnouncement, ServerInfoDocument,
     DIRECTORY_VERSION, INFO_PATH, MAX_SERVER_NAME_LEN, NOT_OWNED_RESERVATION,
 };
-use rand::{Rng, TryRngCore};
+use rand::TryRngCore;
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::ai_seats_wire_guard::{guard_create_ai_seats, MAX_FULL_GAME_PLAYER_COUNT};
 use server_core::client_hello_guard::guard_client_hello;
@@ -56,8 +56,8 @@ use server_core::draft_session::{
     draft_seats_needing_auto_pick, DraftMatchPlayer, DraftMatchSpawn, DraftSessionManager,
 };
 use server_core::draft_wire_guard::{
-    guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,
-    guard_reconnect_draft,
+    guard_chaos_layout_for_kind, guard_create_draft_with_settings, guard_draft_action,
+    guard_join_draft_with_password, guard_reconnect_draft,
 };
 use server_core::emote_guard::guard_emote;
 use server_core::game_action_payload_guard::guard_game_action_payload;
@@ -1317,13 +1317,20 @@ fn client_forbidden_draft_action_reason(action: &draft_core::types::DraftAction)
         DraftAction::SetSeatConnected { .. } => {
             Some("SetSeatConnected is server-internal; not allowed from client".to_string())
         }
+        // A shared-stack decision is ordinary player intent, exactly as `Pick`
+        // is: the seat is re-scoped to the authenticated one by
+        // `authorize_client_draft_action`, and the pile index is bounded by
+        // `guard_draft_action_payload`. Classifying it server-internal would
+        // refuse EVERY shared-stack decision at the transport, before the
+        // reducer ever saw one.
         DraftAction::StartDraft
         | DraftAction::Pick { .. }
         | DraftAction::PickWithDraftEffect { .. }
         | DraftAction::SubmitDeck { .. }
         | DraftAction::ReportMatchResult { .. }
         | DraftAction::AdvanceRound
-        | DraftAction::ReplaceSeatWithBot { .. } => None,
+        | DraftAction::ReplaceSeatWithBot { .. }
+        | DraftAction::SharedStackDecision { .. } => None,
     }
 }
 
@@ -5718,50 +5725,51 @@ fn spawn_pick_timer(
 
         let pod_size = session.player_tokens.len();
         let seats = draft_seats_needing_auto_pick(&mut session.session, pod_size);
+        // DELEGATES to `DraftSessionManager::pick_random_for_seat` rather than
+        // re-deriving the body. One authority, and the delegation is also what
+        // removes the second `current_pack` guard this body used to carry: that
+        // guard re-imposed the pick-and-pass filter one layer ABOVE the
+        // distribution dispatch `draft_seats_needing_auto_pick` and
+        // `pick_random_for_seat` now perform, which would have made every
+        // shared-stack arm below it dead. The CR 903.13b pick-step derivation
+        // (and the shared-stack forced decision) live there, in the one copy.
         for seat_idx in seats {
-            if let Some(pack) = &session.session.current_pack[seat_idx] {
-                if !pack.0.is_empty() {
-                    // CR 903.13b: the expired pick timer takes the kind's WHOLE
-                    // pick step — one card for the four CR 905.1a kinds, two for
-                    // CommanderDraft, dropping to the remainder on an odd final
-                    // pick. Read from the procedure so this and the reducer's
-                    // `expected` agree by construction. Was a hardcoded single
-                    // id, which stalled a Commander pod at `WrongPickCardCount`.
-                    // Same mechanism as `server-core`'s disconnected-seat
-                    // auto-pick, which carries the full derivation.
-                    let cards_per_pick =
-                        usize::from(session.session.config.kind.procedure().cards_per_pick)
-                            .min(pack.0.len());
-                    let mut rng = rand::rng();
-                    // Distinct ids: drawing twice by index into the pack could
-                    // pick the same card twice, which the reducer rejects.
-                    let mut remaining: Vec<String> =
-                        pack.0.iter().map(|c| c.instance_id.clone()).collect();
-                    let card_instance_ids: Vec<String> = (0..cards_per_pick)
-                        .map(|_| remaining.swap_remove(rng.random_range(0..remaining.len())))
-                        .collect();
-                    let action = draft_core::types::DraftAction::Pick {
-                        seat: seat_idx as u8,
-                        card_instance_ids,
-                    };
-                    if let Err(e) = draft_core::session::apply(&mut session.session, action, None) {
-                        warn!(
-                            draft = %timer_draft_code,
-                            seat = seat_idx,
-                            error = %e,
-                            "auto-pick failed"
-                        );
-                    }
-                }
+            if let Err(e) = mgr.pick_random_for_seat(&timer_draft_code, seat_idx as u8, None) {
+                warn!(
+                    draft = %timer_draft_code,
+                    seat = seat_idx,
+                    error = %e,
+                    "auto-pick failed"
+                );
             }
         }
 
-        session.timer_remaining_ms = None;
+        if let Some(session) = mgr.sessions.get_mut(&timer_draft_code) {
+            session.timer_remaining_ms = None;
+        }
 
         drop(mgr);
         broadcast_draft_views(&timer_draft_code, &timer_connections, &timer_draft_state).await;
 
         // Re-arm for the next pick window if the draft is still in progress.
+        //
+        // UNCONDITIONAL, and that is load-bearing for a shared-stack pod: this
+        // self-re-arm is what keeps one from stalling.
+        // `should_rearm_pick_timer` governs only the POST-ACTION restart and is
+        // keyed on `DraftPickWindow = (status, current_pack_number,
+        // pick_number)` — two counters a shared-stack session never moves — so
+        // the post-action path never re-arms for one and only this loop does.
+        //
+        // The residual defect is therefore FAIRNESS, not a stall: after a
+        // shared-stack decision the clock is not restarted, so the next seat
+        // begins its turn with whatever seconds its opponent left behind. That
+        // is DELIBERATELY DEFERRED. The fix is a `DraftPickWindow`
+        // tuple-to-named-struct retype across eleven sites in this file plus
+        // five existing assertions and a new `DraftSession` method, and the
+        // whole benefit accrues to the server-authoritative draft path, which
+        // no shipped client reaches. Recorded here so the next reader neither
+        // re-derives the wrong severity ("the pod stalls" — it does not) nor
+        // concludes the gap was missed.
         let still_drafting = {
             let mgr = timer_draft_state.lock().await;
             let status = mgr
@@ -10430,8 +10438,15 @@ async fn handle_client_message(
                 // core layout holds the result, so reconnect/start never reroll
                 // a pod and a client never transmits assignments.
                 server_core::protocol::DraftSourceIntent::Chaos { candidate_codes } => {
-                    let seed = rand::rngs::OsRng.try_next_u64().map_err(|error| {
-                        format!("Unable to seed Chaos draft assignments: {error}")
+                    // Asked BEFORE the entropy draw and before this pod is
+                    // registered and broadcast, because the reducer's answer at
+                    // `StartDraft` would otherwise arrive on a full lobby that
+                    // can never start. The engine owns both the verdict and its
+                    // wording; this boundary only asks earlier.
+                    let seed = guard_chaos_layout_for_kind(kind).and_then(|()| {
+                        rand::rngs::OsRng.try_next_u64().map_err(|error| {
+                            format!("Unable to seed Chaos draft assignments: {error}")
+                        })
                     });
                     seed.and_then(|seed| {
                         draft_pools
@@ -15883,11 +15898,31 @@ mod handshake_tests {
                 seat: 1,
                 name: None,
             },
+            draft_core::types::DraftAction::SharedStackDecision {
+                seat: 0,
+                pile: 0,
+                decision: draft_core::types::SharedStackPileDecision::Take,
+            },
         ];
         for action in allowed {
             assert!(
                 client_forbidden_draft_action_reason(&action).is_none(),
                 "expected {action:?} to be allowed from client"
+            );
+        }
+        // Paired positive, already in this file's sibling tests and restated
+        // here so the allow-list above cannot degrade into an allow-everything:
+        // the two server-internal variants are still refused.
+        for forbidden in [
+            draft_core::types::DraftAction::GeneratePairings,
+            draft_core::types::DraftAction::SetSeatConnected {
+                seat: 0,
+                connected: true,
+            },
+        ] {
+            assert!(
+                client_forbidden_draft_action_reason(&forbidden).is_some(),
+                "expected {forbidden:?} to stay server-internal"
             );
         }
     }
