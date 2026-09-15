@@ -996,8 +996,13 @@ async function runTournamentRpc<T>(
   send: (
     socket: PhaseSocket,
     signal: AbortSignal,
+    origin: string,
   ) => Promise<TournamentRpcResult<T>>,
 ): Promise<TournamentRpcResult<T>> {
+  // `url` is the broker authority captured ONCE, synchronously, at entry. It is
+  // threaded to `send` as `origin` so nothing downstream re-reads the mutable
+  // `hostingServer` — a host switch during socket acquisition cannot re-bind the
+  // action or its renewal to a different broker than the one this socket is for.
   const url = tournamentBroadcastUrl(get);
   if (url === null) {
     return {
@@ -1006,7 +1011,9 @@ async function runTournamentRpc<T>(
       message: "Lobby connection unavailable. Check your server address.",
     };
   }
-  return withOriginSocket(set, get, url, send);
+  return withOriginSocket(set, get, url, (socket, signal) =>
+    send(socket, signal, url),
+  );
 }
 
 /**
@@ -1160,6 +1167,7 @@ export async function maybeRenewNearExpiry(
   set: MultiplayerSet,
   get: MultiplayerGet,
   socket: PhaseSocket,
+  origin: string,
   code: string,
   role: TournamentRole,
   heldToken: string,
@@ -1189,13 +1197,13 @@ export async function maybeRenewNearExpiry(
   // on the same surviving secret. The entry is cleared when the renewal settles
   // so a later, non-concurrent action starts fresh.
   //
-  // Keyed on (BROKER ORIGIN, code, role), not just (code, role): the origin is
-  // the broker this tournament's RPCs run against. Without it, an action against
-  // broker B after an A→B host switch could await broker A's still-in-flight
-  // renewal and send A's bearer token to B. `JSON.stringify` of the triple is
-  // the key so no origin, code, or role can be spelled to collide with another
-  // triple (it escapes any internal quotes/brackets).
-  const origin = tournamentBroadcastUrl(get) ?? "";
+  // Keyed on (BROKER ORIGIN, code, role), not just (code, role): the `origin` is
+  // the broker this RPC was bound to at entry, threaded in IMMUTABLY (not re-read
+  // from the mutable `hostingServer` here, which could have changed during socket
+  // acquisition). Without it, an action against broker B after an A→B host switch
+  // could await broker A's still-in-flight renewal and send A's bearer token to
+  // B. `JSON.stringify` of the triple is the key so no origin, code, or role can
+  // be spelled to collide with another triple (it escapes internal quotes).
   const key = JSON.stringify([origin, code, role]);
   const existing = credentialRenewalsInFlight.get(key);
   if (existing !== undefined) return existing;
@@ -1359,6 +1367,10 @@ async function runGatedTournamentRpc<T>(
     signal: AbortSignal,
   ) => Promise<TournamentRpcResult<T>>,
 ): Promise<GatedTournamentRpcResult<T>> {
+  // The broker authority this RPC will run against, captured synchronously here
+  // (same tick `runTournamentRpc` will re-derive its socket url from), so the
+  // credential check below and the socket acquisition agree on one origin.
+  const rpcOrigin = tournamentBroadcastUrl(get);
   const held = get().tournamentCredentials[code];
   let token: string | undefined;
   switch (role) {
@@ -1380,17 +1392,36 @@ async function runGatedTournamentRpc<T>(
           : "You are not entered in this tournament.",
     };
   }
+  // Origin binding: a bearer minted against a DIFFERENT broker must never be sent
+  // to this one (codes are only unique per broker, so an A→B host switch could
+  // otherwise send A's token to B). Refuse before anything goes on the wire. A
+  // credential with no recorded origin (a legacy blob) is left unchecked.
+  if (
+    held?.origin !== undefined &&
+    rpcOrigin !== null &&
+    held.origin !== rpcOrigin
+  ) {
+    return {
+      ok: false,
+      reason: "not_authorized",
+      role,
+      message:
+        "This credential was issued by a different server. Reconnect to that server to act on this tournament.",
+    };
+  }
   const heldToken = token;
-  return runTournamentRpc(set, get, async (socket, signal) => {
+  return runTournamentRpc(set, get, async (socket, signal, origin) => {
     // Proactive rotation before the action: a credential nearing its expiry is
     // refreshed while still valid, since an expired one cannot be renewed. A
     // fresh credential (or a broker below the recoverable-rotation floor) falls
     // straight through — `maybeRenewNearExpiry` returns the held token with no
-    // round trip.
+    // round trip. `origin` is the immutable broker authority threaded from
+    // `runTournamentRpc`, so the renewal binds to the same broker the action does.
     const freshToken = await maybeRenewNearExpiry(
       set,
       get,
       socket,
+      origin,
       code,
       role,
       heldToken,
@@ -1983,6 +2014,15 @@ export interface TournamentCredential {
    * am I in THIS event" stays answerable even if the ambient id ever changes.
    */
   playerKey?: string;
+  /**
+   * The broker origin (hosting-server URL) this credential was minted against.
+   * Bearer tokens are broker-scoped: a token minted on server A must never be
+   * sent to server B (tournament codes are only unique per broker). A gated RPC
+   * refuses to send when its resolved origin does not match this, so an A→B host
+   * switch cannot leak A's bearer to B. Absent only on a pre-origin-binding
+   * credential (a legacy sessionStorage blob), where it degrades to unchecked.
+   */
+  origin?: string;
   /** ms epoch of the last write. The eviction key; never rendered. */
   updatedAt: number;
 }
@@ -2090,6 +2130,10 @@ export function normalizeTournamentCredentials(
       typeof raw.playerToken === "string" ? raw.playerToken : undefined;
     const playerKey =
       typeof raw.playerKey === "string" ? raw.playerKey : undefined;
+    // The broker origin the credential is bound to — preserved so the
+    // origin-binding check survives a sessionStorage round trip.
+    const origin =
+      typeof raw.origin === "string" ? raw.origin : undefined;
     if (organizerToken === undefined && playerToken === undefined) continue;
     // An expiry is kept only beside a token that actually survived — a bare
     // expiry with no token is meaningless, and its token's absence already
@@ -2130,6 +2174,7 @@ export function normalizeTournamentCredentials(
         ? { playerPendingRotationNonce }
         : {}),
       ...(playerKey !== undefined ? { playerKey } : {}),
+      ...(origin !== undefined ? { origin } : {}),
       updatedAt:
         typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt)
           ? raw.updatedAt
@@ -3806,6 +3851,10 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                 result.value.code,
                 {
                   organizerToken: result.value.organizer_token,
+                  // The broker this token was minted against — `url` is the
+                  // socket's origin, captured at RPC entry. Binds the bearer so a
+                  // later host switch cannot send it to a different server.
+                  origin: url,
                   // Guarded, not merely read: the reply TYPE marks
                   // `expires_at_ms` required, but a pre-v6 broker omits it and
                   // the field is `undefined` at this trust boundary. No expiry
@@ -3822,7 +3871,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       joinTournament: async (code, displayName) =>
-        runTournamentRpc(set, get, async (socket, signal) => {
+        runTournamentRpc(set, get, async (socket, signal, origin) => {
           // Captured BEFORE the await so the credential records the key that
           // was actually sent, not whatever `playerId` reads as afterwards.
           const playerKey = get().playerId;
@@ -3841,6 +3890,9 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                 {
                   playerToken: result.value.player_token,
                   playerKey,
+                  // The broker this entrant token was minted against — binds the
+                  // bearer to its origin (same reasoning as the organizer mint).
+                  origin,
                   // Guarded for the same reason as the organizer mint above.
                   ...(isFiniteNumber(result.value.expires_at_ms)
                     ? { playerTokenExpiresAtMs: result.value.expires_at_ms }

@@ -732,9 +732,50 @@ describe("tournament credentials", () => {
       playerToken: "ply-a",
       playerTokenExpiresAtMs: 1_800_000_000_000,
       playerKey: sent.player_key,
+      // The credential is bound to the broker it was minted against.
+      origin: SERVER_PRESETS[0].url,
       updatedAt: expect.any(Number) as unknown as number,
     });
     expect(sent.player_key).toBe(store().playerId);
+  });
+
+  // Maintainer [HIGH] #1, ordinary (non-renewal) path: a bearer minted on server
+  // A must never be sent to server B after a host switch. The origin-bound
+  // credential makes a gated action refuse locally, before anything is sent.
+  it("refuses a gated action when the host has switched away from the credential's origin", async () => {
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+
+    // Create a tournament on server A (SERVER_PRESETS[0]); its organizer token is
+    // bound to that origin.
+    const created = store().createTournament({
+      name: "Origin Bound",
+      arity: 2,
+      scoring: { win_points: 3, draw_points: 1, loss_points: 0 },
+      bracket: "Swiss",
+    });
+    await flush();
+    fake.deliver("TournamentCreated", {
+      code: "OBND",
+      organizer_token: "org-a",
+      expires_at_ms: 1_800_000_000_000,
+      view: viewFor("OBND"),
+    });
+    await created;
+    expect(store().tournamentCredentials.OBND?.origin).toBe(SERVER_PRESETS[0].url);
+
+    // The user switches their hosting server to a DIFFERENT broker.
+    const otherBroker = "wss://other-broker.example/ws";
+    expect(otherBroker).not.toBe(SERVER_PRESETS[0].url);
+    store().setHostingServer(otherBroker);
+
+    // A gated action now resolves against server B. It must be refused locally as
+    // not-authorized — the A-minted bearer is never put on the wire to B.
+    fake.send.mockClear();
+    const result = await store().startTournamentRound("OBND");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("not_authorized");
+    expect(fake.tally("StartTournamentRound")).toBe(0);
   });
 });
 
