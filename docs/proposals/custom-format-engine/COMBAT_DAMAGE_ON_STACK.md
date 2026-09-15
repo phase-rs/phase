@@ -5,7 +5,7 @@
 built. It is the last `LegacyRuleSet` axis, and it gates the two remaining
 Eternal Central presets, `middle_school()` and `classic_magic()`.
 
-**Revision 4** (2026-09-15). Final revision after three review rounds, each
+**Revision 4** (2026-09-15; Q4 decision recorded). Final revision after three review rounds, each
 pairing an architecture review with an adversarial fact-check of the rules
 premises. The round-3 verdict was **APPROVE WITH CHANGES**; this revision
 applies all of those changes. §11 records what every finding changed.
@@ -43,16 +43,18 @@ lifelink batching and the trigger/SBA loop are reused, not duplicated.
 - a policy module like `game::mana_burn`.
 
 **Plan.** Four implementation phases (§9). The first two are no-behavior
-groundwork. The gate flips, and the presets register, only in the last.
+groundwork. The gate flips, and **Middle School** registers, only in the last.
+**Classic Magic is deferred** to a separate follow-up (decided 2026-09-15, Q4).
 
 **Corrections to the charter:**
 1. `PLAN.md:644`, `RESEARCH.md:331` and the `CombatDamageTiming` doc comment
    (`types/custom_format.rs:79-84`) call this rule "pre-6th-edition". That is
    backwards. Damage on the stack was **introduced** by the Classic Sixth
    Edition rules (1999) and **removed** by M10 (July 2009); see §1.3.
-2. `PLAN.md`/`RESEARCH.md` treat both EC formats as "modern rules plus
-   overlays". Classic Magic actually describes itself as "Sixth Edition rules";
-   §1.4 records how this design handles that.
+2. Classic Magic's page opens by saying it "uses Sixth Edition rules". Its
+   operative ruleset, though, is the enumerated "Notable Rules/Differences
+   from Modern Era of Magic" list (§1.4), which asks for nothing this design
+   doesn't provide except two card-text overrides.
 
 Phase 3a fixes the doc comment. The merged design documents stay as reviewed,
 per `IMPLEMENTATION_PLAN.md`'s convention, and this document records the
@@ -208,11 +210,22 @@ The two Eternal Central pages frame their rules differently.
     similar to how Illusionary Mask worked in a previous rules update, prior to
     the modern wording."
 
-**Design decision D0 (a project decision, not a quotation): `OnStack` changes
-only combat damage *timing* and dealing-time source/recipient identity.
-Everything else follows the current CR and current Oracle text.** For Middle
-School this is exactly what the page requires. For Classic Magic it is a
-deliberate approximation (Q4).
+**Design decision D0: `OnStack` changes only combat damage *timing* and
+dealing-time source/recipient identity. Everything else follows the current CR
+and current Oracle text.**
+- **Middle School:** this is exactly what the page requires ("Everything else
+  … works the same as modern Magic rules").
+- **Classic Magic:** this also matches what the page requires. "Uses Sixth
+  Edition rules (including stacking damage, and mana burn)" is its
+  introduction. The operative list, "Notable Rules/Differences from Modern Era
+  of Magic", has exactly four items:
+  1. mana burn (`ManaBurnPolicy`, shipped);
+  2. damage uses the stack (this axis);
+  3. pre-M10 Wish (`WishOutsideGameScope`, shipped);
+  4. updated text for Time Vault and Illusionary Mask.
+
+  It asks for no other 2009 rule, so the table below lists differences from
+  2009 play, not gaps in either preset's ruleset.
 
 **Known departures from 2009 behavior that D0 accepts:**
 
@@ -223,10 +236,13 @@ deliberate approximation (Q4).
 | 310.5 read literally: "any attackers and blockers that didn't assign combat damage in the first step" | CR 702.7b: participation fixed "as the first combat damage step began" | A first striker whose blocker left (so it assigned nothing) doesn't assign again in the second step. |
 | Division among multiple blockers: 310.2c/d "divided as its controller chooses" | CR 510.1c/d "divided as its controller chooses among them" | None. |
 
-**Classic Magic card-text overrides** (Time Vault, Illusionary Mask) are a
-separate per-card concern **outside this axis**. They must be resolved or
-explicitly disclosed before `classic_magic()` registers (§9 Phase 3d), under
-PLAN.md §7's no-caveated-exposure rule.
+**Classic Magic card-text overrides** (Time Vault, Illusionary Mask) are the
+one remaining gap for Classic, and they are **outside this axis**: they need
+format-scoped card text, not combat changes. **Decision (2026-09-15): Classic
+Magic is deferred.** `classic_magic()` is not written or registered in this
+sub-project. It follows as a separate PR that adds those two overrides, under
+PLAN.md §7's no-caveated-exposure rule. Middle School has no such overrides and
+registers in Phase 3d.
 
 **Triggers on damage being assigned** (310.1) are out of scope, because no
 current Oracle text has one. Scryfall `o:"is assigned combat damage"` returns
@@ -1014,13 +1030,13 @@ sharp by mutating the fix and pasting the failure.
 
 - **Gate:** add `LegacyAxis::CombatDamageTiming` to `IMPLEMENTED_LEGACY_AXES`,
   and re-check every reachability claim against the widened gate.
-- **Presets:** **write** `middle_school()` and `classic_magic()`. Neither exists
+- **Preset:** **write and register** `middle_school()` only. It doesn't exist
   at the pin. Use PLAN.md §2 and RESEARCH.md §1; verify set codes against
   `set_catalog`; assert rosters by name.
-- **Classic Magic:** before `classic_magic()` registers, Q4 must be decided and
-  the Time Vault / Illusionary Mask overrides resolved or disclosed. Otherwise
-  Middle School registers alone and Classic stays withheld with a documented
-  reason, the same shape as `swedish_old_school()`.
+- **Classic Magic: deferred** (Q4). Its registration follows in its own PR,
+  once the Time Vault / Illusionary Mask format-scoped card text exists. That
+  PR must also add a registration-gate test proving `classic_magic()` can't
+  become selectable without those overrides.
 - **Polish:** AI arms (§6); `cargo ai-gate` once with no refresh;
   `StackTargetArcs`; README / IMPLEMENTATION_PLAN status.
 
@@ -1048,11 +1064,10 @@ sharp by mutating the fix and pasting the failure.
 - **Q2 — resolved:** no controller (D9, 2009 600.4a).
 - **Q3 — scope beyond the presets:** "Lost Legacy 606" (CONTEXT.md) is
   expressible with this axis, but it isn't a bundled preset.
-- **Q4 — Classic Magic fidelity boundary.** Is D0 (with the §1.4 departures
-  table, especially lifelink saving a player at 0) plus disclosed card-text
-  overrides acceptable for `classic_magic()`? Or does its "Sixth Edition rules"
-  framing require more? This is a product decision for the user and
-  maintainers. It gates only Classic.
+- **Q4 — resolved (2026-09-15):** Classic Magic's ruleset is its enumerated
+  four-item list, so D0 is faithful to it. The only gap is the Time Vault /
+  Illusionary Mask card text. Decision: **Middle School first; Classic
+  deferred** to a separate follow-up PR that adds those overrides.
 - **Q5 — resolved:** damage from a departed player's sources is dealt from LKI.
   2009 600.4a: "A player leaving the game doesn't affect combat damage on the
   stack"; combined with 310.4a/b. Implementation dependency: R9.
