@@ -303,10 +303,25 @@ pub(crate) fn static_functions_in_zone(obj: &GameObject, def: &StaticDefinition)
 /// because those depend on the proposed event, not on the object's zone. A
 /// definition in case 1 gets no carve-outs — it has already said where it works.
 pub(crate) fn replacement_functions_in_zone(obj: &GameObject, def: &ReplacementDefinition) -> bool {
+    replacement_functions_from_zone(def, obj.zone)
+}
+
+/// CR 113.6b: [`replacement_functions_in_zone`] against an EXPLICIT zone rather
+/// than the source's current one.
+///
+/// Exists for CR 113.6h + CR 614.12: "an object's ability that modifies how that
+/// particular object enters the battlefield functions as that object is entering
+/// the battlefield," and CR 614.12 directs the check at "the characteristics of
+/// the permanent as it would exist ON THE BATTLEFIELD." At that moment the
+/// object still sits in the zone it is LEAVING (hand, library, graveyard, stack),
+/// so asking where it is would reject a definition that declares the zone it is
+/// entering. `replacement::object_replacement_candidate_applies` passes the
+/// destination for that one case and the source's own zone for every other.
+pub(crate) fn replacement_functions_from_zone(def: &ReplacementDefinition, zone: Zone) -> bool {
     if def.active_zones.is_empty() {
-        DEFAULT_REPLACEMENT_ZONES.contains(&obj.zone)
+        DEFAULT_REPLACEMENT_ZONES.contains(&zone)
     } else {
-        def.active_zones.contains(&obj.zone)
+        def.active_zones.contains(&zone)
     }
 }
 
