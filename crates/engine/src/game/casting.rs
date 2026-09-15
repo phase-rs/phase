@@ -10362,7 +10362,6 @@ pub(crate) fn resolution_spell_face_legality(
         object_id,
         policy,
         permission_index,
-        false,
     )
 }
 
@@ -10378,7 +10377,6 @@ fn resolution_spell_face_legality_for_permission(
     object_id: ObjectId,
     policy: &crate::types::ability::ResolutionCastFacePolicy,
     permission_index: CastingPermissionIndex,
-    full_cost_front_face: bool,
 ) -> ResolutionSpellFaceLegality {
     let Some(original) = state.objects.get(&object_id) else {
         return ResolutionSpellFaceLegality {
@@ -10393,12 +10391,7 @@ fn resolution_spell_face_legality_for_permission(
     };
 
     for back_face in [false, true] {
-        if full_cost_front_face && back_face {
-            // CR 608.2g + CR 609.4b: a paid "cast that card" instruction
-            // uses the card's front characteristics, without a separate
-            // modal/split spell-face election.
-            continue;
-        } else if back_face && !may_choose_back {
+        if back_face && !may_choose_back {
             continue;
         }
         let mut projected = state.clone();
@@ -10466,7 +10459,7 @@ fn resolution_spell_face_legality_for_permission(
                 &projected,
                 player,
                 object_id,
-                (!back_face && full_cost_front_face).then_some(CastingVariant::Normal),
+                None,
                 None,
                 Some(permission_index),
                 CastingMode::Actual,
@@ -10498,7 +10491,6 @@ pub(crate) fn resolution_spell_face_legality_for_current_permission(
         object_id,
         policy,
         permission_index,
-        false,
     )
 }
 
@@ -12783,23 +12775,14 @@ pub(super) fn initiate_cast_during_resolution(
         cost,
     } = request;
     let cleanup_for_rejection = cleanup.clone();
-    // CR 608.2g + CR 712.8a: a paid cast granted by an effect uses the
-    // casting card's front face and printed mana cost unless that effect
-    // explicitly says to cast it transformed. Intrinsic graveyard methods such
-    // as disturb are separate alternatives and must not silently replace a
-    // Tinybones-style full-cost cast.
-    let full_cost_front_face = matches!(
-        &cost,
-        crate::types::ability::ResolutionCastCost::FullCost { .. }
-    ) && !cast_transformed;
     // CR 608.2g + CR 609.4b + CR 118.9: resolve the payment shape once.
     // `Free` zeroes the cost and auto-pays (Cascade/Discover/Suspend).
-    // `FullCost` charges the card's live printed cost (`SelfManaCost`) and
-    // pauses for manual payment so the caster can spend mana; the any-type
+    // `FullCost` charges the elected face's live printed cost (`SelfManaCost`)
+    // and pauses for manual payment so the caster can spend mana; the any-type
     // concession, when present, rides the grant (Quistis Trepe, Tinybones the
     // Pickpocket). `AlternativeMana` charges a specific explicit mana cost
     // borrowed from a keyword (The Face of Boe's suspend cost) and pauses for
-    // manual payment at that cost rather than the card's printed cost.
+    // manual payment at that cost rather than the elected face's printed cost.
     // CR 118.9a: `FullCost` restates the card's own printed cost — a normal
     // cast; `Free` / `AlternativeMana` substitute it (alternative costs).
     let cost_provenance = if matches!(
@@ -12872,7 +12855,6 @@ pub(super) fn initiate_cast_during_resolution(
         hit_card,
         &face_policy,
         casting_permission_index,
-        full_cost_front_face,
     );
     if legality.count() == 0 {
         state
@@ -12922,9 +12904,7 @@ pub(super) fn initiate_cast_during_resolution(
         hit_card,
         ResolutionModalFaceChoice {
             permission_index: casting_permission_index,
-            back_face: legality.only_back(),
             payment_mode,
-            full_cost_front_face,
         },
         events,
     );
@@ -12991,9 +12971,7 @@ fn selected_resolution_spell_face_is_allowed(
 /// so a forged/rejected choice is transactionally inert.
 pub(super) struct ResolutionModalFaceChoice {
     pub(super) permission_index: CastingPermissionIndex,
-    pub(super) back_face: bool,
     pub(super) payment_mode: CastPaymentMode,
-    pub(super) full_cost_front_face: bool,
 }
 
 pub(super) fn continue_resolution_modal_face_choice(
@@ -13041,7 +13019,7 @@ pub(super) fn continue_resolution_modal_face_choice(
         state,
         player,
         object_id,
-        (!choice.back_face && choice.full_cost_front_face).then_some(CastingVariant::Normal),
+        None,
         None,
         Some(choice.permission_index),
         CastingMode::Actual,

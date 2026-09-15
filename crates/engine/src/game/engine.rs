@@ -11085,9 +11085,7 @@ fn apply_non_priority_pass_action(
                     *object_id,
                     casting::ResolutionModalFaceChoice {
                         permission_index,
-                        back_face,
                         payment_mode: *payment_mode,
-                        full_cost_front_face: false,
                     },
                     &mut events,
                 );

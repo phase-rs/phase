@@ -53627,6 +53627,104 @@ fn resolution_cast_auto_selects_its_only_legal_spell_face() {
     assert!(state.objects[&spell].modal_back_face);
 }
 
+/// A paid resolution offer evaluates both independently castable faces.  Once
+/// a player elects the back face, `SelfManaCost` must resolve from that face
+/// rather than silently charging the unchosen front face's printed cost.
+#[test]
+fn resolution_full_cost_face_choice_uses_elected_face_printed_cost() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::generic(1);
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .back_face
+        .as_mut()
+        .unwrap()
+        .mana_cost = ManaCost::generic(2);
+    let mut request = resolution_test_request(TargetFilter::Any);
+    request.cost = crate::types::ability::ResolutionCastCost::FullCost {
+        mana_spend_permission: None,
+    };
+
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("both paid spell faces must open a choice");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("two legal paid faces must not reject");
+    };
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ModalFaceChoice { .. }
+    ));
+    state.waiting_for = *waiting_for;
+    let actions = crate::ai_support::legal_actions(&state);
+    assert!(actions.contains(&GameAction::ChooseModalFace { back_face: false }));
+    assert!(actions.contains(&GameAction::ChooseModalFace { back_face: true }));
+
+    apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: true })
+        .expect("the elected paid back face must prepare");
+
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+    assert_eq!(state.objects[&spell].name, "Resolution Back");
+    assert_eq!(
+        state
+            .pending_cast
+            .as_ref()
+            .expect("the paid cast must retain its transaction")
+            .cost
+            .mana_value(),
+        2,
+        "a paid resolution cast must charge the elected back face's printed cost"
+    );
+}
+
+/// A frozen policy that accepts only the back face must still auto-elect and
+/// charge that face for a paid resolution cast.
+#[test]
+fn resolution_full_cost_auto_selects_only_legal_back_face() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::generic(1);
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .back_face
+        .as_mut()
+        .unwrap()
+        .mana_cost = ManaCost::generic(2);
+    let mut request =
+        resolution_test_request(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)));
+    request.cost = crate::types::ability::ResolutionCastCost::FullCost {
+        mana_spend_permission: None,
+    };
+
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("the only legal paid back face must prepare");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("the only legal paid back face must not reject");
+    };
+
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ManaPayment { .. }
+    ));
+    assert_eq!(state.objects[&spell].name, "Resolution Back");
+    assert_eq!(
+        state
+            .pending_cast
+            .as_ref()
+            .expect("the paid cast must retain its transaction")
+            .cost
+            .mana_value(),
+        2,
+        "a paid resolution cast must charge its only legal back face's printed cost"
+    );
+}
+
 /// CR 712.14a: a transformed-resolution permission keeps a transforming DFC's
 /// front face on the stack and lets the established post-entry transform make
 /// it enter on its back face.  Pre-swapping here would double-transform it.
@@ -53793,11 +53891,11 @@ fn ordinary_modal_face_choice_neither_issues_nor_accepts_cancel() {
     assert_eq!(state, state_before);
 }
 
-/// The same transaction authority remains live after automatic face election:
+/// The same transaction authority remains live after a paid face election:
 /// a later cast-step cancellation must not strand the resolution permission,
 /// placeholder stack entry, or parent continuation.
 #[test]
-fn resolution_cast_cancel_after_auto_face_preparation_routes_through_cleanup() {
+fn resolution_cast_cancel_after_paid_face_preparation_routes_through_cleanup() {
     let mut state = setup_game_at_main_phase();
     let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
     state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::generic(1);
@@ -53807,15 +53905,18 @@ fn resolution_cast_cancel_after_auto_face_preparation_routes_through_cleanup() {
     };
     let initiation =
         initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
-            .expect("the full-cost resolution offer must prepare its required front face");
+            .expect("the full-cost resolution offer must open its paid face choice");
     let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
-        panic!("the legal full-cost front face must not reject");
+        panic!("the legal full-cost faces must not reject");
     };
     assert!(matches!(
         waiting_for.as_ref(),
-        WaitingFor::ManaPayment { .. }
+        WaitingFor::ModalFaceChoice { .. }
     ));
     state.waiting_for = *waiting_for;
+    apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: false })
+        .expect("the elected paid front face must prepare");
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
     assert!(state.pending_cast.is_some());
     assert!(state.stack.iter().any(|entry| entry.source_id == spell));
 
@@ -53845,14 +53946,18 @@ fn resolution_cast_cancel_from_collect_evidence_routes_through_cleanup() {
     };
     let initiation =
         initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
-            .expect("the full-cost resolution offer must prepare its required front face");
+            .expect("the full-cost resolution offer must open its paid face choice");
     let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
-        panic!("the legal full-cost front face must not reject");
+        panic!("the legal full-cost faces must not reject");
     };
     assert!(matches!(
         waiting_for.as_ref(),
-        WaitingFor::ManaPayment { .. }
+        WaitingFor::ModalFaceChoice { .. }
     ));
+    state.waiting_for = *waiting_for;
+    apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: false })
+        .expect("the elected paid front face must prepare");
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
     let pending_cast = state
         .pending_cast
         .clone()
