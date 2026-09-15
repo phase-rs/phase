@@ -12899,13 +12899,13 @@ mod tests {
             controller_of(
                 "create x of those tokens, where x is the number of creatures they control"
             ),
-            Some(ControllerRef::ScopedPlayer),
+            Some(crate::types::ability::ControllerRef::ScopedPlayer),
         );
         assert_eq!(
             controller_of(
                 "create x of those tokens, where x is the number of creatures you control"
             ),
-            Some(ControllerRef::You),
+            Some(crate::types::ability::ControllerRef::You),
         );
     }
 
