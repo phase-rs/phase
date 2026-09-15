@@ -2744,7 +2744,13 @@ describe("tournament credential storage (sessionStorage, not localStorage)", () 
     // (an emptied map removes the key).
     sessionStorage.setItem(
       SESSION_KEY,
-      JSON.stringify({ TOUR01: { playerToken: "secret", updatedAt: 5 } }),
+      JSON.stringify({
+        TOUR01: {
+          playerToken: "secret",
+          playerOrigin: "wss://o.example/ws",
+          updatedAt: 5,
+        },
+      }),
     );
 
     hydrateSessionTournamentCredentials();
@@ -2752,6 +2758,35 @@ describe("tournament credential storage (sessionStorage, not localStorage)", () 
     expect(
       useMultiplayerStore.getState().tournamentCredentials.TOUR01?.playerToken,
     ).toBe("secret");
+  });
+
+  // Maintainer [HIGH] #2: a legacy persisted credential with NO recorded origin
+  // is an authority bypass — it could be replayed against an unintended broker.
+  // Fail closed: drop the origin-less token on load.
+  it("drops an origin-less (legacy) stored credential on hydration", () => {
+    sessionStorage.setItem(
+      SESSION_KEY,
+      JSON.stringify({
+        // Organizer token with no organizerOrigin, and a player token with no
+        // playerOrigin — both legacy, both must be dropped.
+        LEGACY: { organizerToken: "org", updatedAt: 1 },
+        MIXED: {
+          organizerToken: "org2",
+          playerToken: "ply",
+          playerOrigin: "wss://o.example/ws",
+          updatedAt: 2,
+        },
+      }),
+    );
+
+    hydrateSessionTournamentCredentials();
+
+    const creds = useMultiplayerStore.getState().tournamentCredentials;
+    // The wholly origin-less credential is gone entirely.
+    expect(creds.LEGACY).toBeUndefined();
+    // The mixed one keeps only the token whose origin survived.
+    expect(creds.MIXED?.organizerToken).toBeUndefined();
+    expect(creds.MIXED?.playerToken).toBe("ply");
   });
 
   it("removes the sessionStorage key when the credential map empties", () => {

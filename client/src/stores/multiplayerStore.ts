@@ -1373,12 +1373,15 @@ async function runGatedTournamentRpc<T>(
   const rpcOrigin = tournamentBroadcastUrl(get);
   const held = get().tournamentCredentials[code];
   let token: string | undefined;
+  let tokenOrigin: string | undefined;
   switch (role) {
     case "organizer":
       token = held?.organizerToken;
+      tokenOrigin = held?.organizerOrigin;
       break;
     case "player":
       token = held?.playerToken;
+      tokenOrigin = held?.playerOrigin;
       break;
   }
   if (token === undefined) {
@@ -1392,15 +1395,14 @@ async function runGatedTournamentRpc<T>(
           : "You are not entered in this tournament.",
     };
   }
-  // Origin binding: a bearer minted against a DIFFERENT broker must never be sent
-  // to this one (codes are only unique per broker, so an A→B host switch could
-  // otherwise send A's token to B). Refuse before anything goes on the wire. A
-  // credential with no recorded origin (a legacy blob) is left unchecked.
-  if (
-    held?.origin !== undefined &&
-    rpcOrigin !== null &&
-    held.origin !== rpcOrigin
-  ) {
+  // Origin binding, PER ROLE and FAIL-CLOSED: a bearer minted against a DIFFERENT
+  // broker must never be sent to this one (codes are only unique per broker, so
+  // an A→B host switch could otherwise send A's token to B). The role's origin
+  // must be present AND equal this RPC's origin, or nothing goes on the wire — an
+  // origin-less token (a legacy blob that escaped the load-time drop) is refused,
+  // not trusted. Skipped only when there is no origin to run against (`null`,
+  // direct-codes mode), where `runTournamentRpc` returns `connection_lost`.
+  if (rpcOrigin !== null && tokenOrigin !== rpcOrigin) {
     return {
       ok: false,
       reason: "not_authorized",
@@ -2015,14 +2017,20 @@ export interface TournamentCredential {
    */
   playerKey?: string;
   /**
-   * The broker origin (hosting-server URL) this credential was minted against.
-   * Bearer tokens are broker-scoped: a token minted on server A must never be
-   * sent to server B (tournament codes are only unique per broker). A gated RPC
-   * refuses to send when its resolved origin does not match this, so an A→B host
-   * switch cannot leak A's bearer to B. Absent only on a pre-origin-binding
-   * credential (a legacy sessionStorage blob), where it degrades to unchecked.
+   * The broker origin (hosting-server URL) the ORGANIZER token was minted
+   * against — bound PER ROLE, not per code, because one code can carry an
+   * organizer authority from server A and a player authority from server B at
+   * once (an organizer of an A event who also joined a same-code B event), and a
+   * single per-code origin would let those overwrite each other. Bearer tokens
+   * are broker-scoped: a gated organizer RPC refuses to send unless its resolved
+   * origin matches this, so a token minted on A is never sent to B. A token
+   * whose role-origin is missing is dropped on load (fail-closed) — see
+   * {@link normalizeTournamentCredentials}.
    */
-  origin?: string;
+  organizerOrigin?: string;
+  /** The broker origin the PLAYER token was minted against. Same per-role
+   * binding and fail-closed handling as {@link TournamentCredential.organizerOrigin}. */
+  playerOrigin?: string;
   /** ms epoch of the last write. The eviction key; never rendered. */
   updatedAt: number;
 }
@@ -2124,16 +2132,26 @@ export function normalizeTournamentCredentials(
   const out: Record<string, TournamentCredential> = {};
   for (const [code, raw] of Object.entries(persisted)) {
     if (!isRecord(raw)) continue;
-    const organizerToken =
-      typeof raw.organizerToken === "string" ? raw.organizerToken : undefined;
-    const playerToken =
-      typeof raw.playerToken === "string" ? raw.playerToken : undefined;
     const playerKey =
       typeof raw.playerKey === "string" ? raw.playerKey : undefined;
-    // The broker origin the credential is bound to — preserved so the
+    // The broker origin each token is bound to — preserved so the per-role
     // origin-binding check survives a sessionStorage round trip.
-    const origin =
-      typeof raw.origin === "string" ? raw.origin : undefined;
+    const organizerOrigin =
+      typeof raw.organizerOrigin === "string" ? raw.organizerOrigin : undefined;
+    const playerOrigin =
+      typeof raw.playerOrigin === "string" ? raw.playerOrigin : undefined;
+    // FAIL CLOSED: a bearer with no recorded broker origin is DROPPED, not kept
+    // unchecked — a legacy origin-less credential could otherwise be replayed
+    // against an unintended broker, which is exactly the authority-partition
+    // bypass this binding closes. A token survives only beside its role's origin.
+    const organizerToken =
+      organizerOrigin !== undefined && typeof raw.organizerToken === "string"
+        ? raw.organizerToken
+        : undefined;
+    const playerToken =
+      playerOrigin !== undefined && typeof raw.playerToken === "string"
+        ? raw.playerToken
+        : undefined;
     if (organizerToken === undefined && playerToken === undefined) continue;
     // An expiry is kept only beside a token that actually survived — a bare
     // expiry with no token is meaningless, and its token's absence already
@@ -2160,6 +2178,9 @@ export function normalizeTournamentCredentials(
         : undefined;
     out[code] = {
       ...(organizerToken !== undefined ? { organizerToken } : {}),
+      // The origin rides only beside a token that survived — dropping the token
+      // drops its origin too.
+      ...(organizerToken !== undefined ? { organizerOrigin } : {}),
       ...(organizerTokenExpiresAtMs !== undefined
         ? { organizerTokenExpiresAtMs }
         : {}),
@@ -2167,6 +2188,7 @@ export function normalizeTournamentCredentials(
         ? { organizerPendingRotationNonce }
         : {}),
       ...(playerToken !== undefined ? { playerToken } : {}),
+      ...(playerToken !== undefined ? { playerOrigin } : {}),
       ...(playerTokenExpiresAtMs !== undefined
         ? { playerTokenExpiresAtMs }
         : {}),
@@ -2174,7 +2196,6 @@ export function normalizeTournamentCredentials(
         ? { playerPendingRotationNonce }
         : {}),
       ...(playerKey !== undefined ? { playerKey } : {}),
-      ...(origin !== undefined ? { origin } : {}),
       updatedAt:
         typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt)
           ? raw.updatedAt
@@ -3851,10 +3872,10 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                 result.value.code,
                 {
                   organizerToken: result.value.organizer_token,
-                  // The broker this token was minted against — `url` is the
-                  // socket's origin, captured at RPC entry. Binds the bearer so a
-                  // later host switch cannot send it to a different server.
-                  origin: url,
+                  // The broker this organizer token was minted against — `url` is
+                  // the socket's origin, captured at RPC entry. Binds the bearer
+                  // so a later host switch cannot send it to a different server.
+                  organizerOrigin: url,
                   // Guarded, not merely read: the reply TYPE marks
                   // `expires_at_ms` required, but a pre-v6 broker omits it and
                   // the field is `undefined` at this trust boundary. No expiry
@@ -3892,7 +3913,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                   playerKey,
                   // The broker this entrant token was minted against — binds the
                   // bearer to its origin (same reasoning as the organizer mint).
-                  origin,
+                  playerOrigin: origin,
                   // Guarded for the same reason as the organizer mint above.
                   ...(isFiniteNumber(result.value.expires_at_ms)
                     ? { playerTokenExpiresAtMs: result.value.expires_at_ms }
