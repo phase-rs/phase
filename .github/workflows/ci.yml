@@ -115,6 +115,12 @@ jobs:
         # that weakens it fails here instead of shipping unnoticed.
         run: python3 scripts/release_dispatch_guard_tests.py
 
+      - name: Preview data wait tests
+        # preview-server.yml signs the preview manifest only after this script
+        # sees its data URLs served; the tests drive the script against a local
+        # HTTP server and check the publish job waits on every manifest data URL.
+        run: python3 scripts/preview_data_wait_tests.py
+
       - name: Action pin checker unit tests
         # Exercises the checker against throwaway repositories only; it does
         # not walk this repository's own workflows. The gate over the real tree

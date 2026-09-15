@@ -621,6 +621,9 @@ jobs:
   # The shell uses ENGINE_FINGERPRINT to fetch this exact binary. Keep the
   # server publication in the same workflow graph so Pages can never publish a
   # fingerprint whose signed server artifact is missing from the manifest.
+  # Its publish job waits, up to card-data's own timeout, until the data files
+  # its manifest entry names are served, so the manifest never advertises data
+  # that is not.
   preview-server:
     name: Publish Preview Server
     needs: [deploy-gate, preview-inputs]
@@ -894,24 +897,29 @@ jobs:
       deploy_sha: ${{ github.event.workflow_run.head_sha || github.sha }}
       pages_artifact_id: ${{ needs.build-pages.outputs.pages_artifact_id }}
 
-  # ── Server binary compile (parallel with card-data) ─────────────────────────
+  # ── Server binary compile (after preview inputs) ────────────────────────────
   # phase-server is compiled NATIVELY as a static musl binary, then uploaded as
-  # an artifact for push-server-image. The compile needs nothing the data
-  # pipeline produces, so it deliberately has no `needs:` and overlaps card-data's
-  # ~10min run instead of serializing behind it.
+  # an artifact for push-server-image. It embeds the preview identity that
+  # preview-server.yml's native builds carry (PHASE_CHANNEL=preview plus the
+  # engine fingerprint), so the image fetches its data into an empty
+  # PHASE_DATA_DIR. The fingerprint comes from preview-inputs; the compile then
+  # overlaps card-data and the preview-server builds.
   #
   # NOTE: this is a cold ~10min compile every run. Swatinem's rust-cache (via
   # setup-rust-toolchain) caches registry/git deps but prunes the workspace
   # crates' own artifacts, so the optimized server-release build of the engine
-  # crate recompiles each time. The win here is parallelism, not incrementality;
-  # warming the workspace compile would need sccache or similar.
+  # crate recompiles each time; warming the workspace compile would need sccache
+  # or similar.
   build-server-binary:
     name: Build server binary (linux ${{ matrix.arch }})
-    needs: [deploy-gate]
+    needs: [deploy-gate, preview-inputs]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
+    env:
+      PHASE_CHANNEL: preview
+      PHASE_ENGINE_FINGERPRINT: ${{ needs.preview-inputs.outputs.engine_fingerprint }}
     strategy:
       fail-fast: false
       matrix:
@@ -973,21 +981,23 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # ── Server image push (needs binary) ────────────────────────────────────────
+  # ── Server image push (needs binary + published preview server + card data) ─
   # Pure packaging step: pulls the prebuilt musl binary, then BINARY_STAGE=prebuilt
   # makes Docker just apt + COPY (no compile).
   #
-  # NOTE: this binary is compiled WITHOUT a PHASE_CHANNEL identity (it builds in
-  # parallel with card-data, so the fingerprint cannot exist yet), which means
-  # the image cannot self-bootstrap its data: booting it against an empty
-  # PHASE_DATA_DIR is a clear fatal error. Any consumer must either
-  # pre-provision the data volume or set PHASE_DATA_MANIFEST_URL to a signed
-  # release-shaped data manifest. No in-repo deployment currently runs this
-  # image (beebs deploy-server is disabled); see GH #6287 for publishing a
-  # signed staging data manifest before re-enabling one.
+  # The binary finds its data under its fingerprint in the signed
+  # preview-server.json, so the push waits for preview-server: an image is pushed
+  # only once its fingerprint is listed, and a failed publication leaves the
+  # previous image in place, as it leaves the previous Pages deploy. The push also
+  # waits for card-data, which uploads the content-addressed files the entry's
+  # data URLs name. The manifest keeps only the current and previous
+  # fingerprints, and publications that push no image (a failed build or push
+  # here, a manual preview-server dispatch) still rotate it, so any image,
+  # `:preview` included, can outlive its entry and then needs pre-provisioned
+  # data or PHASE_DATA_MANIFEST_URL.
   push-server-image:
     name: Build & push server image
-    needs: [build-server-binary]
+    needs: [build-server-binary, preview-server, card-data]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
