@@ -78,6 +78,6 @@ describe("ModalFaceModal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(dispatch).toHaveBeenNthCalledWith(1, frontAction);
     expect(dispatch).toHaveBeenNthCalledWith(2, backAction);
-    expect(dispatch.mock.calls[2]?.[0]).toBe(cancelAction);
+    expect(dispatch).toHaveBeenNthCalledWith(3, cancelAction);
   });
 });

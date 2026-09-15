@@ -102,7 +102,7 @@ describe("CastingVariantModal", () => {
     render(<CastingVariantModal />);
 
     fireEvent.click(screen.getByRole("button", { name: /Cast Normally Entering/ }));
-    expect(dispatch.mock.calls[0]?.[0]).toBe(normalRightAction);
+    expect(dispatch).toHaveBeenNthCalledWith(1, normalRightAction);
   });
 
   it("does not render for another player's casting-variant prompt", () => {
