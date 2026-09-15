@@ -2586,6 +2586,8 @@ mod tests {
             graveyard_replacement: None,
             cast_transformed: false,
             constraint: None,
+            additional_cost: None,
+            installed_triggers: Vec::new(),
         };
         let positive = vec![
             CastOfferKind::Adventure {
