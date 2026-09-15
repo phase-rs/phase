@@ -9038,6 +9038,22 @@ enum StructuralFeature {
     AdditionalCost,
     CostReduction,
     TriggerCondition,
+    /// TRACKED-SET-RETURN-DEFECT: a delayed trigger that moves a tracked set
+    /// with a SINGULAR `ChangeZone` while its `uses_tracked_set` flag is false.
+    ///
+    /// The published set is fine — it holds live ids, and `filter.rs` evaluates
+    /// `TargetFilter::TrackedSet` as a bare id-membership test. The CONSUME side
+    /// is what fails: with the flag false the eager bind in
+    /// `delayed_trigger.rs` never rewrites the singular move into a
+    /// `ChangeZoneAll`, so `change_zone.rs:1982` — which re-derives scan zones
+    /// only for `ChangeZoneAll { origin: None, .. }` — leaves it scanning the
+    /// BATTLEFIELD for members sitting in EXILE. It moves nothing and the
+    /// objects are stranded permanently.
+    ///
+    /// The card PARSES correctly and every effect is a real variant, so nothing
+    /// else in coverage can see it. This is exactly the "parses fine but the
+    /// runtime cannot execute it" case `ResolverFeature` exists for.
+    TrackedSetReturnAfterBattlefieldExit,
 }
 
 impl StructuralFeature {
@@ -9057,6 +9073,9 @@ impl StructuralFeature {
             AdditionalCost => "structural:additional_cost",
             CostReduction => "structural:cost_reduction",
             TriggerCondition => "structural:trigger_condition",
+            TrackedSetReturnAfterBattlefieldExit => {
+                "structural:tracked_set_return_after_battlefield_exit"
+            }
         }
     }
 
@@ -9069,6 +9088,14 @@ impl StructuralFeature {
             Condition | ElseAbility | RepeatFor | ForwardResult | Duration | OptionalFor
             | MultiTarget | Distribute | AbilityModal | SpellModal | AdditionalCost
             | CostReduction | TriggerCondition => FeatureSupport::Handled,
+            // MEASURED UNHANDLED. Lae'zel's Acrobatics was driven through the
+            // real cast pipeline at this tip and its creatures are permanently
+            // stranded in exile. The paired control is Sudden Disappearance —
+            // same publisher, same singular-`ChangeZone` consumer, but with the
+            // flag TRUE — which was driven through the same pipeline and DOES
+            // return its creatures. That pair is why the FLAG, not the effect
+            // shape, is the discriminator.
+            TrackedSetReturnAfterBattlefieldExit => FeatureSupport::Unhandled,
         }
     }
 }
@@ -9081,9 +9108,25 @@ impl StructuralFeature {
 fn extract_card_features(face: &CardFace, features: &mut HashMap<String, FeatureSupport>) {
     for def in face.abilities.iter() {
         extract_ability_features(def, features);
+        if delayed_trigger_strands_a_tracked_set(def) {
+            emit_structural(
+                features,
+                StructuralFeature::TrackedSetReturnAfterBattlefieldExit,
+            );
+        }
     }
     for trig in &face.triggers {
         extract_trigger_features(trig, features, TokenStaticTraversal::Include);
+        if trig
+            .execute
+            .as_deref()
+            .is_some_and(delayed_trigger_strands_a_tracked_set)
+        {
+            emit_structural(
+                features,
+                StructuralFeature::TrackedSetReturnAfterBattlefieldExit,
+            );
+        }
     }
     for repl in &face.replacements {
         visit_replacement_ability_payloads(repl, |token_static_traversal, payload| {
@@ -9100,6 +9143,84 @@ fn extract_card_features(face: &CardFace, features: &mut HashMap<String, Feature
     if face.modal.is_some() {
         emit_structural(features, StructuralFeature::SpellModal);
     }
+}
+
+/// TRACKED-SET-RETURN-DEFECT detector — see
+/// [`StructuralFeature::TrackedSetReturnAfterBattlefieldExit`].
+///
+/// Fires on ONE precise shape: a `CreateDelayedTrigger` whose `uses_tracked_set`
+/// flag is FALSE and whose body is a SINGULAR `Effect::ChangeZone` moving a
+/// tracked set.
+///
+/// That flag is the whole discriminator, and it is mechanical rather than
+/// heuristic:
+///
+/// * flag TRUE — `delayed_trigger.rs`'s eager bind runs and its `ChangeZone` arm
+///   REWRITES the singular move into an `Effect::ChangeZoneAll`, which then takes
+///   the WORKING scan-zone re-derivation branch at `change_zone.rs:1982`.
+/// * flag FALSE — the eager bind never runs, the effect stays a singular
+///   `ChangeZone`, and `change_zone.rs:1982` gates its re-derivation on
+///   `Effect::ChangeZoneAll { origin: None, .. }`. The singular move falls to the
+///   `else` branch, keeps the battlefield default, scans the BATTLEFIELD for
+///   members sitting in EXILE, and moves nothing. `extract_in_zone`
+///   (`types/ability.rs:19644`) cannot correct the default because it has no
+///   tracked-set arm — the same gap `put_on_top.rs:341` already documents.
+///
+/// MEASURED, both directions, at this tip:
+///
+/// * flag FALSE → 2 cards, Lae'zel's Acrobatics and Kharasha Foothills. Lae'zel's
+///   was driven through the real cast pipeline and its creatures are permanently
+///   stranded in exile.
+/// * flag TRUE → 16 cards. Sudden Disappearance was driven through the same
+///   pipeline and its creatures DO return. Planar Guide, Storm Herald, Rally the
+///   Ancestors and the rest of that set are green and must stay green.
+///
+/// An earlier revision of this detector keyed on "a battlefield-exit publisher
+/// plus any tracked-set consumer". That was too broad and was withdrawn after
+/// Sudden Disappearance — same publisher, same singular-`ChangeZone` consumer —
+/// was measured WORKING. Marking a working card red is the same honesty
+/// violation as leaving a broken one green.
+fn delayed_trigger_strands_a_tracked_set(def: &AbilityDefinition) -> bool {
+    if let Effect::CreateDelayedTrigger {
+        effect,
+        uses_tracked_set,
+        ..
+    } = &*def.effect
+    {
+        if !*uses_tracked_set
+            && matches!(
+                &*effect.effect,
+                Effect::ChangeZone { target, .. } if matches!(
+                    target,
+                    TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+                )
+            )
+        {
+            return true;
+        }
+    }
+    let nested = match &*def.effect {
+        Effect::CreateDelayedTrigger { effect, .. } => {
+            delayed_trigger_strands_a_tracked_set(effect)
+        }
+        Effect::RollDie { results, .. } => results
+            .iter()
+            .any(|branch| delayed_trigger_strands_a_tracked_set(&branch.effect)),
+        _ => false,
+    };
+    nested
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(delayed_trigger_strands_a_tracked_set)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(delayed_trigger_strands_a_tracked_set)
+        || def
+            .mode_abilities
+            .iter()
+            .any(delayed_trigger_strands_a_tracked_set)
 }
 
 fn emit_structural(features: &mut HashMap<String, FeatureSupport>, s: StructuralFeature) {

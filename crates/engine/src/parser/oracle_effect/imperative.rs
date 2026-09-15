@@ -12999,6 +12999,27 @@ fn try_parse_roll_die_with_modifier(
 /// `max = u8::MAX` so any modifier-boosted roll above the printed lower bound
 /// resolves to this branch — see CR 706.2 on modifier-shifted results
 /// (Diviner's Portent, Gale's Redirection, etc.).
+///
+/// CR 706.3a also admits a striation stating only its upper endpoint
+/// ("9 or less" — Druid of the Emerald Grove). Its lower endpoint is implicit,
+/// and CR 706.1a fixes it at 1 (a dN is "numbered from 1 to N"). A printed
+/// "0 or less" therefore yields `(1, 0)` and is refused below by `min > max`.
+///
+/// ASYMMETRY WITH `"N+"`, deliberate and bounded. The open-ended UPPER form maps
+/// to `u8::MAX` so a modifier-boosted roll above the printed bound still lands in
+/// the branch (CR 706.2). The `"N or less"` form does NOT get the mirrored
+/// treatment of a `0` floor, because CR 706.1a makes 1 the smallest NATURAL
+/// result and this lower bound is exact for an unmodified roll. A negative
+/// modifier can drive a result below 1 (CR 706.2 allows the final number to be
+/// any integer), and such a result would fall through this branch rather than
+/// into it. No printed card combines a downward modifier with an "or less" row,
+/// so the gap is unreachable today; it is recorded here rather than papered over
+/// by widening the floor to 0, which would silently swallow `"0 or less"` — the
+/// exact refusal the guard below exists to make.
+///
+/// This is also the DETECTOR the spell-resolution continuation loop uses to
+/// recognize a results-table row (`oracle.rs`), so the loop and the row
+/// collector share this one row grammar.
 pub(crate) fn try_parse_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
     // CR 706.3a: a result-table header is one complete numeric range followed
     // by a pipe and a nonempty instruction. Keep the grammar here rather than
@@ -13008,6 +13029,15 @@ pub(crate) fn try_parse_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
     let mut parser = all_consuming((
         space0::<_, OracleError<'_>>,
         alt((
+            // CR 706.3a: a printed "N or less" row is a results-table striation
+            // stating only its UPPER endpoint. CR 706.1a fixes the implicit lower
+            // one: a dN has outcomes "numbered from 1 to N", so the smallest
+            // result any die can produce is 1 (Druid of the Emerald Grove's
+            // "9 or less"). Placed first among the numeric arms for readability
+            // only — the whole grammar is `all_consuming`, so the bare-value arm
+            // below cannot shadow this wording at any position: it would leave
+            // " or less" unconsumed and fail.
+            map(terminated(parse_u8, tag(" or less")), |max| (1u8, max)),
             map((parse_u8, one_of("-–—"), parse_u8), |(min, _, max)| {
                 (min, max)
             }),
@@ -24934,5 +24964,98 @@ mod tests {
             Some(ImperativeFamilyAst::GainKeyword(Effect::Unimplemented { name, .. }))
                 if name == "prevent"
         ));
+    }
+}
+
+/// Row 1.O — the die-result ROW grammar adds no arm that duplicates an existing
+/// numeric shape.
+///
+/// Each pre-existing shape is asserted to still produce the SAME pair it
+/// produced before the `"N or less"` arm was added, so an arm that shadowed one
+/// by ordering is caught. The paired positive reach-guard is
+/// `nine_or_less_lowers_to_one_through_nine` — without it this module would be
+/// satisfied by a change that added nothing at all.
+#[cfg(test)]
+mod die_result_row_grammar_tests {
+    use super::try_parse_die_result_line;
+
+    /// POSITIVE REACH-GUARD for every negative below: the new wording form is
+    /// actually accepted, and its implicit lower endpoint is 1 (CR 706.1a — a
+    /// dN is "numbered from 1 to N", so 1 is the smallest result any die yields).
+    #[test]
+    fn nine_or_less_lowers_to_one_through_nine() {
+        assert_eq!(
+            try_parse_die_result_line("9 or less | Put those cards into your hand, then shuffle."),
+            Some((1, 9, "Put those cards into your hand, then shuffle.")),
+            "Druid of the Emerald Grove's printed `9 or less` row must lower to \
+             the closed range 1..=9"
+        );
+    }
+
+    /// HOSTILE, shape 1 — the closed range. All three printed dash characters
+    /// must still yield the identical pair, at the identical arm.
+    #[test]
+    fn closed_range_is_unchanged_across_every_dash_character() {
+        for line in ["1-9 | x", "1\u{2013}9 | x", "1\u{2014}9 | x"] {
+            assert_eq!(
+                try_parse_die_result_line(line),
+                Some((1, 9, "x")),
+                "closed range `{line}` must be unchanged by the new wording arm"
+            );
+        }
+    }
+
+    /// HOSTILE, shape 2 — the open-ended `N+` form. `u8::MAX` IS the open-ended
+    /// encoding (CR 706.3a's "range with a single endpoint in the form N+"), so
+    /// Druid's `20+` needs no type change and no second arm.
+    #[test]
+    fn open_ended_row_is_unchanged() {
+        assert_eq!(
+            try_parse_die_result_line("15+ | x"),
+            Some((15, u8::MAX, "x"))
+        );
+        assert_eq!(
+            try_parse_die_result_line("20+ | x"),
+            Some((20, u8::MAX, "x"))
+        );
+    }
+
+    /// HOSTILE, shape 3 — the bare single value. This is the arm the new wording
+    /// form sits above, and `all_consuming` (not ordering) is what keeps them
+    /// apart: applied to `"9 or less | x"` the bare arm leaves `" or less"`
+    /// unconsumed and fails at ANY position in the `alt`.
+    #[test]
+    fn bare_single_value_is_unchanged() {
+        assert_eq!(try_parse_die_result_line("20 | x"), Some((20, 20, "x")));
+        assert_eq!(try_parse_die_result_line("1 | x"), Some((1, 1, "x")));
+    }
+
+    /// HOSTILE — a printed `"0 or less"` row must be refused.
+    ///
+    /// The rejecting conjunct is `min > max`, NOT `min == 0`: the new arm
+    /// hardcodes the CR 706.1a lower bound of 1, so the pair is `(1, 0)` and
+    /// `min == 0` never fires. A future guard edit that dropped `min > max`
+    /// while keeping `min == 0` would pass a naive test and fail this one.
+    #[test]
+    fn zero_or_less_is_refused_by_the_min_greater_than_max_conjunct() {
+        assert_eq!(
+            try_parse_die_result_line("0 or less | x"),
+            None,
+            "`0 or less` yields (1, 0) and must be rejected by `min > max` — \
+             `min == 0` does not fire, because the arm's min is 1"
+        );
+        // Companion: a bare `0` row IS what `min == 0` rejects. Asserting both
+        // keeps the two conjuncts separately attributable.
+        assert_eq!(try_parse_die_result_line("0 | x"), None);
+    }
+
+    /// The new arm must not accept a partial or malformed wording, and must not
+    /// swallow a row whose body is empty.
+    #[test]
+    fn malformed_or_bodiless_rows_are_refused() {
+        assert_eq!(try_parse_die_result_line("9 or less |"), None);
+        assert_eq!(try_parse_die_result_line("9 or les | x"), None);
+        assert_eq!(try_parse_die_result_line("9 or lesser | x"), None);
+        assert_eq!(try_parse_die_result_line("or less | x"), None);
     }
 }
