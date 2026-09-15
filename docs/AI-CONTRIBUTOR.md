@@ -135,6 +135,8 @@ git push origin main                                     # keep the fork's main 
 
 If `git merge --ff-only` fails, your fork's `main` has diverged from upstream — do **not** force it. Proceed to §4 regardless: that step cuts your working branch directly from `upstream/main`, so a diverged fork `main` never contaminates your change.
 
+**Re-sync immediately before §6's verification stage too, not only here.** If meaningful wall-clock time has passed since this sync — background waits, multiple review rounds, an environment-fix detour — `upstream/main` can have moved again before you push, including from this same session's own earlier PRs merging mid-session. Discovering that only after clippy/test-engine and Gate A have already run means redoing a ~15-20 minute verification pass and re-pushing. Re-fetching and rebasing right before you start §6, rather than trusting the sync you did at the top of the task, avoids paying for verification twice.
+
 ---
 
 ## 2.5. Bootstrap the repo (Developer track only)
@@ -158,6 +160,8 @@ The `--agent` flag skips the three Scryfall image sidecars (`scryfall-data.json`
 - `client/node_modules/` — required by `pnpm` commands. Same caveat.
 
 Agent mode also implies `--no-tilt` internally: even if `tilt` is on your PATH, setup.sh runs `gen-card-data.sh` and `build-wasm.sh` inline rather than deferring them to `tilt up`, so the required artifacts above are guaranteed present when the script exits.
+
+**Installing Tilt is optional but speeds up repeated §6 runs** across a multi-card or multi-round session: `brew install tilt-dev/tap/tilt && tilt up` (see CLAUDE.md's Tilt section for the resource table). The *first* `tilt up` after install triggers a cold build across every resource it manages — clippy, test-engine, wasm, card-data, and more — which can look like a lot of unrelated compilation (e.g. a `tauri` resource alone pulling in hundreds of crates). That's a one-time cost of bringing Tilt up, not a sign anything is wrong; subsequent edits rebuild incrementally and fast.
 
 Skip this section entirely on the Non-developer track — CI runs everything `--agent` mode produces.
 
@@ -276,6 +280,8 @@ Apply **all three** checks:
 ## 6. Record verification and run Gate A (track-specific)
 
 **Developer track** — the implementation workflow must run the mechanical checks below before its final commit. On any failure, fix in-loop (max 2 retries) before committing. If still failing after retries, record the failure in the PR body under "CI Failures" and continue to Step 7 — do not abort. After §5's clean read-only review, run only the Gate A command shown after the mechanical checks; if it finds a problem, change and commit the fix, rerun §5, and then rerun Gate A.
+
+**Run only the checks this section lists — don't add ad hoc confirmation builds.** In particular, don't invoke a binary under a different `--features`/profile flag than what's already covered (e.g. `cargo run --bin oracle-gen --features cli` to get a human-readable parse dump for the PR body's "Claimed parse impact" evidence) — cargo's feature unification treats a different feature set as a different build, forcing a recompile even though nothing in the diff changed. A dedicated integration test that exercises the change through production entry points is stronger evidence than a one-off export anyway; cite it instead of re-deriving it.
 
 Step 2.5 (`./scripts/setup.sh --agent`) is a prerequisite for this section — `cargo coverage` and `cargo semantic-audit` both read `client/public/card-data.json`, and the integration suite self-skips without it.
 
