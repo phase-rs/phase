@@ -1,5 +1,17 @@
 import type * as DraftWasm from "@wasm/draft";
 import type { MatchConfig } from "./types";
+import type {
+  LlmDraftOutcome,
+  LlmDraftPickRequest,
+} from "../services/llm/types";
+
+/** One seat's LLM reply, handed back to the engine to resolve into a pick. */
+export interface LlmDraftResponsePayload {
+  seat: number;
+  fingerprint: string;
+  provider: string;
+  body: string;
+}
 
 // ── Types (mirror Rust serde output from draft-core) ────────────────────
 
@@ -902,6 +914,42 @@ export class DraftEngineOperationLease {
 
   submitPick(cardInstanceId: string): DraftPlayerView {
     return this.wasm.submit_pick(cardInstanceId) as DraftPlayerView;
+  }
+
+  /**
+   * Engine-authored LLM pick requests for the named bot seats.
+   *
+   * Read-only: no pick is applied and no session state changes. Seats absent
+   * from `seats`, and seats the engine cannot build a prompt for, simply get no
+   * request and keep the heuristic bot.
+   */
+  buildLlmDraftPickRequests(
+    endpointJson: string,
+    seats: number[],
+    setNames: Record<string, string>,
+  ): LlmDraftPickRequest[] {
+    return this.wasm.buildLlmDraftPickRequests(
+      endpointJson,
+      JSON.stringify(seats),
+      JSON.stringify(setNames),
+    ) as LlmDraftPickRequest[];
+  }
+
+  /**
+   * Apply the human's pick, resolving each LLM seat's pick from its response.
+   *
+   * Per-seat fallback is the engine's: a response it cannot decode, or one
+   * whose pack has moved on, leaves that seat to the heuristic bot in the same
+   * pass. The pick always completes.
+   */
+  submitPickWithLlmBotPicks(
+    cardInstanceId: string,
+    responses: LlmDraftResponsePayload[],
+  ): { view: DraftPlayerView; llmOutcomes: LlmDraftOutcome[] } {
+    return this.wasm.submitPickWithLlmBotPicks(
+      cardInstanceId,
+      JSON.stringify(responses),
+    ) as { view: DraftPlayerView; llmOutcomes: LlmDraftOutcome[] };
   }
 
   submitPickWithDraftEffect(

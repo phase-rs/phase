@@ -58,6 +58,7 @@ import { useSetCatalog } from "../../hooks/useSetSymbols.ts";
 import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
 import { VisualPackManager } from "./visual-packs/VisualPackManager.tsx";
 import { OfflinePreparationSection } from "./OfflinePreparationSection.tsx";
+import { LlmOpponentsSection } from "./LlmOpponentsSection.tsx";
 
 export type SettingsHighlight = "board-background";
 
@@ -100,6 +101,7 @@ function formatSpeed(value: number, max: number, labels: { instant: string; slow
 }
 const SETTINGS_TABS = [
   { id: "gameplay" },
+  { id: "ai" },
   { id: "experimental" },
   { id: "visual" },
   { id: "combat" },
@@ -497,6 +499,12 @@ export function PreferencesModal({
                       )}
                     </SettingGroup>
                   </div>
+                </SettingsSection>
+              )}
+
+              {activeTab === "ai" && (
+                <SettingsSection title={t("llm.title")}>
+                  <LlmOpponentsSection />
                 </SettingsSection>
               )}
 
