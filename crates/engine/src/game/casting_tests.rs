@@ -53459,27 +53459,57 @@ fn resolution_cast_auto_selects_its_only_legal_spell_face() {
     assert!(state.objects[&spell].modal_back_face);
 }
 
-/// An instruction to cast transformed elects the transformed face before the
-/// ordinary resolution face-election cardinality is considered.  It cannot
-/// leak a front action or a modal prompt.
+/// CR 712.14a: a transformed-resolution permission keeps a transforming DFC's
+/// front face on the stack and lets the established post-entry transform make
+/// it enter on its back face.  Pre-swapping here would double-transform it.
 #[test]
-fn resolution_cast_transformed_precedes_modal_face_election() {
+fn resolution_cast_transformed_keeps_front_on_stack_and_enters_back() {
     let mut state = setup_game_at_main_phase();
-    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    let spell = create_object(
+        &mut state,
+        CardId(83_020),
+        PlayerId(0),
+        "Resolution Transform Front".to_string(),
+        Zone::Exile,
+    );
+    {
+        let object = state.objects.get_mut(&spell).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.power = Some(2);
+        object.toughness = Some(2);
+        object.mana_cost = ManaCost::zero();
+        let mut back_types = crate::types::card_type::CardType::default();
+        back_types.core_types.push(CoreType::Creature);
+        object.back_face = Some(crate::game::game_object::BackFaceData {
+            name: "Resolution Transform Back".to_string(),
+            power: Some(5),
+            toughness: Some(5),
+            card_types: back_types,
+            layout_kind: Some(LayoutKind::Transform),
+            ..Default::default()
+        });
+    }
     let mut request = resolution_test_request(TargetFilter::Any);
     request.cast_transformed = true;
 
     let initiation =
         initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
-            .expect("the transformed back face must be prepared");
+            .expect("the transformed resolution cast must be prepared");
     let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
         panic!("a legal transformed face must not reject");
     };
 
     assert!(matches!(waiting_for.as_ref(), WaitingFor::Priority { .. }));
-    assert_eq!(state.objects[&spell].name, "Resolution Back");
-    assert!(state.objects[&spell].modal_back_face);
     assert!(state.stack.iter().any(|entry| entry.source_id == spell));
+    assert_eq!(state.objects[&spell].name, "Resolution Transform Front");
+    assert!(!state.objects[&spell].transformed);
+
+    crate::game::stack::resolve_top(&mut state, &mut Vec::new());
+
+    assert_eq!(state.objects[&spell].zone, Zone::Battlefield);
+    assert!(state.objects[&spell].transformed);
+    assert_eq!(state.objects[&spell].name, "Resolution Transform Back");
+    assert_eq!(state.objects[&spell].power, Some(5));
 }
 
 /// When both spell faces pass the same serialized policy, the legacy
@@ -53623,6 +53653,54 @@ fn resolution_cast_cancel_after_auto_face_preparation_routes_through_cleanup() {
 
     apply_as_current(&mut state, GameAction::CancelCast)
         .expect("a later cast-step cancel must use the resolution cleanup authority");
+
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_cast.is_none());
+    assert!(state.stack.iter().all(|entry| entry.source_id != spell));
+    assert!(state.objects[&spell].casting_permissions.is_empty());
+    assert_eq!(state.objects[&spell].zone, Zone::Exile);
+    assert_eq!(state.objects[&spell].name, "Resolution Front");
+    assert!(!state.objects[&spell].cast_face_committed);
+}
+
+/// A resolution-owned cast can pause in an interactive collect-evidence cost.
+/// That cancellation path must use the same exact permission cleanup as every
+/// other post-announcement cast step.
+#[test]
+fn resolution_cast_cancel_from_collect_evidence_routes_through_cleanup() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::generic(1);
+    let mut request = resolution_test_request(TargetFilter::Any);
+    request.cost = crate::types::ability::ResolutionCastCost::FullCost {
+        mana_spend_permission: None,
+    };
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("the full-cost resolution offer must prepare its required front face");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("the legal full-cost front face must not reject");
+    };
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ManaPayment { .. }
+    ));
+    let pending_cast = state
+        .pending_cast
+        .clone()
+        .expect("the announced resolution cast must retain its transaction");
+    state.waiting_for = WaitingFor::CollectEvidenceChoice {
+        player: PlayerId(0),
+        minimum_mana_value: 0,
+        cards: Vec::new(),
+        resume: Box::new(crate::types::game_state::CollectEvidenceResume::Casting {
+            pending_cast,
+            source: Default::default(),
+        }),
+    };
+
+    apply_as_current(&mut state, GameAction::CancelCast)
+        .expect("collect-evidence cancellation must settle the resolution transaction");
 
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     assert!(state.pending_cast.is_none());

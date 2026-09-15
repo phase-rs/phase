@@ -10296,39 +10296,18 @@ fn resolution_spell_face_legality_for_permission(
             back: false,
         };
     };
-    let cast_transformed = matches!(
-        original.casting_permissions.get(permission_index.0),
-        Some(CastingPermission::ExileWithAltCost {
-            cast_transformed: true,
-            resolution_cleanup: Some(_),
-            ..
-        })
-    );
     let may_choose_back = resolution_spell_face_choice_available(original);
-    // Some established transformed-cast routes (including the minimal Siege
-    // fixture) carry the transformed permission before an alternative-face
-    // snapshot is available. Preserve their existing single-face cast path;
-    // when an alternative exists, the transformed instruction is authoritative
-    // and suppresses ordinary election.
-    let transformed_back_face = cast_transformed && original.back_face.is_some();
     let mut legality = ResolutionSpellFaceLegality {
         front: false,
         back: false,
     };
 
     for back_face in [false, true] {
-        // "Cast it transformed" elects the transformed face before any
-        // ordinary MDFC/split election.  When the card has that alternative
-        // face, it never exposes a competing front action.
         if full_cost_front_face && back_face {
             // CR 608.2g + CR 609.4b: a paid "cast that card" instruction
-            // uses the card's front characteristics.  Only an explicit
-            // transformed instruction may elect its other face.
+            // uses the card's front characteristics, without a separate
+            // modal/split spell-face election.
             continue;
-        } else if transformed_back_face {
-            if !back_face {
-                continue;
-            }
         } else if back_face && !may_choose_back {
             continue;
         }
@@ -10414,8 +10393,8 @@ fn resolution_spell_face_legality_for_permission(
 }
 
 /// Public-to-the-engine indexed form for an already-issued modal choice.  The
-/// legal-action projector must read the same permission (including its
-/// transformed-cast bit) that the eventual reducer will consume.
+/// legal-action projector must read the same exact permission and frozen policy
+/// that the eventual reducer will consume.
 pub(crate) fn resolution_spell_face_legality_for_current_permission(
     state: &GameState,
     player: PlayerId,
@@ -12812,11 +12791,6 @@ pub(super) fn initiate_cast_during_resolution(
         .objects
         .get(&hit_card)
         .is_some_and(resolution_spell_face_choice_available);
-    let transformed_back_face = cast_transformed
-        && state
-            .objects
-            .get(&hit_card)
-            .is_some_and(|object| object.back_face.is_some());
     if legality.count() == 2 {
         return Ok(ResolutionCastInitiation::WaitingFor(Box::new(
             WaitingFor::ModalFaceChoice {
@@ -12832,7 +12806,7 @@ pub(super) fn initiate_cast_during_resolution(
     // face before preparation; on a failure below restore the pre-election
     // object so neither an announced face nor the temporary permission leaks.
     let object_before = state.objects.get(&hit_card).cloned();
-    if has_face_election || transformed_back_face {
+    if has_face_election {
         let object = state
             .objects
             .get_mut(&hit_card)

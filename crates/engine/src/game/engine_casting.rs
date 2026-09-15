@@ -416,11 +416,15 @@ pub(super) fn handle_collect_evidence_cancel(
     player: PlayerId,
     resume: &CollectEvidenceResume,
     events: &mut Vec<GameEvent>,
-) -> WaitingFor {
+) -> Result<WaitingFor, EngineError> {
     if let CollectEvidenceResume::Casting { pending_cast, .. } = resume {
-        casting::handle_cancel_cast(state, pending_cast, events);
+        let pending_cast = state
+            .pending_cast
+            .take()
+            .unwrap_or_else(|| pending_cast.clone());
+        return cancel_pending_cast(state, player, &pending_cast, events);
     }
-    WaitingFor::Priority { player }
+    Ok(WaitingFor::Priority { player })
 }
 
 pub(super) fn handle_harmonize_tap_choice(

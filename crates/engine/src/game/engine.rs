@@ -12176,7 +12176,7 @@ fn apply_non_priority_pass_action(
             &mut events,
         )?,
         (WaitingFor::CollectEvidenceChoice { player, resume, .. }, GameAction::CancelCast) => {
-            engine_casting::handle_collect_evidence_cancel(state, *player, resume, &mut events)
+            engine_casting::handle_collect_evidence_cancel(state, *player, resume, &mut events)?
         }
         // CR 702.180b: Player chose which creature to tap for harmonize cost reduction.
         // CR 601.2b: Creature is tapped as part of paying the total cost.
