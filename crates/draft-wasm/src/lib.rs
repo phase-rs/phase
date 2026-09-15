@@ -577,6 +577,26 @@ fn apply_human_pick_and_resolve_bots_with_action(
     draft_session: &mut DraftSession,
     human_action: DraftAction,
 ) -> Result<(), JsValue> {
+    apply_human_pick_and_resolve_bots_with_overrides(
+        draft_session,
+        human_action,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+/// Resolve the bot seats, letting `overrides` supply the pick for any seat an
+/// LLM drafter already chose for.
+///
+/// An override is a list of `instance_id`s, never indices: the ids were resolved
+/// against the same pack this loop reads, and `session::apply` re-validates them
+/// against the live pack regardless. A seat with no override — or whose override
+/// the reducer refuses — falls through to the heuristic bot in the same pass, so
+/// a failed LLM call costs a seat its flavour, never its pick.
+fn apply_human_pick_and_resolve_bots_with_overrides(
+    draft_session: &mut DraftSession,
+    human_action: DraftAction,
+    overrides: &std::collections::BTreeMap<u8, Vec<String>>,
+) -> Result<(), JsValue> {
     if !matches!(draft_session.config.kind, DraftKind::Quick) {
         return Err(JsValue::from_str(
             "apply_human_pick_and_resolve_bots is only valid for Quick Draft",
@@ -609,20 +629,33 @@ fn apply_human_pick_and_resolve_bots_with_action(
             // rather than by coincidence.
             let cards_per_pick =
                 usize::from(draft_session.config.kind.procedure().cards_per_pick).min(pack.0.len());
-            let pick_indices = bot_ai::bot_picks(
-                &pack.0,
-                cards_per_pick,
-                difficulty,
-                &draft_session.pools[seat as usize],
-                card_db,
-                &mut rng,
-            );
-            // Map indices to ids BEFORE applying — the apply mutates the pack
-            // the indices refer to.
-            let card_instance_ids: Vec<String> = pick_indices
-                .into_iter()
-                .map(|index| pack.0[index].instance_id.clone())
-                .collect();
+            let chosen = overrides
+                .get(&seat)
+                .filter(|ids| {
+                    // Only honour an override that names the exact step and
+                    // cards this pack still holds; anything else is stale.
+                    ids.len() == cards_per_pick
+                        && ids
+                            .iter()
+                            .all(|id| pack.0.iter().any(|card| &card.instance_id == id))
+                })
+                .cloned();
+            let card_instance_ids = chosen.unwrap_or_else(|| {
+                let pick_indices = bot_ai::bot_picks(
+                    &pack.0,
+                    cards_per_pick,
+                    difficulty,
+                    &draft_session.pools[seat as usize],
+                    card_db,
+                    &mut rng,
+                );
+                // Map indices to ids BEFORE applying — the apply mutates the pack
+                // the indices refer to.
+                pick_indices
+                    .into_iter()
+                    .map(|index| pack.0[index].instance_id.clone())
+                    .collect()
+            });
 
             session::apply(
                 draft_session,
@@ -713,6 +746,179 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
         apply_human_pick_and_resolve_bots(draft_session, card_id)?;
         Ok(to_js(&filter_for_player(draft_session, 0)))
     })
+}
+
+// ── LLM-driven draft seats ───────────────────────────────────────────────────
+//
+// Strictly opt-in, exactly as in `engine-wasm`: with no configured endpoint the
+// heuristic bot in `bot_ai` drives every seat, unchanged.
+//
+// The two calls bracket the network round trip. `buildLlmDraftPickRequests`
+// renders each LLM seat's own `DraftPlayerView` — the same per-seat projection
+// the heuristic bot is handed, which is what keeps an LLM drafter blind to other
+// seats' pools — and stamps the pack with a fingerprint.
+// `submitPickWithLlmBotPicks` applies the human's pick and then hands each
+// resolved pick to the bot loop as an override, falling back per seat.
+
+/// The per-seat inputs a caller supplies to resolve LLM picks: which seat, the
+/// pack fingerprint the prompt was built over, which provider answered, and the
+/// raw response body.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmDraftResponse {
+    seat: u8,
+    fingerprint: String,
+    provider: String,
+    body: String,
+}
+
+/// What happened to one seat's LLM pick, so the UI can report a misconfigured
+/// endpoint instead of silently drafting like a bot forever.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmDraftOutcome {
+    seat: u8,
+    used: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Build one LLM pick request per named bot seat.
+///
+/// `seats_json` is the list of seats bound to an LLM profile; seats absent from
+/// it keep the heuristic bot. `set_names_json` is an optional set-code -> name
+/// map so the format brief reads "Triple Mirrodin" rather than "Triple MRD";
+/// codes are used verbatim when it is absent.
+#[wasm_bindgen(js_name = buildLlmDraftPickRequests)]
+pub fn build_llm_draft_pick_requests(
+    endpoint_json: &str,
+    seats_json: &str,
+    set_names_json: &str,
+) -> Result<JsValue, JsValue> {
+    let endpoint: phase_llm::LlmEndpointConfig = serde_json::from_str(endpoint_json)
+        .map_err(|e| JsValue::from_str(&format!("Invalid LLM endpoint config: {e}")))?;
+    let seats: Vec<u8> = serde_json::from_str(seats_json)
+        .map_err(|e| JsValue::from_str(&format!("Invalid LLM seat list: {e}")))?;
+    // A missing or unparsable name map degrades the brief to set codes; it is
+    // never a reason to refuse a pick.
+    let set_names: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(set_names_json).unwrap_or_default();
+    let set_names = phase_llm::draft_decision::set_names_from_pairs(set_names);
+    let difficulty = DIFFICULTY.with(|cell| cell.get());
+
+    with_draft(|draft_session| {
+        let requests: Vec<serde_json::Value> = CARD_DB.with(|cell| {
+            let db_borrow = cell.borrow();
+            let card_db = db_borrow.as_ref();
+            seats
+                .iter()
+                .filter(|seat| {
+                    // Seat 0 is the human; a seat past the pod does not exist.
+                    **seat > 0 && usize::from(**seat) < draft_session.seats.len()
+                })
+                .filter_map(|seat| {
+                    let view = filter_for_player(draft_session, *seat);
+                    let request = phase_llm::build_draft_pick_prompt(
+                        *seat, &view, difficulty, card_db, &set_names,
+                    )
+                    .ok()?;
+                    let http = phase_llm::build_chat_request(&endpoint, &request.prompt).ok()?;
+                    Some(serde_json::json!({
+                        "seat": seat,
+                        "fingerprint": request.fingerprint,
+                        "optionCount": request.option_count,
+                        "requiredPickCount": request.required_pick_count,
+                        "request": http,
+                    }))
+                })
+                .collect()
+        });
+        to_js(&requests)
+    })
+}
+
+/// Submit the human's pick, resolving any LLM seat's pick from its response.
+///
+/// Returns `{ view, llmOutcomes }`: the same `DraftPlayerView` `submit_pick`
+/// returns, plus a per-seat record of whether the LLM pick was used.
+#[wasm_bindgen(js_name = submitPickWithLlmBotPicks)]
+pub fn submit_pick_with_llm_bot_picks(
+    card_instance_id: &str,
+    responses_json: &str,
+) -> Result<JsValue, JsValue> {
+    let responses: Vec<LlmDraftResponse> = serde_json::from_str(responses_json)
+        .map_err(|e| JsValue::from_str(&format!("Invalid LLM draft responses: {e}")))?;
+    let card_id = card_instance_id.to_string();
+
+    with_draft_mut(|draft_session| {
+        let mut overrides: std::collections::BTreeMap<u8, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut outcomes: Vec<LlmDraftOutcome> = Vec::with_capacity(responses.len());
+
+        for response in &responses {
+            match resolve_llm_draft_pick(draft_session, response) {
+                Ok(selection) => {
+                    overrides.insert(response.seat, selection.card_instance_ids);
+                    outcomes.push(LlmDraftOutcome {
+                        seat: response.seat,
+                        used: true,
+                        reasoning: selection.reasoning,
+                        error: None,
+                    });
+                }
+                Err(error) => outcomes.push(LlmDraftOutcome {
+                    seat: response.seat,
+                    used: false,
+                    reasoning: None,
+                    error: Some(error.to_string()),
+                }),
+            }
+        }
+
+        apply_human_pick_and_resolve_bots_with_overrides(
+            draft_session,
+            DraftAction::Pick {
+                seat: 0,
+                card_instance_ids: vec![card_id],
+            },
+            &overrides,
+        )?;
+
+        Ok(to_js(&serde_json::json!({
+            "view": filter_for_player(draft_session, 0),
+            "llmOutcomes": outcomes,
+        })))
+    })
+}
+
+/// Decode one seat's LLM response against the pack it is actually holding.
+fn resolve_llm_draft_pick(
+    draft_session: &DraftSession,
+    response: &LlmDraftResponse,
+) -> Result<phase_llm::LlmPickSelection, phase_llm::LlmError> {
+    let Some(Some(pack)) = draft_session.current_pack.get(usize::from(response.seat)) else {
+        return Err(phase_llm::LlmError::StaleDecision);
+    };
+    let provider = phase_llm::LlmProvider::from_label(&response.provider);
+    let completion = phase_llm::extract_completion_text(provider, &response.body)?;
+    // CR 903.13b: the step's card count is the procedure's, not the model's.
+    let required = usize::from(draft_session.config.kind.procedure().cards_per_pick);
+    phase_llm::select_picks(
+        response.seat,
+        &pack.0,
+        required,
+        &response.fingerprint,
+        &completion,
+    )
+}
+
+/// The engine-owned LLM provider catalog, mirrored here so a draft-only client
+/// surface does not have to load the game engine to render the settings UI.
+#[wasm_bindgen(js_name = llmProviderCatalog)]
+pub fn llm_provider_catalog() -> JsValue {
+    to_js(phase_llm::catalog::provider_catalog())
 }
 
 /// Get the current DraftPlayerView without mutation.

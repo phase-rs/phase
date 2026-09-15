@@ -12,6 +12,8 @@ import {
   type SetPackSequence,
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
+import { botSeatIndices, submitPickWithLlmBots } from "../services/llm/draftLlm";
+import { draftProfile, useLlmStore } from "./llmStore";
 import {
   MAX_MATERIALIZED_VIRTUAL_BASICS,
   migrateLegacyWorkspace,
@@ -667,8 +669,17 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
         throw new Error("Stale draft pick request");
       }
       switch (request.kind) {
-        case "pick":
+        case "pick": {
+          // LLM drafters are opt-in twice over: a profile must be configured
+          // AND drafting must be switched on for it. Anything else — including
+          // a pod with no bot seats — takes the ordinary engine-bot path.
+          const profile = draftProfile(useLlmStore.getState());
+          const botSeats = profile ? botSeatIndices(view) : [];
+          if (profile && botSeats.length > 0) {
+            return submitPickWithLlmBots(lease, request.instanceId, profile, botSeats);
+          }
           return lease.submitPick(request.instanceId);
+        }
         case "draft-effect": {
           const adapterInstanceIds = [...request.instanceIds];
           return lease.submitPickWithDraftEffect(request.effectCardInstanceId, adapterInstanceIds);

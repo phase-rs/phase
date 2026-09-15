@@ -1,5 +1,8 @@
 import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, PLAYER_ID } from "../../constants/game";
 import { useGameStore } from "../../stores/gameStore";
+import { profileForSeat, useLlmStore } from "../../stores/llmStore";
+import { executeLlmRequest } from "../../services/llm/llmClient";
+import { endpointOf } from "../../services/llm/types";
 import type { AiActionProposal, GameAction, GameState, WaitingFor } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { pressureMultiplier } from "../../utils/stackPressure";
@@ -23,6 +26,17 @@ const MAX_TOTAL_FAILURES = 6;
 export interface AISeatBinding {
   playerId: number;
   difficulty: string;
+  /**
+   * Index of this seat in `preferencesStore.aiSeats` / `llmStore.seatBindings`
+   * (0 = first AI opponent). Present so the controller can look up an LLM
+   * binding at DECISION time rather than copying one in: the player may edit or
+   * delete a profile mid-game, and a stale copy would keep calling a key they
+   * revoked.
+   *
+   * Absent for callers that do not configure per-seat opponents; such a seat is
+   * always heuristic.
+   */
+  llmSeatIndex?: number;
 }
 
 export interface AIControllerConfig {
@@ -70,6 +84,84 @@ function waitingForDebugLabel(waitingFor: WaitingFor | null | undefined): string
   return `${waitingFor.type}/${choiceTypeKey(waitingFor.data.choice_type)} for player ${player}`;
 }
 
+/**
+ * How many engine-authored log entries an LLM decision is given as history.
+ *
+ * The engine decides how many of these it actually renders (by difficulty, via
+ * `phase_llm::prompt::history_window`); this is only the bound on what crosses
+ * the boundary, so a thousand-entry Commander game does not serialize its whole
+ * log on every priority pass.
+ */
+const LLM_HISTORY_TRANSFER_LIMIT = 120;
+
+/**
+ * Consecutive LLM failures a seat may take before the controller stops trying
+ * the provider for the rest of the session.
+ *
+ * Without this, a provider that is down, rate-limited, or simply hanging costs
+ * the full request timeout on EVERY decision, turning one misconfiguration into
+ * a permanently unplayable game. The seat keeps playing throughout — it just
+ * plays with the engine AI, which is what it was already falling back to.
+ */
+const MAX_CONSECUTIVE_LLM_FAILURES = 3;
+
+/**
+ * Run one LLM-driven decision for `playerId`.
+ *
+ * Returns `null` for EVERY failure — no configured profile, an adapter without
+ * the capability, a network or provider error, a reply the engine would not
+ * bind to a legal option, a decision that moved on mid-flight. The caller then
+ * takes the ordinary heuristic path, so an LLM seat degrades to a normal AI
+ * seat rather than stalling the game.
+ *
+ * The engine owns everything of consequence here: it builds the prompt, it
+ * builds the HTTP request, and it is the only thing that turns a reply back
+ * into an action. This function performs the call and passes bytes along.
+ */
+async function llmActionProposal(
+  playerId: number,
+  difficulty: string,
+  llmSeatIndex: number | undefined,
+  signal: AbortSignal,
+): Promise<AiActionProposal | null> {
+  if (llmSeatIndex == null) return null;
+  const profile = profileForSeat(useLlmStore.getState(), llmSeatIndex);
+  if (!profile) return null;
+
+  const { adapter, logHistory } = useGameStore.getState();
+  if (!adapter?.buildLlmDecisionRequest || !adapter.getAiActionProposalFromLlmResponse) {
+    return null;
+  }
+
+  const history = (logHistory ?? []).slice(-LLM_HISTORY_TRANSFER_LIMIT);
+  const built = await adapter.buildLlmDecisionRequest(
+    difficulty,
+    playerId,
+    JSON.stringify(endpointOf(profile)),
+    JSON.stringify(history),
+  );
+  if (!built?.request || !built.fingerprint) {
+    if (built?.error) debugLog(`LLM opponent (seat ${llmSeatIndex}): ${built.error}`, "warn");
+    return null;
+  }
+
+  const body = await executeLlmRequest(built.request, { signal });
+  const resolved = await adapter.getAiActionProposalFromLlmResponse(
+    playerId,
+    built.fingerprint,
+    profile.provider,
+    body,
+  );
+  if (!resolved?.proposal) {
+    if (resolved?.error) debugLog(`LLM opponent (seat ${llmSeatIndex}): ${resolved.error}`, "warn");
+    return null;
+  }
+  if (resolved.reasoning) {
+    debugLog(`LLM opponent (seat ${llmSeatIndex}) reasoning: ${resolved.reasoning}`, "info");
+  }
+  return resolved.proposal;
+}
+
 export function createAIController(config: AIControllerConfig): AIController {
   let active = false;
   let pending = false;
@@ -95,7 +187,35 @@ export function createAIController(config: AIControllerConfig): AIController {
   const MAX_CONSECUTIVE_FAILURES = 3;
 
   const difficultyByPlayerId = new Map(config.seats.map((s) => [s.playerId, s.difficulty]));
+  // Only the INDEX is retained, never the profile: the lookup happens at
+  // decision time so an edited or deleted profile takes effect immediately.
+  const llmSeatIndexByPlayerId = new Map(
+    config.seats.map((s) => [s.playerId, s.llmSeatIndex]),
+  );
   const aiPlayerIds = new Set(difficultyByPlayerId.keys());
+  /** Aborts an in-flight LLM call whose decision is no longer current. */
+  let llmAbort: AbortController | null = null;
+  /** Consecutive LLM failures per seat, reset by the first success. */
+  const llmFailures = new Map<number, number>();
+  /** Seats whose provider has failed enough to be given up on this session. */
+  const llmDisabled = new Set<number>();
+
+  function recordLlmOutcome(playerId: number, succeeded: boolean): void {
+    if (succeeded) {
+      llmFailures.delete(playerId);
+      return;
+    }
+    const failures = (llmFailures.get(playerId) ?? 0) + 1;
+    llmFailures.set(playerId, failures);
+    if (failures >= MAX_CONSECUTIVE_LLM_FAILURES) {
+      llmDisabled.add(playerId);
+      debugLog(
+        `LLM opponent (player ${playerId}) failed ${failures} times in a row; `
+          + "this seat will use the engine AI for the rest of the game",
+        "warn",
+      );
+    }
+  }
 
   /**
    * Stable identity key for a WaitingFor — type + player so Priority{0} ≠ Priority{1}.
@@ -200,6 +320,10 @@ export function createAIController(config: AIControllerConfig): AIController {
   function invalidateAttempt(): void {
     attemptGeneration++;
     pending = false;
+    // A decision that moved on must not keep a provider call alive: the engine
+    // would refuse the stale reply anyway, and the socket is worth reclaiming.
+    llmAbort?.abort();
+    llmAbort = null;
     if (timeoutId != null) {
       clearTimeout(timeoutId);
       timeoutId = null;
@@ -285,9 +409,37 @@ export function createAIController(config: AIControllerConfig): AIController {
       : adapter?.getAiActionProposal;
     if (!getProposal) return;
     const attempt = beginAttempt(scheduledWaitingFor, playerId);
-    const proposalPromise: Promise<AiActionProposal | null> = Promise.resolve(
-      getProposal.call(adapter, difficulty, playerId),
-    );
+    const heuristicProposal = (): Promise<AiActionProposal | null> =>
+      Promise.resolve(getProposal.call(adapter, difficulty, playerId));
+    // An LLM seat is tried first and falls back to the heuristic AI on any
+    // failure. The tactical-fallback path deliberately skips the LLM entirely:
+    // it exists to recover a seat whose proposals keep failing, and adding a
+    // network round trip to a recovery path is the wrong trade.
+    const llmSeatIndex = llmSeatIndexByPlayerId.get(playerId);
+    let proposalPromise: Promise<AiActionProposal | null>;
+    if (useTacticalFallback || llmSeatIndex == null || llmDisabled.has(playerId)) {
+      proposalPromise = heuristicProposal();
+    } else {
+      llmAbort?.abort();
+      const abort = new AbortController();
+      llmAbort = abort;
+      proposalPromise = llmActionProposal(playerId, difficulty, llmSeatIndex, abort.signal)
+        .catch((error) => {
+          debugLog(
+            `LLM opponent (player ${playerId}) failed; using the engine AI: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            "warn",
+          );
+          return null;
+        })
+        .then((proposal) => {
+          // A cancelled call is not the provider's fault — the decision simply
+          // moved on — so it must not count toward giving up on the seat.
+          if (!abort.signal.aborted) recordLlmOutcome(playerId, proposal != null);
+          return proposal ?? heuristicProposal();
+        });
+    }
     // Suppress unhandled-rejection warnings if stop() cancels the timeout
     // before it fires and nothing else awaits this promise.
     proposalPromise.catch(() => {});

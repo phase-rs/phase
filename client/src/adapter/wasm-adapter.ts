@@ -2,6 +2,7 @@ import type {
   AiActionProposal,
   AiDecisionDiagnosticReceipt,
   AiDecisionDiagnosticsCapability,
+  AiLlmProposalResult,
   AiProposalSubmission,
   EngineAdapter,
   EngineSnapshot,
@@ -9,6 +10,7 @@ import type {
   GameAction,
   GameState,
   LegalActionsResult,
+  LlmDecisionRequestResult,
   MatchConfig,
   ObjectId,
   PersistedGameState,
@@ -646,6 +648,73 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     }
   }
 
+  /**
+   * Engine-authored LLM request for this seat's current decision.
+   *
+   * Returns `null` on any engine error rather than throwing: an LLM seat that
+   * cannot build a request falls back to the heuristic AI, and a network-shaped
+   * failure must never take the game down with it.
+   */
+  async buildLlmDecisionRequest(
+    difficulty: string,
+    playerId: number,
+    endpointJson: string,
+    historyJson: string,
+  ): Promise<LlmDecisionRequestResult | null> {
+    this.assertInitialized();
+    try {
+      if (this.engine) {
+        return await this.engine.buildLlmDecisionRequest(
+          difficulty,
+          playerId,
+          endpointJson,
+          historyJson,
+        );
+      }
+      return await this.fallback!.buildLlmDecisionRequest(
+        difficulty,
+        playerId,
+        endpointJson,
+        historyJson,
+      );
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  async getAiActionProposalFromLlmResponse(
+    playerId: number,
+    fingerprint: string,
+    provider: string,
+    responseBody: string,
+  ): Promise<AiLlmProposalResult | null> {
+    this.assertInitialized();
+    try {
+      if (this.engine) {
+        return await this.engine.getAiActionProposalFromLlmResponse(
+          playerId,
+          fingerprint,
+          provider,
+          responseBody,
+        );
+      }
+      return await this.fallback!.getAiActionProposalFromLlmResponse(
+        playerId,
+        fingerprint,
+        provider,
+        responseBody,
+      );
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  async llmProviderCatalog(): Promise<unknown> {
+    this.assertInitialized();
+    if (this.engine) return await this.engine.llmProviderCatalog();
+    return this.fallback!.llmProviderCatalog();
+  }
+
   async submitAiActionProposal(
     proposal: AiActionProposal,
   ): Promise<AiProposalSubmission> {
@@ -1235,6 +1304,19 @@ interface MainThreadFallback {
     playerId: number,
   ): Promise<{ proposal: AiActionProposal; receipt: AiDecisionDiagnosticReceipt } | null>;
   submitAiActionProposal(proposal: AiActionProposal): Promise<AiProposalSubmission>;
+  buildLlmDecisionRequest(
+    difficulty: string,
+    playerId: number,
+    endpointJson: string,
+    historyJson: string,
+  ): Promise<LlmDecisionRequestResult | null>;
+  getAiActionProposalFromLlmResponse(
+    playerId: number,
+    fingerprint: string,
+    provider: string,
+    responseBody: string,
+  ): Promise<AiLlmProposalResult | null>;
+  llmProviderCatalog(): Promise<unknown>;
   exportState(): Promise<string>;
   restoreState(stateJson: string): Promise<void>;
   resumeRestoredGameState(): Promise<RestoredFallbackResult>;
@@ -1404,6 +1486,36 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     getAiTacticalActionProposal: (difficulty: string, playerId: number) =>
       enqueue(() => (wasm.get_ai_tactical_action_proposal(difficulty, playerId) ?? null) as AiActionProposal | null),
+
+    buildLlmDecisionRequest: (
+      difficulty: string,
+      playerId: number,
+      endpointJson: string,
+      historyJson: string,
+    ) =>
+      enqueue(
+        () =>
+          (wasm.buildLlmDecisionRequest(difficulty, playerId, endpointJson, historyJson) ??
+            null) as LlmDecisionRequestResult | null,
+      ),
+
+    getAiActionProposalFromLlmResponse: (
+      playerId: number,
+      fingerprint: string,
+      provider: string,
+      responseBody: string,
+    ) =>
+      enqueue(
+        () =>
+          (wasm.getAiActionProposalFromLlmResponse(
+            playerId,
+            fingerprint,
+            provider,
+            responseBody,
+          ) ?? null) as AiLlmProposalResult | null,
+      ),
+
+    llmProviderCatalog: () => enqueue(() => wasm.llmProviderCatalog() as unknown),
 
     getAiActionProposalWithDiagnostics: (difficulty: string, playerId: number) =>
       enqueue(() => (wasm.get_ai_action_proposal_with_diagnostics(difficulty, playerId) ?? null) as {

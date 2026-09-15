@@ -685,6 +685,7 @@ dependencies = [
  "js-sys",
  "phase-ai",
  "phase-engine",
+ "phase-llm",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
  "serde",
@@ -763,6 +764,7 @@ dependencies = [
  "js-sys",
  "phase-ai",
  "phase-engine",
+ "phase-llm",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
  "seat-reducer",
@@ -1981,6 +1983,17 @@ dependencies = [
  "tracing-subscriber",
  "ts-rs 12.0.1",
  "web-time",
+]
+
+[[package]]
+name = "phase-llm"
+version = "0.83.0"
+dependencies = [
+ "draft-core",
+ "phase-ai",
+ "phase-engine",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
