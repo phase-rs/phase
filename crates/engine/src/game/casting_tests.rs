@@ -2636,12 +2636,13 @@ fn normal_option_offered(set: &CastingVariantChoiceSet) -> bool {
         .any(|o| o.variant == CastingVariant::Normal)
 }
 
-/// A non-split cast still has one complete selection tuple. `Current` is not a
-/// compatibility omission: it identifies the object's already-active face.
+/// An ordinary cast skips the variant menu, but its direct preparation still
+/// accepts only the object's already-active `Current` face.
 #[test]
-fn ordinary_casting_variant_option_uses_current_face() {
+fn ordinary_cast_preparation_accepts_only_current_face() {
     use crate::game::scenario::{GameScenario, P0};
     use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::types::game_state::CastingVariantFace;
 
     let db = crate::test_support::shared_card_db();
     let mut scenario = GameScenario::new();
@@ -2649,14 +2650,31 @@ fn ordinary_casting_variant_option_uses_current_face() {
     let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
     add_mana(&mut scenario.state, P0, ManaType::Red, 1);
 
-    let options = casting_variant_choice_set(&scenario.state, P0, bolt, None).options;
-    assert_eq!(options.len(), 1);
-    assert_eq!(options[0].variant, CastingVariant::Normal);
-    assert_eq!(
-        options[0].face,
-        crate::types::game_state::CastingVariantFace::Current,
-        "ordinary casts must carry an explicit Current face"
-    );
+    let current = prepare_casting_variant_on_face(
+        &scenario.state,
+        P0,
+        bolt,
+        CastingVariant::Normal,
+        CastingVariantFace::Current,
+        CastingMode::Actual,
+    )
+    .expect("ordinary casts must accept their explicit Current face");
+    assert_eq!(current.prepared.casting_variant, CastingVariant::Normal);
+    assert!(can_cast_object_now(&scenario.state, P0, bolt));
+    for face in [CastingVariantFace::Left, CastingVariantFace::Right] {
+        assert!(
+            prepare_casting_variant_on_face(
+                &scenario.state,
+                P0,
+                bolt,
+                CastingVariant::Normal,
+                face,
+                CastingMode::Actual,
+            )
+            .is_err(),
+            "ordinary casts must reject the split-only {face:?} selector"
+        );
+    }
 }
 
 /// Fuse exposes two `Normal` choices. Selection is therefore the entire
