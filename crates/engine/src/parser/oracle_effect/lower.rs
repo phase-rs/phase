@@ -10173,6 +10173,24 @@ fn parse_amount_of_mana_paid_this_way(input: &str) -> OracleResult<'_, ()> {
     Ok((input, ()))
 }
 
+/// CR 107.3c + CR 608.2c: the parse context for a "where X is <count>" binding.
+///
+/// The binding is carried as text and bound during assembly, after the clause
+/// that introduced a player referent has been parsed, so no enclosing context
+/// reaches it. A third-person "they control" in the count therefore names the
+/// player the ability is acting on, which is the same anaphoric default the
+/// per-player count parser uses (`parse_for_each_clause_with_context`):
+/// `ControllerRef::ScopedPlayer`. The resolver binds that to the phase trigger's
+/// active player or the `player_scope` iteration player, and falls back to the
+/// controller when neither is bound. A printed "you control" stays
+/// `ControllerRef::You`.
+fn where_x_count_context() -> crate::parser::oracle_ir::context::ParseContext {
+    crate::parser::oracle_ir::context::ParseContext {
+        relative_player_scope: Some(crate::types::ability::ControllerRef::ScopedPlayer),
+        ..Default::default()
+    }
+}
+
 pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<QuantityExpr> {
     let expression = where_x_expression.trim().trim_end_matches('.');
     let expression_lower = expression.to_ascii_lowercase();
@@ -10324,7 +10342,10 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     // CDA-quantity classification takes precedence: it is the more specific
     // where-X interpreter (object counts, "that spell's mana value",
     // "the number of age counters on this enchantment", etc.).
-    if let Some(expr) = parse_cda_quantity(where_x_expression) {
+    if let Some(expr) = crate::parser::oracle_quantity::parse_cda_quantity_with_context(
+        where_x_expression,
+        &mut where_x_count_context(),
+    ) {
         return Some(expr);
     }
     // CR 107.3i: Keep the compositional nom quantity grammar available to
