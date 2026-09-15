@@ -18,6 +18,7 @@ mod adamant_enters_with_leading_if_gate;
 mod adapter_contract_fixtures;
 mod advanced_reconstruction_regression;
 mod affinity_plural_subtype;
+mod agent_frank_horrigan_attacked_this_turn_indestructible;
 mod ai_decision_contract;
 mod ai_multi_target_selection;
 mod ajani_nacatl_pariah_co_departure_6427;

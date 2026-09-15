@@ -11617,6 +11617,98 @@ fn static_enchanted_creature_it_entered_this_turn_stays_unrecognized() {
     );
 }
 
+/// CR 508.1a + CR 611.3a + CR 613.1f + CR 702.12a (P4): Agent Frank Horrigan —
+/// "Agent Frank Horrigan has indestructible as long as it attacked this turn."
+/// For a SelfRef static the bound pronoun "it" co-refers with the source, so
+/// `rewrite_self_pronoun_subject` normalizes "it attacked this turn" to the
+/// canonical "~ attacked this turn" templating before the condition is typed,
+/// and the context-free grammar lowers that to `SourceMatchesFilter` over the
+/// type-free `FilterProp::AttackedThisTurn` runtime property. Previously this
+/// dropped to `Unrecognized`, which `evaluate_condition_with_context` treats as
+/// TRUE — i.e. the card was permanently indestructible. Generalizes to The Lunar
+/// Whale ("As long as The Lunar Whale attacked this turn, ...").
+#[test]
+fn static_indestructible_as_long_as_it_attacked_this_turn() {
+    let expected_condition = StaticCondition::SourceMatchesFilter {
+        filter: TargetFilter::Typed(
+            TypedFilter::default()
+                .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
+        ),
+    };
+
+    let def = parse_static_line(
+        "Agent Frank Horrigan has indestructible as long as it attacked this turn.",
+    )
+    .expect("the indestructible gate must parse");
+    // The SelfRef path is what enables the "it" rewrite — assert it explicitly.
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Indestructible,
+        }]
+    );
+    assert_eq!(def.condition, Some(expected_condition.clone()));
+
+    // Same gate on the generic printed-subject shape.
+    let generic =
+        parse_static_line("This creature has indestructible as long as it attacked this turn.")
+            .expect("the generic subject form must parse");
+    assert_eq!(generic.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(generic.condition, Some(expected_condition));
+}
+
+/// CR 611.3a (P5, attached-subject NEGATIVE regression): for an Aura/Equipment
+/// static the "it" in "as long as it attacked this turn" binds the
+/// ENCHANTED/EQUIPPED creature, NOT the Aura/Equipment source. The SelfRef
+/// rewrite must NOT fire: the affected subject is the enchanted creature, the
+/// else branch of `parse_continuous_gets_has` skips the rewrite, and the pronoun
+/// stays an honest gap rather than being mis-bound to the source's combat
+/// history. Mirrors the "it entered this turn" attached-subject guard above.
+#[test]
+fn static_enchanted_creature_it_attacked_this_turn_stays_unrecognized() {
+    let def = parse_static_line(
+        "Enchanted creature has indestructible as long as it attacked this turn.",
+    )
+    .expect("should parse the attached-subject grant");
+    // Attached subject — the enchanted creature, decidedly NOT SelfRef.
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+        ))
+    );
+    // "it" binds the enchanted creature, so it is an honest gap, not the source.
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Unrecognized {
+            text: "it attacked this turn".to_string(),
+        })
+    );
+}
+
+/// CR 611.3a (P7): the new gate composes through the " unless " splitter, which
+/// wraps the typed condition in `Not` (the modification applies precisely when
+/// the gate is FALSE). Proves the arm is reached by every condition consumer of
+/// `parse_affected_scoped_static_condition`, not just " as long as ".
+#[test]
+fn static_keyword_unless_it_attacked_this_turn_negates() {
+    let def = parse_static_line("~ has hexproof unless it attacked this turn.")
+        .expect("the unless-gated grant must parse");
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceMatchesFilter {
+                filter: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
+                ),
+            }),
+        })
+    );
+}
+
 #[test]
 fn static_cards_in_graveyards_lose_all_abilities() {
     let def = parse_static_line("Cards in graveyards lose all abilities.").unwrap();
