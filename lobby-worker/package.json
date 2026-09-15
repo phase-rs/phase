@@ -13,10 +13,10 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260721.1",
-    "miniflare": "4.20260721.0",
+    "miniflare": "5.20260903.0-alpha",
     "tsx": "^4.19.4",
     "typescript": "^5.6.0",
-    "wrangler": "^4.113.0"
+    "wrangler": "^4.129.0"
   },
   "overrides": {
     "sharp": "0.35.3"
