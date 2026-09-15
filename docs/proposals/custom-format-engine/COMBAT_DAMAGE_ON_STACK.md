@@ -5,7 +5,7 @@
 built. It is the last `LegacyRuleSet` axis, and it gates the two remaining
 Eternal Central presets, `middle_school()` and `classic_magic()`.
 
-**Revision 4** (2026-09-15; Q4 decision recorded). Final revision after three review rounds, each
+**Revision 5** (2026-09-15; Q4 decision and maintainer review on phase-rs/phase#8898 applied). Final revision after three review rounds, each
 pairing an architecture review with an adversarial fact-check of the rules
 premises. The round-3 verdict was **APPROVE WITH CHANGES**; this revision
 applies all of those changes. §11 records what every finding changed.
@@ -235,6 +235,7 @@ and current Oracle text.**
 | 502.68a "Lifelink is a triggered ability"; 502.68b "each triggers separately"; 420.3 + 408.1f (SBAs are checked before triggers go on the stack) | CR 702.15b (life gain is part of the damage event), CR 702.15f (redundant) | (1) **A player brought to 0 by combat damage can be kept alive by their own lifelink.** In 2009 they lost to the SBA before the trigger resolved. (2) No trigger to respond to. (3) Two instances no longer gain double life. |
 | 310.5 read literally: "any attackers and blockers that didn't assign combat damage in the first step" | CR 702.7b: participation fixed "as the first combat damage step began" | A first striker whose blocker left (so it assigned nothing) doesn't assign again in the second step. |
 | Division among multiple blockers: 310.2c/d "divided as its controller chooses" | CR 510.1c/d "divided as its controller chooses among them" | None. |
+| 310.2a: "Creatures with power less than 0 assign 0 combat damage" (they still assign) | CR 510.1a: creatures that would assign 0 or less "don't assign combat damage at all" | **`OnStack` follows 2009 here**, because the assignment is part of the observable stack object (§3.2). Dealing is identical: a 0-amount assignment deals no damage (current CR 120.8 / 2009 419.5a). |
 
 **Classic Magic card-text overrides** (Time Vault, Illusionary Mask) are the
 one remaining gap for Classic, and they are **outside this axis**: they need
@@ -376,11 +377,10 @@ match combat_damage_timing::policy(state):
   OnStack =>
     let pending = take_pending_damage(state);
     reset per-sub-step collection state (damage_step_index, damage_assignments)
-    if pending is non-empty:
-        push_combat_damage_object(state, sub_step, freeze(pending), events)    // journaled, §3.10
-    else:
-        mark sub-step dealt (first_strike_done / regular_damage_done)          // BEFORE any prompt: C1
-    // AFTER the push/mark, so abilities land ABOVE the object and re-entry can't re-run this
+    // ALWAYS exactly one object per combat damage step, even if every entry is 0
+    // or the list is empty (2009 310.1: "All assignments … go on the stack as a single object")
+    push_combat_damage_object(state, sub_step, freeze(pending), events)        // journaled, §3.10
+    // AFTER the push, so abilities land ABOVE the object and D3 blocks re-entry
     collect_step_start_triggers_and_run_sbas(state, sub_step, events)           // CR 500.6 + CR 704.3
     if let Some(wf) = pending_combat_damage_waiting(state) { return Some(wf) } // OrderTriggers, targets, …
     reset_priority(state)
@@ -401,11 +401,8 @@ match combat_damage_timing::policy(state):
 - Collected after the push, they sit above it and resolve first.
 - **A prompt raised here** (e.g. `OrderTriggers` for two same-controller
   triggers, or a target choice) is returned before Priority is granted.
-  Re-entry after the answer can't re-collect or re-emit the marker:
-  - with an object pushed, the D3 guard blocks it;
-  - with nothing pushed, the sub-step was already marked dealt. A set
-    `first_strike_done` also suppresses the regular marker
-    (`combat_damage.rs:241-246`).
+  Re-entry after the answer can't re-collect or re-emit the marker: an object
+  is always on the stack by then, so the D3 guard blocks it.
 
 **Step-start marker.** Today it is synthesized at *dealing* time, inside
 `process_combat_damage_triggers`, gated by `include_phase_event`
@@ -424,18 +421,42 @@ match combat_damage_timing::policy(state):
   `o:"beginning of the combat damage step"` returns 0 cards), so this keeps
   today's behavior.
 
-**Empty assignment: no object, but the step still gets its priority window.**
-- When `pending` is empty (every participant assigns 0, or has no legal
-  recipient), no object is pushed (Q1). The sub-step is marked dealt and **its
-  priority window is still granted**.
-- For an empty *first-strike* sub-step, the regular sub-step then starts through
-  the ordinary completeness gate, *after* players have had priority. That is
-  required both by 2009 310.4/310.5 and by current CR 510.3/510.4, which make
-  the first step a complete step.
+**Every combat damage step puts exactly one object on the stack**, including
+an inert one. This follows the maintainer review on #8898.
+- **Why.** 2009 310.1 puts "All assignments of combat damage" on the stack "as a
+  single object" as the step begins, and 310.4 resolves it and removes it. A
+  creature with power 0 or less still *assigns* (310.2a: "assign 0 combat
+  damage"), so the historical object exists and is observable. Skipping it
+  would omit a stack state the rule creates.
+- **Zero-amount assignments are recorded under `OnStack`.**
+  - `collect_damage_assignments` today skips a creature whose
+    `combat_damage_amount` is 0 (`combat_damage.rs:768`, `:938`), per current
+    CR 510.1a.
+  - That skip becomes an exhaustive `match` on the policy:
+    - `Modern` keeps skipping;
+    - `OnStack` records a 0-amount entry to the creature's recipient(s), per
+      310.2a.
+  - A 0 amount has exactly one division, so no `AssignCombatDamage` prompt is
+    raised for it.
+  - A creature that "assigns no combat damage" by an effect
+    (`assigns_no_combat_damage`), or that has no legal recipient
+    (310.2b–d: "will assign no combat damage"), makes no entry.
+- **An empty assignment list still pushes the object.** For example, every
+  attacker's blockers were removed and nothing tramples. The object resolves
+  with nothing to deal.
+- **Resolution of 0 entries:** no damage is dealt, so there are no
+  `DamageDealt` events, no damage triggers and no prevention events (current
+  CR 120.8; 2009 419.5a). The Phase A gate already drops 0-amount damage.
+- **Consequences:**
+  - there is no special empty branch;
+  - an empty *first-strike* step gets its object, its resolution and its
+    priority window like any other step, as 2009 310.4/310.5 and current
+    CR 510.3/510.4 require;
+  - D3 always has an object to guard on.
 - **Pre-existing modern-path gap, out of scope:** `finish_combat_damage_sub_step`
   gives no window between sub-steps when the stack is empty. That departs from
-  current CR 510.3 under Modern too. It is recorded as a separate issue to file
-  and is not changed here.
+  current CR 510.3 under Modern. It is recorded as a separate issue to file and
+  is not changed here.
 
 **Priority seat.** Use `turn_control::turn_decision_maker(state)`
 (`turn_control.rs:169`), as step entry does (`turns.rs:1121`). Phase 3c aligns
@@ -455,7 +476,7 @@ stored.**
 
 **Completion flags.** `first_strike_done` and `regular_damage_done` mean
 "damage for this sub-step has been dealt". They are set when the object
-resolves, or at push time when nothing was pushed.
+resolves (every step has an object).
 
 ### 3.3 Resolving: `stack.rs` arm
 
@@ -955,8 +976,9 @@ sharp by mutating the fix and pasting the failure.
 ### Phase 3c — `OnStack` engine behavior
 
 - **Scope:**
-  - the seam (§3.2): push → step-start triggers → prompt → Priority, the
-    empty-sub-step window, the D3 guard, the decision-maker seat;
+  - the seam (§3.2): push (always one object per step, zero-amount
+    assignments recorded) → step-start triggers → prompt → Priority, the D3
+    guard, the decision-maker seat;
   - the resolver arm and `ResolvedCombatDamage` (§3.3);
   - D7;
   - 310.4a–c dealing (§3.4);
@@ -985,10 +1007,11 @@ sharp by mutating the fix and pasting the failure.
 
      Control: the other incarnation isn't shielded.
   9. *First strike:* two objects, a window after each; 502.2c and 502.28d.
-  10. *Empty first-strike sub-step* (every first striker's blocker removed): no
-      object, a Priority window, then regular assignments. **Also asserts** the
-      first strikers deal no damage in the regular sub-step, which is the D0
-      departure in §1.4's table.
+  10. *Empty first-strike step* (every first striker's blocker removed, no
+      trample): an **inert** first-strike object appears with an empty
+      assignment list and resolves, a Priority window follows, then the regular
+      object is pushed. **Also asserts** the first strikers deal no damage in
+      the regular sub-step, which is the D0 departure in §1.4's table.
   11. *First strike + lifelink + two life-gain replacements (D7):* a Priority
       window exists before the second object. Modern control: the resume still
       flows straight into the regular sub-step.
@@ -997,8 +1020,9 @@ sharp by mutating the fix and pasting the failure.
         damage.
       - Variant: two same-controller triggers raise `OrderTriggers`; after
         ordering, exactly one damage object exists and the marker fired once.
-      - Variant: the same with an **empty** sub-step. The marker fires once, and
-        no damage object exists.
+      - Variant: the same with an **inert** step (empty assignment list). The
+        marker fires once, the trigger is above the inert object, and exactly one
+        object exists.
       - No card has this trigger text, so the test uses a **synthetic
         `TriggerDefinition`**, and the `/card-test` verbatim-Oracle requirement
         doesn't apply.
@@ -1025,6 +1049,15 @@ sharp by mutating the fix and pasting the failure.
       deals that much damage to that source's controller" shield created after
       assignment finds the token's controller from LKI. Control: under Modern
       the same shield against a live token behaves as today.
+  19. *Zero and negative power (310.2a):* a 0/1 attacker and a creature at
+      power −2 attack an open board.
+      - `OnStack`: exactly one `CombatDamage` entry appears, listing a
+        **0-amount assignment** for each. It resolves with no `DamageDealt`
+        event, no life change and no "deals combat damage" trigger, then
+        Priority follows.
+      - Modern control: no entry, and neither creature assigns (CR 510.1a).
+      - Mutation proof: restoring the `power == 0 → continue` skip under
+        `OnStack` must fail the entry assertion.
 
 ### Phase 3d — Release: gate, presets, client and AI polish
 
@@ -1049,18 +1082,10 @@ sharp by mutating the fix and pasting the failure.
 
 ## 10. Open questions
 
-- **Q1 — empty assignment (simplification, retained).**
-  - The design pushes no object when a sub-step assigns nothing. It still gives
-    that sub-step its priority window (§3.2), so nothing player-visible is lost.
-  - 2009 read literally would push an inert object in some cases:
-    - Under 310.2a, a creature with power less than 0 "assign[s] 0 combat
-      damage", so an object exists. But 419.5a says a source that "would deal 0
-      damage … does not deal damage at all".
-    - Creatures with no legal recipient "will assign no combat damage"
-      (310.2b–d), so no assignment exists for them at all.
-  - No pre-M10 ruling was found.
-  - The only remaining difference is an inert object visible on the stack
-    during the window. No assignment triggers exist to observe it.
+- **Q1 — resolved (maintainer review on #8898):** every combat damage step
+  pushes exactly one object, including an inert one. Zero-amount assignments
+  are recorded under `OnStack` (2009 310.2a). A 0 amount deals no damage
+  (current CR 120.8). See §3.2 and test 3c-19.
 - **Q2 — resolved:** no controller (D9, 2009 600.4a).
 - **Q3 — scope beyond the presets:** "Lost Legacy 606" (CONTEXT.md) is
   expressible with this axis, but it isn't a bundled preset.
@@ -1159,6 +1184,12 @@ sharp by mutating the fix and pasting the failure.
 | CR 702.16b is targeting, not damage | §8 cites 702.16a / 702.16e |
 | The elided 310.1 quote is about assignment triggers | §3.2 cites 2009 408.1f + current CR 500.6 |
 | Lifelink to a departed controller | §3.4 paragraph; test 3c-15 |
+
+### PR review (phase-rs/phase#8898)
+
+| Finding | Change |
+|---|---|
+| **MED** (matthewevans): an empty or zero assignment still needs the historical stack object; a 0- or negative-power creature assigns under 310.2a | Always one object per step (§3.2); zero-amount assignments recorded under `OnStack`; §1.4 row; Q1 resolved; tests 3c-10, 3c-12 and new 3c-19. This also removes round 3's C1 empty-branch hazard: there is no longer an empty branch. |
 
 **Review loop closed** at the three-round cap. The final architecture verdict is
 APPROVE WITH CHANGES, and all changes are applied above. Each implementation
