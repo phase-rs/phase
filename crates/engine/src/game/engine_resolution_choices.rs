@@ -6742,6 +6742,32 @@ pub(super) fn handle_resolution_choice(
                 })
                 .collect();
 
+            // CR 608.2c + CR 400.7: the synchronous chain forwards a
+            // `forward_result` producer's moved objects to the next instruction
+            // (`resolve_chain_body`). When that producer paused for this
+            // selection, its parked continuation was marked as awaiting the
+            // result; hand it exactly the objects this selection moved, so a
+            // later "that creature" (and the delayed trigger that snapshots it)
+            // names them rather than nothing (Sneak Attack, issue #6902). An
+            // unmarked continuation belongs to a non-forwarding producer and is
+            // left alone, so a declared target is never overridden.
+            let forwarded = crate::types::ability::ForwardedResultContext::from_object_ids(
+                state,
+                &state.last_zone_changed_ids,
+            );
+            if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                if frame
+                    .pending
+                    .chain
+                    .context
+                    .forwarded_result_context
+                    .is_some()
+                {
+                    frame.pending.chain.context.forwarded_result_context =
+                        Some(Box::new(forwarded));
+                }
+            }
+
             // Step B: resolve the reflexive `WhenYouDo` continuation (Grist's
             // `[-2]`). `waiting_for` is still `Priority` here, so
             // `resume_with_error_propagation`'s guard passes and
