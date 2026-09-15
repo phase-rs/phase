@@ -94,26 +94,32 @@ export function createPeerSession(
     return snapshot;
   };
   let retainedCandidates: CandidateDiagnosticSnapshot | null = null;
-  let statsPending = false;
+  let statsPending: Promise<CandidateDiagnosticSnapshot | null> | null = null;
+  let statsRerun = false;
   const transportClosed = () => closed || peerConnection?.connectionState === "closed"
     || peerConnection?.iceConnectionState === "closed" || dataChannel?.readyState === "closing"
     || dataChannel?.readyState === "closed";
   const sampleCandidates = async (): Promise<CandidateDiagnosticSnapshot | null> => {
-    if (transportClosed() || statsPending || !peerConnection?.getStats) return retainedCandidates;
-    statsPending = true;
-    try {
-      const candidates = await boundedDiagnosticProbe(async () => {
-        // The bounded probe begins on a microtask; teardown can run before it.
-        if (transportClosed()) return null;
-        return projectCandidateStats(await peerConnection.getStats());
-      });
-      if (!transportClosed() && candidates) {
-        retainedCandidates = candidates;
-        recordDiagnostic({ kind: "candidate-route", diagnosticId, observedAt: candidates.observedAt ?? Date.now(), candidates });
-      }
-    } catch { /* Unsupported or already closed transports have no new route evidence. */ }
-    finally { statsPending = false; }
-    return retainedCandidates;
+    if (transportClosed() || !peerConnection?.getStats) return retainedCandidates;
+    if (statsPending) { statsRerun = true; return statsPending; }
+    statsPending = (async () => {
+      do {
+        statsRerun = false;
+        try {
+          const candidates = await boundedDiagnosticProbe(async () => {
+            // The bounded probe begins on a microtask; teardown can run before it.
+            if (transportClosed()) return null;
+            return projectCandidateStats(await peerConnection.getStats());
+          });
+          if (!transportClosed() && candidates) {
+            retainedCandidates = candidates;
+            recordDiagnostic({ kind: "candidate-route", diagnosticId, observedAt: candidates.observedAt ?? Date.now(), candidates });
+          }
+        } catch { /* Unsupported or already closed transports have no new route evidence. */ }
+      } while (statsRerun && !transportClosed());
+      return retainedCandidates;
+    })().finally(() => { statsPending = null; });
+    return statsPending;
   };
   const onTransportState = () => { sampleTransport(); void sampleCandidates(); };
   const onChannelError = () => { channelError = "data-channel-error"; sampleTransport(); };

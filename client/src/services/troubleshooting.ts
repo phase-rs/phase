@@ -1,4 +1,4 @@
-import { DIAGNOSTIC_HISTORY_LIMIT, DIAGNOSTIC_HISTORY_MAX_AGE_MS, loadDiagnosticHistory, saveDiagnosticHistory } from "./diagnosticHistory";
+import { DIAGNOSTIC_HISTORY_LIMIT, isRetainedDiagnosticEntry, loadDiagnosticHistory, saveDiagnosticHistory } from "./diagnosticHistory";
 
 /** Local, identity-free observations. Sources are local instances, not gameplay ownership. */
 export interface EngineDiagnosticSnapshot {
@@ -82,13 +82,13 @@ export function getDiagnosticSources(): { engines: EngineDiagnosticSource[]; pee
   return { engines: [...engines], peers: [...peers] };
 }
 export function recordDiagnostic(entry: DiagnosticHistoryEntry): void {
+  if (!isRetainedDiagnosticEntry(entry)) return;
   history.push(structuredClone(entry));
   if (history.length > DIAGNOSTIC_HISTORY_LIMIT) history.shift();
   saveDiagnosticHistory(history);
 }
 export function getDiagnosticHistory(): DiagnosticHistoryEntry[] {
-  const cutoff = Date.now() - DIAGNOSTIC_HISTORY_MAX_AGE_MS;
-  const retained = history.filter((entry) => entry.observedAt >= cutoff && entry.observedAt <= Date.now());
+  const retained = history.filter(isRetainedDiagnosticEntry);
   history.splice(0, history.length, ...retained);
   saveDiagnosticHistory(history);
   return structuredClone(history);
@@ -278,7 +278,7 @@ export async function runDiagnostics(environment: DiagnosticEnvironment, endpoin
       const registered = peers.has(source);
       const connected = registered && transport.connectionState === "connected" && transport.channelState === "open";
       const failed = transport.connectionState === "failed" || transport.iceState === "failed" || transport.channelError !== null;
-      add("peer", failed ? "error" : connected ? "pass" : "warning", wasConnected && !connected ? "peerDisconnectedDuringCheck" : failed ? "peerFailed" : connected ? "peerConnected" : "peerWaiting", diagnosticId);
+      add("peer", failed ? "error" : connected ? "pass" : "warning", failed ? "peerFailed" : wasConnected && !connected ? "peerDisconnectedDuringCheck" : connected ? "peerConnected" : "peerWaiting", diagnosticId);
     } catch { add("peer", "unavailable", "probeFailed", diagnosticId); }
   }
   return { schemaVersion: 1, startedAt, completedAt: Date.now(), environment: { ...environment }, results, engines: engineSnapshots, peers: peerSnapshots, history: getDiagnosticHistory() };

@@ -50,7 +50,7 @@ const schemas: Record<DiagnosticHistoryEntry["kind"], Check> = {
   "engine-not-initialized": shape({ ...common, kind: oneOf("engine-not-initialized"), engine,
     operation: oneOf("submitAction", "submitInteraction", "previewManaPayment", "previewInteraction", "getState", "getFilteredState", "getLegalActions", "getLegalActionsForViewer", "getSnapshot", "getViewerSnapshot", "getAiActionProposal", "getAiTacticalActionProposal", "submitAiActionProposal", "restoreState", "resumeRestoredGameState", "exportPersistenceState", "setMultiplayerMode", "applySeatMutation", "projectSeatView", "resumeMultiplayerHostState", "estimateBracket", "ping", "initializeGame", "initializeMultiplayerHostGame") }),
 };
-function retainedEntry(value: unknown): value is DiagnosticHistoryEntry {
+export function isRetainedDiagnosticEntry(value: unknown): value is DiagnosticHistoryEntry {
   if (!value || typeof value !== "object" || !("kind" in value) || !("observedAt" in value)) return false;
   if (typeof value.observedAt !== "number" || value.observedAt < Date.now() - DIAGNOSTIC_HISTORY_MAX_AGE_MS || value.observedAt > Date.now()) return false;
   return typeof value.kind === "string" && Object.prototype.hasOwnProperty.call(schemas, value.kind)
@@ -64,14 +64,14 @@ export function loadDiagnosticHistory(): DiagnosticHistoryEntry[] {
     if (!raw) return [];
     if (raw.length > MAX_BYTES) { sessionStorage.removeItem(STORAGE_KEY); return []; }
     const value: unknown = JSON.parse(raw);
-    const entries = Array.isArray(value) ? value.slice(-DIAGNOSTIC_HISTORY_LIMIT).filter(retainedEntry) : [];
+    const entries = Array.isArray(value) ? value.slice(-DIAGNOSTIC_HISTORY_LIMIT).filter(isRetainedDiagnosticEntry) : [];
     saveDiagnosticHistory(entries);
     return entries;
   } catch { return []; }
 }
 export function saveDiagnosticHistory(entries: DiagnosticHistoryEntry[]): void {
   try {
-    const retained = entries.slice(-DIAGNOSTIC_HISTORY_LIMIT).filter(retainedEntry);
+    const retained = entries.slice(-DIAGNOSTIC_HISTORY_LIMIT).filter(isRetainedDiagnosticEntry);
     if (!retained.length) { sessionStorage.removeItem(STORAGE_KEY); return; }
     const raw = JSON.stringify(retained);
     if (raw.length <= MAX_BYTES) sessionStorage.setItem(STORAGE_KEY, raw);

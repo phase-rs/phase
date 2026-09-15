@@ -201,3 +201,25 @@ it("includes a connection registered while network checks were running", async (
   expect(report.results).toContainEqual(expect.objectContaining({ reason: "peerConnected" }));
   expect(report.results).not.toContainEqual(expect.objectContaining({ reason: "noPeer" }));
 });
+
+it("gives explicit transport failure precedence when a connected peer fails during checks", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null)));
+  let current = transport;
+  unregister.push(registerPeerDiagnostics({ snapshot: () => current, stats: async () => null }));
+  let finish!: (value: []) => void;
+  const pending = runDiagnostics(environment, "/servers", new AbortController().signal, () => new Promise((resolve) => { finish = resolve; }));
+  current = { ...transport, connectionState: "failed", iceState: "failed" };
+  finish([]);
+  expect((await pending).results).toContainEqual(expect.objectContaining({ check: "peer", status: "error", reason: "peerFailed" }));
+});
+
+it("rejects undeclared fields before they enter in-memory history or reports", async () => {
+  const before = getDiagnosticHistory();
+  const secretTopLevel = { kind: "credentials" as const, observedAt: Date.now(), outcome: "fresh" as const, credential: "SECRET" };
+  const secretNested = { kind: "candidate-route" as const, observedAt: Date.now(), candidates: { localType: "relay" as const, remoteType: null, roundTripMs: 1, address: "SECRET" } };
+  recordDiagnostic(secretTopLevel);
+  recordDiagnostic(secretNested);
+  expect(getDiagnosticHistory()).toEqual(before);
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null)));
+  expect(JSON.stringify(await runDiagnostics(environment, "/servers", new AbortController().signal))).not.toContain("SECRET");
+});

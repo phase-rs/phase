@@ -16,7 +16,9 @@ it("bounds and expires history including across reloads", () => {
   const entries = Array.from({ length: 40 }, event);
   saveDiagnosticHistory(entries);
   expect(loadDiagnosticHistory()).toEqual(entries.slice(-30));
-  vi.advanceTimersByTime(60 * 60 * 1000 + 1);
+  vi.advanceTimersByTime(59 * 60 * 1000);
+  expect(loadDiagnosticHistory()).toEqual(entries.slice(-30));
+  vi.advanceTimersByTime(60 * 1000 + 1);
   expect(loadDiagnosticHistory()).toEqual([]);
   expect(sessionStorage.getItem(key)).toBeNull();
 });
