@@ -23724,6 +23724,8 @@ pub struct AbilityDefinition {
     /// false. See `SiblingCondition`. `Dependent` (default) preserves today's
     /// behavior; `ReplicatedOrBranch` marks per-item keyword-list replication.
     pub sibling_condition: SiblingCondition,
+    /// CR 608.2c + CR 614.1a: see [`UnloweredGuard`]. Always `None` on a finished parse.
+    pub unlowered_guard: Option<UnloweredGuard>,
 }
 
 /// Private serialization mirror for `AbilityDefinition`. Holds a borrowed view
@@ -23805,6 +23807,8 @@ struct AbilityDefinitionRepr<'a> {
     iteration_kind_binding: &'a Option<IterationKindBinding>,
     #[serde(skip_serializing_if = "SiblingCondition::is_default")]
     sibling_condition: SiblingCondition,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unlowered_guard: &'a Option<UnloweredGuard>,
 }
 
 impl Serialize for AbilityDefinition {
@@ -23852,6 +23856,7 @@ impl Serialize for AbilityDefinition {
             sub_link,
             iteration_kind_binding,
             sibling_condition,
+            unlowered_guard,
         } = self;
         let repr = AbilityDefinitionRepr {
             kind,
@@ -23894,6 +23899,7 @@ impl Serialize for AbilityDefinition {
             sub_link: *sub_link,
             iteration_kind_binding,
             sibling_condition: *sibling_condition,
+            unlowered_guard,
         };
         /// Flatten wrapper: the mirror carries the real field set;
         /// `consumes_source` (#506) and `is_mana_ability` (CR 605.1a) are
@@ -24008,6 +24014,8 @@ struct AbilityDefinitionDe {
     iteration_kind_binding: Option<IterationKindBinding>,
     #[serde(default)]
     sibling_condition: SiblingCondition,
+    #[serde(default)]
+    unlowered_guard: Option<UnloweredGuard>,
 }
 
 impl<'de> Deserialize<'de> for AbilityDefinition {
@@ -24060,6 +24068,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             sub_link: de.sub_link,
             iteration_kind_binding: de.iteration_kind_binding,
             sibling_condition: de.sibling_condition,
+            unlowered_guard: de.unlowered_guard,
         })
     }
 }
@@ -24196,6 +24205,64 @@ pub enum IterationKindBinding {
     RebindToIteratedKind,
 }
 
+/// CR 614.1 + CR 614.1a / CR 608.2c: which reading a leading "if" guard has when the
+/// single condition authority (`lower_instead_condition`) cannot lower it.
+///
+/// The two readings have genuinely different remedies (CR 614.1a + CR 614.6 vs CR 608.2c),
+/// so the split matters. **The parser's discriminator for it — the modal "would" — is a
+/// defensible PROXY, not the rule's own boundary, and this doc says so deliberately.**
+/// CR 614.1 uses "would" to describe the event a replacement effect *watches for* ("watch
+/// for a particular event that would happen"); the textual marker CR 614.1a names is
+/// "instead" ("Effects that use the word 'instead' are replacement effects"). This parser
+/// keys on "would" and never on "instead", so a printed replacement that omits the modal
+/// classifies STATE here — `"… put it on top of its owner's library instead"` is one, and
+/// CR 608.2c quotes that exact sentence as its own example. Both readings therefore have
+/// real members under either marker, and "would" is chosen because it is the reliable one
+/// for the population this seam sees: an unlowerable LEADING guard, where "instead" sits in
+/// the body rather than in the guard being classified.
+///
+/// Consequence to keep in view when extending: a misclassified EVENT guard reads STATE and
+/// falls through with its body emitted, which is the pre-existing behaviour rather than a
+/// new one — see `parser::oracle::resolve_guards_in_ability`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuardReading {
+    /// CR 614.1a: the guard names an EVENT ("... would ...").
+    Event,
+    /// CR 608.2c: the guard names a game STATE. Back-references ("... this way")
+    /// read State — CR 608.2c's own example is one.
+    State,
+}
+
+/// CR 608.2c + CR 614.1a: an unlowerable leading guard whose body is an ownership
+/// candidate, carried from the clause seam to `parser::oracle::resolve_unlowered_guards`
+/// — the post-routing chokepoint that can see the body's final parent.
+///
+/// `None` on every tree `parse_oracle_pipeline` HANDS OUT — the production
+/// `ParsedAbilities` it returns AND the report-only `RawLoweredIr` stage clone it
+/// captures for `parse_oracle_text_traced`, both settled by the same resolver pass (see
+/// `parser::oracle::parse_oracle_pipeline`'s tail). The resolver clears the mark on both
+/// of its branches. A `Some` reaching `card-data.json` means the resolver did not run,
+/// which is why this field serializes when set rather than being `skip`ped.
+///
+/// It is NOT `None` on a tree produced by `parse_effect_chain` outside the pipeline: that
+/// entry has no resolver, so a mark there survives with the body intact — i.e. it fails
+/// open to base behaviour.
+///
+/// There is a SECOND fail-open path, and it fails open by DROPPING rather than by carrying:
+/// `oracle_effect::ability_definition_from_clause` (seven call sites) lifts a
+/// `ParsedEffectClause` onto a fresh `AbilityDefinition` field by field and does not copy this
+/// one. A clause marked at the seam therefore becomes an unmarked definition, the resolver
+/// never sees a verdict to settle, and the guard is dropped with the body emitted — the same
+/// base behaviour the `parse_effect_chain` path lands on, reached the other way round. Both
+/// paths are fail-OPEN in the same direction, which is why neither can strand a live mark in
+/// a shipped tree; see that function's own doc for why the field is not threaded instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnloweredGuard {
+    pub reading: GuardReading,
+    /// The byte-unchanged `"if <guard>, <body>"` clause text the gap is recorded over.
+    pub clause_text: String,
+}
+
 impl fmt::Debug for AbilityDefinition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // JSON serialization instead of field-by-field Debug — avoids stack overflow
@@ -24260,6 +24327,7 @@ impl AbilityDefinition {
             sub_link: SubAbilityLink::ContinuationStep,
             iteration_kind_binding: None,
             sibling_condition: SiblingCondition::Dependent,
+            unlowered_guard: None,
         }
     }
 

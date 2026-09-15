@@ -23,7 +23,7 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::parser::oracle_ir::context::ParseContext;
-use crate::parser::oracle_ir::diagnostic::ClauseGap;
+use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind};
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use crate::parser::oracle_nom::primitives::{
     parse_number_or_x, scan_at_word_boundaries, scan_contains, scan_preceded,
@@ -135,8 +135,55 @@ pub(crate) fn diagnose_clause_gap(text: &str) -> ClauseGap {
 /// a stable snake_case *category* key in `name`, the unparsed fragment in `description`
 /// — is honored: the fragment is passed through byte-identically.
 pub(crate) fn clause_gap_unimplemented(text: &str) -> Effect {
-    let gap = diagnose_clause_gap(text);
-    let kind = gap.kind();
+    // Records directly rather than through `clause_gap_unimplemented_as`: that function's
+    // `debug_assert_eq!` compares the caller's verdict against `diagnose_clause_gap(text)`,
+    // which on THIS path is where the verdict just came from. Routing through it would
+    // assert `x == x` and pay for a second full diagnosis in every debug build.
+    record_clause_gap(diagnose_clause_gap(text).kind(), text)
+}
+
+/// Record a clause gap whose verdict the caller already holds.
+///
+/// The wire name still comes from `ClauseGapKind::unimplemented_name` and the fragment is
+/// still passed through byte-identically, so this is the same single authority as
+/// [`clause_gap_unimplemented`] — it only skips re-deriving a verdict the caller computed
+/// with the live `ParseContext` (see the guard seam, `oracle_effect::lower_clause_ast`).
+///
+/// # Preconditions of the `debug_assert_eq!`
+///
+/// The assert is sound, not defensive, but it rests on facts the callers must keep true.
+/// State them here so a future edit cannot silently turn it into a suite-wide panic:
+///
+/// 1. **Caller passes the full trimmed `"if <guard>, <body>"` clause.** `diagnose_clause_gap`
+///    re-splits it with `conditions::split_leading_conditional` and re-strips the prefix with
+///    `conditions::parse_leading_conditional_prefix` — the same two productions the seam uses —
+///    so a body fragment or a pre-stripped guard breaks the correspondence.
+/// 2. **Every live caller passes `ClauseGapKind::Replacement`.** The two guard seams
+///    (`oracle_effect::lower_clause_ast` and `parser::oracle::resolve_guards_in_ability`) each
+///    record only under the EVENT reading, and `diagnose_clause_gap` decides `Replacement` from
+///    `condition_names_an_event` alone — before any ladder call, and that predicate lowercases
+///    internally. So the two verdicts agree by construction, with no dependency on the
+///    `ParseContext` the seam held or on the case of the text it passed.
+///
+/// A future caller recording `ClauseGapKind::Condition` here would NOT inherit (2). It would
+/// reach `diagnose_clause_gap`'s rule 1, which calls `lower_instead_condition` with a FRESH
+/// context on a LOWERCASED guard where the seam used the live context and original case —
+/// both of which can only WIDEN the diagnoser's acceptance, which is the unsafe direction
+/// (a diagnoser that accepts where the seam refused falls through to the body-diagnosis
+/// return and this assert fires). Such a caller must discharge that by measurement over the
+/// corpus, not by argument, before it is added.
+pub(crate) fn clause_gap_unimplemented_as(kind: ClauseGapKind, text: &str) -> Effect {
+    debug_assert_eq!(
+        diagnose_clause_gap(text).kind(),
+        kind,
+        "guard-seam verdict disagrees with the context-free diagnosis for {text:?}"
+    );
+    record_clause_gap(kind, text)
+}
+
+/// Write the gap node. The one place `Effect::unimplemented` is called for a clause gap, so
+/// the wire name always comes from `ClauseGapKind::unimplemented_name`.
+fn record_clause_gap(kind: ClauseGapKind, text: &str) -> Effect {
     tracing::debug!(
         gap = kind.unimplemented_name(),
         oracle_text = text,

@@ -680,6 +680,7 @@ fn build_conditional_protection_grant_clause(
         })
         .collect();
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::GenericEffect {
             static_abilities,
             duration: duration.clone(),
@@ -741,6 +742,7 @@ fn build_additive_type_continuous_clause(
     let affected = static_affected_for_application(application);
 
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(affected)
@@ -822,6 +824,7 @@ fn try_parse_compound_all_subjects_become_clause(
     }
 
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::GenericEffect {
             static_abilities,
             duration: merged_duration.clone(),
@@ -1557,6 +1560,7 @@ fn try_parse_combat_tax_effect_clause(text: &str) -> Option<ParsedEffectClause> 
         return None;
     }
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous().modifications(vec![
                 ContinuousModification::GrantStaticAbility {
@@ -1728,6 +1732,7 @@ fn try_parse_target_and_same_name_pump_clause(
         ],
     };
     let mass_clause = ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::PumpAll {
             power,
             toughness,
@@ -1854,6 +1859,7 @@ fn try_parse_subject_restriction_clause(
         let application = parse_subject_application(subject, ctx)?;
         let affected = static_affected_for_application(&application);
         return Some(ParsedEffectClause {
+            unlowered_guard: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked {
                     by: None,
@@ -1906,6 +1912,7 @@ fn try_parse_subject_restriction_clause(
                 .map(|def| def.affected(affected.clone()))
                 .collect();
             return Some(ParsedEffectClause {
+                unlowered_guard: None,
                 effect: Effect::GenericEffect {
                     static_abilities,
                     duration: duration.clone(),
@@ -1937,6 +1944,7 @@ fn try_parse_subject_restriction_clause(
             let application = parse_subject_application(subject, ctx)?;
             let affected = static_affected_for_application(&application);
             return Some(ParsedEffectClause {
+                unlowered_guard: None,
                 effect: Effect::GenericEffect {
                     static_abilities: vec![
                         imperative::must_attack_away_static_definition().affected(affected)
@@ -1997,6 +2005,7 @@ fn try_parse_subject_restriction_clause(
             });
             if let Some(application) = broadcast {
                 return Some(ParsedEffectClause {
+                    unlowered_guard: None,
                     effect: Effect::ForceAttack {
                         target: static_affected_for_application(&application),
                         required_defender,
@@ -2027,6 +2036,7 @@ fn try_parse_subject_restriction_clause(
             let application = parse_subject_application(subject, ctx)?;
             let affected = static_affected_for_application(&application);
             return Some(ParsedEffectClause {
+                unlowered_guard: None,
                 effect: Effect::GenericEffect {
                     static_abilities: vec![
                         imperative::must_attack_static_definition().affected(affected)
@@ -2092,6 +2102,7 @@ fn try_parse_subject_restriction_clause(
             kind: None,
         };
         return Some(ParsedEffectClause {
+            unlowered_guard: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(mode.clone())
                     .affected(affected)
@@ -2137,6 +2148,7 @@ fn try_parse_subject_restriction_clause(
         let affected = static_affected_for_application(&application);
         let mode = StaticMode::CantBeRegenerated;
         return Some(ParsedEffectClause {
+            unlowered_guard: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(mode.clone())
                     .affected(affected)
@@ -2194,6 +2206,7 @@ fn try_parse_subject_restriction_clause(
         };
         let affected = static_affected_for_application(&application);
         return Some(ParsedEffectClause {
+            unlowered_guard: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::AssignNoCombatDamage)
                     .affected(affected)
@@ -2253,6 +2266,7 @@ fn try_parse_can_attack_with_defender(
     };
     let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::new(StaticMode::CanAttackWithDefender)
                 .affected(affected)
@@ -2318,6 +2332,7 @@ fn try_parse_can_block_additional(
     let mode = StaticMode::ExtraBlockers { count };
     let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::new(mode.clone())
                 .affected(affected)
@@ -4162,6 +4177,7 @@ fn try_split_pump_compound(
         )))
     };
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect,
         duration,
         sub_ability,
@@ -4316,6 +4332,7 @@ fn build_keyword_choice_clause(
     };
 
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect,
         duration: None,
         sub_ability,
@@ -4356,6 +4373,7 @@ fn build_continuous_clause(
     {
         let effect = build_pump_effect(&application, power, toughness);
         return Some(ParsedEffectClause {
+            unlowered_guard: None,
             effect,
             duration,
             sub_ability: None,
@@ -4395,6 +4413,7 @@ fn build_continuous_clause(
         build_defender_attack_continuous_compound(&application, predicate_text)
     {
         return Some(ParsedEffectClause {
+            unlowered_guard: None,
             effect: Effect::GenericEffect {
                 static_abilities,
                 duration: duration.clone(),
@@ -4486,6 +4505,7 @@ fn build_continuous_clause(
     if let Some((power, toughness)) = extract_pump_modifiers(&modifications) {
         let effect = build_pump_effect(&application, power, toughness);
         return Some(ParsedEffectClause {
+            unlowered_guard: None,
             effect,
             duration,
             sub_ability: None,
@@ -4522,6 +4542,7 @@ fn build_continuous_clause(
         };
 
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::GenericEffect {
             static_abilities,
             duration: duration.clone(),
@@ -4861,6 +4882,7 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            unlowered_guard: None,
             effect,
             duration,
             sub_ability: None,
@@ -4890,6 +4912,7 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            unlowered_guard: None,
             effect,
             duration,
             sub_ability: None,
@@ -4922,6 +4945,7 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            unlowered_guard: None,
             effect,
             duration,
             sub_ability: None,
@@ -5061,6 +5085,7 @@ fn build_become_clause(
                 .unwrap_or_default();
         let recipient = copy_recipient_for_application(&application, &target);
         return Some(ParsedEffectClause {
+            unlowered_guard: None,
             effect: Effect::BecomeCopy {
                 target,
                 recipient,
@@ -5098,6 +5123,7 @@ fn build_become_clause(
                 .unwrap_or_default();
         let recipient = copy_recipient_for_application(&application, &target);
         return Some(ParsedEffectClause {
+            unlowered_guard: None,
             effect: Effect::BecomeCopy {
                 target,
                 recipient,
@@ -5139,6 +5165,7 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            unlowered_guard: None,
             effect,
             duration,
             sub_ability: None,
@@ -5197,6 +5224,7 @@ fn build_become_clause(
 
     let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(affected)
@@ -5333,6 +5361,7 @@ fn try_parse_become_and_attack_if_able(
     };
 
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(affected)
@@ -5439,6 +5468,7 @@ fn try_parse_set_life_total(
         .clone()
         .unwrap_or_else(|| application.affected.clone());
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::SetLifeTotal { target, amount },
         duration: None,
         sub_ability: None,
@@ -5658,6 +5688,7 @@ fn try_parse_become_choice(
     )));
 
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::Choose {
             choice_type,
             persist: false,
@@ -5707,6 +5738,7 @@ fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
             .modifications(vec![ContinuousModification::AddStaticMode { mode }])
     };
     ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![
                 make_static(StaticMode::CantGainLife),
@@ -5774,6 +5806,7 @@ fn build_restriction_clause(
             .modifications(vec![ContinuousModification::AddKeyword { keyword }])
             .description(predicate.to_string());
         return Some(ParsedEffectClause {
+            unlowered_guard: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![static_def],
                 duration: duration.clone(),
@@ -5882,6 +5915,7 @@ fn build_restriction_clause(
         .collect();
 
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::GenericEffect {
             static_abilities,
             duration: duration.clone(),
@@ -6407,6 +6441,7 @@ fn try_parse_copula_goaded_clause(
     };
     let target = resolve_it_pronoun(ctx);
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::Goad { target },
         duration,
         sub_ability: None,

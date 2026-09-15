@@ -1426,9 +1426,9 @@ fn cast_single_target_during_resolution(
 /// move. Returns the redirect destination the rider encodes, or `None` when the
 /// sub-ability is not such a rider.
 pub(crate) fn graveyard_destination_rider(
-    ability: &ResolvedAbility,
+    effect: &Effect,
 ) -> Option<SpellStackToGraveyardReplacement> {
-    match &ability.effect {
+    match effect {
         Effect::ChangeZone {
             destination: Zone::Exile,
             target: TargetFilter::ParentTarget,
@@ -1468,9 +1468,9 @@ pub(crate) fn graveyard_destination_rider(
 /// is the only destination the COUNTER rider ever encodes (Force of Negation,
 /// No More Lies; the counter library/hand redirect rides `countered_spell_zone`
 /// instead, never a sub-ability).
-pub(crate) fn is_graveyard_exile_rider_subability(ability: &ResolvedAbility) -> bool {
+pub(crate) fn is_graveyard_exile_rider_subability(effect: &Effect) -> bool {
     matches!(
-        graveyard_destination_rider(ability),
+        graveyard_destination_rider(effect),
         Some(SpellStackToGraveyardReplacement::Exile)
     )
 }
@@ -1519,7 +1519,7 @@ pub(crate) fn graveyard_exile_rider_applies_to(
     sub: &ResolvedAbility,
     obj_id: ObjectId,
 ) -> bool {
-    is_graveyard_exile_rider_subability(sub)
+    is_graveyard_exile_rider_subability(&sub.effect)
         && match &sub.condition {
             None => true,
             Some(AbilityCondition::ZoneChangedThisWay {
@@ -1593,7 +1593,7 @@ fn cast_from_zone_graveyard_destination(
     ability
         .sub_ability
         .as_deref()
-        .and_then(graveyard_destination_rider)
+        .and_then(|s| graveyard_destination_rider(&s.effect))
 }
 
 /// CR 614.1c + CR 122.1: Osteomancer Adept / The Tomb of Aclazotz class — the

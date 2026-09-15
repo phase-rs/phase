@@ -9029,6 +9029,7 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         });
     }
     ParsedEffectClause {
+        unlowered_guard: None,
         effect,
         duration: None,
         sub_ability: Some(Box::new(shuffle)),
