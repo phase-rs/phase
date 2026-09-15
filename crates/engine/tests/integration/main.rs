@@ -113,6 +113,7 @@ mod cavern_hoard_dragon_cost_reduction;
 mod cda_counted_quantities_pt;
 mod celestial_kirin_cast_spell_mana_value;
 mod chain_of_smog_copy;
+mod chain_root_target_suspension;
 mod chains_of_mephistopheles_discard_draw_or_mill;
 mod chandra_revolution_doesnt_untap_slot;
 mod charging_cinderhorn_issue_2868;
