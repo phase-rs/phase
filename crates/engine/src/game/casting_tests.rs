@@ -3094,21 +3094,15 @@ fn non_fuse_alt_cost_candidate_enumeration_uses_front_half() {
     );
 }
 
-/// Regression: a fusable split card in hand under an ACTIVE Unlimited free-cast
-/// permission (Omniscience) must offer EXACTLY ONE `Normal` option. The Fuse
-/// block pushes `Normal` (front-half printed) and the Omniscience block also
-/// pushes `Normal`; those two pushes are NON-adjacent (Fuse + HandPermission sit
-/// between them), and `casting_variant_choice_set` dedups with consecutive-only
-/// `Vec::dedup` (no preceding sort), so before the guard both identical `Normal`
-/// options survived — a malformed "two Cast Normally buttons" menu. The
-/// `!has_fuse_candidate` guard on the Omniscience-block push suppresses the
-/// duplicate. This asserts `count() == 1` (not `>= 1`), so it fails on the
-/// unfixed code (count 2) and passes after the guard; the `HandPermission` and
-/// `Fuse` presence checks prove the guard didn't drop the free or fused options.
+/// Regression: a fusable split card in hand under Omniscience keeps every
+/// independently legal spell face. In particular, the free permission cannot
+/// disappear when Fuse expands the normal rows, and selecting either free half
+/// must commit precisely that half.
 #[test]
-fn fuse_split_under_unlimited_free_cast_offers_single_normal_option() {
+fn fuse_split_under_omniscience_keeps_normal_fuse_and_free_half_rows() {
     use crate::game::scenario::{GameScenario, P0};
     use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::types::game_state::CastingVariantFace;
 
     let db = crate::test_support::shared_card_db();
 
@@ -3131,32 +3125,70 @@ fn fuse_split_under_unlimited_free_cast_offers_single_normal_option() {
             .expect("Omniscience static should parse"),
     );
 
-    let set = casting_variant_choice_set(&sc.state, P0, breaking, None);
-    let variants: Vec<CastingVariant> = set.options.iter().map(|o| o.variant).collect();
-
-    let normal_count = set
-        .options
+    let options = casting_variant_choice_set(&sc.state, P0, breaking, None).options;
+    let rows: Vec<_> = options
         .iter()
-        .filter(|o| o.variant == CastingVariant::Normal)
-        .count();
-    assert_eq!(
-        normal_count, 1,
-        "a fusable split card under an Unlimited free-cast permission must offer EXACTLY ONE \
-         Normal option; the non-adjacent Fuse-block + Omniscience-block Normal pushes survive \
-         consecutive-only dedup without the guard. Offered: {variants:?}"
-    );
+        .map(|option| (option.variant.clone(), option.face, option.mana_cost.clone()))
+        .collect();
+
     assert!(
-        set.options
-            .iter()
-            .any(|o| matches!(o.variant, CastingVariant::HandPermission { .. })),
-        "the free HandPermission option must still be offered. Offered: {variants:?}"
+        rows.iter().any(|(variant, face, _)| {
+            *variant == CastingVariant::Normal && *face == CastingVariantFace::Left
+        }) && rows.iter().any(|(variant, face, _)| {
+            *variant == CastingVariant::Normal && *face == CastingVariantFace::Right
+        }) && rows.iter().any(|(variant, face, _)| {
+            *variant == CastingVariant::Fuse && *face == CastingVariantFace::Left
+        }),
+        "the ordinary left/right and fused rows must remain available: {rows:?}"
     );
+    let free_left = options
+        .iter()
+        .position(|option| {
+            matches!(option.variant, CastingVariant::HandPermission { .. })
+                && option.face == CastingVariantFace::Left
+                && option.mana_cost == ManaCost::NoCost
+        })
+        .expect("Omniscience must offer a free left-half cast");
+    let free_right = options
+        .iter()
+        .position(|option| {
+            matches!(option.variant, CastingVariant::HandPermission { .. })
+                && option.face == CastingVariantFace::Right
+                && option.mana_cost == ManaCost::NoCost
+        })
+        .expect("Omniscience may cast the independently castable right half for free");
+
+    let card_id = sc.state.objects[&breaking].card_id;
+    let mut left_state = sc.state.clone();
+    let left_waiting = handle_casting_variant_choice(
+        &mut left_state,
+        P0,
+        breaking,
+        card_id,
+        &options,
+        free_left,
+        &mut Vec::new(),
+    )
+    .expect("the offered free left-half choice must commit");
+    assert_eq!(left_state.objects[&breaking].name, "Breaking");
     assert!(
-        set.options
-            .iter()
-            .any(|o| o.variant == CastingVariant::Fuse),
-        "the Fuse option must still be offered — the guard must not drop it. Offered: {variants:?}"
+        !matches!(left_waiting, WaitingFor::ManaPayment { .. }),
+        "a HandPermission cast pays no mana"
     );
+
+    let mut right_state = sc.state.clone();
+    handle_casting_variant_choice(
+        &mut right_state,
+        P0,
+        breaking,
+        card_id,
+        &options,
+        free_right,
+        &mut Vec::new(),
+    )
+    .expect("the offered free right-half choice must commit exactly once");
+    assert_eq!(right_state.objects[&breaking].name, "Entering");
+    assert!(right_state.objects[&breaking].cast_face_committed);
 }
 
 #[test]

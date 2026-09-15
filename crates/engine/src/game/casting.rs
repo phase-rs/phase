@@ -6651,9 +6651,9 @@ fn prepare_casting_variant(
     })
 }
 
-/// Prepare one exact menu tuple.  A Fuse pair's right-half normal cast must
-/// install the existing one-time split-face projection before every legality
-/// and cost reader; Fuse itself always remains the left/current combined spell.
+/// Prepare one exact menu tuple. A Fuse pair's right-half cast must install the
+/// existing one-time split-face projection before every legality and cost
+/// reader; Fuse itself always remains the left/current combined spell.
 fn prepare_casting_variant_on_face(
     state: &GameState,
     player: PlayerId,
@@ -6664,11 +6664,25 @@ fn prepare_casting_variant_on_face(
 ) -> Result<PreparedCastingVariant, EngineError> {
     let fuse_pair = is_uncommitted_hand_fuse_pair(state, object_id);
     let valid = match face {
+        // Non-Fuse cast methods use the object's active (front/left) face
+        // unless their menu tuple explicitly names a split half below.
         CastingVariantFace::Current => variant != CastingVariant::Fuse,
         CastingVariantFace::Left => {
-            fuse_pair && matches!(variant, CastingVariant::Normal | CastingVariant::Fuse)
+            fuse_pair
+                && matches!(
+                    variant,
+                    CastingVariant::Normal
+                        | CastingVariant::Fuse
+                        | CastingVariant::HandPermission { .. }
+                )
         }
-        CastingVariantFace::Right => fuse_pair && variant == CastingVariant::Normal,
+        CastingVariantFace::Right => {
+            fuse_pair
+                && matches!(
+                    variant,
+                    CastingVariant::Normal | CastingVariant::HandPermission { .. }
+                )
+        }
     };
     if !valid {
         return Err(EngineError::InvalidAction(
@@ -6717,9 +6731,15 @@ fn casting_variant_choice_set(
     for variant in candidates {
         let faces: &[CastingVariantFace] = if is_uncommitted_hand_fuse_pair(state, object_id) {
             match variant {
-                CastingVariant::Normal => &[CastingVariantFace::Left, CastingVariantFace::Right],
+                CastingVariant::Normal | CastingVariant::HandPermission { .. } => {
+                    &[CastingVariantFace::Left, CastingVariantFace::Right]
+                }
                 CastingVariant::Fuse => &[CastingVariantFace::Left],
-                _ => &[],
+                // Other alternative costs were previously prepared directly
+                // against this card's front/left face. Keep that route rather
+                // than deleting the candidate merely because the card also
+                // has Fuse.
+                _ => &[CastingVariantFace::Current],
             }
         } else {
             &[CastingVariantFace::Current]
