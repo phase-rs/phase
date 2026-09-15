@@ -4871,15 +4871,15 @@ export type TournamentCredentialRole = "Organizer" | "Player";
 
 /**
  * `LobbyServerMessage::TournamentCredentialRenewed`'s payload
- * (`crates/lobby-broker/src/protocol.rs:1341`) — the point reply to
- * `RenewTournamentCredential`. Carries the FRESHLY MINTED secret that replaces
- * the presented one. Under lobby protocol v9 the presented secret is NOT
- * refused instantly: a rotation parks it for a bounded overlap window
- * (`TOURNAMENT_CREDENTIAL_OVERLAP_MS`, `crates/lobby-broker/src/tournament.rs`)
- * so a lost reply cannot strand the holder — but the caller should switch to
- * this new secret immediately regardless. `role` echoes which authority was
- * rotated, and `expires_at_ms` is the new expiry, measured from now. Never
- * broadcast.
+ * (`crates/lobby-broker/src/protocol.rs`) — the point reply to
+ * `RenewTournamentCredential`. Carries the secret the caller should hold going
+ * forward. Under lobby protocol v9 (idempotent-nonce replay) this is the newly
+ * MINTED secret when the request presented the current secret, OR — on a retry
+ * that presents the now-superseded secret with the same `rotation_nonce` — the
+ * SAME already-committed secret REPLAYED (the broker mints nothing the second
+ * time). Either way it is the one live secret; the superseded secret is not kept
+ * valid. `role` echoes which authority was rotated, and `expires_at_ms` is the
+ * expiry, measured from the mint. Never broadcast.
  */
 export interface TournamentCredentialRenewedReply {
   code: string;

@@ -1022,13 +1022,11 @@ async function runTournamentRpc<T>(
  * window closes, while a normal same-day event — whose credential never enters
  * this margin — never spends a rotation round trip.
  *
- * **Load-bearing invariant:** the broker's `TOURNAMENT_CREDENTIAL_OVERLAP_MS`
- * (the window a just-superseded secret stays valid) is sized to be `>=` this
- * margin. That is what makes a lost renewal reply recoverable no matter how long
- * the organizer waits before acting again: a rotation only fires within this
- * margin of expiry, so the parked old secret outlives the client's own believed
- * expiry. Shrinking this margin below the overlap is safe; growing it past the
- * overlap re-opens the strand. Keep the two in step.
+ * Recovery does NOT depend on this margin: a lost renewal reply is recovered by
+ * retrying with the same (token, nonce), which the broker replays regardless of
+ * how long the organizer waited (see {@link maybeRenewNearExpiry}). The margin
+ * only governs WHEN a proactive rotation is attempted, not whether a lost one
+ * can be recovered.
  */
 const TOURNAMENT_CREDENTIAL_RENEW_MARGIN_MS = 24 * 60 * 60 * 1000;
 
@@ -1168,9 +1166,10 @@ export async function maybeRenewNearExpiry(
   signal: AbortSignal,
   now: number = Date.now(),
 ): Promise<string> {
-  // Version gate first: without the broker's bounded overlap, a lost renewal
-  // reply strands the holder, so proactive rotation is only correct at or above
-  // the recoverable-rotation floor. An absent version predates the floor.
+  // Version gate first: without the broker's idempotent-nonce replay, a lost
+  // renewal reply cannot be recovered (a retry with a superseded token is just
+  // refused), so proactive rotation is only correct at or above the
+  // recoverable-rotation floor. An absent version predates the floor.
   const brokerVersion = socket.serverInfo.lobbyProtocolVersion;
   if (
     brokerVersion === undefined ||
@@ -1193,10 +1192,11 @@ export async function maybeRenewNearExpiry(
   // Keyed on (BROKER ORIGIN, code, role), not just (code, role): the origin is
   // the broker this tournament's RPCs run against. Without it, an action against
   // broker B after an A→B host switch could await broker A's still-in-flight
-  // renewal and send A's bearer token to B. A NUL joins the parts so no origin,
-  // code, or role can be spelled to collide with another triple.
+  // renewal and send A's bearer token to B. `JSON.stringify` of the triple is
+  // the key so no origin, code, or role can be spelled to collide with another
+  // triple (it escapes any internal quotes/brackets).
   const origin = tournamentBroadcastUrl(get) ?? "";
-  const key = `${origin} ${code} ${role}`;
+  const key = JSON.stringify([origin, code, role]);
   const existing = credentialRenewalsInFlight.get(key);
   if (existing !== undefined) return existing;
 

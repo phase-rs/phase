@@ -495,18 +495,22 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
- * 9 — Recoverable credential rotation (behavioral, NOT a shape change). No lobby
- *     variant changes: RenewTournamentCredential and TournamentCredentialRenewed
- *     are byte-identical to 8. A rotation now keeps the just-presented secret
- *     valid through a bounded overlap window server-side, instead of
- *     invalidating it instantly, so a renewal reply lost in transit no longer
- *     strands the holder. This client gates on it:
- *     `maybeRenewNearExpiry` (multiplayerStore) only rotates proactively — and
- *     only then relies on the held token surviving an uncertain result — against
- *     a broker at or above MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION below.
- *     Purely additive/behavioral, so MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays
- *     at 2: every older broker still parses every v9 frame, and this client
- *     simply does not proactively rotate against one.
+ * 9 — Recoverable credential rotation via idempotent-nonce replay.
+ *     RenewTournamentCredential gains an optional `rotation_nonce` field
+ *     (#[serde(default)]) — the "a lobby field is added" trigger;
+ *     TournamentCredentialRenewed is unchanged. A rotation mints ONLY from the
+ *     current secret (recording the superseded secret + that nonce); presenting
+ *     the superseded secret with the SAME nonce REPLAYS the already-committed
+ *     secret (minting nothing), so a lost renewal reply is recovered by retrying
+ *     the same (token, nonce) rather than by any overlap window — a superseded
+ *     secret never stays valid and never yields a fresh primary without the
+ *     initiator's nonce. This client gates on it: `maybeRenewNearExpiry`
+ *     (multiplayerStore) only rotates proactively — and only then relies on
+ *     same-nonce replay recovery — against a broker at or above
+ *     MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION below. Additive, so
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2: every older broker still
+ *     parses every v9 frame (the nonce defaults away), and this client simply
+ *     does not proactively rotate against one.
  * 8 — Tournament match structure. CreateTournament gains `match_type` (Bo1 /
  *     Bo3), optional (`#[serde(default)]`); `None` resolves to the arity default
  *     (Bo3 head-to-head, Bo1 for pods — single-game per MSTR), preserving pre-8
@@ -674,16 +678,17 @@ export const MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE = 8;
 
 /**
  * Lowest broker `LOBBY_PROTOCOL_VERSION` whose credential rotation is
- * RECOVERABLE — i.e. keeps a just-presented secret valid through a bounded
- * overlap window rather than invalidating it the instant the new one is minted
- * (`TOURNAMENT_CREDENTIAL_OVERLAP_MS`, `crates/lobby-broker/src/tournament.rs`).
+ * RECOVERABLE — i.e. supports idempotent-nonce replay: it mints only from the
+ * current secret (recording the superseded secret + the client's nonce) and, on
+ * a retry presenting that superseded secret with the SAME nonce, REPLAYS the
+ * already-committed secret rather than minting again
+ * (`crates/lobby-broker/src/tournament.rs`, `renew`/`renew_kind`).
  *
  * This is the capability that makes proactive rotation SAFE. Against a broker at
  * or above this floor, a renewal reply lost after the server commits is
- * survivable: the held secret still authorizes through the overlap, so keeping
- * it on an uncertain result and recovering on the next renewal is correct.
- * Against a broker below it, that same "keep the held token" fallback strands
- * the holder on a secret the broker invalidated instantly — so
+ * survivable: the client retries with the same (token, nonce) and the broker
+ * replays the committed secret. Against a broker below it there is no replay, so
+ * a retry with a superseded token would just be refused — hence
  * `maybeRenewNearExpiry` (`stores/multiplayerStore`) does not proactively rotate
  * at all below this floor, leaving the pre-rotation behavior (the credential
  * simply lapses at its TTL) untouched rather than introducing a strand.

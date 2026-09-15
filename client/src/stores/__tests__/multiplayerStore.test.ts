@@ -3064,79 +3064,120 @@ describe("proactive credential rotation", () => {
     ).toBe("fresh");
   });
 
-  // Maintainer [HIGH] #1: a renewal in flight against broker A must not, when it
-  // completes after an A->B host switch, clobber the credential B has since
-  // stored under the same code. The compare-and-swap adoption checks the stored
-  // token is still the one this rotation started from.
-  it("does not clobber another broker's credential when a renewal completes after a host switch", async () => {
-    // On broker A: credential near expiry.
+  // Maintainer [HIGH] #1, discriminating: with A's renewal in flight, a host
+  // switch to B and a SECOND renewal against B (distinct socket + token) must
+  // NOT dedupe onto A's promise — reverting the broker-origin component of the
+  // key would make B await A's promise and send A's bearer to B, and this test
+  // would catch it. B settles only from B's own response, and A's stale
+  // completion afterward cannot clobber B's credential (the CAS adoption).
+  it("scopes the dedupe by broker origin: a B renewal never awaits an in-flight A renewal", async () => {
+    // Resolve each renewal by hand, keyed by the presented token, so A and B can
+    // be driven independently.
+    const resolvers: Record<
+      string,
+      (r: {
+        ok: true;
+        value: {
+          code: string;
+          role: "Organizer" | "Player";
+          token: string;
+          expires_at_ms: number;
+        };
+      }) => void
+    > = {};
+    vi.mocked(renewTournamentCredentialOver).mockImplementation(
+      (_socket, _code, _role, token) =>
+        new Promise((res) => {
+          resolvers[token] = res;
+        }),
+    );
+    const now = NOW;
+
+    // Broker A: credential near expiry. Start A's renewal (pending).
     useMultiplayerStore.setState({
       hostingServer: "wss://a.example/ws",
       tournamentCredentials: {
         TOUR01: {
           organizerToken: "A-old",
-          organizerTokenExpiresAtMs: NOW + 1000,
+          organizerTokenExpiresAtMs: now + 1000,
           updatedAt: 0,
         },
       },
     });
-    // A renewal we resolve by hand, so we can switch hosts mid-flight.
-    let resolveRenew!: (r: {
-      ok: true;
-      value: {
-        code: string;
-        role: "Organizer" | "Player";
-        token: string;
-        expires_at_ms: number;
-      };
-    }) => void;
-    vi.mocked(renewTournamentCredentialOver).mockImplementation(
-      () =>
-        new Promise((res) => {
-          resolveRenew = res;
-        }),
-    );
-
-    const controller = new AbortController();
-    const inflight = maybeRenewNearExpiry(
+    const aInflight = maybeRenewNearExpiry(
       useMultiplayerStore.setState,
       useMultiplayerStore.getState,
       socketAtLobbyVersion(9),
       "TOUR01",
       "organizer",
       "A-old",
-      controller.signal,
-      NOW,
+      new AbortController().signal,
+      now,
     );
 
-    // Host switch to B; B's credential for the SAME code replaces the store.
+    // Host switch to B — SAME code, distinct credential — and start B's renewal
+    // (distinct socket + token) while A is still pending.
     useMultiplayerStore.setState({
       hostingServer: "wss://b.example/ws",
       tournamentCredentials: {
         TOUR01: {
-          organizerToken: "B-token",
-          organizerTokenExpiresAtMs: NOW + 5000,
+          organizerToken: "B-old",
+          organizerTokenExpiresAtMs: now + 1000,
           updatedAt: 1,
         },
       },
     });
+    const bInflight = maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "TOUR01",
+      "organizer",
+      "B-old",
+      new AbortController().signal,
+      now,
+    );
 
-    // A's renewal now lands with a fresh A token — a stale completion.
-    resolveRenew({
+    // Let the two microtasks reach their awaits, then assert BOTH rotations went
+    // out — no cross-origin dedupe. (With a code:role-only key, B would await A's
+    // promise and only ONE send would have happened.)
+    await Promise.resolve();
+    expect(renewTournamentCredentialOver).toHaveBeenCalledTimes(2);
+    expect(resolvers["A-old"]).toBeDefined();
+    expect(resolvers["B-old"]).toBeDefined();
+
+    // Resolve B first: B settles from B's own response.
+    resolvers["B-old"]({
+      ok: true,
+      value: {
+        code: "TOUR01",
+        role: "Organizer",
+        token: "B-fresh",
+        expires_at_ms: now + 7 * 24 * 60 * 60 * 1000,
+      },
+    });
+    expect(await bInflight).toBe("B-fresh");
+    expect(
+      useMultiplayerStore.getState().tournamentCredentials.TOUR01
+        ?.organizerToken,
+    ).toBe("B-fresh");
+
+    // A's stale completion lands afterward: it returns A's token for A's own
+    // socket but does NOT clobber B's credential (CAS: stored token is B-fresh,
+    // not the A-old this rotation started from).
+    resolvers["A-old"]({
       ok: true,
       value: {
         code: "TOUR01",
         role: "Organizer",
         token: "A-fresh",
-        expires_at_ms: NOW + 999,
+        expires_at_ms: now + 999,
       },
     });
-    await inflight;
-
-    // B's credential is intact: A's stale completion did NOT overwrite it.
+    expect(await aInflight).toBe("A-fresh");
     expect(
       useMultiplayerStore.getState().tournamentCredentials.TOUR01
         ?.organizerToken,
-    ).toBe("B-token");
+    ).toBe("B-fresh");
   });
 });
