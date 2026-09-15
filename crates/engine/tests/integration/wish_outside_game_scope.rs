@@ -176,9 +176,26 @@ fn a_cast_wish_never_reaches_a_card_the_caster_does_not_own() {
 /// owned face-up exile under the legacy scope and only the sideboard under the
 /// modern one. This is the case that shows eligibility is NOT inferred from
 /// wording or era.
+///
+/// Both boards also carry an eligible SIDEBOARD card, and both branches assert
+/// it is offered. That is the reach guard: without it the modern "exile is not
+/// offered" assertion would pass just as well if the wish never reached
+/// `WaitingFor::OutsideGameChoice` at all.
 #[test]
 fn a_modern_wish_follows_the_same_boundary() {
+    use engine::game::deck_loading::DeckEntry;
+    use engine::types::card::CardFace;
+    use engine::types::game_state::PlayerDeckPool;
+    use std::sync::Arc;
+
     const MODERN_WISH: &str = "You may play a card you own from outside the game this turn.";
+
+    struct Offer {
+        exile: bool,
+        sideboard: bool,
+        waiting: WaitingFor,
+    }
+
     let offered = |scope| {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -188,19 +205,164 @@ fn a_modern_wish_follows_the_same_boundary() {
             .id();
         let mut runner = scenario.build();
         runner.state_mut().format_config = format_with(scope);
+        runner.state_mut().deck_pools = vec![PlayerDeckPool {
+            player: P0,
+            current_sideboard: Arc::new(vec![DeckEntry {
+                card: CardFace {
+                    name: "Sideboard Ritual".to_string(),
+                    card_type: CardType {
+                        core_types: vec![CoreType::Sorcery],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                count: 1,
+            }]),
+            ..Default::default()
+        }];
         let exiled = exile_sorcery(&mut runner, P0, "Removed Ritual");
         cast_the_wish(&mut runner, wish);
-        (offered_exile_ids(&runner).contains(&exiled), runner.state().waiting_for.clone())
+        let sideboard = matches!(
+            &runner.state().waiting_for,
+            WaitingFor::OutsideGameChoice { choices, .. }
+                if choices.iter().any(|c| matches!(
+                    &c.source,
+                    OutsideGameChoiceSource::Sideboard { card, .. } if card.name == "Sideboard Ritual"
+                ))
+        );
+        Offer {
+            exile: offered_exile_ids(&runner).contains(&exiled),
+            sideboard,
+            waiting: runner.state().waiting_for.clone(),
+        }
     };
 
-    let (legacy, legacy_wait) = offered(WishOutsideGameScope::PreM10ReachesExile);
+    let legacy = offered(WishOutsideGameScope::PreM10ReachesExile);
     assert!(
-        legacy,
-        "the pre-M10 zone model applies to a 2021 card too — got {legacy_wait:?}"
+        legacy.sideboard && legacy.exile,
+        "pre-M10 zone model: a 2021 card reaches both the sideboard and owned \
+         face-up exile — got {:?}",
+        legacy.waiting
     );
-    let (modern, modern_wait) = offered(WishOutsideGameScope::PostM10SideboardOnly);
+
+    let modern = offered(WishOutsideGameScope::PostM10SideboardOnly);
     assert!(
-        !modern,
-        "CR 400.11: under the modern zone model exile is in the game — got {modern_wait:?}"
+        modern.sideboard,
+        "reach guard: the modern wish must actually offer its sideboard card, or \
+         the exile assertion below proves nothing — got {:?}",
+        modern.waiting
+    );
+    assert!(
+        !modern.exile,
+        "CR 400.11: under the modern zone model exile is in the game — got {:?}",
+        modern.waiting
+    );
+}
+
+/// CR 701.48a + CR 400.11: **Learn follows the same boundary, through its
+/// production path** — a cast spell reaching `Effect::Learn`, the
+/// `WaitingFor::LearnChoice` prompt, `GameAction::LearnDecision`, and the
+/// Lesson-search continuation that decision creates.
+///
+/// The caster holds a card, so the discard choice is genuinely offered and the
+/// test drives the decline branch ("if you didn't discard a card, you may
+/// reveal a Lesson card you own from outside the game"). Each board has a
+/// sideboard Lesson (the reach guard: both scopes must offer it, so the modern
+/// exile assertion cannot pass merely by never reaching the search) and an
+/// owned face-up exiled Lesson, which only the pre-M10 zone model offers.
+#[test]
+fn learn_follows_the_formats_outside_the_game_boundary() {
+    use engine::game::deck_loading::DeckEntry;
+    use engine::types::actions::LearnOption;
+    use engine::types::card::CardFace;
+    use engine::types::game_state::PlayerDeckPool;
+    use std::sync::Arc;
+
+    struct Offer {
+        exile: bool,
+        sideboard: bool,
+        waiting: WaitingFor,
+    }
+
+    let lesson_face = |name: &str| CardFace {
+        name: name.to_string(),
+        card_type: CardType {
+            core_types: vec![CoreType::Sorcery],
+            subtypes: vec!["Lesson".to_string()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let offered = |scope| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Learning Spell", false, "Learn.")
+            .with_mana_cost(engine::types::mana::ManaCost::zero())
+            .id();
+        // A second card in hand, so CR 701.48a's discard choice is really offered.
+        scenario.add_card_to_hand(P0, "Forest");
+        let mut runner = scenario.build();
+        runner.state_mut().format_config = format_with(scope);
+        runner.state_mut().deck_pools = vec![PlayerDeckPool {
+            player: P0,
+            current_sideboard: Arc::new(vec![DeckEntry {
+                card: lesson_face("Sideboard Lesson"),
+                count: 1,
+            }]),
+            ..Default::default()
+        }];
+        let exiled = exile_sorcery(&mut runner, P0, "Exiled Lesson");
+        if let Some(obj) = runner.state_mut().objects.get_mut(&exiled) {
+            obj.card_types.subtypes = vec!["Lesson".to_string()];
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        cast_the_wish(&mut runner, spell);
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::LearnChoice { .. }),
+            "the cast must reach Learn's discard-or-skip prompt — got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::LearnDecision {
+                choice: LearnOption::Skip,
+            })
+            .expect("declining to discard is a legal Learn decision");
+
+        let sideboard = matches!(
+            &runner.state().waiting_for,
+            WaitingFor::OutsideGameChoice { choices, .. }
+                if choices.iter().any(|c| matches!(
+                    &c.source,
+                    OutsideGameChoiceSource::Sideboard { card, .. } if card.name == "Sideboard Lesson"
+                ))
+        );
+        Offer {
+            exile: offered_exile_ids(&runner).contains(&exiled),
+            sideboard,
+            waiting: runner.state().waiting_for.clone(),
+        }
+    };
+
+    let legacy = offered(WishOutsideGameScope::PreM10ReachesExile);
+    assert!(
+        legacy.sideboard && legacy.exile,
+        "pre-M10 zone model: Learn reaches both the sideboard Lesson and the owned \
+         face-up exiled Lesson — got {:?}",
+        legacy.waiting
+    );
+
+    let modern = offered(WishOutsideGameScope::PostM10SideboardOnly);
+    assert!(
+        modern.sideboard,
+        "reach guard: modern Learn must actually offer its sideboard Lesson — got {:?}",
+        modern.waiting
+    );
+    assert!(
+        !modern.exile,
+        "CR 400.11: under the modern zone model exile is in the game — got {:?}",
+        modern.waiting
     );
 }

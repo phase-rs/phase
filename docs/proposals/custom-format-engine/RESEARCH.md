@@ -529,8 +529,13 @@ Oracle text is errata'd to modern templating for every card and cannot date
 one. A per-card era authority (first-printing date) would make one rule depend
 on print date while the engine plays current Oracle text everywhere else. So the
 flag is a whole-game zone-model choice — "removed from the game counts as
-outside it" — for all effects. The bundled presets that declare it have
-pre-2004 pools, where the distinction never arises; it matters only for
+outside it" — for all effects. Two separate questions, not to be conflated:
+**card-era inference** is unnecessary for the bundled presets (their pools end
+by 2003, so no post-M10 outside-the-game card is legal in them and the uniform
+and per-era readings pick the same cards), but the **runtime zone model**
+still changes legal choices in those presets — under the flag, a Burning Wish
+in Middle School or Classic Magic can choose an owned face-up exiled card that
+the modern rules would not offer. The per-era reading would only diverge for
 lobby-saved formats with arbitrary pools.
 
 **Size: SMALL — and materially smaller than PLAN §4's current "Medium"
