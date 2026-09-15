@@ -20574,6 +20574,7 @@ mod tests {
             controller: PlayerId(1),
             object_id: triggering_spell,
             cast_mana_value: None,
+            incarnation: None,
         });
         let mut events = Vec::new();
         crate::game::effects::exchange_control::resolve(&mut state, &mixed, &mut events).unwrap();

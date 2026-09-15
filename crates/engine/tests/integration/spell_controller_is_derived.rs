@@ -1447,6 +1447,7 @@ fn that_spells_controller_follows_a_control_change() {
         controller: caster,
         object_id: spell,
         cast_mana_value: None,
+        incarnation: None,
     });
     let ability = ResolvedAbility::new(Effect::unimplemented("test", "V7"), vec![], spell, caster);
 
@@ -1475,6 +1476,7 @@ fn that_spells_owner_does_not_follow_a_control_change() {
         controller: caster,
         object_id: spell,
         cast_mana_value: None,
+        incarnation: None,
     });
     let ability = ResolvedAbility::new(Effect::unimplemented("test", "V7"), vec![], spell, caster);
     let owner_target = resolved_targets(&ability, &TargetFilter::TriggeringSpellOwner, &state);
@@ -1504,6 +1506,7 @@ fn triggering_spell_controller_and_owner_diverge_for_a_gonti_class_cast() {
         controller: caster,
         object_id: spell,
         cast_mana_value: None,
+        incarnation: None,
     });
     let ability = ResolvedAbility::new(Effect::unimplemented("test", "V7"), vec![], spell, caster);
     let controller_target =
