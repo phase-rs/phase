@@ -3239,8 +3239,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_71_for_resolution_cast_face_policy() {
-        assert_eq!(PROTOCOL_VERSION, 71);
+    fn protocol_version_is_72_for_casting_variant_face() {
+        assert_eq!(PROTOCOL_VERSION, 72);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3251,7 +3251,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_71_for_resolution_cast_face_policy` stays
+    /// `protocol_version_is_72_for_casting_variant_face` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

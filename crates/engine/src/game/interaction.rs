@@ -6354,6 +6354,15 @@ fn project_prompt_payload(
         ) => {
             if let Some(option) = options.get(*index) {
                 project_casting_variant(option.variant, state, surfaces);
+                push_value_surface(
+                    surfaces,
+                    InteractionRoleCode::Face,
+                    match option.face {
+                        crate::types::game_state::CastingVariantFace::Current => "Current",
+                        crate::types::game_state::CastingVariantFace::Left => "Left",
+                        crate::types::game_state::CastingVariantFace::Right => "Right",
+                    },
+                );
                 surfaces.push(InteractionPresentationSurface::Mana {
                     role: InteractionRoleCode::CastingCost,
                     index: None,

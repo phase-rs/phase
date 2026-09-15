@@ -427,6 +427,10 @@ pub struct TournamentRequestId(pub u64);
 ///      owners are now wire-visible.
 /// 16 — Meld pair/attacking-entry choices after mana-payment preview variants.
 /// 15 — Mana-payment preview request/response variants.
+/// 72 — `CastingVariantChoiceOption` gained required `face`, making a paused
+///      Fuse split-card menu an exact `(variant, face)` tuple. Old snapshots
+///      cannot safely bind an index to a new right-half cast, so full-game
+///      peers must refuse the skew. Lobby messages are unchanged.
 /// 71 — `ResolutionCastFacePolicy` replaces the legacy free-cast-window
 ///      filter with a required serialized carrier. Full-game/P2P peers must
 ///      reject pre-bridge snapshots; lobby message shape is unchanged.
@@ -435,7 +439,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 71;
+pub const PROTOCOL_VERSION: u32 = 72;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1511,12 +1515,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 71);
+        assert_eq!(PROTOCOL_VERSION, 72);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 70);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 71);
     }
 
     #[test]

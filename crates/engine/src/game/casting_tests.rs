@@ -2636,6 +2636,125 @@ fn normal_option_offered(set: &CastingVariantChoiceSet) -> bool {
         .any(|o| o.variant == CastingVariant::Normal)
 }
 
+/// A non-split cast still has one complete selection tuple. `Current` is not a
+/// compatibility omission: it identifies the object's already-active face.
+#[test]
+fn ordinary_casting_variant_option_uses_current_face() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::test_support::shared_card_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    add_mana(&mut scenario.state, P0, ManaType::Red, 1);
+
+    let options = casting_variant_choice_set(&scenario.state, P0, bolt, None).options;
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0].variant, CastingVariant::Normal);
+    assert_eq!(
+        options[0].face,
+        crate::types::game_state::CastingVariantFace::Current,
+        "ordinary casts must carry an explicit Current face"
+    );
+}
+
+/// Fuse exposes two `Normal` choices. Selection is therefore the entire
+/// `(index, variant, face, cost)` tuple: a stale right-half option carrying the
+/// left-half cost must be refused rather than silently choosing either Normal.
+#[test]
+fn fuse_variant_selection_requires_the_fresh_full_tuple_and_exact_right_index() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::types::game_state::CastingVariantFace;
+
+    let db = crate::test_support::shared_card_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let breaking = scenario.add_real_card(P0, "Breaking", Zone::Hand, db);
+    fill_mana_for_fused_cast(&mut scenario, P0);
+    let card_id = scenario.state.objects[&breaking].card_id;
+    let options = casting_variant_choice_set(&scenario.state, P0, breaking, None).options;
+
+    assert_eq!(
+        options
+            .iter()
+            .map(|option| (
+                option.variant.clone(),
+                option.face,
+                option.mana_cost.clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                CastingVariant::Normal,
+                CastingVariantFace::Left,
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue, ManaCostShard::Black],
+                    generic: 0,
+                },
+            ),
+            (
+                CastingVariant::Normal,
+                CastingVariantFace::Right,
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::Black, ManaCostShard::Red],
+                    generic: 4,
+                },
+            ),
+            (
+                CastingVariant::Fuse,
+                CastingVariantFace::Left,
+                ManaCost::Cost {
+                    shards: vec![
+                        ManaCostShard::Blue,
+                        ManaCostShard::Black,
+                        ManaCostShard::Black,
+                        ManaCostShard::Red,
+                    ],
+                    generic: 4,
+                },
+            ),
+        ],
+        "the two Normal entries are disambiguated by their faces and costs"
+    );
+
+    let right_index = options
+        .iter()
+        .position(|option| {
+            option.variant == CastingVariant::Normal && option.face == CastingVariantFace::Right
+        })
+        .expect("the right normal half has one exact option index");
+    let mut stale_options = options.clone();
+    stale_options[right_index].mana_cost = stale_options[0].mana_cost.clone();
+    let mut stale_state = scenario.state.clone();
+    let stale = handle_casting_variant_choice(
+        &mut stale_state,
+        P0,
+        breaking,
+        card_id,
+        &stale_options,
+        right_index,
+        &mut Vec::new(),
+    )
+    .expect_err("a stale option must not be matched by variant alone");
+    assert!(matches!(stale, EngineError::ActionNotAllowed(_)));
+
+    let mut selected_state = scenario.state.clone();
+    handle_casting_variant_choice(
+        &mut selected_state,
+        P0,
+        breaking,
+        card_id,
+        &options,
+        right_index,
+        &mut Vec::new(),
+    )
+    .expect("the exact right-half tuple should enter the normal cast pipeline");
+    assert_eq!(selected_state.objects[&breaking].name, "Entering");
+    assert!(selected_state.objects[&breaking].cast_face_committed);
+}
+
 /// Test 1 (prohibition / per-turn-limit path). A `PerTurnCastLimit { max: 0,
 /// spell_filter: Cmc >= 5 }` prohibits casting any spell with mana value >= 5.
 /// A fused Breaking // Entering (combined MV 8) must be BLOCKED — so Fuse is
@@ -13849,6 +13968,7 @@ fn x_cost_alt_cost_max_and_charge_derive_from_alt_base() {
         PlayerId(0),
         spell,
         CastingVariant::Overload,
+        crate::types::game_state::CastingVariantFace::Current,
         CastPaymentMode::Auto,
         &mut events,
     )
@@ -47920,6 +48040,7 @@ fn exile_static_any_color_is_bound_to_elected_source() {
             source: plain_source,
             frequency: CastFrequency::Unlimited,
         },
+        crate::types::game_state::CastingVariantFace::Current,
         CastPaymentMode::Auto,
         &mut denied_events,
     );
@@ -47936,6 +48057,7 @@ fn exile_static_any_color_is_bound_to_elected_source() {
             source: any_color_source,
             frequency: CastFrequency::Unlimited,
         },
+        crate::types::game_state::CastingVariantFace::Current,
         CastPaymentMode::Auto,
         &mut allowed_events,
     )

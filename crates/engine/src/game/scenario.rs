@@ -26,7 +26,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption,
-    ConvokeMode, GameState, ManaChoice, ManaChoicePrompt, PendingCast, WaitingFor,
+    CastingVariantFace, ConvokeMode, GameState, ManaChoice, ManaChoicePrompt, PendingCast,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -2234,6 +2235,7 @@ pub struct SpellCast<'a> {
     alternative_cast: Option<AlternativeCastDecision>,
     adventure_creature: Option<bool>,
     casting_variant: Option<CastingVariant>,
+    casting_variant_face: Option<CastingVariantFace>,
     free_cast: bool,
     modes: Option<Vec<usize>>,
     x: Option<u32>,
@@ -2262,6 +2264,7 @@ impl<'a> SpellCast<'a> {
             alternative_cast: None,
             adventure_creature: None,
             casting_variant: None,
+            casting_variant_face: None,
             free_cast: false,
             modes: None,
             x: None,
@@ -2328,6 +2331,18 @@ impl<'a> SpellCast<'a> {
     /// surfaces a variant choice without an explicit test intent.
     pub fn casting_variant(mut self, variant: CastingVariant) -> Self {
         self.casting_variant = Some(variant);
+        self
+    }
+
+    /// Choose an exact `(variant, face)` casting tuple. Required for a Fuse
+    /// pair's two independently castable normal halves.
+    pub fn casting_variant_face(
+        mut self,
+        variant: CastingVariant,
+        face: CastingVariantFace,
+    ) -> Self {
+        self.casting_variant = Some(variant);
+        self.casting_variant_face = Some(face);
         self
     }
 
@@ -2481,6 +2496,7 @@ impl<'a> SpellCast<'a> {
             alternative_cast,
             adventure_creature,
             casting_variant,
+            casting_variant_face,
             free_cast,
             modes,
             x,
@@ -2611,15 +2627,22 @@ impl<'a> SpellCast<'a> {
                                  .casting_variant(..) was declared — declare the intended cast variant"
                             )
                         });
-                        options
+                        let matching: Vec<_> = options
                             .iter()
-                            .position(|option| option.variant == variant)
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "SpellCast could not find requested cast variant {:?} in options {:?}",
-                                    variant, options
-                                )
+                            .enumerate()
+                            .filter_map(|(index, option)| {
+                                (option.variant == variant
+                                    && casting_variant_face.is_none_or(|face| option.face == face))
+                                .then_some(index)
                             })
+                            .collect();
+                        if matching.len() != 1 {
+                            panic!(
+                                "SpellCast .casting_variant({variant:?}) is ambiguous in options {:?}; use .casting_variant_face(variant, face)",
+                                options
+                            );
+                        }
+                        matching[0]
                     };
                     selected_casting_variant = Some(options[index].clone());
                     act_collect(

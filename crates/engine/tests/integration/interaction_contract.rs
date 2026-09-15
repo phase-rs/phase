@@ -1181,10 +1181,8 @@ fn reordering_hand_rotates_indexed_choices_before_the_new_projection_is_usable()
 }
 
 #[test]
-fn exact_casting_variant_choices_include_index_variant_and_mana_cost() {
-    let Some(db) = load_db() else {
-        return;
-    };
+fn exact_casting_variant_choices_include_index_variant_face_and_mana_cost() {
+    let db = load_db().expect("interaction contract requires the real card database");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario.add_real_card(P0, "Breaking", Zone::Hand, db);
@@ -1227,65 +1225,66 @@ fn exact_casting_variant_choices_include_index_variant_and_mana_cost() {
     else {
         panic!("casting variants are exact choices");
     };
-    assert_eq!(choices.len(), 2);
-    assert!(choices
+    assert_eq!(choices.len(), 3);
+    let tuples: Vec<_> = choices
         .iter()
-        .all(|choice| choice.surfaces.iter().any(|surface| matches!(
-            surface,
-            InteractionPresentationSurface::Mana {
-                role: InteractionRoleCode::CastingCost,
-                ..
-            }
-        ))));
-    let indices: std::collections::HashSet<_> = choices
-        .iter()
-        .flat_map(|choice| &choice.surfaces)
-        .filter_map(|surface| match surface {
-            InteractionPresentationSurface::Value {
-                role: InteractionRoleCode::OptionIndex,
-                value,
-                ..
-            } => Some(value.clone()),
-            _ => None,
+        .map(|choice| {
+            let value = |role| {
+                choice.surfaces.iter().find_map(|surface| match surface {
+                    InteractionPresentationSurface::Value {
+                        role: actual,
+                        value,
+                        ..
+                    } if *actual == role => Some(value.clone()),
+                    _ => None,
+                })
+            };
+            let cost = choice.surfaces.iter().find_map(|surface| match surface {
+                InteractionPresentationSurface::Mana {
+                    role: InteractionRoleCode::CastingCost,
+                    symbols,
+                    ..
+                } => Some(symbols.clone()),
+                _ => None,
+            });
+            (
+                value(InteractionRoleCode::OptionIndex),
+                value(InteractionRoleCode::CastingVariant),
+                value(InteractionRoleCode::Face),
+                cost,
+            )
         })
         .collect();
     assert_eq!(
-        indices,
-        ["0".to_string(), "1".to_string()].into_iter().collect()
+        tuples,
+        vec![
+            (
+                Some("0".to_string()),
+                Some("Normal".to_string()),
+                Some("Left".to_string()),
+                Some(vec!["U".to_string(), "B".to_string()]),
+            ),
+            (
+                Some("1".to_string()),
+                Some("Normal".to_string()),
+                Some("Right".to_string()),
+                Some(vec!["4".to_string(), "B".to_string(), "R".to_string()]),
+            ),
+            (
+                Some("2".to_string()),
+                Some("Fuse".to_string()),
+                Some("Left".to_string()),
+                Some(vec![
+                    "4".to_string(),
+                    "U".to_string(),
+                    "B".to_string(),
+                    "B".to_string(),
+                    "R".to_string(),
+                ]),
+            ),
+        ],
+        "each indexed response must retain its associated variant, face, and cost"
     );
-    let variants: std::collections::HashSet<_> = choices
-        .iter()
-        .flat_map(|choice| &choice.surfaces)
-        .filter_map(|surface| match surface {
-            InteractionPresentationSurface::Value {
-                role: InteractionRoleCode::CastingVariant,
-                value,
-                ..
-            } => Some(value.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(variants, ["Normal", "Fuse"].into_iter().collect());
-    let costs: std::collections::HashSet<_> = choices
-        .iter()
-        .flat_map(|choice| &choice.surfaces)
-        .filter_map(|surface| match surface {
-            InteractionPresentationSurface::Mana {
-                role: InteractionRoleCode::CastingCost,
-                symbols,
-                ..
-            } => Some(symbols.clone()),
-            _ => None,
-        })
-        .collect();
-    assert!(costs.contains(&vec!["U".to_string(), "B".to_string()]));
-    assert!(costs.contains(&vec![
-        "4".to_string(),
-        "U".to_string(),
-        "B".to_string(),
-        "B".to_string(),
-        "R".to_string(),
-    ]));
 }
 
 #[test]

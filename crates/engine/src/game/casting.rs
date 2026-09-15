@@ -15,11 +15,11 @@ use crate::types::events::{ActivatedAbilityKind, GameEvent};
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, AlternativeAdditionalCostDescription,
     CastOfferKind, CastPaymentMode, CastingPermissionIndex, CastingVariant,
-    CastingVariantChoiceOption, ConvokeMode, CostResume, DistributionUnit, EmergeSacrificeQuality,
-    GameState, ManaAbilityCostParent, ManaAbilityResume, ManaChoice, ManaChoiceContext,
-    ManaChoicePrompt, NextSpellModifier, PayCostKind, PendingCast, PendingCostMoveResume,
-    SneakPlacement, SpellCostSource, StackEntry, StackEntryKind, TargetEffectDetail,
-    TargetSelectionSlot, WaitingFor,
+    CastingVariantChoiceOption, CastingVariantFace, ConvokeMode, CostResume, DistributionUnit,
+    EmergeSacrificeQuality, GameState, ManaAbilityCostParent, ManaAbilityResume, ManaChoice,
+    ManaChoiceContext, ManaChoicePrompt, NextSpellModifier, PayCostKind, PendingCast,
+    PendingCostMoveResume, SneakPlacement, SpellCostSource, StackEntry, StackEntryKind,
+    TargetEffectDetail, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -6651,6 +6651,58 @@ fn prepare_casting_variant(
     })
 }
 
+/// Prepare one exact menu tuple.  A Fuse pair's right-half normal cast must
+/// install the existing one-time split-face projection before every legality
+/// and cost reader; Fuse itself always remains the left/current combined spell.
+fn prepare_casting_variant_on_face(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    variant: CastingVariant,
+    face: CastingVariantFace,
+    mode: CastingMode,
+) -> Result<PreparedCastingVariant, EngineError> {
+    let fuse_pair = is_uncommitted_hand_fuse_pair(state, object_id);
+    let valid = match face {
+        CastingVariantFace::Current => variant != CastingVariant::Fuse,
+        CastingVariantFace::Left => {
+            fuse_pair && matches!(variant, CastingVariant::Normal | CastingVariant::Fuse)
+        }
+        CastingVariantFace::Right => fuse_pair && variant == CastingVariant::Normal,
+    };
+    if !valid {
+        return Err(EngineError::InvalidAction(
+            "Invalid cast variant face choice".to_string(),
+        ));
+    }
+    if face == CastingVariantFace::Right {
+        let mut projected = state.clone();
+        let object = projected
+            .objects
+            .get_mut(&object_id)
+            .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+        simulate_chosen_split_spell_back_face(object);
+        prepare_casting_variant(&projected, player, object_id, variant, mode)
+    } else {
+        prepare_casting_variant(state, player, object_id, variant, mode)
+    }
+}
+
+fn is_uncommitted_hand_fuse_pair(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|object| {
+        object.zone == Zone::Hand
+            && object
+                .keywords
+                .iter()
+                .any(|keyword| matches!(keyword, Keyword::Fuse))
+            && object
+                .back_face
+                .as_ref()
+                .is_some_and(|back| back.layout_kind == Some(LayoutKind::Split))
+            && !object.cast_face_committed
+    })
+}
+
 fn casting_variant_choice_set(
     state: &GameState,
     player: PlayerId,
@@ -6663,23 +6715,40 @@ fn casting_variant_choice_set(
     let mut options = Vec::new();
 
     for variant in candidates {
-        let Ok(candidate) =
-            prepare_casting_variant(state, player, object_id, variant, CastingMode::Actual)
-        else {
-            continue;
+        let faces: &[CastingVariantFace] = if is_uncommitted_hand_fuse_pair(state, object_id) {
+            match variant {
+                CastingVariant::Normal => &[CastingVariantFace::Left, CastingVariantFace::Right],
+                CastingVariant::Fuse => &[CastingVariantFace::Left],
+                _ => &[],
+            }
+        } else {
+            &[CastingVariantFace::Current]
         };
-        if !can_cast_prepared_now_with_probe(
-            &candidate.transformed_state,
-            player,
-            &candidate.prepared,
-            probe,
-        ) {
-            continue;
+        for &face in faces {
+            let Ok(candidate) = prepare_casting_variant_on_face(
+                state,
+                player,
+                object_id,
+                variant,
+                face,
+                CastingMode::Actual,
+            ) else {
+                continue;
+            };
+            if !can_cast_prepared_now_with_probe(
+                &candidate.transformed_state,
+                player,
+                &candidate.prepared,
+                probe,
+            ) {
+                continue;
+            }
+            options.push(CastingVariantChoiceOption {
+                variant: candidate.prepared.casting_variant,
+                face,
+                mana_cost: candidate.prepared.mana_cost,
+            });
         }
-        options.push(CastingVariantChoiceOption {
-            variant: candidate.prepared.casting_variant,
-            mana_cost: candidate.prepared.mana_cost,
-        });
     }
 
     CastingVariantChoiceSet {
@@ -12000,11 +12069,18 @@ fn continue_cast_with_variant(
     player: PlayerId,
     object_id: ObjectId,
     variant: CastingVariant,
+    face: CastingVariantFace,
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let candidate =
-        prepare_casting_variant(state, player, object_id, variant, CastingMode::Actual)?;
+    let candidate = prepare_casting_variant_on_face(
+        state,
+        player,
+        object_id,
+        variant,
+        face,
+        CastingMode::Actual,
+    )?;
     continue_with_prepared_casting_variant(state, player, candidate, payment_mode, events)
 }
 
@@ -12101,15 +12177,17 @@ pub fn handle_casting_variant_choice_with_payment_mode(
             "Chosen cast variant is no longer legal".to_string(),
         ));
     }
-    let candidate = prepare_casting_variant(
+    let candidate = prepare_casting_variant_on_face(
         state,
         player,
         object_id,
         option.variant,
+        option.face,
         CastingMode::Actual,
     )?;
     let fresh = CastingVariantChoiceOption {
         variant: candidate.prepared.casting_variant,
+        face: option.face,
         mana_cost: candidate.prepared.mana_cost.clone(),
     };
     if fresh != *option
@@ -13229,6 +13307,7 @@ pub fn handle_cast_spell_with_payment_mode(
                 player,
                 object_id,
                 option.variant,
+                option.face,
                 payment_mode,
                 events,
             );
@@ -13260,6 +13339,7 @@ pub fn handle_cast_spell_with_payment_mode(
             player,
             object_id,
             option.variant,
+            option.face,
             payment_mode,
             events,
         );

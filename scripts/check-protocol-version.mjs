@@ -6,7 +6,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Phase B changes the serialized GameState carrier. Keep the measured base
 // alongside the asserted value so this gate proves the bridge was exactly one
 // bump, rather than merely checking that its pins happen to agree.
-const PHASE_B_BASE_FULL_GAME_PROTOCOL_VERSION = 70;
+const PHASE_B_BASE_FULL_GAME_PROTOCOL_VERSION = 71;
 const EXPECTED_PROTOCOL_VERSION = PHASE_B_BASE_FULL_GAME_PROTOCOL_VERSION + 1;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
@@ -35,7 +35,7 @@ const EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING = 6;
 // here, so a full-game bump could ship with an unbumped P2P version and CI
 // stayed green — a v(n-1) host and a v(n) guest would then complete a
 // handshake and only fail when the incompatible payload arrived.
-const PHASE_B_BASE_WIRE_PROTOCOL_VERSION = 53;
+const PHASE_B_BASE_WIRE_PROTOCOL_VERSION = 54;
 const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_B_BASE_WIRE_PROTOCOL_VERSION + 1;
 
 function extractVersion(source, pattern, label) {
