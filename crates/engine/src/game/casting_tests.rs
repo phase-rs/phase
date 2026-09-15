@@ -2679,11 +2679,7 @@ fn fuse_variant_selection_requires_the_fresh_full_tuple_and_exact_right_index() 
     assert_eq!(
         options
             .iter()
-            .map(|option| (
-                option.variant.clone(),
-                option.face,
-                option.mana_cost.clone()
-            ))
+            .map(|option| (option.variant, option.face, option.mana_cost.clone()))
             .collect::<Vec<_>>(),
         vec![
             (
@@ -3128,13 +3124,7 @@ fn fuse_split_under_omniscience_keeps_normal_fuse_and_free_half_rows() {
     let options = casting_variant_choice_set(&sc.state, P0, breaking, None).options;
     let rows: Vec<_> = options
         .iter()
-        .map(|option| {
-            (
-                option.variant.clone(),
-                option.face,
-                option.mana_cost.clone(),
-            )
-        })
+        .map(|option| (option.variant, option.face, option.mana_cost.clone()))
         .collect();
 
     assert!(
