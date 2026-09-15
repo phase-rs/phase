@@ -25288,10 +25288,12 @@ fn parse_linked_exile_owner_may_cast_that_card_is_owner_scoped_resolution_cast()
             duration,
             driver,
             mana_spend_permission,
+            additional_cost,
         } = &*def.effect
         else {
             panic!("{subject}: expected CastFromZone, got {:?}", def.effect);
         };
+        assert!(additional_cost.is_none(), "{subject}");
         assert_eq!(target, &owned_linked_card, "{subject}");
         assert!(*without_paying_mana_cost, "{subject}");
         assert_eq!(mode, &Cast, "{subject}");
@@ -36306,6 +36308,7 @@ fn conduit_of_worlds_line2_paid_graveyard_during_resolution() {
                 mode: Cast,
                 driver: DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
                 ..
             }
         ),
@@ -55710,8 +55713,9 @@ fn face_of_boe_clause_folds_suspend_cost_and_during_resolution() {
 }
 
 /// CR 608.2g vs CR 611.2: the shared filter-form DRIVER authority is
-/// duration-blind — the discriminator is mode + hand-origin + an alternative
-/// casting method (`without_paying` OR an alternative cost). Duration is
+/// duration-blind — the discriminators are mode + hand-origin + an alternative
+/// casting method (`without_paying` OR an alternative cost), and, since issue
+/// #8775, a chosen graveyard card at its printed cost. Duration is
 /// intentionally not a parameter because this authority answers the
 /// NO-DURATION question; a stated lifetime is reconciled afterwards by
 /// `CastFromZoneDriver::with_lingering_duration`, which degrades every
@@ -55723,18 +55727,163 @@ fn face_of_boe_clause_folds_suspend_cost_and_during_resolution() {
 fn filter_cast_driver_authority_is_duration_blind() {
     let d = super::during_resolution_for_filter_cast_clause;
     // The Face of Boe via fold: hand-origin alt cost.
-    assert_eq!(d(Cast, false, true, true), DuringResolution);
+    assert_eq!(d(Cast, false, true, true, false), DuringResolution);
     // Colossal Dreadmaw / Form of the Mulldrifter / Sen Triplets: full-cost
     // hand cast (durational or not) -> standing grant.
-    assert_eq!(d(Cast, false, false, true), LingeringPermission);
-    // Memory Plunder / Tasha: non-hand free pool.
-    assert_eq!(d(Cast, true, false, false), LingeringPermission);
+    assert_eq!(d(Cast, false, false, true, false), LingeringPermission);
+    // Tasha: non-hand free pool, no chosen card.
+    assert_eq!(d(Cast, true, false, false, false), LingeringPermission);
     // Expertise cycle / Brain in a Jar / Twinning Glass: hand free.
-    assert_eq!(d(Cast, true, false, true), DuringResolution);
+    assert_eq!(d(Cast, true, false, true, false), DuringResolution);
     // Xander's Pact: exile-origin alt cost — hand gate, not duration.
-    assert_eq!(d(Cast, false, true, false), LingeringPermission);
+    assert_eq!(d(Cast, false, true, false, false), LingeringPermission);
     // CR 305.1 land plays have no during-resolution mechanism.
-    assert_eq!(d(Play, true, false, true), LingeringPermission);
+    assert_eq!(d(Play, true, false, true, false), LingeringPermission);
+    // Ogre Battlecaster / Helmut Zemo / Toshiro Umezawa: ONE chosen graveyard
+    // card at its printed cost is cast as the ability resolves (CR 608.2g).
+    assert_eq!(d(Cast, false, false, false, true), DuringResolution);
+    // Memory Plunder / Torrential Gearhulk: the free chosen graveyard card is
+    // routed by the resolver's own shape guard; the driver is not changed for
+    // it here.
+    assert_eq!(d(Cast, true, false, false, true), LingeringPermission);
+    // A stated lifetime ("this turn") is stamped afterwards and degrades the
+    // driver; that seam is `with_lingering_duration`, not this authority.
+    // An alternative cost on a chosen graveyard card is not the printed-cost
+    // form.
+    assert_eq!(d(Cast, false, true, false, true), LingeringPermission);
+}
+
+/// CR 608.2g (issue #8775): the printed-cost "you may cast target … card from
+/// your graveyard" lowers to a during-resolution cast — the whole paid class
+/// (Ogre Battlecaster's shape, Chandra, Flame's Catalyst's `Or` type list) —
+/// while the same clause with a stated lifetime keeps the lingering permission.
+#[test]
+fn a_paid_chosen_graveyard_cast_is_lowered_as_a_during_resolution_cast() {
+    fn driver_of(text: &str) -> crate::types::ability::CastFromZoneDriver {
+        let chain = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::CastFromZone { driver, .. } = &*chain.effect else {
+            panic!("expected CastFromZone, got: {:?}", chain.effect);
+        };
+        *driver
+    }
+    // Ogre Battlecaster / Toshiro Umezawa / Emet-Selch.
+    assert_eq!(
+        driver_of("You may cast target instant or sorcery card from your graveyard."),
+        DuringResolution
+    );
+    // Chandra, Flame's Catalyst −2: an `Or` of graveyard leaves.
+    assert_eq!(
+        driver_of("You may cast target red instant or sorcery card from your graveyard."),
+        DuringResolution
+    );
+    // A stated lifetime is a later priority window (CR 611.2a).
+    assert_eq!(
+        driver_of("You may cast target creature card from your graveyard this turn."),
+        LingeringPermission
+    );
+}
+
+/// CR 601.2b + CR 118.8 (issue #8775): "by paying {R}{R} in addition to its
+/// other costs" is an additional mana cost of the offered cast, carried on
+/// the `CastFromZone`; the same clause with a stated lifetime would be a
+/// lingering permission with no slot for it and is refused, not lowered
+/// without the cost.
+#[test]
+fn ogres_additional_cost_rides_the_during_resolution_cast() {
+    let chain = parse_effect_chain(
+        "You may cast target instant or sorcery card from your graveyard by paying {R}{R} in \
+         addition to its other costs.",
+        AbilityKind::Spell,
+    );
+    let Effect::CastFromZone {
+        driver,
+        additional_cost,
+        without_paying_mana_cost,
+        alt_ability_cost,
+        ..
+    } = &*chain.effect
+    else {
+        panic!("expected CastFromZone, got: {:?}", chain.effect);
+    };
+    assert_eq!(*driver, DuringResolution);
+    assert_eq!(
+        *additional_cost,
+        Some(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+            generic: 0,
+        }),
+        "the {{R}}{{R}} is an additional cost, kept on the cast"
+    );
+    assert!(!without_paying_mana_cost && alt_ability_cost.is_none());
+
+    let unrepresentable = parse_effect_chain(
+        "You may cast target instant or sorcery card from your graveyard by paying {X} in \
+         addition to its other costs.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*unrepresentable.effect, Effect::Unimplemented { name, .. }
+            if name == "unrepresentable_additional_cost"),
+        "an {{X}} additional cost has no choice point on this cast: refused, got {:?}",
+        unrepresentable.effect
+    );
+
+    let refused = parse_effect_chain(
+        "You may cast target instant or sorcery card from your graveyard by paying {R}{R} in \
+         addition to its other costs this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*refused.effect, Effect::Unimplemented { name, .. }
+            if name == crate::types::ability::ADDITIONAL_COST_ON_LINGERING_CAST_GAP),
+        "a stated lifetime makes this a lingering permission, which cannot carry the cost: \
+         refused, got {:?}",
+        refused.effect
+    );
+}
+
+/// CR 601.2c + CR 115.1: the chosen-graveyard-card signal needs BOTH the
+/// printed word "target" on the head and a graveyard origin on the filter.
+#[test]
+fn chosen_graveyard_card_signal_needs_the_target_word_and_the_graveyard() {
+    let graveyard = |controller: Option<ControllerRef>| {
+        let mut tf = TypedFilter::new(TypeFilter::Instant);
+        tf.controller = controller;
+        tf.properties.push(FilterProp::InZone {
+            zone: Zone::Graveyard,
+        });
+        TargetFilter::Typed(tf)
+    };
+    let c = super::cast_target_is_chosen_graveyard_card;
+    assert!(c(
+        "target instant card from your graveyard",
+        &graveyard(Some(ControllerRef::You))
+    ));
+    assert!(c(
+        "target instant card from an opponent's graveyard",
+        &graveyard(Some(ControllerRef::Opponent))
+    ));
+    // Chandra, Flame's Catalyst: "target red instant or sorcery card" is an
+    // `Or` of leaves, each in the graveyard.
+    assert!(c(
+        "target red instant or sorcery card from your graveyard",
+        &TargetFilter::Or {
+            filters: vec![
+                graveyard(Some(ControllerRef::You)),
+                graveyard(Some(ControllerRef::You)),
+            ],
+        }
+    ));
+    // Tasha-shaped pool: no target word.
+    assert!(!c("instant cards from your graveyard", &graveyard(None)));
+    // A chosen card that is not in a graveyard (hand pick, exile anaphor).
+    let mut hand = TypedFilter::new(TypeFilter::Instant);
+    hand.properties
+        .push(FilterProp::InZone { zone: Zone::Hand });
+    assert!(!c(
+        "target instant card from your hand",
+        &TargetFilter::Typed(hand)
+    ));
 }
 
 #[test]

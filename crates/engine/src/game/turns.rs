@@ -2789,8 +2789,10 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // performed, then those triggered abilities are put on the stack"); this
     // block performs no SBA pass. SBAs are instead performed at the priority
     // boundary this block routes to, by `sba::check_state_based_actions` inside
-    // `engine_priority::run_post_action_pipeline` (`engine_priority.rs:177`),
-    // i.e. AFTER the abilities are stacked rather than before. Whether cleanup
+    // `engine_priority::run_post_action_pipeline_from_with_policy` (reached from
+    // `engine_priority::run_post_action_pipeline` via
+    // `run_post_action_pipeline_from`), i.e. AFTER the
+    // abilities are stacked rather than before. Whether cleanup
     // should perform a full CR 704 pass at CR 514.3a's exact instant is a
     // separate question, deliberately not answered here.
     //

@@ -3436,8 +3436,8 @@ pub(crate) fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
 /// CR 604.3: In zone-count contexts ("two or more instant and/or sorcery cards
 /// in your graveyard"), the joining conjunction is semantically a disjunction
 /// — a card matches if it has any of the listed types. The result
-/// `Vec<TypeFilter>` is consumed by `matches_zone_card_filter`
-/// (`game/quantity.rs:1151`), which uses `.iter().any(...)` (logical OR).
+/// `Vec<TypeFilter>` is consumed by `game::quantity::matches_zone_card_filter`,
+/// which uses `.iter().any(...)` (logical OR).
 ///
 /// All three separators (`and`, `or`, `and/or`) are accepted so the combinator
 /// covers the grammatical variants Wizards uses across templating eras

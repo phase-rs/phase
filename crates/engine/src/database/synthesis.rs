@@ -6713,6 +6713,7 @@ fn build_suspend_last_counter_cast_trigger() -> TriggerDefinition {
             // sorcery-speed timing bypass for an upkeep recast (issue #1520).
             driver: CastFromZoneDriver::DuringResolution,
             mana_spend_permission: None,
+            additional_cost: None,
         },
     )
     .optional();
@@ -9976,6 +9977,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 // the explicit discriminator preserves that.)
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
         )
         .optional();
@@ -13788,8 +13790,8 @@ mod undying_persist_runtime_tests {
     /// the `ObjectId` across the zone change). When the second trigger
     /// resolves, its `Effect::ChangeZone` evaluates `from_zone =
     /// Zone::Battlefield`, which fails the `expected_origin ==
-    /// Some(Zone::Graveyard)` guard at `change_zone.rs:501-505` and the
-    /// move silently no-ops. `enter_with_counters` runs only on a successful
+    /// Some(Zone::Graveyard)` guard in `change_zone::process_one_zone_move_with_terminal`
+    /// and the move silently no-ops. `enter_with_counters` runs only on a successful
     /// move, so the second trigger places no counter either.
     ///
     /// Post-condition pinned by this test: exactly one battlefield object
@@ -13837,7 +13839,7 @@ mod undying_persist_runtime_tests {
             count_in_battlefield, 1,
             "dual-keyword permanent must not be double-returned"
         );
-        // The origin guard at change_zone.rs:501-505 prevents the
+        // The origin guard in `change_zone::process_one_zone_move_with_terminal` prevents the
         // second-to-resolve trigger from executing its move, so its
         // `enter_with_counters` never runs. Exactly one counter ends up on
         // the returned permanent (polarity = whichever trigger resolved

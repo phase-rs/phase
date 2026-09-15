@@ -3137,15 +3137,15 @@ impl GameObject {
     ///
     /// # Scope: BATTLEFIELD EXIT ONLY. Deliberately not zone-parameterized.
     ///
-    /// `zones::apply_zone_exit_cleanup` (`zones.rs:137`) restores the stashed face
+    /// `zones::apply_zone_exit_cleanup` restores the stashed face
     /// through **three independent gates**, not one disjunction, and only two of the
     /// three are unconditional:
     ///
     /// | flag | gate in `apply_zone_exit_cleanup` | at `from = Battlefield` |
     /// |---|---|---|
-    /// | `transformed` (`:261`, CR 712.8a + CR 400.7) | no zone gate at all | reverts |
-    /// | `modal_back_face` (`:273`, CR 712.8a + CR 400.7) | `to != Stack && to != Battlefield` | reverts for any non-stack, non-battlefield destination |
-    /// | `face_down` (`:286`, CR 708.9) | `from == Battlefield \|\| (from == Stack && to != Battlefield)` | reverts |
+    /// | `transformed` (CR 712.8a + CR 400.7) | no zone gate at all | reverts |
+    /// | `modal_back_face` (CR 712.8a + CR 400.7) | `to != Stack && to != Battlefield` | reverts for any non-stack, non-battlefield destination |
+    /// | `face_down` (CR 708.9) | `from == Battlefield \|\| (from == Stack && to != Battlefield)` | reverts |
     ///
     /// **Each flag INDEPENDENTLY reverts for `Battlefield -> Graveyard`** (CR
     /// 701.21a's transition), which is what the disjunction below relies on. The
@@ -3162,16 +3162,17 @@ impl GameObject {
     /// A **flipped permanent that is then turned face down** (Ixidron, Cyber
     /// Conversion — CR 712.16 does not cover flip cards, so this is legal) sets
     /// `flipped` AND `face_down` at once, and the two statuses **share the single
-    /// `back_face` slot**. `effects::turn_face_down` (`turn_face_down.rs:66-69`)
+    /// `back_face` slot**. `effects::turn_face_down::turn_permanent_face_down`
     /// keeps the FLIP stash there rather than overwriting it with a base snapshot,
     /// and `zones::apply_zone_exit_cleanup` runs the CR 708.9 face-down restore
-    /// BEFORE the CR 710.4 flip revert (`zones.rs:300-309`) precisely so one slot
+    /// BEFORE the CR 710.4 flip revert (the `flip::revert_flip_on_zone_exit` call
+    /// in that same function) precisely so one slot
     /// serves both.
     ///
     /// So for that object `back_face` holds the flip card's NORMAL half, not the
     /// base face — and reading it is not merely harmless, it is REQUIRED. Turning
     /// the permanent face down set both `mana_cost` and `base_mana_cost` to
-    /// `ManaCost::NoCost` (`morph.rs:47`, CR 708.2a), so the `None =>` arm would
+    /// `ManaCost::NoCost` (`morph::apply_face_down_creature_characteristics`, CR 708.2a), so the `None =>` arm would
     /// return 0 here. The `face_down` disjunct is what routes this object to the
     /// stash instead. CR 710.1c ("A flip card's color and mana cost don't change if
     /// the permanent is flipped") makes that stash mana-cost-identical to the
@@ -3179,24 +3180,25 @@ impl GameObject {
     ///
     /// `flipped` is **not** a fourth conjunct, and this is settled — do not
     /// re-chase it. CR 710.1c again: `flip::apply_flipped_face_to_object`
-    /// (`flip.rs:320`) leaves `mana_cost` and `base_mana_cost` untouched by design
-    /// (`flip.rs:363-365`), so for a flipped-but-face-UP permanent the `None =>`
-    /// arm already returns the right number.
+    /// leaves `mana_cost` and `base_mana_cost` untouched by design (that
+    /// function's doc comment lists them under "Deliberately NOT copied"), so
+    /// for a flipped-but-face-UP permanent the `None =>` arm already returns
+    /// the right number.
     ///
     /// # Why not `self.mana_cost`
     ///
     /// It is the live, layer-mutable characteristic (CR 613.1). `layers::
     /// seed_live_characteristics_from_base` re-seeds it from `base_mana_cost` at the
     /// top of every layer pass, and `printed_cards::apply_copiable_values`
-    /// (`printed_cards.rs:644`) then overwrites **only** the live field — it writes
+    /// then overwrites **only** the live field — it writes
     /// no `base_*` field at all. CR 903.3's own example puts a copied commander in
     /// scope here ("A commander that's copying another card … is still a commander").
     ///
     /// # Why not `self.base_mana_cost` alone
     ///
-    /// `printed_cards::apply_back_face_to_object` (`:287`) writes **both** the live
-    /// (`:295`) and base (`:308`) fields from the installed face, and
-    /// `morph::apply_face_down_creature_characteristics` (`morph.rs:47`) sets both to
+    /// `printed_cards::apply_back_face_to_object` writes **both** the live
+    /// (`obj.mana_cost`) and base (`obj.base_mana_cost`) fields from the installed face, and
+    /// `morph::apply_face_down_creature_characteristics` sets both to
     /// `ManaCost::NoCost` (CR 708.2a). For those objects `base_mana_cost` describes
     /// the face currently shown, not the face the card will show off the battlefield.
     ///
@@ -3204,14 +3206,17 @@ impl GameObject {
     ///
     /// The `back_face` slot is **shared** by the transform, MDFC, face-down and flip
     /// stashes, and its writers do not agree on which snapshot they take:
-    ///   * `transform.rs:85`/`:90` stash `printed_cards::snapshot_object_face`, which
-    ///     captures the **live** `mana_cost` (`printed_cards.rs:717`). A permanent
+    ///   * `transform::transform_permanent`'s two `back_face` stashes call
+    ///     `printed_cards::snapshot_object_face`, which
+    ///     captures the **live** `mana_cost` (the `mana_cost: obj.mana_cost.clone()`
+    ///     field of the `BackFaceData` it builds). A permanent
     ///     transformed while already under a mana-cost-altering copy effect therefore
     ///     parks a polluted value, and this method will read it.
-    ///   * `effects/turn_face_down.rs:68` stashes `snapshot_object_base_face` — the
+    ///   * `effects::turn_face_down::turn_permanent_face_down` stashes
+    ///     `snapshot_object_base_face` — the
     ///     **printed** baseline. That path is clean.
     ///     The divergence is **BIDIRECTIONAL**, not downward-only: `intrinsic_copiable_
-    ///     values` (`printed_cards.rs:486`) sources `obj.base_mana_cost` from the COPY
+    ///     values` sources `obj.base_mana_cost` from the COPY
     ///     SOURCE and `apply_copiable_values` writes it to the RECIPIENT's live field
     ///     with no clamp, so a `{1}{U}` Clone copying a fifteen-drop ends with live 15
     ///     against base 2. Tracked as task #36; the fix is an engine change at the

@@ -2329,6 +2329,15 @@ impl CastFromZoneDriver {
 /// it.
 pub const CAST_BOUND_LOST_TO_DURATION_GAP: &str = "duration_scoped_cast_bound";
 
+/// CR 601.2b + CR 611.2a: The parser gap name for a cast clause that attaches
+/// an additional mana cost ("by paying {R}{R} in addition to its other costs")
+/// to a cast the lingering-permission mechanism would carry — that mechanism
+/// records no such cost, so the clause is refused rather than lowered without
+/// it. The during-resolution cast (`CastOffer::GraveyardPaidCast`) is the one
+/// mechanism that charges it; Ogre Battlecaster, the only printed carrier,
+/// takes that route (issue #8775).
+pub const ADDITIONAL_COST_ON_LINGERING_CAST_GAP: &str = "additional_cost_on_lingering_cast";
+
 /// CR 702.104a + CR 702.104b: The outcome of the Tribute choice the chosen opponent
 /// made as the creature entered the battlefield. Persisted as a `ChosenAttribute` on
 /// the Tribute creature so the companion "if tribute wasn't paid" trigger (CR
@@ -5006,6 +5015,12 @@ pub enum ResolutionCastCost {
     FullCost {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mana_spend_permission: Option<ManaSpendPermission>,
+        /// CR 601.2b + CR 118.8: an additional mana cost the granting effect
+        /// attaches ("by paying {R}{R} in addition to its other costs", Ogre
+        /// Battlecaster), added to the tax-inclusive base before cost
+        /// modifiers apply (CR 601.2f).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        additional_cost: Option<crate::types::mana::ManaCost>,
     },
     /// CR 118.9 + CR 702.62a: Cast paying a specific alternative mana cost
     /// borrowed from a keyword (e.g., The Face of Boe's suspend cost). The
@@ -11414,6 +11429,23 @@ impl StaticCondition {
         self.any_leaf(|leaf| matches!(leaf, StaticCondition::Unrecognized { .. }))
     }
 
+    /// CR 506.2 + CR 508.5: true when this condition tree contains a leaf whose
+    /// answer depends on WHICH player is the defending player. That is only
+    /// answerable relative to a specific attacking creature — from the target it is
+    /// declared to be attacking, or from the target recorded for it once it is an
+    /// attacking creature (CR 508.1k). A CREATURE-LEVEL query ("can this creature
+    /// attack at all?") carries neither, so it must defer to the per-pairing
+    /// authority rather than evaluate the gate unanchored — exactly as
+    /// `StaticDefinition::attack_defended` scoping already defers (CR 508.1c,
+    /// + CR 508.1d for the cost form).
+    ///
+    /// Delegates to [`Self::any_leaf`], the same compiler-forced leaf walker
+    /// `contains_unrecognized` and `has_unbindable_designation_anchor` use, so a
+    /// future nested-condition variant is a compile error here too.
+    pub(crate) fn needs_defending_player_anchor(&self) -> bool {
+        self.any_leaf(|leaf| matches!(leaf, StaticCondition::DefendingPlayerControls { .. }))
+    }
+
     /// Returns the text of every [`StaticCondition::Unrecognized`] leaf found
     /// anywhere in this condition tree, for use in coverage gap labels.
     /// Derived from [`Self::walk_leaves`] — the same single traversal
@@ -17109,6 +17141,20 @@ pub enum Effect {
         /// payment unchanged for every other cast-from-zone grant.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mana_spend_permission: Option<ManaSpendPermission>,
+        /// CR 601.2b + CR 601.2f + CR 118.8: an ADDITIONAL mana cost of the
+        /// granted cast — "you may cast target instant or sorcery card from
+        /// your graveyard by paying {R}{R} in addition to its other costs"
+        /// (Ogre Battlecaster, the one printed carrier). Paid together with
+        /// the card's printed cost, on top of it: it neither replaces the mana
+        /// cost (`alt_ability_cost`, CR 118.9) nor waives it
+        /// (`without_paying_mana_cost`). Consumed by the during-resolution
+        /// paid cast (`CastOffer::GraveyardPaidCast` →
+        /// `casting::initiate_cast_during_resolution`), the one route the
+        /// printed carrier takes; a lingering permission has no slot for it,
+        /// and the parser refuses the clause rather than drop the cost when the
+        /// driver is not `DuringResolution`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        additional_cost: Option<crate::types::mana::ManaCost>,
     },
     /// CR 608.2g + CR 601.2 + CR 118.9: Open an interactive "free-cast window"
     /// during this spell/ability's resolution: the controller may cast up to

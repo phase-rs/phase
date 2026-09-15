@@ -10374,8 +10374,8 @@ fn parse_chosen_copy_source(input: &str) -> OracleResult<'_, FirstTimeCopySource
     };
     let (rest, _) = tag(" and create that many tokens that are copies of that ").parse(rest)?;
     // CR 707.1 + CR 201.5: "that creature" is an anaphor for the permanent just
-    // chosen. Same shape as `parse_definite_parent_reference`
-    // (`oracle_target.rs:1958-2013`): determiner (carried in the tag above) ->
+    // chosen. Same shape as `parse_definite_parent_reference`:
+    // determiner (carried in the tag above) ->
     // `parse_type_filter_word` -> agreement. Require the nouns to agree, so a
     // disagreeing sentence fails the parse instead of silently binding the wrong
     // subject; the compound-noun case ("that artifact creature") is refused here

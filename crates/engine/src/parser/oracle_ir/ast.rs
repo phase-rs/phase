@@ -2111,6 +2111,35 @@ pub(crate) fn cast_bound_lost_to_duration_gap(
     )
 }
 
+/// CR 601.2b + CR 611.2a: a `CastFromZone` on the lingering-permission
+/// mechanism that still carries an `additional_cost` would drop that cost at
+/// resolution (the permission has no slot for it), so the clause becomes the
+/// `ADDITIONAL_COST_ON_LINGERING_CAST_GAP` instead. Called at every seam that
+/// can leave a cast grant on that mechanism: the Branch-2 producer in
+/// `oracle_effect::try_parse_cast_effect`, the alt-cost fold
+/// (`oracle_effect::attach_alt_cost_to_prior_cast_from_zone`), and the three
+/// duration seams that degrade a during-resolution driver
+/// (`apply_duration_to_effect`, `reconcile_coordinated_cast`, the
+/// trailing-duration peel in `oracle_effect::parse_effect_clause`). Zero
+/// printed carriers today.
+pub(crate) fn refuse_additional_cost_on_lingering_cast(effect: &mut Effect) {
+    let Effect::CastFromZone {
+        driver,
+        additional_cost: Some(cost),
+        ..
+    } = effect
+    else {
+        return;
+    };
+    if *driver == crate::types::ability::CastFromZoneDriver::DuringResolution {
+        return;
+    }
+    *effect = Effect::unimplemented(
+        crate::types::ability::ADDITIONAL_COST_ON_LINGERING_CAST_GAP,
+        format!("additional cost the lingering permission cannot carry: {cost:?}"),
+    );
+}
+
 /// CR 611.2a + CR 608.2g + CR 608.2c: Carry a sentence's LEADING duration onto a
 /// later coordinated clause of that same sentence.
 ///
@@ -2203,8 +2232,10 @@ fn reconcile_coordinated_cast(
         None => {
             let bounds = driver.window_bounds().unwrap_or_default();
             *effect = cast_bound_lost_to_duration_gap(bounds);
+            return;
         }
     }
+    refuse_additional_cost_on_lingering_cast(effect);
 }
 
 pub(crate) fn with_clause_duration(
@@ -2391,6 +2422,7 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
             ref alt_ability_cost,
             ref constraint,
             ref mana_spend_permission,
+            ref additional_cost,
             ..
         } => {
             // CR 601.2b + CR 118.9 + CR 611.2a: "Until end of turn, you may cast
@@ -2455,6 +2487,7 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
                 && alt_ability_cost.is_none()
                 && constraint.is_none()
                 && mana_spend_permission.is_none()
+                && additional_cost.is_none()
                 && duration_is_unset_sentinel(effect_duration)
                 && matches!(target, TargetFilter::Typed(_))
                 && target.extract_zones() == vec![crate::types::zones::Zone::Hand]
@@ -2574,6 +2607,9 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
             end_cost: None,
         };
     }
+    // CR 601.2b: a grant the stated lifetime just moved onto the lingering
+    // mechanism cannot keep an additional cost.
+    refuse_additional_cost_on_lingering_cast(effect);
 }
 
 /// CR 611.2b + CR 301.5: does this `BecomeCopy` recipient anaphorically name the
@@ -3223,6 +3259,7 @@ mod duration_distribution_tests_7923 {
             duration,
             driver: CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
         }
     }
 
@@ -3241,6 +3278,7 @@ mod duration_distribution_tests_7923 {
                 constraint,
                 duration,
                 mana_spend_permission,
+                additional_cost,
                 ..
             } => Effect::CastFromZone {
                 target,
@@ -3252,6 +3290,7 @@ mod duration_distribution_tests_7923 {
                 duration,
                 driver,
                 mana_spend_permission,
+                additional_cost,
             },
             other => other,
         }

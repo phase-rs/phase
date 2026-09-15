@@ -1369,12 +1369,15 @@ fn student_of_warfare() {
 /// Leveler *body* static (Plan 05b, T2 witness).
 ///
 /// `student_of_warfare` above reaches only the block-SUMMARY static
-/// (`oracle_level.rs:194`), synthesized from P/T and keyword lines. Kabira
+/// (the `summary_text` / `StaticIr::from_definition` push in
+/// `oracle_level::parse_level_blocks`), synthesized from P/T and keyword lines. Kabira
 /// Vindicator prints a full sentence inside each LEVEL block, so it is the
-/// witness for the body arm (`oracle_level.rs:154`, via `parse_static_line`)
+/// witness for the body arm (the `parse_static_line` call in
+/// `oracle_level::parse_level_blocks`)
 /// — twice, once per block — while still carrying two block summaries.
 ///
-/// The sibling multi arm (`:146`, `parse_static_line_multi`) has no pool
+/// The sibling multi arm (the `parse_static_line_multi` call in
+/// `oracle_level::parse_level_blocks`) has no pool
 /// witness: no printed LEVEL body line lowers to more than one static.
 #[test]
 fn kabira_vindicator() {
@@ -1422,8 +1425,9 @@ fn lighthouse_chronologist() {
 /// Both Spacecraft static arms on one card (CR 702.184a / CR 721.2).
 ///
 /// `2+ | Other creatures you control get +1/+1.` takes the
-/// `parse_static_line` arm (`oracle_spacecraft.rs:256`); `12+ | Flying,
-/// lifelink` takes the keyword-only arm (`:178`). Nothing else in the two-layer
+/// `parse_static_line` arm of `oracle_spacecraft`'s `parse_body`; `12+ | Flying,
+/// lifelink` takes that same method's keyword-only (`parse_keyword_only_body`)
+/// arm. Nothing else in the two-layer
 /// corpus reaches either — Chalice of the Void carries `charge` counters but
 /// prints no threshold line — so without this fixture T2's Spacecraft
 /// conversion would be snapshot-invisible.

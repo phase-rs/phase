@@ -2332,7 +2332,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // these phrases because trigger context is not threaded through the
     // effect-parser entry points; this post-lowering pass rewrites the
     // top-level effect target from `ParentTarget` to `TriggeringSource` so
-    // `extract_source_from_event` (game/targeting.rs:539) resolves it to the
+    // `targeting::extract_source_from_event` resolves it to the
     // correct event object id at runtime.
     //
     // Drives Tergrid, God of Fright's reanimation class:

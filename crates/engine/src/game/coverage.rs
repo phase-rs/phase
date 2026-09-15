@@ -9921,7 +9921,16 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::And { .. } => ("And", Handled),
         StaticCondition::Or { .. } => ("Or", Handled),
         StaticCondition::Not { .. } => ("Not", Handled),
-        StaticCondition::DefendingPlayerControls { .. } => ("DefendingPlayerControls", Unhandled),
+        // CR 506.2 + CR 508.1c + CR 508.5: resolved at runtime by
+        // `layers::evaluate_condition_with_context`'s `DefendingPlayerControls` arm from
+        // `ConditionContext` — the attack target under validation during
+        // declare-attackers (before CR 508.1k records the attacker), else the recorded
+        // `AttackerInfo` for the RECIPIENT attacking creature (so a remote carrier such
+        // as Tanglewalker resolves per affected attacker rather than per carrier).
+        // Creature-level queries that cannot bind the anchor defer to
+        // `combat::attacker_can_attack_target` rather than guess. The board census is
+        // `filter::player_controls_matching` (CR 109.2 + CR 108.4).
+        StaticCondition::DefendingPlayerControls { .. } => ("DefendingPlayerControls", Handled),
         StaticCondition::SourceAttackingAlone => ("SourceAttackingAlone", Unhandled),
         // CR 508.1k / 509.1g / 509.1h: runtime-evaluated against the live combat
         // attacker/blocker sets (conditions.rs:81 / layers.rs:1118 / layers.rs:1123).
@@ -9954,8 +9963,8 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
         // CR 903.3d: the RUNTIME does evaluate this static
-        // (`layers::evaluate_static_condition`, layers.rs:1875, delegating both
-        // ownership arms to the single `game::commander` authority), so the
+        // (the `ControlsCommander` arm of `layers::evaluate_condition_with_context`,
+        // delegating both ownership arms to the single `game::commander` authority), so the
         // `Unhandled` tag below understates the resolver.
         //
         // It stays `Unhandled` DELIBERATELY, and must not be flipped as a rider on
@@ -9983,7 +9992,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceIsMonstrous => ("SourceIsMonstrous", Handled),
         // SourceIsHarnessed resolved by layers::evaluate_condition (the ∞ gate).
         StaticCondition::SourceIsHarnessed => ("SourceIsHarnessed", Handled),
-        // SourceAttachedToCreature resolved by layers::evaluate_condition (layers.rs:1078)
+        // SourceAttachedToCreature resolved by `layers::evaluate_condition`
         StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Handled),
         // SourceMatchesFilter resolved by layers::evaluate_condition (layers.rs:1104)
         StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
@@ -14383,7 +14392,7 @@ mod tests {
     /// cannot be smuggled in as a rider on an unrelated change.
     ///
     /// The runtime DOES evaluate `StaticCondition::ControlsCommander`
-    /// (`layers::evaluate_static_condition`, layers.rs:1875), so on the
+    /// (the `ControlsCommander` arm of `layers::evaluate_condition_with_context`), so on the
     /// resolver axis alone the tag understates the engine. But the tag is also
     /// the only thing keeping two demonstrably misparsed Lieutenant cards out
     /// of the supported set, so it must stay until those misparses register as
@@ -18868,8 +18877,7 @@ mod tests {
     }
 
     /// Regression for PR #8012 (Bombur, Gentle Dreamer) — maintainer review
-    /// round 3, which cited this exact `is_static_supported` gate
-    /// (`coverage.rs:7794-7816` as of that review): a recipient-scoped
+    /// round 3, which cited this exact `is_static_supported` gate: a recipient-scoped
     /// `unless` tail with no runtime binding authority falls back to
     /// `Not(Unrecognized{..})`, a NESTED unrecognized leaf. Before the fix,
     /// `is_static_supported` matched only a TOP-LEVEL

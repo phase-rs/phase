@@ -13766,11 +13766,11 @@ fn zone_changed_condition_provenance_is_coherent(event: &GameEvent) -> bool {
 /// The live-entrant branch is also scoped to `record.to_zone == Zone::Battlefield`
 /// — not because CR 608.2h + CR 113.7a's "public zone it was expected in" is
 /// battlefield-only (it is not), but because the PRECONDITION above cuts both
-/// ways: the projection is snapshotted (`snapshot_for_zone_change`,
-/// `game/zones.rs:1248`) before the move it describes, so once the subject
+/// ways: the projection is snapshotted (`GameObject::snapshot_for_zone_change`)
+/// before the move it describes, so once the subject
 /// has moved, whatever that move writes to the live object afterward —
 /// inline, or downstream through a callee that receives the already-built
-/// record by value, as `resolve_and_apply_zone_change` (`game/zones.rs:817`)
+/// record by value, as `zones::resolve_and_apply_zone_change`
 /// does — necessarily lands after the snapshot. So for every destination the
 /// record's projection is an equal-or-better authority than the live object,
 /// regardless of which step does the writing or where a future one is added.
@@ -14722,6 +14722,9 @@ fn evaluate_trigger_condition_with_source(
             .any(|p| p.id != controller && p.life_lost_last_turn > 0),
         // CR 509.1a + CR 603.4: "if defending player controls no [type]" — check if the
         // defending player in combat controls no permanents matching the filter.
+        // Census shares `filter::player_controls_matching` with the static-condition
+        // `DefendingPlayerControls` arm (`layers.rs`); the all-defenders quantifier and
+        // the negation stay here — see `defending_player_controls_none_quantifies_all_defenders_cr_508_5a_gap`.
         TriggerCondition::DefendingPlayerControlsNone { filter } => {
             if let Some(combat) = &state.combat {
                 let defenders: std::collections::HashSet<PlayerId> = combat
@@ -14732,12 +14735,7 @@ fn evaluate_trigger_condition_with_source(
                 let ctx = source_context
                     .map_or_else(FilterContext::neutral, FilterContext::from_trigger_source);
                 defenders.iter().all(|&def_pid| {
-                    !state.battlefield.iter().any(|id| {
-                        state.objects.get(id).is_some_and(|obj| {
-                            obj.controller == def_pid
-                                && matches_target_filter(state, *id, filter, &ctx)
-                        })
-                    })
+                    !crate::game::filter::player_controls_matching(state, def_pid, filter, &ctx)
                 })
             } else {
                 false
@@ -30409,6 +30407,13 @@ pub mod tests {
     /// This test pins TODAY's behaviour so a later change that routes the arm
     /// through the CR 508.5 authority fails here and forces an explicit
     /// decision instead of a silent behaviour swap.
+    ///
+    /// The arm now shares `filter::player_controls_matching` as its CENSUS
+    /// authority with the static-condition `DefendingPlayerControls` arm
+    /// (`layers.rs`), while the all-defenders QUANTIFIER and the NEGATION were
+    /// deliberately left at this call site. The CR 508.5a gap this test pins
+    /// is therefore unchanged and still open; nothing about this test's
+    /// assertions changed.
     #[test]
     fn defending_player_controls_none_quantifies_all_defenders_cr_508_5a_gap() {
         let (mut state, source) = monarch_setup();
@@ -31753,6 +31758,7 @@ pub mod tests {
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
@@ -31785,6 +31791,7 @@ pub mod tests {
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),

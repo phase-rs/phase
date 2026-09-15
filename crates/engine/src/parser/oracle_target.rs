@@ -3493,9 +3493,9 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     }
 
     // CR 700.9 (modified) + CR 109.4 (control): "<typed filter> other than ~"
-    // excludes the ability source from the population. FilterProp::Another
-    // (filter.rs:2206) matches every object except the source, so the count
-    // omits the source permanent (Thundering Raiju: "modified creatures you
+    // excludes the ability source from the population. The `FilterProp::Another`
+    // arm of `filter::matches_filter_prop` matches every object except the
+    // source, so the count omits the source permanent (Thundering Raiju: "modified creatures you
     // control other than this creature" — normalized to "~"). The trailing
     // self-reference is recognized via `nom_target::parse_self_reference`
     // ("~"/"it"/"this creature"/"itself"/…). CR 303.4b + CR 301.5a: the
@@ -4295,9 +4295,11 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
 
     // CR 201.2a: Compose the typed filter with the chosen-name constraint when
     // the suffix was present. Runtime And-eval requires every inner filter to
-    // match (game/filter.rs line 1464/1782); the HasChosenName arm
-    // (game/filter.rs line 1604) compares the object's name to the source's
-    // ChosenAttribute::CardName.
+    // match (the `TargetFilter::And` arm of `filter::filter_inner_for_object`
+    // for the object path, and of `filter::spell_record_matches_filter` for
+    // the spell-record path); the `TargetFilter::HasChosenName` arm of
+    // `filter::filter_inner_for_object` compares the object's name to the
+    // source's ChosenAttribute::CardName.
     let filter = if has_chosen_name {
         TargetFilter::And {
             filters: vec![filter, TargetFilter::HasChosenName],
@@ -9077,7 +9079,7 @@ fn parse_except_for_type_list_suffix(
         // the legacy `trim_end_matches('s')` produced "Octopuse"/"Elve", which no
         // lookup recognizes, so every genuine subtype exclusion declined. `word` is a
         // whole alphabetic token from this function's own `take_till1`, and
-        // `parse_subtype_entry` (oracle_util.rs:1258) word-bounds every arm —
+        // `parse_subtype_entry` word-bounds every arm —
         // `starts_with_word_ci` on the singular, an equivalent
         // non-alphanumeric-follower guard on the `-s`/`-es`/`-ies` plurals — so a
         // match here always consumes the whole word: "Serpentine" cannot match

@@ -210,12 +210,22 @@ export class NativeEngineVersionMismatchError extends Error {
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
  * 73 — `CastingVariantChoiceOption` gained required `face`, making a paused
- *      Fuse split-card menu an exact `(variant, face)` tuple. Old snapshots
- *      cannot safely bind an index to a new right-half cast, so full-game
- *      peers must refuse the skew. Lobby messages are unchanged.
- * 72 — `ResolutionCastFacePolicy` replaces the legacy free-cast-window
- *      filter with a required serialized carrier. Full-game/P2P peers must
- *      reject pre-bridge snapshots; lobby message shape is unchanged.
+ *      Fuse split-card menu an exact `(variant, face)` tuple. This integrated
+ *      state also carries a resolution-owned modal choice's additional cost so
+ *      a paid graveyard cast cannot lose it across face election. Old snapshots
+ *      cannot safely bind either payload, so full-game peers must refuse skew.
+ * 72 — `ResolutionCastFacePolicy` replaces the legacy free-cast-window filter,
+ *      and `WaitingFor.CastOffer { kind: GraveyardPaidCast }` carries two additive
+ *      fields: additional_cost (Ogre Battlecaster's "{R}{R} in addition to its
+ *      other costs", CR 601.2b) and installed_triggers (the delayed triggers a
+ *      declined offer withdraws). Both are serde-defaulted, so a v71 peer
+ *      parses a v72 offer — and then pays the offered card at its printed
+ *      cost alone while the v72 host charges the addition. The offer also
+ *      opens for seven more printed cards (the paid "cast target … card from
+ *      your graveyard" class, CR 608.2g) that v71 granted a lingering
+ *      permission instead. Exact-match refuses the pairing. P2P moves in
+ *      lockstep (wire 54); lobby messages are unchanged. See PROTOCOL_VERSION
+ *      in crates/lobby-broker/src/protocol.rs for the full entry.
  * 71 — DraftKind.Winston and DraftAction::SharedStackDecision are serialized
  *      by draft WebSocket messages. A PARSE bump like 27 and 34, not a
  *      capability bump like 24 — but a CONDITIONAL one: neither type carries

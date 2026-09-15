@@ -2263,8 +2263,9 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     // trigger has no parent target to inherit. `parse_target` returns the
     // subject-position anaphor as `ParentTarget` because trigger context is not
     // threaded through the effect parser; lift it to `TriggeringSource` so the
-    // runtime binds the grant via `resolve_event_context_target` (effect.rs:259)
-    // instead of the empty chain-tracked set (effect.rs:474). Mirrors the
+    // runtime binds the grant via `targeting::resolve_event_context_target`
+    // instead of the empty chain-tracked set in the `TargetFilter::ParentTarget`
+    // arm of `effects::effect::register_transient_effect`. Mirrors the
     // `lift_parent_target_to_triggering_source` family in oracle_trigger.rs.
     lift_generic_effect_parent_target_to_triggering_source_in_ability(&mut inner);
 
@@ -2322,9 +2323,9 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
 /// runtime registers the transient grant against `chain_tracked_set_id`, which
 /// is empty for a delayed trigger, so the grant silently never lands (#5337,
 /// Solar Array / Lux Artillery's when-next form). Rebinding to
-/// `TriggeringSource` routes it through `resolve_event_context_target`
-/// (effect.rs:259) — the same path Lux Artillery's non-delayed "it gains
-/// sunburst" already uses. Only `GenericEffect`-borne grants are affected;
+/// `TriggeringSource` routes it through `targeting::resolve_event_context_target`
+/// — the same path Lux Artillery's non-delayed "it gains sunburst" already
+/// uses. Only `GenericEffect`-borne grants are affected;
 /// other effect variants (e.g. a delayed `ChangeZone` on the cast spell) are
 /// out of scope for this class and left untouched.
 fn lift_generic_effect_parent_target_to_triggering_source_in_ability(
@@ -18153,6 +18154,7 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         if let Some(bounds) = refused_bound {
             clause.effect = crate::parser::oracle_ir::ast::cast_bound_lost_to_duration_gap(bounds);
         }
+        crate::parser::oracle_ir::ast::refuse_additional_cost_on_lingering_cast(&mut clause.effect);
     }
     // CR 115.1d: Post-parse fixup for the "…counter(s) on up to N target …" shape.
     // The multi_target is lost in the AST→Effect lowering chain, so we re-extract
@@ -21891,6 +21893,7 @@ fn try_parse_per_opponent_graveyard_free_cast(lower: &str) -> Option<Effect> {
         duration: None,
         driver: CastFromZoneDriver::DuringResolution,
         mana_spend_permission: None,
+        additional_cost: None,
     })
 }
 
@@ -25776,8 +25779,8 @@ fn parse_cast_head_noun(input: &str) -> OracleResult<'_, ()> {
 /// type (for example, an artifact creature). Such objects satisfy the criteria
 /// for any effect that applies to any of their card types." So adjacent words
 /// describe ONE object bearing all of them and lower to a conjunctive
-/// `TypedFilter::type_filters` vector (`game/filter.rs:3722` / `:4024` evaluate
-/// that vector with `.all()`).
+/// `TypedFilter::type_filters` vector (`filter::spell_record_matches_filter` /
+/// `filter::spell_object_matches_filter_inner` evaluate that vector with `.all()`).
 ///
 /// The word alphabet is `oracle_nom::target::parse_type_filter_word` — the
 /// shared, word-boundary-guarded table of core types (singular AND plural) plus
@@ -26176,6 +26179,7 @@ fn from_among_batch_cast_effect(
         duration: None,
         driver,
         mana_spend_permission: None,
+        additional_cost: None,
     }
 }
 
@@ -27198,6 +27202,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             duration,
             driver,
             mana_spend_permission: None,
+            additional_cost: None,
         });
     }
 
@@ -27505,6 +27510,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
         });
     }
 
@@ -27565,6 +27571,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
         });
     }
 
@@ -27592,8 +27599,23 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             without_paying,
             alt_ability_cost.is_some(),
             cast_target_is_hand_origin(&filter),
+            cast_target_is_chosen_graveyard_card(rest, &filter),
         );
-        return Some(Effect::CastFromZone {
+        // CR 601.2b: "by paying {R}{R} in addition to its other costs" (Ogre
+        // Battlecaster). Only the during-resolution paid cast charges it; a
+        // clause the lingering mechanism would carry is refused by the shared
+        // authority rather than lowered without its cost.
+        let additional_cost = parse_additional_mana_cost_rider(rest);
+        // A rider printed in the "in addition to its other costs" shape that
+        // the reader could not turn into mana symbols (a life payment, an
+        // {X}) must not be lowered without its cost either.
+        if additional_cost.is_none() && names_an_additional_cost(rest) {
+            return Some(Effect::unimplemented(
+                UNREPRESENTABLE_ADDITIONAL_COST_GAP,
+                rest,
+            ));
+        }
+        let mut effect = Effect::CastFromZone {
             target: filter,
             without_paying_mana_cost: without_paying,
             mode,
@@ -27603,7 +27625,10 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             duration: None,
             driver,
             mana_spend_permission: None,
-        });
+            additional_cost,
+        };
+        crate::parser::oracle_ir::ast::refuse_additional_cost_on_lingering_cast(&mut effect);
+        return Some(effect);
     }
 
     // Branch 3: bare fallback.
@@ -27617,6 +27642,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         duration: None,
         driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         mana_spend_permission: None,
+        additional_cost: None,
     })
 }
 
@@ -27656,25 +27682,116 @@ fn cast_target_is_hand_origin(target: &TargetFilter) -> bool {
 /// the `DuringResolution` this function returns for it.
 ///
 /// Casts during resolution iff it is a `Cast` (CR 601.2, not a CR 305.1 land
-/// play) from a `hand` origin via an alternative casting method — free
-/// (`without_paying`: the Expertise cycle, Brain in a Jar) OR an alternative
-/// cost (`alt_is_some`: The Face of Boe's suspend cost). A *full-cost*
-/// continuous "as though" permission (Colossal Dreadmaw / Form of the
-/// Mulldrifter / Sen Triplets — hand-origin, neither free nor alt-cost) is a
-/// standing grant (CR 611.2); non-hand pools (Memory Plunder, Tasha) likewise
-/// stay lingering permissions exercised at a later priority window.
+/// play) and either
+/// - from a `hand` origin via an alternative casting method — free
+///   (`without_paying`: the Expertise cycle, Brain in a Jar) OR an alternative
+///   cost (`alt_is_some`: The Face of Boe's suspend cost); or
+/// - of ONE chosen card in a graveyard at its printed cost
+///   (`chosen_graveyard_card`, neither free nor alt-cost: "you may cast target
+///   instant or sorcery card from your graveyard" — Ogre Battlecaster, Helmut
+///   Zemo, Toshiro Umezawa, Emet-Selch, the two Chandras' −2, Harness the
+///   Storm). CR 608.2g: the card is cast as the ability resolves, so a sorcery
+///   granted by an attack trigger is cast in combat and no player receives
+///   priority in between. The FREE form of the same shape (Torrential
+///   Gearhulk, Dreadhorde Arcanist) is routed by the resolver's own shape guard
+///   (`cast_from_zone::resolve`, `immediate_graveyard_free_cast`) and keeps
+///   the driver it always had; the paid form has no such guard — its
+///   during-resolution branch (`paid_during_resolution_cast`) reads THIS
+///   driver — which is why the printed-cost case is decided here.
+///
+/// A *full-cost* continuous "as though" permission (Colossal Dreadmaw / Form of
+/// the Mulldrifter / Sen Triplets — hand-origin, neither free nor alt-cost) is
+/// a standing grant (CR 611.2); unchosen non-hand pools (Tasha's "cast a spell
+/// from among cards exiled with ~") likewise stay lingering permissions
+/// exercised at a later priority window.
 fn during_resolution_for_filter_cast_clause(
     mode: CardPlayMode,
     without_paying: bool,
     alt_is_some: bool,
     hand_origin: bool,
+    chosen_graveyard_card: bool,
 ) -> crate::types::ability::CastFromZoneDriver {
     use crate::types::ability::CastFromZoneDriver;
-    if mode == CardPlayMode::Cast && hand_origin && (without_paying || alt_is_some) {
-        CastFromZoneDriver::DuringResolution
-    } else {
-        CastFromZoneDriver::LingeringPermission
+    if mode != CardPlayMode::Cast {
+        return CastFromZoneDriver::LingeringPermission;
     }
+    if hand_origin && (without_paying || alt_is_some) {
+        return CastFromZoneDriver::DuringResolution;
+    }
+    if chosen_graveyard_card && !without_paying && !alt_is_some {
+        return CastFromZoneDriver::DuringResolution;
+    }
+    CastFromZoneDriver::LingeringPermission
+}
+
+/// CR 601.2b: The parser gap name for a cast clause whose "in addition to its
+/// other costs" rider is not a plain mana cost this engine can carry (a life
+/// payment, an {X}). Zero printed carriers today (Festival of Embers pays life
+/// through a static permission and never reaches the cast-clause producer).
+const UNREPRESENTABLE_ADDITIONAL_COST_GAP: &str = "unrepresentable_additional_cost";
+
+/// The printed additional-cost wording is present on the clause, whatever
+/// follows "by paying".
+fn names_an_additional_cost(rest: &str) -> bool {
+    scan_contains_phrase(rest, "in addition to its other costs")
+        || scan_contains_phrase(rest, "in addition to their other costs")
+}
+
+/// CR 601.2b + CR 118.8: "… by paying <mana cost> in addition to its other
+/// costs" on a cast clause — an additional mana cost of the granted cast
+/// (Ogre Battlecaster: "by paying {R}{R} in addition to its other costs").
+/// The rider must close the clause: mana symbols, then exactly the printed
+/// "in addition to its/their other costs". Mana symbols are matched on an
+/// ASCII-uppercased copy because the clause arrives lowercased and
+/// `parse_mana_cost` reads printed symbols.
+fn parse_additional_mana_cost_rider(rest: &str) -> Option<crate::types::mana::ManaCost> {
+    type E<'a> = OracleError<'a>;
+    let (after_head, _) = take_until::<_, _, E>(" by paying ").parse(rest).ok()?;
+    let (cost_and_tail, _) = tag::<_, _, E>(" by paying ").parse(after_head).ok()?;
+    let upper = cost_and_tail.to_ascii_uppercase();
+    let (tail_upper, cost) = nom_primitives::parse_mana_cost(&upper).ok()?;
+    // An {X} in an additional cost would need a choice this cast never asks
+    // for; refuse it here so the clause becomes a gap, not a cast without it.
+    if cost.has_x() {
+        return None;
+    }
+    let tail = &cost_and_tail[cost_and_tail.len() - tail_upper.len()..];
+    let (tail, _) = alt((
+        tag::<_, _, E>(" in addition to its other costs"),
+        tag(" in addition to their other costs"),
+    ))
+    .parse(tail)
+    .ok()?;
+    eof::<_, E>(tail.trim_end_matches('.')).ok()?;
+    Some(cost)
+}
+
+/// CR 601.2c + CR 115.1: A "cast TARGET <card> from [a|your|…] graveyard"
+/// clause names one chosen card in a graveyard — the printed word "target"
+/// on the head and an `InZone { Graveyard }` property on every leaf of the
+/// filter (a type list such as "red instant or sorcery card" is an `Or` of
+/// leaves, each carrying the zone). Mirrors `cast_target_is_hand_origin` for
+/// the graveyard axis; the target-word test is the same
+/// `strip_cast_target_prefix` the Branch-2 producer uses.
+fn cast_target_is_chosen_graveyard_card(rest: &str, target: &TargetFilter) -> bool {
+    fn every_leaf_in_a_graveyard(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Typed(tf) => tf.properties.iter().any(|prop| {
+                matches!(
+                    prop,
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard
+                    }
+                )
+            }),
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                !filters.is_empty() && filters.iter().all(every_leaf_in_a_graveyard)
+            }
+            _ => false,
+        }
+    }
+    let names_a_target = strip_cast_target_prefix(rest).len() != rest.len();
+    names_a_target && every_leaf_in_a_graveyard(target)
 }
 
 /// CR 601.2 + CR 609.4b + CR 608.2g: "[you may ]cast target [type] card from
@@ -28023,13 +28140,21 @@ fn attach_alt_cost_to_prior_cast_from_zone(
             // attaching one. The exile-origin folded rider (Xander's Pact,
             // `ExiledBySource` → hand_origin false) correctly stays
             // `LingeringPermission` via the hand gate.
+            // `chosen_graveyard_card` is false here: that signal decides the
+            // PRINTED-cost graveyard cast, and an alternative cost is attaching.
             *driver = during_resolution_for_filter_cast_clause(
                 *mode,
                 *without_paying_mana_cost,
                 true,
                 cast_target_is_hand_origin(target),
+                false,
             );
             *alt = Some(cost.clone());
+            // CR 601.2b: the fourth seam that can leave a cast grant on the
+            // lingering mechanism; an additional cost cannot stay on it.
+            crate::parser::oracle_ir::ast::refuse_additional_cost_on_lingering_cast(
+                def.effect.as_mut(),
+            );
             return true;
         }
         false

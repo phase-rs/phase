@@ -123,6 +123,7 @@ fn siege_victory_cast_during_resolution_enters_transformed() {
             duration: None,
             driver: CastFromZoneDriver::DuringResolution,
             mana_spend_permission: None,
+            additional_cost: None,
         },
         vec![TargetRef::Object(battle)],
         battle,

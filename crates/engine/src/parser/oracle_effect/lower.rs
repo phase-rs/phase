@@ -1328,6 +1328,7 @@ mod linked_exile_cleanup_tests {
             duration: None,
             driver: CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
         }
     }
 
@@ -6892,21 +6893,24 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
 /// CR 603.7 (issue #8721): the cast-permission back-reference gate — "if you cast
 /// a spell this way, …" / "when you cast that spell, …".
 ///
-/// CR 608.2g is the CONTRAST rule here, not an authority for this lowering, and
-/// an earlier version of this header cited it as though it were: 608.2g governs
-/// an effect that "specifically instructs or allows a player to cast a spell
-/// during resolution", which is precisely what this class is NOT. If a member of
-/// it ever lowered to that shape, the delayed trigger would be created after its
-/// own event and never fire (CR 603.7a).
-///
 /// The consequent is gated on a cast that HAS NOT HAPPENED when the granting
-/// ability resolves: in every case measured over the full-corpus parse dump the
-/// permission outlives the granting resolution (the default
-/// `CastFromZoneDriver::LingeringPermission`, which the dump shows as an absent
-/// `driver` key), so the granted spell is cast later under priority rather than
-/// inside it. So the consequent is a delayed
-/// triggered ability keyed to that later cast, and lowering it as a sequential
-/// instruction of this resolution applies it unconditionally (issue #8721).
+/// clause is applied — whichever way the cast is then made. Since issue #8775
+/// both carriers that reach this recognizer (Helmut Zemo, Ogre Battlecaster)
+/// cast the chosen card DURING the granting ability's resolution (CR 608.2g,
+/// `CastFromZoneDriver::DuringResolution` → `CastOffer::GraveyardPaidCast`);
+/// before that they granted a lingering permission exercised later under
+/// priority. Either way the consequent is a delayed triggered ability keyed to
+/// the cast (CR 603.7), and lowering it as a sequential instruction of this
+/// resolution applies it unconditionally (issue #8721).
+///
+/// ORDER IS LOAD-BEARING for the during-resolution form: the delayed trigger
+/// must exist before the cast it waits for (CR 603.7a — a delayed trigger
+/// created after its own event never fires). That is guaranteed one seam away,
+/// in `effects/mod.rs`: the `CastFromZone` head's sequential tail (this
+/// `CreateDelayedTrigger`) is resolved inline while the offer is still open,
+/// and the accepted offer performs the cast afterwards. An earlier version of
+/// this header said the opposite ("precisely what this class is NOT"); that
+/// described the lingering model, which the paid class no longer uses.
 ///
 /// Deliberately stated about the PERMISSION, not about one effect variant. The
 /// recognizer itself checks only the two wordings — it does not verify that a
@@ -6927,19 +6931,19 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
 /// corpus card is that shape (Discord, Lord of Disharmony) and it is left
 /// unchanged; see the decline at the call site in `oracle_effect::mod`.
 ///
-/// `ThisTurn` rather than `Reflexive` for exactly that reason: CR 603.12 has a
-/// reflexive ability "checked immediately after being created" and triggering on
-/// whether its event occurred EARLIER DURING THE RESOLUTION that created it —
-/// precisely the window in which this cast cannot occur. (Not "one shot":
+/// `ThisTurn` rather than `Reflexive`: CR 603.12 has a reflexive ability
+/// "checked immediately after being created" and triggering on whether its
+/// event occurred EARLIER DURING THE RESOLUTION that created it — the cast
+/// here happens AFTER the trigger is created (the inline-tail order above),
+/// so a reflexive form would look back at nothing. (Not "one shot":
 /// CR 603.12a triggers it once per occurrence.)
 ///
-/// And `ThisTurn` rather than a persistent lifetime, which is the other question
-/// a hard-coded lifetime invites: MEASURED, the permission itself expires at
-/// cleanup. `cast_from_zone::record_lingering_permissions` caps an in-place
-/// graveyard grant with `duration: None` at `UntilEndOfTurn` (`granted_duration`'s
-/// `None => in_place.then_some(...)` arm), and both cards this recognizer changes
-/// carry `duration: None`. A longer-lived trigger could never fire, because the
-/// cast it waits for can no longer happen.
+/// And `ThisTurn` rather than a persistent lifetime: the offer is answered
+/// within this resolution, so the cast it waits for happens this turn or not
+/// at all. A declined offer withdraws the trigger again
+/// (`engine_resolution_choices::withdraw_declined_offer_cast_triggers`) —
+/// keyed to the card, it would otherwise fire on a cast of that card by some
+/// other route this turn.
 ///
 /// Two prefixes, not three: `"if you cast it this way, "` has ZERO corpus
 /// members (26 cards print `"if you cast a spell this way, "`, 7 print

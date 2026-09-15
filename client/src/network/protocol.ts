@@ -106,9 +106,14 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  54 — game_setup and state_update carry GameState, whose FreeCastWindow now
- *       requires `ResolutionCastFacePolicy` instead of the legacy `filter`.
- *       First contact therefore rejects a v53 peer before state delivery.
+ *  54 — game_setup and state_update carry GameState, whose
+ *       FreeCastWindow requires `ResolutionCastFacePolicy` instead of the
+ *       legacy `filter`; WaitingFor.CastOffer { kind: GraveyardPaidCast } carries
+ *       additional_cost and installed_triggers (both serde-additive) and opens
+ *       for seven more printed cards that a v53 peer handled as a lingering
+ *       permission. A v53 guest parses the offer and pays the wrong cost, so
+ *       first contact rejects a v53 peer before state delivery. Bumped in
+ *       lockstep with full-game protocol 72.
  *  53 — game_setup and state_update carry GameState, whose OutsideGameChoice
  *       for an opened booster pack now names a required origin: PackOrigin in
  *       place of set_code. First contact therefore rejects a v52 peer before

@@ -3243,10 +3243,10 @@ mod tests {
         }
     }
 
-    /// `CastingVariantChoiceOption` now serializes a required `face`, on top
-    /// of v71's Winston draft frames and v72's `ResolutionCastFacePolicy`.
-    /// A v72 peer cannot bind a paused Fuse menu to the right-half cast, so it
-    /// must be refused before it receives the v73 state.
+    /// `CastingVariantChoiceOption` now serializes a required `face`; the
+    /// resumed `ModalFaceChoice` also preserves an added paid-cast cost. A v72
+    /// peer cannot bind a paused Fuse menu to the right-half cast or charge its
+    /// carried addition, so it must be refused before it receives v73 state.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so

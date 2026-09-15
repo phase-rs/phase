@@ -10225,7 +10225,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     // legality re-check at CR 608.2b (target legality is verified again as a
     // spell or ability resolves) fails every legal spell. The strip-and-apply
     // pattern mirrors the Birthing Ritual callsite (see
-    // `oracle_effect/mod.rs:16859`).
+    // `oracle_effect::try_parse_put_zone_change_parts`).
     let (without_where_tp, where_x_expression) =
         super::strip_trailing_where_x(crate::parser::oracle_util::TextPair::new(rest_orig, rest));
     let (target, _rem) = parse_target(without_where_tp.original);

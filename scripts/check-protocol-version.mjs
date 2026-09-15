@@ -3,10 +3,11 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-// Upstream's Winston draft frames are v71. This branch then adds two distinct
-// serialized GameState changes: `ResolutionCastFacePolicy` (v72) and the
-// face-qualified casting-variant tuple (v73). Keep that measured base so a
-// future merge cannot collapse independent wire changes onto one number.
+// Upstream's Winston draft frames are v71. This branch's v72 combines the
+// independent policy carrier with upstream's paid graveyard cast offer; v73
+// adds face-qualified variants and preserves a paid addition while a resolution
+// modal-face prompt is paused. Keep the measured base so a future merge cannot
+// collapse independent wire changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 2;
 // The LOBBY message-set version, not derived from the full-game number above.

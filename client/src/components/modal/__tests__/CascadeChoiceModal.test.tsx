@@ -153,4 +153,43 @@ describe("CascadeChoiceModal", () => {
       data: { choice: { type: "Decline" } },
     });
   });
+
+  // CR 608.2g + CR 601.2b + CR 609.4b (issue #8775): the paid offer names
+  // exactly what it carries — nothing for the plain offer (Helmut Zemo,
+  // Toshiro Umezawa), the additional cost for Ogre Battlecaster, the
+  // concession by its variant (`AnyColor` relaxes colors only), and both
+  // together when both are present.
+  it("names the plain paid cost, the additional cost, the concession variant, and both", () => {
+    const renderOffer = (kind: Record<string, unknown>) => {
+      setWaitingFor({
+        type: "CastOffer",
+        data: { player: 0, kind: { type: "GraveyardPaidCast", hit_card: 52, ...kind } },
+      });
+      return render(<CascadeChoiceModal />);
+    };
+    const redRed = { type: "Cost", shards: ["Red", "Red"], generic: 0 };
+
+    let view = renderOffer({});
+    expect(screen.getByText("(pay its mana cost)")).toBeInTheDocument();
+    expect(screen.queryByText(/any type of mana|any color of mana/)).not.toBeInTheDocument();
+    view.unmount();
+
+    view = renderOffer({ additional_cost: redRed });
+    expect(screen.getByText("(pay its mana cost plus {R}{R})")).toBeInTheDocument();
+    expect(screen.getByText(/by paying its mana cost plus \{R\}\{R\}\. Or decline/)).toBeInTheDocument();
+    view.unmount();
+
+    view = renderOffer({ mana_spend_permission: "AnyColor" });
+    expect(screen.getByText("(pay its mana cost — any color of mana may be spent)")).toBeInTheDocument();
+    expect(screen.queryByText(/any type of mana/)).not.toBeInTheDocument();
+    view.unmount();
+
+    renderOffer({ mana_spend_permission: "AnyTypeOrColor", additional_cost: redRed });
+    expect(
+      screen.getByText("(pay its mana cost plus {R}{R} — any type of mana may be spent)"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/by paying its mana cost plus \{R\}\{R\} — mana of any type may be spent\./),
+    ).toBeInTheDocument();
+  });
 });

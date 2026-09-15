@@ -692,10 +692,13 @@ impl DeclaredPool {
 /// set-code convention (`draft_set_concessions`) — never uppercase-normalize.
 ///
 /// Fails CLOSED when `db.printings_for` returns `None`: "no evidence of a
-/// legal printing" is not "a legal printing." Two production paths hit this
-/// today: `phase-server` under `PHASE_DEV_FIXTURE=1` (`main.rs:2055-2062` →
-/// `from_mtgjson` → `oracle_loader.rs:147`'s empty printings index) and
-/// `CardDatabase::default()` (`server-core/src/draft_session.rs:1369`) — in
+/// legal printing" is not "a legal printing." One production path and one test
+/// path hit this today: `phase-server` under `PHASE_DEV_FIXTURE=1` (the
+/// `CardDataSource::DevFixture` arm in `main::serve` →
+/// `from_mtgjson` → `database::oracle_loader::load_from_mtgjson`'s empty
+/// printings index) and
+/// `CardDatabase::default()`, whose every occurrence in `server-core` is inside
+/// `#[cfg(test)]` (`session`, `deck_resolve`, `draft_session`) — in
 /// both, every card in the deck is rejected as "(not legal in
 /// {format_label})" rather than silently passing a `legal_sets`-restricted
 /// custom format.

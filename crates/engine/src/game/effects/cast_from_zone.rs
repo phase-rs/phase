@@ -413,6 +413,7 @@ pub fn resolve(
         duration,
         driver,
         mana_spend_permission,
+        additional_cost,
     ) = match &ability.effect {
         Effect::CastFromZone {
             target,
@@ -423,6 +424,7 @@ pub fn resolve(
             duration,
             driver,
             mana_spend_permission,
+            additional_cost,
             ..
         } => (
             target,
@@ -433,9 +435,19 @@ pub fn resolve(
             duration.clone(),
             *driver,
             *mana_spend_permission,
+            additional_cost.clone(),
         ),
         _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
     };
+    // CR 608.2h: a per-spell ceiling that reads the game ("mana value less
+    // than or equal to this creature's power" — Dreadhorde Arcanist, Helmut
+    // Zemo) is determined ONCE, as this effect is applied, and every route
+    // below consumes the frozen value. The two during-resolution single-card
+    // routes used to carry the live `Ref` onto the cast, where it was
+    // re-read at finalization without the source context and resolved to 0 —
+    // so a Bolt with a real mana cost was rejected and stayed in the
+    // graveyard (issue #4943; the lingering route already froze it).
+    let constraint = freeze_cast_permission_constraint(state, ability, constraint);
 
     // Collect target object IDs. CR 115.1: a tracked-set filter is a linked
     // reference whose members the chain published, so it binds INTRINSICALLY
@@ -854,8 +866,12 @@ pub fn resolve(
     //   - own-graveyard targets defer the cast to a later priority window,
     //     which violates CR 608.2g for resolution-time "you may cast" with no
     //     standing duration (issue #852).
-    // Timed grants (`duration: Some(_)`) and paid casts stay on the lingering
-    // permission path (Emry, Urza-class deferred play).
+    // Timed grants (`duration: Some(_)`) stay on the lingering permission path
+    // (Emry, Urza-class deferred play). A PAID chosen graveyard card (Ogre
+    // Battlecaster, Helmut Zemo, Toshiro Umezawa) is not routed by this guard:
+    // its during-resolution offer is the paid branch below, reached through
+    // the `DuringResolution` driver the parser now stamps on that shape
+    // (issue #8775).
     let immediate_graveyard_free_cast = without_paying
         && alt_ability_cost.is_none()
         && duration.is_none()
@@ -911,6 +927,11 @@ pub fn resolve(
                 graveyard_replacement: cast_from_zone_graveyard_destination(ability),
                 cast_transformed,
                 constraint: constraint.clone(),
+                // CR 601.2b: "by paying {R}{R} in addition to its other costs"
+                // rides the offer and is charged on accept (Ogre Battlecaster).
+                additional_cost,
+                // Filled by the resolution's inline tail (`effects/mod.rs`).
+                installed_triggers: Vec::new(),
             },
         };
         return Ok(());
@@ -2259,6 +2280,7 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -2320,6 +2342,7 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -2367,6 +2390,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![],
             ObjectId(999),
@@ -2390,6 +2414,7 @@ mod tests {
                 duration: Some(Duration::UntilEndOfTurn),
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -2442,6 +2467,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -2516,6 +2542,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -2592,6 +2619,7 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(suspended)],
             suspended,
@@ -2702,6 +2730,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(copy_id)],
             scepter_id,
@@ -2813,6 +2842,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(copy_id)],
             ObjectId(68_656),
@@ -2898,6 +2928,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![], // empty — the bug: source is the card to cast, not a named target
             siege_id,
@@ -2969,6 +3000,7 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -3011,6 +3043,7 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -3045,6 +3078,7 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -3115,6 +3149,7 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![],
             source,
@@ -3178,6 +3213,7 @@ mod tests {
                     bounds: ResolutionCastWindow::default(),
                 },
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(stale), TargetRef::Object(current)],
             source,
@@ -3251,6 +3287,7 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![],
             source,
@@ -3462,6 +3499,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![],
             ObjectId(999),
@@ -3546,6 +3584,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![],
             ObjectId(999),
@@ -3777,6 +3816,7 @@ mod tests {
                 }),
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![],
             ObjectId(999),
@@ -3838,6 +3878,7 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![],
             ObjectId(999),
@@ -3878,6 +3919,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(instant)],
             ObjectId(999),
@@ -3942,6 +3984,7 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),

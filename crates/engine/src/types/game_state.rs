@@ -9500,11 +9500,13 @@ pub enum CastOfferKind {
         member_pool: Vec<ObjectId>,
     },
     /// CR 608.2g + CR 609.4b: A during-resolution PAID cast of a single card
-    /// from a graveyard (Quistis Trepe, Tinybones the Pickpocket: "you may cast
-    /// target X card from a graveyard, and mana of any type can be spent to cast
-    /// that spell"). Unlike Cascade/Discover/Ripple this is not a free cast — on
-    /// accept the caster pays the card's real printed cost with the any-type
-    /// concession applied; on decline the card stays in the graveyard.
+    /// from a graveyard — "you may cast target X card from a graveyard", with
+    /// the any-type-mana concession (Quistis Trepe, Tinybones the Pickpocket)
+    /// or at normal mana (Ogre Battlecaster, Helmut Zemo, Toshiro Umezawa,
+    /// issue #8775). Unlike Cascade/Discover/Ripple this is not a free cast —
+    /// on accept the caster pays the card's real printed cost (plus any
+    /// `additional_cost`), with the concession applied when present; on
+    /// decline the card stays in the graveyard.
     GraveyardPaidCast {
         /// CR 601.2a: The graveyard card being offered for casting.
         hit_card: ObjectId,
@@ -9523,6 +9525,21 @@ pub enum CastOfferKind {
         /// CR 601.2b: Optional cast-time predicate gating the cast.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         constraint: Option<crate::types::ability::CastPermissionConstraint>,
+        /// CR 601.2b + CR 118.8: an additional mana cost the grant attaches to
+        /// this cast ("by paying {R}{R} in addition to its other costs", Ogre
+        /// Battlecaster), paid on top of the card's printed cost when the offer
+        /// is accepted. `None` for every other paid offer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        additional_cost: Option<crate::types::mana::ManaCost>,
+        /// CR 603.7: the delayed triggers the granting resolution installed
+        /// AFTER this offer opened — its "when you cast that spell" tail,
+        /// resolved inline before the offer is answered (`effects/mod.rs`) —
+        /// by installation instance. Declining the offer withdraws exactly
+        /// these records and no other, so a second delayed trigger of the same
+        /// source on the same card (a second offer, another effect) is left
+        /// alone. Empty for saved states predating the field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        installed_triggers: Vec<crate::types::identifiers::DelayedTriggerInstanceId>,
     },
 }
 
@@ -13535,12 +13552,16 @@ pub enum WaitingFor {
     /// by the now-active face's type (land → play-land, spell → cast).
     /// `payment_mode` carries the manual/auto mana mode forward into the
     /// spell-cast re-entry (ignored for the land path, which is always Auto).
+    /// A resolution-owned paid cast may also carry a cost added to the elected
+    /// face's printed mana cost; ordinary face choices leave it `None`.
     ModalFaceChoice {
         player: PlayerId,
         object_id: ObjectId,
         card_id: CardId,
         #[serde(default)]
         payment_mode: CastPaymentMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution_additional_cost: Option<ManaCost>,
     },
     /// CR 118.9: Player chooses between paying the spell's printed mana cost
     /// and paying a keyword-granted alternative mana cost. Only presented when

@@ -4217,9 +4217,10 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
 /// Both read `ability.targets` with `.find_map(first Object)` and NEITHER
 /// consults `target_incarnations`.
 ///
-/// DELIBERATELY EXCLUDED — the object-IDENTITY arm (`filter.rs:3620` for
-/// `TargetFilter::ParentTarget`, `:3628` for `ParentTargetSlot { index }`) and
-/// the positional read at `filter.rs:5331`/`:5333`. That arm additionally
+/// DELIBERATELY EXCLUDED — the object-IDENTITY arm (`filter::filter_inner_for_object` —
+/// the `TargetFilter::ParentTarget` and `ParentTargetSlot { index }` arms) and
+/// the positional read in that same function's `ParentTargetSlot { index }` arm
+/// (via `targeting::resolve_live_parent_slot_from_root`). That arm additionally
 /// requires `!ability.target_incarnations.is_empty()` and
 /// `target_pin_is_current`, and `target_incarnations` means "pinned at
 /// DELAYED-TRIGGER creation" (`set_target_incarnations_recursive`, CR 400.7 +
@@ -8045,7 +8046,7 @@ fn assign_targets_recursive(
     // PRODUCER-AGNOSTIC BY CONSTRUCTION. `assign_targets_in_chain` has 18
     // production call sites and `targets` arrives from three different
     // producers: a player's `GameAction::SelectTargets`
-    // (`casting_targets.rs:387`, `engine_stack.rs:182`),
+    // (the `assign_targets_in_chain` call in `casting_targets::handle_select_targets`, the `assign_targets_in_chain` call in `engine_stack::restamp_pending_die_result`),
     // `auto_select_targets_for_ability` / `auto_select_targets` when EXACTLY
     // ONE legal assignment exists, and `random_select_targets_for_ability`
     // under `TargetSelectionMode::Random`. (CR 115.1d: a triggered ability's
@@ -8058,7 +8059,8 @@ fn assign_targets_recursive(
     // Making this node a sink additionally exposes the chain-level leftover
     // check (`next_target != targets.len()`) to paired nodes for the first
     // time at every one of those sites; on the trigger route
-    // (`triggers.rs:8347`) an error there is turned into
+    // (the `assign_targets_in_chain` call in `triggers::prepare_trigger_targets`)
+    // an error there is turned into
     // `PreparedTriggerTargets::NeedsFallbackPush` and the trigger is DROPPED
     // SILENTLY.
     //
@@ -8533,9 +8535,10 @@ fn assign_selected_slots_recursive(
     // CR 601.2c + CR 700.2f: mirror of the paired-subject block in
     // `assign_targets_recursive`, for the ONE-SLOT-AT-A-TIME walk. The bulk
     // `GameAction::SelectTargets` path reaches that function
-    // (`casting_targets.rs:387`, `engine_stack.rs:182`); the step-by-step
+    // (the `assign_targets_in_chain` call in `casting_targets::handle_select_targets`, the `assign_targets_in_chain` call in `engine_stack::restamp_pending_die_result`); the step-by-step
     // `GameAction::ChooseTarget` walk reaches THIS one
-    // (`casting_targets.rs:498`, `engine_stack.rs:345`) — and
+    // (the `assign_selected_slots_in_chain` call in `casting_targets::handle_choose_target`, the `assign_selected_slots_in_chain` call in
+    // `engine_stack::handle_trigger_target_selection_choose_target`) — and
     // `ai_support::candidates::target_step_actions` emits ONLY `ChooseTarget`,
     // so this is the block every AI game goes through.
     //
@@ -10347,7 +10350,7 @@ mod tests {
     }
 
     /// Row P-LEGACY-ROOT (ii) (phase-rs/phase#8355 round-8 review; m10's
-    /// stated predicate, `ability_utils.rs:8291-8299`) — cheap, and the only
+    /// stated predicate, in `assign_targets_recursive`) — cheap, and the only
     /// guard between a `node_slot_filters`/`emit_node` arm-order drift and a
     /// silent whole-cascade admission in release. `SlotEnforcement::Legacy`
     /// (`node_slot_filters`' `NotDerivable` verdict) is BASE-equivalent ONLY
@@ -15569,6 +15572,7 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             Vec::new(),
             ObjectId(1),
@@ -15608,6 +15612,7 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             Vec::new(),
             ObjectId(1),
@@ -15641,6 +15646,7 @@ mod tests {
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             Vec::new(),
             ObjectId(1),
@@ -16688,6 +16694,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![],
             ObjectId(900),

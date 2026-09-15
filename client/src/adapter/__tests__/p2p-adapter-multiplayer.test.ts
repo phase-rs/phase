@@ -4482,7 +4482,7 @@ describe("P2P wire-protocol version gate", () => {
   // other handshake fixture in the suite is useless as an instrument for a
   // bump. Revert 55 → 54 and BOTH halves red: the v54 frame stops being
   // refused, and the v55 frame stops being admitted. The admitting half is
-  // the reach-guard — without it "refuses v52" is also satisfied by a client
+  // the reach-guard — without it "refuses v53" is also satisfied by a client
   // that refuses everything.
   it("refuses the previous wire protocol (v54) and admits its own (v55)", async () => {
     const refusing = makeGuest();

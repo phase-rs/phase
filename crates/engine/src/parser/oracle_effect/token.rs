@@ -781,7 +781,8 @@ fn parse_token_description_with_context(
         if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "count")
         {
             // CR 706.2: "the result" (die roll / coin flip) flows through
-            // `EventContextAmount`, consistent with `oracle_quantity.rs:1176`.
+            // `EventContextAmount`, consistent with the `"the result"` arm in
+            // `oracle_quantity::parse_event_context_quantity`.
             // `parse_event_context_quantity` only fires when `parse_cda_quantity`
             // returns None and itself returns None for unrecognized phrases, so
             // it strictly widens coverage without disturbing existing matches.

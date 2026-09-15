@@ -1457,7 +1457,7 @@ enum ControllerLookup {
 /// object leaves those zones, it ceases to have a controller (CR 109.4: "Objects
 /// that are neither on the stack nor on the battlefield aren't controlled by
 /// any player"), and the at-departure controller is preserved in
-/// `state.lki_cache` by `change_zone` (`game/zones.rs:65-92`). Filters such as
+/// `state.lki_cache` by `zones::apply_zone_exit_cleanup`. Filters such as
 /// "creatures they controlled that were exiled this way" (Oversimplify) must
 /// read the at-exile controller, not the post-reset owner; the LKI cache holds
 /// exactly that value.
@@ -8917,6 +8917,42 @@ pub(crate) fn extract_targets(filter: &TargetFilter) -> Option<TargetFilter> {
         }
         _ => None,
     }
+}
+
+/// CR 109.2 + CR 108.4 + CR 110.1: True when `player` CONTROLS a permanent
+/// matching `filter`.
+///
+/// CR 109.2: an object description that names a card type or subtype without a
+/// zone word ("an Island", "an untapped land", "an artifact land") means a
+/// PERMANENT of that type on the battlefield. CR 110.1: permanents exist only
+/// on the battlefield. CR 108.4: a card that does not represent a permanent or
+/// spell has no controller at all, so a card in a graveyard, hand, or library
+/// can never satisfy "a player controls X".
+///
+/// This is the single authority for the defending-player board census shared by
+/// `layers::evaluate_condition_with_context`'s
+/// `StaticCondition::DefendingPlayerControls` arm and
+/// `triggers::evaluate_trigger_condition`'s
+/// `TriggerCondition::DefendingPlayerControlsNone` arm. Quantifier and polarity
+/// stay at the call sites; the census does not.
+///
+/// CR 702.26b: phased-out permanents are excluded by `matches_target_filter`'s
+/// own entry gate (`filter_inner`, filter.rs:4131-4140) — no extra gate here.
+/// CR 730.2 note: iterate `state.battlefield`, the authoritative list of
+/// INDEPENDENT permanents, so an absorbed merge component is not counted
+/// separately. This is also the convention `FilterProp::NameMatchesAnyPermanent`
+/// (filter.rs:6952-6954) already follows.
+pub(crate) fn player_controls_matching(
+    state: &GameState,
+    player: PlayerId,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    state.battlefield.iter().any(|id| {
+        state.objects.get(id).is_some_and(|obj| {
+            obj.controller == player && matches_target_filter(state, *id, filter, ctx)
+        })
+    })
 }
 
 /// Check if a player target matches a TargetFilter constraint.

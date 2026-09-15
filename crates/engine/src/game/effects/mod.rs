@@ -12594,6 +12594,35 @@ fn is_bound_attach_remainder_for(pending: &PendingContinuation, ability: &Resolv
 /// `GameScenario`, so neither repair can be measured here either (issue #8750).
 /// Adding a variant to this list without a test that fails when the branch is
 /// reverted is the mistake it was introduced to prevent.
+/// CR 603.7 + CR 608.2g: after a `CastFromZone` head's tail ran inline behind
+/// an open `CastOffer::GraveyardPaidCast`, note on that offer the delayed
+/// triggers the tail installed — every record whose installation instance is
+/// at or past `first_new_instance`, the counter value read before the tail
+/// ran. The offer's decline withdraws exactly these
+/// (`engine_resolution_choices::withdraw_declined_offer_cast_triggers`). No-op
+/// when the head left any other state.
+fn record_tail_installs_on_paid_offer(state: &mut GameState, first_new_instance: u64) {
+    let new_instances: Vec<_> = state
+        .delayed_triggers
+        .iter()
+        .filter_map(|trigger| trigger.provenance.origin())
+        .map(|origin| origin.instance)
+        .filter(|instance| instance.0 >= first_new_instance)
+        .collect();
+    if new_instances.is_empty() {
+        return;
+    }
+    if let WaitingFor::CastOffer {
+        kind: CastOfferKind::GraveyardPaidCast {
+            installed_triggers, ..
+        },
+        ..
+    } = &mut state.waiting_for
+    {
+        installed_triggers.extend(new_instances);
+    }
+}
+
 fn tail_family_has_runtime_evidence(effect: &Effect) -> bool {
     matches!(
         effect,
@@ -15072,36 +15101,39 @@ fn resolve_chain_body(
             // has not answered yet would read a state that does not exist, so
             // park it behind that head instead.
             //
-            // NARROWER than the states a `CastFromZone` head can leave, and named
-            // rather than hidden: `cast_from_zone::resolve` can also leave a
-            // `CastOfferKind::GraveyardPaidCast`, an in-resolution cast from
-            // `initiate_cast_during_resolution`, or a
-            // `LingeringPermissionGrantResult::NeedsChoice`.
+            // The other window a `CastFromZone` head leaves here is the PAID
+            // during-resolution offer, `CastOfferKind::GraveyardPaidCast`
+            // (Helmut Zemo, Ogre Battlecaster — issue #8775; their
+            // `without_paying_mana_cost: false` head carries the
+            // `DuringResolution` driver the paid branch of
+            // `cast_from_zone::resolve` reads). For that window the tail is
+            // resolved INLINE, before the offer is answered, and that order is
+            // load-bearing: the tail is the `CreateDelayedTrigger` for "when you
+            // cast that spell" / "if you cast a spell this way", keyed to the
+            // chosen card (CR 603.7), and the cast the offer performs is the
+            // event it waits for — installed after the cast it would never fire.
+            // It reads nothing the unanswered offer decides: its referent is the
+            // chosen target, bound when the trigger went on the stack. The
+            // trigger is keyed to the CARD, not to the offer, so a declined
+            // offer WITHDRAWS it again
+            // (`engine_resolution_choices::withdraw_declined_offer_cast_triggers`);
+            // otherwise it would fire on a cast of that card by another route
+            // this turn (Zemo declined, the Bolt then cast under Kess). Pinned by
+            // `cast_this_way_gate_8721::zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast`
+            // and `ogre_battlecaster_8775`.
             //
-            // CORRECTED after review: an earlier version credited the driver for
-            // this ("all six carriers drive `LingeringPermission`"), which is not
-            // what gates those paths — `immediate_graveyard_free_cast` never
-            // consults the driver, and Finale of Promise satisfies its conditions.
-            // The load-bearing facts are per card, and only three heads reach this
-            // decision at all (the other three tails are stopped one step earlier
-            // by the two scope rules): Sins of the Past carries
-            // `duration: UntilEndOfTurn`, so the free-cast-during-resolution gate
-            // is false; Helmut Zemo and Ogre Battlecaster carry
-            // `without_paying_mana_cost: false`, so both free-cast gates are
-            // false; and all three target a card already in a graveyard, which
-            // `grant_lingering_permissions` routes in place, so `NeedsChoice`
-            // cannot fire.
+            // The remaining states are named rather than hidden:
+            // `cast_from_zone::resolve` can also leave an in-resolution cast
+            // from `initiate_cast_during_resolution`, or a
+            // `LingeringPermissionGrantResult::NeedsChoice`. Of the tail
+            // carriers only Sins of the Past reaches this decision through
+            // them: it carries `duration: UntilEndOfTurn`, so both
+            // during-resolution gates are false, and its target is already in
+            // a graveyard, which `grant_lingering_permissions` routes in place,
+            // so `NeedsChoice` cannot fire. (Finale of Promise satisfies the
+            // free gate's conditions but is stopped by the family allowlist.)
             //
-            // One correction to that correction, because over-correcting is its
-            // own failure: for the PAID offer (`CastOfferKind::GraveyardPaidCast`)
-            // `without_paying_mana_cost: false` is the SATISFIED first conjunct,
-            // not an exclusion. What keeps Zemo and Ogre out of that one is the
-            // driver after all — it also requires `driver.is_during_resolution()`,
-            // and both carry the default `LingeringPermission`. The driver is
-            // simply not what gates the two FREE-cast paths, which is what the
-            // first correction was about.
-            //
-            // Site without a demonstrated consequence, so this stays
+            // Site without a demonstrated consequence for those, so this stays
             // the pre-#8721 condition rather than being widened on speculation;
             // the broader idiom further down this function is
             // `!matches!(state.waiting_for, WaitingFor::Priority { .. })`.
@@ -15115,7 +15147,12 @@ fn resolve_chain_body(
                 ) {
                     prepend_to_pending_continuation(state, tail);
                 } else {
+                    // CR 603.7: every delayed trigger this tail installs is
+                    // recorded on the open paid offer by installation instance,
+                    // so a declined offer can withdraw exactly those records.
+                    let first_new_instance = state.next_delayed_trigger_instance;
                     resolve_ability_chain(state, &tail, events, depth + 1)?;
+                    record_tail_installs_on_paid_offer(state, first_new_instance);
                 }
             }
             return Ok(());
@@ -18343,6 +18380,7 @@ mod tests {
                         bounds: crate::types::ability::ResolutionCastWindow::UNBOUNDED,
                     },
                     mana_spend_permission: None,
+                    additional_cost: None,
                 },
                 vec![],
                 ObjectId(1),
@@ -36531,6 +36569,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
         );
         let ability = build_resolved_from_def(&pure_peek_definition(cast, 1), source, PlayerId(0));
@@ -36598,6 +36637,7 @@ mod tests {
                     duration: None,
                     driver: CastFromZoneDriver::DuringResolution,
                     mana_spend_permission: None,
+                    additional_cost: None,
                 },
             )
             .optional();
@@ -36720,6 +36760,7 @@ mod tests {
                         duration: Some(Duration::UntilEndOfTurn),
                         driver,
                         mana_spend_permission: None,
+                        additional_cost: None,
                     },
                     vec![],
                     ObjectId(900),
@@ -36754,6 +36795,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![],
             ObjectId(900),
@@ -36921,6 +36963,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(spell)],
             source,
@@ -36959,6 +37002,7 @@ mod tests {
                     duration: None,
                     driver: CastFromZoneDriver::DuringResolution,
                     mana_spend_permission: None,
+                    additional_cost: None,
                 },
                 vec![],
                 ObjectId(900),
@@ -37083,6 +37127,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
         )
         .optional();
@@ -37204,6 +37249,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
         );
         let dig_def = AbilityDefinition::new(

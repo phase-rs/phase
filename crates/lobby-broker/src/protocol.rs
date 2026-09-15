@@ -57,12 +57,26 @@ pub struct TournamentRequestId(pub u64);
 /// can be refused. See 24.
 ///
 /// 73 — `CastingVariantChoiceOption` gained required `face`, making a paused
-///      Fuse split-card menu an exact `(variant, face)` tuple. Old snapshots
-///      cannot safely bind an index to a new right-half cast, so full-game
-///      peers must refuse the skew. Lobby messages are unchanged.
+///      Fuse split-card menu an exact `(variant, face)` tuple. The resumed
+///      choice also preserves an added paid-cast cost. Old snapshots cannot
+///      safely bind the face or cost, so full-game peers must refuse the skew.
+///      Lobby messages are unchanged.
 /// 72 — `ResolutionCastFacePolicy` replaces the legacy free-cast-window
-///      filter with a required serialized carrier. Full-game/P2P peers must
-///      reject pre-bridge snapshots; lobby message shape is unchanged.
+///      filter with a required serialized carrier. The same release added
+///      `WaitingFor::CastOffer { kind: CastOfferKind::GraveyardPaidCast }`,
+///      which carries two additive fields: `additional_cost: Option<ManaCost>` (Ogre
+///      Battlecaster's "{R}{R} in addition to its other costs", CR 601.2b) and
+///      `installed_triggers: Vec<DelayedTriggerInstanceId>` (the delayed
+///      triggers a declined offer withdraws). Both are serde-defaulted and
+///      skipped when empty, so a v71 peer parses a v72 offer — and that is the
+///      break: it then displays and PAYS the offered card at its printed cost
+///      alone, while the v72 host charges the addition, and its decline
+///      withdraws nothing. The same paid offer now also opens for seven more
+///      printed cards (the paid "cast target … card from your graveyard"
+///      class, CR 608.2g) whose v71 peers granted a lingering permission
+///      instead — a `WaitingFor` a v71 guest never expects mid-resolution. Full
+///      game stays exact-match; P2P moves in lockstep (wire 54); lobby messages
+///      are unchanged.
 /// 71 — `DraftKind::Winston` and `DraftAction::SharedStackDecision` are
 ///      serialized by draft WebSocket messages. A PARSE bump like 27 and 34,
 ///      not a capability bump like 24 — but a CONDITIONAL one, and the

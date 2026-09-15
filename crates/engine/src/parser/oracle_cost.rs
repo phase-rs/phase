@@ -829,8 +829,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 // CR 119.4 + CR 122.1: "Pay N life for each <clause>" — a
                 // per-object multiplier on the life cost (e.g. Tornado's
                 // "Pay 3 life for each velocity counter on this enchantment").
-                // Model on parse_unless_for_each_payment
-                // (oracle_effect/mod.rs:14482). `after_n` is
+                // Model on `oracle_effect::parse_unless_for_each_payment`.
+                // `after_n` is
                 // "life for each <clause>" because parse_number trim_start()s
                 // the remainder, so "life " / "for each " carry their
                 // separators on the TRAILING side.

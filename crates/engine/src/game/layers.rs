@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::arithmetic::saturating_pt_add;
+use crate::game::combat::AttackTarget;
 use crate::game::conditions::{
     counter_condition_matches, eval_chosen_label_is, eval_class_level_ge, eval_has_city_blessing,
     eval_has_enduring_story, eval_is_initiative, eval_is_monarch, eval_no_monarch,
@@ -1327,6 +1328,53 @@ pub(crate) fn prune_controller_controls_source_on_leave(
 ///
 /// Used by both intrinsic (permanent-based) and transient (state-level) continuous
 /// effects so that condition evaluation is consistent regardless of effect origin.
+/// CR 506.2 + CR 508.5 + CR 611.3a: the runtime anchors a [`StaticCondition`]
+/// may need that are NOT recoverable from `(controller, source_id)` alone.
+///
+/// One value per anchor axis. A future anchor is a new FIELD here, never a new
+/// `evaluate_condition_*` sibling and never a sixth positional parameter. This
+/// is the condition-evaluation layer's context: the `FilterContext` and
+/// `QuantityContext` the evaluator builds are DERIVED from it, which is why
+/// neither of those is the right carrier for these fields.
+///
+/// Construct via the associated functions, not a struct literal — the same
+/// convention `FilterContext` documents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConditionContext {
+    /// CR 611.3a: the object the effect is evaluated AGAINST when that differs
+    /// from its source (an Equipment's equipped creature, a remote grant's
+    /// affected creature). Forwarded to `QuantityContext.recipient` and, when
+    /// bound, to `FilterContext::from_source_with_recipient`.
+    pub recipient: Option<ObjectId>,
+    /// The attack target under validation for `recipient` during the
+    /// declare-attackers turn-based action (CR 508.1a-c). `state.combat` is
+    /// still empty at that point — the attacker is not recorded until
+    /// CR 508.1k — so this is the only anchor available there.
+    pub declared_attack: Option<AttackTarget>,
+}
+
+impl ConditionContext {
+    /// No anchors bound.
+    pub(crate) const NONE: Self = Self {
+        recipient: None,
+        declared_attack: None,
+    };
+
+    /// CR 611.3a recipient anchor only.
+    pub(crate) const fn recipient(id: ObjectId) -> Self {
+        Self {
+            recipient: Some(id),
+            declared_attack: None,
+        }
+    }
+
+    /// Add the declaration-time attack target (CR 508.1a-c).
+    pub(crate) const fn with_declared_attack(mut self, target: Option<AttackTarget>) -> Self {
+        self.declared_attack = target;
+        self
+    }
+}
+
 /// Evaluate a `StaticCondition` for the given controller and source object.
 /// Returns `true` if the condition is met (effect should apply), `false` otherwise.
 ///
@@ -1338,10 +1386,13 @@ pub(crate) fn evaluate_condition(
     controller: PlayerId,
     source_id: ObjectId,
 ) -> bool {
-    if static_condition_has_unresolvable_designation_anchor(condition) {
-        return false;
-    }
-    evaluate_condition_with_context(state, condition, controller, source_id, None)
+    evaluate_condition_with_context(
+        state,
+        condition,
+        controller,
+        source_id,
+        ConditionContext::NONE,
+    )
 }
 
 pub(crate) fn evaluate_condition_with_recipient(
@@ -1351,10 +1402,13 @@ pub(crate) fn evaluate_condition_with_recipient(
     source_id: ObjectId,
     recipient_id: ObjectId,
 ) -> bool {
-    if static_condition_has_unresolvable_designation_anchor(condition) {
-        return false;
-    }
-    evaluate_condition_with_context(state, condition, controller, source_id, Some(recipient_id))
+    evaluate_condition_with_context(
+        state,
+        condition,
+        controller,
+        source_id,
+        ConditionContext::recipient(recipient_id),
+    )
 }
 
 /// CR 109.4 + CR 725.5 (static analogue of the trigger-side CR 603.4 gate):
@@ -1432,7 +1486,6 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         StaticCondition::IsPresent {
             filter: Some(filter),
         }
-        | StaticCondition::DefendingPlayerControls { filter }
         | StaticCondition::SourceMatchesFilter { filter } => filter_uses_recipient(filter),
         StaticCondition::QuantityComparison { lhs, rhs, .. } => {
             quantity_expr_uses_recipient(lhs) || quantity_expr_uses_recipient(rhs)
@@ -1443,6 +1496,10 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         StaticCondition::Not { condition } => condition_uses_recipient_context(condition),
         StaticCondition::RecipientHasCounters { .. } => true,
         StaticCondition::RecipientMatchesFilter { .. } => true,
+        // CR 508.5: the defending player is resolved from the RECIPIENT (the attacking
+        // creature this static applies to), not the source, so this condition is
+        // recipient-relative regardless of what its filter reads.
+        StaticCondition::DefendingPlayerControls { .. } => true,
         // CR 105.2 + CR 611.3a: "Enchanted creature gets +3/+3 unless IT shares a
         // color…" — the color check is on the recipient (the enchanted creature),
         // not the Aura source, so it must route through the recipient-eval path.
@@ -1909,12 +1966,30 @@ fn source_condition_gate_passes(
     }
 }
 
-fn evaluate_condition_with_context(
+/// CR 109.4 + CR 725.5: the designation-anchor entry gate, applied here so the
+/// anchored entry point is guarded exactly like `evaluate_condition` and
+/// `evaluate_condition_with_recipient`. The And/Or/Not recursions deliberately
+/// bypass it by calling `evaluate_condition_inner` — preserving the pre-existing
+/// recursion shape, which never re-entered the gate.
+pub(crate) fn evaluate_condition_with_context(
     state: &GameState,
     condition: &StaticCondition,
     controller: PlayerId,
     source_id: ObjectId,
-    recipient_id: Option<ObjectId>,
+    context: ConditionContext,
+) -> bool {
+    if static_condition_has_unresolvable_designation_anchor(condition) {
+        return false;
+    }
+    evaluate_condition_inner(state, condition, controller, source_id, context)
+}
+
+fn evaluate_condition_inner(
+    state: &GameState,
+    condition: &StaticCondition,
+    controller: PlayerId,
+    source_id: ObjectId,
+    context: ConditionContext,
 ) -> bool {
     match condition {
         StaticCondition::DevotionGE { colors, threshold } => {
@@ -1955,7 +2030,7 @@ fn evaluate_condition_with_context(
                         entering: None,
                         source: source_id,
                         trigger_source: None,
-                        recipient: recipient_id,
+                        recipient: context.recipient,
                         scoped_player: None,
                         damage_source: None,
                         event_amount: None,
@@ -1966,14 +2041,14 @@ fn evaluate_condition_with_context(
         }
         StaticCondition::HasMaxSpeed => has_max_speed(state, controller),
         StaticCondition::SpeedGE { threshold } => effective_speed(state, controller) >= *threshold,
-        StaticCondition::And { conditions } => conditions.iter().all(|c| {
-            evaluate_condition_with_context(state, c, controller, source_id, recipient_id)
-        }),
-        StaticCondition::Or { conditions } => conditions.iter().any(|c| {
-            evaluate_condition_with_context(state, c, controller, source_id, recipient_id)
-        }),
+        StaticCondition::And { conditions } => conditions
+            .iter()
+            .all(|c| evaluate_condition_inner(state, c, controller, source_id, context)),
+        StaticCondition::Or { conditions } => conditions
+            .iter()
+            .any(|c| evaluate_condition_inner(state, c, controller, source_id, context)),
         StaticCondition::Not { condition } => {
-            !evaluate_condition_with_context(state, condition, controller, source_id, recipient_id)
+            !evaluate_condition_inner(state, condition, controller, source_id, context)
         }
         // CR 731.1: True when the game has the requested day/night designation.
         StaticCondition::DayNightIs {
@@ -2004,7 +2079,8 @@ fn evaluate_condition_with_context(
             counters,
             minimum,
             maximum,
-        } => recipient_id
+        } => context
+            .recipient
             .and_then(|id| state.objects.get(&id))
             .map(|obj| counter_condition_matches(obj, counters, *minimum, *maximum))
             .unwrap_or(false),
@@ -2013,7 +2089,8 @@ fn evaluate_condition_with_context(
         // object being modified this layer cycle; tests THIS recipient against the
         // type/subtype/color filter (not mere existence of some matching object).
         // No recipient → false (mirrors the RecipientHasCounters defensive default).
-        StaticCondition::RecipientMatchesFilter { filter } => recipient_id
+        StaticCondition::RecipientMatchesFilter { filter } => context
+            .recipient
             .map(|id| {
                 matches_target_filter(
                     state,
@@ -2027,7 +2104,8 @@ fn evaluate_condition_with_context(
         // this static gates) is attacking its owner / a permanent its owner
         // controls. Owner-relative (CR 108.3); no recipient → false (mirrors the
         // RecipientMatchesFilter defensive default).
-        StaticCondition::RecipientAttackingOwnerTarget { target } => recipient_id
+        StaticCondition::RecipientAttackingOwnerTarget { target } => context
+            .recipient
             .map(|id| eval_recipient_attacking_owner_target(state, id, target))
             .unwrap_or(false),
         // CR 716.2a + CR 716.3: Level abilities are active at or above the specified
@@ -2082,7 +2160,7 @@ fn evaluate_condition_with_context(
         // creature, "it"), not the Aura source; fall back to the source only when
         // evaluated without a recipient (the source gate defers to per-recipient).
         StaticCondition::SharesColorWithMostCommonColorAmongPermanents => {
-            eval_shares_color_with_most_common_color(state, recipient_id.unwrap_or(source_id))
+            eval_shares_color_with_most_common_color(state, context.recipient.unwrap_or(source_id))
         }
         StaticCondition::SourceEnteredThisTurn => eval_source_entered_this_turn(state, source_id),
         // CR 120.3 + CR 120.6 + CR 702.11b: True once the source has actually dealt
@@ -2122,7 +2200,7 @@ fn evaluate_condition_with_context(
         // only ever emits `scope: Target` (the demonstrative "that creature
         // remains tapped" case — Zygon Infiltrator), bound at resolution time to
         // the copy target via `duration_subject` and surfaced here as the
-        // `recipient_id`. `Recipient` resolves identically. `Source` is spelled
+        // `context.recipient`. `Recipient` resolves identically. `Source` is spelled
         // `SourceIsTapped` and never reaches this arm; the remaining scopes are
         // never produced for a duration tap condition, so they fail safely.
         StaticCondition::IsTapped { scope } => match scope {
@@ -2131,7 +2209,7 @@ fn evaluate_condition_with_context(
             }
             crate::types::ability::ObjectScope::Target
             | crate::types::ability::ObjectScope::Recipient => {
-                recipient_id.is_some_and(|id| eval_source_is_tapped_on_battlefield(state, id))
+                context.recipient.is_some_and(|id| eval_source_is_tapped_on_battlefield(state, id))
             }
             crate::types::ability::ObjectScope::EventSource
             | crate::types::ability::ObjectScope::EventTarget
@@ -2245,26 +2323,55 @@ fn evaluate_condition_with_context(
             .objects
             .get(&source_id)
             .is_some_and(|obj| obj.paired_with.is_some()),
-        // CR 509.1b: True when the defending player controls a permanent matching the filter.
-        // Only meaningful during combat — finds the defending player from the source's
-        // attacker info in the CombatState.
-        StaticCondition::DefendingPlayerControls { filter } => state
-            .combat
-            .as_ref()
-            .and_then(|combat| {
-                combat
-                    .attackers
-                    .iter()
-                    .find(|a| a.object_id == source_id)
-                    .map(|a| a.defending_player)
+        // CR 506.2 + CR 508.5 + CR 509.1b: "the defending player" is determined
+        // relative to an ATTACKING CREATURE, so the anchor is the creature this
+        // static is evaluated AGAINST — the recipient. For an intrinsic SelfRef
+        // static that is the source itself; for a remote grant ("Each creature
+        // you control can't be blocked…", Tanglewalker) it is the affected
+        // attacker, NOT the granting permanent, which need not be attacking at
+        // all. CR 509.1b (and its second paragraph, which names evasion
+        // abilities specifically) is the authorizing rule for this condition's
+        // block-side half — the 7 cards that grant a "can't be blocked unless
+        // defending player controls…" restriction (Hazy Homunculus,
+        // Tanglewalker, Arctic Foxes, Bouncing/Bubbling Beebles, Neurok Spy,
+        // Scrapdiver Serpent) consume the same arm as the attack-side cards
+        // below.
+        //
+        // CR 506.2 (two-player) fixes the defending player for the whole combat phase;
+        // CR 508.5 is the general rule, resolving it from the target that creature is
+        // attacking. During the declare-attackers turn-based action the creature is not
+        // yet recorded as an attacker (that is CR 508.1k), so the target under
+        // validation is the only available anchor. When `declared_attack` is bound it
+        // is AUTHORITATIVE for CR 508.1c's proposed-declaration question: it does not
+        // fall through to the latched `AttackerInfo` even if the target resolves to no
+        // defending player (an unprotected battle) — that IS the CR 508.1c answer.
+        //
+        // CR 508.5 last sentence: once declared (`declared_attack` unbound), the
+        // latched `AttackerInfo` keeps answering, including after the creature leaves
+        // combat.
+        //
+        // No anchor bindable => no defending player => false. A `Not` wrapper inverting
+        // this is the printed "unless" and is correct.
+        StaticCondition::DefendingPlayerControls { filter } => {
+            let attacking = context.recipient.unwrap_or(source_id);
+            let defending = match context.declared_attack {
+                Some(target) => crate::game::combat::defending_player_for_target(state, target),
+                None => crate::game::combat::defending_player_for_attacker(state, attacking),
+            };
+            defending.is_some_and(|defending| {
+                // CR 109.2 + CR 108.4 + CR 110.1: battlefield-scoped census (Unit 1).
+                // CR 109.5 + CR 611.3a: source-relative filter props stay anchored to
+                // the STATIC'S source; per-recipient props bind to the affected
+                // attacker via the existing `from_source_with_recipient` constructor.
+                let ctx = match context.recipient {
+                    Some(recipient) => {
+                        FilterContext::from_source_with_recipient(state, source_id, recipient)
+                    }
+                    None => FilterContext::from_source(state, source_id),
+                };
+                crate::game::filter::player_controls_matching(state, defending, filter, &ctx)
             })
-            .is_some_and(|defending| {
-                let ctx = FilterContext::from_source(state, source_id);
-                state.objects.values().any(|obj| {
-                    obj.controller == defending
-                        && matches_target_filter(state, obj.id, filter, &ctx)
-                })
-            }),
+        }
         // CR 506.5: True when the source creature is the only attacking creature.
         StaticCondition::SourceAttackingAlone => state.combat.as_ref().is_some_and(|combat| {
             combat.attackers.len() == 1

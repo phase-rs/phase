@@ -752,6 +752,7 @@ fn cast_effect(
         duration: None,
         driver,
         mana_spend_permission,
+        additional_cost: None,
     }
 }
 

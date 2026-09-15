@@ -2437,8 +2437,9 @@ pub(crate) fn spec_emits_only_etb_pair(spec: &TokenSpec) -> bool {
 
 /// CR 603.6a + CR 111.1: The set of event keys a single produced token EMITS as
 /// it enters the battlefield, given its core types. Mirrors the event-side
-/// deriver exactly (`keys_from_event`, trigger_index.rs:462-468 for the ETB pair
-/// and :529-531 for `TokenCreated`): a token entering emits the broad
+/// deriver exactly (`keys_from_event` — the `to == Zone::Battlefield` branch of
+/// its `GameEvent::ZoneChanged` arm for the ETB pair, and its
+/// `GameEvent::TokenCreated` arm for `TokenCreated`): a token entering emits the broad
 /// `EnterBattlefield(None)`, one narrow `EnterBattlefield(Some(ct))` per core
 /// type, and `TokenCreated`. Kept in lockstep with the deriver so the §2.3a gate
 /// reasons about exactly the events siblings would observe.

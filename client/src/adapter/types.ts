@@ -2128,6 +2128,10 @@ export type CastOfferKind =
       // copy is fixed — but carried to mirror the serialized shape.
       mana_spend_permission?: "AnyTypeOrColor" | "AnyColor";
       cast_transformed?: boolean;
+      // CR 601.2b: an additional mana cost the grant attaches to this cast
+      // ("by paying {R}{R} in addition to its other costs", Ogre Battlecaster).
+      // Absent for every other paid offer.
+      additional_cost?: ManaCost;
     }
   | {
       type: "FreeCastWindow";

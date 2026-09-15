@@ -11038,6 +11038,7 @@ fn apply_non_priority_pass_action(
                 object_id,
                 card_id,
                 payment_mode,
+                resolution_additional_cost,
             },
             GameAction::ChooseModalFace { back_face },
         ) => {
@@ -11086,6 +11087,7 @@ fn apply_non_priority_pass_action(
                     casting::ResolutionModalFaceChoice {
                         permission_index,
                         payment_mode: *payment_mode,
+                        additional_cost: resolution_additional_cost.clone(),
                     },
                     &mut events,
                 );
@@ -16462,6 +16464,7 @@ fn handle_play_land(
                 object_id,
                 card_id,
                 payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                resolution_additional_cost: None,
             });
         }
 

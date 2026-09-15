@@ -4230,7 +4230,8 @@ mod tests {
     /// counter "it" that follows a TYPED target with NO token creator (Turtle Van:
     /// "Put a +1/+1 counter on target creature, then double the number of +1/+1
     /// counters on it") STILL binds the parent target (`ParentTarget`). The
-    /// `mod.rs:14753` `LastCreated` guard fires only when the parse bound
+    /// counter-target `LastCreated` guard in `oracle_effect::replace_target_with_parent`
+    /// fires only when the parse bound
     /// `LastCreated` (a token creator was present), so this non-token anaphor is
     /// untouched — it must NOT become `LastCreated` or `SelfRef`. Brackets the
     /// guard's revert-to-red (which proves the NEW token behavior).

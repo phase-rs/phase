@@ -12628,8 +12628,8 @@ mod tests {
         // separate clause that patches this field after the DigFromAmong
         // restructuring. The resolver ignores rest_destination on a look-only
         // Dig (keep_count=0, reveal=false) because it takes an early return
-        // after populating private_look_ids (dig.rs:123). Some(Library) here
-        // is correct and harmless.
+        // after populating private_look_ids (the `raw_keep_count == 0` branch
+        // of `dig::resolve`). Some(Library) here is correct and harmless.
         assert_eq!(
             *rest_destination,
             Some(Zone::Library),
