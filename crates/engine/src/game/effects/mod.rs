@@ -15604,6 +15604,18 @@ fn resolve_chain_body(
                     {
                         else_resolved.targets =
                             inject_last_revealed_targets(state, ability, else_branch.as_ref());
+                    } else if else_resolved.targets.is_empty()
+                        && !state.last_zone_changed_ids.is_empty()
+                        && matches!(ability.effect, Effect::ExileTop { .. })
+                        && !effect_uses_implicit_tracked_set_targets(&else_resolved.effect)
+                    {
+                        // CR 309.4c + CR 607.1: Forward exiled card IDs to else-ability
+                        // (linked ability pair — second refers to cards exiled by the first).
+                        else_resolved.targets = state
+                            .last_zone_changed_ids
+                            .iter()
+                            .map(|&id| TargetRef::Object(id))
+                            .collect();
                     } else if should_propagate_parent_targets(ability, &else_resolved) {
                         else_resolved.targets = ability.targets.clone();
                     }

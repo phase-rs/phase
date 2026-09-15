@@ -554,9 +554,9 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// [`LobbyServerMessage`]), independent of [`PROTOCOL_VERSION`].
 ///
 /// Bump ONLY when a lobby variant is added, removed, renamed, or has a field
-/// type changed. A full-game bump must NOT move this number: no lobby variant
-/// carries `GameState` or `GameAction`, so full-game churn cannot break lobby
-/// traffic.
+/// added or its type changed. A full-game bump must NOT move this number: no
+/// lobby variant carries `GameState` or `GameAction`, so full-game churn cannot
+/// break lobby traffic.
 ///
 /// Sharing one integer between the two surfaces is what took preview
 /// multiplayer down: `PROTOCOL_VERSION` moved twice for `GameState`-only
@@ -564,6 +564,30 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// broker's window went disjoint from the shipped client's. This constant is
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
+/// 9 — Recoverable credential rotation via idempotent replay.
+///     `RenewTournamentCredential` gains a `rotation_nonce` field
+///     (`#[serde(default)]`, optional) — the "a lobby field is added" trigger.
+///     `renew_credential` used to mint a new secret, commit it, and invalidate
+///     the old one atomically, so a renewal reply lost after the commit stranded
+///     the holder on a dead, unrenewable secret (the #8782 [HIGH]). Now a
+///     rotation from the current secret records the secret it superseded beside
+///     that nonce, and a retry presenting the superseded secret WITH the same
+///     nonce REPLAYS the already-committed secret instead of minting a second one
+///     — so a lost reply is recoverable, while a superseded secret alone (a
+///     wrong or absent nonce) can neither mint nor obtain a credential, keeping
+///     the authority with its legitimate holder rather than allowing a takeover.
+///     Purely ADDITIVE, so [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does **not** move:
+///     the field is optional (a frame omitting it deserializes to an empty
+///     nonce, which can only mint from a current secret, never replay), only v9+
+///     clients send this frame at all, and a pre-9 broker ignores the unknown
+///     field. A v9-aware client additionally gates its PROACTIVE rotation on the
+///     broker advertising >= 9 (a CLIENT-side floor,
+///     `MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION` in
+///     `client/src/adapter/ws-adapter.ts`, the same shape as 6(c)'s
+///     `MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING`), since replay recovery only
+///     exists at or above this version. [`PROTOCOL_VERSION`] does not move: no
+///     variant here carries `GameState`. (One unbroken paragraph on purpose —
+///     see entry 5's note on the rustdoc indented-code-block trap.)
 /// 8 — Tournament match structure: a per-event best-of choice. `CreateTournament`
 ///     gains `match_type: Option<MatchType>` (Bo1 / Bo3); `None` resolves to the
 ///     arity default (`Bo3` head-to-head, `Bo1` for pods — which are single-game
@@ -721,7 +745,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     that direction can reject — into one legible handshake refusal.
 /// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
 ///     `LobbyServerMessage` variant sets, unchanged since #1880.
-pub const LOBBY_PROTOCOL_VERSION: u32 = 8;
+pub const LOBBY_PROTOCOL_VERSION: u32 = 9;
 
 /// Lowest [`LOBBY_PROTOCOL_VERSION`] a broker accepts from a client.
 ///
@@ -1247,10 +1271,24 @@ pub enum LobbyClientMessage {
     RenewTournamentCredential {
         code: String,
         role: crate::tournament::TournamentRole,
-        /// The credential being rotated. It must still be accepted — an
-        /// already-expired one is refused, so this extends nothing that has
-        /// already lapsed.
+        /// The credential being rotated. Either the live CURRENT secret (mints a
+        /// fresh one) or the secret a prior rotation superseded (replays that
+        /// rotation, with `rotation_nonce`); an expired one is refused either way.
         token: String,
+        /// The client-minted, per-attempt nonce that makes rotation recoverable
+        /// yet safe from takeover. A first attempt sends a fresh nonce and mints;
+        /// a RETRY after a lost reply re-sends the SAME nonce with the SAME
+        /// (now-superseded) `token`, and the broker replays the already-committed
+        /// secret instead of minting a second one
+        /// ([`crate::tournament::TournamentCredential::renew`]). A superseded
+        /// token WITHOUT the matching nonce cannot mint or replay — that is what
+        /// stops a stolen superseded secret becoming a fresh authority.
+        ///
+        /// `#[serde(default)]` for wire tolerance: an empty nonce simply never
+        /// matches a stored rotation record, so it can only mint from a current
+        /// secret, never replay. Only v9+ clients send this frame at all.
+        #[serde(default)]
+        rotation_nonce: String,
     },
 }
 
@@ -1595,7 +1633,7 @@ mod tests {
     /// rather than silently re-coupling the lobby to full-game churn.
     #[test]
     fn lobby_protocol_version_is_independent_of_the_full_game_one() {
-        assert_eq!(LOBBY_PROTOCOL_VERSION, 8);
+        assert_eq!(LOBBY_PROTOCOL_VERSION, 9);
         // Deliberately still 2, not 6: lobby versions 3, 4 and 5 are purely
         // additive, and 6 is additive in the only direction this floor governs
         // — its server → client fields are ignored by a consumer that does not
@@ -1768,16 +1806,22 @@ mod tests {
     /// again at 6, once more at 7 for the format label and the "automatic + N"
     /// round option, and again at 8 for the match structure (Bo1 / Bo3): the
     /// chain grows a step and the name grows with it, rather than the tail
-    /// constant being quietly re-pointed.
+    /// constant being quietly re-pointed. Version 9 breaks the pattern the
+    /// earlier steps share — it adds NO wire surface, because rotation's
+    /// SEMANTICS changed while its frames stayed byte-identical — so it extends
+    /// the chain as a BEHAVIORAL step rather than a surface one, named to say so,
+    /// all the same rather than re-pointing the tail.
     #[test]
-    fn the_tournament_surface_spans_lobby_versions_four_through_eight() {
+    fn the_tournament_surface_spans_lobby_versions_four_through_nine() {
         const PRE_TOURNAMENT_LOBBY_VERSION: u32 = 3;
         const TOURNAMENT_SET_LOBBY_VERSION: u32 = PRE_TOURNAMENT_LOBBY_VERSION + 1;
         const CORRELATED_SETTLEMENT_LOBBY_VERSION: u32 = TOURNAMENT_SET_LOBBY_VERSION + 1;
         const BROKER_OWNED_POLICY_LOBBY_VERSION: u32 = CORRELATED_SETTLEMENT_LOBBY_VERSION + 1;
         const FORMAT_AND_PLUS_ROUNDS_LOBBY_VERSION: u32 = BROKER_OWNED_POLICY_LOBBY_VERSION + 1;
         const MATCH_STRUCTURE_LOBBY_VERSION: u32 = FORMAT_AND_PLUS_ROUNDS_LOBBY_VERSION + 1;
-        assert_eq!(LOBBY_PROTOCOL_VERSION, MATCH_STRUCTURE_LOBBY_VERSION);
+        // The first NON-surface step: rotation semantics, no new wire frames.
+        const RECOVERABLE_ROTATION_LOBBY_VERSION: u32 = MATCH_STRUCTURE_LOBBY_VERSION + 1;
+        assert_eq!(LOBBY_PROTOCOL_VERSION, RECOVERABLE_ROTATION_LOBBY_VERSION);
     }
 
     /// The guard for [`is_known_lobby_tag`], which is a string `matches!` and
@@ -1933,6 +1977,7 @@ mod tests {
                 code: "TOUR01".to_string(),
                 role: TournamentRole::Organizer,
                 token: "tok".to_string(),
+                rotation_nonce: "nonce".to_string(),
             },
         ];
 
@@ -2172,6 +2217,7 @@ mod tests {
                 code: "TOUR01".to_string(),
                 role: TournamentRole::Organizer,
                 token: "tok".to_string(),
+                rotation_nonce: "nonce".to_string(),
             },
         ] {
             assert_eq!(msg.tournament_request_id(), None, "{msg:?}");

@@ -623,6 +623,11 @@ pub enum ClientMessage {
         code: String,
         role: TournamentRole,
         token: String,
+        /// Mirrors `rotation_nonce` on the lobby variant: the client-minted,
+        /// per-attempt nonce that lets a lost renewal reply be recovered by an
+        /// idempotent replay. `#[serde(default)]` for the same wire tolerance.
+        #[serde(default)]
+        rotation_nonce: String,
     },
 }
 

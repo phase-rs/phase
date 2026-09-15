@@ -4714,13 +4714,17 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             organizer_token: organizer_token.clone(),
             request_id: *request_id,
         },
-        ClientMessage::RenewTournamentCredential { code, role, token } => {
-            L::RenewTournamentCredential {
-                code: code.clone(),
-                role: *role,
-                token: token.clone(),
-            }
-        }
+        ClientMessage::RenewTournamentCredential {
+            code,
+            role,
+            token,
+            rotation_nonce,
+        } => L::RenewTournamentCredential {
+            code: code.clone(),
+            role: *role,
+            token: token.clone(),
+            rotation_nonce: rotation_nonce.clone(),
+        },
         _ => return None,
     })
 }
@@ -15182,6 +15186,7 @@ mod mode_gate_tests {
                 code: "TOUR01".into(),
                 role: TournamentRole::Organizer,
                 token: "org-tok".into(),
+                rotation_nonce: "nonce".into(),
             },
         ]
     }

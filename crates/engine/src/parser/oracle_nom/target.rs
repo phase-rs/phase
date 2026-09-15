@@ -287,6 +287,11 @@ pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
         // entry, so the plural must be an explicit head-noun word here.
         ("battles", TypeFilter::Battle),
         ("battle", TypeFilter::Battle),
+        // CR 308: Kindred card type (and legacy Tribal terminology).
+        ("kindreds", TypeFilter::Kindred),
+        ("kindred", TypeFilter::Kindred),
+        ("tribals", TypeFilter::Kindred),
+        ("tribal", TypeFilter::Kindred),
         ("permanents", TypeFilter::Permanent),
         ("permanent", TypeFilter::Permanent),
         ("cards", TypeFilter::Card),

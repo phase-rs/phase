@@ -117,14 +117,18 @@ web:
     # Affirmative opt-in to a mutable tag that tracks the server image.
     # Choose this when something bumps `image.tag` for you (a release
     # automation, a GitOps sync) and you want the SPA to move with it: the tag
-    # falls back through image.tag to "v<Chart.appVersion>", so the SPA and the
-    # server resolve to the same version by construction rather than by an
-    # operator remembering. They must stay within one protocol-version step of
-    # each other — a client accepts only [PROTOCOL_VERSION-1, PROTOCOL_VERSION]
-    # and the server advertises one number blind in an unprompted ServerHello —
-    # so a pinned digest that outlives two releases is a site that loads and
-    # then cannot connect. Mutually exclusive with `digest` and with `tag`:
-    # either would win over the tracking you asked for.
+    # falls back through image.tag to "v<Chart.appVersion>", so for release
+    # (vX.Y.Z) and sha-<12> tags the SPA and the server resolve to the same
+    # version by construction rather than by an operator remembering. A
+    # `preview` image.tag is not guaranteed to pair: separate jobs push the two
+    # images' preview tags, which can name different commits, so track preview
+    # with image.tag: sha-<12>. They must stay within one protocol-version step
+    # of each other — a client accepts only
+    # [PROTOCOL_VERSION-1, PROTOCOL_VERSION] and the server advertises one
+    # number blind in an unprompted ServerHello — so a pinned digest that
+    # outlives two releases is a site that loads and then cannot connect.
+    # Mutually exclusive with `digest` and with `tag`: either would win over
+    # the tracking you asked for.
     #
     # Requires image.tag to be set; the render fails otherwise. With image.tag
     # empty the tag falls back to "v<Chart.appVersion>", a constant this chart

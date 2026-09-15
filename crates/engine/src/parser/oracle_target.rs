@@ -2272,7 +2272,7 @@ pub(super) enum AnaphorZoneClass {
 /// CR 400.1: the zone class a declared target slot filter itself denotes. A slot
 /// with no zone property, or one explicitly scoped to the battlefield, is a
 /// permanent; any other zone property makes it a card in that zone.
-fn slot_zone_class(slot: &TargetFilter) -> AnaphorZoneClass {
+pub(super) fn slot_zone_class(slot: &TargetFilter) -> AnaphorZoneClass {
     match slot.extract_in_zone() {
         Some(zone) if zone != Zone::Battlefield => AnaphorZoneClass::CardInNonBattlefieldZone,
         _ => AnaphorZoneClass::BattlefieldPermanent,
@@ -2996,6 +2996,7 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
                         | TypeFilter::Planeswalker
                         | TypeFilter::Land
                         | TypeFilter::Battle
+                        | TypeFilter::Kindred
                         | TypeFilter::Permanent
                 );
                 if is_concrete_core_type {
@@ -3108,6 +3109,7 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
                 | TypeFilter::Planeswalker
                 | TypeFilter::Land
                 | TypeFilter::Battle
+                | TypeFilter::Kindred
                 | TypeFilter::Permanent
         )
     ) {
@@ -3131,6 +3133,7 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
                     | TypeFilter::Planeswalker
                     | TypeFilter::Land
                     | TypeFilter::Battle
+                    | TypeFilter::Kindred
             );
             if !is_concrete_core_type {
                 break;

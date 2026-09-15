@@ -23120,7 +23120,7 @@ fn chain_declared_object_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
         }
         match prev.parsed.effect.target_filter() {
             Some(TargetFilter::ParentTarget) => continue,
-            Some(t @ TargetFilter::Typed(_)) => return Some(t),
+            Some(t @ TargetFilter::Typed(_)) if !t.is_player_scope() => return Some(t),
             _ => return None,
         }
     }
@@ -34733,18 +34733,24 @@ pub(crate) fn finalize_effect_chain(def: &mut AbilityDefinition) {
 
 fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text: &str) {
     let lower = text.to_lowercase();
-    if !scan_contains_phrase(&lower, "shuffles it into their library")
-        || !scan_contains_phrase(&lower, "reveals the top card of their library")
-        || scan_contains_phrase(&lower, "reveals the top card of your library")
-    {
+    if !scan_contains_phrase(&lower, "shuffles it into their library") {
+        return;
+    }
+
+    let repair_reveal = scan_contains_phrase(&lower, "reveals the top card of their library")
+        && !scan_contains_phrase(&lower, "reveals the top card of your library");
+    let repair_exile = scan_contains_phrase(&lower, "exiles the top card of their library")
+        && !scan_contains_phrase(&lower, "exiles the top card of your library");
+
+    if !repair_reveal && !repair_exile {
         return;
     }
 
     // CR 108.3 + CR 400.3 + CR 608.2c: after an owner's-library shuffle,
-    // a following "their library" reveal refers to that same owner. The generic
-    // reveal parser binds "their library" to the relative-player anaphor (or, for
-    // a subjectless reveal, to the controller), so repair only the owner-shuffle
-    // chain and leave explicit "your library" reveals untouched.
+    // a following "their library" reveal or exile refers to that same owner. The generic
+    // reveal/exile parser binds "their library" to the relative-player anaphor (or, for
+    // a subjectless reveal/exile, to the controller), so repair only the owner-shuffle
+    // chain and leave explicit "your library" instructions untouched.
     let mut saw_owner_shuffle = false;
     let mut current = Some(def);
     while let Some(node) = current {
@@ -34753,7 +34759,12 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
                 saw_owner_shuffle = true;
             }
             Effect::RevealTop { player, .. }
-                if saw_owner_shuffle && is_repairable_library_owner(player) =>
+                if saw_owner_shuffle && repair_reveal && is_repairable_library_owner(player) =>
+            {
+                *player = TargetFilter::ParentTargetOwner;
+            }
+            Effect::ExileTop { player, .. }
+                if saw_owner_shuffle && repair_exile && is_repairable_library_owner(player) =>
             {
                 *player = TargetFilter::ParentTargetOwner;
             }
@@ -38101,91 +38112,61 @@ pub(crate) fn parse_effect_chain_ir(
         // and is excluded for free, where a wording list would miss it.
         let (text_after_prefix, prefix_delayed) = match prefix_delayed {
             Some(condition) => (text_after_prefix, Some(condition)),
-            // TARGETLESS GRANTS ARE LEFT ALONE (review of PR #8749).
-            //
-            // The condition this recognizer emits scopes itself with
-            // `valid_card: ParentTarget`, which binds at delayed-trigger creation
-            // to the granting ability's chosen target. A chain that never
-            // declared an object target has nothing for it to bind to: the
-            // engine's over-fire guard then refuses to install the trigger at all
-            // (`delayed_trigger::resolve`), and the printed consequent is lost
-            // rather than re-timed.
-            //
-            // MEASURED over the full corpus, exactly one card's PARSE is changed
-            // by this decline — Discord, Lord of Disharmony, whose permission is
-            // "you may cast a COPY of a spell with that name" with no target. Its
-            // consequent is not scoped by a chosen object at all but by the
-            // permission itself ("a spell cast this way"), which is provenance
-            // this seam does not carry yet. Until it does, Discord keeps exactly
-            // the lowering it has on `main` — wrong in its own pre-existing way,
-            // but not newly suppressed by this change.
-            //
-            // Deliberately NOT claimed: that Discord is the only prefix-carrying
-            // card without a declared object referent. It is not — many of the 33
-            // print no "target" at all. For every other one the decline lands
-            // where the consequent discriminator below would have landed anyway,
-            // which is why the corpus diff moves by exactly this one card.
-            //
-            // `chain_declared_object_target` is the existing authority for "what
-            // object target has this chain declared", asked here rather than
-            // re-derived and rather than matched on the absence of the word
-            // "target" in the surrounding text.
-            //
-            // Named imprecision: it answers about the DECLARED target, while the
-            // runtime guard tests `ability.targets.is_empty()`. A declared target
-            // that becomes illegal before resolution would still read as "yes"
-            // here. That is the dangerous direction — proxy says yes, runtime has
-            // no targets, the guard refuses, and the consequent is lost, which is
-            // the Discord failure again — so it is named rather than glossed.
-            //
-            // CORRECTED after review, twice, and both corrections are recorded
-            // because the wrong reasons were plausible. An earlier revision used
-            // the sibling walk `chain_has_prior_typed_referent(.., true)` and
-            // claimed this one "bails on the graveyard rider's condition" and so
-            // could not serve. MEASURED, that is false: it serves, and the two
-            // walks produce BYTE-IDENTICAL `card-data.json` over all 35804 corpus
-            // entries. This one ships because it is the tighter question — it
-            // returns the declared `Typed` filter itself, where the sibling also
-            // accepts compound and non-target referents that never reach
-            // `ability.targets`.
-            //
-            // CR 603.7 (the delayed-trigger reading is stated at the top of this
-            // block): this arm declines it on an engine limit — nothing for
-            // `valid_card: ParentTarget` to bind to — not on a different reading
-            // of the rule. The NEXT `None` arm is the one that lowers the
-            // consequent as that trigger; the gap left here is named in the PR.
-            None if chain_declared_object_target(builder.clauses()).is_none() => {
-                (text_after_prefix, None)
-            }
             None => match crate::parser::oracle_effect::lower::strip_cast_this_way_gate(&text) {
                 Some((body, condition)) => {
-                    // This parse exists only to ASK what the consequent is; its
-                    // context is discarded either way. `clone_throwaway` is the
-                    // named authority for exactly that (see its doc comment —
-                    // deliberately not a `Clone` impl, and deliberately
-                    // greppable). Passing the live `ctx` would leave this probe's
-                    // diagnostics and `chosen_player_count` behind, and the
-                    // accepted branch parses `body` a second time below.
+                    // TARGETLESS GRANTS ARE LEFT ALONE (review of PR #8749 / #8883).
                     //
-                    // Named consequence of that second parse: `clone_throwaway`
-                    // resets `chosen_color_qualifier` to `Unbound` (so a
-                    // `ChainBound` qualifier does not reach the probe), and
-                    // everything the probe itself accumulates — diagnostics,
-                    // `chosen_player_count`, any `pending_printed_color_choice`
-                    // it sets — is discarded with the clone. It does NOT start
-                    // without the caller's pending choice; that field rides in on
-                    // `..self.clone()`. Either way the probe and the shipped
-                    // lowering could in principle differ, and the discriminator
-                    // would then have classified a text it is not shipping. Site without a
-                    // demonstrated consequence — the corpus double bake bounds it
-                    // to zero.
-                    let mut probe_ctx = ctx.clone_throwaway();
-                    let probe =
-                        lower_effect_chain_ir(&parse_effect_chain_ir(body, kind, &mut probe_ctx));
-                    if consequent_is_a_property_of_the_granted_cast(&probe) {
+                    // The condition this recognizer emits scopes itself with
+                    // `valid_card: ParentTarget`, which binds at delayed-trigger creation
+                    // to the granting ability's chosen target. A chain whose cast
+                    // permission never declared a card target has nothing for it to bind
+                    // to: the engine's over-fire guard then refuses to install the trigger
+                    // at all (`delayed_trigger::resolve`), and the printed consequent is
+                    // lost rather than re-timed.
+                    //
+                    // Discord, Lord of Disharmony is that card — its permission is
+                    // "you may cast a COPY of a spell with that name" with no target.
+                    // Its consequent is kept unwrapped as a sequential instruction.
+                    //
+                    // `chain_granted_cast_permission_has_card_target` is the authority
+                    // for whether the chain grants a cast permission with a valid card
+                    // target — distinct from `chain_declared_object_target` (which walks
+                    // backwards for bare-it pronoun resolution and aborts on intervening
+                    // conditions or non-Typed targets).
+                    if !chain_granted_cast_permission_has_card_target(builder.clauses()) {
                         (text_after_prefix, None)
                     } else {
-                        (body, Some(condition))
+                        // This parse exists only to ASK what the consequent is; its
+                        // context is discarded either way. `clone_throwaway` is the
+                        // named authority for exactly that (see its doc comment —
+                        // deliberately not a `Clone` impl, and deliberately
+                        // greppable). Passing the live `ctx` would leave this probe's
+                        // diagnostics and `chosen_player_count` behind, and the
+                        // accepted branch parses `body` a second time below.
+                        //
+                        // Named consequence of that second parse: `clone_throwaway`
+                        // resets `chosen_color_qualifier` to `Unbound` (so a
+                        // `ChainBound` qualifier does not reach the probe), and
+                        // everything the probe itself accumulates — diagnostics,
+                        // `chosen_player_count`, any `pending_printed_color_choice`
+                        // it sets — is discarded with the clone. It does NOT start
+                        // without the caller's pending choice; that field rides in on
+                        // `..self.clone()`. Either way the probe and the shipped
+                        // lowering could in principle differ, and the discriminator
+                        // would then have classified a text it is not shipping. Site without a
+                        // demonstrated consequence — the corpus double bake bounds it
+                        // to zero.
+                        let mut probe_ctx = ctx.clone_throwaway();
+                        let probe = lower_effect_chain_ir(&parse_effect_chain_ir(
+                            body,
+                            kind,
+                            &mut probe_ctx,
+                        ));
+                        if consequent_is_a_property_of_the_granted_cast(&probe) {
+                            (text_after_prefix, None)
+                        } else {
+                            (body, Some(condition))
+                        }
                     }
                 }
                 None => (text_after_prefix, None),
@@ -42701,6 +42682,51 @@ mod chain_declared_object_target_tests {
              `subject_slot: None` resolve the same object",
         );
     }
+
+    /// A nearer clause with a player target (e.g. `Target opponent`) must block
+    /// the walk and return `None`, never leaking a player filter as an object target.
+    #[test]
+    fn chain_declared_object_target_blocks_at_a_player_target_clause() {
+        use crate::types::ability::ControllerRef;
+
+        let opponent = TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::Opponent),
+            ..Default::default()
+        });
+        let mut builder =
+            ClauseIrBuilder::new("destroy target creature. target opponent loses 2 life");
+        builder
+            .clause(
+                "destroy target creature",
+                parsed_clause(Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }),
+                    cant_regenerate: false,
+                }),
+                None,
+                emit(),
+            )
+            .push();
+        builder
+            .clause(
+                "target opponent loses 2 life",
+                parsed_clause(Effect::LoseLife {
+                    target: Some(opponent),
+                    amount: QuantityExpr::Fixed { value: 2 },
+                }),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(builder.clauses().len(), 2);
+        assert_eq!(
+            chain_declared_object_target(builder.clauses()),
+            None,
+            "a nearer player-target clause must BLOCK the walk and return None",
+        );
+    }
 }
 
 /// CR 601.2 + CR 603.7 (issue #8721): does a cast-permission back-reference's
@@ -42730,4 +42756,46 @@ fn consequent_is_a_property_of_the_granted_cast(def: &AbilityDefinition) -> bool
         &*def.effect,
         Effect::CastFromZone { .. } | Effect::GenericEffect { .. }
     )
+}
+
+/// CR 603.7: Checks whether an earlier clause in this chain granted a card-casting
+/// permission that has a declared card target (e.g. `Effect::CastFromZone`).
+///
+/// The delayed trigger condition emitted by `strip_cast_this_way_gate` scopes itself with
+/// `valid_card: ParentTarget`, which binds at runtime to the granting ability's chosen target.
+/// A chain whose cast permission declared no card target (e.g. Discord, Lord of Disharmony:
+/// "you may cast a copy of a spell with that name") has no object target for `ParentTarget`
+/// to bind to, so its consequent is kept unwrapped as a sequential instruction.
+fn chain_granted_cast_permission_has_card_target(clauses: &[ClauseIr]) -> bool {
+    for clause in clauses.iter().rev() {
+        let target = match &clause.parsed.effect {
+            Effect::CastFromZone { target, .. }
+            | Effect::CastCopyOfCard { target, .. }
+            | Effect::GrantCastingPermission { target, .. } => target,
+            _ => continue,
+        };
+        return is_valid_card_target_filter(target, clauses);
+    }
+    false
+}
+
+fn is_valid_card_target_filter(filter: &TargetFilter, clauses: &[ClauseIr]) -> bool {
+    match filter {
+        TargetFilter::None | TargetFilter::Any => false,
+        TargetFilter::ParentTarget => {
+            clauses
+                .iter()
+                .any(|c| match c.parsed.effect.target_filter() {
+                    Some(f) => is_valid_card_target_filter(f, &[]),
+                    None => false,
+                })
+        }
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|f| is_valid_card_target_filter(f, clauses)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .any(|f| is_valid_card_target_filter(f, clauses)),
+        other => !other.is_player_scope(),
+    }
 }

@@ -543,9 +543,12 @@ impl Broker {
 
             LobbyClientMessage::GetTournament { code } => self.handle_get_tournament(code),
 
-            LobbyClientMessage::RenewTournamentCredential { code, role, token } => {
-                self.handle_renew_tournament_credential(code, role, token, env)
-            }
+            LobbyClientMessage::RenewTournamentCredential {
+                code,
+                role,
+                token,
+                rotation_nonce,
+            } => self.handle_renew_tournament_credential(code, role, token, rotation_nonce, env),
 
             // The four gated actions destructure their correlator by name and
             // route the handler's outcome through [`Broker::settle_gated`], the
@@ -1372,9 +1375,13 @@ impl Broker {
         code: String,
         role: TournamentRole,
         token: String,
+        rotation_nonce: String,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
-        match self.tournaments.renew_credential(&code, role, &token, env) {
+        match self
+            .tournaments
+            .renew_credential(&code, role, &token, &rotation_nonce, env)
+        {
             Ok(minted) => {
                 // The code and the role, never the secret — the same rule
                 // `ConnState`'s tournament bookkeeping already follows.
@@ -4604,6 +4611,7 @@ mod tests {
                 code: code.clone(),
                 role: TournamentRole::Organizer,
                 token: organizer_token.clone(),
+                rotation_nonce: "nonce-a".to_string(),
             },
             &env,
         );
@@ -4645,6 +4653,7 @@ mod tests {
                 code: code.clone(),
                 role: TournamentRole::Organizer,
                 token: organizer_token.clone(),
+                rotation_nonce: "nonce-a".to_string(),
             },
             &env,
         );
@@ -4655,20 +4664,23 @@ mod tests {
             "a rotated secret must never be broadcast: {out:?}"
         );
 
-        // The old secret is dead at the broker's own authority boundary, not
-        // only inside the manager.
+        // The superseded secret stops authorizing actions the instant it is
+        // rotated away — only the current secret does, at the broker's own gate
+        // as inside the manager. Its sole residual power is an idempotent replay
+        // through RenewTournamentCredential with the matching nonce, exercised in
+        // the tournament unit tests; it can never authorize an action.
         let refused = broker.handle(
             &mut conn,
             LobbyClientMessage::StartTournamentRound {
-                code: code.clone(),
+                code,
                 organizer_token,
                 request_id: None,
             },
             &env,
         );
         assert!(
-            is_error(&refused) && error_reason(&refused).contains("Invalid organizer token"),
-            "the rotated-away organizer secret must stop authorizing: {refused:?}"
+            error_reason_contains(&refused, "Invalid organizer token"),
+            "the rotated-away secret must not authorize an action: {refused:?}"
         );
     }
 
