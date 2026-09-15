@@ -20228,7 +20228,9 @@ mod tests {
                             PlayerId(0),
                             Some(CastPermissionConstraint::ManaValue {
                                 comparator: Comparator::LT,
-                                value: QuantityExpr::Fixed { value: source_mv as i32 },
+                                value: QuantityExpr::Fixed {
+                                    value: source_mv as i32,
+                                },
                             }),
                         ),
                         exiled_misses: vec![miss_a, miss_b],
@@ -20348,7 +20350,10 @@ mod tests {
                     resolution_cleanup: Some(ResolutionCastCleanup {
                         source_id: hit,
                         face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
-                            crate::types::ability::TargetFilter::Any, hit, PlayerId(0), None,
+                            crate::types::ability::TargetFilter::Any,
+                            hit,
+                            PlayerId(0),
+                            None,
                         ),
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
@@ -20424,7 +20429,10 @@ mod tests {
                     resolution_cleanup: Some(ResolutionCastCleanup {
                         source_id: hit,
                         face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
-                            crate::types::ability::TargetFilter::Any, hit, PlayerId(0), None,
+                            crate::types::ability::TargetFilter::Any,
+                            hit,
+                            PlayerId(0),
+                            None,
                         ),
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,

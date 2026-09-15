@@ -3128,7 +3128,13 @@ fn fuse_split_under_omniscience_keeps_normal_fuse_and_free_half_rows() {
     let options = casting_variant_choice_set(&sc.state, P0, breaking, None).options;
     let rows: Vec<_> = options
         .iter()
-        .map(|option| (option.variant.clone(), option.face, option.mana_cost.clone()))
+        .map(|option| {
+            (
+                option.variant.clone(),
+                option.face,
+                option.mana_cost.clone(),
+            )
+        })
         .collect();
 
     assert!(
