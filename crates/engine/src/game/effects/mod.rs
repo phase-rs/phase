@@ -12161,6 +12161,41 @@ fn stamp_discovered_referent_onto_continuation(state: &mut GameState) {
     }
 }
 
+/// CR 608.2c + CR 400.7: A `forward_result` producer that pauses for its choice
+/// (the `EffectZoneChoice` of "put a creature card from your hand onto the
+/// battlefield" when more than one card qualifies) has not moved anything yet,
+/// so the synchronous forwarding in `resolve_chain_body` cannot run. Mark the
+/// just-parked continuation head as awaiting that producer's result; the
+/// choice's completion replaces the marker with exactly the objects the
+/// selection moved (the `EffectZoneChoice` arm of `handle_resolution_choice`).
+///
+/// Marked ONLY when the pause is that zone-move `EffectZoneChoice`, the one
+/// completion that replaces the marker. Other resolution choices hand their
+/// result to the continuation another way — `SearchChoice` writes the found card
+/// into the continuation's `targets` — and `parent_chain_referents` reads a
+/// forwarded result FIRST, so an unreplaced marker there would shadow that
+/// injected target. Chains whose producer does not forward are left untouched.
+fn mark_continuation_awaits_forwarded_result(state: &mut GameState, ability: &ResolvedAbility) {
+    if !ability.forward_result
+        || !matches!(
+            state.waiting_for,
+            WaitingFor::EffectZoneChoice {
+                effect_kind: EffectKind::ChangeZone | EffectKind::BounceAll,
+                ..
+            }
+        )
+    {
+        return;
+    }
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        frame.pending.chain.context.forwarded_result_context =
+            Some(Box::new(crate::types::ability::ForwardedResultContext {
+                targets: Vec::new(),
+                object_incarnations: Vec::new(),
+            }));
+    }
+}
+
 pub fn resolve_ability_chain(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -15534,6 +15569,7 @@ fn resolve_chain_body(
                 // token count) resolve against the discovered card, not an absent
                 // referent. No-op for every non-Discover pause.
                 stamp_discovered_referent_onto_continuation(state);
+                mark_continuation_awaits_forwarded_result(state, ability);
                 return Ok(());
             }
 
@@ -15848,6 +15884,7 @@ fn resolve_chain_body(
             // CR 701.57c + CR 608.2h: an unconditional Discover follow-up stashed
             // here still binds the hit card as its referent (no-op otherwise).
             stamp_discovered_referent_onto_continuation(state);
+            mark_continuation_awaits_forwarded_result(state, ability);
             return Ok(());
         }
 
