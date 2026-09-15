@@ -5,9 +5,10 @@
 built. It is the last `LegacyRuleSet` axis, and it gates the two remaining
 Eternal Central presets, `middle_school()` and `classic_magic()`.
 
-**Revision 3** (2026-09-15). Two review rounds have run so far, each pairing an
-architecture review with an adversarial fact-check of the rules premises.
-§11 records what every finding changed.
+**Revision 4** (2026-09-15). Final revision after three review rounds, each
+pairing an architecture review with an adversarial fact-check of the rules
+premises. The round-3 verdict was **APPROVE WITH CHANGES**; this revision
+applies all of those changes. §11 records what every finding changed.
 
 **As of:** `upstream/main` @ `05c27e0d5`. Every `file:line` below is pinned to
 that commit (paths relative to `crates/engine/src/` unless stated). Re-verify
@@ -31,7 +32,8 @@ lifelink batching and the trigger/SBA loop are reused, not duplicated.
 **New surface:**
 - one `StackEntryKind::CombatDamage` variant;
 - an exhaustive spell / ability / combat-damage classification;
-- an `Option` stack-entry controller;
+- a stack-entry controller carried by that classification (none for combat
+  damage);
 - **incarnation-aware damage-source identity** through the whole damage
   pipeline (protection, prevention filters, events, trigger matchers);
 - a dealing-time resolver for 310.4a–c;
@@ -218,7 +220,6 @@ deliberate approximation (Q4).
 |---|---|---|
 | 502.63a "Deathtouch is a triggered ability"; 502.63b multiple instances "each triggers separately"; 502.9d trample "considers only the actual toughness of a blocking creature" | CR 702.2b (destruction by SBA), CR 702.2c + CR 702.19b (1 is lethal for trample assignment), CR 702.2f (redundant instances) | (1) A deathtouch trampler assigns 1 per blocker, not toughness. (2) Deathtouch destruction can no longer be responded to or Stifled. (3) Extra instances do nothing. |
 | 502.68a "Lifelink is a triggered ability"; 502.68b "each triggers separately"; 420.3 + 408.1f (SBAs are checked before triggers go on the stack) | CR 702.15b (life gain is part of the damage event), CR 702.15f (redundant) | (1) **A player brought to 0 by combat damage can be kept alive by their own lifelink.** In 2009 they lost to the SBA before the trigger resolved. (2) No trigger to respond to. (3) Two instances no longer gain double life. |
-| 502.10h: banding assignment applies only if the creature "had banding when it attacked or blocked" | CR 702.22j/k check "during the combat damage step" | Banding granted after blocks changes assignment today; it didn't in 2009. The chooser and free division are the same. |
 | 310.5 read literally: "any attackers and blockers that didn't assign combat damage in the first step" | CR 702.7b: participation fixed "as the first combat damage step began" | A first striker whose blocker left (so it assigned nothing) doesn't assign again in the second step. |
 | Division among multiple blockers: 310.2c/d "divided as its controller chooses" | CR 510.1c/d "divided as its controller chooses among them" | None. |
 
@@ -304,25 +305,34 @@ across zone changes and bumps an incarnation (CR 400.7).
 meaningful if **every** downstream source read honors the incarnation; §3.11
 makes that a single design decision.
 
-**D9 — the stack entry controller becomes `Option<PlayerId>`.**
+**D9 — the stack entry controller is carried by the classification, not a
+public field.**
 - **The rule.** 2009 600.4a: "A player leaving the game doesn't affect combat
   damage on the stack." Current CR 800.4a makes stack objects not represented
   by cards that are controlled by a leaving player cease to exist. An
   engine-assigned controller (e.g. the active player) would therefore erase
   every pending assignment, the defenders' included, when that player left a
   multiplayer game. So the object has **no controller**.
-- **Why a type change and not a lookup rule.** The controller is read directly
-  in many places (`filter.rs:2998,3019` and far more), and only a few readers
-  go through `stack_object_controller`. Routing lookups through a
-  classification can't be enforced; unaudited readers would silently see a
-  controller.
-- **The change.** `StackEntry.controller` becomes `Option<PlayerId>` (or
-  private behind `fn controller(&self) -> Option<PlayerId>`). Every existing
-  constructor passes `Some(..)`; `CombatDamage` passes `None`. The compiler then
-  lists every reader, which *is* the §3.6 audit.
-- **Serialization.** The shape change is covered by the protocol bump (§4).
-  `#[serde(default)]` isn't possible for a previously required field without a
-  migration note, so the bump changelog records it.
+- **Why not a lookup rule.** The controller is read directly in many places
+  (`filter.rs:2998,3019` and more). Only the four non-test callers of
+  `stack_object_controller` (`ability_utils.rs:784`, `casting.rs:709`,
+  `elimination.rs:974`, `stack.rs:1469`) go through a helper. A convention
+  can't be enforced.
+- **Why not a bare `Option<PlayerId>`.** It would enumerate readers, but it
+  invites `.expect(..)` / `unwrap_or(active_player)` at sites that only ever see
+  spells and abilities. That fallback silently reintroduces the CR 800.4a
+  hazard.
+- **The change:**
+  - `StackEntry.controller` becomes private, stored as `Option<PlayerId>`.
+  - The only public reader is D5's projection, which carries the controller
+    where one exists: `StackObjectClass::Spell { controller }`,
+    `Ability { kind, controller }`, `CombatDamage` (none).
+  - Readers that need a controller `match` the class, so `None` is visible
+    only in the `CombatDamage` arm. Every existing constructor passes a
+    controller; `CombatDamage` doesn't.
+- **Serialization.** Old saved states and replays deserialize unchanged: serde
+  reads an old bare `PlayerId` straight into `Option<PlayerId>` as `Some`. Only
+  `None` payloads are new, and the protocol bump (§4) covers old clients.
 - **Elimination** (`elimination.rs:970-981`) then never removes a `CombatDamage`
   entry, matching 600.4a.
 
@@ -352,11 +362,11 @@ match combat_damage_timing::policy(state):
     reset per-sub-step collection state (damage_step_index, damage_assignments)
     if pending is non-empty:
         push_combat_damage_object(state, sub_step, freeze(pending), events)    // journaled, §3.10
-    // AFTER the push, so abilities land ABOVE the object (2009 310.1 order; CR 500.6)
+    else:
+        mark sub-step dealt (first_strike_done / regular_damage_done)          // BEFORE any prompt: C1
+    // AFTER the push/mark, so abilities land ABOVE the object and re-entry can't re-run this
     collect_step_start_triggers_and_run_sbas(state, sub_step, events)           // CR 500.6 + CR 704.3
     if let Some(wf) = pending_combat_damage_waiting(state) { return Some(wf) } // OrderTriggers, targets, …
-    if pending was empty:
-        mark sub-step dealt (first_strike_done / regular_damage_done)          // nothing to resolve
     reset_priority(state)
     return Some(WaitingFor::Priority { player: turn_decision_maker(state) })
 ```
@@ -366,22 +376,28 @@ match combat_damage_timing::policy(state):
   incarnation.
 
 **Order: push, then step-start triggers.**
-- 2009 310.1 puts the object on the stack and "Then any abilities that
-  triggered … go on the stack". Current CR 500.6 puts step-start triggers on
-  the stack "the next time a player would receive priority".
+- Step-start triggers go on the stack the next time a player would receive
+  priority: 2009 408.1f ("each time a player would receive priority") and
+  current CR 500.6. That moment is after the push.
 - Trigger processing pushes immediately (`triggers.rs:12993`), so running it
   *before* the push would place those abilities **below** the object and
   resolve them after damage.
 - Collected after the push, they sit above it and resolve first.
 - **A prompt raised here** (e.g. `OrderTriggers` for two same-controller
-  triggers, or a target choice) is returned before Priority is granted. By then
-  the object is already on the stack, so the D3 guard blocks re-collection on
-  re-entry, and the marker can't be emitted twice.
+  triggers, or a target choice) is returned before Priority is granted.
+  Re-entry after the answer can't re-collect or re-emit the marker:
+  - with an object pushed, the D3 guard blocks it;
+  - with nothing pushed, the sub-step was already marked dealt. A set
+    `first_strike_done` also suppresses the regular marker
+    (`combat_damage.rs:241-246`).
 
 **Step-start marker.** Today it is synthesized at *dealing* time, inside
 `process_combat_damage_triggers`, gated by `include_phase_event`
 (`combat_damage.rs:239-247`, `:56-60`).
-- `include_phase_event` becomes a **parameter supplied by the caller**.
+- `include_phase_event` becomes a **parameter supplied by the caller**, computed
+  by **one shared helper** (today's `combat_damage.rs:239-247` logic). The
+  inline Modern path, the `OnStack` push and D7's `TurnBasedAction` resume all
+  call it, so the computations can't drift.
 - The `OnStack` push emits it with the same per-sub-step rule the engine uses
   today: the first-strike sub-step always, the regular sub-step only when it is
   the sole sub-step.
@@ -506,13 +522,22 @@ These checks live **only** in the record resolver of §3.3 step 1.
 | Recipient player has left the game | design reading of current CR 800.4a; CR 800.4e covers only *assigning* damage to a departed player | Dropped. |
 | Protection, prevention or redirection created after assignment | 310.4 + current CR 615 | Applies, evaluated against the incarnation-aware source (§3.11). |
 
-**Ownership vs control** (current CR 800.4a):
-- Objects a departed player **owns** leave the game. Their damage is still
-  dealt from LKI, and damage assigned to them is dropped.
-- Objects they **controlled but didn't own** are exiled afterward, and the same
-  two outcomes follow.
-- A creature owned by the leaver but attacking for someone else also leaves; its
-  damage is dealt from LKI.
+**A player leaving the game** (current CR 800.4a runs in order: objects the
+player owns leave the game, and effects giving that player control end; then
+objects the player *still* controls are exiled). The three cases differ:
+
+| Object | What happens to it | As a damage source | As a recipient |
+|---|---|---|---|
+| **Owned** by the leaver | Leaves the game | Dealt from LKI (2009 600.4a, 310.4a/b) | Dropped (310.4c) |
+| Controlled through a **control-changing effect** (Control Magic, Threaten) | Returns to its owner and stays on the battlefield as the **same incarnation**; removed from combat (CR 506.4) | **Live** characteristics; the new controller is the controller (e.g. for lifelink) | **Dealt**: still on the battlefield ("has left combat", 310.4a) |
+| **Still controlled** after those effects end, not owned (e.g. reanimated from another player's graveyard) | Exiled | Dealt from LKI | Dropped |
+
+**Life gain for a departed controller.** When an LKI source's controller has
+left the game, lifelink gains nothing: current CR 702.15b gives the life to the
+source's controller, and a player who has left can't gain life. 2009 agrees
+(600.4c: a trigger controlled by a departed player isn't put on the stack).
+`drain_combat_lifelink` must skip a departed player rather than crediting the
+owner or anyone else.
 
 **Battles.** 310.4c predates battles; under D0 current object types apply. Per
 §8, annotate the current rules and name 310.4c only in prose.
@@ -537,14 +562,15 @@ pattern-match `StackEntryKind` (§3.6).
 
 ```rust
 pub enum StackObjectClass {
-    Spell,
-    Ability(StackAbilityKind),
-    /// Neither a spell nor an ability (pre-M10 combat damage, 310.3).
+    Spell { controller: PlayerId },
+    Ability { kind: StackAbilityKind, controller: PlayerId },
+    /// Neither a spell nor an ability, and controlled by no one
+    /// (pre-M10 combat damage, 310.3 + 600.4a).
     CombatDamage,
 }
 ```
 
-`matches_stack_ability_kind` becomes `matches!(class, Ability(k) if …)`. This
+`matches_stack_ability_kind` becomes `matches!(class, Ability { kind, .. } if …)`. This
 parameterizes an existing axis rather than adding a sibling predicate.
 
 **Consequences:**
@@ -691,15 +717,62 @@ fn damage_source_view(state: &GameState, src: DamageSourceRef) -> Option<DamageS
   `matches_target_filter_on_lki_snapshot` (`filter.rs:3865`), so no parallel
   matcher is written. Protection needs the snapshot's `colors` / `card_types`,
   which `LKISnapshot` already has.
+- **Protection takes a source view, not a filter.** Protection doesn't go
+  through `TargetFilter`. `protection_prevents_from(&GameObject, &GameObject)`
+  (`keywords.rs:590`), `source_matches_protection_target`,
+  `source_matches_protection_filter` and `player_protection_from_object` read
+  the source's effective colors, core types, subtypes, controller or owner,
+  mana value and P/T from a `&GameObject`.
+  - Phase 3b changes those predicates' *source* parameter to a characteristics
+    view that both `GameObject` and `LKISnapshot` provide, i.e.
+    `DamageSourceView`. `LKISnapshot` already stores all of those fields.
+  - Existing targeting, blocking and attach callers pass `Live`.
+  - **No second, LKI-only copy of the protection logic.** Current CR 702.16a
+    defines the quality; CR 702.16e the damage prevention.
+- **Post-replacement source slots.** `TargetFilter::PostReplacementDamageSource`
+  and `PostReplacementSourceController` (`targeting.rs:1629-1642`) turn the
+  prevented event's source into a live object id or controller. They drive
+  "reflect" riders such as "deals that much damage to that source's controller"
+  (`rider_reflects_per_event_damage_source`, `replacement.rs:2024`). They also
+  go through `damage_source_view`, so a sacrificed token's controller is read
+  from its LKI.
+- **Token flag.** `matches_target_filter_on_lki_snapshot` reads `is_token` from
+  the live object (`filter.rs:3902-3905`). That reads `false` for a token that
+  has ceased to exist. Add `LKISnapshot.is_token` next to `is_commander`, and
+  have the LKI filter read it.
+- **Deliberately NOT incarnation-keyed:**
+  - **Commander damage totals.** `CommanderDamageEntry.commander` (`game_state.rs:2453`)
+    stays keyed by id: CR 903.10a counts damage "by the same commander over the
+    course of the game", which spans zone changes.
+  - **Shield-host events.** `DamagePrevented { source_id: rid.source }` emitted
+    by prevention riders (`combat_damage.rs:1878,1908`) names the shield's
+    *host*, not a damage source.
+  - **Excess-damage redirect** (CR 120.4a). `excess_recipient` is always `None`
+    on the combat path (`deal_damage.rs:345`).
 - **Chosen source with incarnation.** The concrete shape (e.g. parameterizing
   `SpecificObject` with an optional incarnation, or a distinct chosen-source
   filter) **must go through the `add-engine-variant` gate** in Phase 3b's plan,
   because `TargetFilter` is a shared, serialized surface. The requirement is
   fixed here: a shield created for incarnation *n* must not apply to *n+1*.
-- **Behavior under Modern: unchanged by construction.** No source can change
-  between assignment and dealing, so `damage_source_view` always returns `Live`
-  for the same object. That makes it a separately shippable, no-behavior phase
-  (3b) with direct building-block tests.
+- **Behavior under Modern: unchanged, by an explicit stamping rule.**
+  - **The scale.** D10 touches ~59 `DamageContext::from_source` callers and ~135
+    `ProposedEvent::Damage` constructors, most of them noncombat. "The source
+    can't change" holds only for combat.
+  - **The rule.** Every site stamps **the incarnation of the object currently
+    stored under that id**, exactly what `from_source` records today
+    (`deal_damage.rs:311`). A missing object keeps today's fallback: the view
+    returns `None`.
+  - **What it means for noncombat damage.** A dies-trigger's damage whose
+    source is now a newer incarnation in the graveyard is still read from that
+    graveyard object, as today. No noncombat site starts reading LKI in 3b.
+  - **Only `OnStack` stamps a frozen, possibly-departed incarnation.** Widening
+    noncombat damage to LKI is a separate, later change with its own review.
+- **Legacy payloads.** `DamageSourceRef` replaces bare ids inside persisted
+  state (`GameEvent`, `ProposedEvent`, `PendingCombatLifelink.batch_events`).
+  Accept legacy bare-id payloads through a compat deserializer, following the
+  existing precedent `ObjectIncarnationRef`'s
+  `#[serde(from = "ObjectIncarnationRefCompat")]` (`identifiers.rs:146,188`).
+  That way an old persisted mid-choice game still loads.
 - **Scope beyond combat is intentional.** Noncombat damage from a source that
   left mid-resolution already needs LKI, and this authority serves it, but 3b
   keeps noncombat call sites behavior-identical and doesn't widen them.
@@ -789,7 +862,8 @@ puts it on the stack instead.` Precedent: `game/mana_burn.rs:1-19`.
 | 702.2b / 702.2c / 702.2f | Deathtouch |
 | 702.19b | Trample assignment |
 | 702.15b / 702.15f | Lifelink |
-| 702.16b / 702.16e | Protection damage prevention |
+| 702.16a | Protection quality (D10 source view) |
+| 702.16e | Protection damage prevention |
 | 724.1b / 724.2b | Stack exile |
 | 800.4a / 800.4e / 800.4j | Leaving player |
 | 903.10a + 704.6c | Commander damage |
@@ -818,7 +892,7 @@ sharp by mutating the fix and pasting the failure.
   - `StackEntryKind::CombatDamage` and `AssignedCombatDamage` /
     `AssignedDamageRecipient`;
   - `StackObjectClass` (D5);
-  - `StackEntry.controller: Option<PlayerId>` (D9), every §3.6 decision,
+  - the private controller carried by `StackObjectClass` (D9), every §3.6 decision,
     display label and lines, TS types;
   - protocol bump;
   - fix the `CombatDamageTiming` doc comment.
@@ -840,7 +914,10 @@ sharp by mutating the fix and pasting the failure.
     source filter, matcher source filters and `damage_source_options`;
   - the chosen-source-with-incarnation filter shape (through the
     `add-engine-variant` gate);
-  - `LKISnapshot.is_commander`;
+  - protection predicates over `DamageSourceView`; the post-replacement
+    source slots;
+  - `LKISnapshot.is_commander` and `is_token`;
+  - the stamping rule, and the legacy-payload compat deserializer;
   - the client event-type mirrors;
   - protocol bump.
 - **Tests (building block):**
@@ -850,7 +927,14 @@ sharp by mutating the fix and pasting the failure.
      Control: a non-red LKI source isn't prevented.
   3. A "red sources" prevention filter matches an LKI red source.
   4. A chosen-source shield for incarnation *n* doesn't apply to *n+1*.
-  5. A full existing-suite run shows no Modern behavior change.
+  5. **Pinning test for the stamping rule:** a dies-trigger's noncombat damage,
+     whose source has since changed incarnation into the graveyard, is judged
+     against the graveyard object exactly as before, e.g. by a protection
+     quality the graveyard card has. It fails if a site stamps the captured
+     battlefield incarnation instead.
+  6. `matches_target_filter_on_lki_snapshot` treats a ceased token as a token
+     ("nontoken source" doesn't match). Control: a nontoken card does match.
+  7. A legacy bare-id damage event deserializes.
 
 ### Phase 3c — `OnStack` engine behavior
 
@@ -885,15 +969,23 @@ sharp by mutating the fix and pasting the failure.
 
      Control: the other incarnation isn't shielded.
   9. *First strike:* two objects, a window after each; 502.2c and 502.28d.
-  10. *Empty first-strike sub-step* (every first striker's blocker removed):
-      no object, a Priority window, then regular assignments.
+  10. *Empty first-strike sub-step* (every first striker's blocker removed): no
+      object, a Priority window, then regular assignments. **Also asserts** the
+      first strikers deal no damage in the regular sub-step, which is the D0
+      departure in §1.4's table.
   11. *First strike + lifelink + two life-gain replacements (D7):* a Priority
       window exists before the second object. Modern control: the resume still
       flows straight into the regular sub-step.
-  12. *Beginning-of-combat-damage-step trigger:* the stack order is trigger
-      **above** the object, and it resolves before damage. Variant: two
-      same-controller triggers raise `OrderTriggers`; after ordering, exactly
-      one damage object exists and the marker fired once.
+  12. *Beginning-of-combat-damage-step trigger:*
+      - The stack order is trigger **above** the object, and it resolves before
+        damage.
+      - Variant: two same-controller triggers raise `OrderTriggers`; after
+        ordering, exactly one damage object exists and the marker fired once.
+      - Variant: the same with an **empty** sub-step. The marker fires once, and
+        no damage object exists.
+      - No card has this trigger text, so the test uses a **synthetic
+        `TriggerDefinition`**, and the `/card-test` verbatim-Oracle requirement
+        doesn't apply.
   13. *CR 724.1 end the turn and CR 724.2 end combat* with the object on the
       stack: no damage, clean teardown, and the gate doesn't re-fire.
   14. *Observer trigger on a sacrificed source:* "whenever a creature you
@@ -907,9 +999,16 @@ sharp by mutating the fix and pasting the failure.
         - damage *by* creatures they owned or controlled is dealt from LKI
           (2009 600.4a);
         - damage *to* their creatures is dropped;
-        - priority after resolution goes to the next player (CR 800.4j).
+        - priority after resolution goes to the next player (CR 800.4j);
+        - a creature they **stole** (control-changing effect) returns to its
+          owner and deals and receives its damage **live**;
+        - an LKI lifelink source they controlled gains them no life.
   16. *Counter/Stifle-class* effects have no legal target (reachable flow).
   17. *Journal replay* of a push and resolve reproduces an identical state.
+  18. *Reflect rider on a sacrificed token source:* a "prevent that damage; it
+      deals that much damage to that source's controller" shield created after
+      assignment finds the token's controller from LKI. Control: under Modern
+      the same shield against a live token behaves as today.
 
 ### Phase 3d — Release: gate, presets, client and AI polish
 
@@ -1019,6 +1118,36 @@ sharp by mutating the fix and pasting the failure.
 | Illusionary Mask quote not verbatim | full sentence quoted; Time Vault `[sic]` |
 | Owned vs controlled | §3.4 ownership paragraph; test 3c-15 |
 | Step-start marker in the second step | §3.2 note (no observable card) |
+
+### Round 3 (final)
+
+**Architecture (APPROVE WITH CHANGES):**
+
+| Finding | Change |
+|---|---|
+| C1 empty-branch prompt returns before the sub-step is marked dealt; the marker fires twice | §3.2 marks the sub-step dealt before triggers and prompt; empty-sub-step variant in test 3c-12 |
+| C2 protection can't use the LKI filter matcher | protection predicates over `DamageSourceView` (§3.11); no LKI-only copy |
+| C3 post-replacement source slots and the live `is_token` read | added to D10; `LKISnapshot.is_token`; test 3c-18, test 3b-6; commander keys, shield-host events and excess damage stay id-keyed, stated explicitly |
+| C4 3b's no-behavior claim needs a noncombat stamping rule | stamping rule (§3.11); pinning test 3b-5 replaces the unfalsifiable suite-run check |
+| C5 a bare `Option` controller invites unwraps | D9: private field; controller carried in `StackObjectClass`; serde correction |
+| L1 one helper for `include_phase_event` | §3.2 |
+| L2 legacy event payloads | compat deserializer (§3.11); test 3b-7 |
+| L3 untested D0 first-strike departure | test 3c-10 |
+| L4 synthetic trigger in test 3c-12 | stated |
+
+**Rules:**
+
+| Finding | Change |
+|---|---|
+| Control-changed permanents aren't exiled when their controller leaves | §3.4 three-case table; test 3c-15 |
+| The banding 502.10h row was wrong | row removed |
+| CR 702.16b is targeting, not damage | §8 cites 702.16a / 702.16e |
+| The elided 310.1 quote is about assignment triggers | §3.2 cites 2009 408.1f + current CR 500.6 |
+| Lifelink to a departed controller | §3.4 paragraph; test 3c-15 |
+
+**Review loop closed** at the three-round cap. The final architecture verdict is
+APPROVE WITH CHANGES, and all changes are applied above. Each implementation
+phase still gets its own plan review and implementation review.
 
 ---
 
