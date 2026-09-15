@@ -53725,6 +53725,46 @@ fn resolution_full_cost_auto_selects_only_legal_back_face() {
     );
 }
 
+/// A paid resolution cast from a graveyard is still a normal-cost cast.  Its
+/// temporary permission must not let the card's native Flashback alternative
+/// replace the printed cost while preparing the selected face.
+#[test]
+fn resolution_full_cost_graveyard_cast_uses_printed_cost_not_flashback() {
+    let mut state = setup_game_at_main_phase();
+    let spell = add_flashback_instant_to_graveyard(
+        &mut state,
+        PlayerId(0),
+        ManaCost::generic(5),
+        ManaCost::generic(2),
+    );
+    let mut request = resolution_test_request(TargetFilter::Any);
+    request.cost = crate::types::ability::ResolutionCastCost::FullCost {
+        mana_spend_permission: None,
+    };
+
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("the paid graveyard cast must prepare");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("the paid graveyard cast must not reject");
+    };
+
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ManaPayment { .. }
+    ));
+    let pending_cast = state
+        .pending_cast
+        .as_ref()
+        .expect("the paid cast must retain its transaction");
+    assert_eq!(pending_cast.casting_variant, CastingVariant::Normal);
+    assert_eq!(
+        pending_cast.cost.mana_value(),
+        2,
+        "a paid resolution cast must charge its printed cost, not Flashback"
+    );
+}
+
 /// CR 712.14a: a transformed-resolution permission keeps a transforming DFC's
 /// front face on the stack and lets the established post-entry transform make
 /// it enter on its back face.  Pre-swapping here would double-transform it.

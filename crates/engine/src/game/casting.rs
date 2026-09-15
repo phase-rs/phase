@@ -10385,6 +10385,17 @@ fn resolution_spell_face_legality_for_permission(
         };
     };
     let may_choose_back = resolution_spell_face_choice_available(original);
+    // The permission provenance is the authority for whether this is a paid
+    // normal-cost cast.  Preserve that choice for either elected face: omitting
+    // the override here would let a native graveyard alternative (Flashback,
+    // Escape, and so on) replace a resolution `FullCost` offer during probing.
+    let force_normal_cost = matches!(
+        original.casting_permissions.get(permission_index.0),
+        Some(CastingPermission::ExileWithAltCost {
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::NormalCost,
+            ..
+        })
+    );
     let mut legality = ResolutionSpellFaceLegality {
         front: false,
         back: false,
@@ -10459,7 +10470,7 @@ fn resolution_spell_face_legality_for_permission(
                 &projected,
                 player,
                 object_id,
-                None,
+                force_normal_cost.then_some(CastingVariant::Normal),
                 None,
                 Some(permission_index),
                 CastingMode::Actual,
@@ -12981,7 +12992,7 @@ pub(super) fn continue_resolution_modal_face_choice(
     choice: ResolutionModalFaceChoice,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let graveyard_replacement = state
+    let (graveyard_replacement, force_normal_cost) = state
         .objects
         .get(&object_id)
         .and_then(|object| object.casting_permissions.get(choice.permission_index.0))
@@ -12990,8 +13001,15 @@ pub(super) fn continue_resolution_modal_face_choice(
                 granted_to: Some(grantee),
                 resolution_cleanup: Some(_),
                 graveyard_replacement,
+                cost_provenance,
                 ..
-            } if *grantee == player => Some(graveyard_replacement.clone()),
+            } if *grantee == player => Some((
+                graveyard_replacement.clone(),
+                matches!(
+                    cost_provenance,
+                    crate::types::ability::ExileGrantCostProvenance::NormalCost
+                ),
+            )),
             _ => None,
         })
         .ok_or_else(|| {
@@ -13019,7 +13037,7 @@ pub(super) fn continue_resolution_modal_face_choice(
         state,
         player,
         object_id,
-        None,
+        force_normal_cost.then_some(CastingVariant::Normal),
         None,
         Some(choice.permission_index),
         CastingMode::Actual,
