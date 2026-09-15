@@ -46,9 +46,11 @@ fn drive_to_declare_attackers(runner: &mut GameRunner) {
     for _ in 0..64 {
         match runner.state().waiting_for {
             WaitingFor::DeclareAttackers { .. } => return,
-            WaitingFor::Priority { .. } => runner
-                .act(GameAction::PassPriority)
-                .expect("passing priority should reach declare attackers"),
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority should reach declare attackers");
+            }
             ref other => panic!("expected priority or declare attackers, got {other:?}"),
         }
     }
@@ -72,19 +74,25 @@ fn drive_until_source_triggers_are_stacked(
         }
 
         match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } => runner
-                .act(GameAction::PassPriority)
-                .expect("passing priority should advance the stack"),
-            WaitingFor::DeclareBlockers { .. } => runner
-                .act(GameAction::DeclareBlockers {
-                    assignments: vec![],
-                })
-                .expect("defender should be able to declare no blockers"),
-            WaitingFor::OrderTriggers { triggers, .. } => runner
-                .act(GameAction::OrderTriggers {
-                    order: (0..triggers.len()).collect(),
-                })
-                .expect("trigger order should be accepted"),
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority should advance the stack");
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    })
+                    .expect("defender should be able to declare no blockers");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("trigger order should be accepted");
+            }
             other => panic!("unexpected wait state while stacking triggers: {other:?}"),
         }
     }
