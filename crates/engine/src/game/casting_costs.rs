@@ -2217,7 +2217,14 @@ fn finish_cost_object_moves(
             ZoneMoveRequest::cost(object_id, destination, pending.object_id),
             events,
         ) {
-            ZoneMoveResult::Done => {}
+            ZoneMoveResult::Done => {
+                // CR 406.6: the resumed leg delivers like the direct one, so it
+                // must index the same "exiled with [source] this turn" relation.
+                // Without this a replacement-paused cost move lost its provenance.
+                if destination == Zone::Exile {
+                    super::costs::record_delivered_cost_exile(state, object_id, pending.object_id);
+                }
+            }
             ZoneMoveResult::NeedsChoice(choice_player) => {
                 state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
                     player,

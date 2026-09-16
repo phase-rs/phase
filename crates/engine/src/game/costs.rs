@@ -528,20 +528,18 @@ fn move_self_activation_cost(
 
 /// CR 406.6: Record an "exiled with [source] this turn" relation only for a
 /// cost object that actually arrived in exile after replacements applied.
-fn record_delivered_cost_exile(
+pub(crate) fn record_delivered_cost_exile(
     state: &mut GameState,
     exiled_id: ObjectId,
     source_id: ObjectId,
-) -> bool {
+) {
     if state
         .objects
         .get(&exiled_id)
         .is_some_and(|object| object.zone == Zone::Exile)
     {
         super::exile_links::push_exiled_with_source_this_turn(state, exiled_id, source_id);
-        return true;
     }
-    false
 }
 
 /// CR 614.12a + CR 616.1: Continue a forced MayCost exile after the inner
@@ -570,9 +568,7 @@ pub(crate) fn resume_replacement_may_cost_move(
             ZoneMoveRequest::cost(object_id, Zone::Exile, source_id),
             events,
         ) {
-            ZoneMoveResult::Done => {
-                record_delivered_cost_exile(state, object_id, source_id);
-            }
+            ZoneMoveResult::Done => record_delivered_cost_exile(state, object_id, source_id),
             ZoneMoveResult::NeedsChoice(choice_player) => {
                 state.pending_cost_move_resume = Some(PendingCostMoveResume::ReplacementMayCost {
                     source_id,
@@ -1815,21 +1811,13 @@ fn pay_ability_cost_inner(
                     "not enough cards in library to exile for cost",
                 ));
             }
-            let mut delivered = 0i32;
             for (index, &card_id) in top.iter().enumerate() {
                 match zone_pipeline::move_object(
                     state,
                     ZoneMoveRequest::cost(card_id, Zone::Exile, source_id),
                     events,
                 ) {
-                    ZoneMoveResult::Done => {
-                        // CR 614.1a: a replacement may redirect or prevent a cost
-                        // move, so the paid count is what ARRIVED in exile, never
-                        // the requested count.
-                        if record_delivered_cost_exile(state, card_id, source_id) {
-                            delivered += 1;
-                        }
-                    }
+                    ZoneMoveResult::Done => record_delivered_cost_exile(state, card_id, source_id),
                     ZoneMoveResult::NeedsChoice(choice_player) => {
                         state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
                             player,
@@ -1851,10 +1839,11 @@ fn pay_ability_cost_inner(
                     }
                 }
             }
-            // CR 118.12: record the paid count for downstream chain steps
-            // (`QuantityRef::EventContextAmount` tier 5). Counts deliveries, so a
-            // redirected or prevented cost move is never counted as paid.
-            state.last_effect_count = Some(delivered);
+            // CR 118.11: "The actions performed when paying a cost may be modified
+            // by effects. Even if they are ... the cost has still been paid." So the
+            // paid count is the count the cost CALLED FOR, not how many objects a
+            // replacement let arrive in exile.
+            state.last_effect_count = Some(count as i32);
         }
         // Other cost types require interactive resolution and are intercepted
         // before reaching pay_ability_cost, or are not yet auto-payable.

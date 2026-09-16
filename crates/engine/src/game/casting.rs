@@ -18996,6 +18996,61 @@ fn has_self_ref_discard_cost(cost: &AbilityCost) -> bool {
 /// source out of hand before the ability resolves, so ability-scoped filters
 /// like Transmute's same-mana-value search need a public-characteristics
 /// snapshot attached to the resolving ability before cost payment.
+/// CR 118.3 + CR 608.2k + CR 400.7j: Bind the cost-paid referent for a
+/// deterministic "exile the top N cards of your library" activation cost BEFORE
+/// the payment moves them.
+///
+/// `QuantityRef::ObjectManaValue { scope: ObjectScope::CostPaidObject }` is how
+/// "the exiled card's mana value" resolves (Phyrexian Devourer), and the
+/// snapshot must be captured while the card is still a live object — once the
+/// cost has moved it to exile the pre-move characteristics are gone. The single
+/// snapshot binds the top card (the singular referent the card text names);
+/// every exiled id is also recorded so a multi-card cost (Whirling Catapult
+/// exiles two) is not misrepresented by that one snapshot.
+pub(crate) fn stamp_top_library_exile_cost_paid_object(
+    state: &GameState,
+    player: PlayerId,
+    ability: &mut ResolvedAbility,
+    cost: &AbilityCost,
+) {
+    let Some(count) = top_library_exile_cost_count(cost) else {
+        return;
+    };
+    let Some(top) = state.players.get(player.0 as usize).map(|p| {
+        p.library
+            .iter()
+            .copied()
+            .take(count as usize)
+            .collect::<Vec<_>>()
+    }) else {
+        return;
+    };
+    if top.len() < count as usize {
+        return;
+    }
+    if let Some(obj) = top.first().and_then(|id| state.objects.get(id)) {
+        ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+            obj,
+            obj.snapshot_for_mana_spent(),
+        ));
+    }
+    ability.add_cost_paid_object_ids_recursive(&top);
+}
+
+/// The deterministic top-of-library exile shape, recursing into `Composite` so a
+/// combined cost ("{2}, Exile the top two cards of your library") is covered.
+fn top_library_exile_cost_count(cost: &AbilityCost) -> Option<u32> {
+    match cost {
+        AbilityCost::Exile {
+            count,
+            zone: Some(Zone::Library),
+            filter: None,
+        } => Some(*count),
+        AbilityCost::Composite { costs } => costs.iter().find_map(top_library_exile_cost_count),
+        _ => None,
+    }
+}
+
 pub(crate) fn stamp_self_ref_discard_cost_paid_object(
     state: &GameState,
     source_id: ObjectId,
@@ -21521,6 +21576,7 @@ pub fn handle_activate_ability(
             ));
         }
         stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
+        stamp_top_library_exile_cost_paid_object(state, player, &mut resolved, cost);
         if let Some(waiting) = try_finalize_activation_mana_payment(
             state,
             player,
