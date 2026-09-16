@@ -62,6 +62,7 @@ vi.mock("../../stores/draftPodStore", () => ({
     setHostDisplayName: () => void;
     guestDisplayName: string;
     setGuestDisplayName: () => void;
+    adoptSavedDisplayName: () => void;
     joinCode: string;
     setJoinCode: () => void;
     createPod: () => void;
@@ -88,6 +89,10 @@ vi.mock("../../stores/draftPodStore", () => ({
     setHostDisplayName: vi.fn(),
     guestDisplayName: "Guest",
     setGuestDisplayName: vi.fn(),
+    // Inert here: both name fields above are already non-empty, which is the
+    // state in which the real action does nothing. This suite is about offline
+    // admission, not seeding.
+    adoptSavedDisplayName: vi.fn(),
     joinCode: "",
     setJoinCode: vi.fn(),
     createPod: vi.fn(),

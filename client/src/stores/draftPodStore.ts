@@ -157,6 +157,20 @@ interface DraftPodActions {
   setHostDisplayName: (name: string) => void;
   /** Set guest display name. */
   setGuestDisplayName: (name: string) => void;
+  /**
+   * Seed both pod display-name fields from the saved multiplayer identity
+   * (`multiplayerStore.displayName`), filling only a field still empty.
+   *
+   * Read at call time rather than captured into `initialState`, because that
+   * identity is editable — `PlayerIdentityBanner`, and Preferences →
+   * Multiplayer — long after this module is evaluated.
+   *
+   * The empty-field guard exists for the name the player typed for this pod.
+   * A host session restored by `resumeHostedPod` survives for a different
+   * reason: that path assigns `hostDisplayName` unconditionally, and on the
+   * page it lands after this seed rather than before it.
+   */
+  adoptSavedDisplayName: () => void;
   /** Set join code for guest. */
   setJoinCode: (code: string) => void;
   /**
@@ -506,6 +520,22 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
 
     setGuestDisplayName: (name) => {
       set({ guestDisplayName: name });
+    },
+
+    adoptSavedDisplayName: () => {
+      // `typeof` rather than a bare `.trim()`, even though the field is typed
+      // `string`: `multiplayerStore`'s persist `merge` normalizes five of its
+      // siblings under "Persisted state is external input" but spreads
+      // `displayName` through unvalidated, so a corrupt localStorage blob can
+      // hydrate a non-string. `PodSetup` calls this from a mount effect, where
+      // a throw takes the whole Draft Pod route down over a cosmetic prefill.
+      const persisted: unknown = useMultiplayerStore.getState().displayName;
+      const saved = typeof persisted === "string" ? persisted.trim() : "";
+      if (!saved) return;
+      set((prev) => ({
+        hostDisplayName: prev.hostDisplayName || saved,
+        guestDisplayName: prev.guestDisplayName || saved,
+      }));
     },
 
     setJoinCode: (code) => {
