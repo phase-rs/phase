@@ -1777,6 +1777,67 @@ fn pay_ability_cost_inner(
                 return Ok(outcome);
             }
         }
+        // CR 118.3 + CR 601.2h + CR 406.6: "Exile the top N cards of your
+        // library" is a DETERMINISTIC cost — the cards are not chosen, so no
+        // interactive detour intercepts it (`find_non_self_exile` matches only
+        // hand and graveyard, and `cost_payability::eligible_exile_cost_objects`
+        // already treats a library exile cost as top-of-library rather than a
+        // choice). Without this arm the cost fell through to the interactive
+        // no-op below and was silently treated as paid, so the ability resolved
+        // for free (issue #782). Covers Thought Lash, Phyrexian Devourer, Royal
+        // Herbalist, Storm Elemental and Whirling Catapult (which exiles two).
+        //
+        // Activation scope only: resolution-time payment of this shape (Thought
+        // Lash's cumulative upkeep) keeps its existing path and remains issue
+        // #581's territory.
+        AbilityCost::Exile {
+            count,
+            zone: Some(Zone::Library),
+            filter: None,
+        } if matches!(scope, PaymentScope::Activation { .. }) => {
+            let count = *count as usize;
+            let top: Vec<ObjectId> = state
+                .players
+                .get(player.0 as usize)
+                .map(|p| p.library.iter().copied().take(count).collect())
+                .unwrap_or_default();
+            // CR 118.3: a player can't pay a cost without the resources to pay it.
+            if top.len() < count {
+                return Ok(payment_failed(
+                    "not enough cards in library to exile for cost",
+                ));
+            }
+            for (index, &card_id) in top.iter().enumerate() {
+                match zone_pipeline::move_object(
+                    state,
+                    ZoneMoveRequest::cost(card_id, Zone::Exile, source_id),
+                    events,
+                ) {
+                    ZoneMoveResult::Done => record_delivered_cost_exile(state, card_id, source_id),
+                    ZoneMoveResult::NeedsChoice(choice_player) => {
+                        state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
+                            player,
+                            pending: None,
+                            chosen: top.clone(),
+                            paused_at_index: index,
+                            destination: Zone::Exile,
+                            completion: PendingCostMoveCompletion::FinishPending,
+                        });
+                        if state.pending_replacement.is_some() {
+                            pause_cost_payment_for_replacement_choice(state, choice_player);
+                        }
+                        return Ok(PaymentOutcome::Paused {
+                            remaining_cost: None,
+                        });
+                    }
+                    ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        unreachable!("a cost move to Exile cannot require Aura attachment")
+                    }
+                }
+            }
+            // CR 118.12: record the paid count for downstream chain steps.
+            state.last_effect_count = Some(count as i32);
+        }
         // Other cost types require interactive resolution and are intercepted
         // before reaching pay_ability_cost, or are not yet auto-payable.
         // CR 117.1 + CR 601.2b: `ExileWithAggregate` (Baron Helmut Zemo's Boast)
