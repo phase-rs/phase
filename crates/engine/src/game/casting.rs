@@ -10375,6 +10375,11 @@ pub(crate) fn resolution_spell_face_admission(
             zone,
             &policy.filter,
             &context,
+        ) && cast_permission_constraint_allows_cast(
+            &projected,
+            object,
+            &policy.constraint,
+            Some(object.spell_mana_value()),
         );
         if back_face {
             admission.back = allowed;

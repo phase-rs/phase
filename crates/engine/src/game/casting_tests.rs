@@ -53805,6 +53805,48 @@ fn resolution_test_request(filter: TargetFilter) -> ResolutionCastRequest {
     }
 }
 
+/// A private-library look/cast policy is frozen before it reaches the candidate
+/// chooser.  Kiora's "less than X" constraint therefore applies to each
+/// projected face: the front may be offered, while a back face equal to X may
+/// not leak into the private choice.  This remains an offer-admission check;
+/// target, timing, and payment preparation still wait for the elected face.
+#[test]
+fn resolution_spell_face_admission_applies_frozen_constraint_per_private_library_face() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    {
+        let object = state.objects.get_mut(&spell).expect("fixture spell exists");
+        object.zone = Zone::Library;
+        object.mana_cost = ManaCost::generic(2);
+        object
+            .back_face
+            .as_mut()
+            .expect("fixture has a back spell face")
+            .mana_cost = ManaCost::generic(3);
+    }
+    state.players[0].library.push_front(spell);
+
+    let policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        TargetFilter::Any,
+        ObjectId(83_021),
+        PlayerId(0),
+        Some(CastPermissionConstraint::ManaValue {
+            comparator: Comparator::LT,
+            // This is Kiora, Sovereign of the Deep's already-frozen X = 3.
+            value: QuantityExpr::Fixed { value: 3 },
+        }),
+    );
+
+    assert_eq!(
+        resolution_spell_face_admission(&state, spell, &policy),
+        ResolutionSpellFaceLegality {
+            front: true,
+            back: false,
+        },
+        "the back face has MV equal to Kiora's frozen X and must not be offered"
+    );
+}
+
 fn mark_resolution_test_back_face_as_aftermath(state: &mut GameState, spell: ObjectId) {
     let back_face = state.objects[&spell]
         .back_face

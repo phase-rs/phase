@@ -20320,18 +20320,23 @@ fn migrate_legacy_graveyard_paid_cast_cleanup(value: &mut serde_json::Value) -> 
         }
         let constraint = kind.remove("constraint").unwrap_or(serde_json::Value::Null);
         kind.remove("installed_triggers");
+        let any_filter = serde_json::to_value(crate::types::ability::TargetFilter::Any)
+            .expect("TargetFilter::Any is serializable");
+        let remain_exiled =
+            serde_json::to_value(crate::types::ability::ResolutionMvRejectAction::RemainExiled)
+                .expect("ResolutionMvRejectAction::RemainExiled is serializable");
         kind.insert(
             "cleanup".to_string(),
             serde_json::json!({
                 "source_id": hit_card,
                 "face_policy": {
-                    "filter": "Any",
+                    "filter": any_filter,
                     "source_id": policy_source_id,
                     "controller": player,
                     "constraint": constraint,
                 },
                 "exiled_misses": [],
-                "reject_action": "RemainExiled",
+                "reject_action": remain_exiled,
                 "success_action": { "type": "BottomMisses" },
                 "delayed_trigger_receipts": delayed_trigger_receipts,
             }),
@@ -28615,6 +28620,223 @@ mod tests {
             .expect("persisted state with complete exploit evidence decodes")
             .into_game_state_unchecked();
             assert_eq!(restored.deferred_entry_events, vec![expected.clone()]);
+        }
+    }
+
+    fn paid_offer_cleanup_fixture() -> (
+        GameState,
+        ObjectId,
+        ObjectId,
+        crate::types::ability::CastPermissionConstraint,
+        crate::types::ability::ResolutionCastDelayedTriggerReceipt,
+    ) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(9_301),
+            PlayerId(0),
+            "Paid offer source".to_string(),
+            Zone::Battlefield,
+        );
+        let hit_card = create_object(
+            &mut state,
+            CardId(9_302),
+            PlayerId(0),
+            "Paid offer hit".to_string(),
+            Zone::Graveyard,
+        );
+        let delayed = DelayedTrigger::new(
+            DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            )),
+            PlayerId(0),
+            source,
+            true,
+        );
+        crate::game::triggers::install_delayed_trigger(&mut state, delayed, &mut Vec::new());
+        let origin = state.delayed_triggers[0]
+            .provenance
+            .origin()
+            .expect("live delayed installation has an exact receipt");
+        let receipt = crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+            token: origin.token,
+            instance: origin.instance,
+            source_id: origin.source_id,
+        };
+        let constraint = crate::types::ability::CastPermissionConstraint::ManaValue {
+            comparator: Comparator::LT,
+            value: QuantityExpr::Fixed { value: 4 },
+        };
+        let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+            TargetFilter::Any,
+            source,
+            PlayerId(1),
+            Some(constraint.clone()),
+        );
+        state.waiting_for = WaitingFor::CastOffer {
+            // This is deliberately different from the hit card's owner and
+            // source controller. The outer prompt actor is the only legacy
+            // controller authority the migration can faithfully retain.
+            player: PlayerId(1),
+            kind: CastOfferKind::GraveyardPaidCast {
+                hit_card,
+                mana_spend_permission: None,
+                graveyard_replacement: None,
+                cast_transformed: false,
+                additional_cost: None,
+                cleanup: crate::types::ability::ResolutionCastCleanup {
+                    source_id: source,
+                    face_policy,
+                    exiled_misses: Vec::new(),
+                    reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                    success_action:
+                        crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                    delayed_trigger_receipts: vec![receipt.clone()],
+                },
+            },
+        };
+        (state, source, hit_card, constraint, receipt)
+    }
+
+    fn downgrade_paid_offer_cleanup_to_legacy(state: &mut serde_json::Value) {
+        let kind = state["waiting_for"]["data"]["kind"]
+            .as_object_mut()
+            .expect("fixture has a paid cast offer");
+        let cleanup = kind
+            .remove("cleanup")
+            .expect("modern fixture has canonical cleanup");
+        let constraint = cleanup["face_policy"]["constraint"].clone();
+        let receipts = cleanup["delayed_trigger_receipts"]
+            .as_array()
+            .expect("modern fixture has receipt list");
+        let installed = receipts
+            .iter()
+            .map(|receipt| receipt["instance"].clone())
+            .collect::<Vec<_>>();
+        kind.insert("constraint".to_string(), constraint);
+        kind.insert(
+            "installed_triggers".to_string(),
+            serde_json::Value::Array(installed),
+        );
+    }
+
+    fn assert_migrated_paid_offer_cleanup(
+        state: &GameState,
+        hit_card: ObjectId,
+        constraint: &crate::types::ability::CastPermissionConstraint,
+        receipt: &crate::types::ability::ResolutionCastDelayedTriggerReceipt,
+    ) {
+        let WaitingFor::CastOffer {
+            player: PlayerId(1),
+            kind:
+                CastOfferKind::GraveyardPaidCast {
+                    hit_card: restored_hit,
+                    cleanup,
+                    ..
+                },
+        } = &state.waiting_for
+        else {
+            panic!(
+                "legacy paid offer must decode as its canonical CastOffer: {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(*restored_hit, hit_card);
+        assert_eq!(cleanup.source_id, hit_card);
+        assert_eq!(cleanup.face_policy.source_id, hit_card);
+        assert_eq!(
+            cleanup.face_policy.controller,
+            PlayerId(1),
+            "the outer CastOffer.player, not a live source or hit-card owner, owns legacy policy authority"
+        );
+        assert_eq!(cleanup.face_policy.constraint.as_ref(), Some(constraint));
+        assert_eq!(cleanup.delayed_trigger_receipts, vec![receipt.clone()]);
+    }
+
+    #[test]
+    fn legacy_paid_offer_cleanup_migrates_across_raw_trusted_and_versioned_ingresses() {
+        let (state, _source, hit_card, constraint, receipt) = paid_offer_cleanup_fixture();
+
+        // Bare current-state serde is the direct raw ingress. It does not have
+        // a resolution wire discriminator, so it exercises GameStateDecode's
+        // raw migration path directly.
+        let mut direct_raw = serde_json::to_value(&state).expect("fixture serializes");
+        downgrade_paid_offer_cleanup_to_legacy(&mut direct_raw);
+        let restored: GameState = serde_json::from_value(direct_raw.clone())
+            .expect("direct raw legacy paid offer migrates");
+        assert_migrated_paid_offer_cleanup(&restored, hit_card, &constraint, &receipt);
+
+        // An unversioned persisted raw save declares its historical wire mode
+        // at the persistence boundary before running the same migration.
+        let restored = serde_json::from_value::<PersistedGameState>(direct_raw)
+            .expect("persisted raw legacy paid offer migrates")
+            .into_game_state_unchecked();
+        assert_migrated_paid_offer_cleanup(&restored, hit_card, &constraint, &receipt);
+
+        let mut versioned = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("versioned fixture serializes");
+        downgrade_paid_offer_cleanup_to_legacy(&mut versioned);
+        let restored = serde_json::from_value::<ResolutionStateWire>(versioned.clone())
+            .expect("declared resolution wire migrates legacy paid offer")
+            .into_game_state();
+        assert_migrated_paid_offer_cleanup(&restored, hit_card, &constraint, &receipt);
+
+        let restored = serde_json::from_value::<PersistedGameState>(serde_json::json!({
+            "state": versioned,
+        }))
+        .expect("trusted envelope migrates legacy paid offer")
+        .into_game_state_unchecked();
+        assert_migrated_paid_offer_cleanup(&restored, hit_card, &constraint, &receipt);
+    }
+
+    #[test]
+    fn paid_offer_cleanup_decode_preserves_modern_payload_and_rejects_mixed_legacy_fields() {
+        let (state, source, _hit_card, constraint, receipt) = paid_offer_cleanup_fixture();
+        let modern = serde_json::to_value(&state).expect("modern fixture serializes");
+        let restored: GameState =
+            serde_json::from_value(modern.clone()).expect("modern cleanup remains canonical");
+        let WaitingFor::CastOffer {
+            kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
+            ..
+        } = restored.waiting_for
+        else {
+            panic!("modern paid offer must retain its canonical cleanup");
+        };
+        assert_eq!(cleanup.source_id, source);
+        assert_eq!(cleanup.face_policy.source_id, source);
+        assert_eq!(cleanup.face_policy.constraint, Some(constraint.clone()));
+        assert_eq!(cleanup.delayed_trigger_receipts, vec![receipt]);
+
+        for (label, mut malformed) in [
+            ("direct raw", modern),
+            (
+                "declared versioned wire",
+                serde_json::to_value(ResolutionStateWire::from_game_state(state))
+                    .expect("versioned fixture serializes"),
+            ),
+        ] {
+            malformed["waiting_for"]["data"]["kind"]["constraint"] =
+                serde_json::to_value(constraint.clone()).expect("constraint serializes");
+            let error = if label == "direct raw" {
+                serde_json::from_value::<GameState>(malformed)
+                    .expect_err("a cleanup plus legacy fields is malformed")
+                    .to_string()
+            } else {
+                serde_json::from_value::<ResolutionStateWire>(malformed)
+                    .expect_err("a cleanup plus legacy fields is malformed")
+                    .to_string()
+            };
+            assert!(
+                error.contains("mixes canonical cleanup with legacy fields"),
+                "{label}: {error}"
+            );
         }
     }
 
