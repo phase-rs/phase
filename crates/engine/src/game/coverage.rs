@@ -14,7 +14,7 @@ use crate::parser::oracle::{
     is_draft_matters_sentence, parse_strive_cost_line,
 };
 use crate::parser::oracle_casting::parse_casting_restriction_line;
-use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_ir::diagnostic::{ClauseGap, OracleDiagnostic};
 use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
@@ -5916,10 +5916,18 @@ pub fn parse_warning_pattern(
         OracleDiagnostic::SwallowedClause {
             detector,
             description,
+            gap,
             ..
         } => {
-            let excerpt = oracle_text
-                .and_then(|text| swallowed_clause_excerpt(detector, text))
+            // Prefer the engine's own typed verdict. The phrase the axis authority rejected
+            // is parens-stripped, it is bounded by the grammar's own clause bounds, and it is
+            // not subject to `description`'s 140-byte truncation. The excerpt and the
+            // whole-description fallbacks are unchanged, and a `gap: None` warning takes
+            // exactly the path it takes today.
+            let excerpt = gap
+                .as_ref()
+                .map(ClauseGap::phrase)
+                .or_else(|| oracle_text.and_then(|text| swallowed_clause_excerpt(detector, text)))
                 .unwrap_or(description.as_str());
             (
                 warning.category_name().to_string(),
@@ -14351,6 +14359,7 @@ mod tests {
         let warnings = vec![OracleDiagnostic::swallowed_clause(
             "APNAP",
             "Repeat the following process for each opponent in turn order.",
+            None,
         )];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
         assert_eq!(gaps[0].handler, "Swallow:APNAP");
@@ -14362,6 +14371,7 @@ mod tests {
             crate::parser::oracle_ir::diagnostic::OracleDiagnostic::swallowed_clause(
                 "Condition_If",
                 "If foo, draw a card.",
+                None,
             ),
         ];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
@@ -14578,6 +14588,75 @@ mod tests {
         assert!(missing.is_empty());
     }
 
+    /// The warning pattern prefers the engine's typed phrase, and falls back
+    /// to the sentence excerpt when there is none.
+    ///
+    /// The two halves are given the SAME `oracle_text` and the SAME detector, so `gap` is
+    /// the only variable, and each half is pinned to its own literal. Those two literals
+    /// differ, which is what stops either half from passing on a constant. The `None` half's
+    /// expected string is the excerpt path's output, i.e. exactly what this warning produced
+    /// before this field existed.
+    #[test]
+    fn swallowed_clause_pattern_prefers_the_gap_phrase_and_falls_back_without_one() {
+        const ORACLE: &str = "Whenever Aggressive Detective attacks, if all your commanders \
+have been revealed, Aggressive Detective deals 2 damage to each opponent.";
+        const DESCRIPTION: &str =
+            "Whenever Aggressive Detective attacks, if all your commanders have been revealed";
+
+        let with_gap = OracleDiagnostic::SwallowedClause {
+            detector: "Condition_If".to_string(),
+            description: DESCRIPTION.to_string(),
+            line_index: 0,
+            unit_span: None,
+            items: Vec::new(),
+            gap: Some(ClauseGap::Condition {
+                guard: "all your commanders have been revealed".to_string(),
+            }),
+        };
+        let without_gap = OracleDiagnostic::swallowed_clause("Condition_If", DESCRIPTION, None);
+
+        let preferred = parse_warning_pattern(&with_gap, Some(ORACLE));
+        let fallback = parse_warning_pattern(&without_gap, Some(ORACLE));
+
+        // The phrase the axis authority rejected, normalized, wins the chain head.
+        assert_eq!(
+            preferred,
+            (
+                "swallowed-clause".to_string(),
+                "Condition_If: all your commanders have been revealed".to_string()
+            )
+        );
+
+        // With no gap the excerpt path is untouched: the marker's whole sentence.
+        assert_eq!(
+            fallback,
+            (
+                "swallowed-clause".to_string(),
+                "Condition_If: if all your commanders have been revealed, aggressive detective \
+                 deals N damage to each opponent"
+                    .to_string()
+            )
+        );
+    }
+
+    /// A non-phrase detector's pattern is byte-identical to the value the phase-base
+    /// export records for it. The expected string is taken from that export's warning
+    /// patterns, an artifact, not from this code.
+    #[test]
+    fn non_phrase_detector_pattern_is_unchanged() {
+        const ORACLE: &str =
+            "Needle Drop deals 1 damage to any target that was dealt damage this turn.\nDraw a card.";
+        let warning = OracleDiagnostic::swallowed_clause("Duration_ThisTurn", ORACLE, None);
+
+        assert_eq!(
+            parse_warning_pattern(&warning, Some(ORACLE)),
+            (
+                "swallowed-clause".to_string(),
+                "Duration_ThisTurn: this turn".to_string()
+            )
+        );
+    }
+
     /// A fired `SwallowedClause` diagnostic must demote the card from
     /// "supported" via a `Swallow:{detector}` gap label (issue #2230 / #2243).
     /// The label format is a contract: parser tests in `oracle.rs` grep for
@@ -14587,6 +14666,7 @@ mod tests {
         let warnings = vec![OracleDiagnostic::swallowed_clause(
             "Condition_If",
             "if you control a creature, …",
+            None,
         )];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
         assert_eq!(gaps[0].handler, "Swallow:Condition_If");
@@ -14600,8 +14680,13 @@ mod tests {
             OracleDiagnostic::swallowed_clause(
                 "DynamicQty",
                 "equal to the number of charge counters",
+                None,
             ),
-            OracleDiagnostic::swallowed_clause("DynamicQty", "equal to that card's mana value"),
+            OracleDiagnostic::swallowed_clause(
+                "DynamicQty",
+                "equal to that card's mana value",
+                None,
+            ),
         ];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
         assert_eq!(gaps.len(), 1);
@@ -14617,6 +14702,7 @@ mod tests {
         let warnings = vec![OracleDiagnostic::swallowed_clause(
             "Optional_YouMay",
             "you may reveal that card and put it into your hand",
+            None,
         )];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
         assert_eq!(gaps[0].handler, "Swallow:Optional_YouMay");
@@ -15463,6 +15549,7 @@ mod tests {
         let warnings = vec![OracleDiagnostic::swallowed_clause(
             "Condition_If",
             "If a condition is met, do something.",
+            None,
         )];
 
         let gaps = merge_coverage_gaps(&analysis, tree, &warnings);

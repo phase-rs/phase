@@ -26,7 +26,7 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind};
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use crate::parser::oracle_nom::primitives::{
-    parse_number_or_x, scan_at_word_boundaries, scan_contains, scan_preceded,
+    parse_number_or_x, scan_at_word_boundaries, scan_contains, scan_preceded, split_sentence_units,
 };
 use crate::parser::oracle_quantity::{
     parse_cda_quantity, parse_event_context_quantity, parse_for_each_clause_expr,
@@ -223,8 +223,8 @@ fn first_rejected_quantity_operand(lower: &str) -> Option<String> {
 
 /// The first `word`-guard whose condition text the single condition authority rejects.
 ///
-/// `word` is a FILTER: a guard introduced by the other guard word is skipped and the
-/// scan resumes after it, so the caller can ask the two questions in its own precedence
+/// `word` is a FILTER: a guard introduced by another guard word is skipped and the
+/// scan resumes after it, so the caller can ask each question in its own precedence
 /// order. The `Skip` arms exist because "as if", "even if" and "if able" are not guards
 /// at all — they are part of the action's own grammar.
 fn first_rejected_guard(lower: &str, word: GuardWord) -> Option<String> {
@@ -259,6 +259,209 @@ fn replacement_antecedent(lower: &str) -> String {
     .to_string()
 }
 
+// ── Swallow-audit phrases ───────────────────────────────────────────────────
+
+/// Which swallowed semantic axis a detector is asking the extractors about.
+///
+/// A typed parameter rather than five sibling entry points: the axis IS the question, and
+/// `Guard` parameterizes on the guard word `first_rejected_guard` already takes. A sixth
+/// phrase-bearing detector is then a call-site change, not a new call surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SwallowedAxis {
+    /// Routes to `first_rejected_guard`: the guard this word introduces gates the clause,
+    /// and the single condition authority decides whether it lowers.
+    Guard(GuardWord),
+    /// Routes to `first_rejected_quantity_operand`: a dynamic amount whose operand the
+    /// quantity authorities decide.
+    Quantity,
+    /// Routes to `rejected_replacement_antecedent`: an event antecedent that no
+    /// replacement lowering owns.
+    Replacement,
+}
+
+/// The failing phrase a swallow detector's own axis names in `lower`, or `None` when the
+/// axis names none.
+///
+/// This function only scopes text and dispatches. Every rule-applying step is in the
+/// delegate `sentence_gap` routes to — `first_rejected_guard`,
+/// `first_rejected_quantity_operand`, `rejected_replacement_antecedent` — and each of
+/// those carries the rule annotation for the decision it makes.
+///
+/// # `None` is a real answer, but it is TWO answers
+///
+/// It means either the authority ACCEPTED every phrase it found (the clause was dropped for
+/// want of a carrier rather than a grammar), or the axis found NO candidate phrase to judge
+/// at all. Which of those a caller may assume is per-delegate, not universal:
+///
+/// - `first_rejected_guard` and `first_rejected_quantity_operand` each consult an authority
+///   and advance past what it accepts, so both readings are live for them.
+/// - `rejected_replacement_antecedent` has NO accept branch — it consults no authority that
+///   could accept, so its `None` is always "no candidate", never "accepted".
+///
+/// Those two statements are about the three delegate functions in THIS file and are checkable
+/// by reading them. They are deliberately not extended into claims about which case a given
+/// DETECTOR can produce: that depends on how a detector's gate in `swallow_check` relates to
+/// an extractor's markers here, which is a cross-module invariant nothing enforces and which
+/// has been stated wrongly more than once. `SwallowedClause`'s `gap` field says why a
+/// consumer cannot recover the distinction at all and what would fix that.
+///
+/// Either way the reporting layer falls back to its sentence excerpt.
+///
+/// # Scope: line, then sentence
+///
+/// A swallow audit unit is a block of LINES, and it routinely merges a bare keyword line
+/// into the clause line (Flitwing, Lyev Detective's unit is `"Flying\nIf you would create
+/// one or more tokens, …"`). Scanning the whole unit as one string would let a phrase bound
+/// run across a line break, because none of the bound sets contains `'\n'`. So: split on
+/// lines, then on sentences through `split_sentence_units` — the crate's SINGLE sentence
+/// model, which `swallow_check` already delegates to. Nothing here grows another
+/// `split('.')` sentence model.
+///
+/// # Precondition
+///
+/// `lower` is already lowercased, exactly as `first_rejected_guard` and
+/// `first_rejected_quantity_operand` require. `swallow_check` passes `cleaned` or a
+/// derivative of it, both produced by `to_ascii_lowercase`.
+pub(crate) fn swallowed_clause_gap(axis: SwallowedAxis, lower: &str) -> Option<ClauseGap> {
+    lower
+        .lines()
+        .flat_map(split_sentence_units)
+        .find_map(|sentence| sentence_gap(axis, sentence))
+}
+
+fn sentence_gap(axis: SwallowedAxis, sentence: &str) -> Option<ClauseGap> {
+    match axis {
+        SwallowedAxis::Guard(word) => {
+            first_rejected_guard(sentence, word).map(|guard| ClauseGap::Condition { guard })
+        }
+        SwallowedAxis::Quantity => {
+            first_rejected_quantity_operand(sentence).map(|operand| ClauseGap::Quantity { operand })
+        }
+        SwallowedAxis::Replacement => rejected_replacement_antecedent(sentence)
+            .map(|antecedent| ClauseGap::Replacement { antecedent }),
+    }
+}
+
+/// CR 614.1a: "instead" indicates what the event is replaced WITH, so the phrase a
+/// `Replacement_Instead` swallow names is the ANTECEDENT — the event clause — not the
+/// substitution. The `condition_names_an_event` gate below IS that decision ("is there a
+/// replaced event in this sentence at all"), which is why the cite sits here and not on
+/// the scoping function that calls this one.
+///
+/// Reuses three existing authorities: `condition_names_an_event` for the event reading,
+/// `replacement_antecedent` for the bound, and `parse_leading_conditional_prefix` — the
+/// single leading-guard prefix authority — to strip the connector, so the reported
+/// antecedent never carries "if " / "then, if " / "during any turn ".
+///
+/// It does author one step of grammar, and only one: the advance at the bottom re-encodes
+/// `replacement_antecedent`'s own `", "` chunk rule (`take_until(", ")` + `tag(", ")`) to
+/// move the cursor, because that authority returns an owned `String` and cannot hand back
+/// the remainder it consumed. The two must stay in agreement on what a chunk is.
+///
+/// # The predicate and the returned span are the SAME span
+///
+/// This is the whole shape of the function, and the reason it scans. A sentence routinely
+/// opens with something that is not the replaced event — a state guard the prefix authority
+/// has no tag for ("as long as ..."), an ability word, a trigger head ("whenever ..."), a
+/// duration preamble ("until end of turn"), or an "if you do" back-reference. Asking the
+/// event predicate about the whole SENTENCE and then returning its FIRST chunk asks about
+/// one span and answers with another: the predicate finds the "would" in the body and the
+/// bound hands back the guard, which names no event at all. So the predicate is asked about
+/// the exact span that would be returned, and a chunk that fails it advances the scan —
+/// the same CURSOR shape `first_rejected_quantity_operand` uses, where a phrase its
+/// authority approves advances rather than ends the scan. Only the shape is shared: this
+/// function consults no approving authority at all, which is the section below.
+///
+/// The gate on the whole sentence is therefore GONE rather than merely reordered: keeping it
+/// would restore the two-span structure that was the defect. It cost nothing, because the
+/// chunks partition the sentence and "would" is matched at word boundaries — no chunk can
+/// name an event unless the sentence does, and vice versa. The set of sentences that report
+/// SOME antecedent is unchanged; only which phrase they report moves.
+///
+/// # This function has no ACCEPT path, and that makes its `None` mean one thing
+///
+/// Unlike its two sibling extractors, it consults no authority that could approve a phrase:
+/// `first_rejected_guard` asks the condition ladder and `first_rejected_quantity_operand`
+/// asks `QuantityMarker::accepts`, and each advances past what its authority accepts, so a
+/// `None` from either can mean "found phrases, all fine". Here the only question is whether a
+/// span names an event, and a span that does IS the answer. So `None` here always means the
+/// text names no replaced event anywhere — never "the replacement parsed fine". Callers that
+/// read a missing phrase as a carrier problem get this axis exactly backwards; the
+/// consumer-facing statement of that is on `SwallowedClause`'s `gap` field.
+///
+/// # Known residuals: the returned span may not be the event clause alone
+///
+/// Two disjoint shapes, both from `replacement_antecedent`'s bound rather than from this
+/// scan. Neither is attempted here, because changing that bound moves corpus output.
+///
+/// 1. **Leading granting preamble.** When the replaced event is printed inside a quoted
+///    granted ability the span can carry the preamble (`it gains "if this creature would …`)
+///    and is cut at the first comma INSIDE the quote, because the bound is not quote-aware.
+///    `parse_leading_conditional_prefix` cannot help: the preamble is not a conditional
+///    connector and does not sit at position 0. Self-identifying by an ODD number of `"`.
+/// 2. **Trailing substitution.** When a chunk carries no `", "`, the bound's "a clause
+///    carrying no comma is its own antecedent" fallback returns it whole, so the span holds
+///    the event and its substitution together. Self-identifying by ending at a sentence
+///    terminator, and EVEN-quoted — so shape 1's predicate cannot see it.
+///
+/// NOT the same composition as `diagnose_clause_gap`'s rule 2, and deliberately so.
+/// Rule 2 is `scan_contains(lower, "would") && scan_contains(lower, "instead")` over a
+/// whole clause text. This runs per SENTENCE, inside a unit the `Replacement_Instead`
+/// detector has already gated on " instead" appearing somewhere in it, and it omits the
+/// "instead" conjunct on purpose: the antecedent and the substitution may be in DIFFERENT
+/// sentences, and requiring "instead" in the same sentence as "would" would reject the
+/// antecedent sentence — the one this function exists to report — and then find nothing in
+/// the other. Elvish Healer is the shape's witness in printed Oracle text: "{T}: Prevent the
+/// next 1 damage that would be dealt to any target this turn. If it's a green creature,
+/// prevent the next 2 damage instead." — sentence 1 carries "would" and no "instead";
+/// sentence 2 carries "instead" and no "would", so the conjunct would yield None on both.
+/// Measured, no corpus card reaches this function through the split shape today: every
+/// face carrying the shape either raises no swallow warning at all or raises a different
+/// detector's.
+/// So this is a decision about the CLASS, not about a live path — the witness shows what the
+/// conjunct would cost, not something it costs today. The detector's own unit-level gate is
+/// what stops the omission being permissive about non-replacement text.
+///
+/// Regenerate that "Measured" over a card-data export by intersecting two populations: the
+/// faces whose `parse_warnings` hold a `Replacement_Instead` `SwallowedClause` — which is
+/// what "reaches this function" means — and the faces whose `oracle_text`, split on a
+/// sentence terminator OR a line break, has one part matching `\bwould\b` and not
+/// `\binstead\b` plus another part matching `\binstead\b` and not `\bwould\b`. Print BOTH
+/// populations alongside the intersection. An empty intersection is evidence only if
+/// neither side is empty, and the shape side runs to single digits, so a broken predicate
+/// and a true zero look alike from the intersection alone. Elvish Healer is the control:
+/// it must appear on the shape side.
+///
+/// The trade is two-sided and is taken deliberately: omitting the conjunct risks naming a
+/// WRONG antecedent (a first "would"-sentence that is not the replaced event); adding it
+/// risks naming NONE at all. The class above is what decides it — the split shape is real
+/// in the corpus, and a wrong antecedent is a worse-grouped pattern while no antecedent is
+/// no phrase at all.
+fn rejected_replacement_antecedent(lower_sentence: &str) -> Option<String> {
+    let mut scan: &str = lower_sentence;
+    loop {
+        // `replacement_antecedent` is the bound authority, including its "a clause carrying
+        // no comma is its own antecedent" fallback, which is what terminates this scan on
+        // the last chunk.
+        let antecedent = replacement_antecedent(scan);
+        let peeled = conditions::parse_leading_conditional_prefix(&antecedent)
+            .unwrap_or(antecedent.as_str())
+            .trim();
+        if conditions::condition_names_an_event(peeled) {
+            return Some(peeled.to_string());
+        }
+        // This chunk is a guard, a trigger head or a preamble, not the replaced event — so
+        // advance past it and ask the same question of the next one, exactly as
+        // `first_rejected_quantity_operand` advances past an ACCEPTED operand rather than
+        // ending its scan. The parse fails only when `scan` holds no further chunk, which
+        // is the sentence naming no event at all.
+        let (rest, _) = terminated(take_until::<_, _, OracleError<'_>>(", "), tag(", "))
+            .parse(scan)
+            .ok()?;
+        scan = rest;
+    }
+}
+
 // ── Markers and their typed axes ────────────────────────────────────────────
 
 /// A quantity marker: the word that introduces (or operates on) a dynamic amount.
@@ -283,9 +486,13 @@ enum OperandSpan {
 
 /// The guard word that introduces a trailing condition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GuardWord {
+pub(crate) enum GuardWord {
     If,
     Unless,
+    /// The word the `Condition_AsLongAs` swallow detector audits. Like `If` and `Unless`
+    /// it introduces a trailing condition, so `first_rejected_guard` asks the same single
+    /// condition authority about the phrase that follows it.
+    AsLongAs,
 }
 
 /// What a trailing-guard scan found: a real guard, or a phrase that only looks like one.
@@ -510,6 +717,48 @@ fn multiplicand_amount(input: &str) -> OracleResult<'_, ()> {
 fn trailing_guard(input: &str) -> OracleResult<'_, TrailingMarker> {
     alt((
         value(TrailingMarker::Skip, tag("as if ")),
+        // Rule 4 asks `first_rejected_guard` only for `If` and `Unless`, and that function
+        // RETURNS only on `marker == Guard(word)`; every other marker advances the scan to
+        // `after`. So this arm cannot produce a verdict of its own on the clause-gap path —
+        // it can only move WHERE THE SCAN RESUMES.
+        //
+        // That is not nothing. `scan_preceded` advances one space-delimited word at a time
+        // and this arm consumes three words at once, so where the scan RESUMES can differ
+        // between the two worlds — and it can only differ after a "as long as " this arm
+        // matched.
+        //
+        // No account of WHICH CORPUS VERDICTS move, and why, is offered here: three
+        // successive ones were written and all three were wrong. Replay the verdicts rather
+        // than trust a story about them. The disavowal is scoped to that population claim —
+        // the two divergence rows in
+        // `diagnose_clause_gap_verdicts_are_unchanged_by_the_as_long_as_arm` do carry a
+        // per-row account, and that test's own doc records the replay those rows rest on.
+        // It is the story about the corpus that kept coming out wrong.
+        //
+        // The census below deliberately scans a SUPERSET of that class — every tag this
+        // alt() carries, not just "if " — because a superset measured at zero entails zero
+        // for the class itself, and the wider predicate is the one that stays honest if an
+        // arm is added later.
+        //
+        // That superset was measured empty in the corpus this was written against: no card
+        // carries "as long as " immediately followed by any of this alt()'s own tags.
+        // Re-measure rather than trust that, with:
+        //   rg -oi 'as long as (as if |as long as |even if |if able|if |unless )' <export>
+        //
+        // Two properties of that command are load-bearing, and an earlier form of it had
+        // neither. It must be case-INSENSITIVE (`-i`): this scan runs on lowercased text,
+        // but an export stores printed case — a case-sensitive command silently answers a
+        // different question. And the alternation must list ALL SIX tags including
+        // "as long as " itself, or it is not the superset the paragraph above claims.
+        // The corpus-scale witness is the gap-stripped parser-output identity check the
+        // phase runs against the previous export; the unit-level witness is
+        // `diagnose_clause_gap_verdicts_are_unchanged_by_the_as_long_as_arm` below, whose
+        // table includes a member of the divergence class precisely so it is not a table of
+        // inputs that cannot distinguish the two worlds.
+        value(
+            TrailingMarker::Guard(GuardWord::AsLongAs),
+            tag("as long as "),
+        ),
         value(TrailingMarker::Skip, tag("even if ")),
         value(TrailingMarker::Skip, tag("if able")),
         value(TrailingMarker::Guard(GuardWord::If), tag("if ")),
@@ -1295,5 +1544,363 @@ mod tests {
         // `normalize_verb_token` deliberately does not invent stems for unknown verbs.
         assert!(!is_clause_head_verb("freeze"));
         assert!(!is_clause_head_verb("otherwise"));
+    }
+
+    // ── Swallow-audit phrase extraction (venue A) ───────────────────────────
+    //
+    // These call `swallowed_clause_gap` directly, so they witness the axis→phrase
+    // contract and the line/sentence scoping WITHOUT any detector involved. What they
+    // cannot witness is that a detector calls it, or with which text; the detector tests
+    // in `swallow_check` carry that half.
+
+    #[test]
+    fn swallowed_gap_reports_the_first_rejected_if_guard() {
+        assert_eq!(
+            swallowed_clause_gap(
+                SwallowedAxis::Guard(GuardWord::If),
+                "whenever aggressive detective attacks, if all your commanders have been \
+                 revealed, aggressive detective deals 2 damage to each opponent."
+            ),
+            Some(ClauseGap::Condition {
+                guard: "all your commanders have been revealed".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn swallowed_gap_reports_an_as_long_as_guard() {
+        // The arm added to `trailing_guard`. Removing it turns this `None` — measured:
+        // with the arm deleted, `first_rejected_guard` never sees `Guard(AsLongAs)` at
+        // all, because no other arm matches this prefix.
+        assert_eq!(
+            swallowed_clause_gap(
+                SwallowedAxis::Guard(GuardWord::AsLongAs),
+                "as long as torrent of lava is on the stack, each creature has flying."
+            ),
+            Some(ClauseGap::Condition {
+                guard: "torrent of lava is on the stack".to_string()
+            })
+        );
+
+        // The paired negative: the same guard text with no "as long as " introducing it
+        // yields nothing, so the row above cannot be passing on a substring search.
+        assert_eq!(
+            swallowed_clause_gap(
+                SwallowedAxis::Guard(GuardWord::AsLongAs),
+                "torrent of lava is on the stack, each creature has flying."
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn swallowed_gap_reports_the_rejected_quantity_operand() {
+        assert_eq!(
+            swallowed_clause_gap(
+                SwallowedAxis::Quantity,
+                "pirates you control get +1/+1 until end of turn for each time you've cast \
+                 a commander from the command zone this game."
+            ),
+            Some(ClauseGap::Quantity {
+                operand: "time you've cast a commander from the command zone this game".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn swallowed_gap_strips_the_connector_off_a_replacement_antecedent() {
+        // `parse_leading_conditional_prefix` is the single leading-guard prefix authority;
+        // without it the reported antecedent would keep its "if ".
+        let gap = swallowed_clause_gap(
+            SwallowedAxis::Replacement,
+            "if you would create one or more tokens, you may create that many clue tokens \
+             instead.",
+        );
+        assert_eq!(
+            gap,
+            Some(ClauseGap::Replacement {
+                antecedent: "you would create one or more tokens".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn swallowed_gap_does_not_cross_a_line_boundary() {
+        // Flitwing, Lyev Detective's audit unit merges a bare keyword line into the clause
+        // line. None of the bound sets contains '\n', so without the per-LINE scoping the
+        // antecedent would carry "flying\n".
+        let gap = swallowed_clause_gap(
+            SwallowedAxis::Replacement,
+            "flying\nif you would create one or more tokens, you may create that many clue \
+             tokens instead.",
+        );
+        let ClauseGap::Replacement { antecedent } = gap.expect("an antecedent is reported") else {
+            panic!("the Replacement axis must mint a Replacement verdict");
+        };
+        assert_eq!(antecedent, "you would create one or more tokens");
+    }
+
+    #[test]
+    fn swallowed_gap_is_none_when_the_axis_authority_accepts() {
+        // `None` is a real answer: the marker is present and the condition authority
+        // LOWERS the guard it introduces, so the clause was dropped for want of a carrier
+        // rather than for want of a grammar.
+        assert_eq!(
+            swallowed_clause_gap(
+                SwallowedAxis::Guard(GuardWord::If),
+                "draw a card if you control a creature."
+            ),
+            None
+        );
+    }
+
+    /// The `as long as ` arm's `None` means the ladder ACCEPTED the guard, not that the arm
+    /// failed to reach it.
+    ///
+    /// Both rows carry the marker and both reach `first_rejected_guard` through the same
+    /// arm; they differ only in whether `lower_instead_condition` lowers what follows it.
+    /// Written because the two readings of a `None` on this axis — "accepted" and "never
+    /// looked" — are indistinguishable from the count alone, and only the first is what the
+    /// field's documented `None` claims.
+    #[test]
+    fn an_as_long_as_gap_is_none_exactly_when_the_condition_ladder_accepts_the_guard() {
+        // A guard the ladder lowers: control of another creature.
+        assert_eq!(
+            swallowed_clause_gap(
+                SwallowedAxis::Guard(GuardWord::AsLongAs),
+                "this creature has vigilance as long as you control another creature."
+            ),
+            None,
+            "an accepted guard must report no phrase"
+        );
+        // A guard the ladder rejects: a zone predicate on the source itself.
+        assert_eq!(
+            swallowed_clause_gap(
+                SwallowedAxis::Guard(GuardWord::AsLongAs),
+                "this creature has flying as long as this creature is in your graveyard."
+            ),
+            Some(ClauseGap::Condition {
+                guard: "this creature is in your graveyard".to_string()
+            }),
+            "a rejected guard must name the phrase its own axis refused"
+        );
+    }
+
+    /// CR 614.1a: the reported antecedent NAMES the replaced event, rather than naming the
+    /// guard, trigger head or duration preamble that merely precedes it.
+    ///
+    /// Every row here opens with a chunk that is not the event. Asking
+    /// `condition_names_an_event` about the whole SENTENCE while returning its FIRST
+    /// comma-delimited chunk answered two different questions about two different spans, and
+    /// returned a phrase carrying no "would" at all — the bracketed values below. The scan
+    /// now asks the event predicate about the span it is about to return, and advances when
+    /// the answer is no.
+    ///
+    /// # What this test does NOT claim
+    ///
+    /// It does not claim the span is the event clause ALONE. FIVE of the seven rows below
+    /// assert a value that carries something else with the event, in two distinct and
+    /// disjoint shapes, and all of them are measured values rather than aspirational ones:
+    ///
+    /// - **Leading granting preamble** — `it gains "if …`, `you get an emblem with "if …`.
+    ///   When the replacement is printed inside a quoted granted ability,
+    ///   `replacement_antecedent`'s bound is not quote-aware, so the span is cut at the first
+    ///   comma INSIDE the quote, and the preamble ahead of it does not sit at position 0 so no
+    ///   leading-prefix authority can strip it.
+    /// - **Trailing substitution** — `damage that would reduce your life total to less than N
+    ///   reduces it to N instead.` Here the chunk carries no `", "` at all, so
+    ///   `replacement_antecedent`'s documented "a clause carrying no comma is its own
+    ///   antecedent" fallback returns the whole clause: the event AND what CR 614.1a says it
+    ///   is replaced with.
+    ///
+    /// Both shapes ARE pinned from inside this test: every row asserts an exact string, so a
+    /// row that changes shape turns it red. What the test cannot do is FLAG them — a pinned
+    /// residual and a pinned intended value are the same green — which is why both are named
+    /// here instead of left implied.
+    ///
+    /// Regenerate the populations over a card-data export, across every `SwallowedClause`
+    /// whose `gap.kind` is `unparsed_replacement`:
+    /// - the defect this test fixes: `antecedent` does not contain "would" (expected: none);
+    /// - residual shape 1: `antecedent` contains an ODD number of `"` — cut inside a quote;
+    /// - residual shape 2: `antecedent` ends at a sentence terminator — the no-comma fallback
+    ///   returned the clause whole, so the substitution rode along.
+    ///
+    /// The two residual predicates are disjoint, and NEITHER subsumes the other: shape 2 is
+    /// even-quoted and so is invisible to shape 1's predicate, which is how it went unnamed
+    /// when only the quote residual was documented.
+    #[test]
+    fn a_replacement_antecedent_is_the_event_clause_not_the_guard_that_gates_it() {
+        for (sentence, expected) in [
+            // Elderscale Wurm. Was: "as long as you have 7 or more life". `as long as ` is
+            // not a `parse_leading_conditional_prefix` tag, so no amount of peeling reaches
+            // this one — the event is in the next chunk, which is also the last.
+            (
+                "as long as you have 7 or more life, damage that would reduce your life \
+                 total to less than 7 reduces it to 7 instead.",
+                "damage that would reduce your life total to less than 7 reduces it to 7 \
+                 instead.",
+            ),
+            // Anthem of Rakdos. Was: "hellbent — as long as you have no cards in hand". The
+            // peel is still LOAD-BEARING here, just on a later chunk: without it this row
+            // would keep its "if ".
+            (
+                "hellbent — as long as you have no cards in hand, if a source you control \
+                 would deal damage to a permanent or player, it deals double that damage \
+                 to that permanent or player instead.",
+                "a source you control would deal damage to a permanent or player",
+            ),
+            // Puresteel Angel. Was: "whenever puresteel angel deals combat damage to a
+            // player" — a trigger head, which no prefix authority strips.
+            (
+                "whenever puresteel angel deals combat damage to a player, you get an \
+                 emblem with \"if you would lose the game, instead your life total becomes \
+                 20, shuffle your graveyard into your library, you lose all poison \
+                 counters, and you lose this emblem.\"",
+                "you get an emblem with \"if you would lose the game",
+            ),
+            // Elemental Expressionist. Was: "until end of turn" — a duration preamble.
+            (
+                "until end of turn, it gains \"if this creature would leave the \
+                 battlefield, exile it instead of putting it anywhere else\" and \"when \
+                 this creature is put into exile, create a 4/4 blue and red elemental \
+                 creature token.\"",
+                "it gains \"if this creature would leave the battlefield",
+            ),
+            // Spirit-Sister's Call. Was: "you do". This is the one row a leading-conditional
+            // split alone would have rescued, and it is here so the table is not drawn
+            // entirely from the shapes one remedy happens to cover.
+            (
+                "if you do, return the chosen card from your graveyard to the battlefield \
+                 and it gains \"if this permanent would leave the battlefield, exile it \
+                 instead of putting it anywhere else.\"",
+                "return the chosen card from your graveyard to the battlefield and it \
+                 gains \"if this permanent would leave the battlefield",
+            ),
+            // Serra the Benevolent. Was: '[−6]: you get an emblem with "if you control a
+            // creature' — cut at a comma INSIDE a quoted string. The bound is not
+            // quote-aware; advancing past a chunk that does not name the event is what makes
+            // that harmless here. The closing quote is absent from the expectation because
+            // the sentence unit ends at the period before it, which is `split_sentence_units`
+            // doing the scoping and not this scan.
+            (
+                "[−6]: you get an emblem with \"if you control a creature, damage that \
+                 would reduce your life total to less than 1 reduces it to 1 instead.\"",
+                "damage that would reduce your life total to less than 1 reduces it to 1 \
+                 instead.",
+            ),
+            // PRESERVATION. Lava Burst opens with the event, so it returns on the first
+            // chunk and is unmoved by the advance.
+            (
+                "if lava burst would deal damage to a creature, that damage can't be \
+                 prevented or dealt instead to another permanent or player.",
+                "lava burst would deal damage to a creature",
+            ),
+        ] {
+            let gap = swallowed_clause_gap(SwallowedAxis::Replacement, sentence);
+            assert_eq!(
+                gap,
+                Some(ClauseGap::Replacement {
+                    antecedent: expected.to_string()
+                }),
+                "wrong antecedent for {sentence:?}"
+            );
+        }
+    }
+
+    /// A sentence whose every chunk fails the event predicate reports NOTHING rather than
+    /// the last chunk it looked at. This is also the scan's termination witness: the guard
+    /// chunk is consumed, the body chunk is consumed, and the parse then fails for want of a
+    /// further separator.
+    #[test]
+    fn a_replacement_axis_reports_no_antecedent_when_no_chunk_names_an_event() {
+        assert_eq!(
+            swallowed_clause_gap(
+                SwallowedAxis::Replacement,
+                "as long as you control a creature, draw a card instead."
+            ),
+            None
+        );
+    }
+
+    /// The unit-level companion to the corpus-scale claim that the new `as long as ` arm
+    /// does not move any `diagnose_clause_gap` verdict.
+    ///
+    /// Each row was RUN BOTH WAYS — with the arm present and with it deleted — and the
+    /// verdicts below are the measured head values. The first two rows are the measured
+    /// DIVERGENCE class and are marked as such: they are the reason this table is not a
+    /// set of inputs that cannot distinguish the two worlds.
+    #[test]
+    fn diagnose_clause_gap_verdicts_are_unchanged_by_the_as_long_as_arm() {
+        // DIVERGING. Measured: with the arm, rule 4 reaches the "if " guard the arm's
+        // three-word consumption exposes and the condition authority REJECTS it; without
+        // the arm the scan takes the `"as if "` Skip and resumes past that guard, so rule
+        // 4 finds nothing and the verdict falls through to a later rule.
+        //
+        // The guard must be one the authority REJECTS for the difference to be visible —
+        // an accepted guard yields `None` from rule 4 in both worlds. This is the whole
+        // reason these rows use a commander-reveal condition rather than "you control a
+        // dragon", which the ladder lowers.
+        //
+        // SYNTHETIC, and stated as such: the corpus census over "as long as " followed by
+        // any `trailing_guard` tag measured this class EMPTY, which is exactly why it has
+        // to be written rather than cited. Regenerate with the predicate recorded at
+        // `trailing_guard`.
+        assert_eq!(
+            diagnose_clause_gap("... as long as if all your commanders have been revealed"),
+            ClauseGap::Condition {
+                guard: "all your commanders have been revealed".to_string()
+            },
+            "divergence-class row: base returns UnrecognizedHead here"
+        );
+        assert_eq!(
+            diagnose_clause_gap("draw a card as long as if all your commanders have been revealed"),
+            ClauseGap::Condition {
+                guard: "all your commanders have been revealed".to_string()
+            },
+            "divergence-class row: base returns VerbArguments here"
+        );
+
+        // NON-DIVERGING. Every row below was measured identical with and without the arm,
+        // which is the claim the corpus census makes at population scale.
+        for (text, expected) in [
+            (
+                "... as long as if you control a dragon",
+                ClauseGap::UnrecognizedHead {
+                    head: "...".to_string(),
+                },
+            ),
+            (
+                "sacrifice it as long as unless you pay {1}",
+                ClauseGap::Condition {
+                    guard: "you pay {1}".to_string(),
+                },
+            ),
+            (
+                "gain flying as long as you control a dragon",
+                ClauseGap::VerbArguments {
+                    verb: "gain".to_string(),
+                    arguments: "flying as long as you control a dragon".to_string(),
+                },
+            ),
+            (
+                "creatures get +1/+1 as long as it's your turn",
+                ClauseGap::UnrecognizedHead {
+                    head: "creatures".to_string(),
+                },
+            ),
+            (
+                "this creature can't attack as long as defender is untapped",
+                ClauseGap::VerbArguments {
+                    verb: "attack".to_string(),
+                    arguments: "as long as defender is untapped".to_string(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                diagnose_clause_gap(text),
+                expected,
+                "verdict moved for {text:?}"
+            );
+        }
     }
 }
