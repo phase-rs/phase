@@ -148,6 +148,14 @@ jobs:
         # against its standalone manifest after version stamping.
         run: cargo check --locked --manifest-path client/src-tauri/Cargo.toml
 
+      - name: phase-tauri tests
+        # This crate's platform -> engine-target mapping is what lets a published
+        # desktop fetch the engine binary for the machine it runs on, and nothing
+        # else in this workflow executes the tests that hold that mapping to the
+        # platforms below. A failure here stops build-shell before any package or
+        # updater entry is published.
+        run: cargo test --locked --manifest-path client/src-tauri/Cargo.toml
+
   build-shell:
     name: Build Shell (${{ matrix.os }} ${{ matrix.arch }})
     needs: [resolve-shell-ref, shell-preflight]
