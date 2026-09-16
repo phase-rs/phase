@@ -6,13 +6,17 @@
 //! cost, and an ability whose cost can't be paid can't be activated.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::types::ability::AbilityCost;
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode,
+    TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
-use engine::types::zones::Zone;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::{EtbTapState, Zone};
 
 // Verbatim Oracle text (Scryfall, 2026-09-15).
 const THOUGHT_LASH: &str = "Cumulative upkeep—Exile the top card of your library. (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)\nWhen a player doesn't pay this enchantment's cumulative upkeep, that player exiles all cards from their library.\nExile the top card of your library: Prevent the next 1 damage that would be dealt to you this turn.";
@@ -189,5 +193,106 @@ fn phyrexian_devourer_counts_the_exiled_cards_mana_value() {
         ),
         (Some(4), Some(4)),
         "CR 608.2k: X must equal the exiled card's mana value (3), leaving a 4/4"
+    );
+}
+
+/// An OPTIONAL redirect of a move into `Zone::Exile`. Declining it leaves the
+/// card settling in exile, which is the replacement-choice-to-exile path — the
+/// shape `cost_zone_pipeline::exile_tracking_parked_resume_preserves_source_link`
+/// uses for the effect-driven case.
+fn optional_exile_redirect() -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Exile)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                destination: Zone::Graveyard,
+                origin: None,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        ))
+        .mode(ReplacementMode::Optional { decline: None })
+}
+
+/// CR 406.6 + CR 616.1: a deterministic library-exile ACTIVATION cost that pauses
+/// on a replacement choice and then settles in exile must still index the paid
+/// card as "exiled with [source] this turn".
+///
+/// Revert-proof: the cast cost-move resume re-enters `finish_cost_object_moves`
+/// at `paused_at_index + 1`, so without recording the settled paused object at
+/// the delivery boundary this single-card cost records no link at all.
+#[test]
+fn a_paused_activation_cost_that_settles_in_exile_keeps_its_source_link() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Paid Card", "Filler One", "Filler Two"]);
+
+    let lash = scenario
+        .add_creature(P0, "Thought Lash", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(THOUGHT_LASH)
+        .id();
+    scenario
+        .add_creature(P0, "Optional Exile Redirect", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(optional_exile_redirect());
+
+    let mut runner = scenario.build();
+    let paid = runner.state().players[0]
+        .library
+        .iter()
+        .copied()
+        .next()
+        .expect("reach-guard: library seeded");
+    let index = exile_top_ability_index(&runner, lash);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: lash,
+            ability_index: index,
+        })
+        .expect("activation must be accepted");
+
+    // Reach-guard: the cost move really did pause on the replacement choice —
+    // otherwise this test would pass through the unpaused path and prove nothing.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach-guard: the cost move must pause on the optional redirect; got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Decline the redirect, so the card settles in exile after the pause.
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("declining the optional redirect must be accepted");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&paid].zone,
+        Zone::Exile,
+        "reach-guard: declining the redirect leaves the paid card in exile"
+    );
+    assert!(
+        runner
+            .state()
+            .cards_exiled_with_source_this_turn
+            .get(&lash)
+            .is_some_and(|cards| cards.contains(&paid)),
+        "CR 406.6: the paid card must be indexed as exiled with its source even \
+         when its cost move paused on a replacement choice; index = {:?}",
+        runner.state().cards_exiled_with_source_this_turn.get(&lash)
     );
 }
