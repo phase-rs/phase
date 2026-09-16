@@ -2471,10 +2471,11 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
-        // Ordinary MDFC land/spell prompts retain both actions.  A
-        // resolution-owned prompt, however, exposes only faces the exact
-        // temporary permission can still cast; the handler independently
-        // enforces the same policy for forged direct submissions.
+        // CR 712.11b-c / CR 709.3-3a: a face election exposes only faces whose
+        // own characteristics can be cast. Ordinary MDFC land/spell prompts
+        // retain both actions. A resolution-owned prompt, however, exposes
+        // only faces the exact temporary permission can still cast; the handler
+        // independently enforces the same policy for forged direct submissions.
         WaitingFor::ModalFaceChoice {
             player,
             object_id,

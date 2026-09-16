@@ -3186,6 +3186,10 @@ fn fuse_split_under_omniscience_keeps_normal_fuse_and_free_half_rows() {
     .expect("the offered free left-half choice must commit");
     assert_eq!(left_state.objects[&breaking].name, "Breaking");
     assert!(
+        left_state.objects[&breaking].cast_face_committed,
+        "the elected left split face must be committed before cast preparation"
+    );
+    assert!(
         !matches!(left_waiting, WaitingFor::ManaPayment { .. }),
         "a HandPermission cast pays no mana"
     );

@@ -6690,13 +6690,20 @@ fn prepare_casting_variant_on_face(
             "Invalid cast variant face choice".to_string(),
         ));
     }
-    if face == CastingVariantFace::Right {
+    if matches!(face, CastingVariantFace::Left | CastingVariantFace::Right) {
         let mut projected = state.clone();
         let object = projected
             .objects
             .get_mut(&object_id)
             .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
-        simulate_chosen_split_spell_back_face(object);
+        if face == CastingVariantFace::Right {
+            simulate_chosen_split_spell_back_face(object);
+        } else {
+            // CR 709.3-3a: selecting the left split half is an election too,
+            // even though its printed characteristics already occupy the
+            // object. Record it so a paused cast cannot re-open the prompt.
+            object.cast_face_committed = true;
+        }
         prepare_casting_variant(&projected, player, object_id, variant, mode)
     } else {
         prepare_casting_variant(state, player, object_id, variant, mode)
@@ -10278,10 +10285,12 @@ fn split_spell_face_choice_available(obj: &crate::game::game_object::GameObject)
     is_castable_split_face(&obj.card_types) && is_castable_split_face(&back.card_types)
 }
 
-/// The during-resolution path intentionally differs from the ordinary hand
-/// menu: Fuse suppresses the normal face prompt only in hand.  A resolution
-/// permission never grants a fused spell, so its two independently castable
-/// halves remain prospective spell faces.
+/// CR 712.11b-c / CR 709.3-3a: modal double-faced cards and split cards elect
+/// a spell face before the stack entry is created, and only that elected face
+/// is evaluated for castability. The during-resolution path intentionally
+/// differs from the ordinary hand menu: Fuse suppresses the normal face prompt
+/// only in hand. A resolution permission never grants a fused spell, so its
+/// two independently castable halves remain prospective spell faces.
 fn resolution_spell_face_choice_available(obj: &crate::game::game_object::GameObject) -> bool {
     !obj.cast_face_committed
         && (modal_spell_face_choice_available(obj)
@@ -13045,9 +13054,10 @@ pub(super) fn initiate_cast_during_resolution(
     result.map(|waiting_for| ResolutionCastInitiation::WaitingFor(Box::new(waiting_for)))
 }
 
-/// Check the already-elected active face against the policy held by the exact
-/// appended permission slot.  This intentionally does not search for a
-/// compatible permission: the index is the transaction authority.
+/// CR 712.11c / CR 709.3a: check the already-elected face's characteristics
+/// against the policy held by the exact appended permission slot. This
+/// intentionally does not search for a compatible permission: the index is the
+/// transaction authority.
 fn selected_resolution_spell_face_is_allowed(
     state: &GameState,
     player: PlayerId,

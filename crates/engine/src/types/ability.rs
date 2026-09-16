@@ -4923,10 +4923,12 @@ pub enum CastPermissionConstraint {
     },
 }
 
-/// The immutable, serialized authority for one cast made while an effect is
-/// resolving.  This is deliberately a required carrier rather than a legacy
-/// filter with optional side data: a saved interactive state must either carry
-/// the exact route that created it or fail to deserialize.
+/// CR 712.11b-c / CR 709.3-3a: a modal double-faced card or split card elects
+/// a face before it is put onto the stack, and only that face is evaluated for
+/// castability. This immutable, serialized policy is the engine transaction
+/// authority for one such cast made while an effect is resolving. It is not a
+/// standalone game object defined by those rules. A saved interactive state
+/// must either carry the exact route that created it or fail to deserialize.
 ///
 /// `filter` is normalized when the policy is constructed.  `source_id` and
 /// `controller` are the real resolution context used to interpret that filter;
