@@ -3823,7 +3823,8 @@ fn attacked_player_scope_anchors_to_the_declared_attack_target() {
 /// attacking creature, keyed on its object id and read kind-preservingly; with
 /// no latch either it answers false. Phase 1 verification-matrix row 1b — the
 /// only coverage of the `None` branch and of
-/// `combat::attacked_player_for_attacker`.
+/// `combat::attacked_player_for_attacker`. Arms (g)/(h) bind BOTH anchors at
+/// once and are the only coverage of the bound-vs-latched PRECEDENCE.
 #[test]
 fn attacked_player_scope_falls_back_to_the_latched_attacker_record() {
     use crate::game::combat::{self, AttackTarget, AttackerInfo, CombatState};
@@ -3952,6 +3953,55 @@ fn attacked_player_scope_falls_back_to_the_latched_attacker_record() {
             ConditionContext::recipient(other),
         ),
         "(f) the bound recipient IS the attacking creature, so its latch answers"
+    );
+
+    // (g) and (h) BOTH anchors bound at once — the only arms that can express
+    // PRECEDENCE. Arms (a)-(f) each leave at most one anchor bindable, so any of
+    // them passes under a latch-first reading too; only a board where the two
+    // anchors DISAGREE makes the ordering the thing that decides the answer.
+    //
+    // CR 508.1c: the declaration under validation is what the restriction is
+    // being checked against, so a bound `declared_attack` is AUTHORITATIVE and
+    // outranks the latched `AttackerInfo` left over from an earlier declaration
+    // — it does not fall through to the latch.
+
+    // (g) Latch says P2 (who never attacked you); the bound declaration says P1
+    // (who did). Bound-first ⇒ P1 ⇒ true. A latch-first reading answers P2 ⇒ false.
+    state.combat = Some(latch(AttackerInfo::new(
+        src,
+        AttackTarget::Player(PlayerId(2)),
+        PlayerId(2),
+    )));
+    assert!(
+        evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::NONE.with_declared_attack(Some(AttackTarget::Player(PlayerId(1)))),
+        ),
+        "(g) with both anchors bound and disagreeing, the DECLARED target (P1, \
+         who attacked you) outranks the latched one (P2, who did not)"
+    );
+
+    // (h) The converse, so neither direction of the inversion survives: latch
+    // says P1 (who attacked you), declaration says P2 (who did not).
+    // Bound-first ⇒ P2 ⇒ false. A latch-first reading answers P1 ⇒ true.
+    state.combat = Some(latch(AttackerInfo::new(
+        src,
+        AttackTarget::Player(PlayerId(1)),
+        PlayerId(1),
+    )));
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::NONE.with_declared_attack(Some(AttackTarget::Player(PlayerId(2)))),
+        ),
+        "(h) the stale latch (P1) must NOT rescue a declaration against P2, who \
+         never attacked you"
     );
 }
 
