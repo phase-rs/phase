@@ -179,7 +179,7 @@ jobs:
         # pip workaround (actions/runner-images#10897, 2025-05-09). Same
         # flag the Dockerfile already passes for this identical install.
         run: |
-          pip install --break-system-packages cargo-zigbuild==0.23.0 ziglang==0.16.0
+          pip install --break-system-packages --require-hashes -r scripts/requirements-zigbuild.txt
           rustup target add ${{ matrix.triple }}
 
       - name: Build phase-server

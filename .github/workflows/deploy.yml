@@ -942,7 +942,7 @@ jobs:
         # Python is PEP 668 externally-managed since GitHub reverted its
         # pip workaround (actions/runner-images#10897, 2025-05-09). Same
         # flag the Dockerfile already passes for this identical install.
-        run: pip install --break-system-packages cargo-zigbuild==0.23.0 ziglang==0.16.0
+        run: pip install --break-system-packages --require-hashes -r scripts/requirements-zigbuild.txt
 
       - name: Add musl target
         # The musl target must be added explicitly with `rustup target add`, not
