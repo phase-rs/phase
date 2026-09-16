@@ -53019,6 +53019,91 @@ fn resolve_graveyard_paid_grant_with_exile_rider(state: &mut GameState, spell: O
     crate::game::effects::cast_from_zone::resolve(state, &grant, &mut Vec::new()).unwrap();
 }
 
+/// Install the exact CR 603.7 tail that a paid resolution offer transports.
+/// The effect is observably small (`gain 1 life`), so the accepted-cast test
+/// below proves the receipt is retained through payment and then really fires.
+fn install_paid_offer_spell_cast_receipt(
+    state: &mut GameState,
+    spell: ObjectId,
+    source: ObjectId,
+) -> crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+    use crate::types::ability::{
+        DelayedTriggerCondition, DelayedTriggerLifetime, TriggerDefinition,
+    };
+    use crate::types::game_state::DelayedTrigger;
+    use crate::types::triggers::TriggerMode;
+
+    let mut definition = TriggerDefinition::new(TriggerMode::SpellCast);
+    definition.valid_card = Some(TargetFilter::SpecificObject { id: spell });
+    let mut ability = ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        PlayerId(0),
+    );
+    ability.set_trigger_source_recursive(crate::game::triggers::trigger_source_context_for_latch(
+        state,
+        state
+            .objects
+            .get(&source)
+            .expect("the production-style delayed tail must retain a source context"),
+    ));
+    let delayed = DelayedTrigger::new(
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger: Box::new(definition),
+            or_trigger: None,
+            lifetime: DelayedTriggerLifetime::ThisTurn,
+        },
+        Box::new(ability),
+        PlayerId(0),
+        source,
+        true,
+    );
+    crate::game::triggers::install_delayed_trigger(state, delayed, &mut Vec::new());
+    let origin = state
+        .delayed_triggers
+        .last()
+        .unwrap()
+        .provenance
+        .origin()
+        .expect("production delayed-trigger installation must mint an exact receipt");
+    crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+        token: origin.token,
+        instance: origin.instance,
+        source_id: origin.source_id,
+    }
+}
+
+fn receipt_is_installed(
+    state: &GameState,
+    receipt: &crate::types::ability::ResolutionCastDelayedTriggerReceipt,
+) -> bool {
+    state.delayed_triggers.iter().any(|trigger| {
+        trigger.provenance.origin().is_some_and(|origin| {
+            origin.token == receipt.token
+                && origin.instance == receipt.instance
+                && origin.source_id == receipt.source_id
+        })
+    })
+}
+
+fn attach_paid_offer_receipt(
+    state: &mut GameState,
+    receipt: crate::types::ability::ResolutionCastDelayedTriggerReceipt,
+) {
+    let WaitingFor::CastOffer {
+        kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
+        ..
+    } = &mut state.waiting_for
+    else {
+        panic!("fixture must be parked on a paid graveyard cast offer");
+    };
+    cleanup.delayed_trigger_receipts = vec![receipt];
+}
+
 /// Count the synthetic self-scoped spell→graveyard redirect replacements
 /// (`ReplacementEvent::Moved`, `destination_zone: Graveyard`) installed on
 /// `spell` — the rider `apply_spell_graveyard_replacement_rider` pushes. Two
@@ -53309,6 +53394,82 @@ fn cancelling_an_accepted_paid_offer_withdraws_its_tail_receipt() {
         "the accepted offer's delayed tail must be withdrawn on CancelCast"
     );
     assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+}
+
+/// A paid offer can reach its final admission gate only after the player
+/// accepts it.  That real `GameAction` rejection must settle the frozen
+/// resolution tail, rather than leaving its next-spell receipt armed.
+#[test]
+fn graveyard_paid_final_rejection_withdraws_delayed_tail_receipt() {
+    let mut state = setup_game_at_main_phase();
+    let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+    let receipt = install_paid_offer_spell_cast_receipt(&mut state, spell, spell);
+    resolve_graveyard_paid_grant(&mut state, spell);
+    attach_paid_offer_receipt(&mut state, receipt.clone());
+
+    // The router already opened its offer.  Making its target a land causes
+    // the later cast-path admission check to reject it after `Cast`.
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("a final paid-offer rejection must settle instead of becoming an action error");
+
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(!receipt_is_installed(&state, &receipt));
+    assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+    assert!(state.objects[&spell].casting_permissions.is_empty());
+    assert!(state.stack.iter().all(|entry| entry.source_id != spell));
+}
+
+/// An accepted paid offer carries its tail receipt through manual payment.
+/// On the real spell-cast event it must be consumed and produce its effect.
+#[test]
+fn accepted_paid_offer_retains_then_fires_delayed_tail_receipt() {
+    let mut state = setup_game_at_main_phase();
+    let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+    let receipt = install_paid_offer_spell_cast_receipt(&mut state, spell, spell);
+    let life_before = state.players[0].life;
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    resolve_graveyard_paid_grant(&mut state, spell);
+    attach_paid_offer_receipt(&mut state, receipt.clone());
+
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("accepting the paid offer must open its normal payment window");
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+    assert!(
+        receipt_is_installed(&state, &receipt),
+        "acceptance must retain the tail receipt until the spell is actually cast"
+    );
+
+    apply_as_current(&mut state, GameAction::PassPriority)
+        .expect("paying the spell's mana cost must finish the cast");
+    assert!(state.stack.iter().any(|entry| entry.source_id == spell));
+    assert!(
+        !receipt_is_installed(&state, &receipt),
+        "the one-shot receipt must be consumed by that spell-cast event"
+    );
+
+    stack::resolve_top(&mut state, &mut Vec::new());
+    assert_eq!(
+        state.players[0].life,
+        life_before + 1,
+        "the consumed receipt must have put its gain-life trigger on the stack"
+    );
 }
 
 #[test]
@@ -54134,6 +54295,55 @@ fn resolution_cast_two_legal_faces_issues_and_completes_exact_face_choice() {
         .expect("the elected back face must consume the appended resolution permission");
     assert!(state.stack.iter().any(|entry| entry.source_id == spell));
     assert_eq!(state.objects[&spell].name, "Resolution Back");
+}
+
+/// A forged/stale modal action must not consume the resolution-owned delayed
+/// tail.  The actual `GameAction` handler restores every provisional mutation
+/// when the frozen permission no longer admits its elected face.
+#[test]
+fn resolution_modal_forged_late_rejection_preserves_delayed_tail_receipt_and_state() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    let receipt = install_paid_offer_spell_cast_receipt(&mut state, spell, spell);
+    let mut request = resolution_test_request(TargetFilter::Any);
+    request.cleanup.delayed_trigger_receipts = vec![receipt.clone()];
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("two legal spell faces must open the real modal action");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("two legal spell faces must not reject before face choice");
+    };
+    state.waiting_for = *waiting_for;
+
+    // The UI action was valid at issuance, but this forged/stale front-face
+    // action arrives after the exact carried permission becomes back-only.
+    let Some(CastingPermission::ExileWithAltCost {
+        resolution_cleanup: Some(cleanup),
+        ..
+    }) = state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .casting_permissions
+        .last_mut()
+    else {
+        panic!("the modal prompt must retain its exact resolution permission");
+    };
+    cleanup.face_policy.filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant));
+    let state_before = state.clone();
+
+    assert!(
+        apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: false }).is_err(),
+        "the forged front-face action must be rejected by the live handler"
+    );
+    assert_eq!(
+        state, state_before,
+        "a late modal rejection must not mutate the receipt, prompt, or cast state"
+    );
+    assert!(
+        receipt_is_installed(&state, &receipt),
+        "the untouched receipt remains armed because no cast was accepted"
+    );
 }
 
 /// A resolution-owned face prompt is intentionally pre-announcement (there is
