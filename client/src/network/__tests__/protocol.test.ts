@@ -322,6 +322,10 @@ describe("encodeWireMessage / decodeWireMessage", () => {
               type: "GraveyardPaidCast",
               hit_card: 17,
               cast_transformed: false,
+              graveyard_replacement: {
+                type: "Library",
+                position: { type: "BeneathTop", depth: { type: "Fixed", value: 2 } },
+              },
               cleanup: {
                 source_id: 11,
                 face_policy: {
@@ -355,6 +359,10 @@ describe("encodeWireMessage / decodeWireMessage", () => {
               type: "GraveyardPaidCast",
               hit_card: 17,
               cast_transformed: false,
+              graveyard_replacement: {
+                type: "Library",
+                position: { type: "RandomWithinTop", n: { type: "Fixed", value: 3 } },
+              },
               cleanup: {
                 source_id: 11,
                 face_policy: {
