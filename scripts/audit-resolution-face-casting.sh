@@ -11,11 +11,49 @@ if ((BASH_VERSINFO[0] < 4)) || ! type -t mapfile >/dev/null ||
   exit 2
 fi
 
+# Keep these as single executable names (or paths), rather than command
+# fragments.  Besides avoiding eval-like execution, this gives the self-test
+# a small, explicit seam for substituting a deliberately broken tool.
+RG=${RG:-rg}
+AWK=${AWK:-awk}
+SORT=${SORT:-sort}
+
+require_executable() {
+  local label=$1 tool=$2 resolved
+  if [[ -z $tool || $tool == *[[:space:]]* ]]; then
+    printf '%s must name one executable, not a command fragment: %q\n' "$label" "$tool" >&2
+    return 1
+  fi
+  if [[ $tool == */* ]]; then
+    if [[ ! -f $tool || ! -x $tool ]]; then
+      printf '%s is not an executable file: %s\n' "$label" "$tool" >&2
+      return 1
+    fi
+  else
+    resolved=$(type -P -- "$tool") || {
+      printf '%s is not available on PATH: %s\n' "$label" "$tool" >&2
+      return 1
+    }
+    if [[ ! -f $resolved || ! -x $resolved ]]; then
+      printf '%s is not an executable file: %s\n' "$label" "$tool" >&2
+      return 1
+    fi
+  fi
+}
+
+if ! require_executable RG "$RG" || ! require_executable AWK "$AWK" ||
+  ! require_executable SORT "$SORT"; then
+  exit 2
+fi
+
+SCRIPT_PATH=$(readlink -f -- "$0")
+
 usage() {
   printf '%s\n' \
     'usage:' \
     '  audit-resolution-face-casting.sh capture --card-data PATH --candidate-sha SHA --output PATH' \
     '  audit-resolution-face-casting.sh compare --base PATH --candidate PATH --output PATH' \
+    '  audit-resolution-face-casting.sh route-census -- ROOT' \
     '  audit-resolution-face-casting.sh self-test' >&2
   exit 2
 }
@@ -25,7 +63,7 @@ declare -A cfg_test_route_lines=()
 declare -a cfg_test_module_records=()
 
 classify_route_line() {
-  local record=$1 path rest symbol role line_number
+  local record=$1 path rest symbol role line_number status
   path=${record%%:*}
   rest=${record#*:}
   line_number=${rest%%:*}
@@ -37,26 +75,32 @@ classify_route_line() {
     *CastFromZoneDriver*) symbol=cast-from-zone-driver ;;
     *) return 1 ;;
   esac
-  if [[ $path == */tests/* ]] ||
-    path_is_cfg_test_module "$path" ||
-    line_is_cfg_test "$path" "$line_number"; then
+  if [[ $path == */tests/* ]] || path_is_cfg_test_module "$path"; then
     role=test
-  elif [[ $rest == *'fn initiate_cast_during_resolution('* ]] ||
+  elif line_is_cfg_test "$path" "$line_number"; then
+    role=test
+  else
+    status=$?
+    if ((status != 1)); then
+      return "$status"
+    fi
+    if [[ $rest == *'fn initiate_cast_during_resolution('* ]] ||
        [[ $rest == *'fn eligible_candidates('* ]] ||
        [[ $rest == *'struct ResolutionCastRequest'* ]] ||
        [[ $rest == *'enum CastFromZoneDriver'* ]]; then
-    role=definition
-  else
-    role=production
+      role=definition
+    else
+      role=production
+    fi
   fi
   printf 'route\t%s:%s\t%s\n' "$symbol" "$role" "$record"
 }
 
 line_is_cfg_test() {
-  local path=$1 line_number=$2 canonical
-  canonical=$(readlink -f -- "$path") || return 1
+  local path=$1 line_number=$2 canonical scanned
+  canonical=$(readlink -f -- "$path") || return 2
   [[ ${cfg_test_route_lines[$canonical:$line_number]+present} ]] && return 0
-  awk -v target="$line_number" '
+  if ! scanned=$("$AWK" -v target="$line_number" '
     function sanitize(line,    out, i, c, next_c, hashes, terminator) {
       out = ""
       for (i = 1; i <= length(line); i++) {
@@ -132,8 +176,10 @@ line_is_cfg_test() {
       if (code ~ /#\[[[:space:]]*cfg[[:space:]]*\([[:space:]]*test[[:space:]]*\)[[:space:]]*\]/)
         pending_test = 1
 
-      if (NR == target)
-        exit (active_test_scopes > 0 || pending_test) ? 0 : 1
+      if (NR == target) {
+        print (active_test_scopes > 0 || pending_test) ? "test" : "not-test"
+        exit 0
+      }
 
       for (i = 1; i <= length(code); i++) {
         c = substr(code, i, 1)
@@ -156,9 +202,20 @@ line_is_cfg_test() {
     }
     END {
       if (NR < target)
-        exit 1
+        print "not-test"
     }
-  ' "$path"
+  ' "$path"); then
+    printf 'cfg(test) line scanner failed for %s:%s\n' "$path" "$line_number" >&2
+    return 2
+  fi
+  case "$scanned" in
+    test) return 0 ;;
+    not-test) return 1 ;;
+    *)
+      printf 'cfg(test) line scanner emitted malformed result for %s:%s\n' "$path" "$line_number" >&2
+      return 2
+      ;;
+  esac
 }
 
 mark_cfg_test_module_path() {
@@ -207,35 +264,84 @@ mark_cfg_test_module_path() {
   return "$changed"
 }
 
+collect_rust_sources() {
+  local root=$1 array_name=$2 exclude=${3-} stage listed sorted
+  local -n collected=$array_name
+
+  stage=$(mktemp -d "${TMPDIR:-/tmp}/audit-resolution-face-casting.XXXXXX") || {
+    printf 'could not create source-collection staging directory\n' >&2
+    return 1
+  }
+  listed=$stage/listed
+  sorted=$stage/sorted
+  # Do not consume either command's output before it has completed: a failed
+  # command must never be mistaken for a partial source list.
+  if [[ -n $exclude ]]; then
+    if ! "$RG" --files --glob '*.rs' --glob "$exclude" "$root" >"$listed"; then
+      printf 'failed to collect Rust sources with rg under %s\n' "$root" >&2
+      rm -rf -- "$stage"
+      return 1
+    fi
+  elif ! "$RG" --files --glob '*.rs' "$root" >"$listed"; then
+    printf 'failed to collect Rust sources with rg under %s\n' "$root" >&2
+    rm -rf -- "$stage"
+    return 1
+  fi
+  if ! LC_ALL=C "$SORT" "$listed" >"$sorted"; then
+    printf 'failed to sort Rust sources under %s\n' "$root" >&2
+    rm -rf -- "$stage"
+    return 1
+  fi
+  mapfile -t collected <"$sorted"
+  rm -rf -- "$stage"
+  if ((${#collected[@]} == 0)); then
+    printf 'no Rust sources found under %s\n' "$root" >&2
+    return 1
+  fi
+}
+
+validate_cfg_index_record() {
+  local record=$1
+  local -a fields
+  IFS=$'\t' read -r -a fields <<<"$record"
+  case ${fields[0]-} in
+    file)
+      [[ ${#fields[@]} == 2 && -n ${fields[1]} ]]
+      ;;
+    line)
+      [[ ${#fields[@]} == 3 && -n ${fields[1]} && ${fields[2]} =~ ^[1-9][0-9]*$ ]]
+      ;;
+    module)
+      [[ ${#fields[@]} == 5 && -n ${fields[1]} &&
+        ${fields[2]} =~ ^[[:alpha:]_][[:alnum:]_]*$ && -n ${fields[3]} &&
+        (${fields[4]} == 0 || ${fields[4]} == 1) ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 build_cfg_test_module_index() {
-  local root parent kind module path test_only canonical_parent record changed
-  local -a sources
-  cfg_test_module_paths=()
-  cfg_test_route_lines=()
-  cfg_test_module_records=()
+  local root parent kind module path test_only canonical_parent record changed stage scanned
+  local -a sources root_sources
   sources=()
   for root in "$@"; do
-    [[ -d $root ]] || continue
-    while IFS= read -r parent; do
-      sources+=("$parent")
-    done < <(rg --files --glob '*.rs' "$root" | LC_ALL=C sort)
+    [[ -d $root ]] || {
+      printf 'cfg(test) source root is not a directory: %s\n' "$root" >&2
+      return 1
+    }
+    root_sources=()
+    if ! collect_rust_sources "$root" root_sources; then
+      return 1
+    fi
+    sources+=("${root_sources[@]}")
   done
 
-  while IFS=$'\t' read -r kind parent module path test_only; do
-    case "$kind" in
-      file)
-        cfg_test_module_paths["$(readlink -f -- "$parent")"]=1
-        ;;
-      line)
-        cfg_test_route_lines["$(readlink -f -- "$parent"):$module"]=1
-        ;;
-      module)
-        cfg_test_module_records+=("$parent"$'\t'"$module"$'\t'"$path"$'\t'"$test_only")
-        [[ $test_only == 1 ]] && mark_cfg_test_module_path "$parent" "$module" "$path" || true
-        ;;
-    esac
-  done < <(
-    awk '
+  stage=$(mktemp -d "${TMPDIR:-/tmp}/audit-resolution-face-casting.XXXXXX") || {
+    printf 'could not create cfg(test) index staging directory\n' >&2
+    return 1
+  }
+  scanned=$stage/cfg-index
+  if ! "$AWK" '
       function sanitize(line,    out, i, c, next_c, hashes, terminator) {
         out = ""
         for (i = 1; i <= length(line); i++) {
@@ -367,8 +473,49 @@ build_cfg_test_module_index() {
         if (pending_test && code ~ /;/)
           pending_test = 0
       }
-    ' "${sources[@]}"
-  )
+    ' "${sources[@]}" >"$scanned"; then
+    printf 'cfg(test) index scanner failed\n' >&2
+    rm -rf -- "$stage"
+    return 1
+  fi
+
+  while IFS= read -r record; do
+    if ! validate_cfg_index_record "$record"; then
+      printf 'cfg(test) index scanner emitted malformed record: %s\n' "$record" >&2
+      rm -rf -- "$stage"
+      return 1
+    fi
+  done <"$scanned"
+
+  # Only mutate the maps after the complete scanner output has validated.
+  cfg_test_module_paths=()
+  cfg_test_route_lines=()
+  cfg_test_module_records=()
+  while IFS=$'\t' read -r kind parent module path test_only; do
+    case "$kind" in
+      file)
+        canonical_parent=$(readlink -f -- "$parent") || {
+          printf 'could not canonicalize cfg(test) source: %s\n' "$parent" >&2
+          rm -rf -- "$stage"
+          return 1
+        }
+        cfg_test_module_paths["$canonical_parent"]=1
+        ;;
+      line)
+        canonical_parent=$(readlink -f -- "$parent") || {
+          printf 'could not canonicalize cfg(test) source: %s\n' "$parent" >&2
+          rm -rf -- "$stage"
+          return 1
+        }
+        cfg_test_route_lines["$canonical_parent:$module"]=1
+        ;;
+      module)
+        cfg_test_module_records+=("$parent"$'\t'"$module"$'\t'"$path"$'\t'"$test_only")
+        [[ $test_only == 1 ]] && mark_cfg_test_module_path "$parent" "$module" "$path" || true
+        ;;
+    esac
+  done <"$scanned"
+  rm -rf -- "$stage"
 
   # A cfg(test) parent makes every reachable out-of-line child test-only, so
   # propagate that fact to a fixed point for nested modules.
@@ -393,7 +540,7 @@ path_is_cfg_test_module() {
 }
 
 rust_route_records() {
-  awk '
+  "$AWK" '
     function sanitize(line,    out, i, c, next_c, hashes, terminator) {
       out = ""
       for (i = 1; i <= length(line); i++) {
@@ -495,27 +642,65 @@ rust_route_records() {
   ' "$@"
 }
 
+collect_raw_route_records() {
+  local array_name=$1 stage scanned sorted
+  shift
+  local -n records=$array_name
+  stage=$(mktemp -d "${TMPDIR:-/tmp}/audit-resolution-face-casting.XXXXXX") || {
+    printf 'could not create route-record staging directory\n' >&2
+    return 1
+  }
+  scanned=$stage/raw-routes
+  sorted=$stage/sorted-routes
+  if ! rust_route_records "$@" >"$scanned"; then
+    printf 'raw route scanner failed\n' >&2
+    rm -rf -- "$stage"
+    return 1
+  fi
+  if ! LC_ALL=C "$SORT" "$scanned" >"$sorted"; then
+    printf 'raw route sorter failed\n' >&2
+    rm -rf -- "$stage"
+    return 1
+  fi
+  mapfile -t records <"$sorted"
+  rm -rf -- "$stage"
+  if ((${#records[@]} == 0)); then
+    printf 'no raw route records found\n' >&2
+    return 1
+  fi
+}
+
 route_census() {
-  local raw line classified stable
-  local -a sources
-  mapfile -t sources < <(
-    rg --files --glob '*.rs' --glob '!**/resolution_face_census.rs' crates |
-      LC_ALL=C sort
-  )
-  build_cfg_test_module_index crates
-  raw=$(rust_route_records "${sources[@]}" | LC_ALL=C sort)
+  local root line classified stable
+  local -a sources raw_records
+  [[ $# == 2 && $1 == -- && -d $2 ]] || {
+    printf 'route-census requires exactly: -- ROOT (an existing directory)\n' >&2
+    return 2
+  }
+  root=$2
+  if ! collect_rust_sources "$root" sources '!**/resolution_face_census.rs'; then
+    return 1
+  fi
+  if ! build_cfg_test_module_index "$root"; then
+    return 1
+  fi
+  if ! collect_raw_route_records raw_records "${sources[@]}"; then
+    return 1
+  fi
   classified=
-  while IFS= read -r line; do
-    [[ -n $line ]] || continue
+  for line in "${raw_records[@]}"; do
     if ! classified+="$(classify_route_line "$line")"$'\n'; then
       printf 'unclassified production route: %s\n' "$line" >&2
       return 1
     fi
-  done <<<"$raw"
-  printf '%s' "$classified"
-  stable=$(printf '%s' "$classified" |
+  done
+  if ! stable=$(printf '%s' "$classified" |
     sed -E 's#^(route\t[^[:space:]]+\t[^:]+):[0-9]+:.*$#\1#' |
-    LC_ALL=C sort)
+    LC_ALL=C "$SORT"); then
+    printf 'failed to sort stable route records\n' >&2
+    return 1
+  fi
+  printf '%s' "$classified"
   printf 'HASH\troutes_sha256\t%s\n' "$(printf '%s\n' "$stable" | sha256sum | cut -d' ' -f1)"
 }
 
@@ -630,7 +815,7 @@ EOF
     "$scratch"
   classified=$(
     rust_route_records "$fixture" "$cfg_child" "$nested_cfg_child" "$file_cfg" "$production_child" |
-      LC_ALL=C sort |
+      LC_ALL=C "$SORT" |
       while IFS= read -r line; do classify_route_line "$line"; done
   )
   result=0
@@ -696,7 +881,7 @@ capture_to_output() {
   if [[ $output == /dev/stdout ]]; then
     cargo run --quiet -p phase-engine --features test-support \
       --bin resolution-face-census -- capture --output /dev/stdout "$@"
-    route_census
+    route_census -- crates
     return
   fi
 
@@ -705,12 +890,156 @@ capture_to_output() {
   if ! {
     cargo run --quiet -p phase-engine --features test-support \
       --bin resolution-face-census -- capture --output /dev/stdout "$@"
-    route_census
+    route_census -- crates
   } >"$temp"; then
     rm -f -- "$temp"
     return 1
   fi
   mv -- "$temp" "$output"
+}
+
+route_census_tool_self_test() {
+  local scratch root empty_root empty_records tools real_rg real_awk real_sort output result=0
+  scratch=target/audit-resolution-face-casting-tools-self-test.$$
+  root=$scratch/root
+  empty_root=$scratch/empty-root
+  empty_records=$scratch/empty-records
+  tools=$scratch/tools
+  real_rg=$(type -P rg)
+  real_awk=$(type -P awk)
+  real_sort=$(type -P sort)
+  mkdir -p "$root" "$empty_root" "$empty_records" "$tools"
+  cat >"$root/routes.rs" <<'EOF'
+struct ResolutionCastRequest {}
+fn executable_route() {
+    eligible_candidates();
+}
+EOF
+  cat >"$empty_records/empty.rs" <<'EOF'
+fn nothing_to_census() {}
+EOF
+  cat >"$tools/rg" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+count=0
+[[ -f ${TOOL_CALL_STATE:?} ]] && IFS= read -r count <"$TOOL_CALL_STATE"
+count=$((count + 1))
+printf '%s\n' "$count" >"$TOOL_CALL_STATE"
+[[ ${RG_FAIL_ON_CALL:-} == "$count" ]] && exit 70
+[[ ${RG_EMPTY_ON_CALL:-} == "$count" ]] && exit 0
+find "${!#}" -type f -name '*.rs' -print
+EOF
+  cat >"$tools/awk" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+count=0
+[[ -f ${TOOL_CALL_STATE:?} ]] && IFS= read -r count <"$TOOL_CALL_STATE"
+count=$((count + 1))
+printf '%s\n' "$count" >"$TOOL_CALL_STATE"
+[[ ${AWK_FAIL_ON_CALL:-} == "$count" ]] && exit 71
+if [[ ${AWK_MALFORM_ON_CALL:-} == "$count" ]]; then
+  printf 'malformed parser output\n'
+  exit 0
+fi
+exec "${REAL_AWK:?}" "$@"
+EOF
+  cat >"$tools/sort" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+count=0
+[[ -f ${TOOL_CALL_STATE:?} ]] && IFS= read -r count <"$TOOL_CALL_STATE"
+count=$((count + 1))
+printf '%s\n' "$count" >"$TOOL_CALL_STATE"
+if [[ ${SORT_FAIL_ON_CALL:-} == "$count" ]]; then
+  printf 'partial sort output\n'
+  exit 72
+fi
+exec "${REAL_SORT:?}" "$@"
+EOF
+  chmod +x "$tools/rg" "$tools/awk" "$tools/sort"
+
+  if ! output=$("$SCRIPT_PATH" route-census -- "$root") ||
+    ! grep -q $'^route\tresolution-cast-request:definition\t' <<<"$output" ||
+    ! grep -q $'^route\teligible-candidates:production\t' <<<"$output" ||
+    ! grep -Eq $'^HASH\troutes_sha256\t[0-9a-f]{64}$' <<<"$output"; then
+    printf 'route-census normal-output self-test failed\n' >&2
+    result=1
+  fi
+
+  if env RG="$tools/missing-rg" AWK="$real_awk" SORT="$real_sort" \
+      "$SCRIPT_PATH" route-census -- "$root" >/dev/null 2>&1; then
+    printf 'missing rg unexpectedly succeeded\n' >&2
+    result=1
+  fi
+  if env RG="$tools/rg" AWK="$real_awk" SORT="$real_sort" \
+      TOOL_CALL_STATE="$scratch/rg-first" RG_FAIL_ON_CALL=1 \
+      "$SCRIPT_PATH" route-census -- "$root" >/dev/null 2>&1; then
+    printf 'failing route-source rg unexpectedly succeeded\n' >&2
+    result=1
+  fi
+  if env RG="$tools/rg" AWK="$real_awk" SORT="$real_sort" \
+      TOOL_CALL_STATE="$scratch/rg-second" RG_FAIL_ON_CALL=2 \
+      "$SCRIPT_PATH" route-census -- "$root" >/dev/null 2>&1; then
+    printf 'failing cfg-index-source rg unexpectedly succeeded\n' >&2
+    result=1
+  fi
+  if env RG="$real_rg" AWK="$tools/missing-awk" SORT="$real_sort" \
+      "$SCRIPT_PATH" route-census -- "$root" >/dev/null 2>&1; then
+    printf 'missing awk unexpectedly succeeded\n' >&2
+    result=1
+  fi
+  if env RG="$real_rg" AWK="$tools/awk" SORT="$real_sort" \
+      TOOL_CALL_STATE="$scratch/awk-index" REAL_AWK="$real_awk" AWK_FAIL_ON_CALL=1 \
+      "$SCRIPT_PATH" route-census -- "$root" >/dev/null 2>&1; then
+    printf 'failing cfg-index awk unexpectedly succeeded\n' >&2
+    result=1
+  fi
+  if env RG="$real_rg" AWK="$tools/awk" SORT="$real_sort" \
+      TOOL_CALL_STATE="$scratch/awk-raw" REAL_AWK="$real_awk" AWK_FAIL_ON_CALL=2 \
+      "$SCRIPT_PATH" route-census -- "$root" >/dev/null 2>&1; then
+    printf 'failing raw-route awk unexpectedly succeeded\n' >&2
+    result=1
+  fi
+  if env RG="$real_rg" AWK="$tools/awk" SORT="$real_sort" \
+      TOOL_CALL_STATE="$scratch/awk-line" REAL_AWK="$real_awk" AWK_FAIL_ON_CALL=3 \
+      "$SCRIPT_PATH" route-census -- "$root" >/dev/null 2>&1; then
+    printf 'failing cfg-line awk unexpectedly succeeded\n' >&2
+    result=1
+  fi
+  if env RG="$real_rg" AWK="$tools/awk" SORT="$real_sort" \
+      TOOL_CALL_STATE="$scratch/awk-malformed-index" REAL_AWK="$real_awk" AWK_MALFORM_ON_CALL=1 \
+      "$SCRIPT_PATH" route-census -- "$root" >/dev/null 2>&1; then
+    printf 'malformed cfg-index parser output unexpectedly succeeded\n' >&2
+    result=1
+  fi
+  if env RG="$real_rg" AWK="$tools/awk" SORT="$real_sort" \
+      TOOL_CALL_STATE="$scratch/awk-malformed-line" REAL_AWK="$real_awk" AWK_MALFORM_ON_CALL=3 \
+      "$SCRIPT_PATH" route-census -- "$root" >/dev/null 2>&1; then
+    printf 'malformed cfg-line parser output unexpectedly succeeded\n' >&2
+    result=1
+  fi
+  if env RG="$real_rg" AWK="$real_awk" SORT="$tools/sort" \
+      TOOL_CALL_STATE="$scratch/sort-raw" REAL_SORT="$real_sort" SORT_FAIL_ON_CALL=3 \
+      "$SCRIPT_PATH" route-census -- "$root" >/dev/null 2>&1; then
+    printf 'failing raw-route sort unexpectedly succeeded\n' >&2
+    result=1
+  fi
+  if "$SCRIPT_PATH" route-census -- "$empty_root" >/dev/null 2>&1; then
+    printf 'empty route source set unexpectedly succeeded\n' >&2
+    result=1
+  fi
+  if env RG="$tools/rg" AWK="$real_awk" SORT="$real_sort" \
+      TOOL_CALL_STATE="$scratch/rg-empty-second" RG_EMPTY_ON_CALL=2 \
+      "$SCRIPT_PATH" route-census -- "$root" >/dev/null 2>&1; then
+    printf 'empty cfg-index source set unexpectedly succeeded\n' >&2
+    result=1
+  fi
+  if "$SCRIPT_PATH" route-census -- "$empty_records" >/dev/null 2>&1; then
+    printf 'empty raw route record set unexpectedly succeeded\n' >&2
+    result=1
+  fi
+  rm -rf -- "$scratch"
+  return "$result"
 }
 
 real_capture_compare_self_test() {
@@ -720,11 +1049,9 @@ real_capture_compare_self_test() {
   capture=$scratch/capture.tsv
   comparison=$scratch/comparison.tsv
   mkdir -p "$scratch"
-  jq 'with_entries(select(
-        .key == "bind" or
-        .value.scryfall_oracle_id == "ff7c12dd-1a1a-417a-b08a-d1346430858e"
-      ))' client/public/card-data.json >"$card_data"
-  if ! capture_to_output \
+  if ! cargo run --quiet -p phase-engine --features test-support \
+      --bin resolution-face-census -- self-test-fixture-export --output "$card_data" ||
+    ! capture_to_output \
       --card-data "$card_data" \
       --candidate-sha self-test \
       --output "$capture" ||
@@ -748,13 +1075,17 @@ case "$command" in
     ;;
   compare)
     cargo run --quiet -p phase-engine --features test-support --bin resolution-face-census -- compare "$@"
-    route_census
+    route_census -- crates
+    ;;
+  route-census)
+    route_census "$@"
     ;;
   self-test)
     route_classifier_self_test
     cargo run --quiet -p phase-engine --features test-support --bin resolution-face-census -- self-test
+    route_census_tool_self_test
     real_capture_compare_self_test
-    route_census >/dev/null
+    route_census -- crates >/dev/null
     printf 'audit-resolution-face-casting self-test: PASS\n'
     ;;
   *) usage ;;

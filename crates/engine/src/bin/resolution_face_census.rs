@@ -12,6 +12,7 @@ use engine::types::ability::{
     QuantityRef, ResolutionCastWindow, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::actions::{CastChoice, GameAction};
+use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType, Supertype};
 use engine::types::game_state::{
     CastOfferKind, CastingVariant, StackEntry, StackEntryKind, WaitingFor,
@@ -1610,6 +1611,44 @@ fn hand_fuse_section(
     ])
 }
 
+/// A tiny, deterministic two-face export for the wrapper's hermetic
+/// capture/compare positive control.  It intentionally exercises split-face
+/// identity reconstruction without depending on the browser card-data export.
+fn self_test_fixture_export() -> String {
+    let face = |name: &str, face_index: usize, fuse: bool| {
+        let face = CardFace {
+            name: name.to_string(),
+            mana_cost: ManaCost::NoCost,
+            card_type: CardType {
+                core_types: vec![CoreType::Instant],
+                ..CardType::default()
+            },
+            abilities: vec![AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)],
+            keywords: fuse.then_some(Keyword::Fuse).into_iter().collect(),
+            scryfall_oracle_id: Some("fixture-split-oracle".to_string()),
+            ..CardFace::default()
+        };
+        let mut entry = serde_json::to_value(face)
+            .expect("fixture CardFace serializes")
+            .as_object()
+            .expect("fixture CardFace is an object")
+            .clone();
+        entry.insert("layout".to_string(), Value::String("split".to_string()));
+        entry.insert("face_index".to_string(), Value::from(face_index));
+        Value::Object(entry)
+    };
+    let mut export = serde_json::Map::new();
+    export.insert(
+        "fixture-front-storage-key".to_string(),
+        face("Fixture Front", 0, false),
+    );
+    export.insert(
+        "fixture-back-storage-key".to_string(),
+        face("Fixture Back", 1, true),
+    );
+    Value::Object(export).to_string()
+}
+
 fn capture(card_data: &Path, candidate_sha: &str) -> Result<String, String> {
     let raw = fs::read(card_data)
         .map_err(|error| format!("cannot read {}: {error}", card_data.display()))?;
@@ -2411,6 +2450,10 @@ fn real_main() -> Result<(), String> {
             let output = PathBuf::from(required_arg(&args, "--output")?);
             write_output(&output, &capture(&card_data, &candidate_sha)?)
         }
+        Some("self-test-fixture-export") => {
+            let output = PathBuf::from(required_arg(&args, "--output")?);
+            write_output(&output, &self_test_fixture_export())
+        }
         Some("compare") => {
             let base = PathBuf::from(required_arg(&args, "--base")?);
             let candidate = PathBuf::from(required_arg(&args, "--candidate")?);
@@ -2426,7 +2469,10 @@ fn real_main() -> Result<(), String> {
             println!("resolution-face-census self-test: PASS");
             Ok(())
         }
-        _ => Err("usage: resolution-face-census <capture|compare|self-test> [options]".to_string()),
+        _ => Err(
+            "usage: resolution-face-census <capture|compare|self-test|self-test-fixture-export> [options]"
+                .to_string(),
+        ),
     }
 }
 
@@ -2441,44 +2487,9 @@ fn main() {
 mod tests {
     use super::*;
     use engine::types::ability::{ResolutionCastCleanup, ResolutionCastFacePolicy};
-    use engine::types::card::CardFace;
 
     fn fixture_export() -> String {
-        let face = |name: &str, face_index: usize, fuse: bool| {
-            let face = CardFace {
-                name: name.to_string(),
-                mana_cost: ManaCost::NoCost,
-                card_type: CardType {
-                    core_types: vec![CoreType::Instant],
-                    ..CardType::default()
-                },
-                abilities: vec![AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)],
-                keywords: fuse.then_some(Keyword::Fuse).into_iter().collect(),
-                scryfall_oracle_id: Some("fixture-split-oracle".to_string()),
-                ..CardFace::default()
-            };
-            let mut entry = serde_json::to_value(face)
-                .expect("fixture CardFace serializes")
-                .as_object()
-                .expect("fixture CardFace is an object")
-                .clone();
-            entry.insert("layout".to_string(), Value::String("split".to_string()));
-            entry.insert("face_index".to_string(), Value::from(face_index));
-            Value::Object(entry)
-        };
-        let mut export = serde_json::Map::new();
-        // Storage keys deliberately differ from face names. The census must
-        // retain them so database hydration can reconstruct both halves.
-        export.insert(
-            "fixture-front-storage-key".to_string(),
-            face("Fixture Front", 0, false),
-        );
-        export.insert(
-            "fixture-back-storage-key".to_string(),
-            // Fuse is intentionally on the back face to pin cross-face OR.
-            face("Fixture Back", 1, true),
-        );
-        Value::Object(export).to_string()
+        self_test_fixture_export()
     }
 
     fn fixture_identity_and_db() -> (Identity, CardDatabase) {
