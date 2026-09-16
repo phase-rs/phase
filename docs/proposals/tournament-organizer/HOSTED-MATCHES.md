@@ -196,10 +196,12 @@ asserted as decided (§9.5).
   single winner, empty `game_wins` — so `validate_match_result` passes by
   construction), and calls `report_result`. Wire the same four game-over / concede
   / concede-match call sites the draft path uses.
-- **Disconnect / concede** — the engine match layer already resolves
-  disconnect/host-kick via `apply_trusted_match_forfeit`
-  (`crates/engine/src/game/match_flow.rs`) to match `Completed` with a forfeit
-  result; the same GameOver hook auto-reports it. Reused, not rebuilt.
+- **Disconnect / concede** — match-type-dependent, and **not** uniformly covered by
+  one existing primitive (see §6.1). For **2-seat Bo3**, `apply_trusted_match_forfeit`
+  (`crates/engine/src/game/match_flow.rs:276-285`) resolves the match to `Completed`
+  and the same hook auto-reports it. That primitive **hard-rejects non-Bo3 and
+  non-two-seat sessions**, so Bo1 head-to-head (single-elim) and pods need a
+  different trusted-terminal path — a real design fork tracked in §6.1 and §9.6.
 
 ### 4.1. Result authority: server-only for hosted pairings
 
@@ -211,16 +213,34 @@ display choice, not an authorization control: the RPC still exists, and
 holding a valid `player_token`. Left as-is, a seated player could **forge an
 outcome before `WaitingFor::GameOver`** (CWE-863). So:
 
-- `report_gate` (or the broker report handler) gains a hosted-pairing arm that
-  refuses client reports while a hosted game is live/linked — a new
-  `ReportGate::Hosted` reason, symmetric with the existing `Bye`/`Forfeit` arms,
-  so refusal is viewer-independent and the wire `PairingView` shows it.
-- The **only** writer of a hosted pairing's outcome is the server path
-  (`report_tournament_game_over` → `report_result`), invoked from the engine's
-  observed terminal state — a code path clients cannot call.
-- **Manual-only mode is retained** for non-hosted tournaments (and for a hosted
-  tournament's manual fallback, §4.3/§5): when a pairing is not hosted,
-  `report_gate` stays `Open` and the seated-player self-report path is unchanged.
+**Design subtlety (raised in review).** `report_result` (`tournament.rs:2434-2503`)
+applies **one** `report_gate` to **every** caller — the exhaustive `match` on
+`report_gate(pairing)` runs identically for the client handler
+(`broker.rs:1486-1487`) and any server path. So a naive `ReportGate::Hosted → deny`
+arm would deny the server's own hosted report too. The gate is deliberately
+*WHO-independent* (it answers "is this pairing reportable?", not "may this caller
+report?"), and the caller-identity check lives one layer up in the broker
+(`authorize_player`). The fix keeps that split and adds an explicit **authority**:
+
+- The pairing carries **durable hosting authority** — persisted state marking it
+  hosted (and its current generation, §4.3). `report_gate` returns a new
+  `ReportGate::Hosted` for such a pairing: WHO-independent, so the wire
+  `PairingView` shows it and the client handler (which cannot present authority)
+  is refused.
+- `report_result` gains an explicit `ReportAuthority` parameter
+  (`SeatedPlayer` | `System`). The `Hosted` arm **admits `System`, denies
+  `SeatedPlayer`**; the other arms are unchanged. `System` is not constructible
+  from the wire — it is chosen by the server code path
+  (`report_tournament_game_over`), never by an RPC. The client handler always
+  passes `SeatedPlayer`.
+- The **only** writer of a hosted pairing's outcome is thus the server path,
+  invoked from the engine's observed terminal state — inaccessible to clients — and
+  the core stays `GameState`-free (authority is a plain enum parameter, not a
+  session handle).
+- **Manual-only mode is retained** for non-hosted pairings (and the hosted
+  tournament's per-pairing manual fallback, §5): a non-hosted pairing has no
+  hosting authority, so `report_gate` stays `Open` and the seated-player
+  self-report path is unchanged.
 
 The design therefore does **not** ship a `player_token` to the client for the
 purpose of reporting a hosted result; any token the client holds is for joining
@@ -283,6 +303,24 @@ terminal from an old game from landing after a rehost. So:
   `active_matches` entry; the old game's `game_code` is cleared and any terminal it
   later emits is fenced out.
 
+**Atomicity (raised in review).** The generation check and the outcome write must
+be **one atomic critical section per pairing**, not a check-then-act. Today
+`report_result` validates the gate and *then* mutates
+`meta.pairings[index].outcome` (`tournament.rs:2461,2500`) as separate steps; a
+rehost that bumps the generation **between** a terminal's generation-validation and
+its publication would let a stale terminal (validated against the old generation)
+still publish and overwrite the rehosted result — a TOCTOU race. So:
+
+- Generation-validate → publish is a single per-pairing transaction (a per-pairing
+  lock or compare-and-set on `(pairing, generation)` that couples the check to the
+  write), and **rehost** (bump-generation + swap `active_matches`) takes the *same*
+  per-pairing critical section, so the two can never interleave. The restore path
+  (§4.2) enters the same section.
+- This does **not** rely on `report_result`'s replay-safe overwrite: an identical
+  replay after a crash is already a no-op, but that only covers *duplicate* reports
+  of the *same* generation — it does nothing against the *cross-generation* race,
+  which only the atomic section closes.
+
 ---
 
 ## 5. Protocol / versioning impact (B)
@@ -328,10 +366,35 @@ floors in `protocol.rs` + `ws-adapter.ts`):
   start-timeout resolves to a forfeit (or `drop_player`,
   `tournament.rs:2532`). This timeout policy is **new** and is a §7 sub-decision
   (does a no-show auto-forfeit, or wait for organizer action?).
-- **Mid-game disconnect** — handled by the engine match layer's
-  `apply_trusted_match_forfeit` → match `Completed` → auto-report. No new logic.
+- **Mid-game disconnect** — match-type-dependent; see §6.1. Not one primitive.
 - **Lost report** — server-authoritative, so the server reports directly; there
   is no lost self-report frame to recover (unlike A).
+
+### 6.1. Trusted-terminal for disconnect is not uniform (raised in review)
+
+The only cited trusted-forfeit primitive, `apply_trusted_match_forfeit`
+(`match_flow.rs:276-285`), **rejects any session that is not Bo3 and not exactly
+two seats** ("Match forfeits require a best-of-three match" / "require exactly two
+players"). So it covers **2-seat Bo3 only** — not Bo1 head-to-head (single-elim,
+lobby v8) and not pods (Bo1, 3–4 seats). Normal game-over already works for every
+class (a game that reaches `WaitingFor::GameOver` reports fine); the gap is
+strictly the **trusted mid-game disconnect/abandon** terminalization for Bo1/pod.
+
+This is a genuine fork the design must resolve (§9.6), not hand-wave:
+
+- **Option (i) — restrict hosted v1 to 2-seat Bo3.** Simplest and fully covered by
+  the existing primitive, but it **excludes single-elimination (Bo1 H2H) and pod
+  events** from hosting — a large cut, since single-elim is a flagship use.
+- **Option (ii) — define a generic trusted-terminal primitive** covering Bo1
+  (2-seat) and n-seat pods: a transport-trusted terminalization that yields a
+  `WaitingFor::GameOver`-shaped outcome (winner = the non-abandoning seat, or the
+  pod's remaining/kill result) which the same handoff (R2) reports. This is the one
+  piece of genuinely **new engine work** in B and belongs in `match_flow`, bound to
+  authenticated transport identity exactly as `apply_trusted_match_forfeit` is.
+
+Recommendation: **(ii)** — restricting to Bo3 would gut single-elim/pod hosting;
+but this is the maintainer's call (§9.6). Either way, the §8 matrix's disconnect
+row is honestly scoped to the primitive that actually exists.
 
 ---
 
@@ -341,19 +404,25 @@ The trust/recovery boundaries below are **requirements of the design** (raised i
 review), not deferrable — they are specified above and repeated here as a
 checklist the implementation PR must satisfy:
 
-- **R1 — Server-only result authority** for hosted pairings; client
-  `ReportMatchResult` refused via a `ReportGate::Hosted` arm (§4.1).
+- **R1 — Server-only result authority** for hosted pairings: `ReportGate::Hosted`
+  (WHO-independent) + an explicit `ReportAuthority::{SeatedPlayer,System}` param on
+  `report_result` — `Hosted` admits `System` (server code path only, not
+  wire-constructible), denies `SeatedPlayer` (client) (§4.1).
 - **R2 — Durable, idempotent terminal handoff** through one report path across
   normal / concede / disconnect / restart-recovery, reporting before the hosted
   game is removed; typed persisted payload carries pairing id + full `PodOutcome`
   incl. `match_score` (§4.2).
-- **R3 — Current-game generation fence** so a stale terminal cannot overwrite a
-  rehosted pairing (§4.3).
+- **R3 — Current-game generation fence, applied atomically** — generation-validate
+  and outcome-publish in one per-pairing critical section (CAS/lock) that rehost
+  and recovery also take, closing the cross-generation TOCTOU race (§4.3).
 - **R4 — Capability gate + per-pairing manual fallback** (`MIN_LOBBY_PROTOCOL_FOR_HOSTED_MATCH`);
   never seat a below-floor client into a hosting-only pairing (§5).
 - **R5 — Reservation binding** — hosted-table reservations bound to the pairing's
   tournament `player_token`s (`join_game_with_name_and_reservation` +
   `LobbyReservation`) so only seated players occupy the table.
+- **R6 — Uniform trusted-terminal for disconnect** — the disconnect path must cover
+  every hosted match class, not just 2-seat Bo3 (`apply_trusted_match_forfeit`'s
+  limit); resolve via §9.6 (generic primitive vs. Bo3-only scope) (§6.1).
 
 Genuinely open **sub-decisions** (do not block recording the design, resolved in
 the implementation PR):
@@ -374,7 +443,8 @@ the implementation PR):
 |---|---|---|---|
 | Normal game-over | `WaitingFor::GameOver` (`main.rs:6588`) | `report_tournament_game_over` → `report_result` | generation (R3) |
 | Concede / concede-match | existing concede sites | same idempotent path (R2) | generation (R3) |
-| Mid-game disconnect | `apply_trusted_match_forfeit` → `Completed` | same idempotent path (R2) | generation (R3) |
+| Disconnect — 2-seat Bo3 | `apply_trusted_match_forfeit` → `Completed` | same idempotent path (R2) | generation (R3) |
+| Disconnect — Bo1 / pod | generic trusted-terminal (§6.1, **new**) or scoped out (§9.6) | same idempotent path (R2) | generation (R3) |
 | Restart recovery | `finish_restored_full_startup` (`main.rs:249`) | persisted terminal payload → same path (R2) | generation (R3) |
 | No-show / never-connects | start-timeout (new, §9.2) | forfeit / `drop_player` | n/a (no game) |
 | Bye / pre-resolved | `generate_pairings` | never hosted | n/a |
@@ -399,3 +469,7 @@ the implementation PR):
 5. **The trust-model decision itself.** B (server-authoritative) is proposed and
    reverses the lobby-only-v1 posture `CONTEXT.md:392-395` reserves for you —
    please confirm B, or direct A (P2P convenience) instead.
+6. **Disconnect scope (§6.1).** For Bo1 H2H (single-elim) and pods,
+   `apply_trusted_match_forfeit` does not apply. Add a **generic trusted-terminal**
+   primitive in `match_flow` (recommended — keeps single-elim/pod hosting), or
+   **restrict hosted v1 to 2-seat Bo3** and defer the rest?
