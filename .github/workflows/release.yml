@@ -565,7 +565,7 @@ jobs:
   # ── Server binary compile (linux musl, shared) ──────────────────────────────
   # Compiles the static musl binaries ONCE per release run, one matrix leg per
   # image architecture. Consumed by build-server-image (multi-arch prebuilt
-  # image) and build-server's linux leg (slim x86_64 asset), so neither pays a
+  # image) and build-server's linux legs (slim x86_64 and aarch64 assets), so neither pays a
   # redundant ~10min compile. Needs nothing the data pipeline produces, so it
   # starts immediately.
   build-server-binary:
@@ -618,7 +618,7 @@ jobs:
         # Python is PEP 668 externally-managed since GitHub reverted its
         # pip workaround (actions/runner-images#10897, 2025-05-09). Same
         # flag the Dockerfile already passes for this identical install.
-        run: pip install --break-system-packages cargo-zigbuild==0.23.0 ziglang==0.16.0
+        run: pip install --break-system-packages --require-hashes -r scripts/requirements-zigbuild.txt
 
       - name: Add musl target
         # Must be `rustup target add`, not setup-rust-toolchain's `targets:`
@@ -887,20 +887,30 @@ jobs:
             runner: ubuntu-latest
             triple: x86_64-unknown-linux-musl
             extension: ""
+            prebuilt: server-binary-linux-amd64
+          - os: linux-arm64
+            runner: ubuntu-latest
+            triple: aarch64-unknown-linux-musl
+            extension: ""
+            prebuilt: server-binary-linux-arm64
           - os: macos
             runner: macos-latest
             triple: aarch64-apple-darwin
             extension: ""
+            prebuilt: ""
           - os: windows
             runner: windows-latest
             triple: x86_64-pc-windows-msvc
             extension: .exe
+            prebuilt: ""
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.RELEASE_SHA }}
 
+      # Prebuilt legs only copy a binary; the arm64 leg's key would otherwise restore build-server-binary's cache for nothing.
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        if: matrix.prebuilt == ''
         with:
           cache-shared-key: rust-server-${{ matrix.os }}
           # Keep this artifact build consistent with the primary Linux build:
@@ -908,20 +918,20 @@ jobs:
           rustflags: ""
 
       - name: Build phase-server (macOS/Windows)
-        # Linux musl is compiled once in build-server-binary and reused below;
-        # only the non-musl targets compile here.
-        if: matrix.triple != 'x86_64-unknown-linux-musl'
+        # Linux musl is compiled once per architecture in build-server-binary and reused below;
+        # only macOS and Windows compile here.
+        if: matrix.prebuilt == ''
         # -p scopes feature unification (see the Linux leg's note).
         run: cargo build -p phase-server --profile server-release --bin phase-server --target ${{ matrix.triple }}
 
       - name: Download prebuilt linux binary
         # Reuse the single musl build from build-server-binary, placed at the
         # canonical target path so the packaging step is identical across OSes.
-        if: matrix.triple == 'x86_64-unknown-linux-musl'
+        if: matrix.prebuilt != ''
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: server-binary-linux-amd64
-          path: target/x86_64-unknown-linux-musl/server-release
+          name: ${{ matrix.prebuilt }}
+          path: target/${{ matrix.triple }}/server-release
 
       - name: Prepare slim server binary (Unix)
         if: matrix.os != 'windows'
@@ -1052,7 +1062,7 @@ jobs:
           sudo apt-get install -y minisign
 
       - name: Sign slim server artifacts and the release data manifest
-        # Sign in this Ubuntu finisher so all three OS binaries use one trusted
+        # Sign in this Ubuntu finisher so every slim binary uses one trusted
         # signing path. Publishing is the step after this one, so the R2 token
         # is never in scope for minisign and the signing key is gone — the EXIT
         # trap below fires at the end of this step — before wrangler runs.
@@ -1085,6 +1095,7 @@ jobs:
 
           for triple in \
             x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-musl \
             aarch64-apple-darwin \
             x86_64-pc-windows-msvc; do
             binary="artifacts/phase-server-slim-$triple/phase-server-slim-$triple"
@@ -1173,13 +1184,16 @@ jobs:
           cat > changelog.md <<'EOF'
           ## Downloads
 
+          Desktop installers are published with the desktop releases: https://github.com/phase-rs/phase/releases/latest
+
+          This release carries the signed native servers the desktop app downloads for itself:
+
           | Platform | File |
           |----------|------|
-          | **Windows** | `Phase_*_x64-setup.exe` |
-          | **macOS (Apple Silicon)** | `Phase_*_aarch64.dmg` |
-          | **Linux** | `Phase_*_amd64.AppImage` or `.deb` |
-
-          > **macOS note:** If you see "this app is damaged", open Terminal and run: `xattr -cr /Applications/Phase.app`
+          | **Windows (x64)** | `phase-server-slim-x86_64-pc-windows-msvc.exe` |
+          | **macOS (Apple Silicon)** | `phase-server-slim-aarch64-apple-darwin` |
+          | **Linux (x86_64)** | `phase-server-slim-x86_64-unknown-linux-musl` |
+          | **Linux (aarch64)** | `phase-server-slim-aarch64-unknown-linux-musl` |
 
           ## Changes
           EOF
@@ -1214,6 +1228,8 @@ jobs:
             cat <<'EOF'
           artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl
           artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl.minisig
+          artifacts/phase-server-slim-aarch64-unknown-linux-musl/phase-server-slim-aarch64-unknown-linux-musl
+          artifacts/phase-server-slim-aarch64-unknown-linux-musl/phase-server-slim-aarch64-unknown-linux-musl.minisig
           artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin
           artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin.minisig
           artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe

@@ -29,7 +29,7 @@ jobs:
       release_sha: ${{ steps.resolve.outputs.release_sha }}
       shell_version: ${{ steps.resolve.outputs.shell_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -71,7 +71,7 @@ jobs:
       RELEASE_SHA: ${{ needs.resolve-shell-ref.outputs.release_sha }}
       SHELL_VERSION: ${{ needs.resolve-shell-ref.outputs.shell_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.RELEASE_SHA }}
 
@@ -127,7 +127,7 @@ jobs:
             jq empty "$f"
           done
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           cache-shared-key: rust-shell-preflight
 
@@ -148,8 +148,16 @@ jobs:
         # against its standalone manifest after version stamping.
         run: cargo check --locked --manifest-path client/src-tauri/Cargo.toml
 
+      - name: phase-tauri tests
+        # This crate's platform -> engine-target mapping is what lets a published
+        # desktop fetch the engine binary for the machine it runs on, and nothing
+        # else in this workflow executes the tests that hold that mapping to the
+        # platforms below. A failure here stops build-shell before any package or
+        # updater entry is published.
+        run: cargo test --locked --manifest-path client/src-tauri/Cargo.toml
+
   build-shell:
-    name: Build Shell (${{ matrix.os }})
+    name: Build Shell (${{ matrix.os }} ${{ matrix.arch }})
     needs: [resolve-shell-ref, shell-preflight]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -163,28 +171,35 @@ jobs:
       matrix:
         include:
           - os: linux
+            arch: x86_64
             runner: ubuntu-latest
             artifact: shell-tauri-linux
+          - os: linux
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            artifact: shell-tauri-linux-aarch64
           - os: macos
+            arch: aarch64
             runner: macos-latest
             artifact: shell-tauri-macos
           - os: windows
+            arch: x86_64
             runner: windows-latest
             artifact: shell-tauri-windows
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.RELEASE_SHA }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          cache-shared-key: rust-shell-${{ matrix.os }}
+          cache-shared-key: rust-shell-${{ matrix.os }}-${{ matrix.arch }}
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: pnpm
@@ -296,7 +311,7 @@ jobs:
           done
 
       - name: Build shell
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           # beforeBuildCommand runs only pnpm build:bootstrap. SHELL_REMOTE_ORIGIN
           # is intentionally unset so release shells use https://phase-rs.dev.
@@ -309,6 +324,8 @@ jobs:
 
       - name: Stage shell artifacts
         shell: bash
+        env:
+          LINUX_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           mkdir -p staging
@@ -334,12 +351,12 @@ jobs:
           rename_artifact '*-setup.exe' 'Phase-Desktop-Windows-x64-Setup.exe'
           rename_artifact '*.dmg' 'Phase-Desktop-macOS-Apple-Silicon.dmg'
           rename_artifact '*.app.tar.gz' 'Phase-Desktop-macOS-Apple-Silicon.app.tar.gz'
-          rename_artifact '*.AppImage' 'Phase-Desktop-Linux-x86_64.AppImage'
-          rename_artifact '*.deb' 'Phase-Desktop-Linux-x86_64.deb'
+          rename_artifact '*.AppImage' "Phase-Desktop-Linux-${LINUX_ARCH}.AppImage"
+          rename_artifact '*.deb' "Phase-Desktop-Linux-${LINUX_ARCH}.deb"
           ls -la staging/
 
       - name: Upload shell artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.artifact }}
           path: staging/*
@@ -596,6 +613,12 @@ jobs:
           name: shell-tauri-linux
           path: artifacts/shell-tauri-linux
 
+      - name: Download Linux aarch64 shell artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: shell-tauri-linux-aarch64
+          path: artifacts/shell-tauri-linux-aarch64
+
       - name: Download macOS shell artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -632,17 +655,21 @@ jobs:
           }
 
           LINUX_PAYLOAD=$(first_match "artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.AppImage")
+          LINUX_AARCH64_PAYLOAD=$(first_match "artifacts/shell-tauri-linux-aarch64/Phase-Desktop-Linux-aarch64.AppImage")
           MACOS_PAYLOAD=$(first_match "artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.app.tar.gz")
           WINDOWS_PAYLOAD=$(first_match "artifacts/shell-tauri-windows/Phase-Desktop-Windows-x64-Setup.exe")
           LINUX_SIG=""
+          LINUX_AARCH64_SIG=""
           MACOS_SIG=""
           WINDOWS_SIG=""
           if [ -n "$LINUX_PAYLOAD" ] && [ -f "$LINUX_PAYLOAD.sig" ]; then LINUX_SIG=$(cat "$LINUX_PAYLOAD.sig"); fi
+          if [ -n "$LINUX_AARCH64_PAYLOAD" ] && [ -f "$LINUX_AARCH64_PAYLOAD.sig" ]; then LINUX_AARCH64_SIG=$(cat "$LINUX_AARCH64_PAYLOAD.sig"); fi
           if [ -n "$MACOS_PAYLOAD" ] && [ -f "$MACOS_PAYLOAD.sig" ]; then MACOS_SIG=$(cat "$MACOS_PAYLOAD.sig"); fi
           if [ -n "$WINDOWS_PAYLOAD" ] && [ -f "$WINDOWS_PAYLOAD.sig" ]; then WINDOWS_SIG=$(cat "$WINDOWS_PAYLOAD.sig"); fi
 
           missing=0
           if [ -z "$LINUX_PAYLOAD" ] || [ -z "$LINUX_SIG" ]; then echo "::error::Missing Linux updater payload/signature"; missing=1; fi
+          if [ -z "$LINUX_AARCH64_PAYLOAD" ] || [ -z "$LINUX_AARCH64_SIG" ]; then echo "::error::Missing Linux aarch64 updater payload/signature"; missing=1; fi
           if [ -z "$MACOS_PAYLOAD" ] || [ -z "$MACOS_SIG" ]; then echo "::error::Missing macOS updater payload/signature"; missing=1; fi
           if [ -z "$WINDOWS_PAYLOAD" ] || [ -z "$WINDOWS_SIG" ]; then echo "::error::Missing Windows updater payload/signature"; missing=1; fi
           [ "$missing" = "0" ]
@@ -650,6 +677,8 @@ jobs:
           PLATFORMS="{"
           LINUX_URL=$(artifact_url "$LINUX_PAYLOAD")
           PLATFORMS="${PLATFORMS}\"linux-x86_64\":{\"signature\":\"${LINUX_SIG}\",\"url\":\"${LINUX_URL}\"}"
+          LINUX_AARCH64_URL=$(artifact_url "$LINUX_AARCH64_PAYLOAD")
+          PLATFORMS="${PLATFORMS},\"linux-aarch64\":{\"signature\":\"${LINUX_AARCH64_SIG}\",\"url\":\"${LINUX_AARCH64_URL}\"}"
           MACOS_URL=$(artifact_url "$MACOS_PAYLOAD")
           PLATFORMS="${PLATFORMS},\"darwin-aarch64\":{\"signature\":\"${MACOS_SIG}\",\"url\":\"${MACOS_URL}\"}"
           WINDOWS_URL=$(artifact_url "$WINDOWS_PAYLOAD")
@@ -658,7 +687,7 @@ jobs:
           echo "{\"version\":\"${SHELL_VERSION}\",\"notes\":\"Shell release ${TAG}\",\"pub_date\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"platforms\":${PLATFORMS}}" \
             | jq . > artifacts/update.json
           test -s artifacts/update.json
-          test "$(jq -r '.platforms | keys | sort | join(",")' artifacts/update.json)" = 'darwin-aarch64,linux-x86_64,windows-x86_64'
+          test "$(jq -r '.platforms | keys | sort | join(",")' artifacts/update.json)" = 'darwin-aarch64,linux-aarch64,linux-x86_64,windows-x86_64'
           ! grep -qi 'android' artifacts/update.json
 
       - name: Download signed Android APKs
@@ -677,6 +706,8 @@ jobs:
           for asset in \
             artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.deb \
             artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.AppImage \
+            artifacts/shell-tauri-linux-aarch64/Phase-Desktop-Linux-aarch64.deb \
+            artifacts/shell-tauri-linux-aarch64/Phase-Desktop-Linux-aarch64.AppImage \
             artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.dmg \
             artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.app.tar.gz \
             artifacts/shell-tauri-windows/Phase-Desktop-Windows-x64-Setup.exe \
@@ -704,7 +735,8 @@ jobs:
 
             - **Windows:** `Phase-Desktop-Windows-x64-Setup.exe`
             - **macOS (Apple Silicon):** `Phase-Desktop-macOS-Apple-Silicon.dmg`
-            - **Linux:** `Phase-Desktop-Linux-x86_64.deb` or `Phase-Desktop-Linux-x86_64.AppImage`
+            - **Linux (x86_64):** `Phase-Desktop-Linux-x86_64.deb` or `Phase-Desktop-Linux-x86_64.AppImage`
+            - **Linux (aarch64):** `Phase-Desktop-Linux-aarch64.deb` or `Phase-Desktop-Linux-aarch64.AppImage`
             - **Android:** ARM64 and ARMv7 APKs are attached when release signing is configured.
 
             This is the official desktop app for [phase-rs.dev](https://phase-rs.dev).
@@ -715,6 +747,8 @@ jobs:
           files: |
             artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.deb
             artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.AppImage
+            artifacts/shell-tauri-linux-aarch64/Phase-Desktop-Linux-aarch64.deb
+            artifacts/shell-tauri-linux-aarch64/Phase-Desktop-Linux-aarch64.AppImage
             artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.dmg
             artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.app.tar.gz
             artifacts/shell-tauri-windows/Phase-Desktop-Windows-x64-Setup.exe
@@ -722,7 +756,7 @@ jobs:
             artifacts/shell-tauri-android/Phase-Android-ARM64.apk
             artifacts/shell-tauri-android/Phase-Android-ARMv7.apk
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 

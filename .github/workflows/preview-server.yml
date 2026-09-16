@@ -140,14 +140,22 @@ jobs:
             runner: ubuntu-latest
             triple: x86_64-unknown-linux-musl
             extension: ""
+            cargo_cmd: build
+          - os: linux-arm64
+            runner: ubuntu-latest
+            triple: aarch64-unknown-linux-musl
+            extension: ""
+            cargo_cmd: zigbuild
           - os: macos
             runner: macos-latest
             triple: aarch64-apple-darwin
             extension: ""
+            cargo_cmd: build
           - os: windows
             runner: windows-latest
             triple: x86_64-pc-windows-msvc
             extension: .exe
+            cargo_cmd: build
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -164,11 +172,21 @@ jobs:
           sudo apt-get install -y musl-tools
           rustup target add x86_64-unknown-linux-musl
 
+      - name: Install zig cross toolchain and target
+        if: matrix.cargo_cmd == 'zigbuild'
+        # --break-system-packages: ubuntu-latest is 24.04, whose default
+        # Python is PEP 668 externally-managed since GitHub reverted its
+        # pip workaround (actions/runner-images#10897, 2025-05-09). Same
+        # flag the Dockerfile already passes for this identical install.
+        run: |
+          pip install --break-system-packages --require-hashes -r scripts/requirements-zigbuild.txt
+          rustup target add ${{ matrix.triple }}
+
       - name: Build phase-server
         # -p scopes feature unification to phase-server's own dependency set;
         # an unscoped workspace build unifies feed-scraper's default-features
         # reqwest (native-tls -> openssl-sys) into the musl target and fails.
-        run: cargo build -p phase-server --profile server-release --bin phase-server --target ${{ matrix.triple }}
+        run: cargo ${{ matrix.cargo_cmd }} -p phase-server --profile server-release --bin phase-server --target ${{ matrix.triple }}
 
       - name: Prepare preview server binary (Unix)
         if: matrix.os != 'windows'
@@ -252,6 +270,13 @@ jobs:
           name: preview-server-x86_64-unknown-linux-musl
           path: artifacts/x86_64-unknown-linux-musl
 
+      - name: Download Linux arm64 binary
+        if: steps.publication-gate.outputs.already_published != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: preview-server-aarch64-unknown-linux-musl
+          path: artifacts/aarch64-unknown-linux-musl
+
       - name: Download macOS binary
         if: steps.publication-gate.outputs.already_published != 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -288,6 +313,7 @@ jobs:
 
           binaries=(
             artifacts/x86_64-unknown-linux-musl/phase-server-x86_64-unknown-linux-musl
+            artifacts/aarch64-unknown-linux-musl/phase-server-aarch64-unknown-linux-musl
             artifacts/aarch64-apple-darwin/phase-server-aarch64-apple-darwin
             artifacts/x86_64-pc-windows-msvc/phase-server-x86_64-pc-windows-msvc.exe
           )
@@ -352,6 +378,10 @@ jobs:
                          "x86_64-unknown-linux-musl": {
                            url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-unknown-linux-musl"),
                            sig_url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-unknown-linux-musl.minisig")
+                         },
+                         "aarch64-unknown-linux-musl": {
+                           url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-aarch64-unknown-linux-musl"),
+                           sig_url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-aarch64-unknown-linux-musl.minisig")
                          },
                          "aarch64-apple-darwin": {
                            url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-aarch64-apple-darwin"),
