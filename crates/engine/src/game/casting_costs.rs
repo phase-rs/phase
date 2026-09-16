@@ -9898,7 +9898,7 @@ fn finalize_cast_pre_payment_checks(
             }
             CascadeCheck::Rejected { cleanup } => {
                 let waiting_for =
-                    handle_resolution_cast_rejection(state, player, object_id, cleanup, events)?;
+                    handle_resolution_cast_rejection(state, player, object_id, *cleanup, events)?;
                 return Ok(FinalizePrePaymentChecks {
                     early_waiting_for: Some(waiting_for),
                     cascade_cast_transformed: false,
@@ -10897,7 +10897,11 @@ enum CascadeCheck {
     /// unwind the announcement stack entry and route through
     /// `handle_resolution_cast_rejection`, which sends the hit to its
     /// `reject_action` destination.
-    Rejected { cleanup: ResolutionCastCleanup },
+    Rejected {
+        /// Rejection is infrequent and the cleanup payload carries the frozen
+        /// authority; keep it indirect so the common outcome stays compact.
+        cleanup: Box<ResolutionCastCleanup>,
+    },
 }
 
 /// CR 608.2g: Inspect the casting object's `ExileWithAltCost` permissions for a
@@ -11050,7 +11054,9 @@ fn evaluate_cascade_constraint_with_resulting_mv(
             .expect("object present above")
             .casting_permissions
             .remove(index);
-        Ok(CascadeCheck::Rejected { cleanup })
+        Ok(CascadeCheck::Rejected {
+            cleanup: Box::new(cleanup),
+        })
     }
 }
 
