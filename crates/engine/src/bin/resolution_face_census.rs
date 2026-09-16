@@ -157,6 +157,10 @@ struct Identity {
     back_key: String,
     front_name: String,
     bucket: String,
+    /// Structural printed-Fuse classification across both faces. This is kept
+    /// with the raw identity so the census never treats hydrated runtime
+    /// keywords as an authority for an export-level inventory.
+    has_fuse: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -168,6 +172,7 @@ struct RawFace {
     lands: bool,
     room: bool,
     spell: bool,
+    has_fuse: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -350,6 +355,18 @@ fn enumerate_identities(raw: &[u8]) -> Result<(Vec<Identity>, Vec<String>), Stri
                     .iter()
                     .any(|ability| ability.get("kind").and_then(Value::as_str) == Some("Spell"))
             });
+        // allow-raw-authority: this is an export-structure census, not a game
+        // legality decision. The printed `keywords` field is the sole source
+        // for the cross-face Fuse inventory; no GameState/object authority
+        // exists before a fixture object is created from this raw export.
+        let has_fuse = value
+            .get("keywords")
+            .and_then(Value::as_array)
+            .is_some_and(|keywords| {
+                keywords
+                    .iter()
+                    .any(|keyword| keyword.as_str() == Some("Fuse"))
+            });
         grouped
             .entry(oracle_id.to_string())
             .or_default()
@@ -364,6 +381,7 @@ fn enumerate_identities(raw: &[u8]) -> Result<(Vec<Identity>, Vec<String>), Stri
                 lands: core_types.iter().any(|kind| kind.as_str() == Some("Land")),
                 room: subtypes.iter().any(|kind| kind.as_str() == Some("Room")),
                 spell,
+                has_fuse,
             });
     }
 
@@ -430,6 +448,9 @@ fn enumerate_identities(raw: &[u8]) -> Result<(Vec<Identity>, Vec<String>), Stri
             back_key: back.storage_key.clone(),
             front_name: front.name.clone(),
             bucket: bucket.to_string(),
+            // A split card is Fuse-eligible when either printed half bears
+            // Fuse; the export's per-face storage has no privileged side.
+            has_fuse: front.has_fuse || back.has_fuse,
         });
     }
     Ok((identities, diagnostics))
@@ -1550,33 +1571,20 @@ fn hand_fuse_section(
     let mut structural = Vec::new();
     let mut eligible = Vec::new();
     for identity in identities {
-        if identity.bucket != "split-non-room" {
+        if identity.bucket != "split-non-room" || !identity.has_fuse {
             continue;
         }
-        let front = db
-            .face_iter()
-            .find_map(|(key, face)| (key == identity.front_key).then_some(face))
-            .ok_or_else(|| format!("missing Fuse front {}", identity.front_key))?;
-        let back = db
-            .face_iter()
-            .find_map(|(key, face)| (key == identity.back_key).then_some(face))
-            .ok_or_else(|| format!("missing Fuse back {}", identity.back_key))?;
-        let spell_face = |face: &engine::types::card::CardFace| {
-            !face.card_type.core_types.contains(&CoreType::Land)
-                && face
-                    .abilities
-                    .iter()
-                    .any(|ability| ability.kind == engine::types::ability::AbilityKind::Spell)
-        };
-        if !spell_face(front)
-            || !spell_face(back)
-            || !front
-                .keywords
-                .iter()
-                .chain(back.keywords.iter())
-                .any(|keyword| matches!(keyword, Keyword::Fuse))
-        {
-            continue;
+        // The raw structural classification above is only meaningful when both
+        // exact export keys hydrate into the same database the public cast
+        // probe will use. This validates that bridge without inspecting any
+        // hydrated keyword authority.
+        for key in [&identity.front_key, &identity.back_key] {
+            if !db
+                .face_iter()
+                .any(|(candidate_key, _)| candidate_key == key)
+            {
+                return Err(format!("missing hydrated Fuse face {key}"));
+            }
         }
         structural.push((identity.oracle_id.clone(), identity.canonical_name.clone()));
         let mut state = template.clone();
@@ -2432,10 +2440,68 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::types::ability::ResolutionCastFacePolicy;
+    use engine::types::ability::{ResolutionCastCleanup, ResolutionCastFacePolicy};
+    use engine::types::card::CardFace;
 
-    fn production_card_data() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json")
+    fn fixture_export() -> String {
+        let face = |name: &str, oracle_id: &str, face_index: usize, fuse: bool| {
+            let face = CardFace {
+                name: name.to_string(),
+                mana_cost: ManaCost::NoCost,
+                card_type: CardType {
+                    core_types: vec![CoreType::Instant],
+                    ..CardType::default()
+                },
+                abilities: vec![AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)],
+                keywords: fuse.then_some(Keyword::Fuse).into_iter().collect(),
+                scryfall_oracle_id: Some(oracle_id.to_string()),
+                ..CardFace::default()
+            };
+            let mut entry = serde_json::to_value(face)
+                .expect("fixture CardFace serializes")
+                .as_object()
+                .expect("fixture CardFace is an object")
+                .clone();
+            entry.insert("layout".to_string(), Value::String("split".to_string()));
+            entry.insert("face_index".to_string(), Value::from(face_index));
+            Value::Object(entry)
+        };
+        let mut export = serde_json::Map::new();
+        // Storage keys deliberately differ from face names. The census must
+        // retain them so database hydration can reconstruct both halves.
+        export.insert(
+            "fixture-runtime-front-storage-key".to_string(),
+            face("Fixture Runtime Front", "fixture-runtime-oracle", 0, false),
+        );
+        export.insert(
+            "fixture-runtime-back-storage-key".to_string(),
+            face("Fixture Runtime Back", "fixture-runtime-oracle", 1, false),
+        );
+        export.insert(
+            "fixture-fuse-front-storage-key".to_string(),
+            face("Fixture Fuse Front", "fixture-fuse-oracle", 0, false),
+        );
+        export.insert(
+            "fixture-fuse-back-storage-key".to_string(),
+            // Fuse is intentionally on the back face to pin cross-face OR.
+            face("Fixture Fuse Back", "fixture-fuse-oracle", 1, true),
+        );
+        Value::Object(export).to_string()
+    }
+
+    fn fixture_identity_and_db(oracle_id: &str) -> (Identity, CardDatabase) {
+        let export = fixture_export();
+        let (identities, diagnostics) = enumerate_identities(export.as_bytes()).unwrap();
+        assert!(
+            diagnostics.is_empty(),
+            "fixture diagnostics: {diagnostics:?}"
+        );
+        let identity = identities
+            .into_iter()
+            .find(|identity| identity.oracle_id == oracle_id)
+            .expect("fixture split identity exists");
+        let db = CardDatabase::from_json_str(&export).expect("fixture export hydrates");
+        (identity, db)
     }
 
     #[test]
@@ -2585,9 +2651,20 @@ mod tests {
             mana_spend_permission: None,
             graveyard_replacement: None,
             cast_transformed: false,
-            constraint: None,
             additional_cost: None,
-            installed_triggers: Vec::new(),
+            cleanup: ResolutionCastCleanup {
+                source_id: ObjectId(900),
+                face_policy: ResolutionCastFacePolicy::new(
+                    TargetFilter::Any,
+                    ObjectId(900),
+                    PlayerId(0),
+                    None,
+                ),
+                exiled_misses: Vec::new(),
+                reject_action: engine::types::ability::ResolutionMvRejectAction::RemainExiled,
+                success_action: engine::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                delayed_trigger_receipts: Vec::new(),
+            },
         };
         let positive = vec![
             CastOfferKind::Adventure {
@@ -2682,21 +2759,11 @@ mod tests {
     }
 
     #[test]
-    fn target_free_public_route_auto_casts_to_the_stack_without_a_candidate_offer() {
-        let card_data = production_card_data();
-        let raw = fs::read(&card_data).unwrap();
-        let (identities, _) = enumerate_identities(&raw).unwrap();
-        let identity = identities
-            .iter()
-            // The production export currently has no spell/spell MDFC. Bind
-            // // Liberate is a real split spell with two castable faces, and
-            // therefore reaches the same public ModalFaceChoice surface.
-            .find(|identity| identity.oracle_id == "ff7c12dd-1a1a-417a-b08a-d1346430858e")
-            .unwrap();
-        let db = CardDatabase::from_export(&card_data).unwrap();
+    fn target_free_public_route_elects_a_face_before_casting_to_the_stack() {
+        let (identity, db) = fixture_identity_and_db("fixture-runtime-oracle");
         let mut state = canonical_witness();
-        place_candidate(&mut state, identity, Origin::Exile, &db, false, P0).unwrap();
-        let source = prepare_source(&mut state, identity, Profile::TargetFree).unwrap();
+        place_candidate(&mut state, &identity, Origin::Exile, &db, false, P0).unwrap();
+        let source = prepare_source(&mut state, &identity, Profile::TargetFree).unwrap();
         let card_id = state.objects[&source].card_id;
         game_engine::apply(
             &mut state,
@@ -2739,8 +2806,19 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(!candidate_offer_window_membership(&state));
-        assert_eq!(state.objects[&CANDIDATE].zone, Zone::Exile);
+        assert!(candidate_offer_window_membership(&state));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ModalFaceChoice { .. }
+        ));
+        game_engine::apply(
+            &mut state,
+            P0,
+            GameAction::ChooseModalFace { back_face: false },
+        )
+        .unwrap();
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.objects[&CANDIDATE].zone, Zone::Stack);
         let candidate_entries: Vec<_> = state
             .stack
             .iter()
@@ -2759,13 +2837,6 @@ mod tests {
             Ok(CandidateStackEndpoint::Spell(CastingVariant::Normal))
         ));
         assert_ne!(state.objects[&source].zone, Zone::Stack);
-
-        let observed = target_free_auto_stack_probe(&state).unwrap();
-        assert!(!observed.included);
-        assert_eq!(
-            (observed.mask, observed.front, observed.back),
-            (1, Observation::AutoFront, Observation::NotOffered)
-        );
     }
 
     #[test]
@@ -2841,73 +2912,42 @@ mod tests {
     }
 
     #[test]
-    fn exact_export_keys_disambiguate_bind_and_preserve_fuse_faces() {
-        let card_data = production_card_data();
-        let raw = fs::read(&card_data).unwrap();
-        let (identities, _) = enumerate_identities(&raw).unwrap();
-        let db = CardDatabase::from_export(&card_data).unwrap();
-
-        let bind = identities
-            .iter()
-            .find(|identity| identity.oracle_id == "ff7c12dd-1a1a-417a-b08a-d1346430858e")
-            .unwrap();
-        assert_eq!(bind.canonical_name, "Bind // Liberate");
-        assert_ne!(bind.front_key, "bind");
+    fn exact_export_keys_preserve_back_face_and_back_face_fuse() {
+        let (split, db) = fixture_identity_and_db("fixture-fuse-oracle");
+        assert_eq!(
+            split.canonical_name,
+            "Fixture Fuse Front // Fixture Fuse Back"
+        );
+        assert_eq!(split.front_key, "fixture-fuse-front-storage-key");
+        assert_eq!(split.back_key, "fixture-fuse-back-storage-key");
+        assert!(
+            split.has_fuse,
+            "a back-face Fuse must classify the identity"
+        );
         let mut state = canonical_witness();
-        place_candidate(&mut state, bind, Origin::Exile, &db, false, P0).unwrap();
+        place_candidate(&mut state, &split, Origin::Exile, &db, false, P0).unwrap();
         let candidate = state.objects.get(&CANDIDATE).unwrap();
-        assert_eq!(candidate.name, "Bind");
+        assert_eq!(candidate.name, "Fixture Fuse Front");
         assert_eq!(
             candidate
                 .printed_ref
                 .as_ref()
                 .map(|printed_ref| printed_ref.oracle_id.as_str()),
-            Some("ff7c12dd-1a1a-417a-b08a-d1346430858e")
+            Some("fixture-fuse-oracle")
         );
         assert_eq!(
             candidate.back_face.as_ref().map(|face| face.name.as_str()),
-            Some("Liberate")
+            Some("Fixture Fuse Back")
         );
-        assert_eq!(
-            db.get_face_by_name("Bind")
-                .and_then(|face| face.scryfall_oracle_id.as_deref()),
-            Some("2b9557df-7158-4ada-be77-5c346851a568")
-        );
-
-        let fuse = identities
-            .iter()
-            .find(|identity| identity.oracle_id == "043370fd-9cfe-47ce-8019-e915cee1ae95")
-            .unwrap();
-        let fuse_faces = [&fuse.front_key, &fuse.back_key]
-            .into_iter()
-            .map(|key| {
-                db.face_iter()
-                    .find_map(|(candidate_key, face)| {
-                        (candidate_key == key.as_str()).then_some(face)
-                    })
-                    .unwrap()
-            })
-            .collect::<Vec<_>>();
-        assert!(fuse_faces
-            .iter()
-            .flat_map(|face| &face.keywords)
-            .any(|keyword| matches!(keyword, Keyword::Fuse)));
     }
 
     #[test]
     fn cascade_and_discover_seed_library_and_observe_exile_hit() {
-        let card_data = production_card_data();
-        let raw = fs::read(&card_data).unwrap();
-        let (identities, _) = enumerate_identities(&raw).unwrap();
-        let db = CardDatabase::from_export(&card_data).unwrap();
-        let identity = identities
-            .iter()
-            .find(|identity| identity.oracle_id == "ff7c12dd-1a1a-417a-b08a-d1346430858e")
-            .unwrap();
+        let (identity, db) = fixture_identity_and_db("fixture-runtime-oracle");
         let template = canonical_witness();
 
         for profile in [Profile::Cascade, Profile::Discover] {
-            let observation = probe(&template, identity, Origin::Exile, profile, &db).unwrap();
+            let observation = probe(&template, &identity, Origin::Exile, profile, &db).unwrap();
             assert!(observation.included, "{profile:?} did not offer its hit");
             assert_ne!(observation.front, Observation::RouteError);
             assert_ne!(observation.back, Observation::RouteError);
@@ -2965,6 +3005,58 @@ mod tests {
         assert!(diagnostics.iter().any(|line| {
             line == "DIAGNOSTIC\texport-key:malformed\tExport\tentry\tmissing-oracle-id"
         }));
+    }
+
+    #[test]
+    fn raw_keyword_shapes_only_classify_the_exact_fuse_string() {
+        let export = br#"{
+            "missing-front": {
+                "scryfall_oracle_id": "missing",
+                "name": "Missing Front",
+                "layout": "split",
+                "face_index": 0,
+                "card_type": { "core_types": ["Instant"], "subtypes": [] },
+                "abilities": [{ "kind": "Spell" }]
+            },
+            "irrelevant-back": {
+                "scryfall_oracle_id": "missing",
+                "name": "Irrelevant Back",
+                "layout": "split",
+                "face_index": 1,
+                "card_type": { "core_types": ["Sorcery"], "subtypes": [] },
+                "abilities": [{ "kind": "Spell" }],
+                "keywords": ["Flying"]
+            },
+            "malformed-front": {
+                "scryfall_oracle_id": "malformed",
+                "name": "Malformed Front",
+                "layout": "split",
+                "face_index": 0,
+                "card_type": { "core_types": ["Instant"], "subtypes": [] },
+                "abilities": [{ "kind": "Spell" }],
+                "keywords": { "type": "Fuse" }
+            },
+            "malformed-back": {
+                "scryfall_oracle_id": "malformed",
+                "name": "Malformed Back",
+                "layout": "split",
+                "face_index": 1,
+                "card_type": { "core_types": ["Sorcery"], "subtypes": [] },
+                "abilities": [{ "kind": "Spell" }],
+                "keywords": ["Haste"]
+            }
+        }"#;
+
+        let (identities, diagnostics) = enumerate_identities(export).unwrap();
+        assert!(
+            diagnostics.is_empty(),
+            "keyword fixtures remain valid identities"
+        );
+        assert_eq!(identities.len(), 2);
+        assert!(
+            identities.iter().all(|identity| !identity.has_fuse),
+            "missing, malformed, and unrelated keyword shapes are not Fuse"
+        );
     }
 
     #[test]
