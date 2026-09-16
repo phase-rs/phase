@@ -329,9 +329,10 @@ fn resolve_counter_placement_target<'a>(
     if let Some(bound) = counter_anaphor_created_token_binding(on_rest, ctx) {
         return (bound, parsed_remainder, None);
     }
-    // CR 107.1c + CR 115.1d + CR 115.6: "[each of ]any number of [other|another] target …"
+    // CR 107.1c + CR 115.1 + CR 115.6: "[each of ]any number of [other|another] target …"
     // and "[each of ]up to N [other|another] target …" announce a target set whose size the
-    // controller picks as the trigger is put on the stack (CR 603.3d), zero included. The
+    // controller picks as the spell or ability is put on the stack (CR 601.2c; CR 602.2b for
+    // activated abilities; CR 603.3d for triggered abilities), zero included. The
     // quantifier modifies the target count, not the counter count, and
     // `strip_optional_target_prefix` is its single authority. The article-less
     // "up to N <noun>" forms it declines fall through to the arm below.

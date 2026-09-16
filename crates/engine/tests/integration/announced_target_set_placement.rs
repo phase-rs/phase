@@ -18,7 +18,7 @@
 //! IS NOT AVAILABLE TO THIS PHASE and is never cited below: it is empty for
 //! this population (none of the 21 census card names appears in any of the 303
 //! `.snap` files), so green there could not witness a regression here. Every
-//! label below that claims a pairing names a paired red-at-base positive.
+//! label below that claims a pairing names a paired red-at-base row.
 //! The standard binds every green-at-base row this phase writes, whether or not
 //! the charter requires that row. Three green-at-base rows have none of the
 //! three pairings and comply BY DISCLOSURE — their labels say so and they are
@@ -222,6 +222,13 @@ fn conjurers_bauble_declined_target_with_nonempty_graveyard_resolves_as_noop() {
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
         "the run must return to priority, got {:?}",
         outcome.final_waiting_for()
+    );
+    // CR 115.6: the placement instruction itself must still resolve on a
+    // declined optional target. Pairing: MP-EMPTY, which makes the zero-target
+    // branch fail and removes this event.
+    assert!(
+        emitted_placement_resolved(outcome.events()),
+        "the placement effect must resolve even with the target declined"
     );
 }
 
@@ -647,6 +654,14 @@ fn gravepurge_with_zero_targets_resolves_and_still_draws() {
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
         "the run must end at priority, got {:?}",
         outcome.final_waiting_for()
+    );
+    // CR 115.6: the placement instruction itself must still resolve on an empty
+    // announced set — an `expected == 0` placement is a no-op, not a skipped
+    // instruction. Pairing: MP-EMPTY, which makes the zero-target branch fail
+    // and removes this event.
+    assert!(
+        emitted_placement_resolved(outcome.events()),
+        "the placement effect must resolve even with no declared target"
     );
 }
 
@@ -1161,6 +1176,9 @@ fn once_and_future_board() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectI
 /// prompt at all, paired with the positive assertion that the single offered
 /// slot is the RETURN clause's — it offers BOTH graveyard cards, which the
 /// placement's `Another` filter could not.
+/// That reach guard plus in-row positive is not one of the green-at-base
+/// standard's three named pairings, so this row complies BY DISCLOSURE and is
+/// reported, as the module header states.
 ///
 /// Update this row when `else_ability` target slots are minted; the slot count
 /// is then 2 and the sibling row below stops recording a defect.
@@ -1251,8 +1269,12 @@ fn once_and_future_known_bad_else_ability_placement_gets_no_target_slot() {
 ///
 /// This is the runtime face of the structural defect recorded by
 /// `once_and_future_known_bad_else_ability_placement_gets_no_target_slot`, and
-/// it is GREEN AT THIS PHASE'S BASE — DERIVED, not measured on a base build,
-/// so it is stated with its derivation. `put_on_top::resolve` finishes
+/// it is GREEN AT THIS PHASE'S BASE — measured green at base by running this
+/// module against base sources in a phase-1 review run, which reported this row
+/// `ok` in a result of 7 passed / 10 failed. That run recorded no freshness
+/// guard, so the measurement is only as strong as that run; re-measure by
+/// running this module on a base checkout. The derivation follows.
+/// `put_on_top::resolve` finishes
 /// computing `collected_targets` before it first reads `multi_target`, and
 /// `targeting::resolved_targets` never consults `multi_target` at all, so
 /// `collected_targets` is identical on both sides. The sides therefore differ
@@ -1265,6 +1287,9 @@ fn once_and_future_known_bad_else_ability_placement_gets_no_target_slot() {
 /// rather than fizzling, and `library[0] == g1` proves the ADAMANT branch did
 /// NOT apply — that branch is a `Bounce` to hand and cannot place anything in a
 /// library, so a library placement witnesses the `else_ability` running.
+/// These reach guards are not one of the green-at-base standard's three named
+/// pairings, so this row complies BY DISCLOSURE and is reported, as the module
+/// header states.
 ///
 /// Update this row when the return clause keeps its own target.
 #[test]

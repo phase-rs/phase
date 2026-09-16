@@ -66181,3 +66181,501 @@ fn strip_optional_target_prefix_up_to_n_without_article_is_declined() {
         assert_eq!(strip_optional_target_prefix(input), (input, None));
     }
 }
+
+// ══ Phase 4 — announced-set and declared-target anaphor parse shapes ═══════
+//
+// Verbatim Oracle text (MTGJSON `AtomicCards.json`, first face, reminder text
+// stripped), except `P4_SYNTHETIC_NEIGHBOUR`, which is synthetic: the corpus
+// holds no primary-quantified / sub-unquantified article-led neighbour
+// (measured at base: 0 cards), so D-6's hostile input has to be written by
+// hand.
+
+const P4_FILIGREE_VECTOR: &str = "When this creature enters, put a +1/+1 counter on each of any number of target creatures and a charge counter on each of any number of target artifacts.";
+const P4_RIVER_HERALDS_BOON: &str =
+    "Put a +1/+1 counter on target creature and a +1/+1 counter on up to one target Merfolk.";
+const P4_TRYGON_PRIME: &str = "Subterranean Assault — Whenever this creature attacks, put a +1/+1 counter on it and a +1/+1 counter on up to one other target attacking creature. That creature can't be blocked this turn.";
+const P4_DRILLWORKS_MOLE: &str = "{2}, {T}: Put a +1/+1 counter on this creature and a +1/+1 counter on up to one target commander creature you control.";
+const P4_SYNTHETIC_NEIGHBOUR: &str = "When this creature enters, put a +1/+1 counter on each of up to two target creatures and a charge counter on target artifact.";
+const P4_OMO: &str = "Whenever Omo enters or attacks, put an everything counter on each of up to one target land and up to one target creature.\nEach land with an everything counter on it is every land type in addition to its other types.\nEach nonland creature with an everything counter on it is every creature type.";
+const P4_STENSIA_INNKEEPER: &str = "When this creature enters, tap target land an opponent controls. That land doesn't untap during its controller's next untap step.";
+const P4_KENKU_ARTIFICER: &str = "Homunculus Servant — When this creature enters, put three +1/+1 counters on up to one target noncreature artifact. That artifact becomes a 0/0 Homunculus artifact creature with flying.";
+const P4_MAGITEK_SCYTHE: &str = "A Test of Your Reflexes! — When this Equipment enters, you may attach it to target creature you control. If you do, that creature gains first strike until end of turn and must be blocked this turn if able.\nEquipped creature gets +2/+1.\nEquip {2}";
+const P4_SPIKED_RIPSAW: &str = "Equipped creature gets +3/+3.\nWhenever equipped creature attacks, you may sacrifice a Forest. If you do, that creature gains trample until end of turn.\nEquip {3}";
+const P4_ROOTWISE_SURVIVOR: &str = "Haste\nSurvival — At the beginning of your second main phase, if this creature is tapped, put three +1/+1 counters on up to one target land you control. That land becomes a 0/0 Elemental creature in addition to its other types. It gains haste until your next turn.";
+const P4_ACADEMIC_DISPUTE: &str =
+    "Target creature blocks this turn if able. You may have it gain reach until end of turn.\nLearn.";
+const P4_LEGION_LEADERSHIP: &str =
+    "Until end of turn, double target creature's power and it gains first strike.";
+const P4_DOMINUS_OF_FEALTY: &str = "Flying\nAt the beginning of your upkeep, you may gain control of target permanent until end of turn. If you do, untap it and it gains haste until end of turn.";
+const P4_SAMITE_ALCHEMIST: &str = "{W}{W}, {T}: Prevent the next 4 damage that would be dealt this turn to target creature you control. Tap that creature. It doesn't untap during your next untap step.";
+const P4_BLOODCRAZED_SOCIALITE: &str = "Menace\nWhen this creature enters, create a Blood token.\nWhenever this creature attacks, you may sacrifice a Blood token. If you do, it gets +2/+2 until end of turn.";
+
+fn p4_strings(list: &[&str]) -> Vec<String> {
+    list.iter().map(|entry| entry.to_string()).collect()
+}
+
+/// The executable chain of the card's first trigger.
+fn p4_trigger_chain(
+    text: &str,
+    name: &str,
+    types: &[&str],
+    subtypes: &[&str],
+) -> AbilityDefinition {
+    let parsed = parse_oracle_text(text, name, &[], &p4_strings(types), &p4_strings(subtypes));
+    parsed
+        .triggers
+        .iter()
+        .find_map(|trigger| trigger.execute.as_deref())
+        .unwrap_or_else(|| panic!("{name} must produce an executable trigger chain"))
+        .clone()
+}
+
+/// The card's first spell or activated-ability chain.
+fn p4_ability_chain(
+    text: &str,
+    name: &str,
+    types: &[&str],
+    subtypes: &[&str],
+) -> AbilityDefinition {
+    let parsed = parse_oracle_text(text, name, &[], &p4_strings(types), &p4_strings(subtypes));
+    parsed
+        .abilities
+        .first()
+        .unwrap_or_else(|| panic!("{name} must produce an ability chain"))
+        .clone()
+}
+
+/// Every node of a parsed chain, head first, descending both branches.
+fn p4_nodes(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    let mut out = vec![root];
+    let mut index = 0;
+    while index < out.len() {
+        let node = out[index];
+        if let Some(sub) = node.sub_ability.as_deref() {
+            out.push(sub);
+        }
+        if let Some(other) = node.else_ability.as_deref() {
+            out.push(other);
+        }
+        index += 1;
+    }
+    out
+}
+
+/// The `sub_ability` of `root`, which every article-led counter conjunct has.
+fn p4_sub(root: &AbilityDefinition) -> &AbilityDefinition {
+    root.sub_ability
+        .as_deref()
+        .expect("the compound's sub conjunct must be parsed")
+}
+
+fn p4_put_counter_target(def: &AbilityDefinition) -> (&CounterType, &TargetFilter) {
+    match def.effect.as_ref() {
+        Effect::PutCounter {
+            counter_type,
+            target,
+            ..
+        } => (counter_type, target),
+        other => panic!("expected PutCounter, got {other:?}"),
+    }
+}
+
+/// The last `GenericEffect` node of a chain — the anaphor clause of every card
+/// in the D-18 / S-RW class ("That creature …", "It gains …").
+fn p4_last_generic_effect(root: &AbilityDefinition) -> &AbilityDefinition {
+    p4_nodes(root)
+        .into_iter()
+        .rfind(|node| matches!(node.effect.as_ref(), Effect::GenericEffect { .. }))
+        .expect("the anaphor clause must parse as a GenericEffect")
+}
+
+fn p4_generic_effect_parts(
+    def: &AbilityDefinition,
+) -> (&Option<TargetFilter>, &[StaticDefinition]) {
+    match def.effect.as_ref() {
+        Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } => (target, static_abilities.as_slice()),
+        other => panic!("expected GenericEffect, got {other:?}"),
+    }
+}
+
+/// D-5 (Filigree Vector). CR 601.2c + CR 107.1c: each "each of any number of
+/// target" conjunct announces its own unlimited set, so the charge-counter
+/// conjunct carries its own `multi_target` spec.
+///
+/// RED AT BASE: the sub conjunct's spec is `None`. Pairing:
+/// MP-P4-RECOVERY-OFF.
+#[test]
+fn article_led_counter_conjunct_any_number_sub_spec_filigree_vector() {
+    let chain = p4_trigger_chain(
+        P4_FILIGREE_VECTOR,
+        "Filigree Vector",
+        &["Artifact", "Creature"],
+        &["Phyrexian", "Construct"],
+    );
+    let (head_counter, head_target) = p4_put_counter_target(&chain);
+    assert_eq!(head_counter, &CounterType::Plus1Plus1);
+    assert!(
+        matches!(head_target, TargetFilter::Typed(filter) if filter.type_filters.contains(&TypeFilter::Creature)),
+        "the head conjunct targets creatures, got {head_target:?}"
+    );
+    assert_eq!(
+        chain.multi_target,
+        Some(MultiTargetSpec::unlimited(0)),
+        "the head conjunct announces any number of creatures"
+    );
+
+    let sub = p4_sub(&chain);
+    let (sub_counter, sub_target) = p4_put_counter_target(sub);
+    assert_eq!(sub_counter, &CounterType::Generic("charge".to_string()));
+    assert!(
+        matches!(sub_target, TargetFilter::Typed(filter) if filter.type_filters.contains(&TypeFilter::Artifact)),
+        "the sub conjunct targets artifacts, got {sub_target:?}"
+    );
+    assert_eq!(
+        sub.multi_target,
+        Some(MultiTargetSpec::unlimited(0)),
+        "CR 601.2c: the sub conjunct announces its own any-number set"
+    );
+}
+
+/// D-5 (River Heralds' Boon). CR 115.6: the "up to one target Merfolk" conjunct
+/// carries its own bounded spec while the mandatory head carries none.
+///
+/// RED AT BASE: the sub conjunct's spec is `None`. Pairing:
+/// MP-P4-RECOVERY-OFF.
+#[test]
+fn article_led_counter_conjunct_up_to_one_sub_spec_river_heralds_boon() {
+    let chain = p4_ability_chain(
+        P4_RIVER_HERALDS_BOON,
+        "River Heralds' Boon",
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(
+        chain.multi_target, None,
+        "the mandatory head instance announces a single target"
+    );
+    let sub = p4_sub(&chain);
+    let (_, sub_target) = p4_put_counter_target(sub);
+    assert!(
+        matches!(sub_target, TargetFilter::Typed(filter) if filter.get_subtype() == Some("Merfolk")),
+        "the sub conjunct targets a Merfolk, got {sub_target:?}"
+    );
+    assert_eq!(
+        sub.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+        "CR 115.6: the sub conjunct announces up to one target"
+    );
+}
+
+/// D-5 (Trygon Prime). The head instance is the source itself ("on it"), and
+/// the sub conjunct announces its own bounded set. The trailing sentence parses
+/// as a `GenericEffect` node in the same chain; this row asserts its presence
+/// only — its binding is asserted by
+/// `that_type_anaphor_after_declared_target_binds_the_declared_target`.
+///
+/// RED AT BASE: the sub conjunct's spec is `None`. Pairing:
+/// MP-P4-RECOVERY-OFF.
+#[test]
+fn article_led_counter_conjunct_up_to_one_sub_spec_trygon_prime() {
+    let chain = p4_trigger_chain(P4_TRYGON_PRIME, "Trygon Prime", &["Creature"], &["Tyranid"]);
+    let (_, head_target) = p4_put_counter_target(&chain);
+    assert_eq!(
+        head_target,
+        &TargetFilter::SelfRef,
+        "\"put a +1/+1 counter on it\" names the source"
+    );
+    assert_eq!(chain.multi_target, None);
+
+    let sub = p4_sub(&chain);
+    assert_eq!(
+        sub.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+        "CR 115.6: the sub conjunct announces up to one other attacking creature"
+    );
+    assert!(
+        p4_nodes(&chain)
+            .iter()
+            .any(|node| matches!(node.effect.as_ref(), Effect::GenericEffect { .. })),
+        "the trailing sentence must parse as a node of the same chain"
+    );
+}
+
+/// D-5 (Drillworks Mole). The activated ability's head instance is the source,
+/// and the sub conjunct announces up to one commander creature its controller
+/// controls.
+///
+/// RED AT BASE: the sub conjunct's spec is `None`. Pairing:
+/// MP-P4-RECOVERY-OFF.
+#[test]
+fn article_led_counter_conjunct_up_to_one_sub_spec_drillworks_mole() {
+    let chain = p4_ability_chain(
+        P4_DRILLWORKS_MOLE,
+        "Drillworks Mole",
+        &["Artifact", "Creature"],
+        &["Mole"],
+    );
+    let (_, head_target) = p4_put_counter_target(&chain);
+    assert_eq!(head_target, &TargetFilter::SelfRef);
+    assert_eq!(chain.multi_target, None);
+
+    let sub = p4_sub(&chain);
+    let (_, sub_target) = p4_put_counter_target(sub);
+    let TargetFilter::Typed(filter) = sub_target else {
+        panic!("the sub conjunct must carry a typed filter, got {sub_target:?}");
+    };
+    assert!(
+        filter.properties.contains(&FilterProp::IsCommander),
+        "the sub conjunct targets a commander creature, got {filter:?}"
+    );
+    assert_eq!(
+        filter.controller,
+        Some(ControllerRef::You),
+        "\"you control\" belongs to the sub conjunct's filter"
+    );
+    assert_eq!(
+        sub.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+        "CR 115.6: the sub conjunct announces up to one target"
+    );
+}
+
+/// D-6 (hostile neighbour). CR 601.2c: a quantified primary conjunct must not
+/// lend its spec to an unquantified sub conjunct — "a charge counter on target
+/// artifact" announces exactly one target.
+///
+/// GREEN AT BASE — labelled; its pairing is MP-LEAK, which makes the sub
+/// conjunct inherit `up_to(2)`.
+#[test]
+fn article_led_counter_conjunct_unquantified_sub_takes_no_primary_spec() {
+    let chain = p4_trigger_chain(
+        P4_SYNTHETIC_NEIGHBOUR,
+        "Synthetic Neighbour Probe",
+        &["Creature"],
+        &[],
+    );
+    assert_eq!(
+        chain.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 })),
+        "the head conjunct keeps its own bounded spec"
+    );
+    assert_eq!(
+        p4_sub(&chain).multi_target,
+        None,
+        "CR 601.2c: the unquantified sub conjunct announces a single target"
+    );
+}
+
+/// D-7 (Omo, Queen of Vesuva) — PRESERVATION. Two "up to one target" instances
+/// in one sentence keep one bounded spec each.
+///
+/// GREEN AT BASE — labelled; its pairing is MP-OMO-BYPASS.
+#[test]
+fn omo_queen_of_vesuva_counter_nodes_keep_up_to_one_shape() {
+    let chain = p4_trigger_chain(
+        P4_OMO,
+        "Omo, Queen of Vesuva",
+        &["Legendary", "Creature"],
+        &["Shapeshifter", "Noble"],
+    );
+    let (head_counter, head_target) = p4_put_counter_target(&chain);
+    assert_eq!(
+        head_counter,
+        &CounterType::Generic("everything".to_string())
+    );
+    assert!(
+        matches!(head_target, TargetFilter::Typed(filter) if filter.type_filters.contains(&TypeFilter::Land)),
+        "the first instance targets a land, got {head_target:?}"
+    );
+    assert_eq!(
+        chain.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+    );
+
+    let sub = p4_sub(&chain);
+    let (sub_counter, sub_target) = p4_put_counter_target(sub);
+    assert_eq!(sub_counter, &CounterType::Generic("everything".to_string()));
+    assert!(
+        matches!(sub_target, TargetFilter::Typed(filter) if filter.type_filters.contains(&TypeFilter::Creature)),
+        "the second instance targets a creature, got {sub_target:?}"
+    );
+    assert_eq!(
+        sub.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+    );
+}
+
+/// D-18 SHAPE. CR 608.2c: "that [type]" after an instruction that declared a
+/// target of that type names the declared target, so the anaphor clause carries
+/// no target of its own and its static applies to the parent's target.
+///
+/// RED AT BASE: the anaphor clause is stamped with the trigger source
+/// (`target: Some(TriggeringSource)`).
+#[test]
+fn that_type_anaphor_after_declared_target_binds_the_declared_target() {
+    let cases = [
+        (
+            "Trygon Prime",
+            p4_trigger_chain(P4_TRYGON_PRIME, "Trygon Prime", &["Creature"], &["Tyranid"]),
+        ),
+        (
+            "Stensia Innkeeper",
+            p4_trigger_chain(
+                P4_STENSIA_INNKEEPER,
+                "Stensia Innkeeper",
+                &["Creature"],
+                &["Vampire"],
+            ),
+        ),
+        (
+            "Kenku Artificer",
+            p4_trigger_chain(
+                P4_KENKU_ARTIFICER,
+                "Kenku Artificer",
+                &["Creature"],
+                &["Bird", "Artificer"],
+            ),
+        ),
+        (
+            "Magitek Scythe",
+            p4_trigger_chain(
+                P4_MAGITEK_SCYTHE,
+                "Magitek Scythe",
+                &["Artifact"],
+                &["Equipment"],
+            ),
+        ),
+    ];
+    for (name, chain) in cases {
+        let anaphor = p4_last_generic_effect(&chain);
+        let (target, statics) = p4_generic_effect_parts(anaphor);
+        assert_eq!(
+            target, &None,
+            "{name}: the anaphor clause declares no target of its own"
+        );
+        assert!(
+            statics
+                .iter()
+                .any(|static_def| static_def.affected == Some(TargetFilter::ParentTarget)),
+            "{name}: CR 608.2c — the anaphor's static applies to the declared target, got {statics:?}"
+        );
+    }
+}
+
+/// D-18 SHAPE — PRESERVATION. CR 608.2c: when the antecedent is the triggering
+/// attacker rather than a declared target, the clause keeps its source stamp.
+///
+/// GREEN AT BASE — labelled; its pairing is MP-U4-OVERREACH.
+#[test]
+fn that_type_anaphor_with_non_target_antecedent_keeps_source_stamp() {
+    let chain = p4_trigger_chain(
+        P4_SPIKED_RIPSAW,
+        "Spiked Ripsaw",
+        &["Artifact"],
+        &["Equipment"],
+    );
+    let anaphor = p4_last_generic_effect(&chain);
+    let (target, _) = p4_generic_effect_parts(anaphor);
+    assert_eq!(
+        target,
+        &Some(TargetFilter::TriggeringSource),
+        "the trample grant keeps naming the triggering attacker"
+    );
+}
+
+/// S-RW SHAPE. CR 608.2c + CR 601.2c: a bare "it" whose nearest antecedent is
+/// an earlier declared object target (or that target's own bound anaphor) names
+/// that target.
+///
+/// RED AT BASE: the clause's static is stamped `SelfRef`.
+#[test]
+fn bare_it_after_declared_target_binds_the_declared_target() {
+    let cases = [
+        (
+            "Rootwise Survivor",
+            p4_trigger_chain(
+                P4_ROOTWISE_SURVIVOR,
+                "Rootwise Survivor",
+                &["Creature"],
+                &["Human", "Survivor"],
+            ),
+        ),
+        (
+            "Academic Dispute",
+            p4_ability_chain(P4_ACADEMIC_DISPUTE, "Academic Dispute", &["Instant"], &[]),
+        ),
+        (
+            "Legion Leadership",
+            p4_ability_chain(P4_LEGION_LEADERSHIP, "Legion Leadership", &["Instant"], &[]),
+        ),
+        (
+            "Dominus of Fealty",
+            p4_trigger_chain(
+                P4_DOMINUS_OF_FEALTY,
+                "Dominus of Fealty",
+                &["Creature"],
+                &["Spirit", "Avatar"],
+            ),
+        ),
+        (
+            "Samite Alchemist",
+            p4_ability_chain(
+                P4_SAMITE_ALCHEMIST,
+                "Samite Alchemist",
+                &["Creature"],
+                &["Human", "Cleric"],
+            ),
+        ),
+    ];
+    for (name, chain) in cases {
+        let anaphor = p4_last_generic_effect(&chain);
+        let (_, statics) = p4_generic_effect_parts(anaphor);
+        assert!(
+            statics
+                .iter()
+                .any(|static_def| static_def.affected == Some(TargetFilter::ParentTarget)),
+            "{name}: CR 608.2c — the bare \"it\" names the declared target, got {statics:?}"
+        );
+    }
+}
+
+/// S-RW SHAPE — PRESERVATION. CR 115.1: a typed filter the slot collector does
+/// not announce as a target ("sacrifice a Blood token") declares no object
+/// target, so the following "it" keeps naming the source.
+///
+/// GREEN AT BASE — labelled; its pairing is MP-U4-TGTREV.
+#[test]
+fn bare_it_with_untargeted_antecedent_keeps_its_stamp() {
+    let parsed = parse_oracle_text(
+        P4_BLOODCRAZED_SOCIALITE,
+        "Bloodcrazed Socialite",
+        &[],
+        &p4_strings(&["Creature"]),
+        &p4_strings(&["Vampire"]),
+    );
+    let pump = parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .flat_map(|chain| {
+            p4_nodes(chain)
+                .into_iter()
+                .filter(|node| matches!(node.effect.as_ref(), Effect::Pump { .. }))
+                .map(|node| node.effect.as_ref().clone())
+                .collect::<Vec<_>>()
+        })
+        .next_back()
+        .expect("the +2/+2 clause must parse as a Pump node");
+    let Effect::Pump { target, .. } = &pump else {
+        unreachable!("filtered to Pump above");
+    };
+    assert_eq!(
+        target,
+        &TargetFilter::SelfRef,
+        "an untargeted sacrifice antecedent leaves \"it\" naming the source"
+    );
+}
