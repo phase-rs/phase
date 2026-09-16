@@ -25,8 +25,13 @@ server:
   # clients their join URL. Defaults to https://<ingress.host> when the ingress
   # is enabled; required otherwise.
   publicUrl: ""
-  # Sets PHASE_DATA_MANIFEST_URL. Only needed if the image was built without
-  # PHASE_CHANNEL (e.g. upstream :preview images); release builds derive it.
+  # Sets PHASE_DATA_MANIFEST_URL. Empty: the binary derives it from its embedded
+  # channel, which serves release images and preview images whose fingerprint
+  # preview-server.json still lists. That manifest keeps only the current and
+  # previous fingerprints, and publications that push no image still rotate it,
+  # so any preview image, `:preview` included, can drop out. Set this, or
+  # pre-provision the data dir, for such an image or one built without
+  # PHASE_CHANNEL.
   dataManifestUrl: ""
   # Refuse to download card data at startup (data dir must be pre-provisioned).
   noDataDownload: false

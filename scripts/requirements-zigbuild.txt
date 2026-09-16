@@ -17,10 +17,11 @@
 # --require-hashes cannot trip over an unlisted build dependency such as
 # setuptools or wheel.
 #
-# manylinux x86_64 and aarch64 wheels: every workflow runner is x86_64, while the
-# Dockerfile's compile stage runs on whatever the build host is. The ziglang wheels
-# also carry musllinux_1_1, so one set serves the Ubuntu runners and the
-# Debian-based image stage alike.
+# manylinux x86_64 and aarch64 wheels. Only the zigbuild matrix leg installs this
+# file, and it runs on x86_64; the Dockerfile's compile stage follows its build
+# host, which may be either. Both install hosts are glibc, which is why manylinux
+# covers them -- cargo-zigbuild publishes no musllinux wheel at all, so this set
+# would not serve a musl host.
 cargo-zigbuild==0.23.0 \
     --hash=sha256:3a2e021435a5e3c8b3a70bfc490580a3af6952185aa5ffb722b005d1fbe000c9 \
     --hash=sha256:d984af93da7a230606452ef5f6df47e6a081b12dcead8a3e8e5ff024728c94f0
