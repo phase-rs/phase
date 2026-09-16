@@ -29,7 +29,7 @@ jobs:
       release_sha: ${{ steps.resolve.outputs.release_sha }}
       shell_version: ${{ steps.resolve.outputs.shell_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -71,7 +71,7 @@ jobs:
       RELEASE_SHA: ${{ needs.resolve-shell-ref.outputs.release_sha }}
       SHELL_VERSION: ${{ needs.resolve-shell-ref.outputs.shell_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.RELEASE_SHA }}
 
@@ -127,7 +127,7 @@ jobs:
             jq empty "$f"
           done
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           cache-shared-key: rust-shell-preflight
 
@@ -187,19 +187,19 @@ jobs:
             runner: windows-latest
             artifact: shell-tauri-windows
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.RELEASE_SHA }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           cache-shared-key: rust-shell-${{ matrix.os }}-${{ matrix.arch }}
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: pnpm
@@ -311,7 +311,7 @@ jobs:
           done
 
       - name: Build shell
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           # beforeBuildCommand runs only pnpm build:bootstrap. SHELL_REMOTE_ORIGIN
           # is intentionally unset so release shells use https://phase-rs.dev.
@@ -356,7 +356,7 @@ jobs:
           ls -la staging/
 
       - name: Upload shell artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.artifact }}
           path: staging/*
@@ -756,7 +756,7 @@ jobs:
             artifacts/shell-tauri-android/Phase-Android-ARM64.apk
             artifacts/shell-tauri-android/Phase-Android-ARMv7.apk
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 
