@@ -1316,6 +1316,17 @@ impl<'a> CardBuilder<'a> {
         self
     }
 
+    /// Add the Snow supertype (CR 205.4a: supertypes are printed before card types;
+    /// CR 205.4g: any permanent with the supertype "snow" is a snow permanent).
+    pub fn as_snow(&mut self) -> &mut Self {
+        let obj = self.obj();
+        if !obj.card_types.supertypes.contains(&Supertype::Snow) {
+            obj.card_types.supertypes.push(Supertype::Snow);
+        }
+        self.sync_base_card_types();
+        self
+    }
+
     // --- Special modifiers ---
 
     /// CR 903.3: Mark this object as its owner's commander IN PLACE, without
@@ -1386,6 +1397,14 @@ impl<'a> CardBuilder<'a> {
         let color = crate::game::printed_cards::derive_colors_from_mana_cost(&cost);
         obj.color = color.clone();
         obj.base_color = color;
+        self
+    }
+
+    /// Set the color and base color of this card (CR 105.1).
+    pub fn with_color(&mut self, colors: Vec<crate::types::mana::ManaColor>) -> &mut Self {
+        let obj = self.obj();
+        obj.color = colors.clone();
+        obj.base_color = colors;
         self
     }
 
