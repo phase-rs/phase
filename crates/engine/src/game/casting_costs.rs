@@ -2207,6 +2207,9 @@ fn finish_cost_object_moves(
     start_at_index: usize,
     destination: Zone,
     completion: PendingCostMoveCompletion,
+    // CR 118.11: the count this cost called for, carried across every pause so
+    // the completion can publish it. `None` for cost shapes that owe no count.
+    requested_cost_count: Option<u32>,
     cost_event_start: usize,
     park_events_after_completion: bool,
     events: &mut Vec<GameEvent>,
@@ -2233,6 +2236,10 @@ fn finish_cost_object_moves(
                     paused_at_index: index,
                     destination,
                     completion,
+                    // CR 118.11: a multi-object cost (Whirling Catapult exiles two)
+                    // can pause a SECOND time here. Carry the owed count forward, or
+                    // it resets and the completion publishes nothing.
+                    requested_cost_count,
                 });
                 super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
                 let waiting_for = state.waiting_for.clone();
@@ -2264,6 +2271,18 @@ fn finish_cost_object_moves(
     // `NeedsChoice` arm above returns early and re-enters here on resume.
     let mut pending = pending;
     pending.ability.repin_cost_paid_object_recursive(state);
+
+    // CR 118.11: "The actions performed when paying a cost may be modified by
+    // effects. Even if they are ... the cost has still been paid." The paid count
+    // is therefore the count the cost CALLED FOR, not how many objects a
+    // replacement let arrive. An unpaused payment publishes this inline in
+    // `costs::pay_ability_cost_inner`; a payment that paused returns before that
+    // write, so it publishes here — the first point at which the paused object and
+    // every remaining leg have settled. A cost owing no count leaves the value
+    // untouched.
+    if let Some(requested) = requested_cost_count {
+        state.last_effect_count = Some(requested as i32);
+    }
 
     let waiting_for = match completion {
         PendingCostMoveCompletion::FinishPending => {
@@ -2420,6 +2439,7 @@ fn finish_selected_return_to_hand_after_automatic(
         0,
         Zone::Hand,
         PendingCostMoveCompletion::FinishPending,
+        None,
         cost_event_start,
         park_events_after_completion,
         events,
@@ -2486,6 +2506,7 @@ pub(crate) fn resume_interrupted_cost_payment(
             paused_at_index,
             destination,
             completion,
+            requested_cost_count,
         }) = state.pending_cost_move_resume.take()
         else {
             unreachable!("matched a cast cost-move continuation")
@@ -2513,6 +2534,7 @@ pub(crate) fn resume_interrupted_cost_payment(
             paused_at_index + 1,
             destination,
             completion,
+            requested_cost_count,
             replacement_action_cost_event_start.unwrap_or(events.len()),
             true,
             events,
@@ -3955,6 +3977,7 @@ pub(crate) fn handle_return_to_hand_for_cost(
         0,
         Zone::Hand,
         PendingCostMoveCompletion::FinishPending,
+        None,
         cost_event_start,
         false,
         events,
@@ -4583,6 +4606,7 @@ pub(crate) fn handle_behold_for_cost(
             0,
             Zone::Exile,
             PendingCostMoveCompletion::FinishPending,
+            None,
             cost_event_start,
             false,
             events,
@@ -4853,6 +4877,7 @@ fn finish_exile_selection_for_cost(
         0,
         Zone::Exile,
         PendingCostMoveCompletion::FinishPending,
+        None,
         cost_event_start,
         false,
         events,
@@ -4939,6 +4964,7 @@ pub(crate) fn handle_exile_aggregate_for_cost(
         0,
         Zone::Exile,
         PendingCostMoveCompletion::PublishExileTrackedSet,
+        None,
         cost_event_start,
         false,
         events,
@@ -10241,6 +10267,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 resolution_success_waiting_for: resolution_success_waiting_for.map(Box::new),
                 prepaid_actual_mana_spent,
             },
+            None,
             cost_event_start,
             false,
             events,

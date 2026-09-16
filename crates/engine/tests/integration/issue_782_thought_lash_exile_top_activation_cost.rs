@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, ReplacementDefinition,
-    ReplacementMode, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ReplacementMode, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -420,6 +420,146 @@ fn a_targetful_activation_affects_the_card_its_own_cost_exiled() {
         Some(1),
         "CR 608.2k: the target-first path must BIND and RE-PIN the cost-paid \
          referent, so the rider affects the very card the cost exiled"
+    );
+}
+
+/// CR 118.11: "The actions performed when paying a cost may be modified by effects.
+/// Even if they are ... the cost has still been paid." So a deterministic
+/// top-of-library exile cost publishes the count it CALLED FOR, and a replacement
+/// that interrupts the payment must not change that number.
+///
+/// An unpaused payment publishes the count inline in `costs::pay_ability_cost_inner`.
+/// A payment that pauses returns BEFORE that write, and its resume previously only
+/// re-pinned and finished — so `QuantityRef::EventContextAmount` found nothing and
+/// bottomed out at `unwrap_or(0)`. The count now rides the round trip on
+/// `PendingCostMoveResume::Cast::requested_cost_count` and is published at the
+/// completion, once the paused object and every remaining leg have settled.
+///
+/// Two cards, deliberately: the redirect pauses the payment TWICE, so this also
+/// covers the re-park inside `finish_cost_object_moves` carrying the owed count
+/// across a SECOND pause. A one-card cost cannot reach that path (its resume starts
+/// past the end of `chosen`), and Whirling Catapult — "exile the top two cards of
+/// your library" — is exactly this shape.
+///
+/// The count is read directly, and deliberately so. `last_effect_count` is cleared
+/// at the START of every player action (`engine::apply_action_boundary_core`: "clear
+/// transient inter-effect state"), and it is consumed by `sub_ability` continuations
+/// within the SAME action. An activated ability pays its cost in one action and
+/// resolves in a later one, so its own effect can never observe a count published by
+/// its own cost — with or without this fix. The observable point is therefore right
+/// after the final replacement answer completes the payment, before any further
+/// action clears it; that is exactly where "continue the activation with stale or
+/// absent `EventContextAmount`" bites.
+///
+/// Revert-proof: without the carried count this reads `None` while the cost still
+/// exiles both called-for cards — so the assertion isolates the published count, not
+/// the payment.
+#[test]
+fn a_replacement_paused_library_exile_cost_still_publishes_its_requested_count() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    // Six cards: two leave as the cost, two are drawn, and the rest keep the
+    // library non-empty so no draw-from-empty loss ends the game first.
+    scenario.with_library_top(
+        P0,
+        &[
+            "Paid One", "Paid Two", "Draw One", "Draw Two", "Spare A", "Spare B",
+        ],
+    );
+
+    let source = scenario.add_creature(P0, "Count Publisher", 2, 2).id();
+    scenario
+        .add_creature(P0, "Optional Exile Redirect", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(optional_exile_redirect());
+
+    let mut runner = scenario.build();
+
+    let ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Draw {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            target: TargetFilter::Controller,
+        },
+    )
+    .cost(AbilityCost::Exile {
+        count: 2,
+        zone: Some(Zone::Library),
+        filter: None,
+    });
+    {
+        let obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .expect("the scenario source object exists");
+        // Layers reset `abilities` from `base_abilities` on every pass; set both.
+        obj.abilities = Arc::new(vec![ability.clone()]);
+        obj.base_abilities = Arc::new(vec![ability]);
+    }
+
+    let paid: Vec<ObjectId> = runner.state().players[0]
+        .library
+        .iter()
+        .copied()
+        .take(2)
+        .collect();
+    assert_eq!(
+        paid.len(),
+        2,
+        "reach-guard: library seeded with the paid cards"
+    );
+    let index = exile_top_ability_index(&runner, source);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: index,
+        })
+        .expect("a two-card library-exile activation must be accepted");
+
+    // Decline the redirect each time it interrupts the payment, counting the
+    // pauses. This count is the whole point of the fixture: if the payment never
+    // paused, the INLINE publish in `costs.rs` would satisfy the assertion below
+    // and the test would prove nothing about the resume path.
+    let mut pauses = 0;
+    for _ in 0..8 {
+        if !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            break;
+        }
+        pauses += 1;
+        runner
+            .act(GameAction::ChooseReplacement { index: 1 })
+            .expect("declining the optional redirect must be accepted");
+    }
+    // Read the published count HERE: the payment has just completed on the resume,
+    // and the next player action would clear it (see this test's doc comment).
+    let published = runner.state().last_effect_count;
+
+    runner.advance_until_stack_empty();
+
+    assert!(
+        pauses >= 1,
+        "reach-guard: the cost move must pause on the replacement at least once, \
+         otherwise the inline publish would satisfy this test vacuously"
+    );
+    for card in &paid {
+        assert_eq!(
+            runner.state().objects[card].zone,
+            Zone::Exile,
+            "reach-guard: both called-for cards were exiled to pay the cost"
+        );
+    }
+    assert_eq!(
+        published,
+        Some(2),
+        "CR 118.11: the cost called for two cards, so the paid count published to \
+         `EventContextAmount` is 2 even though a replacement interrupted the payment"
     );
 }
 
