@@ -277,12 +277,12 @@ collect_rust_sources() {
   # Do not consume either command's output before it has completed: a failed
   # command must never be mistaken for a partial source list.
   if [[ -n $exclude ]]; then
-    if ! "$RG" --files --glob '*.rs' --glob "$exclude" "$root" >"$listed"; then
+    if ! "$RG" --files --glob '*.rs' --glob "$exclude" -- "$root" >"$listed"; then
       printf 'failed to collect Rust sources with rg under %s\n' "$root" >&2
       rm -rf -- "$stage"
       return 1
     fi
-  elif ! "$RG" --files --glob '*.rs' "$root" >"$listed"; then
+  elif ! "$RG" --files --glob '*.rs' -- "$root" >"$listed"; then
     printf 'failed to collect Rust sources with rg under %s\n' "$root" >&2
     rm -rf -- "$stage"
     return 1
