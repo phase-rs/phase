@@ -2495,6 +2495,16 @@ pub(crate) fn resume_interrupted_cost_payment(
                 player: state.active_player,
             });
         };
+        // CR 406.6: the paused item settled during the replacement choice, and the
+        // loop below resumes at `paused_at_index + 1` — so nothing else records it.
+        // A one-card deterministic library-exile cost (Thought Lash, Phyrexian
+        // Devourer) that pauses and ends in exile would otherwise lose its
+        // "exiled with [source] this turn" link entirely.
+        if destination == Zone::Exile {
+            if let Some(&paused_object) = chosen.get(paused_at_index) {
+                super::costs::record_delivered_cost_exile(state, paused_object, pending.object_id);
+            }
+        }
         return finish_cost_object_moves(
             state,
             player,
