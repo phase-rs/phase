@@ -5,7 +5,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while};
 use nom::character::complete::multispace0;
 use nom::combinator::{all_consuming, map, opt, value};
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -2894,6 +2894,7 @@ fn prepare_spell_resolution_line(raw_line: &str) -> Option<SpellResolutionLine> 
     let line_with_reminder_stripped = strip_reminder_text(raw_line);
     let min_x_value = x_annotation_min_value(&line_with_reminder_stripped);
     let line = strip_x_cant_be_zero_suffix(&line_with_reminder_stripped);
+    let line = strip_spend_only_on_x_annotation(&line);
     if line.is_empty() {
         return None;
     }
@@ -5162,6 +5163,7 @@ fn parse_normalized_oracle_ir(
         let min_x_value = x_annotation_min_value(&line);
         // Strip "X can't be 0." casting constraint suffix — annotation only, not an ability.
         let line = strip_x_cant_be_zero_suffix(&line);
+        let line = strip_spend_only_on_x_annotation(&line);
         if line.is_empty() {
             if min_x_value > 0 {
                 emitter.raise_last_spell_min_x(min_x_value);
@@ -7092,8 +7094,11 @@ fn parse_normalized_oracle_ir(
                     let next_line = strip_reminder_text(lines[next_i].trim());
                     let next_min_x_value = x_annotation_min_value(&next_line);
                     let next_stripped = strip_x_cant_be_zero_suffix(&next_line);
-                    if next_min_x_value > 0 && next_stripped.is_empty() {
-                        spell_min_x_value = spell_min_x_value.max(next_min_x_value);
+                    let next_stripped = strip_spend_only_on_x_annotation(&next_stripped);
+                    if next_stripped.is_empty() {
+                        if next_min_x_value > 0 {
+                            spell_min_x_value = spell_min_x_value.max(next_min_x_value);
+                        }
                         next_i += 1;
                     }
                     break;
@@ -11484,6 +11489,44 @@ fn strip_x_cant_be_zero_suffix(line: &str) -> String {
             return result.trim_end().to_string();
         }
     }
+    line.to_string()
+}
+
+/// CR 107.3m / CR 601.2b: Strip "Spend only ... on X." / "Spend only ... mana on X."
+/// casting cost payment annotations from Oracle text. These are cost-payment
+/// restrictions on variable {X} costs that annotate the spell/ability, not resolution effects.
+fn strip_spend_only_on_x_annotation(line: &str) -> String {
+    let lower = line.to_lowercase();
+    let trimmed = lower.trim();
+
+    // Standalone case: entire line is "spend only ... on x" (with optional trailing period).
+    if let Ok((rest, _)) = pair(
+        tag::<_, _, OracleError<'_>>("spend only "),
+        pair(take_until(" on x"), tag(" on x")),
+    )
+    .parse(trimmed)
+    {
+        if rest.trim().is_empty() || rest.trim() == "." {
+            return String::new();
+        }
+    }
+
+    // Prefix case: "Spend only ... on X. {rest of sentence}"
+    if let Ok((rest, _)) = (
+        tag::<_, _, OracleError<'_>>("spend only "),
+        take_until(" on x"),
+        tag(" on x"),
+        opt(tag(".")),
+    )
+        .parse(trimmed)
+    {
+        let rest_trimmed = rest.trim();
+        if !rest_trimmed.is_empty() {
+            let cut_len = line.len() - rest_trimmed.len();
+            return line[cut_len..].trim().to_string();
+        }
+    }
+
     line.to_string()
 }
 

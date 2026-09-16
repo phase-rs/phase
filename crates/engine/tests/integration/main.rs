@@ -140,6 +140,7 @@ mod comeuppance;
 mod commander_draft_deck_legality;
 mod commander_draft_filler;
 mod companion_special_action;
+mod consume_spirit_legal_targets;
 mod consuming_vapors_life_gain_5925;
 mod consuming_vapors_rebound;
 mod converge_colors_spent_trigger_lifetime;

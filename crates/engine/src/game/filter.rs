@@ -2975,7 +2975,8 @@ pub(crate) fn matches_stack_target_filter(
         return false;
     };
     match filter {
-        TargetFilter::Any => true,
+        // CR 115.4: spells and abilities on the stack cannot be chosen as "any target".
+        TargetFilter::Any => false,
         TargetFilter::StackSpell => matches!(&entry.kind, StackEntryKind::Spell { .. }),
         TargetFilter::StackAbility {
             controller,
@@ -3221,7 +3222,12 @@ fn target_filter_face_state(
     scope: FaceControllerScope,
 ) -> Option<bool> {
     match filter {
-        TargetFilter::Any => Some(true),
+        // CR 115.4: "any target" face must have type Creature, Planeswalker, or Battle.
+        TargetFilter::Any => Some(
+            face.card_type.core_types.contains(&CoreType::Creature)
+                || face.card_type.core_types.contains(&CoreType::Planeswalker)
+                || face.card_type.core_types.contains(&CoreType::Battle),
+        ),
         TargetFilter::None => Some(false),
         TargetFilter::Typed(typed) => {
             let mut terms = vec![controller_ref_face_state(typed.controller.as_ref(), scope)];
@@ -4170,7 +4176,15 @@ fn filter_inner_for_object(
 ) -> bool {
     match filter {
         TargetFilter::None => false,
-        TargetFilter::Any => true,
+        // CR 115.4 + CR Glossary: "any target" may be a creature, player, planeswalker,
+        // or battle. Other game objects (noncreature artifacts, enchantments, lands, spells)
+        // cannot be chosen. Player targets are handled via `player_matches_target_filter_with`
+        // and `add_players`. For GameObjects, it must be a Creature, Planeswalker, or Battle.
+        TargetFilter::Any => {
+            obj.card_types.core_types.contains(&CoreType::Creature)
+                || obj.card_types.core_types.contains(&CoreType::Planeswalker)
+                || obj.card_types.core_types.contains(&CoreType::Battle)
+        }
         TargetFilter::Player => false, // Players are not objects
         // CR 118.12a: unless-payer population — never matches an object.
         TargetFilter::AllPlayers => false,

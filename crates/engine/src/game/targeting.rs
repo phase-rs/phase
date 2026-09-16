@@ -1,6 +1,7 @@
 use crate::types::ability::{
     ControllerRef, FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
+use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind, TriggerSourceContext};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
@@ -461,6 +462,19 @@ fn find_legal_targets_with_context(
         }
 
         for &obj_id in &state.battlefield {
+            if is_any_other_target {
+                let Some(obj) = state.objects.get(&obj_id) else {
+                    continue;
+                };
+                // CR 115.4: "another target" / "any other target" may be a creature,
+                // player, planeswalker, or battle.
+                if !obj.card_types.core_types.contains(&CoreType::Creature)
+                    && !obj.card_types.core_types.contains(&CoreType::Planeswalker)
+                    && !obj.card_types.core_types.contains(&CoreType::Battle)
+                {
+                    continue;
+                }
+            }
             if super::filter::matches_target_filter(state, obj_id, filter, target_ctx) {
                 let obj = match state.objects.get(&obj_id) {
                     Some(o) => o,
@@ -538,7 +552,28 @@ fn has_legal_target_with_context(
         .is_empty();
     }
 
+    let is_any_other_target = matches!(
+        filter,
+        TargetFilter::Typed(tf)
+            if tf.type_filters.is_empty()
+                && tf.controller.is_none()
+                && tf.properties.iter().any(|p| matches!(p, FilterProp::Another))
+    );
+
     for &obj_id in &state.battlefield {
+        if is_any_other_target {
+            let Some(obj) = state.objects.get(&obj_id) else {
+                continue;
+            };
+            // CR 115.4: "another target" / "any other target" may be a creature,
+            // player, planeswalker, or battle.
+            if !obj.card_types.core_types.contains(&CoreType::Creature)
+                && !obj.card_types.core_types.contains(&CoreType::Planeswalker)
+                && !obj.card_types.core_types.contains(&CoreType::Battle)
+            {
+                continue;
+            }
+        }
         if super::filter::matches_target_filter(state, obj_id, filter, target_ctx) {
             let Some(obj) = state.objects.get(&obj_id) else {
                 continue;
@@ -4483,9 +4518,141 @@ mod tests {
         let targets = find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(c0)));
         assert!(targets.contains(&TargetRef::Object(c1)));
-        assert!(targets.contains(&TargetRef::Object(land)));
+        // CR 115.4: "any target" includes creatures, players, planeswalkers, and battles.
+        // Lands are not legal targets.
+        assert!(!targets.contains(&TargetRef::Object(land)));
         assert!(targets.contains(&TargetRef::Player(PlayerId(0))));
         assert!(targets.contains(&TargetRef::Player(PlayerId(1))));
+        assert_eq!(targets.len(), 4); // 2 creatures + 2 players
+    }
+
+    #[test]
+    fn find_legal_targets_cr_115_4_any_target_and_any_other_target() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let planeswalker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Jace".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&planeswalker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Planeswalker);
+
+        let battle = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Invasion of Gobakhan".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&battle)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Battle);
+
+        let land = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Island".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let artifact = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(1),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let enchantment = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(1),
+            "Blood Moon".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&enchantment)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+
+        let source = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Consume Spirit".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Test TargetFilter::Any
+        let any_targets = find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), source);
+        assert!(any_targets.contains(&TargetRef::Player(PlayerId(0))));
+        assert!(any_targets.contains(&TargetRef::Player(PlayerId(1))));
+        assert!(any_targets.contains(&TargetRef::Object(creature)));
+        assert!(any_targets.contains(&TargetRef::Object(planeswalker)));
+        assert!(any_targets.contains(&TargetRef::Object(battle)));
+        assert!(!any_targets.contains(&TargetRef::Object(land)));
+        assert!(!any_targets.contains(&TargetRef::Object(artifact)));
+        assert!(!any_targets.contains(&TargetRef::Object(enchantment)));
+        assert_eq!(any_targets.len(), 5); // 2 players + 3 valid permanents
+
+        // Test "any other target" (TypedFilter with FilterProp::Another and empty type_filters)
+        let other_filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another]));
+        let other_targets = find_legal_targets(&state, &other_filter, PlayerId(0), source);
+        assert!(other_targets.contains(&TargetRef::Player(PlayerId(0))));
+        assert!(other_targets.contains(&TargetRef::Player(PlayerId(1))));
+        assert!(other_targets.contains(&TargetRef::Object(creature)));
+        assert!(other_targets.contains(&TargetRef::Object(planeswalker)));
+        assert!(other_targets.contains(&TargetRef::Object(battle)));
+        assert!(!other_targets.contains(&TargetRef::Object(land)));
+        assert!(!other_targets.contains(&TargetRef::Object(artifact)));
+        assert!(!other_targets.contains(&TargetRef::Object(enchantment)));
+        assert!(!other_targets.contains(&TargetRef::Object(source)));
+        assert_eq!(other_targets.len(), 5);
     }
 
     #[test]
