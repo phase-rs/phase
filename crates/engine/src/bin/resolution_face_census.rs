@@ -467,6 +467,7 @@ fn insert_support(
     mana_value: u32,
 ) {
     let object_id = ObjectId(id);
+    // allow-raw-zone: standalone census fixture constructs disposable witness objects, not gameplay events.
     let mut object = GameObject::new(object_id, CardId(id), owner, name.to_string(), zone);
     object.card_types = CardType {
         core_types: types.to_vec(),
@@ -480,6 +481,7 @@ fn insert_support(
     object.base_mana_cost = object.mana_cost.clone();
     state.objects.insert(object_id, object);
     if zone != Zone::Stack {
+        // allow-raw-zone: census fixture registers its newly constructed disposable witness outside gameplay.
         add_to_zone(state, object_id, zone, owner);
     }
 }
@@ -664,12 +666,15 @@ fn place_candidate(
         db,
         face,
     );
+    // allow-raw-zone: census relocates a disposable hydrated candidate before game actions can observe it.
     remove_from_zone(state, id, Zone::Library, owner);
+    // allow-raw-zone: paired census-fixture bookkeeping, not a replaceable gameplay zone event.
     add_to_zone(state, id, origin.zone(), owner);
     let object = state
         .objects
         .get_mut(&id)
         .ok_or_else(|| "candidate object missing after placement".to_string())?;
+    // allow-raw-zone: keep the synthetic object coherent with census fixture collections, outside gameplay.
     object.zone = origin.zone();
     if alt_hand {
         let keyword = Keyword::Suspend {
