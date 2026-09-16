@@ -12596,30 +12596,46 @@ fn is_bound_attach_remainder_for(pending: &PendingContinuation, ability: &Resolv
 /// reverted is the mistake it was introduced to prevent.
 /// CR 603.7 + CR 608.2g: after a `CastFromZone` head's tail ran inline behind
 /// an open `CastOffer::GraveyardPaidCast`, note on that offer the delayed
-/// triggers the tail installed — every record whose installation instance is
-/// at or past `first_new_instance`, the counter value read before the tail
-/// ran. The offer's decline withdraws exactly these
-/// (`engine_resolution_choices::withdraw_declined_offer_cast_triggers`). No-op
-/// when the head left any other state.
-fn record_tail_installs_on_paid_offer(state: &mut GameState, first_new_instance: u64) {
-    let new_instances: Vec<_> = state
+/// triggers the tail installed.  The receipt is an actual before/after
+/// provenance delta, not a counter range: a restored state or another nested
+/// installation may otherwise make an unrelated trigger look newly installed.
+fn paid_offer_tail_provenance(
+    state: &GameState,
+) -> std::collections::HashSet<(u64, u64, ObjectId)> {
+    state
         .delayed_triggers
         .iter()
         .filter_map(|trigger| trigger.provenance.origin())
-        .map(|origin| origin.instance)
-        .filter(|instance| instance.0 >= first_new_instance)
+        .map(|origin| (origin.token.0, origin.instance.0, origin.source_id))
+        .collect()
+}
+
+fn record_tail_installs_on_paid_offer(
+    state: &mut GameState,
+    before: &std::collections::HashSet<(u64, u64, ObjectId)>,
+) {
+    let receipts: Vec<_> = state
+        .delayed_triggers
+        .iter()
+        .filter_map(|trigger| trigger.provenance.origin())
+        .filter(|origin| !before.contains(&(origin.token.0, origin.instance.0, origin.source_id)))
+        .map(
+            |origin| crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+                token: origin.token,
+                instance: origin.instance,
+                source_id: origin.source_id,
+            },
+        )
         .collect();
-    if new_instances.is_empty() {
+    if receipts.is_empty() {
         return;
     }
     if let WaitingFor::CastOffer {
-        kind: CastOfferKind::GraveyardPaidCast {
-            installed_triggers, ..
-        },
+        kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
         ..
     } = &mut state.waiting_for
     {
-        installed_triggers.extend(new_instances);
+        cleanup.delayed_trigger_receipts.extend(receipts);
     }
 }
 
@@ -15148,11 +15164,11 @@ fn resolve_chain_body(
                     prepend_to_pending_continuation(state, tail);
                 } else {
                     // CR 603.7: every delayed trigger this tail installs is
-                    // recorded on the open paid offer by installation instance,
+                    // recorded on the open paid offer by provenance delta,
                     // so a declined offer can withdraw exactly those records.
-                    let first_new_instance = state.next_delayed_trigger_instance;
+                    let tail_before = paid_offer_tail_provenance(state);
                     resolve_ability_chain(state, &tail, events, depth + 1)?;
-                    record_tail_installs_on_paid_offer(state, first_new_instance);
+                    record_tail_installs_on_paid_offer(state, &tail_before);
                 }
             }
             return Ok(());

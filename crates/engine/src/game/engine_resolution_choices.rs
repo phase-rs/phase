@@ -2280,6 +2280,7 @@ pub(super) fn handle_resolution_choice(
                     reject_action: crate::types::ability::ResolutionMvRejectAction::ToHand,
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                    delayed_trigger_receipts: Vec::new(),
                 };
                 let result = match casting::initiate_cast_during_resolution(
                     state,
@@ -2351,28 +2352,18 @@ pub(super) fn handle_resolution_choice(
                         mana_spend_permission,
                         graveyard_replacement,
                         cast_transformed,
-                        constraint,
                         additional_cost,
-                        installed_triggers,
+                        cleanup,
                     },
             },
             GameAction::GraveyardPaidCastChoice { choice },
         ) => {
             if matches!(choice, crate::types::actions::CastChoice::Cast) {
-                let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
-                    crate::types::ability::TargetFilter::Any,
-                    hit_card,
-                    player,
-                    constraint,
-                );
-                let cleanup = crate::types::ability::ResolutionCastCleanup {
-                    source_id: hit_card,
-                    face_policy: face_policy.clone(),
-                    exiled_misses: Vec::new(),
-                    reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
-                    success_action:
-                        crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
-                };
+                // Validate the exact delayed-tail receipt before the cast path
+                // mutates an object or installs a temporary permission.
+                validate_resolution_cast_cleanup_authority(player, &cleanup)?;
+                validate_resolution_cast_delayed_trigger_receipts(state, &cleanup)?;
+                let face_policy = cleanup.face_policy.clone();
                 let result = match casting::initiate_cast_during_resolution(
                     state,
                     player,
@@ -2398,18 +2389,9 @@ pub(super) fn handle_resolution_choice(
                 };
                 ResolutionChoiceOutcome::WaitingFor(result)
             } else {
-                // CR 608.2g decline: card stays in the graveyard; nothing is cast.
-                // CR 603.7: the "when you cast that spell" trigger the granting
-                // resolution installed ahead of this offer (its inline tail,
-                // `effects/mod.rs`) waits for the cast the offer would have made;
-                // withdrawn here, since it is keyed to the CARD and would otherwise
-                // fire on a later cast of that card by another route this turn
-                // (Helmut Zemo declined, the Bolt then cast under Kess). An
-                // accepted offer whose cast fails to initiate returns the error
-                // above and leaves the offer open, so the decline still reaches
-                // this withdrawal.
-                withdraw_declined_offer_cast_triggers(state, &installed_triggers);
-                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+                ResolutionChoiceOutcome::WaitingFor(abort_resolution_cast(
+                    state, player, hit_card, cleanup, events,
+                )?)
             }
         }
         // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" —
@@ -2641,6 +2623,7 @@ pub(super) fn handle_resolution_choice(
                         crate::types::ability::ResolutionMvRejectAction::BottomWithMisses,
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                    delayed_trigger_receipts: Vec::new(),
                 };
                 let result = match casting::initiate_cast_during_resolution(
                     state,
@@ -2720,6 +2703,7 @@ pub(super) fn handle_resolution_choice(
                         crate::types::ability::ResolutionCastSuccessAction::RippleOfferRemaining {
                             remaining_hits,
                         },
+                    delayed_trigger_receipts: Vec::new(),
                 };
                 let result = match casting::initiate_cast_during_resolution(
                     state,
@@ -2863,7 +2847,7 @@ pub(super) fn handle_resolution_choice(
             // per-card MV is pre-checked and these casts carry no resulting-MV
             // permission constraint).
             let cleanup = crate::types::ability::ResolutionCastCleanup {
-                source_id: chosen,
+                source_id: face_policy.source_id,
                 face_policy: face_policy.clone(),
                 exiled_misses: Vec::new(),
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
@@ -2877,6 +2861,7 @@ pub(super) fn handle_resolution_choice(
                         graveyard_replacement: graveyard_replacement.clone(),
                         member_pool,
                     },
+                delayed_trigger_receipts: Vec::new(),
             };
             let result = match casting::initiate_cast_during_resolution(
                 state,
@@ -8426,12 +8411,16 @@ pub(crate) fn abort_resolution_cast(
 ) -> Result<WaitingFor, EngineError> {
     use crate::types::ability::{ResolutionCastSuccessAction, ResolutionMvRejectAction};
 
+    validate_resolution_cast_cleanup_authority(player, &cleanup)?;
+    withdraw_resolution_cast_delayed_triggers(state, &cleanup)?;
+
     let crate::types::ability::ResolutionCastCleanup {
         source_id,
         face_policy: _,
         exiled_misses,
         reject_action,
         success_action,
+        delayed_trigger_receipts: _,
     } = cleanup;
 
     match success_action {
@@ -8522,26 +8511,78 @@ pub(crate) fn abort_resolution_cast(
     }
 }
 
-/// CR 603.7 + CR 608.2g: withdraw the delayed triggers the granting resolution
-/// installed behind a during-resolution offer, after that offer was declined.
-/// Matched by installation instance — the identity the CR 603.7 install
-/// authority mints once per record — so exactly the records this resolution's
-/// tail installed leave, and a second delayed trigger of the same source on the
-/// same card (another offer, another effect) stays. Booked as `Removed`.
-fn withdraw_declined_offer_cast_triggers(
-    state: &mut GameState,
-    installed: &[crate::types::identifiers::DelayedTriggerInstanceId],
-) {
-    if installed.is_empty() {
-        return;
+/// The player and source on a persisted cleanup must remain the exact frozen
+/// authority which opened the resolution-time offer.
+pub(crate) fn validate_resolution_cast_cleanup_authority(
+    player: crate::types::player::PlayerId,
+    cleanup: &crate::types::ability::ResolutionCastCleanup,
+) -> Result<(), EngineError> {
+    if cleanup.face_policy.controller != player
+        || cleanup.face_policy.source_id != cleanup.source_id
+    {
+        return Err(EngineError::InvalidAction(
+            "resolution-cast cleanup authority is stale or mismatched".to_string(),
+        ));
     }
+    Ok(())
+}
+
+/// Check every delayed-tail receipt before a terminal resolution-cast action
+/// changes state.  A malformed saved receipt is an action error, never a
+/// partially withdrawn trigger set.
+pub(crate) fn validate_resolution_cast_delayed_trigger_receipts(
+    state: &GameState,
+    cleanup: &crate::types::ability::ResolutionCastCleanup,
+) -> Result<(), EngineError> {
+    let mut seen = HashSet::new();
+    for receipt in &cleanup.delayed_trigger_receipts {
+        let identity = (receipt.token, receipt.instance, receipt.source_id);
+        if receipt.token.0 == 0 || receipt.instance.0 == 0 || !seen.insert(identity) {
+            return Err(EngineError::InvalidAction(
+                "invalid resolution-cast delayed-trigger receipt".to_string(),
+            ));
+        }
+        let matches = state
+            .delayed_triggers
+            .iter()
+            .filter(|trigger| {
+                trigger.source_id == receipt.source_id
+                    && trigger.provenance.origin().is_some_and(|origin| {
+                        origin.token == receipt.token
+                            && origin.instance == receipt.instance
+                            && origin.source_id == receipt.source_id
+                    })
+            })
+            .count();
+        if matches != 1 {
+            return Err(EngineError::InvalidAction(
+                "resolution-cast delayed-trigger receipt is stale".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Withdraw every delayed trigger named by a validated resolution-cast receipt.
+/// Validation happens before `delayed_triggers` is taken, so malformed state
+/// cannot leave a cancellation half-applied.
+pub(crate) fn withdraw_resolution_cast_delayed_triggers(
+    state: &mut GameState,
+    cleanup: &crate::types::ability::ResolutionCastCleanup,
+) -> Result<(), EngineError> {
+    validate_resolution_cast_delayed_trigger_receipts(state, cleanup)?;
+    let receipts: HashSet<_> = cleanup
+        .delayed_trigger_receipts
+        .iter()
+        .map(|receipt| (receipt.token, receipt.instance, receipt.source_id))
+        .collect();
     let mut survivors = Vec::new();
     let mut withdrawn = Vec::new();
     for trigger in std::mem::take(&mut state.delayed_triggers) {
-        let is_installed_here = trigger
-            .provenance
-            .origin()
-            .is_some_and(|origin| installed.contains(&origin.instance));
+        let is_installed_here = trigger.provenance.origin().is_some_and(|origin| {
+            receipts.contains(&(origin.token, origin.instance, origin.source_id))
+                && trigger.source_id == origin.source_id
+        });
         if is_installed_here {
             withdrawn.push(trigger);
         } else {
@@ -8555,6 +8596,7 @@ fn withdraw_declined_offer_cast_triggers(
             super::lifecycle::DelayedTerminalDisposition::Removed,
         );
     }
+    Ok(())
 }
 
 fn finish_with_continuation(
@@ -9600,6 +9642,7 @@ mod tests {
                     reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                    delayed_trigger_receipts: Vec::new(),
                 }),
                 duration: None,
                 graveyard_replacement: None,

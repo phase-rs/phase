@@ -258,8 +258,7 @@ pub(crate) fn eligible_candidates(
         // CR 601.2b-c + CR 608.2g: discover candidates by projecting each
         // spell face under the exact frozen policy.  A live-front check here
         // would erase a legal back-only spell before it could be elected.
-        if crate::game::casting::resolution_spell_face_legality(state, controller, id, face_policy)
-            .count()
+        if crate::game::casting::resolution_spell_face_admission(state, id, face_policy).count()
             == 0
         {
             continue;

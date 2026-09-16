@@ -222,9 +222,8 @@ fn compute_hand_pick_eligible(
         .into_iter()
         .filter(|id| {
             if cast_mode_excludes_lands {
-                return crate::game::casting::resolution_spell_face_legality(
+                return crate::game::casting::resolution_spell_face_admission(
                     state,
-                    ability.controller,
                     *id,
                     &face_policy,
                 )
@@ -655,13 +654,8 @@ pub fn resolve(
                 freeze_cast_permission_constraint(state, ability, constraint.clone()),
             );
             target_ids.retain(|id| {
-                crate::game::casting::resolution_spell_face_legality(
-                    state,
-                    ability.controller,
-                    *id,
-                    &face_policy,
-                )
-                .count()
+                crate::game::casting::resolution_spell_face_admission(state, *id, &face_policy)
+                    .count()
                     != 0
             });
         }
@@ -926,12 +920,28 @@ pub fn resolve(
                 mana_spend_permission,
                 graveyard_replacement: cast_from_zone_graveyard_destination(ability),
                 cast_transformed,
-                constraint: constraint.clone(),
                 // CR 601.2b: "by paying {R}{R} in addition to its other costs"
                 // rides the offer and is charged on accept (Ogre Battlecaster).
                 additional_cost,
-                // Filled by the resolution's inline tail (`effects/mod.rs`).
-                installed_triggers: Vec::new(),
+                cleanup: crate::types::ability::ResolutionCastCleanup {
+                    source_id: ability.source_id,
+                    face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                        freeze_resolution_cast_filter(
+                            state,
+                            ability,
+                            target_filter.clone(),
+                            Some(target_ids[0]),
+                        ),
+                        ability.source_id,
+                        ability.controller,
+                        constraint.clone(),
+                    ),
+                    exiled_misses: Vec::new(),
+                    reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                    success_action:
+                        crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                    delayed_trigger_receipts: Vec::new(),
+                },
             },
         };
         return Ok(());
@@ -1104,13 +1114,8 @@ fn open_resolution_cast_window(
                 .objects
                 .get(id)
                 .is_some_and(|obj| RESOLUTION_WINDOW_ORIGIN_ZONES.contains(&obj.zone))
-                && crate::game::casting::resolution_spell_face_legality(
-                    state,
-                    ability.controller,
-                    *id,
-                    &face_policy,
-                )
-                .count()
+                && crate::game::casting::resolution_spell_face_admission(state, *id, &face_policy)
+                    .count()
                     != 0
         })
         .collect();
@@ -1593,6 +1598,7 @@ fn cast_single_target_during_resolution(
         exiled_misses,
         reject_action,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+        delayed_trigger_receipts: Vec::new(),
     };
     let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
     let initiation = crate::game::casting::initiate_cast_during_resolution(

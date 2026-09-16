@@ -4957,6 +4957,16 @@ impl ResolutionCastFacePolicy {
     }
 }
 
+/// The provenance of one delayed trigger installed after a resolution cast was
+/// offered.  Retaining all three values makes cancellation exact even when the
+/// same source installs several otherwise similar triggers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolutionCastDelayedTriggerReceipt {
+    pub token: super::identifiers::DelayedTriggerToken,
+    pub instance: super::identifiers::DelayedTriggerInstanceId,
+    pub source_id: super::identifiers::ObjectId,
+}
+
 /// CR 608.2g: Rejection-cleanup state carried by a cast-during-resolution
 /// `ExileWithAltCost` permission. Its presence is the engine's marker that the
 /// cast happens *during the resolution* of its source ability (CR 608.2g —
@@ -4991,6 +5001,10 @@ pub struct ResolutionCastCleanup {
     /// cards from the same reveal first (CR 702.60a).
     #[serde(default)]
     pub success_action: ResolutionCastSuccessAction,
+    /// Delayed tail triggers which are withdrawn if this offer is not cast.
+    /// Legacy saves have no trustworthy receipt and decode to an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delayed_trigger_receipts: Vec<ResolutionCastDelayedTriggerReceipt>,
 }
 
 /// CR 608.2g + CR 609.4b: how a cast-during-resolution pays.
@@ -5144,6 +5158,7 @@ mod resolution_cast_face_policy_serde_tests {
                 graveyard_replacement: None,
                 member_pool: vec![ObjectId(702)],
             },
+            delayed_trigger_receipts: Vec::new(),
         };
         let round_tripped_policy: ResolutionCastFacePolicy =
             serde_json::from_value(serde_json::to_value(&policy).unwrap()).unwrap();
@@ -5182,6 +5197,7 @@ mod resolution_cast_face_policy_serde_tests {
             exiled_misses: Vec::new(),
             reject_action: ResolutionMvRejectAction::RemainExiled,
             success_action: ResolutionCastSuccessAction::BottomMisses,
+            delayed_trigger_receipts: Vec::new(),
         })
         .unwrap();
         cleanup

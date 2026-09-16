@@ -10311,10 +10311,85 @@ impl ResolutionSpellFaceLegality {
     }
 }
 
+/// The prospective gate used while building a resolution-time offer.  It only
+/// answers whether the card has an eligible spell face under the frozen
+/// policy.  Timing, targets, costs, prohibitions, and the actual preparation
+/// transaction belong to the indexed permission after a player selects a
+/// candidate.
+pub(crate) fn resolution_spell_face_admission(
+    state: &GameState,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+) -> ResolutionSpellFaceLegality {
+    let Some(original) = state.objects.get(&object_id) else {
+        return ResolutionSpellFaceLegality {
+            front: false,
+            back: false,
+        };
+    };
+    let may_choose_back = resolution_spell_face_choice_available(original);
+    let mut admission = ResolutionSpellFaceLegality {
+        front: false,
+        back: false,
+    };
+    for back_face in [false, true] {
+        if back_face && !may_choose_back {
+            continue;
+        }
+        let mut projected = state.clone();
+        let zone = {
+            let object = projected
+                .objects
+                .get_mut(&object_id)
+                .expect("projected object persists");
+            if back_face {
+                simulate_chosen_split_spell_back_face(object);
+            } else {
+                object.cast_face_committed = true;
+            }
+            object.zone
+        };
+        if zone != Zone::Graveyard
+            && super::keywords::object_has_effective_keyword_kind(
+                &projected,
+                object_id,
+                KeywordKind::Aftermath,
+            )
+        {
+            continue;
+        }
+        let object = projected
+            .objects
+            .get(&object_id)
+            .expect("projected object persists");
+        if !object_may_enter_cast_path(object) {
+            continue;
+        }
+        let context = super::filter::FilterContext::from_source_with_controller(
+            policy.source_id,
+            policy.controller,
+        );
+        let allowed = super::filter::matches_target_filter_for_zone(
+            &projected,
+            object_id,
+            zone,
+            &policy.filter,
+            &context,
+        );
+        if back_face {
+            admission.back = allowed;
+        } else {
+            admission.front = allowed;
+        }
+    }
+    admission
+}
+
 /// Project each independently castable spell face and evaluate it with the
 /// same normalized policy that will be copied into the selected temporary
 /// permission.  This is deliberately read-only: announcement state is not
 /// created until a real face has been elected.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn resolution_spell_face_legality(
     state: &GameState,
     player: PlayerId,
@@ -10348,6 +10423,7 @@ pub(crate) fn resolution_spell_face_legality(
                 exiled_misses: Vec::new(),
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                delayed_trigger_receipts: Vec::new(),
             }),
             duration: None,
             source_id: None,
@@ -10542,22 +10618,37 @@ pub(crate) fn take_resolution_cast_cleanup(
     object_id: ObjectId,
     card_id: CardId,
     permission_index: CastingPermissionIndex,
-) -> Option<crate::types::ability::ResolutionCastCleanup> {
-    let object = state.objects.get_mut(&object_id)?;
+) -> Result<Option<crate::types::ability::ResolutionCastCleanup>, EngineError> {
+    let object = match state.objects.get(&object_id) {
+        Some(object) => object,
+        None => return Ok(None),
+    };
     if object.card_id != card_id {
-        return None;
+        return Ok(None);
     }
-    let cleanup = match object.casting_permissions.get(permission_index.0)? {
+    let Some(permission) = object.casting_permissions.get(permission_index.0) else {
+        return Ok(None);
+    };
+    let cleanup = match permission {
         CastingPermission::ExileWithAltCost {
             granted_to: Some(grantee),
             constraint,
             resolution_cleanup: Some(cleanup),
             ..
         } if *grantee == player && *constraint == cleanup.face_policy.constraint => cleanup.clone(),
-        _ => return None,
+        _ => return Ok(None),
     };
-    object.casting_permissions.remove(permission_index.0);
-    Some(cleanup)
+    super::engine_resolution_choices::validate_resolution_cast_cleanup_authority(player, &cleanup)?;
+    super::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
+        state, &cleanup,
+    )?;
+    state
+        .objects
+        .get_mut(&object_id)
+        .expect("resolution cleanup was validated against this object")
+        .casting_permissions
+        .remove(permission_index.0);
+    Ok(Some(cleanup))
 }
 
 /// CR 709.3: A split-card face is independently castable when it is an
@@ -12788,6 +12879,14 @@ pub(super) fn initiate_cast_during_resolution(
         cost,
     } = request;
     let cleanup_for_rejection = cleanup.clone();
+    super::engine_resolution_choices::validate_resolution_cast_cleanup_authority(
+        player,
+        &cleanup_for_rejection,
+    )?;
+    super::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
+        state,
+        &cleanup_for_rejection,
+    )?;
     // CR 608.2g + CR 609.4b + CR 118.9: resolve the payment shape once.
     // `Free` zeroes the cost and auto-pays (Cascade/Discover/Suspend).
     // `FullCost` charges the elected face's live printed cost (`SelfManaCost`)
@@ -23787,6 +23886,7 @@ mod castable_zone_authority_tests {
                 exiled_misses: Vec::new(),
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                delayed_trigger_receipts: Vec::new(),
             });
         }
         assert!(

@@ -11018,6 +11018,7 @@ fn apply_non_priority_pass_action(
                 *card_id,
                 permission_index,
             )
+            ?
             .ok_or_else(|| {
                 EngineError::InvalidAction(
                     "Resolution face choice permission provenance is stale or mismatched"

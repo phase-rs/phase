@@ -9522,24 +9522,15 @@ pub enum CastOfferKind {
         /// class; carried for parity with the free during-resolution casts.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         cast_transformed: bool,
-        /// CR 601.2b: Optional cast-time predicate gating the cast.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        constraint: Option<crate::types::ability::CastPermissionConstraint>,
         /// CR 601.2b + CR 118.8: an additional mana cost the grant attaches to
         /// this cast ("by paying {R}{R} in addition to its other costs", Ogre
         /// Battlecaster), paid on top of the card's printed cost when the offer
         /// is accepted. `None` for every other paid offer.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         additional_cost: Option<crate::types::mana::ManaCost>,
-        /// CR 603.7: the delayed triggers the granting resolution installed
-        /// AFTER this offer opened — its "when you cast that spell" tail,
-        /// resolved inline before the offer is answered (`effects/mod.rs`) —
-        /// by installation instance. Declining the offer withdraws exactly
-        /// these records and no other, so a second delayed trigger of the same
-        /// source on the same card (a second offer, another effect) is left
-        /// alone. Empty for saved states predating the field.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        installed_triggers: Vec<crate::types::identifiers::DelayedTriggerInstanceId>,
+        /// The exact frozen policy and delayed-trigger receipt for this offer.
+        /// It is transferred unchanged to the temporary cast permission.
+        cleanup: crate::types::ability::ResolutionCastCleanup,
     },
 }
 
@@ -20233,6 +20224,167 @@ fn reject_legacy_exploit_event_evidence(value: &serde_json::Value) -> Result<(),
     visit(value, "$")
 }
 
+/// Field-migrate the former paid-resolution offer into its canonical cleanup
+/// carrier.  This runs before every raw, persisted, trusted, and versioned
+/// decode materializes `CastOfferKind`, keeping its compatibility boundary
+/// independent of the transport selected by the caller.
+fn migrate_legacy_graveyard_paid_cast_cleanup(value: &mut serde_json::Value) -> Result<(), String> {
+    fn legacy_delayed_trigger_receipts(
+        value: &serde_json::Value,
+    ) -> Result<
+        HashMap<
+            crate::types::identifiers::DelayedTriggerInstanceId,
+            crate::types::ability::ResolutionCastDelayedTriggerReceipt,
+        >,
+        String,
+    > {
+        let delayed = value
+            .as_object()
+            .and_then(|state| state.get("delayed_triggers"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+        let delayed: Vec<DelayedTrigger> = serde_json::from_value(delayed)
+            .map_err(|_| "persisted delayed triggers have an invalid shape".to_string())?;
+        let mut receipts = HashMap::new();
+        for trigger in delayed {
+            let Some(origin) = trigger.provenance.origin() else {
+                continue;
+            };
+            let receipt = crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+                token: origin.token,
+                instance: origin.instance,
+                source_id: origin.source_id,
+            };
+            if receipts.insert(origin.instance, receipt).is_some() {
+                return Err(
+                    "persisted delayed triggers duplicate a provenance instance".to_string()
+                );
+            }
+        }
+        Ok(receipts)
+    }
+
+    fn migrate_kind(
+        kind: &mut serde_json::Value,
+        player: serde_json::Value,
+        receipts: &HashMap<
+            crate::types::identifiers::DelayedTriggerInstanceId,
+            crate::types::ability::ResolutionCastDelayedTriggerReceipt,
+        >,
+    ) -> Result<(), String> {
+        let kind = kind
+            .as_object_mut()
+            .ok_or_else(|| "paid resolution cast offer must be an object".to_string())?;
+        if kind.get("type").and_then(serde_json::Value::as_str) != Some("GraveyardPaidCast") {
+            return Ok(());
+        }
+        let has_cleanup = kind.contains_key("cleanup");
+        let has_legacy = kind.contains_key("constraint") || kind.contains_key("installed_triggers");
+        if has_cleanup {
+            if has_legacy {
+                return Err(
+                    "paid resolution cast offer mixes canonical cleanup with legacy fields"
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
+        let hit_card = kind
+            .get("hit_card")
+            .cloned()
+            .ok_or_else(|| "legacy paid resolution cast offer is missing hit_card".to_string())?;
+        let policy_source_id = hit_card.clone();
+        let installed = kind
+            .get("installed_triggers")
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+        let installed: Vec<crate::types::identifiers::DelayedTriggerInstanceId> =
+            serde_json::from_value(installed).map_err(|_| {
+                "legacy paid resolution cast offer has invalid delayed-trigger instances"
+                    .to_string()
+            })?;
+        let mut seen = HashSet::new();
+        let mut delayed_trigger_receipts = Vec::with_capacity(installed.len());
+        for instance in installed {
+            if !seen.insert(instance) {
+                return Err(
+                    "legacy paid resolution cast offer duplicates a delayed-trigger instance"
+                        .to_string(),
+                );
+            }
+            let receipt = receipts.get(&instance).cloned().ok_or_else(|| {
+                "legacy paid resolution cast offer has delayed triggers without provenance receipts"
+                    .to_string()
+            })?;
+            delayed_trigger_receipts.push(receipt);
+        }
+        let constraint = kind.remove("constraint").unwrap_or(serde_json::Value::Null);
+        kind.remove("installed_triggers");
+        kind.insert(
+            "cleanup".to_string(),
+            serde_json::json!({
+                "source_id": hit_card,
+                "face_policy": {
+                    "filter": "Any",
+                    "source_id": policy_source_id,
+                    "controller": player,
+                    "constraint": constraint,
+                },
+                "exiled_misses": [],
+                "reject_action": "RemainExiled",
+                "success_action": { "type": "BottomMisses" },
+                "delayed_trigger_receipts": delayed_trigger_receipts,
+            }),
+        );
+        Ok(())
+    }
+
+    fn visit(
+        value: &mut serde_json::Value,
+        receipts: &HashMap<
+            crate::types::identifiers::DelayedTriggerInstanceId,
+            crate::types::ability::ResolutionCastDelayedTriggerReceipt,
+        >,
+    ) -> Result<(), String> {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    visit(value, receipts)?;
+                }
+            }
+            serde_json::Value::Object(object) => {
+                if object.get("type").and_then(serde_json::Value::as_str) == Some("CastOffer") {
+                    let data = object
+                        .get_mut("data")
+                        .ok_or_else(|| "CastOffer is missing data".to_string())?;
+                    let data = data
+                        .as_object_mut()
+                        .ok_or_else(|| "CastOffer data must be an object".to_string())?;
+                    let player = data
+                        .get("player")
+                        .cloned()
+                        .ok_or_else(|| "CastOffer is missing player".to_string())?;
+                    let kind = data
+                        .get_mut("kind")
+                        .ok_or_else(|| "CastOffer is missing kind".to_string())?;
+                    migrate_kind(kind, player, receipts)?;
+                }
+                for value in object.values_mut() {
+                    visit(value, receipts)?;
+                }
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+        Ok(())
+    }
+
+    let receipts = legacy_delayed_trigger_receipts(value)?;
+    visit(value, &receipts)
+}
+
 impl GameStateDecode {
     pub(crate) fn decode_persisted_resolution_state(
         mut value: serde_json::Value,
@@ -20297,6 +20449,7 @@ impl GameStateDecode {
         }
         migrate_legacy_turn_face_up_resume(&mut value)?;
         migrate_legacy_dungeon_choice_previews(&mut value)?;
+        migrate_legacy_graveyard_paid_cast_cleanup(&mut value)?;
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         // NO viewer-projection guard here, deliberately. This is the TRANSPORT decode
@@ -20351,6 +20504,7 @@ impl GameStateDecode {
         // be paused at either dungeon prompt, so the compatibility boundary has
         // to rebuild those payloads before `RawGameStateFields` sees them.
         migrate_legacy_dungeon_choice_previews(value)?;
+        migrate_legacy_graveyard_paid_cast_cleanup(value)?;
         Ok(())
     }
 

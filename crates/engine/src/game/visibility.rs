@@ -8462,6 +8462,7 @@ mod tests {
                         None,
                     ),
                     exiled_misses: Vec::new(),
+                    delayed_trigger_receipts: Vec::new(),
                     reject_action: ResolutionMvRejectAction::BottomWithMisses,
                     success_action: Default::default(),
                 }),

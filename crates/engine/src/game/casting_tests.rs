@@ -20657,6 +20657,7 @@ fn exact_permission_does_not_inherit_sibling_etb_counter() {
                                 crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                             success_action:
                                 crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                            delayed_trigger_receipts: Vec::new(),
                         }
                     }),
                     duration: Some(Duration::UntilEndOfTurn),
@@ -20749,6 +20750,7 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
                                 crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                             success_action:
                                 crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                            delayed_trigger_receipts: Vec::new(),
                         }
                     }),
                     duration: Some(Duration::UntilEndOfTurn),
@@ -46203,6 +46205,7 @@ fn resolution_offer_grant(
             exiled_misses: vec![],
             reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
             success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+            delayed_trigger_receipts: Vec::new(),
         }),
         duration: None,
         graveyard_replacement: None,
@@ -53113,10 +53116,12 @@ fn graveyard_paid_cast_router_opens_offer_not_lingering_permission() {
 
 /// CR 603.7 + CR 608.2g (issue #8775 review): declining a paid offer withdraws
 /// exactly the delayed triggers the granting resolution installed behind THAT
-/// offer — matched by installation instance, not by source and card. Two
+/// offer — matched by its full token/instance/source receipt, not by source and card. Two
 /// "when you cast that spell" triggers of the same source on the same card
 /// (a second offer for the same card, another effect): the offer records the
-/// second; declining leaves the first standing.
+/// second; declining leaves the first standing.  The real `GameAction` is the
+/// reach guard: direct helper-only removal would not exercise the serialized
+/// offer handoff.
 ///
 /// Revert-failing: matching by source + card shape withdraws both (`left: 0`).
 #[test]
@@ -53156,15 +53161,22 @@ fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
     let mut events = Vec::new();
     crate::game::triggers::install_delayed_trigger(&mut state, cast_of_spell(), &mut events);
     crate::game::triggers::install_delayed_trigger(&mut state, cast_of_spell(), &mut events);
-    let instance_of = |state: &GameState, index: usize| {
-        state.delayed_triggers[index]
+    let receipt_of = |state: &GameState, index: usize| {
+        let origin = state.delayed_triggers[index]
             .provenance
             .origin()
-            .expect("a live install mints a receipt root")
-            .instance
+            .expect("a live install mints a receipt root");
+        crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+            token: origin.token,
+            instance: origin.instance,
+            source_id: origin.source_id,
+        }
     };
-    let (first, second) = (instance_of(&state, 0), instance_of(&state, 1));
-    assert_ne!(first, second, "reach guard: two distinct installations");
+    let (first, second) = (receipt_of(&state, 0), receipt_of(&state, 1));
+    assert_ne!(
+        first.instance, second.instance,
+        "reach guard: two distinct installations"
+    );
 
     state.waiting_for = WaitingFor::CastOffer {
         player: PlayerId(0),
@@ -53173,9 +53185,20 @@ fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
             mana_spend_permission: None,
             graveyard_replacement: None,
             cast_transformed: false,
-            constraint: None,
             additional_cost: None,
-            installed_triggers: vec![second],
+            cleanup: crate::types::ability::ResolutionCastCleanup {
+                source_id: source,
+                face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                    TargetFilter::Any,
+                    source,
+                    PlayerId(0),
+                    None,
+                ),
+                exiled_misses: Vec::new(),
+                reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                delayed_trigger_receipts: vec![second],
+            },
         },
     };
     apply_as_current(
@@ -53192,10 +53215,100 @@ fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
         "only the trigger recorded on the declined offer is withdrawn"
     );
     assert_eq!(
-        instance_of(&state, 0),
-        first,
+        receipt_of(&state, 0).instance,
+        first.instance,
         "the other trigger of the same source on the same card stays"
     );
+}
+
+/// An accepted paid offer can still be cancelled from its manual payment
+/// window.  The receipt must survive the neutral post-constraint permission
+/// slot so this real `CancelCast` action withdraws its trigger rather than
+/// leaving it armed for a later unrelated cast.
+#[test]
+fn cancelling_an_accepted_paid_offer_withdraws_its_tail_receipt() {
+    use crate::types::ability::{
+        DelayedTriggerCondition, DelayedTriggerLifetime, TriggerDefinition,
+    };
+    use crate::types::game_state::{CastOfferKind, DelayedTrigger};
+    use crate::types::triggers::TriggerMode;
+
+    let mut state = setup_game_at_main_phase();
+    let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+    let source = ObjectId(9200);
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    let mut definition = TriggerDefinition::new(TriggerMode::SpellCast);
+    definition.valid_card = Some(TargetFilter::SpecificObject { id: spell });
+    let delayed = DelayedTrigger::new(
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger: Box::new(definition),
+            or_trigger: None,
+            lifetime: DelayedTriggerLifetime::ThisTurn,
+        },
+        Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )),
+        PlayerId(0),
+        source,
+        true,
+    );
+    crate::game::triggers::install_delayed_trigger(&mut state, delayed, &mut Vec::new());
+    let origin = state.delayed_triggers[0]
+        .provenance
+        .origin()
+        .expect("reach guard: production installation mints a provenance receipt");
+    state.waiting_for = WaitingFor::CastOffer {
+        player: PlayerId(0),
+        kind: CastOfferKind::GraveyardPaidCast {
+            hit_card: spell,
+            mana_spend_permission: None,
+            graveyard_replacement: None,
+            cast_transformed: false,
+            additional_cost: None,
+            cleanup: crate::types::ability::ResolutionCastCleanup {
+                source_id: source,
+                face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                    TargetFilter::Any,
+                    source,
+                    PlayerId(0),
+                    None,
+                ),
+                exiled_misses: Vec::new(),
+                reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                delayed_trigger_receipts: vec![
+                    crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+                        token: origin.token,
+                        instance: origin.instance,
+                        source_id: origin.source_id,
+                    },
+                ],
+            },
+        },
+    };
+
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("reach guard: accepting the offer opens its manual payment window");
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+    apply_as_current(&mut state, GameAction::CancelCast)
+        .expect("cancelling the accepted paid offer must settle its resolution cleanup");
+
+    assert!(
+        state.delayed_triggers.is_empty(),
+        "the accepted offer's delayed tail must be withdrawn on CancelCast"
+    );
+    assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
 }
 
 #[test]
@@ -53468,6 +53581,7 @@ fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling(
                 exiled_misses: vec![hostile_miss],
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                delayed_trigger_receipts: Vec::new(),
             }),
             duration: None,
             graveyard_replacement: Some(
@@ -53591,6 +53705,7 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+        delayed_trigger_receipts: Vec::new(),
     };
     let initiation = initiate_cast_during_resolution(
         &mut state,
@@ -53681,6 +53796,7 @@ fn resolution_test_request(filter: TargetFilter) -> ResolutionCastRequest {
             exiled_misses: Vec::new(),
             reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
             success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+            delayed_trigger_receipts: Vec::new(),
         },
         face_policy,
         cast_transformed: false,
@@ -54483,6 +54599,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+        delayed_trigger_receipts: Vec::new(),
     };
     initiate_cast_during_resolution(
         &mut state,
@@ -54555,6 +54672,7 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+        delayed_trigger_receipts: Vec::new(),
     };
     initiate_cast_during_resolution(
         &mut state,
@@ -54626,6 +54744,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
                     reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                    delayed_trigger_receipts: Vec::new(),
                 }),
                 duration: None,
                 graveyard_replacement: None,

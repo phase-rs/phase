@@ -30,15 +30,16 @@ pub(super) fn cancel_pending_cast(
     // has no such cleanup and retains the historical Priority result; a
     // resolution cast must instead dispose of its offered card/misses and
     // resume the parked parent exactly once.
-    let resolution_cleanup = pending_cast.casting_permission_index.and_then(|index| {
-        casting::take_resolution_cast_cleanup(
+    let resolution_cleanup = match pending_cast.casting_permission_index {
+        Some(index) => casting::take_resolution_cast_cleanup(
             state,
             player,
             pending_cast.object_id,
             pending_cast.card_id,
             index,
-        )
-    });
+        )?,
+        None => None,
+    };
     casting::handle_cancel_cast(state, pending_cast, events);
     if let Some(cleanup) = resolution_cleanup {
         return super::engine_resolution_choices::abort_resolution_cast(

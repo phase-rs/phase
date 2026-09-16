@@ -6,10 +6,10 @@ use crate::types::ability::{
     AbilityKind, AdditionalCost, AdditionalCostInstance, AdditionalCostOrigin, AggregateFunction,
     BeholdCostAction, CastTimingPermission, Comparator, CostPaidObjectSnapshot,
     CounterCostSelection, Effect, KickerVariant, NotedManaPayment, ObjectProperty, QuantityExpr,
-    QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost, SacrificeRequirement,
-    SpellCastingOptionKind, SpellContext, SpellStackToGraveyardReplacement, StaticCondition,
-    TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TypeFilter, TypedFilter,
-    EXILE_COST_X,
+    QuantityRef, ReplacementDefinition, ResolutionCastCleanup, ResolvedAbility, SacrificeCost,
+    SacrificeRequirement, SpellCastingOptionKind, SpellContext, SpellStackToGraveyardReplacement,
+    StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
+    TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
@@ -9887,7 +9887,7 @@ fn finalize_cast_pre_payment_checks(
             resulting_mv,
             casting_permission_index,
             events,
-        ) {
+        )? {
             CascadeCheck::NotApplicable => None,
             CascadeCheck::Accepted {
                 cast_transformed,
@@ -9896,20 +9896,9 @@ fn finalize_cast_pre_payment_checks(
                 resolution_success_waiting_for = waiting_for.map(|wf| *wf);
                 Some(cast_transformed)
             }
-            CascadeCheck::Rejected {
-                source_id,
-                exiled_misses,
-                reject_action,
-            } => {
-                let waiting_for = handle_resolution_cast_rejection(
-                    state,
-                    player,
-                    object_id,
-                    source_id,
-                    exiled_misses,
-                    reject_action,
-                    events,
-                )?;
+            CascadeCheck::Rejected { cleanup } => {
+                let waiting_for =
+                    handle_resolution_cast_rejection(state, player, object_id, cleanup, events)?;
                 return Ok(FinalizePrePaymentChecks {
                     early_waiting_for: Some(waiting_for),
                     cascade_cast_transformed: false,
@@ -10908,11 +10897,7 @@ enum CascadeCheck {
     /// unwind the announcement stack entry and route through
     /// `handle_resolution_cast_rejection`, which sends the hit to its
     /// `reject_action` destination.
-    Rejected {
-        source_id: ObjectId,
-        exiled_misses: Vec<ObjectId>,
-        reject_action: crate::types::ability::ResolutionMvRejectAction,
-    },
+    Rejected { cleanup: ResolutionCastCleanup },
 }
 
 /// CR 608.2g: Inspect the casting object's `ExileWithAltCost` permissions for a
@@ -10937,7 +10922,7 @@ fn evaluate_cascade_constraint_with_resulting_mv(
     resulting_mv: u32,
     casting_permission_index: Option<CastingPermissionIndex>,
     events: &mut Vec<GameEvent>,
-) -> CascadeCheck {
+) -> Result<CascadeCheck, EngineError> {
     use crate::types::ability::CastingPermission;
 
     let index = match state.objects.get(&object_id) {
@@ -10950,7 +10935,7 @@ fn evaluate_cascade_constraint_with_resulting_mv(
                             state, obj, player, p, None,
                         )
                     }) else {
-                        return CascadeCheck::NotApplicable;
+                        return Ok(CascadeCheck::NotApplicable);
                     };
                     index
                 }
@@ -10965,11 +10950,11 @@ fn evaluate_cascade_constraint_with_resulting_mv(
                 _ => None,
             }
         }
-        None => return CascadeCheck::NotApplicable,
+        None => return Ok(CascadeCheck::NotApplicable),
     };
     let index = match index {
         Some(i) => i,
-        None => return CascadeCheck::NotApplicable,
+        None => return Ok(CascadeCheck::NotApplicable),
     };
 
     let permission = state
@@ -11011,14 +10996,16 @@ fn evaluate_cascade_constraint_with_resulting_mv(
         // CR 609.4b: A during-resolution PAID cast (Quistis Trepe, Tinybones the
         // Pickpocket) carries a "mana of any type can be spent to cast that spell"
         // concession on the consumed resolution permission. The CR 608.2g timing
-        // marker (`resolution_cleanup`) is consumed here, but the selected slot
-        // must remain stable through payment and finalization. Re-home a neutral
-        // `ExileWithAltCost` (no cleanup or riders, so this gate never re-fires)
+        // marker's constraint is consumed here, but the exact cleanup receipt
+        // must remain stable through payment: a later `CancelCast` still has to
+        // withdraw the offered tail trigger. Re-home a neutral
+        // `ExileWithAltCost` (no constraint, so this gate never rejects again)
         // at the same index. Its optional CR 609.4b concession remains available
         // to the real mana payment below (`finalize_cast` →
         // `pay_mana_cost_with_choices`), while a no-concession cast cannot shift
         // a sibling permission into the elected slot. Normal zone-exit cleanup
         // removes the neutral entry when the spell leaves exile for the stack.
+        let cleanup_for_pending_cancel = cleanup.clone();
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.casting_permissions[index] = CastingPermission::ExileWithAltCost {
                 cost: crate::types::mana::ManaCost::SelfManaCost,
@@ -11028,7 +11015,7 @@ fn evaluate_cascade_constraint_with_resulting_mv(
                 cast_transformed: false,
                 constraint: None,
                 granted_to,
-                resolution_cleanup: None,
+                resolution_cleanup: Some(cleanup_for_pending_cancel),
                 duration: None,
                 // CR 611.2a: no duration, so no host to bind to.
                 source_id: None,
@@ -11049,22 +11036,21 @@ fn evaluate_cascade_constraint_with_resulting_mv(
             cleanup.success_action,
             events,
         );
-        CascadeCheck::Accepted {
+        Ok(CascadeCheck::Accepted {
             cast_transformed,
             waiting_for,
-        }
+        })
     } else {
+        super::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
+            state, &cleanup,
+        )?;
         state
             .objects
             .get_mut(&object_id)
             .expect("object present above")
             .casting_permissions
             .remove(index);
-        CascadeCheck::Rejected {
-            source_id: cleanup.source_id,
-            exiled_misses: cleanup.exiled_misses,
-            reject_action: cleanup.reject_action,
-        }
+        Ok(CascadeCheck::Rejected { cleanup })
     }
 }
 
@@ -11318,12 +11304,19 @@ fn handle_resolution_cast_rejection(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,
-    source_id: ObjectId,
-    exiled_misses: Vec<ObjectId>,
-    reject_action: crate::types::ability::ResolutionMvRejectAction,
+    cleanup: ResolutionCastCleanup,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     use crate::types::ability::ResolutionMvRejectAction;
+
+    super::engine_resolution_choices::validate_resolution_cast_cleanup_authority(player, &cleanup)?;
+    super::engine_resolution_choices::withdraw_resolution_cast_delayed_triggers(state, &cleanup)?;
+    let ResolutionCastCleanup {
+        source_id,
+        exiled_misses,
+        reject_action,
+        ..
+    } = cleanup;
 
     // CR 601.2a: Remove the announcement-time stack entry. The spell never
     // finishes entering the stack because we abort before the Hand→Stack
@@ -20283,6 +20276,7 @@ mod tests {
                         exiled_misses: vec![miss_a, miss_b],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::BottomMisses,
+                        delayed_trigger_receipts: Vec::new(),
                     }),
                     duration: None,
 
@@ -20337,7 +20331,8 @@ mod tests {
                 resulting_mv,
                 Some(CastingPermissionIndex(0)),
                 &mut events,
-            );
+            )
+            .expect("constraint evaluation must succeed");
             assert!(matches!(
                 outcome,
                 CascadeCheck::Accepted {
@@ -20351,7 +20346,7 @@ mod tests {
                 matches!(
                     hit_obj.casting_permissions.as_slice(),
                     [CastingPermission::ExileWithAltCost {
-                        resolution_cleanup: None,
+                        resolution_cleanup: Some(_),
                         mana_spend_permission: None,
                         graveyard_replacement: None,
                         enters_with_counter: None,
@@ -20359,7 +20354,7 @@ mod tests {
                         ..
                     }] if enters_with_modifications.is_empty()
                 ),
-                "the consumed cascade permission must retain a neutral stable slot"
+                "the consumed cascade permission must retain its cleanup receipt for cancellation"
             );
 
             for miss in &misses {
@@ -20407,6 +20402,7 @@ mod tests {
                         success_action: ResolutionCastSuccessAction::RippleOfferRemaining {
                             remaining_hits: vec![next_hit],
                         },
+                        delayed_trigger_receipts: Vec::new(),
                     }),
                     duration: None,
 
@@ -20423,7 +20419,8 @@ mod tests {
                 2,
                 Some(CastingPermissionIndex(0)),
                 &mut Vec::new(),
-            );
+            )
+            .expect("constraint evaluation must succeed");
 
             match outcome {
                 CascadeCheck::Accepted {
@@ -20486,6 +20483,7 @@ mod tests {
                         success_action: ResolutionCastSuccessAction::RippleOfferRemaining {
                             remaining_hits: vec![],
                         },
+                        delayed_trigger_receipts: Vec::new(),
                     }),
                     duration: None,
 
@@ -20502,7 +20500,8 @@ mod tests {
                 2,
                 Some(CastingPermissionIndex(0)),
                 &mut Vec::new(),
-            );
+            )
+            .expect("constraint evaluation must succeed");
 
             assert!(matches!(
                 outcome,
@@ -20767,6 +20766,7 @@ mod tests {
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::BottomMisses,
+                        delayed_trigger_receipts: Vec::new(),
                     }),
                     duration: None,
 
@@ -20836,6 +20836,7 @@ mod tests {
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::BottomMisses,
+                        delayed_trigger_receipts: Vec::new(),
                     }),
                     duration: None,
 
@@ -20907,10 +20908,11 @@ mod tests {
                 resulting_mv,
                 Some(CastingPermissionIndex(0)),
                 &mut events,
-            );
+            )
+            .expect("constraint evaluation must succeed");
             match outcome {
-                CascadeCheck::Rejected { exiled_misses, .. } => {
-                    assert_eq!(exiled_misses, misses);
+                CascadeCheck::Rejected { cleanup } => {
+                    assert_eq!(cleanup.exiled_misses, misses);
                 }
                 other => panic!("Expected Rejected, got {:?}", matches_name(&other)),
             }
@@ -20946,7 +20948,8 @@ mod tests {
                 resulting_mv,
                 Some(CastingPermissionIndex(0)),
                 &mut events,
-            );
+            )
+            .expect("constraint evaluation must succeed");
             assert!(matches!(outcome, CascadeCheck::Rejected { .. }));
         }
 
@@ -20975,9 +20978,19 @@ mod tests {
                 &mut state,
                 PlayerId(0),
                 hit,
-                hit,
-                misses.clone(),
-                ResolutionMvRejectAction::BottomWithMisses,
+                ResolutionCastCleanup {
+                    source_id: hit,
+                    face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                        crate::types::ability::TargetFilter::Any,
+                        hit,
+                        PlayerId(0),
+                        None,
+                    ),
+                    exiled_misses: misses.clone(),
+                    reject_action: ResolutionMvRejectAction::BottomWithMisses,
+                    success_action: ResolutionCastSuccessAction::BottomMisses,
+                    delayed_trigger_receipts: Vec::new(),
+                },
                 &mut events,
             )
             .expect("rejection handler must succeed");
