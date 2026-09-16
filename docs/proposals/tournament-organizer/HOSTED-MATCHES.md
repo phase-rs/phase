@@ -13,12 +13,17 @@ layer (roadmap "Track D"). It follows the shipped organizer (Swiss/single-elim
 pairings, standings, self-report, byes, forfeits) and the
 recoverable-credential-rotation work (lobby protocol v9).
 
-**Decision taken (§3): Option B — server-authoritative verified hosting.** The
-`phase-server` hosts a game per pairing, observes the engine's `GameOver`, and
-reports a verified result — reusing the exact machinery drafts already use. This
-document is written around that choice; §3 records the rejected alternative and
-why B was chosen, and §7 lists the sub-decisions that remain for the
-implementation PR.
+**Proposed direction (§3), pending maintainer decision: Option B —
+server-authoritative verified hosting.** The `phase-server` hosts a game per
+pairing, observes the engine's `GameOver`, and reports a verified result —
+reusing the exact machinery drafts already use. This is the fork owner's
+recommended direction and the document is written around it, but it is **not
+recorded as settled**: `CONTEXT.md:392-395` reserves the "v1 stays lobby-only (no
+auto-launched `GameSession` per pairing)" call for the maintainer, and B reverses
+exactly that posture. This PR exists to obtain that decision. §3 records the
+rejected alternative (A) and the case for B; §7 lists the sub-decisions folded
+into the implementation PR. Until the maintainer signs off (§9), treat B as
+proposed, not decided.
 
 ---
 
@@ -104,11 +109,12 @@ layer *beside* the draft one.
 
 ---
 
-## 3. The decision (§3): trust model — **B chosen**
+## 3. The decision: trust model — **B proposed (awaiting maintainer sign-off)**
 
 Because a game is host-authoritative, the auto-report can come from two very
 different places, and the choice determines deployment model, protocol surface,
-and failure-handling scope for the whole feature.
+and failure-handling scope for the whole feature. B is the recommended direction;
+the maintainer decision it needs is stated in §9.
 
 **Option A — P2P convenience auto-report (rejected).** Keep games P2P; the host
 peer auto-submits `ReportMatchResult` on `gameOver` through the existing gate.
@@ -117,10 +123,11 @@ anti-cheat. Cheapest (one additive lobby bump, no server needed, runs on the
 lobby-only Worker) and preserves the "lobby-only, no auto-launched GameSession"
 property (`CONTEXT.md:392, 424`) — but it does **not** close the trust gap.
 
-**Option B — server-authoritative verified hosting (CHOSEN).** `phase-server`
+**Option B — server-authoritative verified hosting (PROPOSED).** `phase-server`
 hosts a `GameSession` per pairing (the §2 draft pattern), observes
 `WaitingFor::GameOver` server-side, and reports a **verified** result. Genuine
-anti-cheat: the server saw the game end.
+anti-cheat: the server saw the game end. **Server-only result authority** is
+part of the proposal, not an afterthought — see §4.1.
 
 **What B costs (corrected against the codebase):**
 
@@ -140,12 +147,15 @@ anti-cheat: the server saw the game end.
 - **Genuinely new surface:** the hosting orchestration + `active_matches` map +
   reservation/credential routing into hosted tables + no-show/timeout + reconnect.
 
-**Why B over A** (the user's call): A automates the labor but leaves results
-unverified — a self-report either way. B is the only option that makes an
-auto-reported result *trustworthy*, which is the point of tying a match to a
-tournament for competitive play. The draft precedent means B is a well-trodden
-pattern rather than greenfield, and it costs less than a from-scratch estimate
-because the crate deps, message routing, and hosting machinery already exist.
+**Why B over A** (the fork owner's recommendation): A automates the labor but
+leaves results unverified — a self-report either way — and, worse, an unverified
+report can be *forged* by a seated player before the game even ends (§4.1). B is
+the only option that makes an auto-reported result *trustworthy*, which is the
+point of tying a match to a tournament for competitive play. The draft precedent
+means B is a well-trodden pattern rather than greenfield, and it costs less than a
+from-scratch estimate because the crate deps, message routing, and hosting
+machinery already exist. This recommendation is put to the maintainer, not
+asserted as decided (§9.5).
 
 ---
 
@@ -191,19 +201,121 @@ because the crate deps, message routing, and hosting machinery already exist.
   (`crates/engine/src/game/match_flow.rs`) to match `Completed` with a forfeit
   result; the same GameOver hook auto-reports it. Reused, not rebuilt.
 
+### 4.1. Result authority: server-only for hosted pairings
+
+**Requirement.** For a hosted pairing, the **server is the sole reporter**. The
+client-facing `ReportMatchResult` RPC must be **rejected** for any pairing that is
+currently hosted — not merely hidden in the UI. Hiding `ReportResultDialog` is a
+display choice, not an authorization control: the RPC still exists, and
+`handle_report_match_result` (`broker.rs:1447-1488`) authorizes any seated player
+holding a valid `player_token`. Left as-is, a seated player could **forge an
+outcome before `WaitingFor::GameOver`** (CWE-863). So:
+
+- `report_gate` (or the broker report handler) gains a hosted-pairing arm that
+  refuses client reports while a hosted game is live/linked — a new
+  `ReportGate::Hosted` reason, symmetric with the existing `Bye`/`Forfeit` arms,
+  so refusal is viewer-independent and the wire `PairingView` shows it.
+- The **only** writer of a hosted pairing's outcome is the server path
+  (`report_tournament_game_over` → `report_result`), invoked from the engine's
+  observed terminal state — a code path clients cannot call.
+- **Manual-only mode is retained** for non-hosted tournaments (and for a hosted
+  tournament's manual fallback, §4.3/§5): when a pairing is not hosted,
+  `report_gate` stays `Open` and the seated-player self-report path is unchanged.
+
+The design therefore does **not** ship a `player_token` to the client for the
+purpose of reporting a hosted result; any token the client holds is for joining
+the hosted table, never for asserting its outcome.
+
+### 4.2. Durable, idempotent terminal handoff (one path for all endings)
+
+**Requirement.** A hosted pairing's result must survive process restart and must
+be reported **exactly once** across every way a game can end: normal game-over,
+concede, disconnect/forfeit, and **restart recovery**. The live GameOver/concede
+hooks alone are insufficient because a restart can terminalize a game without ever
+reaching them:
+
+- `finish_restored_full_startup` (`phase-server/src/main.rs:249`) terminalizes a
+  restored `WaitingFor::GameOver` session via `terminal_artifact(session, winner,
+  "Game ended", ranked_result)` (`main.rs:281`) and returns. That
+  `FullTerminalArtifact` (`persistence.rs`) carries only `winner`, reason, and
+  `ranked_result` — **no pairing identity and no Bo3 `match_score`**. A restored
+  hosted game would thus be torn down **without** calling `report_result`, leaving
+  the pairing stuck pending after a restart.
+
+So the design requires:
+
+1. **A persisted, typed hosted-match terminal payload** attached to the terminal
+   artifact: the `PairingId` (and tournament code), the hosted-game **generation**
+   (§4.3), and the complete `PodOutcome` including `match_score` for Bo3 — enough
+   to reconstruct the exact report with no live session.
+2. **One idempotent report path** — `report_tournament_game_over` — that every
+   ending routes through (normal, concede, disconnect, and the restored path in
+   `finish_restored_full_startup`), and that **calls `report_result` before the
+   hosted game is removed** from `active_matches`. Idempotency mirrors the existing
+   `save_ranked_result_idempotent` precedent (`persistence.rs:874`): re-running the
+   handoff for an already-reported (pairing, generation) is a no-op, so a
+   crash-then-recover or a duplicate terminal cannot double-report or clobber.
+
+Because `report_result` is itself a replay-safe overwrite (`tournament.rs`:
+"re-reporting is a correction, not a refusal"), idempotency must be enforced at
+the **handoff** layer via the generation fence (§4.3), not assumed from
+`report_result`.
+
+### 4.3. Current-game fencing for rehost/correction
+
+**Requirement.** Rehosting a pairing (after a crash, a lost table, or an organizer
+re-launch) must not let a **stale terminal** from the abandoned game overwrite the
+rehosted game's result. Because `report_gate` deliberately treats re-reporting as
+a permitted correction (`tournament.rs` `report_gate_answers_every_arm...` —
+"re-reporting is a correction, not a refusal"), nothing today would stop a late
+terminal from an old game from landing after a rehost. So:
+
+- Each hosted pairing carries a monotonic **generation** (epoch) that increments
+  on every (re)host. `active_matches` keys on `(PairingId, generation)` → the
+  current `game_code`, and the persisted terminal payload (§4.2) records the
+  generation it belongs to.
+- `report_tournament_game_over` accepts a terminal **only if its generation
+  matches the pairing's current generation**; a terminal from a superseded
+  generation is dropped (logged, not applied). This "current-game fence" is the
+  hosted analogue of the credential-rotation nonce fence — a stale artifact is
+  inert, the live game's result wins.
+- Rehost therefore = bump generation, spawn a new `GameSession`, replace the
+  `active_matches` entry; the old game's `game_code` is cleared and any terminal it
+  later emits is fenced out.
+
 ---
 
 ## 5. Protocol / versioning impact (B)
 
 - New `server-core` `ServerMessage::TournamentMatchStart { pairing_id, round,
   game_code, player_token, your_player }` (additive, sibling to `DraftMatchStart`).
-- Possibly a lobby-side field marking a tournament as "hosted / verified" so the
-  client knows to expect an auto-launched game and hide the manual report button
-  (additive on `TournamentSummary`/create).
+- A lobby-side field marking a tournament as "hosted / verified" so a client knows
+  to expect an auto-launched game (additive on `TournamentSummary`/create).
 - `LOBBY_PROTOCOL_VERSION` (currently `9`, `protocol.rs:741`) bumps for any new
   lobby field; `scripts/check-protocol-version.mjs` literals updated. **No P2P
   wire-version change** — hosted games use the existing server game path, not new
   first-contact frames. `MIN_SUPPORTED_LOBBY_PROTOCOL` stays low (additive).
+
+**Capability gate (required — additive is not enough on its own).** Additive wire
+fields keep old clients from crashing, but they do **not** stop an old client from
+being *seated in* a hosted pairing it cannot participate in: it would never receive
+/act on `TournamentMatchStart`, so its game would never launch and the pairing
+would hang. Hosted mode must therefore be **gated on every participant's client
+advertising support**, exactly as per-event match-type was
+(`MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE = 8`, and the sibling
+`MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION`/`_DEFAULT_SCORING`/`_TOURNAMENT_ACK`
+floors in `protocol.rs` + `ws-adapter.ts`):
+
+- Introduce a `MIN_LOBBY_PROTOCOL_FOR_HOSTED_MATCH` capability floor (registered in
+  `scripts/check-protocol-version.mjs`'s bare-integer allowlist, like its
+  predecessors).
+- **Selecting hosted mode is refused** (typed refusal, mirroring
+  `TournamentIncompatible` with a `neededLobbyVersion`) unless the organizer's
+  client meets the floor; and a **per-pairing fallback to manual reporting** covers
+  the case where a *seated player's* client is below the floor — that pairing runs
+  in manual-report mode (§4.1's retained path) instead of hosting, rather than
+  hanging. The tournament thus degrades to manual per pairing, never to a stuck
+  pairing.
 
 ---
 
@@ -223,30 +335,54 @@ because the crate deps, message routing, and hosting machinery already exist.
 
 ---
 
-## 7. Sub-decisions for the implementation PR (do not block the design)
+## 7. Requirements vs. sub-decisions
 
-1. **Hosting trigger** — spawn all of a round's games at `StartRound` (draft
-   does this, `spawn_match_games_for_round`), or lazily when both seats are ready?
-   Draft-parity says at round start.
+The trust/recovery boundaries below are **requirements of the design** (raised in
+review), not deferrable — they are specified above and repeated here as a
+checklist the implementation PR must satisfy:
+
+- **R1 — Server-only result authority** for hosted pairings; client
+  `ReportMatchResult` refused via a `ReportGate::Hosted` arm (§4.1).
+- **R2 — Durable, idempotent terminal handoff** through one report path across
+  normal / concede / disconnect / restart-recovery, reporting before the hosted
+  game is removed; typed persisted payload carries pairing id + full `PodOutcome`
+  incl. `match_score` (§4.2).
+- **R3 — Current-game generation fence** so a stale terminal cannot overwrite a
+  rehosted pairing (§4.3).
+- **R4 — Capability gate + per-pairing manual fallback** (`MIN_LOBBY_PROTOCOL_FOR_HOSTED_MATCH`);
+  never seat a below-floor client into a hosting-only pairing (§5).
+- **R5 — Reservation binding** — hosted-table reservations bound to the pairing's
+  tournament `player_token`s (`join_game_with_name_and_reservation` +
+  `LobbyReservation`) so only seated players occupy the table.
+
+Genuinely open **sub-decisions** (do not block recording the design, resolved in
+the implementation PR):
+
+1. **Hosting trigger** — spawn a round's games at `StartRound` (draft parity,
+   `spawn_match_games_for_round`) vs. lazily when both seats are ready.
 2. **No-show timeout policy** — auto-forfeit after a start-timeout vs. wait for an
-   explicit organizer `drop_player`. (Check whether the draft path already has a
-   timeout to mirror.)
-3. **Reconnect / re-host** — `report_result` is already a replay-safe overwrite;
-   define whether a crashed hosted game can be re-spawned for the same pairing and
-   how the stale `game_code` is cleared from `active_matches`.
-4. **Reservation binding** — bind hosted-table reservations to the pairing's
-   tournament `player_token`s (reuse `join_game_with_name_and_reservation` +
-   `LobbyReservation`) so only the seated players occupy the table.
-5. **Deployment surfacing** — how the client learns a tournament is "hosted"
-   (phase-server) vs. "manual report" (Worker), and how the UI adapts (hide the
-   report dialog when hosted; keep it as the disconnect/override path).
-6. **Single-game single-elim H2H** — a Bo1 head-to-head (Arena-style bracket)
-   still needs the per-event `match_type` path (added in lobby v8, PR #8723) so a
-   1-0 result validates; confirm hosted mode honors it.
+   organizer `drop_player` (§9.2). (Check whether the draft path has a timeout to
+   mirror.)
+3. **Single-game single-elim H2H** — confirm hosted mode honors the per-event
+   `match_type` path (lobby v8, PR #8723) so a Bo1 1-0 result validates.
 
 ---
 
-## 8. Open questions for the maintainer
+## 8. Failure matrix (how each ending is reported, under R1–R3)
+
+| Ending | Detector | Reports via | Fenced by |
+|---|---|---|---|
+| Normal game-over | `WaitingFor::GameOver` (`main.rs:6588`) | `report_tournament_game_over` → `report_result` | generation (R3) |
+| Concede / concede-match | existing concede sites | same idempotent path (R2) | generation (R3) |
+| Mid-game disconnect | `apply_trusted_match_forfeit` → `Completed` | same idempotent path (R2) | generation (R3) |
+| Restart recovery | `finish_restored_full_startup` (`main.rs:249`) | persisted terminal payload → same path (R2) | generation (R3) |
+| No-show / never-connects | start-timeout (new, §9.2) | forfeit / `drop_player` | n/a (no game) |
+| Bye / pre-resolved | `generate_pairings` | never hosted | n/a |
+| Client below floor | capability gate (R4) | manual self-report (§4.1) | n/a |
+
+---
+
+## 9. Open questions for the maintainer
 
 1. **Deployment scope.** Is `phase-server`-only verified hosting acceptable for
    v1 (Worker tournaments keep manual reporting), or must hosting work on the
@@ -256,3 +392,10 @@ because the crate deps, message routing, and hosting machinery already exist.
 3. **Rollout.** Is Feature ③ one PR (hosting + auto-report + UI) or split
    (core hosting layer + auto-report, then client), given the draft path is a
    ready template?
+4. **Terminal-payload placement.** Is extending `FullTerminalArtifact` with the
+   typed hosted-match payload (R2) the right home, or should the hosted-match
+   terminal persist alongside it as a separate idempotent record
+   (`save_ranked_result_idempotent`-style)?
+5. **The trust-model decision itself.** B (server-authoritative) is proposed and
+   reverses the lobby-only-v1 posture `CONTEXT.md:392-395` reserves for you —
+   please confirm B, or direct A (P2P convenience) instead.
