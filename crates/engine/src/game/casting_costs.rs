@@ -6080,6 +6080,21 @@ pub(super) fn push_activated_ability_to_stack(
             &mut resolved,
             cost,
         );
+        // CR 608.2k + CR 608.2h: a targetful activation reaches its payment through
+        // this seam rather than the direct path, so it needs the SAME cost-paid
+        // bindings that path applies -- both of them, not just self-discard.
+        // Without this, an activation whose deterministic top-of-library exile cost
+        // is later referred to by its own effect ("the exiled card") has no
+        // pre-move referent at all, because the binding must be captured before the
+        // payment moves the card. Self-gating: `top_library_exile_cost_count`
+        // yields `None` for any cost with no `Zone::Library` exile leg (recursing
+        // into `Composite`), so this is a no-op for every other cost shape.
+        super::casting::stamp_top_library_exile_cost_paid_object(
+            state,
+            player,
+            &mut resolved,
+            cost,
+        );
         if should_record_loyalty
             && !super::planeswalker::can_activate_loyalty_ability(
                 state,
@@ -6121,6 +6136,20 @@ pub(super) fn push_activated_ability_to_stack(
             pending_loyalty_activation_player = None;
         }
     }
+
+    // CR 400.7 + CR 608.2k: the target-first boundary is the THIRD activation
+    // payment route, alongside the direct path and the replacement-paused
+    // completion, and like both of those it must re-pin the cost-paid referent once
+    // the cost's own moves are complete. The binding seams above capture BEFORE the
+    // move (their `lki` must hold pre-move characteristics — CR 608.2h), so without
+    // this the pin still names a pre-move incarnation,
+    // `CostPaidObjectSnapshot::live_object_id` yields `None` against the object the
+    // cost itself moved, and every live-object consumer of "the exiled card"
+    // silently affects nothing. Placed after payment and ahead of every consumer
+    // below — the plot special action's early return and the stack push. The paused
+    // branch returns above, so it cannot double-re-pin. A no-op when no cost
+    // stamped an object.
+    resolved.repin_cost_paid_object_recursive(state);
 
     // CR 702.170b: Plot is a special action that never uses the stack. Its
     // self-exile is still an activation cost, so it must be paid above before

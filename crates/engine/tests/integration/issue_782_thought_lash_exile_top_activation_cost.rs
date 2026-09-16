@@ -7,10 +7,10 @@
 
 use std::sync::Arc;
 
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, ReplacementDefinition,
-    ReplacementMode, TargetFilter,
+    ReplacementMode, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -295,6 +295,131 @@ fn a_direct_activation_affects_the_card_its_own_cost_exiled() {
         Some(1),
         "CR 608.2k: the effect must affect the very card its own cost exiled; a \
          stale cost-paid pin resolves to no live object and places nothing"
+    );
+}
+
+/// CR 608.2k + CR 400.7: a TARGETFUL activation pays its cost through the
+/// target-first boundary (`casting_costs::push_activated_ability_to_stack`), never the
+/// direct path — so that boundary must apply the SAME two cost-paid authorities the
+/// direct path does: bind the referent before the cost moves it, then re-pin once the
+/// move is complete.
+///
+/// It did neither. The seam stamped only the self-discard binding, so an activation
+/// whose deterministic top-of-library exile cost is referred to by its own effect had
+/// no referent at all; and once bound, the pin still named the pre-move incarnation,
+/// so `CostPaidObjectSnapshot::live_object_id` yielded `None` against the object the
+/// cost itself had just moved.
+///
+/// No printed card reaches this combination. Of the five cards whose activation cost
+/// exiles from the top of the library, Storm Elemental is the only one with a
+/// *targetful* such ability ("Tap target creature with flying") and it never refers
+/// back to the exiled card. The ability is therefore constructed, but the route is
+/// entirely production: a real `GameAction::ActivateAbility`, a real
+/// `WaitingFor::TargetSelection` answered by `GameAction::SelectTargets`, the real
+/// deterministic library-exile payment, and the real `Effect::Destroy` +
+/// `Effect::PutCounter` resolvers.
+///
+/// Two creatures are on the battlefield so target selection cannot auto-resolve a
+/// single legal target and silently take a different route; the reach-guard below
+/// pins that this activation really did pause on target selection.
+///
+/// Revert-proof: drop either the `stamp_top_library_exile_cost_paid_object` call or
+/// the `repin_cost_paid_object_recursive` call from
+/// `casting_costs::push_activated_ability_to_stack` and the exiled card receives no
+/// counter (`None` instead of `Some(1)`), while the destroy half still succeeds — so
+/// the assertion isolates the cost-paid binding, not the effect as a whole.
+#[test]
+fn a_targetful_activation_affects_the_card_its_own_cost_exiled() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Paid Card", "Filler One", "Filler Two"]);
+    let source = scenario.add_creature(P0, "Targeting Stamper", 2, 2).id();
+    let victim = scenario.add_creature(P1, "Victim Bear", 2, 2).id();
+
+    let mut runner = scenario.build();
+
+    let ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            cant_regenerate: false,
+        },
+    )
+    .cost(AbilityCost::Exile {
+        count: 1,
+        zone: Some(Zone::Library),
+        filter: None,
+    })
+    .sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::CostPaidObject,
+        },
+    ));
+    {
+        let obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .expect("the scenario source object exists");
+        // Every layer pass resets `abilities` from `base_abilities`, so set both.
+        obj.abilities = Arc::new(vec![ability.clone()]);
+        obj.base_abilities = Arc::new(vec![ability]);
+    }
+
+    let top = runner.state().players[0]
+        .library
+        .iter()
+        .copied()
+        .next()
+        .expect("reach-guard: library seeded");
+    let index = exile_top_ability_index(&runner, source);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: index,
+        })
+        .expect("a targetful library-exile activation must be accepted");
+
+    // Reach-guard: this is genuinely the TARGET-FIRST route, not the direct path
+    // (which a separate test covers) — otherwise the assertion below would prove
+    // nothing about this seam.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "reach-guard: the activation must pause on real target selection; got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(victim)],
+        })
+        .expect("choosing the creature to destroy must succeed");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&top].zone,
+        Zone::Exile,
+        "reach-guard: the cost exiled the top card"
+    );
+    assert_eq!(
+        runner.state().objects[&victim].zone,
+        Zone::Graveyard,
+        "reach-guard: the targeted half of the ability resolved"
+    );
+    assert_eq!(
+        runner.state().objects[&top]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied(),
+        Some(1),
+        "CR 608.2k: the target-first path must BIND and RE-PIN the cost-paid \
+         referent, so the rider affects the very card the cost exiled"
     );
 }
 
