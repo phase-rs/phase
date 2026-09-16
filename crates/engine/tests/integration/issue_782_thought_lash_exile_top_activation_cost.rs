@@ -5,12 +5,15 @@
 //! cost being paid. CR 602.2b + CR 601.2h: activating an ability pays its total
 //! cost, and an ability whose cost can't be paid can't be activated.
 
+use std::sync::Arc;
+
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode,
-    TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, ReplacementDefinition,
+    ReplacementMode, TargetFilter,
 };
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard};
@@ -193,6 +196,105 @@ fn phyrexian_devourer_counts_the_exiled_cards_mana_value() {
         ),
         (Some(4), Some(4)),
         "CR 608.2k: X must equal the exiled card's mana value (3), leaving a 4/4"
+    );
+}
+
+/// CR 400.7 + CR 608.2k: an activation whose cost moves a card, and whose effect
+/// then AFFECTS that same card, must resolve the cost-paid referent to the card's
+/// CURRENT incarnation — the one the cost's own move produced.
+///
+/// `CostPaidObjectSnapshot::live_object_id` is the single authority for resolving
+/// that referent to a live object, and it yields `None` as soon as the recorded
+/// incarnation stops matching. The binding seams necessarily capture BEFORE the
+/// move (their `lki` must hold pre-move characteristics — CR 608.2h), so without a
+/// post-payment re-pin the DIRECT activation path leaves the pin one incarnation
+/// behind and every live-object consumer silently affects nothing. The
+/// replacement-paused path already re-pins at its completion
+/// (`casting_costs::finish_cost_object_moves`); this covers the direct path.
+///
+/// The ability is constructed because no printed card reaches this combination: of
+/// the five cards whose activation cost exiles from the top of the library (Thought
+/// Lash, Phyrexian Devourer, Royal Herbalist, Storm Elemental, Whirling Catapult)
+/// none AFFECTS the card its own cost exiled. Phyrexian Devourer only reads that
+/// card's mana value, which CR 608.2h serves from the frozen LKI, so it passes with
+/// or without the re-pin and cannot discriminate. Everything beneath the ability is
+/// production: a real `GameAction::ActivateAbility`, the real deterministic
+/// library-exile payment, and the real `Effect::PutCounter` resolver.
+///
+/// Stays on the direct path by construction: `TargetFilter::CostPaidObject` is a
+/// context ref (`TargetFilter::is_context_ref`), so it claims no target slot and
+/// the activation never detours through target selection.
+///
+/// Revert-proof: drop `resolved.repin_cost_paid_object_recursive(state)` from
+/// `casting::handle_activate_ability` and the exiled card receives NO counter,
+/// because `live_object_id` returns `None` against the stale pre-move pin.
+#[test]
+fn a_direct_activation_affects_the_card_its_own_cost_exiled() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Paid Card", "Filler One", "Filler Two"]);
+    let source = scenario.add_creature(P0, "Counter Stamper", 2, 2).id();
+
+    let mut runner = scenario.build();
+
+    let ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::CostPaidObject,
+        },
+    )
+    .cost(AbilityCost::Exile {
+        count: 1,
+        zone: Some(Zone::Library),
+        filter: None,
+    });
+    {
+        let obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .expect("the scenario source object exists");
+        // Every layer pass resets `abilities` from `base_abilities`, so set both —
+        // assigning only the derived field lets a flush before activation erase the
+        // ability and turn an engine result into a harness artifact.
+        obj.abilities = Arc::new(vec![ability.clone()]);
+        obj.base_abilities = Arc::new(vec![ability]);
+    }
+
+    let top = runner.state().players[0]
+        .library
+        .iter()
+        .copied()
+        .next()
+        .expect("reach-guard: library seeded");
+
+    // Reach-guard: the constructed ability survived to activation time with its
+    // library-exile cost intact, so neither assertion below can pass vacuously.
+    let index = exile_top_ability_index(&runner, source);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: index,
+        })
+        .expect("a deterministic library-exile activation must be accepted");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&top].zone,
+        Zone::Exile,
+        "reach-guard: the cost exiled the top card"
+    );
+    assert_eq!(
+        runner.state().objects[&top]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied(),
+        Some(1),
+        "CR 608.2k: the effect must affect the very card its own cost exiled; a \
+         stale cost-paid pin resolves to no live object and places nothing"
     );
 }
 

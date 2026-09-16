@@ -21612,6 +21612,21 @@ pub fn handle_activate_ability(
         }
     }
 
+    // CR 400.7 + CR 608.2k: every cost object move for this activation is complete
+    // here, so re-pin the cost-paid referent to the incarnation the cost's own move
+    // produced. The binding seams above capture BEFORE the move (their `lki` must
+    // record pre-move characteristics — CR 608.2h), so without this the reference
+    // reads stale against the object its own cost just moved (Thought Lash: exile
+    // the top card of your library as a cost, then refer to that exiled card).
+    //
+    // The replacement-paused path already re-pins at its completion
+    // (`casting_costs::finish_cost_object_moves`) and returns above, so it never
+    // reaches here and cannot double-re-pin. This is the direct path's matching
+    // authority, placed ahead of BOTH consumers below — the plot special action's
+    // immediate `grant_permission::resolve` and the stack push — so neither can
+    // read a stale incarnation. A no-op when no cost stamped an object.
+    resolved.repin_cost_paid_object_recursive(state);
+
     // CR 702.170b + CR 116.2k: Exiling a card using its plot ability is a
     // SPECIAL ACTION that doesn't use the stack. The self-exile cost paid above
     // already moved the card to exile (face up — CR 702.170 has no face-down
