@@ -102,13 +102,13 @@
 
 use crate::types::ability::FilterProp;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AttachCardinality, AttachSelection, CardTypeSetSource,
-    ContinuousModification, ControllerRef, Duration, Effect, GuessSubject, KeeperConstraint,
-    ModalChoice, MultiTargetSpec, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementDefinition,
-    ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneChoiceCandidateSource,
-    ZoneRef,
+    AbilityCondition, AbilityDefinition, AttachCardinality, AttachSelection, AttackedYouScope,
+    CardTypeSetSource, ContinuousModification, ControllerRef, Duration, Effect, GuessSubject,
+    KeeperConstraint, ModalChoice, MultiTargetSpec, ObjectProperty, ObjectScope, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation,
+    ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
+    TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter,
+    ZoneChoiceCandidateSource, ZoneRef,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -2069,7 +2069,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::SourceIsTapped
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
-        | StaticCondition::AnyPlayerAttackedYouLastTurn
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::SourceMatchesFilter { .. }
         | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::UnlessPay { .. }
@@ -6908,12 +6908,27 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
             reads_player_of(StateKind::JournalCast)
         }
         // CR 508.6 + CR 514.2: reads the cleanup-time attack-history snapshot
-        // (`attacked_defenders_last_turn`), which changes only at turn boundaries.
-        // `TurnStructure` is the sequencing kind written by cleanup/turn advance;
-        // conservatively depending on it invalidates the cached gate whenever the
-        // turn sequence changes.
-        StaticCondition::AnyPlayerAttackedYouLastTurn => {
-            reads_player_of(StateKind::TurnStructure)
+        // (`attacked_defenders_last_turn`), which changes only at turn
+        // boundaries. `TurnStructure` is the sequencing kind written by
+        // cleanup/turn advance; conservatively depending on it invalidates the
+        // cached gate whenever the turn sequence changes.
+        StaticCondition::AnyPlayerAttackedYouLastTurn {
+            scope: AttackedYouScope::AnyPlayer,
+        } => reads_player_of(StateKind::TurnStructure),
+        // CR 508.1k + CR 603.10a: the ANCHORED scope additionally reads the
+        // latched `AttackerInfo` for its source. Every other latched-combat
+        // read in this match — `SourceIsAttacking`, `SourceAttackingAlone`,
+        // `SourceIsBlocking`, `SourceIsBlocked` — profiles as
+        // `frozen_source_read()`, and there is no `StateKind` combat variant, so
+        // merging it is the in-tree convention rather than a new channel.
+        // Over-declaring is fail-CLOSED: it can only invalidate the cached gate
+        // more often, never less.
+        StaticCondition::AnyPlayerAttackedYouLastTurn {
+            scope: AttackedYouScope::AttackedPlayer,
+        } => {
+            let mut p = reads_player_of(StateKind::TurnStructure);
+            p.merge(frozen_source_read());
+            p
         }
         StaticCondition::SourceMatchesFilter { filter: _ } => {
             let mut p = reads_src_of(StateKind::ObjectPt);
@@ -8960,6 +8975,46 @@ mod tests {
         assert!(
             conflicts(&neg, &se()),
             "an `Other` write × source read ⇒ conflict"
+        );
+    }
+
+    /// CR 508.1k + CR 514.2 + CR 603.10a: the ANCHORED revenge scope reads the
+    /// latched `AttackerInfo` for its source on top of the cleanup-time attack
+    /// snapshot; the DEFAULT scope reads only the snapshot. There is no
+    /// `StateKind` combat variant, so the latched-combat read profiles as
+    /// `frozen_source_read()` — the same channel `SourceIsAttacking` and its
+    /// siblings use in this match.
+    ///
+    /// Revert-failing in BOTH directions: dropping the merge fails the first
+    /// assertion, applying it to the default scope as well fails the third.
+    /// `d.reads_player.turn_structure` is the paired positive control proving
+    /// the default profile is non-empty.
+    #[test]
+    fn attacked_you_last_turn_anchored_scope_reads_the_latched_attacker() {
+        use crate::types::ability::AttackedYouScope;
+
+        let a = rw_static_condition(&StaticCondition::AnyPlayerAttackedYouLastTurn {
+            scope: AttackedYouScope::AttackedPlayer,
+        });
+        assert!(
+            a.reads_frozen.set_membership,
+            "the anchored scope reads the latched AttackerInfo (CR 508.1k)"
+        );
+        assert!(
+            a.reads_player.turn_structure,
+            "and still reads the cleanup-time attack-history snapshot (CR 514.2)"
+        );
+
+        let d = rw_static_condition(&StaticCondition::AnyPlayerAttackedYouLastTurn {
+            scope: AttackedYouScope::AnyPlayer,
+        });
+        assert!(
+            !d.reads_frozen.set_membership,
+            "the default scope reads no latched combat state"
+        );
+        assert!(
+            d.reads_player.turn_structure,
+            "but does read the turn-history snapshot"
         );
     }
 

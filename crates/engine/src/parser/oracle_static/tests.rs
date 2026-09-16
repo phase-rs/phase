@@ -5,10 +5,10 @@ use super::restriction::*;
 use super::support::*;
 use super::*;
 use crate::types::ability::{
-    ActivationRestriction, AggregateFunction, CardTypeSetSource, Comparator, CountScope,
-    DamageKindFilter, Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
-    SharedQualityRelation, SubtypeExclusion, TypeFilter, ZoneRef,
+    ActivationRestriction, AggregateFunction, AttackedYouScope, CardTypeSetSource, Comparator,
+    CountScope, DamageKindFilter, Duration, Effect, FilterProp, ObjectProperty, ObjectScope,
+    PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    SharedQuality, SharedQualityRelation, SubtypeExclusion, TypeFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -1427,7 +1427,9 @@ fn modify_cost_gated_on_attacked_you_during_their_last_turn() {
         .expect("expected a ModifyCost static");
     assert_eq!(
         def.condition,
-        Some(StaticCondition::AnyPlayerAttackedYouLastTurn),
+        Some(StaticCondition::AnyPlayerAttackedYouLastTurn {
+            scope: AttackedYouScope::AnyPlayer,
+        }),
         "the 'if a player attacked you during their last turn' gate must attach to \
          ModifyCost so the reduction is conditional, got {:?}",
         def.condition
@@ -1456,7 +1458,10 @@ fn modify_cost_gated_on_attacked_you_during_their_last_turn() {
         opp.statics
             .iter()
             .any(|d| matches!(d.mode, StaticMode::ModifyCost { .. })
-                && d.condition == Some(StaticCondition::AnyPlayerAttackedYouLastTurn)),
+                && d.condition
+                    == Some(StaticCondition::AnyPlayerAttackedYouLastTurn {
+                        scope: AttackedYouScope::AnyPlayer,
+                    })),
         "the 'an opponent' phrasing must reach the same gate, got {:?}",
         opp.statics
     );

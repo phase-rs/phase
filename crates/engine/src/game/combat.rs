@@ -1417,6 +1417,31 @@ pub(crate) fn defending_player_for_target(
     }
 }
 
+/// CR 506.3 + CR 508.1b: the player being ATTACKED by an attack on `target` —
+/// `Some(pid)` only when the target IS a player. A planeswalker or a battle is
+/// not a player, so neither yields an attacked player.
+///
+/// KIND-PRESERVING BY DESIGN, and this is the whole point of the function:
+/// CR 508.5 (the "defending player" rule, and its sibling
+/// `defending_player_for_target` directly above) resolves a planeswalker attack
+/// to that planeswalker's CONTROLLER and a battle attack to that battle's
+/// PROTECTOR (CR 310.9d). That collapse is right for "the defending player" and
+/// WRONG here: a card that says "can attack PLAYERS who ..." restricts the
+/// attack TARGET to a player, so collapsing would let the permission fire on a
+/// planeswalker attack it was never granted for. CR 508.5 is named here as the
+/// CONTRAST, not as the warrant.
+///
+/// Exhaustive by design — there is deliberately no wildcard arm, mirroring
+/// `defending_player_for_target`. A future `AttackTarget` kind is a COMPILE
+/// ERROR here, forcing an explicit is-it-a-player decision instead of being
+/// silently absorbed into "not a player".
+pub(crate) fn attacked_player_for_target(target: AttackTarget) -> Option<PlayerId> {
+    match target {
+        AttackTarget::Player(pid) => Some(pid),
+        AttackTarget::Planeswalker(_) | AttackTarget::Battle(_) => None,
+    }
+}
+
 /// Iterate every battlefield `StaticDefinition` whose mode is a block-restriction
 /// (`CantBeBlocked`, `CantBeBlockedExceptBy`, or `CantBeBlockedBy`) AND whose
 /// `affected` filter matches `attacker_id`. Yields `(source, def)` pairs so
@@ -7341,6 +7366,31 @@ pub fn defending_player_for_attacker(state: &GameState, attacker: ObjectId) -> O
             None
         }
     })
+}
+
+/// CR 508.1k + CR 506.4: the player `attacker` is recorded as attacking, if the
+/// recorded target is a player at all. Reads the latched `AttackerInfo`'s
+/// `attack_target` — the UNCOLLAPSED field (see `AttackerInfo`) — and applies
+/// the CR 506.3 kind test, so it is the kind-PRESERVING counterpart of
+/// `defending_player_for_attacker` directly above, which returns the collapsed
+/// `defending_player` field.
+///
+/// CR 508.1k: a chosen creature remains an attacking creature until it is
+/// removed from combat or the combat phase ends. CR 506.4: a creature removed
+/// from combat stops being an attacking creature — and `prune_object_from_combat`
+/// (this file) drops its `AttackerInfo` outright, so this returns `None` from
+/// that point on. No claim is made that the record answers after removal.
+pub(crate) fn attacked_player_for_attacker(
+    state: &GameState,
+    attacker: ObjectId,
+) -> Option<PlayerId> {
+    let info = state
+        .combat
+        .as_ref()?
+        .attackers
+        .iter()
+        .find(|info| info.object_id == attacker)?;
+    attacked_player_for_target(info.attack_target)
 }
 
 /// CR 508.5 + CR 508.5a: Single authority for resolving the defending player a

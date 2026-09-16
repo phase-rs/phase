@@ -2305,7 +2305,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
-        | StaticCondition::AnyPlayerAttackedYouLastTurn
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
