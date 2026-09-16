@@ -326,8 +326,47 @@ fn open_private_zone_cast_selection(
     // CR 202.3 + CR 608.2h: Freeze before filtering so the private prompt's
     // eligibility test and its later cast consume the same concrete ceiling.
     snapshot_cast_from_zone_constraint_into_effect(state, ability, &mut stash);
+    // CR 608.2h: a private-zone choice resumes after the resolving ability's
+    // trigger/event context has expired. Persist the complete cast policy now,
+    // while that context is still live, rather than retaining a live anaphor on
+    // the stashed ability. A look-then-cast chain keeps its cards in the
+    // library, so its parser-provided `ExiledBySource` anaphor must become the
+    // published `LastRevealed` window before it is frozen. On selection,
+    // `freeze_resolution_cast_filter(..., Some(card))` binds that window to the
+    // selected `SpecificObject` while retaining every other filter leg.
+    let stored_filter = if source_zone == Zone::Library {
+        crate::game::filter::remap_exiled_by_source_for_looked_cards(target_filter)
+    } else {
+        target_filter.clone()
+    };
+    let stored_filter = freeze_resolution_cast_filter(state, ability, stored_filter, None);
+    if let Effect::CastFromZone {
+        target,
+        without_paying_mana_cost,
+        alt_ability_cost,
+        duration,
+        mode,
+        driver,
+        ..
+    } = &mut stash.effect
+    {
+        *target = stored_filter.clone();
+        // A hand selection is normally a lingering permission (including a
+        // play, durational, or alternate-cost grant). The exact free spell-cast
+        // shape is the one exception: it must be offered and cast while this
+        // ability resolves. Store that mechanism on the continuation, rather
+        // than inferring it later from the target zone.
+        if source_zone == Zone::Hand
+            && *without_paying_mana_cost
+            && alt_ability_cost.is_none()
+            && duration.is_none()
+            && *mode == crate::types::ability::CardPlayMode::Cast
+        {
+            *driver = crate::types::ability::CastFromZoneDriver::DuringResolution;
+        }
+    }
     stash.targets.clear();
-    let eligible = compute_hand_pick_eligible(state, &stash, target_filter, source_zone);
+    let eligible = compute_hand_pick_eligible(state, &stash, &stored_filter, source_zone);
 
     if eligible.is_empty() {
         if source_zone == Zone::Library {
@@ -1188,33 +1227,23 @@ pub(crate) fn complete_hand_pick_cast_from_zone(
     card: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<bool, EffectError> {
-    let (without_paying, cast_transformed, alt_ability_cost, constraint, driver) =
-        match &ability.effect {
-            Effect::CastFromZone {
-                without_paying_mana_cost,
-                cast_transformed,
-                alt_ability_cost,
-                constraint,
-                driver,
-                ..
-            } => (
-                *without_paying_mana_cost,
-                *cast_transformed,
-                alt_ability_cost.as_ref(),
-                constraint.clone(),
-                *driver,
-            ),
-            _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
-        };
+    let (cast_transformed, alt_ability_cost, constraint, driver) = match &ability.effect {
+        Effect::CastFromZone {
+            cast_transformed,
+            alt_ability_cost,
+            constraint,
+            driver,
+            ..
+        } => (
+            *cast_transformed,
+            alt_ability_cost.as_ref(),
+            constraint.clone(),
+            *driver,
+        ),
+        _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
+    };
 
-    let during_resolution = driver.is_during_resolution()
-        || (without_paying
-            && alt_ability_cost.is_none()
-            && matches!(
-                &ability.effect,
-                Effect::CastFromZone { target, .. }
-                    if target.extract_in_zone() == Some(Zone::Hand)
-            ));
+    let during_resolution = driver.is_during_resolution();
 
     if during_resolution {
         // CR 118.9 + CR 702.62a: read the borrowed keyword cost (The Face of Boe's
@@ -2402,6 +2431,88 @@ mod tests {
             ObjectId(999),
             PlayerId(0),
         )
+    }
+
+    /// The continuation, rather than the hand-zone shape later observed by the
+    /// choice resolver, owns the private-pick casting mechanism. Only an
+    /// untimed, free spell cast receives the resolution-time driver; every
+    /// nearby lingering hand grant must retain its parsed driver.
+    #[test]
+    fn private_hand_pick_stashes_during_resolution_only_for_exact_free_spell_cast() {
+        fn stashed_driver(ability: ResolvedAbility) -> CastFromZoneDriver {
+            let mut state = make_test_state();
+            let _ = add_card_to_hand(&mut state, PlayerId(0), CardId(5_240));
+            let mut events = vec![];
+
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            let pending = state
+                .active_ability_continuation()
+                .expect("eligible private hand pick must stash its continuation");
+            let Effect::CastFromZone { driver, .. } = &pending.chain.effect else {
+                panic!("private hand pick must stash CastFromZone");
+            };
+            *driver
+        }
+
+        assert_eq!(
+            stashed_driver(electrodominance_hand_ability(3)),
+            CastFromZoneDriver::DuringResolution,
+            "the exact free, untimed Cast hand pick must cast during resolution"
+        );
+
+        let mut timed_free_cast = electrodominance_hand_ability(3);
+        let Effect::CastFromZone { duration, .. } = &mut timed_free_cast.effect else {
+            unreachable!("fixture is CastFromZone");
+        };
+        *duration = Some(Duration::UntilEndOfTurn);
+        assert_eq!(
+            stashed_driver(timed_free_cast),
+            CastFromZoneDriver::LingeringPermission,
+            "a timed free hand cast keeps its lingering driver"
+        );
+
+        let mut free_play = electrodominance_hand_ability(3);
+        let Effect::CastFromZone { mode, .. } = &mut free_play.effect else {
+            unreachable!("fixture is CastFromZone");
+        };
+        *mode = CardPlayMode::Play;
+        assert_eq!(
+            stashed_driver(free_play),
+            CastFromZoneDriver::LingeringPermission,
+            "a free hand play is not a resolution-time spell cast"
+        );
+
+        let mut full_cost = electrodominance_hand_ability(3);
+        let Effect::CastFromZone {
+            without_paying_mana_cost,
+            ..
+        } = &mut full_cost.effect
+        else {
+            unreachable!("fixture is CastFromZone");
+        };
+        *without_paying_mana_cost = false;
+        assert_eq!(
+            stashed_driver(full_cost),
+            CastFromZoneDriver::LingeringPermission,
+            "a full-cost hand cast keeps its lingering driver"
+        );
+
+        let mut alternative_cost = electrodominance_hand_ability(3);
+        let Effect::CastFromZone {
+            alt_ability_cost, ..
+        } = &mut alternative_cost.effect
+        else {
+            unreachable!("fixture is CastFromZone");
+        };
+        *alt_ability_cost = Some(crate::types::ability::AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        });
+        assert_eq!(
+            stashed_driver(alternative_cost),
+            CastFromZoneDriver::LingeringPermission,
+            "an alternate-cost hand grant keeps its lingering driver"
+        );
     }
 
     #[test]
