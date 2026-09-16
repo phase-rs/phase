@@ -3823,8 +3823,11 @@ fn attacked_player_scope_anchors_to_the_declared_attack_target() {
 /// attacking creature, keyed on its object id and read kind-preservingly; with
 /// no latch either it answers false. Phase 1 verification-matrix row 1b — the
 /// only coverage of the `None` branch and of
-/// `combat::attacked_player_for_attacker`. Arms (g)/(h) bind BOTH anchors at
-/// once and are the only coverage of the bound-vs-latched PRECEDENCE.
+/// `combat::attacked_player_for_attacker`. Arms (g)/(h)/(i) bind BOTH anchors at
+/// once and are the only coverage of the bound-vs-latched PRECEDENCE — (i) being
+/// the only arm anywhere that binds a NON-player target over a live latch, and so
+/// the only guard that row 2's kind-preservation falses are not merely falses
+/// from an empty latch.
 #[test]
 fn attacked_player_scope_falls_back_to_the_latched_attacker_record() {
     use crate::game::combat::{self, AttackTarget, AttackerInfo, CombatState};
@@ -4002,6 +4005,37 @@ fn attacked_player_scope_falls_back_to_the_latched_attacker_record() {
         ),
         "(h) the stale latch (P1) must NOT rescue a declaration against P2, who \
          never attacked you"
+    );
+
+    // (i) Precedence when the bound anchor yields NO attacked player. The
+    // sibling kind-preservation test (row 2,
+    // `attacked_player_scope_is_kind_preserving_on_the_bound_anchor`) never
+    // assigns `state.combat` on either of its boards, so every `false` it
+    // asserts is equally explained by an EMPTY latch; it cannot tell
+    // kind-preservation apart from a fallback that is merely dead. This arm
+    // supplies the missing discrimination: the latch is LIVE and says P1, who
+    // really did attack you.
+    //
+    // CR 508.1c: the declaration under validation is the authority, and CR
+    // 506.3: a planeswalker is not a player — so a bound planeswalker target
+    // yields no attacked player and the answer is false OUTRIGHT, without
+    // consulting the latch. A bound-first reading that FALLS THROUGH on `None`
+    // reads the latch, finds P1, and wrongly answers true.
+    state.combat = Some(latch(AttackerInfo::new(
+        src,
+        AttackTarget::Player(PlayerId(1)),
+        PlayerId(1),
+    )));
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::NONE.with_declared_attack(Some(AttackTarget::Planeswalker(pw))),
+        ),
+        "(i) a bound PLANESWALKER target attacks no player (CR 506.3) and must \
+         not fall through to the live latch (P1, who did attack you)"
     );
 }
 
