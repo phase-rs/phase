@@ -6755,14 +6755,11 @@ pub(super) fn handle_resolution_choice(
                 state,
                 &state.last_zone_changed_ids,
             );
+            // CR 608.2c: fill ONLY the frame that is awaiting this producer's
+            // result, and consume the marker so a later non-forwarding zone
+            // choice in the same resolution cannot overwrite it.
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                if frame
-                    .pending
-                    .chain
-                    .context
-                    .forwarded_result_context
-                    .is_some()
-                {
+                if frame.pending.awaiting_forwarded_result.take().is_some() {
                     frame.pending.chain.context.forwarded_result_context =
                         Some(Box::new(forwarded));
                 }

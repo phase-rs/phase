@@ -862,6 +862,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             attachment_remainder: _,
             player_scope_linked_exile,
             player_scope_queue_end,
+            awaiting_forwarded_result: _,
         } = cont;
         debug_assert!(
             attachment_choice.is_none(),
@@ -2142,6 +2143,7 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
             attachment_remainder,
             player_scope_linked_exile,
             player_scope_queue_end,
+            awaiting_forwarded_result,
         } = existing;
         super::ability_utils::append_to_sub_chain(&mut head, *chain);
         state.push_ability_continuation(AbilityContinuationFrame {
@@ -2158,6 +2160,7 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
                 attachment_remainder,
                 player_scope_linked_exile,
                 player_scope_queue_end,
+                awaiting_forwarded_result,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
@@ -12187,12 +12190,12 @@ fn mark_continuation_awaits_forwarded_result(state: &mut GameState, ability: &Re
     {
         return;
     }
+    let owner = crate::types::identifiers::ObjectIncarnationRef::of(
+        ability.source_id,
+        ability.source_incarnation.unwrap_or_default(),
+    );
     if let Some(frame) = state.active_ability_continuation_frame_mut() {
-        frame.pending.chain.context.forwarded_result_context =
-            Some(Box::new(crate::types::ability::ForwardedResultContext {
-                targets: Vec::new(),
-                object_incarnations: Vec::new(),
-            }));
+        frame.pending.awaiting_forwarded_result = Some(owner);
     }
 }
 

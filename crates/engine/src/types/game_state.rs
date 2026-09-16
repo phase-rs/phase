@@ -2544,6 +2544,19 @@ pub struct PendingContinuation {
     /// placeholder `chain` is never resolved when this is set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) player_scope_queue_end: bool,
+    /// CR 608.2c: which `forward_result` producer this parked continuation is
+    /// waiting on, keyed by the producer's exact incarnation.
+    ///
+    /// `SpellContext.forwarded_result_context` cannot carry this: `Some([])`
+    /// there already means "a completed producer that moved no objects", so a
+    /// pending marker written into it is indistinguishable from a finished
+    /// empty result. Consumers keyed on `is_some()` then read a pending marker
+    /// as a completed one, and a later NON-forwarding zone choice in the same
+    /// resolution overwrites an already-correct forwarded result. Ownership
+    /// lives here instead, so only the frame that is actually awaiting a result
+    /// is ever filled, and exactly once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) awaiting_forwarded_result: Option<ObjectIncarnationRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2584,6 +2597,7 @@ impl PendingContinuation {
             attachment_remainder: None,
             player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
             player_scope_queue_end: false,
+            awaiting_forwarded_result: None,
         }
     }
 
@@ -2606,6 +2620,7 @@ impl PendingContinuation {
             attachment_remainder: None,
             player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
             player_scope_queue_end: false,
+            awaiting_forwarded_result: None,
         }
     }
 }
