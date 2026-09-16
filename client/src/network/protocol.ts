@@ -106,6 +106,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  56 — game_setup and state_update carry GameState, whose
+ *       ResolutionCastCleanup can now carry exact delayed-trigger receipts.
+ *       A v55 peer cannot preserve the cancellation authority across a paused
+ *       paid offer, so first contact rejects the skew. Bumped in lockstep with
+ *       full-game protocol 74.
  *  54 — game_setup and state_update carry GameState, whose
  *       FreeCastWindow requires `ResolutionCastFacePolicy` instead of the
  *       legacy `filter`; WaitingFor.CastOffer { kind: GraveyardPaidCast } carries
@@ -385,7 +390,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 55 as const;
+export const WIRE_PROTOCOL_VERSION = 56 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
