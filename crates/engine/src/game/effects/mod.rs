@@ -12178,6 +12178,145 @@ fn stamp_discovered_referent_onto_continuation(state: &mut GameState) {
 /// into the continuation's `targets` — and `parent_chain_referents` reads a
 /// forwarded result FIRST, so an unreplaced marker there would shadow that
 /// injected target. Chains whose producer does not forward are left untouched.
+#[cfg(test)]
+mod forwarded_marker_ownership_tests {
+    use crate::types::ability::{
+        Effect, ForwardedResultContext, QuantityExpr, ResolvedAbility, TargetFilter,
+    };
+    use crate::types::game_state::{GameState, PendingContinuation};
+    use crate::types::identifiers::{CardId, ObjectIncarnationRef};
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    fn park(state: &mut GameState, source: crate::types::identifiers::ObjectId) {
+        let chain = Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        ));
+        let pending = PendingContinuation::new(chain, state);
+        state.park_ability_continuation(pending);
+    }
+
+    /// CR 608.2c: the completion fills ONLY a frame that is awaiting a result,
+    /// and consumes the marker, so a later NON-forwarding zone choice in the
+    /// same resolution cannot overwrite an already-correct forwarded result.
+    ///
+    /// Revert-proof: with the completion keyed on
+    /// `forwarded_result_context.is_some()` instead of the owned marker, the
+    /// second (unmarked) completion below overwrites `moved` with `stale`.
+    #[test]
+    fn a_non_forwarding_completion_cannot_overwrite_a_filled_forwarded_result() {
+        let mut state = GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Producer".to_string(),
+            Zone::Battlefield,
+        );
+        let moved = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Moved Object".to_string(),
+            Zone::Battlefield,
+        );
+        let stale = crate::game::zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Unrelated Object".to_string(),
+            Zone::Battlefield,
+        );
+        park(&mut state, source);
+
+        // The producer pauses: ownership is recorded on the frame, and the
+        // serialized context keeps its documented `None` meaning.
+        let owner = ObjectIncarnationRef::of(source, 0);
+        {
+            let frame = state
+                .active_ability_continuation_frame_mut()
+                .expect("parked continuation");
+            frame.pending.awaiting_forwarded_result = Some(owner);
+            assert!(
+                frame
+                    .pending
+                    .chain
+                    .context
+                    .forwarded_result_context
+                    .is_none(),
+                "reach-guard: pending must NOT be encoded as Some([]) in the context"
+            );
+        }
+
+        // Completion #1 — this producer's result. Fills, and consumes the marker.
+        let first = ForwardedResultContext::from_object_ids(&state, &[moved]);
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            if frame.pending.awaiting_forwarded_result.take().is_some() {
+                frame.pending.chain.context.forwarded_result_context = Some(Box::new(first));
+            }
+        }
+        let filled = state
+            .active_ability_continuation()
+            .and_then(|c| c.chain.context.forwarded_result_context.clone())
+            .expect("reach-guard: the awaiting frame must have been filled");
+        assert_eq!(
+            filled.targets.len(),
+            1,
+            "reach-guard: the forwarded result names the moved object"
+        );
+
+        // Completion #2 — a later NON-forwarding zone choice in the same
+        // resolution. The frame is no longer awaiting, so it must be left alone.
+        let second = ForwardedResultContext::from_object_ids(&state, &[stale]);
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            if frame.pending.awaiting_forwarded_result.take().is_some() {
+                frame.pending.chain.context.forwarded_result_context = Some(Box::new(second));
+            }
+        }
+
+        let after = state
+            .active_ability_continuation()
+            .and_then(|c| c.chain.context.forwarded_result_context.clone())
+            .expect("the forwarded result must survive the unrelated completion");
+        assert_eq!(
+            after.targets, filled.targets,
+            "a non-forwarding completion must not overwrite the producer's result"
+        );
+    }
+
+    /// The marker is consumed exactly once: a second completion for the SAME
+    /// frame finds nothing awaiting.
+    #[test]
+    fn the_awaiting_marker_is_consumed_exactly_once() {
+        let mut state = GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Producer".to_string(),
+            Zone::Battlefield,
+        );
+        park(&mut state, source);
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame.pending.awaiting_forwarded_result = Some(ObjectIncarnationRef::of(source, 0));
+        }
+        let first = state
+            .active_ability_continuation_frame_mut()
+            .and_then(|f| f.pending.awaiting_forwarded_result.take());
+        let second = state
+            .active_ability_continuation_frame_mut()
+            .and_then(|f| f.pending.awaiting_forwarded_result.take());
+        assert!(first.is_some(), "reach-guard: the marker was recorded");
+        assert!(second.is_none(), "the marker must be consumed exactly once");
+    }
+}
+
 fn mark_continuation_awaits_forwarded_result(state: &mut GameState, ability: &ResolvedAbility) {
     if !ability.forward_result
         || !matches!(
