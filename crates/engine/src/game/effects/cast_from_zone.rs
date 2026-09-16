@@ -218,10 +218,37 @@ fn compute_hand_pick_eligible(
         ability.controller,
         constraint.clone(),
     );
+    let private_immediate_cast = matches!(
+        &ability.effect,
+        Effect::CastFromZone {
+            mode: crate::types::ability::CardPlayMode::Cast,
+            driver,
+            ..
+        } if driver.is_during_resolution()
+    );
     cards
         .into_iter()
         .filter(|id| {
             if cast_mode_excludes_lands {
+                // A private pick that will be cast while the ability resolves
+                // must preview the exact candidate-specific request.  Deferred
+                // grants and "play" choices intentionally keep the structural
+                // eligibility check: their later permission/land route is not
+                // this immediate resolution-cast transaction.
+                if private_immediate_cast {
+                    return private_resolution_cast_request(state, ability, *id).is_some_and(
+                        |request| {
+                            crate::game::casting::resolution_spell_face_legality(
+                                state,
+                                ability.controller,
+                                *id,
+                                &request,
+                            )
+                            .count()
+                                != 0
+                        },
+                    );
+                }
                 return crate::game::casting::resolution_spell_face_admission(
                     state,
                     *id,
@@ -339,7 +366,8 @@ fn open_private_zone_cast_selection(
     } else {
         target_filter.clone()
     };
-    let stored_filter = freeze_resolution_cast_filter(state, ability, stored_filter, None);
+    let stored_filter =
+        freeze_resolution_cast_filter(state, ability, stored_filter, None).normalized();
     if let Effect::CastFromZone {
         target,
         without_paying_mana_cost,
@@ -1227,6 +1255,45 @@ pub(crate) fn complete_hand_pick_cast_from_zone(
     card: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<bool, EffectError> {
+    let driver = match &ability.effect {
+        Effect::CastFromZone { driver, .. } => *driver,
+        _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
+    };
+
+    if driver.is_during_resolution() {
+        let Some(request) = private_resolution_cast_request(state, ability, card) else {
+            // CR 118.9: an unreadable borrowed keyword cost is a defensive
+            // refusal, never a downgrade to a free cast. The prompt filter uses
+            // this same request constructor, so this is only reachable if the
+            // card changed after the private choice was issued.
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::CastFromZone,
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(false);
+        };
+        cast_resolution_request_during_resolution(state, ability, card, request, events)?;
+        return Ok(true);
+    }
+
+    Ok(matches!(
+        grant_lingering_permissions(state, ability, std::slice::from_ref(&card), events)?,
+        LingeringPermissionGrantResult::NeedsChoice
+    ))
+}
+
+/// Build the candidate-specific resolution-cast request used by a private-zone
+/// pick.  The filter has already been frozen on the stashed ability; selecting
+/// a card makes its `SpecificObject` binding concrete before either the prompt
+/// dry-run or the real cast. `None` means a borrowed keyword mana cost can no
+/// longer be read, so the spell is not eligible for an immediate free-cast
+/// choice.
+fn private_resolution_cast_request(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    card: ObjectId,
+) -> Option<crate::game::casting::ResolutionCastRequest> {
     let (cast_transformed, alt_ability_cost, constraint, driver) = match &ability.effect {
         Effect::CastFromZone {
             cast_transformed,
@@ -1240,62 +1307,28 @@ pub(crate) fn complete_hand_pick_cast_from_zone(
             constraint.clone(),
             *driver,
         ),
-        _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
+        _ => return None,
     };
-
-    let during_resolution = driver.is_during_resolution();
-
-    if during_resolution {
-        // CR 118.9 + CR 702.62a: read the borrowed keyword cost (The Face of Boe's
-        // suspend cost) from the picked card so the during-resolution cast
-        // overrides its mana cost with that cost rather than casting it free.
-        let alt_mana_cost = match alt_ability_cost {
-            Some(AbilityCost::KeywordCostOfCastSpell { keyword }) => {
-                let Some(cost) =
-                    crate::game::keywords::effective_keyword_mana_cost(state, card, *keyword)
-                else {
-                    // CR 118.9: `effective_keyword_mana_cost` returns `None` only as
-                    // the documented defensive refusal that surfaces a misparse
-                    // (see `keywords::effective_keyword_mana_cost`). The
-                    // during-resolution path must NOT downgrade that refusal into a
-                    // `{0}` free cast (`initiate_cast_during_resolution` defaults a
-                    // `None` `alt_mana_cost` to zero) — that inverts the contract and
-                    // would miscost the spell. Abort the cast instead: leave the
-                    // picked card untouched in its current zone and resolve the
-                    // granting effect as a no-op rather than free-casting.
-                    events.push(GameEvent::EffectResolved {
-                        kind: EffectKind::CastFromZone,
-                        source_id: ability.source_id,
-                        subject: None,
-                    });
-                    return Ok(false);
-                };
-                Some(cost)
-            }
-            _ => None,
-        };
-        // CR 202.3 + CR 608.2h: The mana-value gate was frozen to a `Fixed` on
-        // this ability's `CastFromZone` effect when the hand pick was opened
-        // (`snapshot_cast_from_zone_constraint_into_effect`), while the trigger
-        // event was still live. Read it back here (via the effect's `constraint`
-        // field, falling back to the target-filter Cmc form for direct-target
-        // during-resolution casts that never opened a hand pick).
-        let constraint = constraint.or_else(|| effective_cast_from_zone_constraint(ability));
-        cast_single_target_during_resolution(
-            state,
-            ability,
-            card,
-            constraint,
-            cast_transformed,
-            alt_mana_cost,
-            events,
-        )?;
-        return Ok(true);
+    if !driver.is_during_resolution() {
+        return None;
     }
-
-    Ok(matches!(
-        grant_lingering_permissions(state, ability, std::slice::from_ref(&card), events)?,
-        LingeringPermissionGrantResult::NeedsChoice
+    // CR 118.9 + CR 702.62a: use the selected card's actual borrowed keyword
+    // cost. A missing cost refuses the pick rather than silently becoming {0}.
+    let cost = match alt_ability_cost {
+        Some(AbilityCost::KeywordCostOfCastSpell { keyword }) => {
+            crate::game::keywords::effective_keyword_mana_cost(state, card, *keyword)
+                .map(|cost| crate::types::ability::ResolutionCastCost::AlternativeMana { cost })?
+        }
+        _ => crate::types::ability::ResolutionCastCost::Free,
+    };
+    let constraint = constraint.or_else(|| effective_cast_from_zone_constraint(ability));
+    Some(resolution_cast_request_for_single_target(
+        state,
+        ability,
+        card,
+        constraint,
+        cast_transformed,
+        cost,
     ))
 }
 
@@ -1582,11 +1615,32 @@ fn cast_single_target_during_resolution(
     alt_mana_cost: Option<ManaCost>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::CastFromZone,
-        source_id: ability.source_id,
-        subject: None,
-    });
+    let cost = match alt_mana_cost {
+        Some(cost) => crate::types::ability::ResolutionCastCost::AlternativeMana { cost },
+        None => crate::types::ability::ResolutionCastCost::Free,
+    };
+    let request = resolution_cast_request_for_single_target(
+        state,
+        ability,
+        card,
+        constraint,
+        cast_transformed,
+        cost,
+    );
+    cast_resolution_request_during_resolution(state, ability, card, request, events)
+}
+
+/// Build the concrete resolution-cast transaction for one selected
+/// `CastFromZone` card. Both direct and private-zone routes call this before
+/// asking the shared casting builder to install it.
+fn resolution_cast_request_for_single_target(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    card: ObjectId,
+    constraint: Option<crate::types::ability::CastPermissionConstraint>,
+    cast_transformed: bool,
+    cost: crate::types::ability::ResolutionCastCost,
+) -> crate::game::casting::ResolutionCastRequest {
     // CR 702.62a's "if you don't, it remains exiled" disposition is `RemainExiled`
     // for targeted single-card free casts. A library-peek pick instead bottoms
     // its declined hit with all unchosen looked-at cards (CR 401.4).
@@ -1630,20 +1684,35 @@ fn cast_single_target_during_resolution(
         delayed_trigger_receipts: Vec::new(),
     };
     let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
+    crate::game::casting::ResolutionCastRequest {
+        face_policy,
+        cast_transformed,
+        cleanup,
+        graveyard_replacement,
+        cost,
+    }
+}
+
+/// Execute an already-built resolution-cast request. The construction happens
+/// at the caller so preflight and real announcement consume identical policy,
+/// cleanup, rider, and payment provenance.
+fn cast_resolution_request_during_resolution(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    card: ObjectId,
+    request: crate::game::casting::ResolutionCastRequest,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::CastFromZone,
+        source_id: ability.source_id,
+        subject: None,
+    });
     let initiation = crate::game::casting::initiate_cast_during_resolution(
         state,
         ability.controller,
         card,
-        crate::game::casting::ResolutionCastRequest {
-            face_policy,
-            cast_transformed,
-            cleanup,
-            graveyard_replacement,
-            cost: match alt_mana_cost {
-                Some(c) => crate::types::ability::ResolutionCastCost::AlternativeMana { cost: c },
-                None => crate::types::ability::ResolutionCastCost::Free,
-            },
-        },
+        request,
         events,
     )
     .map_err(|e| EffectError::InvalidParam(e.to_string()))?;

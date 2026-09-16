@@ -11175,6 +11175,15 @@ fn handle_resolution_cast_success(
             if casts_left == Some(0) {
                 return None;
             }
+            let request = super::effects::free_cast_from_zones::free_cast_window_resolution_request(
+                controller,
+                casts_left,
+                budget_left,
+                (*face_policy).clone(),
+                zones.clone(),
+                graveyard_replacement.clone(),
+                member_pool.clone(),
+            );
             let mut candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
                 state,
                 &zones,
@@ -11183,7 +11192,7 @@ fn handle_resolution_cast_success(
                 // "exiled this way" batch (Plargg and Nassari) — see the
                 // window's `member_pool` docs; empty means no restriction.
                 &member_pool,
-                face_policy.as_ref(),
+                &request,
             );
             // CR 608.2g: Finalize runs before the chosen card is removed from
             // its origin zone; it cannot be offered again while already cast.

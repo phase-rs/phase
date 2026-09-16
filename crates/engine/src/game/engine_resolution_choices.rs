@@ -2846,39 +2846,17 @@ pub(super) fn handle_resolution_choice(
             // where it is (RemainExiled — never reached here because the
             // per-card MV is pre-checked and these casts carry no resulting-MV
             // permission constraint).
-            let cleanup = crate::types::ability::ResolutionCastCleanup {
-                source_id: face_policy.source_id,
-                face_policy: face_policy.clone(),
-                exiled_misses: Vec::new(),
-                reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
-                success_action:
-                    crate::types::ability::ResolutionCastSuccessAction::FreeCastOfferRemaining {
-                        controller: player,
-                        remaining_casts,
-                        remaining_mv_budget,
-                        face_policy: Box::new(face_policy.clone()),
-                        zones,
-                        graveyard_replacement: graveyard_replacement.clone(),
-                        member_pool,
-                    },
-                delayed_trigger_receipts: Vec::new(),
-            };
-            let result = match casting::initiate_cast_during_resolution(
-                state,
+            let request = effects::free_cast_from_zones::free_cast_window_resolution_request(
                 player,
-                chosen,
-                casting::ResolutionCastRequest {
-                    face_policy,
-                    cast_transformed: false,
-                    cleanup,
-                    // The window's success action installs this rider exactly
-                    // once after the cast finalizes. Passing it through this
-                    // request would make `initiate_cast_during_resolution`
-                    // install a duplicate synthetic replacement.
-                    graveyard_replacement: None,
-                    cost: crate::types::ability::ResolutionCastCost::Free,
-                },
-                events,
+                remaining_casts,
+                remaining_mv_budget,
+                face_policy,
+                zones,
+                graveyard_replacement,
+                member_pool,
+            );
+            let result = match casting::initiate_cast_during_resolution(
+                state, player, chosen, request, events,
             )? {
                 casting::ResolutionCastInitiation::WaitingFor(result) => *result,
                 casting::ResolutionCastInitiation::Rejected(cleanup) => {
@@ -8482,14 +8460,24 @@ pub(crate) fn abort_resolution_cast(
             member_pool,
         } => {
             // No spell was committed, so neither the cast count nor the mana
-            // value budget changes.  Recompute the exact same policy-backed
-            // window rather than retaining a stale chosen-card list.
+            // value budget changes. Recompute through the exact Free request
+            // rather than retaining a stale candidate list or a policy-only
+            // approximation of the rejected cast.
+            let request = effects::free_cast_from_zones::free_cast_window_resolution_request(
+                controller,
+                remaining_casts,
+                remaining_mv_budget,
+                (*face_policy).clone(),
+                zones.clone(),
+                graveyard_replacement.clone(),
+                member_pool.clone(),
+            );
             let candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
                 state,
                 &zones,
                 remaining_mv_budget,
                 &member_pool,
-                &face_policy,
+                &request,
             );
             if candidates.is_empty() {
                 return Ok(finish_with_continuation(state, controller, events));

@@ -54032,7 +54032,7 @@ fn resolution_cast_auto_selects_its_only_legal_spell_face() {
         resolution_test_request(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)));
 
     assert_eq!(
-        resolution_spell_face_legality(&state, PlayerId(0), spell, &request.face_policy),
+        resolution_spell_face_legality(&state, PlayerId(0), spell, &request),
         ResolutionSpellFaceLegality {
             front: false,
             back: true,
@@ -54546,7 +54546,7 @@ fn resolution_face_projection_rejects_a_zone_prohibited_cast_before_announcement
     let request = resolution_test_request(TargetFilter::Any);
 
     assert_eq!(
-        resolution_spell_face_legality(&state, PlayerId(0), spell, &request.face_policy),
+        resolution_spell_face_legality(&state, PlayerId(0), spell, &request),
         ResolutionSpellFaceLegality {
             front: false,
             back: false,
@@ -54572,10 +54572,10 @@ fn resolution_face_projection_limits_aftermath_half_to_graveyard() {
             resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
         state.objects.get_mut(&spell).unwrap().zone = zone;
         mark_resolution_test_back_face_as_aftermath(&mut state, spell);
-        let policy = resolution_test_request(TargetFilter::Any).face_policy;
+        let request = resolution_test_request(TargetFilter::Any);
 
         assert_eq!(
-            resolution_spell_face_legality(&state, PlayerId(0), spell, &policy),
+            resolution_spell_face_legality(&state, PlayerId(0), spell, &request),
             ResolutionSpellFaceLegality {
                 front: true,
                 back: zone == Zone::Graveyard,

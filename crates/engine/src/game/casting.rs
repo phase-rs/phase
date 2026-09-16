@@ -10320,11 +10320,10 @@ impl ResolutionSpellFaceLegality {
     }
 }
 
-/// The prospective gate used while building a resolution-time offer.  It only
-/// answers whether the card has an eligible spell face under the frozen
-/// policy.  Timing, targets, costs, prohibitions, and the actual preparation
-/// transaction belong to the indexed permission after a player selects a
-/// candidate.
+/// The structural prospective gate used by deferred and play permissions.  An
+/// immediate resolution offer uses [`resolution_spell_face_legality`] with its
+/// exact request instead, because timing, targets, costs, and the temporary
+/// permission's cleanup are all part of whether the player may choose it.
 pub(crate) fn resolution_spell_face_admission(
     state: &GameState,
     object_id: ObjectId,
@@ -10399,59 +10398,43 @@ pub(crate) fn resolution_spell_face_admission(
     admission
 }
 
-/// Project each independently castable spell face and evaluate it with the
-/// same normalized policy that will be copied into the selected temporary
-/// permission.  This is deliberately read-only: announcement state is not
-/// created until a real face has been elected.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn resolution_spell_face_legality(
+/// Project each independently castable spell face through the exact temporary
+/// permission that the caller will install for a real cast.  This is
+/// deliberately read-only: the cloned request preserves the concrete cleanup,
+/// rider, cost provenance, and policy without creating announcement state in
+/// the real game.
+pub(super) fn resolution_spell_face_legality(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
-    policy: &crate::types::ability::ResolutionCastFacePolicy,
+    request: &ResolutionCastRequest,
 ) -> ResolutionSpellFaceLegality {
     // Window construction happens before `initiate_cast_during_resolution` has
-    // appended its real permission.  Probe a clone with the same kind of
-    // temporary grant that the real path will elect, so the projector takes
-    // every zone-admission and casting-prohibition gate in preparation rather
-    // than approximating that path from card characteristics alone.
+    // appended its real permission. Probe a clone with the same exact request
+    // that the real path will elect, so the projector takes every
+    // zone-admission, casting-prohibition, target, cost, cleanup, and rider
+    // gate rather than approximating that path from policy alone.
     let mut projected = state.clone();
-    let Some(object) = projected.objects.get_mut(&object_id) else {
+    if !projected.objects.contains_key(&object_id) {
+        return ResolutionSpellFaceLegality {
+            front: false,
+            back: false,
+        };
+    }
+    let Ok(permission) =
+        install_resolution_cast_permission(&mut projected, player, object_id, request)
+    else {
         return ResolutionSpellFaceLegality {
             front: false,
             back: false,
         };
     };
-    let permission_index = CastingPermissionIndex(object.casting_permissions.len());
-    object
-        .casting_permissions
-        .push(CastingPermission::ExileWithAltCost {
-            cost: ManaCost::zero(),
-            cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
-            cast_transformed: false,
-            constraint: policy.constraint.clone(),
-            granted_to: Some(player),
-            resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
-                source_id: policy.source_id,
-                face_policy: policy.clone(),
-                exiled_misses: Vec::new(),
-                reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
-                success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
-                delayed_trigger_receipts: Vec::new(),
-            }),
-            duration: None,
-            source_id: None,
-            graveyard_replacement: None,
-            enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
-            mana_spend_permission: None,
-        });
     resolution_spell_face_legality_for_permission(
         &projected,
         player,
         object_id,
-        policy,
-        permission_index,
+        &request.face_policy,
+        permission.index,
     )
 }
 
@@ -12819,6 +12802,7 @@ pub fn handle_cast_spell_as_madness_with_payment_mode(
     continue_with_prepared(state, player, prepared, events)
 }
 
+#[derive(Clone)]
 pub(super) struct ResolutionCastRequest {
     /// The exact serialized policy supplied by the offer that elected this
     /// cast.  It is moved into the temporary indexed permission, never
@@ -12844,6 +12828,120 @@ pub(super) struct ResolutionCastRequest {
 pub(super) enum ResolutionCastInitiation {
     WaitingFor(Box<WaitingFor>),
     Rejected(Box<crate::types::ability::ResolutionCastCleanup>),
+}
+
+/// The one temporary permission that owns an in-flight resolution cast.  Both
+/// the real cast and a prospective clone install it through
+/// [`install_resolution_cast_permission`], so a candidate is checked against
+/// the caller's exact cleanup, rider, and payment provenance rather than a
+/// nearby default-shaped approximation.
+struct ResolutionCastPermission {
+    index: CastingPermissionIndex,
+    payment_mode: CastPaymentMode,
+    additional_cost: Option<ManaCost>,
+}
+
+/// Install the exact temporary permission selected by a resolution-cast
+/// caller.  The request is the transaction authority: this builder does not
+/// replace its cleanup policy or graveyard rider with a default while probing
+/// or announcing a spell.
+fn install_resolution_cast_permission(
+    state: &mut GameState,
+    player: PlayerId,
+    hit_card: ObjectId,
+    request: &ResolutionCastRequest,
+) -> Result<ResolutionCastPermission, EngineError> {
+    if request.cleanup.face_policy != request.face_policy {
+        return Err(EngineError::InvalidAction(
+            "resolution cast request cleanup policy is stale or mismatched".to_string(),
+        ));
+    }
+    super::engine_resolution_choices::validate_resolution_cast_cleanup_authority(
+        player,
+        &request.cleanup,
+    )?;
+    super::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
+        state,
+        &request.cleanup,
+    )?;
+
+    // CR 608.2g + CR 609.4b + CR 118.9: resolve the payment shape once.
+    // `Free` zeroes the cost and auto-pays (Cascade/Discover/Suspend).
+    // `FullCost` charges the elected face's live printed cost (`SelfManaCost`)
+    // and pauses for manual payment so the caster can spend mana; the any-type
+    // concession, when present, rides the grant (Quistis Trepe, Tinybones the
+    // Pickpocket). `AlternativeMana` charges a specific explicit mana cost
+    // borrowed from a keyword (The Face of Boe's suspend cost) and pauses for
+    // manual payment at that cost rather than the elected face's printed cost.
+    // CR 118.9a: `FullCost` restates the card's own printed cost — a normal
+    // cast; `Free` / `AlternativeMana` substitute it (alternative costs).
+    let cost_provenance = if matches!(
+        &request.cost,
+        crate::types::ability::ResolutionCastCost::FullCost { .. }
+    ) {
+        crate::types::ability::ExileGrantCostProvenance::NormalCost
+    } else {
+        crate::types::ability::ExileGrantCostProvenance::Alternative
+    };
+    // CR 601.2b: the additional mana cost a `FullCost` grant attaches (Ogre
+    // Battlecaster's "{R}{R} in addition to its other costs") is not part of
+    // the permission's cost — that is the card's own printed cost, restated —
+    // and is added to the prepared cast's base below, where a Fuse cast adds
+    // its second half.
+    let (perm_cost, mana_spend_permission, payment_mode, additional_cost) = match &request.cost {
+        crate::types::ability::ResolutionCastCost::Free => {
+            (ManaCost::zero(), None, CastPaymentMode::Auto, None)
+        }
+        // CR 609.4b: SelfManaCost resolves to the card's live printed cost; the
+        // any-type concession rides the grant.
+        crate::types::ability::ResolutionCastCost::FullCost {
+            mana_spend_permission,
+            additional_cost,
+        } => (
+            ManaCost::SelfManaCost,
+            *mana_spend_permission,
+            CastPaymentMode::Manual,
+            additional_cost.clone(),
+        ),
+        // CR 118.9 + CR 702.62a: explicit alternative mana cost borrowed from a
+        // keyword (e.g. The Face of Boe's suspend cost). The cost is stamped
+        // directly — not `SelfManaCost` — so the permission carries the exact
+        // keyword cost. `Auto` payment drains the pool for the keyword cost
+        // automatically during resolution, matching Suspend's last-counter cast
+        // semantics (the triggering player's pool already has the mana).
+        crate::types::ability::ResolutionCastCost::AlternativeMana { cost } => {
+            (cost.clone(), None, CastPaymentMode::Auto, None)
+        }
+    };
+    let Some(object) = state.objects.get_mut(&hit_card) else {
+        return Err(EngineError::InvalidAction("Object not found".to_string()));
+    };
+    // CR 601.2a + CR 601.2i: the indexed permission is consumed by
+    // `prepare_spell_cast_with_variant_override`'s exile alt-cost scan.  Its
+    // non-optional cleanup is the CR 608.2g timing discriminator.
+    let index = CastingPermissionIndex(object.casting_permissions.len());
+    object
+        .casting_permissions
+        .push(CastingPermission::ExileWithAltCost {
+            cost: perm_cost,
+            cost_provenance,
+            cast_transformed: request.cast_transformed,
+            constraint: request.face_policy.constraint.clone(),
+            granted_to: Some(player),
+            resolution_cleanup: Some(request.cleanup.clone()),
+            duration: None,
+            // CR 611.2a: no duration, so no host to bind to.
+            source_id: None,
+            graveyard_replacement: request.graveyard_replacement.clone(),
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission,
+        });
+    Ok(ResolutionCastPermission {
+        index,
+        payment_mode,
+        additional_cost,
+    })
 }
 
 /// CR 608.2g: Cast a Cascade/Discover hit *during resolution* of its source
@@ -12885,111 +12983,17 @@ pub(super) fn initiate_cast_during_resolution(
     request: ResolutionCastRequest,
     events: &mut Vec<GameEvent>,
 ) -> Result<ResolutionCastInitiation, EngineError> {
-    let ResolutionCastRequest {
-        face_policy,
-        cast_transformed,
-        cleanup,
-        graveyard_replacement,
-        cost,
-    } = request;
-    let cleanup_for_rejection = cleanup.clone();
-    super::engine_resolution_choices::validate_resolution_cast_cleanup_authority(
-        player,
-        &cleanup_for_rejection,
-    )?;
-    super::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
-        state,
-        &cleanup_for_rejection,
-    )?;
-    // CR 608.2g + CR 609.4b + CR 118.9: resolve the payment shape once.
-    // `Free` zeroes the cost and auto-pays (Cascade/Discover/Suspend).
-    // `FullCost` charges the elected face's live printed cost (`SelfManaCost`)
-    // and pauses for manual payment so the caster can spend mana; the any-type
-    // concession, when present, rides the grant (Quistis Trepe, Tinybones the
-    // Pickpocket). `AlternativeMana` charges a specific explicit mana cost
-    // borrowed from a keyword (The Face of Boe's suspend cost) and pauses for
-    // manual payment at that cost rather than the elected face's printed cost.
-    // CR 118.9a: `FullCost` restates the card's own printed cost — a normal
-    // cast; `Free` / `AlternativeMana` substitute it (alternative costs).
-    let cost_provenance = if matches!(
-        &cost,
-        crate::types::ability::ResolutionCastCost::FullCost { .. }
-    ) {
-        crate::types::ability::ExileGrantCostProvenance::NormalCost
-    } else {
-        crate::types::ability::ExileGrantCostProvenance::Alternative
-    };
-    // CR 601.2b: the additional mana cost a `FullCost` grant attaches (Ogre
-    // Battlecaster's "{R}{R} in addition to its other costs") is not part of
-    // the permission's cost — that is the card's own printed cost, restated —
-    // and is added to the prepared cast's base below, where a Fuse cast adds
-    // its second half.
-    let mut additional_cost = None;
-    let (perm_cost, mana_spend_permission, payment_mode) = match cost {
-        crate::types::ability::ResolutionCastCost::Free => {
-            (ManaCost::zero(), None, CastPaymentMode::Auto)
-        }
-        // CR 609.4b: SelfManaCost resolves to the card's live printed cost; the
-        // any-type concession rides the grant.
-        crate::types::ability::ResolutionCastCost::FullCost {
-            mana_spend_permission,
-            additional_cost: extra,
-        } => {
-            additional_cost = extra;
-            (
-                ManaCost::SelfManaCost,
-                mana_spend_permission,
-                CastPaymentMode::Manual,
-            )
-        }
-        // CR 118.9 + CR 702.62a: explicit alternative mana cost borrowed from a
-        // keyword (e.g. The Face of Boe's suspend cost). The cost is stamped
-        // directly — not `SelfManaCost` — so the permission carries the exact
-        // keyword cost. `Auto` payment drains the pool for the keyword cost
-        // automatically during resolution, matching Suspend's last-counter cast
-        // semantics (the triggering player's pool already has the mana).
-        crate::types::ability::ResolutionCastCost::AlternativeMana { cost: alt_cost } => {
-            (alt_cost, None, CastPaymentMode::Auto)
-        }
-    };
-    let casting_permission_index = if let Some(obj) = state.objects.get_mut(&hit_card) {
-        // CR 601.2a + CR 601.2i: zero-cost permission consumed by
-        // `prepare_spell_cast_with_variant_override`'s exile alt-cost scan.
-        // `resolution_cleanup` is always `Some` here: it is the
-        // cast-during-resolution discriminator that arms the CR 608.2g timing
-        // bypass. Cascade/Discover carry their dig misses + MV-reject
-        // disposition; Suspend (CR 702.62a) carries an empty-misses /
-        // `RemainExiled` cleanup that has no dig and no MV gate, so it never
-        // enters the cascade reject path.
-        let index = CastingPermissionIndex(obj.casting_permissions.len());
-        obj.casting_permissions
-            .push(CastingPermission::ExileWithAltCost {
-                cost: perm_cost,
-                cost_provenance,
-                cast_transformed,
-                constraint: face_policy.constraint.clone(),
-                granted_to: Some(player),
-                resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
-                    face_policy: face_policy.clone(),
-                    ..cleanup
-                }),
-                duration: None,
-                // CR 611.2a: no duration, so no host to bind to.
-                source_id: None,
-                graveyard_replacement: graveyard_replacement.clone(),
-                enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
-                mana_spend_permission,
-            });
-        index
-    } else {
-        return Err(EngineError::InvalidAction("Object not found".to_string()));
-    };
+    let cleanup_for_rejection = request.cleanup.clone();
+    let ResolutionCastPermission {
+        index: casting_permission_index,
+        payment_mode,
+        additional_cost,
+    } = install_resolution_cast_permission(state, player, hit_card, &request)?;
     let legality = resolution_spell_face_legality_for_permission(
         state,
         player,
         hit_card,
-        &face_policy,
+        &request.face_policy,
         casting_permission_index,
     );
     if legality.count() == 0 {
