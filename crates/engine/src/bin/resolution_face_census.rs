@@ -2444,7 +2444,7 @@ mod tests {
     use engine::types::card::CardFace;
 
     fn fixture_export() -> String {
-        let face = |name: &str, oracle_id: &str, face_index: usize, fuse: bool| {
+        let face = |name: &str, face_index: usize, fuse: bool| {
             let face = CardFace {
                 name: name.to_string(),
                 mana_cost: ManaCost::NoCost,
@@ -2454,7 +2454,7 @@ mod tests {
                 },
                 abilities: vec![AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)],
                 keywords: fuse.then_some(Keyword::Fuse).into_iter().collect(),
-                scryfall_oracle_id: Some(oracle_id.to_string()),
+                scryfall_oracle_id: Some("fixture-split-oracle".to_string()),
                 ..CardFace::default()
             };
             let mut entry = serde_json::to_value(face)
@@ -2470,26 +2470,18 @@ mod tests {
         // Storage keys deliberately differ from face names. The census must
         // retain them so database hydration can reconstruct both halves.
         export.insert(
-            "fixture-runtime-front-storage-key".to_string(),
-            face("Fixture Runtime Front", "fixture-runtime-oracle", 0, false),
+            "fixture-front-storage-key".to_string(),
+            face("Fixture Front", 0, false),
         );
         export.insert(
-            "fixture-runtime-back-storage-key".to_string(),
-            face("Fixture Runtime Back", "fixture-runtime-oracle", 1, false),
-        );
-        export.insert(
-            "fixture-fuse-front-storage-key".to_string(),
-            face("Fixture Fuse Front", "fixture-fuse-oracle", 0, false),
-        );
-        export.insert(
-            "fixture-fuse-back-storage-key".to_string(),
+            "fixture-back-storage-key".to_string(),
             // Fuse is intentionally on the back face to pin cross-face OR.
-            face("Fixture Fuse Back", "fixture-fuse-oracle", 1, true),
+            face("Fixture Back", 1, true),
         );
         Value::Object(export).to_string()
     }
 
-    fn fixture_identity_and_db(oracle_id: &str) -> (Identity, CardDatabase) {
+    fn fixture_identity_and_db() -> (Identity, CardDatabase) {
         let export = fixture_export();
         let (identities, diagnostics) = enumerate_identities(export.as_bytes()).unwrap();
         assert!(
@@ -2498,7 +2490,7 @@ mod tests {
         );
         let identity = identities
             .into_iter()
-            .find(|identity| identity.oracle_id == oracle_id)
+            .find(|identity| identity.oracle_id == "fixture-split-oracle")
             .expect("fixture split identity exists");
         let db = CardDatabase::from_json_str(&export).expect("fixture export hydrates");
         (identity, db)
@@ -2760,7 +2752,7 @@ mod tests {
 
     #[test]
     fn target_free_public_route_elects_a_face_before_casting_to_the_stack() {
-        let (identity, db) = fixture_identity_and_db("fixture-runtime-oracle");
+        let (identity, db) = fixture_identity_and_db();
         let mut state = canonical_witness();
         place_candidate(&mut state, &identity, Origin::Exile, &db, false, P0).unwrap();
         let source = prepare_source(&mut state, &identity, Profile::TargetFree).unwrap();
@@ -2913,13 +2905,10 @@ mod tests {
 
     #[test]
     fn exact_export_keys_preserve_back_face_and_back_face_fuse() {
-        let (split, db) = fixture_identity_and_db("fixture-fuse-oracle");
-        assert_eq!(
-            split.canonical_name,
-            "Fixture Fuse Front // Fixture Fuse Back"
-        );
-        assert_eq!(split.front_key, "fixture-fuse-front-storage-key");
-        assert_eq!(split.back_key, "fixture-fuse-back-storage-key");
+        let (split, db) = fixture_identity_and_db();
+        assert_eq!(split.canonical_name, "Fixture Front // Fixture Back");
+        assert_eq!(split.front_key, "fixture-front-storage-key");
+        assert_eq!(split.back_key, "fixture-back-storage-key");
         assert!(
             split.has_fuse,
             "a back-face Fuse must classify the identity"
@@ -2927,23 +2916,23 @@ mod tests {
         let mut state = canonical_witness();
         place_candidate(&mut state, &split, Origin::Exile, &db, false, P0).unwrap();
         let candidate = state.objects.get(&CANDIDATE).unwrap();
-        assert_eq!(candidate.name, "Fixture Fuse Front");
+        assert_eq!(candidate.name, "Fixture Front");
         assert_eq!(
             candidate
                 .printed_ref
                 .as_ref()
                 .map(|printed_ref| printed_ref.oracle_id.as_str()),
-            Some("fixture-fuse-oracle")
+            Some("fixture-split-oracle")
         );
         assert_eq!(
             candidate.back_face.as_ref().map(|face| face.name.as_str()),
-            Some("Fixture Fuse Back")
+            Some("Fixture Back")
         );
     }
 
     #[test]
     fn cascade_and_discover_seed_library_and_observe_exile_hit() {
-        let (identity, db) = fixture_identity_and_db("fixture-runtime-oracle");
+        let (identity, db) = fixture_identity_and_db();
         let template = canonical_witness();
 
         for profile in [Profile::Cascade, Profile::Discover] {
