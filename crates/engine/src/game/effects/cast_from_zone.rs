@@ -3519,7 +3519,10 @@ mod tests {
             matches!(
                 state.objects[&cheap].casting_permissions.as_slice(),
                 [CastingPermission::ExileWithAltCost {
-                    resolution_cleanup: None,
+                    // The accepted resolution cast retains its exact cleanup
+                    // receipt while it is on the stack; terminal stack cleanup
+                    // consumes the temporary permission.
+                    resolution_cleanup: Some(_),
                     mana_spend_permission: None,
                     graveyard_replacement: None,
                     enters_with_counter: None,
@@ -3527,7 +3530,7 @@ mod tests {
                     ..
                 }] if enters_with_modifications.is_empty()
             ),
-            "the consumed hand-cast permission must remain only as a neutral stable slot"
+            "the accepted hand cast must retain its resolution cleanup until stack exit"
         );
 
         crate::game::stack::resolve_top(&mut state, &mut events);
