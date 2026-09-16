@@ -21735,6 +21735,18 @@ impl GameState {
         self.resolution_stack.active_ability_continuation_mut()
     }
 
+    /// Mutably accesses the continuation parked immediately beneath an active
+    /// `ChangeZone` iteration frame. Distinct from
+    /// `active_ability_continuation_frame_mut`, which is strictly top-of-stack
+    /// and therefore blind while an iteration frame owns the top — see
+    /// `ResolutionStack::continuation_beneath_active_change_zone`.
+    pub fn continuation_beneath_active_change_zone_mut(
+        &mut self,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        self.resolution_stack
+            .continuation_beneath_active_change_zone_mut()
+    }
+
     /// Park a new continuation as the active inner frame.
     pub fn push_ability_continuation(&mut self, frame: AbilityContinuationFrame) {
         self.resolution_stack.push_ability_continuation(frame);

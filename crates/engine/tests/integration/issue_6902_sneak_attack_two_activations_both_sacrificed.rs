@@ -10,6 +10,7 @@
 //! creature on the battlefield.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -23,7 +24,11 @@ const SNEAK_ATTACK: &str = "{R}: You may put a creature card from your hand onto
 
 /// Drive one activation to completion on the real action path, choosing `pick`
 /// from hand. Every prompt seen is recorded; an unexpected one fails loudly.
-fn activate_putting(runner: &mut GameRunner, sneak_attack: ObjectId, pick: ObjectId) {
+fn activate_putting(
+    runner: &mut GameRunner,
+    sneak_attack: ObjectId,
+    pick: ObjectId,
+) -> Vec<String> {
     resolve_putting(
         runner,
         GameAction::ActivateAbility {
@@ -31,12 +36,12 @@ fn activate_putting(runner: &mut GameRunner, sneak_attack: ObjectId, pick: Objec
             ability_index: 0,
         },
         pick,
-    );
+    )
 }
 
 /// Submit `first` (an activation or a cast) and drive it to completion on the
 /// real action path, choosing `pick` from hand. An unexpected prompt fails loudly.
-fn resolve_putting(runner: &mut GameRunner, first: GameAction, pick: ObjectId) {
+fn resolve_putting(runner: &mut GameRunner, first: GameAction, pick: ObjectId) -> Vec<String> {
     let mut waiting = runner
         .act(first)
         .expect("the put-from-hand instruction must be accepted")
@@ -45,11 +50,19 @@ fn resolve_putting(runner: &mut GameRunner, first: GameAction, pick: ObjectId) {
     for _ in 0..20 {
         seen.push(format!("{waiting:?}").chars().take(50).collect::<String>());
         let action = match &waiting {
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return seen,
             WaitingFor::Priority { .. } => GameAction::PassPriority,
             WaitingFor::OptionalEffectChoice { .. } => {
                 GameAction::DecideOptionalEffect { accept: true }
             }
+            WaitingFor::ReplacementChoice { .. } => GameAction::ChooseReplacement { index: 0 },
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(
+                    *valid_targets
+                        .first()
+                        .expect("a creature to copy must be offered"),
+                )),
+            },
             WaitingFor::EffectZoneChoice { cards, .. }
             | WaitingFor::ChooseFromZoneChoice { cards, .. } => {
                 assert!(
@@ -229,5 +242,95 @@ fn through_the_breach_sacrifices_the_chosen_creature_after_a_choice_prompt() {
         runner.state().objects[&left_behind].zone,
         Zone::Hand,
         "the unchosen creature is untouched"
+    );
+}
+// Verbatim Oracle text (Scryfall, 2026-09-15).
+const CLONE: &str =
+    "You may have this creature enter as a copy of any creature on the battlefield.";
+
+/// CR 608.2c + CR 614.12 + CR 707.9: the chosen creature's own "enter as a copy"
+/// replacement re-pauses the put mid-delivery, so the selection completes
+/// through the change-zone iteration drain instead of the choice prompt's own
+/// completion. The delayed sacrifice must still name that creature.
+#[test]
+fn sneak_attack_sacrifices_a_creature_whose_entry_paused_on_a_copy_choice() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Lib A", "Lib B"]);
+
+    let sneak_attack = scenario
+        .add_creature(P0, "Sneak Attack", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(SNEAK_ATTACK)
+        .id();
+    let copy_source = scenario.add_creature(P0, "Copy Source", 3, 3).id();
+    let clone = scenario
+        .add_creature_to_hand(P0, "Clone", 0, 0)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 3,
+        })
+        .from_oracle_text(CLONE)
+        .id();
+    let left_behind = scenario
+        .add_creature_to_hand(P0, "Other Bear", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Red,
+            sneak_attack,
+            false,
+            Vec::new(),
+        )],
+    );
+    let mut runner = scenario.build();
+    let prompts = activate_putting(&mut runner, sneak_attack, clone);
+
+    // Reach-guards: the creature was chosen through the selection prompt, and
+    // its entry then paused on the copy choice, so the drain path is the one
+    // under test.
+    assert!(
+        prompts.iter().any(|p| p.starts_with("EffectZoneChoice")),
+        "reach-guard: the creature was chosen through the selection prompt; {prompts:?}"
+    );
+    assert!(
+        prompts
+            .iter()
+            .any(|p| p.starts_with("ReplacementChoice") || p.starts_with("CopyTargetChoice")),
+        "reach-guard: the entry paused on the copy choice; {prompts:?}"
+    );
+    assert_eq!(
+        runner.state().objects[&clone].zone,
+        Zone::Battlefield,
+        "reach-guard: the chosen creature entered"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "reach-guard: the activation installed its delayed sacrifice trigger"
+    );
+
+    pass_priority_into_end_step_of(&mut runner, P0);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&clone].zone,
+        Zone::Graveyard,
+        "the creature whose entry paused on a copy choice must be sacrificed (CR 603.7)"
+    );
+    assert_eq!(
+        runner.state().objects[&copy_source].zone,
+        Zone::Battlefield,
+        "the copied creature is untouched"
+    );
+    assert_eq!(
+        runner.state().objects[&left_behind].zone,
+        Zone::Hand,
+        "the unchosen creature stays in hand"
     );
 }

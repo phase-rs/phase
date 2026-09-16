@@ -3042,6 +3042,50 @@ impl ResolutionStack {
         }
     }
 
+    /// CR 608.2c + CR 614.12a: Returns the continuation parked immediately
+    /// beneath an active `ChangeZone` iteration frame.
+    ///
+    /// A `forward_result` producer whose selected member re-paused mid-entry (an
+    /// as-enters copy choice, an Aura host choice) resumes while its iteration
+    /// frame still owns the stack top, so `active_ability_continuation` — which
+    /// is strictly top-of-stack — cannot see the parked continuation at all. The
+    /// moved object is known only at the paused member-delivery completion, and
+    /// that is the one instant at which the continuation, the marker's owner and
+    /// the delivered object are all reachable.
+    ///
+    /// Measured shape at that seam: `[AbilityContinuation, ChangeZone]`. This is
+    /// a fixed two-frame adjacency, never a stack search — binding a continuation
+    /// found at arbitrary depth would risk handing one producer's result to an
+    /// unrelated sibling. Any other shape yields `None` and the caller binds
+    /// nothing.
+    pub fn continuation_beneath_active_change_zone(&self) -> Option<&AbilityContinuationFrame> {
+        match (self.last(), self.active_predecessor()) {
+            (
+                Some(ResolutionFrame::ChangeZone(_)),
+                Some(ResolutionFrame::AbilityContinuation(continuation)),
+            ) => Some(continuation),
+            _ => None,
+        }
+    }
+
+    /// Mutable companion of [`Self::continuation_beneath_active_change_zone`];
+    /// see it for the structural invariant this preserves.
+    pub fn continuation_beneath_active_change_zone_mut(
+        &mut self,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        // Check the exact pair through the immutable half first, so the shape
+        // rule lives in one place; only then reborrow the same slot mutably.
+        self.continuation_beneath_active_change_zone()?;
+        let top = self.frames.top()?;
+        let continuation = self.frames.below(top)?;
+        match self.frames.get_mut(continuation) {
+            Some(ResolutionFrame::AbilityContinuation(continuation)) => Some(continuation),
+            Some(_) | None => {
+                unreachable!("checked continuation-beneath-ChangeZone must retain its frame kind")
+            }
+        }
+    }
+
     /// Consumes exactly the active general post-replacement frame.
     pub fn take_active_post_replacement(
         &mut self,

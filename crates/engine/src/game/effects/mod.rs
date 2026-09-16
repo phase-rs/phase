@@ -1594,6 +1594,35 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     paused_current.terminal_completion_after_resume(),
                 )
                 .expect("resumed ChangeZone member records its exact terminal outcome");
+            // CR 608.2c + CR 614.12a: the paused member's delivery is complete
+            // here, and this is the ONE instant at which the moved object, the
+            // parked continuation and the marker's owner are all reachable at
+            // once. A `forward_result` producer whose selected member re-paused
+            // mid-entry (an as-enters copy choice, an Aura host choice) is
+            // delivered out-of-band by the replacement resume, so it never
+            // reaches the moved-object path further down this drain; without
+            // binding here its chained "that creature" rider resolves against an
+            // empty referent and the delayed trigger is built with no target
+            // (#6902).
+            //
+            // The continuation sits directly BENEATH this iteration frame, so the
+            // top-of-stack accessor cannot see it — hence the fixed two-frame
+            // adjacency rather than `active_ability_continuation_frame_mut`.
+            // Consuming the marker stops a later non-forwarding zone choice from
+            // overwriting the bound result, and makes this a no-op on every route
+            // that is not awaiting a forwarded result.
+            {
+                let delivered = crate::types::ability::ForwardedResultContext::from_object_ids(
+                    state,
+                    &[paused_current.member.object_id],
+                );
+                if let Some(frame) = state.continuation_beneath_active_change_zone_mut() {
+                    if frame.pending.awaiting_forwarded_result.take().is_some() {
+                        frame.pending.chain.context.forwarded_result_context =
+                            Some(Box::new(delivered));
+                    }
+                }
+            }
             if matches!(
                 paused_current.count,
                 crate::types::game_state::PausedZoneChangeDeliveryCount::NeedsCount
