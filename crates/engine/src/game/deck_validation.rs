@@ -692,10 +692,13 @@ impl DeclaredPool {
 /// set-code convention (`draft_set_concessions`) — never uppercase-normalize.
 ///
 /// Fails CLOSED when `db.printings_for` returns `None`: "no evidence of a
-/// legal printing" is not "a legal printing." Two production paths hit this
-/// today: `phase-server` under `PHASE_DEV_FIXTURE=1` (`main.rs:2055-2062` →
-/// `from_mtgjson` → `oracle_loader.rs:147`'s empty printings index) and
-/// `CardDatabase::default()` (`server-core/src/draft_session.rs:1369`) — in
+/// legal printing" is not "a legal printing." One production path and one test
+/// path hit this today: `phase-server` under `PHASE_DEV_FIXTURE=1` (the
+/// `CardDataSource::DevFixture` arm in `main::serve` →
+/// `from_mtgjson` → `database::oracle_loader::load_from_mtgjson`'s empty
+/// printings index) and
+/// `CardDatabase::default()`, whose every occurrence in `server-core` is inside
+/// `#[cfg(test)]` (`session`, `deck_resolve`, `draft_session`) — in
 /// both, every card in the deck is rejected as "(not legal in
 /// {format_label})" rather than silently passing a `legal_sets`-restricted
 /// custom format.
@@ -4265,8 +4268,7 @@ mod tests {
 
     use crate::types::custom_format::{
         CombatDamageTiming, CommanderEligibilityRule, CustomFormatDef, CustomFormatId,
-        CustomFormatRules, LegacyRuleSet, LegendRuleScope, PrintingFidelity, ReprintPolicy,
-        StructuralRules, WishOutsideGameScope,
+        CustomFormatRules, LegacyRuleSet, PrintingFidelity, ReprintPolicy, StructuralRules,
     };
     use crate::types::format::DeckSizeRule;
     use crate::types::keywords::PartnerType;
@@ -10056,27 +10058,16 @@ mod tests {
     #[test]
     fn custom_format_rejects_every_undeclared_legacy_axis() {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
-        // Loops over every axis NOT in `IMPLEMENTED_LEGACY_AXES` — currently
-        // all five, since that list is empty; a future phase populating it
-        // narrows this loop automatically (each entry is still exercised
-        // above by `passes_legacy_axis_gate`'s own direct assertion, so a
-        // freshly-implemented axis fails loudly here instead of silently
-        // dropping out).
+        // Loops over every axis NOT in `IMPLEMENTED_LEGACY_AXES`; each phase
+        // that implements one narrows this loop automatically. Mana burn left
+        // in Phase 2b, the Wish and legend-rule scopes in Phase 2cd, so what
+        // remains is combat-damage timing and ante — and both are still
+        // exercised above by `passes_legacy_axis_gate`'s own direct assertion,
+        // so a freshly-implemented axis fails loudly here rather than silently
+        // dropping out of coverage.
         let non_default_rulesets = [
-            // Mana burn is NOT in this list any more: Phase 2b implemented it,
-            // so it is no longer an undeclared axis and the gate correctly
-            // accepts it. This is the loop narrowing itself exactly as its
-            // comment above promised.
             LegacyRuleSet {
                 damage_timing: CombatDamageTiming::OnStack,
-                ..LegacyRuleSet::default()
-            },
-            LegacyRuleSet {
-                wish_scope: WishOutsideGameScope::PreM10ReachesExile,
-                ..LegacyRuleSet::default()
-            },
-            LegacyRuleSet {
-                legend_rule_scope: LegendRuleScope::PreM14AnyController,
                 ..LegacyRuleSet::default()
             },
             // CR 407.2/407.4: only `Enabled` is a declared axis — it promises
@@ -10091,8 +10082,7 @@ mod tests {
         for legacy in non_default_rulesets {
             assert!(
                 !passes_legacy_axis_gate(&legacy),
-                "IMPLEMENTED_LEGACY_AXES is empty, so every non-default axis must fail the \
-                 gate: {legacy:?}"
+                "an axis outside IMPLEMENTED_LEGACY_AXES must fail the gate: {legacy:?}"
             );
             let mut rules = base_custom_rules(DeckSizeRule::Minimum(60), DeckCopyLimit::Unlimited);
             rules.legality.legacy = legacy;

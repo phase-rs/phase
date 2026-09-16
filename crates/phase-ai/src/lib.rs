@@ -35,6 +35,7 @@ pub mod tactical_gate;
 pub(crate) mod test_support;
 pub mod threat_profile;
 pub mod tribute_eval;
+pub mod winston_eval;
 pub mod zone_eval;
 
 pub use card_hints::should_play_now;

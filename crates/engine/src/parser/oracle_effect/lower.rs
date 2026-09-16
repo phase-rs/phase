@@ -22,8 +22,8 @@ use super::super::oracle_quantity::{
     parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
-    parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx,
+    parse_bare_was_dealt_damage_suffix, parse_target, parse_target_with_ctx,
+    parse_that_clause_suffix, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
 };
 use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
 use crate::parser::oracle_ir::ast::*;
@@ -1328,6 +1328,7 @@ mod linked_exile_cleanup_tests {
             duration: None,
             driver: CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
         }
     }
 
@@ -1516,7 +1517,11 @@ fn rewrite_other_revealed_card_to_unimplemented(def: &mut AbilityDefinition) {
         let fragment = def.description.clone().unwrap_or_else(|| {
             "lose life equal to the mana value of the card revealed by the other player".to_string()
         });
-        *def.effect = Effect::unimplemented("lose", fragment);
+        // The old key was `"lose"` — the clause's first word, deliberately imitating the
+        // imperative fallback's naming, which is exactly what this phase abolishes. This
+        // is a stable snake_case CATEGORY key (a named producer's, not a clause-gap
+        // verdict), so `ClauseGapKind::from_unimplemented_name` must NOT decode it.
+        *def.effect = Effect::unimplemented("other_revealed_card_quantity", fragment);
     }
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_other_revealed_card_to_unimplemented(sub);
@@ -1928,6 +1933,57 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
             .unwrap_or_default()
             .to_ascii_lowercase();
         if !nom_primitives::scan_contains(&lower, "target ") {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
+
+    // CR 115.10a + CR 608.2d: a `ChooseOneOf` whose every branch was ALREADY
+    // stamped `Resolution` (by the producer that built it — the shared-
+    // recipient counter-choice reader's untargeted-recipient path, currently
+    // the only stamper) is a choice made entirely while the effect resolves —
+    // no cast-time slot for the outer wrapper either.
+    //
+    // Deliberately keyed on the branch's OWN `target_choice_timing`, not on
+    // `TargetFilter::is_context_ref()`: a `TypedFilter` can equally represent
+    // a literal "target creature" (kept `Stack` elsewhere in this file only
+    // because the shared-recipient reader retargets it to `ParentTarget`
+    // before it gets here) or a described, untargeted recipient — the filter
+    // SHAPE alone cannot tell those apart, so a structural
+    // `!target.is_context_ref()` check here would misclassify any OTHER
+    // `Effect::ChooseOneOf` producer (present or future) whose branches carry
+    // an unretargeted `Typed` filter for a genuinely literal target (e.g. an
+    // independently-parsed "A or B" inline choice — `try_parse_choose_one_of_
+    // inline` — never runs the shared-recipient lift/retarget pass at all).
+    // The `target_choice_timing == Resolution` stamp is authoritative
+    // precisely because nothing else ever writes it onto a `PutCounter`
+    // branch def today (`ability_definition_from_clause` does not propagate
+    // it, so every other producer's branches default to `Stack`); this arm
+    // therefore only ever CARRIES that upstream decision into the wrapper,
+    // never re-derives its own. Also gated on `Effect::PutCounter` so a
+    // hypothetical future stamp on some other branch effect kind does not
+    // silently widen this arm.
+    //
+    // A `scan_contains(fragment, "target ")` re-check on `clause_ir.source` is
+    // deliberately NOT used either: a `ChooseOneOf` clause synthesized by the
+    // shared-recipient reader has no distinct parse span of its own
+    // (`ParsedEffectClause` carries no `source` field), so its fragment
+    // resolves to the enclosing chunk / whole line ("Destroy **target**
+    // artifact.") — a fragment key here would wrongly suppress the arm and
+    // leave Dismantle's recipient a cast-time slot with no legal artifact,
+    // i.e. uncastable.
+    //
+    // Every shipping `ChooseOneOf`-of-`PutCounter` card (dwarven armorer,
+    // elspeth resplendent, invoke the ancients, owen grady, vivien monsters'
+    // advocate) is produced by the retarget-then-lift path, so none of their
+    // branches is ever stamped `Resolution` — `.all()` fails for all of them
+    // and they keep `Stack` unchanged.
+    if let Effect::ChooseOneOf { branches, .. } = &clause_ir.parsed.effect {
+        let all_branches_choose_recipient_at_resolution = !branches.is_empty()
+            && branches.iter().all(|branch| {
+                branch.target_choice_timing == TargetChoiceTiming::Resolution
+                    && matches!(&*branch.effect, Effect::PutCounter { .. })
+            });
+        if all_branches_choose_recipient_at_resolution {
             return TargetChoiceTiming::Resolution;
         }
     }
@@ -3102,13 +3158,10 @@ pub(super) fn rewrite_counter_instead_target_from_antecedent(
 /// "create <N> of those tokens" (optionally with a trailing modifier like
 /// "that are tapped and attacking" or "instead"). Returns the parsed count.
 fn match_create_of_those_tokens(effect: &Effect) -> Option<QuantityExpr> {
-    let Effect::Unimplemented { name, description } = effect else {
-        return None;
-    };
-    if name != "create" {
-        return None;
-    }
-    let text = description.as_deref()?;
+    // The discriminator is the `tag("create ")` + count/anaphor parse below, read off the
+    // recorded description; the gap's name is the parser's verdict on which sub-grammar
+    // refused the clause and is not a stable key for this rewrite.
+    let text = effect.unimplemented_description()?;
     let lower = text.to_lowercase();
     let (_, rest) = nom_on_lower(text, &lower, |i| value((), tag("create ")).parse(i))?;
     let rest_lower = rest.to_lowercase();
@@ -6319,6 +6372,7 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     let duration_text = text.trim_end_matches('.').trim();
     let lower = duration_text.to_lowercase();
     if target_relative_clause_owns_suffix(lower.as_str())
+        || bare_dealt_damage_relative_clause_owns_suffix(lower.as_str())
         || player_lookback_relative_clause_owns_suffix(lower.as_str())
         || spell_history_relative_clause_owns_suffix(lower.as_str())
         || cant_be_activated_clause_owns_tapped_suffix(lower.as_str())
@@ -6651,6 +6705,54 @@ fn target_relative_clause_owns_suffix(input: &str) -> bool {
         .is_ok()
 }
 
+/// Bare-participle sibling of
+/// `target_relative_clause_owns_suffix`, for the REDUCED relative clause that
+/// carries no relative pronoun at all — "each creature dealt damage this turn"
+/// (Inflame). `target_relative_clause_owns_suffix` anchors on a literal
+/// " that " and so never fires here; without this guard the generic
+/// end-of-string duration stripper above amputates "this turn" as a bogus
+/// `Duration::UntilEndOfTurn` before the target parser ever runs — correct for
+/// a genuine duration clause, wrong here, since "this turn" is the closing
+/// word of the target's own damage-history restriction, not an expiry on the
+/// effect. Mirrors the find-then-fully-consume shape of its sibling, anchored
+/// on the bare participle phrase `parse_bare_was_dealt_damage_suffix` (the
+/// single authority for this reduced clause) recognizes instead of "that ".
+fn bare_dealt_damage_relative_clause_owns_suffix(input: &str) -> bool {
+    // Exclude the WITH-copula forms ("that was"/"that were
+    // dealt damage this turn") up front — those already carry a relative
+    // pronoun and are owned by `target_relative_clause_owns_suffix` (paired
+    // with the "was"/"were dealt damage this turn" `VERB_PHRASES` rows). This
+    // guard is only for the truly BARE participle with no copula at all, so a
+    // contiguous "was "/"were " immediately before "dealt damage this turn"
+    // must fall through to the sibling guard instead of being claimed here.
+    let has_leading_copula = alt((
+        take_until::<_, _, OracleError<'_>>("was dealt damage this turn"),
+        take_until("were dealt damage this turn"),
+    ))
+    .parse(input)
+    .is_ok();
+    if has_leading_copula {
+        return false;
+    }
+    let Ok((relative_clause, _)) =
+        take_until::<_, _, OracleError<'_>>(" dealt damage this turn").parse(input)
+    else {
+        return false;
+    };
+    let Some((_, consumed)) = parse_bare_was_dealt_damage_suffix(relative_clause) else {
+        return false;
+    };
+    let remaining = &relative_clause[consumed..];
+    (
+        multispace0,
+        opt(alt((tag::<_, _, OracleError<'_>>("."), tag(",")))),
+        multispace0,
+        eof,
+    )
+        .parse(remaining)
+        .is_ok()
+}
+
 /// CR 603.7a: Strip temporal suffix indicating a delayed trigger condition.
 /// Parallel to `strip_trailing_duration()` but for one-shot deferred effects.
 /// Duration = "effect is active during this period"; DelayedTriggerCondition = "fire once at this
@@ -6791,21 +6893,24 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
 /// CR 603.7 (issue #8721): the cast-permission back-reference gate — "if you cast
 /// a spell this way, …" / "when you cast that spell, …".
 ///
-/// CR 608.2g is the CONTRAST rule here, not an authority for this lowering, and
-/// an earlier version of this header cited it as though it were: 608.2g governs
-/// an effect that "specifically instructs or allows a player to cast a spell
-/// during resolution", which is precisely what this class is NOT. If a member of
-/// it ever lowered to that shape, the delayed trigger would be created after its
-/// own event and never fire (CR 603.7a).
-///
 /// The consequent is gated on a cast that HAS NOT HAPPENED when the granting
-/// ability resolves: in every case measured over the full-corpus parse dump the
-/// permission outlives the granting resolution (the default
-/// `CastFromZoneDriver::LingeringPermission`, which the dump shows as an absent
-/// `driver` key), so the granted spell is cast later under priority rather than
-/// inside it. So the consequent is a delayed
-/// triggered ability keyed to that later cast, and lowering it as a sequential
-/// instruction of this resolution applies it unconditionally (issue #8721).
+/// clause is applied — whichever way the cast is then made. Since issue #8775
+/// both carriers that reach this recognizer (Helmut Zemo, Ogre Battlecaster)
+/// cast the chosen card DURING the granting ability's resolution (CR 608.2g,
+/// `CastFromZoneDriver::DuringResolution` → `CastOffer::GraveyardPaidCast`);
+/// before that they granted a lingering permission exercised later under
+/// priority. Either way the consequent is a delayed triggered ability keyed to
+/// the cast (CR 603.7), and lowering it as a sequential instruction of this
+/// resolution applies it unconditionally (issue #8721).
+///
+/// ORDER IS LOAD-BEARING for the during-resolution form: the delayed trigger
+/// must exist before the cast it waits for (CR 603.7a — a delayed trigger
+/// created after its own event never fires). That is guaranteed one seam away,
+/// in `effects/mod.rs`: the `CastFromZone` head's sequential tail (this
+/// `CreateDelayedTrigger`) is resolved inline while the offer is still open,
+/// and the accepted offer performs the cast afterwards. An earlier version of
+/// this header said the opposite ("precisely what this class is NOT"); that
+/// described the lingering model, which the paid class no longer uses.
 ///
 /// Deliberately stated about the PERMISSION, not about one effect variant. The
 /// recognizer itself checks only the two wordings — it does not verify that a
@@ -6826,19 +6931,19 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
 /// corpus card is that shape (Discord, Lord of Disharmony) and it is left
 /// unchanged; see the decline at the call site in `oracle_effect::mod`.
 ///
-/// `ThisTurn` rather than `Reflexive` for exactly that reason: CR 603.12 has a
-/// reflexive ability "checked immediately after being created" and triggering on
-/// whether its event occurred EARLIER DURING THE RESOLUTION that created it —
-/// precisely the window in which this cast cannot occur. (Not "one shot":
+/// `ThisTurn` rather than `Reflexive`: CR 603.12 has a reflexive ability
+/// "checked immediately after being created" and triggering on whether its
+/// event occurred EARLIER DURING THE RESOLUTION that created it — the cast
+/// here happens AFTER the trigger is created (the inline-tail order above),
+/// so a reflexive form would look back at nothing. (Not "one shot":
 /// CR 603.12a triggers it once per occurrence.)
 ///
-/// And `ThisTurn` rather than a persistent lifetime, which is the other question
-/// a hard-coded lifetime invites: MEASURED, the permission itself expires at
-/// cleanup. `cast_from_zone::record_lingering_permissions` caps an in-place
-/// graveyard grant with `duration: None` at `UntilEndOfTurn` (`granted_duration`'s
-/// `None => in_place.then_some(...)` arm), and both cards this recognizer changes
-/// carry `duration: None`. A longer-lived trigger could never fire, because the
-/// cast it waits for can no longer happen.
+/// And `ThisTurn` rather than a persistent lifetime: the offer is answered
+/// within this resolution, so the cast it waits for happens this turn or not
+/// at all. A declined offer withdraws the trigger again
+/// (`engine_resolution_choices::withdraw_declined_offer_cast_triggers`) —
+/// keyed to the card, it would otherwise fire on a cast of that card by some
+/// other route this turn.
 ///
 /// Two prefixes, not three: `"if you cast it this way, "` has ZERO corpus
 /// members (26 cards print `"if you cast a spell this way, "`, 7 print
@@ -8452,6 +8557,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
     let (target, _) = parse_target(stripped_target_text);
 
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::DealDamage {
             amount,
             target,
@@ -8537,6 +8643,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
 
     let counter_name = counter_type.as_str().into_owned();
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::PutCounter {
             counter_type,
             count: count_expr,
@@ -8606,6 +8713,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
     };
 
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: Effect::PreventDamage {
             amount,
             amount_dynamic,
@@ -8707,6 +8815,7 @@ pub(super) fn try_parse_bidirectional_prevent(
     by_ability.sub_link = SubAbilityLink::SequentialSibling;
 
     Some(ParsedEffectClause {
+        unlowered_guard: None,
         effect: to_effect,
         duration: None,
         sub_ability: Some(Box::new(by_ability)),
@@ -12294,14 +12403,15 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
 #[cfg(test)]
 mod tests {
     use super::{
-        match_create_of_those_tokens, nest_whenever_this_turn_token_cleanup_delayed_trigger,
-        parse_enter_counters_clause_body, parse_where_x_quantity_expression,
-        patch_choose_from_zone_counter_continuation_target, relink_gated_token_referent_consumers,
-        strip_redundant_flip_win_quantifier, strip_return_destination_ext_with_remainder,
-        strip_temporal_prefix, strip_temporal_suffix, strip_trailing_duration,
-        strip_trailing_where_x, value_quantity_clause_owns_this_turn_suffix,
-        ControlClausePossessor,
+        gate_other_revealed_card_on_multiplayer_reveal, match_create_of_those_tokens,
+        nest_whenever_this_turn_token_cleanup_delayed_trigger, parse_enter_counters_clause_body,
+        parse_where_x_quantity_expression, patch_choose_from_zone_counter_continuation_target,
+        relink_gated_token_referent_consumers, strip_redundant_flip_win_quantifier,
+        strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
+        strip_trailing_duration, strip_trailing_where_x,
+        value_quantity_clause_owns_this_turn_suffix, ControlClausePossessor,
     };
+    use crate::parser::oracle_ir::diagnostic::ClauseGapKind;
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction,
@@ -12535,7 +12645,7 @@ mod tests {
             !parsed
                 .abilities
                 .iter()
-                .any(ability_chain_has_unimplemented_the),
+                .any(ability_chain_has_unimplemented_copy_grant),
             "the 'the copy gains...' clause must no longer be Unimplemented"
         );
     }
@@ -12568,7 +12678,7 @@ mod tests {
                 .triggers
                 .iter()
                 .filter_map(|t| t.execute.as_deref())
-                .any(ability_chain_has_unimplemented_the),
+                .any(ability_chain_has_unimplemented_copy_grant),
             "the 'the copy gains...' clause must no longer be Unimplemented"
         );
     }
@@ -12591,10 +12701,19 @@ mod tests {
         None
     }
 
-    fn ability_chain_has_unimplemented_the(def: &AbilityDefinition) -> bool {
+    /// The clause the two negatives below guard. Rename-proof: key on the CLAUSE a gap
+    /// would record, not on the gap's name — once gaps are named by verdict rather than
+    /// by the clause's first word, a `name == "the"` compare can never be true and the
+    /// guard stops guarding silently.
+    const COPY_GRANT_PHRASE: &str = "the copy gains haste";
+
+    fn ability_chain_has_unimplemented_copy_grant(def: &AbilityDefinition) -> bool {
         let mut cur = Some(def);
         while let Some(d) = cur {
-            if matches!(d.effect.as_ref(), Effect::Unimplemented { name, .. } if name == "the") {
+            if d.effect
+                .unimplemented_description()
+                .is_some_and(|desc| desc.to_lowercase().contains(COPY_GRANT_PHRASE))
+            {
                 return true;
             }
             cur = d.sub_ability.as_deref();
@@ -13650,6 +13769,56 @@ mod tests {
             other => panic!("expected ClampMin, got {other:?}"),
         }
         assert_eq!(remainder, "");
+    }
+
+    /// V14 — CR 608.2c: the `OtherRevealedCard` honesty gate mints a stable
+    /// snake_case CATEGORY key belonging to a named producer, not a clause-gap
+    /// verdict and not the clause's first word.
+    ///
+    /// This producer has no corpus witness at the phase base (Parker Luck keeps its
+    /// lowered `LoseLife` because `multi_target` is present; Keen Duelist fails
+    /// closed further upstream), so the gate is driven directly here — the only
+    /// venue where the rewritten node is observable at all.
+    #[test]
+    fn other_revealed_card_gap_uses_a_category_key_not_a_clause_gap_verdict() {
+        const CLASS_FRAGMENT: &str =
+            "lose life equal to the mana value of the card revealed by the other player";
+
+        // A `LoseLife` whose amount reads the `OtherRevealedCard` anaphor in a chain
+        // with NO multiplayer `RevealTop`, so the gate must fire.
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::OtherRevealedCard,
+                    },
+                },
+                target: None,
+            },
+        );
+        def.description = Some(CLASS_FRAGMENT.to_string());
+
+        gate_other_revealed_card_on_multiplayer_reveal(&mut def);
+
+        // Reach-guard: the gate demonstrably fired rather than returning early.
+        let Effect::Unimplemented { name, .. } = def.effect.as_ref() else {
+            panic!(
+                "the unanchored anaphor must be rewritten to a gap; got {:?}",
+                def.effect
+            );
+        };
+        assert_eq!(name, "other_revealed_card_quantity");
+        assert_eq!(
+            def.effect.unimplemented_description(),
+            Some(CLASS_FRAGMENT),
+            "the class fragment is recorded unchanged"
+        );
+        assert_eq!(
+            ClauseGapKind::from_unimplemented_name(name),
+            None,
+            "a named producer's category key must NOT decode as a clause-gap verdict"
+        );
     }
 }
 #[cfg(test)]

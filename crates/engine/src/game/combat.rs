@@ -6,7 +6,7 @@ use super::game_object::GameObject;
 use super::players;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::static_kind_present;
-use crate::types::ability::{StaticDefinition, TargetFilter, TargetRef};
+use crate::types::ability::{StaticCondition, StaticDefinition, TargetFilter, TargetRef};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -1360,25 +1360,25 @@ pub(crate) fn defending_player_for_target_or(
     target: AttackTarget,
     fallback: PlayerId,
 ) -> PlayerId {
-    match target {
-        AttackTarget::Player(pid) => pid,
-        AttackTarget::Planeswalker(pw_id) => state
-            .objects
-            .get(&pw_id)
-            .map(|pw| pw.controller)
-            .unwrap_or(fallback),
-        AttackTarget::Battle(battle_id) => state
-            .objects
-            .get(&battle_id)
-            .and_then(|b| b.protector())
-            .unwrap_or(fallback),
-    }
+    defending_player_for_target(state, target).unwrap_or(fallback)
 }
 
-/// CR 508.5 + CR 310.9d: [`defending_player_for_target_or`] with the historical
-/// `PlayerId(0)` fallback used by attack-declaration bookkeeping.
-fn defending_player_for_target(state: &GameState, target: AttackTarget) -> PlayerId {
-    defending_player_for_target_or(state, target, PlayerId(0))
+/// CR 508.5 + CR 310.9d: the defending player relative to an attack target —
+/// the player attacked, the CONTROLLER of the planeswalker attacked, or the
+/// PROTECTOR of the battle attacked. `None` when the target permanent is gone
+/// or a battle has no protector: there is then no defending player, which is a
+/// distinct answer from "player 0".
+pub(crate) fn defending_player_for_target(
+    state: &GameState,
+    target: AttackTarget,
+) -> Option<PlayerId> {
+    match target {
+        AttackTarget::Player(pid) => Some(pid),
+        AttackTarget::Planeswalker(pw_id) => state.objects.get(&pw_id).map(|pw| pw.controller),
+        AttackTarget::Battle(battle_id) => {
+            state.objects.get(&battle_id).and_then(|b| b.protector())
+        }
+    }
 }
 
 /// Iterate every battlefield `StaticDefinition` whose mode is a block-restriction
@@ -3431,6 +3431,17 @@ fn local_cant_attack_def_applies(
         sd.mode,
         StaticMode::CantAttack | StaticMode::CantAttackOrBlock
     ) && sd.attack_defended.is_none()
+        // CR 506.2 + CR 508.1c + CR 508.5: a restriction GATED on the defending
+        // player's board is per-pairing for the same reason `attack_defended` is —
+        // the defending player is determined relative to an attacking creature and
+        // the target it attacks. A creature-level query has no such anchor, so defer
+        // to `attacker_can_attack_target`, which does. Without this, the printed
+        // "unless" (`Not(DefendingPlayerControls)`) evaluates unanchored to TRUE and
+        // the restriction applies on every board, on both arms.
+        && !sd
+            .condition
+            .as_ref()
+            .is_some_and(StaticCondition::needs_defending_player_anchor)
         && match sd.affected.as_ref() {
             // CR 604.1 + CR 109.5: an unscoped source-local attack
             // restriction is intrinsic to its own source.
@@ -3818,7 +3829,8 @@ fn creature_must_attack_with_attackable_targets_gated(
     // CR 805.10a: attacking-team guard — a must-attack requirement applies to any
     // creature controlled by the active player or a teammate, not just the literal
     // active player (the active team makes one combined attack).
-    if !active_attacking_team(state).contains(&obj.controller) {
+    let active_team = active_attacking_team(state);
+    if !active_team.contains(&obj.controller) {
         return false;
     }
     if !obj.card_types.core_types.contains(&CoreType::Creature) {
@@ -3880,6 +3892,21 @@ fn creature_must_attack_with_attackable_targets_gated(
     // "attacks if able" requirement — a creature under Pacifism is not forced to
     // attack even while goaded. Enforcement must agree with display.
     if creature_cant_attack_gated(state, obj_id, gates) {
+        return false;
+    }
+    // CR 508.1d, the "if able" clause — the ANCHORED half of the CR 508.1c
+    // override above. `creature_cant_attack_gated` is a CREATURE-LEVEL query: it
+    // carries no attack target, so a restriction gated on the DEFENDING PLAYER's
+    // board (`StaticCondition::needs_defending_player_anchor` — CR 506.2 +
+    // CR 508.5) is deferred there and answers `false` on every board. Consulting
+    // only that deferred answer claimed a requirement for a creature whose every
+    // pairing the legality model refuses. Ask the shared pairability authority
+    // instead — the SAME per-pairing predicate `AttackDeclarationConstraints::build`
+    // filters its `legal_targets` map with — so the requirement/display path and
+    // the legality path cannot disagree: no obeyable requirement exists for a
+    // creature with an empty legal-target list. This view short-circuits on the
+    // first legal pairing; it never builds or sorts the list.
+    if !attacker_has_legal_attack_target(state, obj_id, attackable, gates, &active_team) {
         return false;
     }
     // CR 702.26b: A phased-out permanent is treated as though it doesn't exist
@@ -4238,6 +4265,8 @@ fn attacker_can_attack_target(
     gates: &CombatStaticGates,
     active_team: &[PlayerId],
 ) -> bool {
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_attack_pairability_evaluation();
     // CR 508.1b + CR 310.5/310.9b: target validity + active-team exclusion.
     match target {
         AttackTarget::Player(pid) => {
@@ -4318,6 +4347,75 @@ fn attacker_can_attack_target(
     }
 
     true
+}
+
+/// CR 508.1b + CR 508.1c + CR 508.5: the live defenders `attacker_id` may legally
+/// be declared as attacking, drawn from the defender universe `attackable`
+/// ([`attackable_defender_targets`] / [`get_valid_attack_targets`]), lazily.
+///
+/// THE shared pairability authority. Two views are built on this one sweep and
+/// nothing else consults `attacker_can_attack_target` for a whole attacker:
+///  * [`legal_attack_targets_for_attacker`] — the LIST view, collected and
+///    sorted, published by [`AttackDeclarationConstraints::build`] as its
+///    `legal_targets` map (the legality path);
+///  * [`attacker_has_legal_attack_target`] — the EXISTENTIAL view, which
+///    short-circuits on the first legal pairing and allocates nothing. It is the
+///    CR 508.1d "if able" gate in
+///    `creature_must_attack_with_attackable_targets_gated` (the requirement /
+///    display / AI path).
+///
+/// One predicate serves both, so they cannot disagree about whether a creature
+/// can attack anything at all — which is exactly what a second, parallel
+/// predicate let happen: a creature-level "can't attack" query must DEFER a
+/// restriction gated on the defending player's board (CR 506.2 + CR 508.5 —
+/// `StaticCondition::needs_defending_player_anchor`), so it answered "no
+/// restriction" while every pairing here was refused. Every verdict below comes
+/// from the single per-pairing authority [`attacker_can_attack_target`], which
+/// carries the attack target such a restriction needs.
+fn legal_attack_targets_iter<'a>(
+    state: &'a GameState,
+    attacker_id: ObjectId,
+    attackable: &'a [AttackTarget],
+    gates: &'a CombatStaticGates,
+    active_team: &'a [PlayerId],
+) -> impl Iterator<Item = AttackTarget> + 'a {
+    attackable.iter().copied().filter(move |&target| {
+        attacker_can_attack_target(state, attacker_id, target, gates, active_team)
+    })
+}
+
+/// The LIST view of [`legal_attack_targets_iter`], sorted. Use this only when the
+/// caller needs the targets themselves; asking whether ANY exists must go through
+/// [`attacker_has_legal_attack_target`], which does not allocate.
+fn legal_attack_targets_for_attacker(
+    state: &GameState,
+    attacker_id: ObjectId,
+    attackable: &[AttackTarget],
+    gates: &CombatStaticGates,
+    active_team: &[PlayerId],
+) -> Vec<AttackTarget> {
+    let mut targets: Vec<AttackTarget> =
+        legal_attack_targets_iter(state, attacker_id, attackable, gates, active_team).collect();
+    targets.sort_unstable();
+    targets
+}
+
+/// The EXISTENTIAL view of [`legal_attack_targets_iter`]: is there at least one
+/// defender `attacker_id` could legally be declared as attacking?
+///
+/// CR 508.1d needs only this bit, so it stops at the first legal pairing and
+/// never builds or sorts a list. Same predicate as the list view, so the
+/// requirement/display path and the legality path agree by construction.
+fn attacker_has_legal_attack_target(
+    state: &GameState,
+    attacker_id: ObjectId,
+    attackable: &[AttackTarget],
+    gates: &CombatStaticGates,
+    active_team: &[PlayerId],
+) -> bool {
+    legal_attack_targets_iter(state, attacker_id, attackable, gates, active_team)
+        .next()
+        .is_some()
 }
 
 /// CR 508.1c + CR 109.5 + CR 607.2d: per-pairing `AttackOnlyNeighbor` check
@@ -4487,13 +4585,10 @@ impl AttackDeclarationConstraints {
 
         let mut legal_targets: HashMap<ObjectId, Vec<AttackTarget>> = HashMap::new();
         for &cid in &candidates {
-            let mut targets: Vec<AttackTarget> = all_targets
-                .iter()
-                .copied()
-                .filter(|&t| attacker_can_attack_target(state, cid, t, &gates, &active_team))
-                .collect();
-            targets.sort_unstable();
-            legal_targets.insert(cid, targets);
+            legal_targets.insert(
+                cid,
+                legal_attack_targets_for_attacker(state, cid, &all_targets, &gates, &active_team),
+            );
         }
 
         // CR 508.1d / CR 701.15c: requirement multiset over eligible candidates.
@@ -5615,7 +5710,7 @@ pub(super) fn commit_attack_declaration(
         .map(|(object_id, target)| {
             // CR 508.5 + CR 310.9d: Defending player for a battle = its protector,
             // not its controller. For planeswalkers, defending player = controller.
-            let defending_player = defending_player_for_target(state, *target);
+            let defending_player = defending_player_for_target_or(state, *target, PlayerId(0));
             AttackerInfo::new(*object_id, *target, defending_player)
         })
         .collect();
@@ -6160,10 +6255,21 @@ pub fn attacker_constraints_for_active_player(
         {
             continue;
         }
-        // A creature under a "can't attack" restriction is never an eligible
-        // attacker (`get_valid_attacker_ids` filters it out), and B1 makes the
-        // must-attack predicate return false for it — so eligible creatures are
-        // the only MustAttack candidates and the complement carries CantAttack.
+        // A creature under a "can't attack" restriction is USUALLY not an
+        // eligible attacker (`get_valid_attacker_ids` filters it out), and B1
+        // makes the must-attack predicate return false for it — so eligible
+        // creatures are the only MustAttack candidates and the complement
+        // carries CantAttack. The exception: a `CantAttack` static gated on
+        // `StaticCondition::DefendingPlayerControls` (defender-anchored —
+        // `StaticCondition::needs_defending_player_anchor`) can't be answered
+        // without a proposed target, so `static_ability_match_applies` defers
+        // it to the per-pairing authority `attacker_can_attack_target` instead
+        // of filtering the creature here — the same deferral the `attack_defended`
+        // scoping (CR 508.1c, + CR 508.1d for the cost form) already performs for
+        // target-SCOPED prohibitions. Those creatures ARE in `valid` (eligible,
+        // no CantAttack badge here) with an empty legal-target set enforced
+        // downstream; emitting a badge for that case is a known follow-up, not
+        // done by this comment.
         if valid.contains(&obj_id) {
             if creature_must_attack_with_attackable_targets_gated(
                 state,

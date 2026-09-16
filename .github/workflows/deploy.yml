@@ -79,8 +79,7 @@ jobs:
   # ── Preview inputs ─────────────────────────────────────────────────────────
   # Generates the immutable card-data/draft-pool pair and derives the engine
   # fingerprint shared by the preview server and frontend. The publication work
-  # follows in `card-data`, so native preview builds can start immediately after
-  # these inputs are ready rather than waiting on ancillary data generation.
+  # follows in `card-data`, which both Pages and the preview server need.
   preview-inputs:
     name: Prepare preview inputs
     needs: [deploy-gate]
@@ -343,9 +342,9 @@ jobs:
 
   # ── Ancillary data + R2 publication ───────────────────────────────────────
   # The preview inputs above are already immutable and fingerprinted. This job
-  # publishes the remaining frontend data while the signed preview-server
-  # matrix builds. Pages still depends on this job, so no browser sees a shell
-  # pointing at data that has not reached R2.
+  # publishes the remaining frontend data, including the content-addressed pair
+  # the preview manifest names. Pages and the preview server both depend on it,
+  # so nothing points at data that has not reached R2.
   card-data:
     name: Publish card data & R2
     needs: [deploy-gate, preview-inputs]
@@ -617,13 +616,15 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # ── Signed preview server (parallel with data publication) ──────────────────
+  # ── Signed preview server (after data publication) ─────────────────────────
   # The shell uses ENGINE_FINGERPRINT to fetch this exact binary. Keep the
   # server publication in the same workflow graph so Pages can never publish a
   # fingerprint whose signed server artifact is missing from the manifest.
+  # It needs `card-data`, which uploads the files its manifest entry names, so
+  # the manifest can never advertise data that is not on R2.
   preview-server:
     name: Publish Preview Server
-    needs: [deploy-gate, preview-inputs]
+    needs: [deploy-gate, preview-inputs, card-data]
     uses: ./.github/workflows/preview-server.yml
     with:
       fingerprint: ${{ needs.preview-inputs.outputs.engine_fingerprint }}
@@ -734,6 +735,8 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
+    outputs:
+      pages_artifact_id: ${{ steps.upload-pages.outputs.artifact_id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -869,6 +872,7 @@ jobs:
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
 
       - name: Upload Pages artifact
+        id: upload-pages
         uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:
           path: client/dist
@@ -877,24 +881,43 @@ jobs:
         id: deploy
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
 
-  # ── Server binary compile (parallel with card-data) ─────────────────────────
+  # ── Preview web image (needs the deployed Pages bundle) ────────────────────
+  # Downstream of build-pages: no image for a failed Pages deploy, and an image
+  # failure cannot hold Pages back.
+  preview-web-image:
+    name: Publish Preview Web Image
+    needs: [build-pages]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/preview-web.yml
+    with:
+      deploy_sha: ${{ github.event.workflow_run.head_sha || github.sha }}
+      pages_artifact_id: ${{ needs.build-pages.outputs.pages_artifact_id }}
+
+  # ── Server binary compile (after preview inputs) ────────────────────────────
   # phase-server is compiled NATIVELY as a static musl binary, then uploaded as
-  # an artifact for push-server-image. The compile needs nothing the data
-  # pipeline produces, so it deliberately has no `needs:` and overlaps card-data's
-  # ~10min run instead of serializing behind it.
+  # an artifact for push-server-image. It embeds the preview identity that
+  # preview-server.yml's native builds carry (PHASE_CHANNEL=preview plus the
+  # engine fingerprint), so the image fetches its data into an empty
+  # PHASE_DATA_DIR. The fingerprint comes from preview-inputs; the compile then
+  # overlaps card-data and the preview-server builds.
   #
   # NOTE: this is a cold ~10min compile every run. Swatinem's rust-cache (via
   # setup-rust-toolchain) caches registry/git deps but prunes the workspace
   # crates' own artifacts, so the optimized server-release build of the engine
-  # crate recompiles each time. The win here is parallelism, not incrementality;
-  # warming the workspace compile would need sccache or similar.
+  # crate recompiles each time; warming the workspace compile would need sccache
+  # or similar.
   build-server-binary:
     name: Build server binary (linux ${{ matrix.arch }})
-    needs: [deploy-gate]
+    needs: [deploy-gate, preview-inputs]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
+    env:
+      PHASE_CHANNEL: preview
+      PHASE_ENGINE_FINGERPRINT: ${{ needs.preview-inputs.outputs.engine_fingerprint }}
     strategy:
       fail-fast: false
       matrix:
@@ -925,7 +948,7 @@ jobs:
         # Python is PEP 668 externally-managed since GitHub reverted its
         # pip workaround (actions/runner-images#10897, 2025-05-09). Same
         # flag the Dockerfile already passes for this identical install.
-        run: pip install --break-system-packages cargo-zigbuild==0.23.0 ziglang==0.16.0
+        run: pip install --break-system-packages --require-hashes -r scripts/requirements-zigbuild.txt
 
       - name: Add musl target
         # The musl target must be added explicitly with `rustup target add`, not
@@ -956,21 +979,23 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # ── Server image push (needs binary) ────────────────────────────────────────
+  # ── Server image push (needs binary + published preview server + card data) ─
   # Pure packaging step: pulls the prebuilt musl binary, then BINARY_STAGE=prebuilt
   # makes Docker just apt + COPY (no compile).
   #
-  # NOTE: this binary is compiled WITHOUT a PHASE_CHANNEL identity (it builds in
-  # parallel with card-data, so the fingerprint cannot exist yet), which means
-  # the image cannot self-bootstrap its data: booting it against an empty
-  # PHASE_DATA_DIR is a clear fatal error. Any consumer must either
-  # pre-provision the data volume or set PHASE_DATA_MANIFEST_URL to a signed
-  # release-shaped data manifest. No in-repo deployment currently runs this
-  # image (beebs deploy-server is disabled); see GH #6287 for publishing a
-  # signed staging data manifest before re-enabling one.
+  # The binary finds its data under its fingerprint in the signed
+  # preview-server.json, so the push waits for preview-server: an image is pushed
+  # only once its fingerprint is listed, and a failed publication leaves the
+  # previous image in place, as it leaves the previous Pages deploy. The push also
+  # waits for card-data, which uploads the content-addressed files the entry's
+  # data URLs name. The manifest keeps only the current and previous
+  # fingerprints, and publications that push no image (a failed build or push
+  # here, a manual preview-server dispatch) still rotate it, so any image,
+  # `:preview` included, can outlive its entry and then needs pre-provisioned
+  # data or PHASE_DATA_MANIFEST_URL.
   push-server-image:
     name: Build & push server image
-    needs: [build-server-binary]
+    needs: [build-server-binary, preview-server, card-data]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

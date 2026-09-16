@@ -277,9 +277,11 @@ pub fn guard_client_message_before_dispatch(
             code,
             role: _,
             token,
+            rotation_nonce,
         } => validate_renew_tournament_credential_fields(RenewTournamentCredentialFields {
             code,
             token,
+            rotation_nonce,
         }),
         ClientMessage::CreateDraftWithSettings {
             display_name,
@@ -549,9 +551,11 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             code,
             role: _,
             token,
+            rotation_nonce,
         } => validate_renew_tournament_credential_fields(RenewTournamentCredentialFields {
             code,
             token,
+            rotation_nonce,
         }),
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
@@ -1018,6 +1022,7 @@ mod tests {
                     code: "TOUR01".into(),
                     role: TournamentRole::Organizer,
                     token: long_token,
+                    rotation_nonce: "n".into(),
                 },
             ),
             (
@@ -1026,6 +1031,7 @@ mod tests {
                     code: long_code,
                     role: TournamentRole::Player,
                     token: "tok".into(),
+                    rotation_nonce: "n".into(),
                 },
             ),
         ]
@@ -1077,11 +1083,13 @@ mod tests {
                 code: "TOUR01".into(),
                 role: TournamentRole::Organizer,
                 token: "tok".into(),
+                rotation_nonce: "nonce".into(),
             },
             ClientMessage::RenewTournamentCredential {
                 code: "TOUR01".into(),
                 role: TournamentRole::Player,
                 token: "tok".into(),
+                rotation_nonce: String::new(),
             },
         ]
     }

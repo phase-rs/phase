@@ -328,6 +328,34 @@ local_resource('lobby-servers',
     labels = ['lint'],
 )
 
+# scripts/check-prelowered-ratchet.sh is a pre-commit AND CI gate whose failure
+# modes are all silent-pass: it was written with `declare -A`, so on macOS bash
+# 3.2 it aborted before checking anything (and took the rest of the hook with
+# it, since contributors then commit --no-verify), and a repeated ledger path
+# used to resolve to whichever row the lookup happened to reach first. Neither
+# shows up as a red gate -- they show up as a green one that measured nothing.
+#
+# scripts/prelowered-ratchet.txt is deliberately NOT a dep: the tests build
+# their own ledgers in a mktemp dir, and watching the real one would re-run this
+# on every burn-down tranche for no signal.
+#
+# Same venue and limits as pnpm-preflight and lobby-servers above: Tilt under
+# the 'lint' label, local-only. CI runs the gate itself (ci.yml), not these
+# tests -- enrolling them needs a .github/workflows/** edit, a hard stop for
+# agent changes.
+#
+# No CARGO_TARGET_DIR and no cargo: bash and ripgrep against fixture trees in a
+# mktemp dir, so it cannot contend for a build lock.
+local_resource('prelowered-ratchet',
+    cmd = 'bash scripts/lib/prelowered_ratchet_tests.sh',
+    deps = ['scripts/check-prelowered-ratchet.sh',
+            'scripts/lib/prelowered_ratchet_tests.sh'],
+    ignore = TMP_IGNORE,
+    allow_parallel = True,
+    auto_init = 'lint' in enabled,
+    labels = ['lint'],
+)
+
 # ---------------------------------------------------------------------------
 # Data (manual trigger — click in UI to run)
 # ---------------------------------------------------------------------------

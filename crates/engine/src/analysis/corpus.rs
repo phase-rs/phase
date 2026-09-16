@@ -1818,7 +1818,7 @@ pub(crate) fn drive_offline_pentad_prism_seeded(
 /// opponent (CR 120.3a). Proliferate runs BEFORE the ping so the count is ≥ seed at
 /// every intra-cycle frame (seed 1 → 2 → 1), keeping Ballista a live ≥1/1 (never a
 /// 0/0 that would die to CR 704.5f). Board identical modulo the monotone +1/+1
-/// (projected out, resource.rs:2481), +1 damage/cycle ⇒ `detect_loop` certifies
+/// (projected out by `resource::project_object_for_loop`), +1 damage/cycle ⇒ `detect_loop` certifies
 /// `WinKind::LethalDamage`, naming `DamageDealt(P1)`.
 ///
 /// `seed_counters == 0` is the X=0 dead-loop CONTROL: Ballista enters a 0/0 with no

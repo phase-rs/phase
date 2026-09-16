@@ -395,11 +395,21 @@ generic image points at any deployment with no rebuild. Leave it empty and the
 bundle keeps its build-time default (the public lobby). A malformed address is
 ignored rather than seeded into every profile.
 
+`web.previewSiteUrl` is where the site's "Try Preview" badge points, typically
+this site's own preview deployment, as an `http://` or `https://` address. The
+chart renders it into the same `/config.js` and refuses to render an address the
+client would ignore. Leave it empty and the badge keeps the image's build-time
+preview site. Only release-built images show the badge. A release image built
+before this setting existed shows the badge too, but opens its built-in preview
+site whatever `web.previewSiteUrl` holds.
+
 **Keep the two images on one version.** A client accepts a lobby only within one
 protocol version of its own build, and the server advertises its number without
 being asked — so a web image two releases from its server yields a site that
-loads and then cannot connect. `web.image.tag` defaults to `image.tag`, so
-pinning the server pins both; override it only together.
+loads and then cannot connect. `web.image.tag` defaults to `image.tag`, so a
+release `vX.Y.Z` or `sha-<12>` server tag names the web image of the same
+version — a `:preview` server tag is not guaranteed to (see
+[Building the image](#building-the-image)). Override it only together.
 
 Only `/config.js` differs between deployments, and nginx serves it
 `must-revalidate` while the service worker is told never to precache it —
@@ -431,7 +441,7 @@ render unless you make one of two choices:
 | your situation | set | what you get |
 | --- | --- | --- |
 | you manage upgrades yourself | `web.image.digest: sha256:…` | the exact bytes you tested, until you change them |
-| something bumps `image.tag` for you (release automation, GitOps sync) | `web.image.followServerTag: true` | the SPA moves with the server, staying inside one protocol step by construction |
+| something bumps `image.tag` for you (release automation, GitOps sync) | `web.image.followServerTag: true` | the SPA moves with the server, staying inside one protocol step by construction for release `vX.Y.Z` and `sha-<12>` tags; the two `:preview` tags are pushed by separate jobs and can name different commits, so to track preview set `image.tag: sha-<12>` |
 
 `followServerTag` requires `image.tag`, and the render fails without it. It makes
 the SPA use the server's tag, and with `image.tag` empty that falls back to
@@ -450,13 +460,16 @@ If you pin a digest, **bump it when you bump `image.tag`.** Nothing does it for
 you: a digest does not move when the server does, and once the two drift past two
 releases the site loads and then cannot connect.
 
-`web.image.repository` defaults to `ghcr.io/phase-rs/phase-web`. The job that
-publishes it ships separately from this chart (touching a workflow makes a whole
-PR maintainer-only), so until that lands, point the value at your own build —
-`web.enabled` is false by default, so nothing resolves the image until you opt
-in. It is a static bundle over `nginx-unprivileged`, carrying no nginx.conf of
-its own because the chart mounts one, so building it is a client build plus a
-copy:
+`web.image.repository` defaults to `ghcr.io/phase-rs/phase-web`, published for
+each release from v0.73.0 as `:<tag>` and `:latest`, and for each successful
+preview deploy as `:preview` and `:sha-<12-char commit>`, the preview site's
+bundle. `phase-web:sha-<12>` and `phase-server:sha-<12>` are built from the same
+commit, but separate jobs publish them and either can fail alone, so check that
+both tags exist before using the pair. For anything else, point the value at
+your own build — `web.enabled` is false by default, so nothing resolves the
+image until you opt in. It is a static bundle over `nginx-unprivileged`,
+carrying no nginx.conf of its own because the chart mounts one, so building it
+is a client build plus a copy:
 
 ```bash
 docker buildx create --use --driver docker-container --bootstrap   # once

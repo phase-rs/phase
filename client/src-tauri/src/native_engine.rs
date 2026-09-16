@@ -2146,29 +2146,26 @@ fn make_executable(_path: &Path) -> Result<(), NativeEngineError> {
     Ok(())
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn target_triple() -> Result<&'static str, NativeEngineError> {
-    Ok("aarch64-apple-darwin")
+/// `(os, arch)` → the triple naming the `phase-server-slim-<triple>` release
+/// asset and the preview `binaries` key a desktop on that platform provisions.
+const SERVER_TARGET_TRIPLES: &[((&str, &str), &str)] = &[
+    (("macos", "aarch64"), "aarch64-apple-darwin"),
+    (("windows", "x86_64"), "x86_64-pc-windows-msvc"),
+    (("linux", "x86_64"), "x86_64-unknown-linux-musl"),
+    (("linux", "aarch64"), "aarch64-unknown-linux-musl"),
+];
+
+fn server_target_triple(os: &str, arch: &str) -> Option<&'static str> {
+    SERVER_TARGET_TRIPLES
+        .iter()
+        .find(|(platform, _)| *platform == (os, arch))
+        .map(|(_, triple)| *triple)
 }
 
-#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 fn target_triple() -> Result<&'static str, NativeEngineError> {
-    Ok("x86_64-pc-windows-msvc")
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn target_triple() -> Result<&'static str, NativeEngineError> {
-    Ok("x86_64-unknown-linux-musl")
-}
-
-#[cfg(not(any(
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64"),
-    all(target_os = "linux", target_arch = "x86_64")
-)))]
-fn target_triple() -> Result<&'static str, NativeEngineError> {
-    Err(NativeEngineError::UnsupportedPlatform {
-        detail: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    server_target_triple(os, arch).ok_or_else(|| NativeEngineError::UnsupportedPlatform {
+        detail: format!("{os}-{arch}"),
     })
 }
 
@@ -2207,11 +2204,11 @@ mod tests {
     // this public key/signature are retained; the temporary private key was
     // never added to the repository.
     const TEST_MANIFEST_PUBLIC_KEY: &str =
-        "RWShXyki5XOg0I93KFq/y1ZmJM80FRzQ2yw7POGQ9KSjxscp/2FDTqNU";
+        "RWRDnhhtb7/nrWMP2ITc9DaLnywLbWRXbVAHOCZ8TRfCFCffRzLfzfBe";
     const TEST_RELEASE_MANIFEST: &[u8] = br#"{"schema":1,"channel":"release","version":"1.2.3","generated_at":"2026-01-01T00:00:00Z","data":[]}"#;
-    const TEST_RELEASE_MANIFEST_SIGNATURE: &str = "untrusted comment: signature from minisign secret key\nRUShXyki5XOg0GM/CqvIehBL/PgNuvRzKsR+fjxvdYZq3TWNW5QrsDlAsSCra8g3dGsB5V2Kf6QwUO9jjYbCwznNEpfqNJkHAwE=\ntrusted comment: timestamp:1788355523\tfile:release.json\thashed\nxYDP6Cn8xpjf4DJ3dwQ5UUXEAlRK15QJyis1l2/TFXc4kxRRgmxJwIAJ1nwuk4zM6nrob0dsIEJIRv5l265OBw==";
-    const TEST_PREVIEW_MANIFEST: &[u8] = br#"{"schema":1,"channel":"preview","generated_at":"2026-01-02T00:00:00Z","current":"0123456789abcdef","previous":null,"fingerprints":{"0123456789abcdef":{"commit":"abc","binaries":{"aarch64-apple-darwin":{"url":"https://example.test/macos","sig_url":"https://example.test/macos.minisig"},"x86_64-pc-windows-msvc":{"url":"https://example.test/windows","sig_url":"https://example.test/windows.minisig"},"x86_64-unknown-linux-musl":{"url":"https://example.test/linux","sig_url":"https://example.test/linux.minisig"}},"data":[]}}}"#;
-    const TEST_PREVIEW_MANIFEST_SIGNATURE: &str = "untrusted comment: signature from minisign secret key\nRUShXyki5XOg0Hztqsw1GFwxMgrX5o0/vRLNsbcGz32R1gVODVfUg+ZR4L/PreI9Nsu8u+BGPoGHYw5CNXQlpWHn6ndKe/vFVwM=\ntrusted comment: timestamp:1788355523\tfile:preview.json\thashed\nQwTR8roTR23UbV+hOm3MZMChfMFtZzbZHFH3fPLoPSp6y0HH2zxx7Jqo2/51r+4oeKjzyjptqWFOXk+1mdRaDQ==";
+    const TEST_RELEASE_MANIFEST_SIGNATURE: &str = "untrusted comment: signature from minisign secret key\nRURDnhhtb7/nrZaTnVS9BKwQkuFNEUSnb36Zzf4vfNeQJctAqksY8Bc14W3ygJR9QhbImWmwmgnxa/IalcVWMqcjqjkya2jJbQY=\ntrusted comment: timestamp:1789512543\tfile:release.json\thashed\n/iN3TrIHifX/THa5Vzsbkr9aaQmxvMwlWUYwBviuAP1AUbGMENjFK0ePp5d90ld2YTJ3Eim6FEe5YQ+iOuVKDA==";
+    const TEST_PREVIEW_MANIFEST: &[u8] = br#"{"schema":1,"channel":"preview","generated_at":"2026-01-02T00:00:00Z","current":"0123456789abcdef","previous":null,"fingerprints":{"0123456789abcdef":{"commit":"abc","binaries":{"aarch64-apple-darwin":{"url":"https://example.test/macos","sig_url":"https://example.test/macos.minisig"},"aarch64-unknown-linux-musl":{"url":"https://example.test/linux-arm64","sig_url":"https://example.test/linux-arm64.minisig"},"x86_64-pc-windows-msvc":{"url":"https://example.test/windows","sig_url":"https://example.test/windows.minisig"},"x86_64-unknown-linux-musl":{"url":"https://example.test/linux","sig_url":"https://example.test/linux.minisig"}},"data":[]}}}"#;
+    const TEST_PREVIEW_MANIFEST_SIGNATURE: &str = "untrusted comment: signature from minisign secret key\nRURDnhhtb7/nrYtCCrTg8zqSH+NNPjgDbn9BJUBArB/ZJUuDshbyb9YQNunwijZe8PI3axvrQ61iPHNYycCWm87p81fBuKvm8wM=\ntrusted comment: timestamp:1789512543\tfile:preview.json\thashed\nGEeXonnUs85CowR1YMGev+sRiFt0O4Ijlma1GsukYUMpC7XjaQEzcLmj7ox3kmYgOR5mLwGSm5tE0Bq8X6u7DA==";
 
     fn test_directory(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -3427,6 +3424,46 @@ mod tests {
         assert!(state.bridges.contains_key(&1));
         assert_eq!(read_spawn_record(&files).unwrap().unwrap().key, other);
         fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
+    fn server_target_triple_maps_every_published_desktop_platform() {
+        for (os, arch, triple) in [
+            ("macos", "aarch64", "aarch64-apple-darwin"),
+            ("windows", "x86_64", "x86_64-pc-windows-msvc"),
+            ("linux", "x86_64", "x86_64-unknown-linux-musl"),
+            ("linux", "aarch64", "aarch64-unknown-linux-musl"),
+        ] {
+            assert_eq!(server_target_triple(os, arch), Some(triple), "{os}-{arch}");
+        }
+        for (os, arch) in [
+            ("macos", "x86_64"),
+            ("windows", "aarch64"),
+            ("linux", "arm"),
+            ("freebsd", "x86_64"),
+        ] {
+            assert_eq!(server_target_triple(os, arch), None, "{os}-{arch}");
+        }
+    }
+
+    #[test]
+    fn signed_preview_fixture_lists_a_binary_for_every_server_target() {
+        let manifest = PreviewManifest::parse(TEST_PREVIEW_MANIFEST).unwrap();
+        let entry = manifest.entry_for("0123456789abcdef").unwrap();
+        for (platform, triple) in SERVER_TARGET_TRIPLES {
+            assert!(
+                entry.binaries.contains_key(*triple),
+                "{platform:?}: no fixture binary for {triple}"
+            );
+        }
+    }
+
+    #[test]
+    fn target_triple_resolves_the_host_through_the_mapping() {
+        assert_eq!(
+            target_triple().ok(),
+            server_target_triple(std::env::consts::OS, std::env::consts::ARCH)
+        );
     }
 
     #[test]

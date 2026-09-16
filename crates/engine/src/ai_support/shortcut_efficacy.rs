@@ -657,6 +657,13 @@ fn ability_window_reach(def: &AbilityDefinition) -> WindowReach {
         target_selection_mode: _,
         sub_link: _,
         sibling_condition: _,
+        // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
+        // deferred guard verdict before it hands a tree out, so this is `None` on
+        // every tree that pipeline produces — which is every tree a runtime walker
+        // sees. (NOT a universal claim about the field: `parse_effect_chain` outside
+        // the pipeline leaves marks intact, and no runtime path reaches such a tree.
+        // See `types::ability::UnloweredGuard`.)
+        unlowered_guard: _,
     } = def;
 
     let mut acc = effect_window_reach(effect);

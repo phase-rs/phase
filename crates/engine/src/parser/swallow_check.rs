@@ -1329,23 +1329,17 @@ fn def_tree_has_cast_graveyard_redirect_rider(def: &AbilityDefinition) -> bool {
 /// A graveyard-redirect rider body: a move of the cast/countered spell
 /// (`ParentTarget`) to exile, the owner's hand, or a library position. Walks the
 /// sub-ability chain so an intervening continuation does not hide the rider.
+///
+/// The shape set is the runtime rider classifier's in
+/// `game::effects::cast_from_zone` — the single authority the resolver itself
+/// reads, so a parser-side copy cannot drift from what the resolver consumes.
+/// This function adds only the sub-ability walk around it.
 fn def_is_graveyard_redirect_to_parent(def: &AbilityDefinition) -> bool {
-    if matches!(
-        &*def.effect,
-        Effect::ChangeZone {
-            destination: crate::types::zones::Zone::Exile | crate::types::zones::Zone::Hand,
-            target: crate::types::ability::TargetFilter::ParentTarget,
-            ..
-        } | Effect::PutAtLibraryPosition {
-            target: crate::types::ability::TargetFilter::ParentTarget,
-            ..
-        }
-    ) {
-        return true;
-    }
-    def.sub_ability
-        .as_deref()
-        .is_some_and(def_is_graveyard_redirect_to_parent)
+    crate::game::effects::cast_from_zone::graveyard_destination_rider(&def.effect).is_some()
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(def_is_graveyard_redirect_to_parent)
 }
 
 /// CR 119.7 + CR 608.2c: True when any ability/trigger tree contains a

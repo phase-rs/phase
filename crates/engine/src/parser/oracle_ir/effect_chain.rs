@@ -592,13 +592,13 @@ pub(crate) struct ClauseId(pub(crate) u32);
 /// applied it.
 ///
 /// The three arms are the top-level XOR discriminant of the pre-U5 lower.rs loop
-/// (`if absorbed_by_followup … else if special … else …`, lower.rs:1314/1321).
+/// (`if absorbed_by_followup … else if special … else …`, the pre-U5 lowering pass).
 /// The two continuation channels ride ORTHOGONALLY on the arms — they are applied
 /// in multiple paths — so each arm carries the channels its path actually uses:
-/// - normal/`Emit`: `followup` patches PRIOR defs (lower.rs:1703), then the def is
-///   emitted, then `intrinsic` patches SELF (lower.rs:2078).
+/// - normal/`Emit`: `followup` patches PRIOR defs, then the def is
+///   emitted, then `intrinsic` patches SELF (the pre-U5 lowering pass).
 /// - absorbed/`Continue`: `continuation` patches PRIOR defs; no self def is
-///   emitted (lower.rs:1314).
+///   emitted (the pre-U5 lowering pass).
 /// - `FoldSearchIntoElse`: applies `intrinsic` to the def it builds, inline at its
 ///   own tail (the former `special` path's only intrinsic carrier).
 // Intentional: variants carry parser IR directly (the `Emit` channels hold two
@@ -609,16 +609,16 @@ pub(crate) struct ClauseId(pub(crate) u32);
 pub(crate) enum ClauseDisposition {
     /// CR 608.2c: this clause emits its own definition(s). `followup` is a
     /// continuation from THIS chunk that patches the PRIOR defs before this clause
-    /// emits (formerly `followup_continuation` on the non-absorbed path,
-    /// lower.rs:1703); `intrinsic` patches this clause's OWN lowered def after it
-    /// emits (formerly `intrinsic_continuation`, lower.rs:2078).
+    /// emits (formerly `followup_continuation` on the non-absorbed path);
+    /// `intrinsic` patches this clause's OWN lowered def after it
+    /// emits (formerly `intrinsic_continuation`, the pre-U5 lowering pass).
     Emit {
         followup: Option<ContinuationAst>,
         intrinsic: Option<ContinuationAst>,
     },
     /// CR 608.2c: this clause continues/patches the prior emitted clause rather
     /// than emitting an independent def. Folds the former `absorbed_by_followup`
-    /// and `followup_continuation` pair (absorbed path, lower.rs:1314). The clause
+    /// and `followup_continuation` pair (absorbed path, the pre-U5 lowering pass). The clause
     /// remains addressable (its own id/source) even though it produces no sibling
     /// def. The explicit antecedent selector is JIT-deferred to U6 (module note);
     /// in M1 the target is the prior emitted def, as the pre-U5 lowering applied it.

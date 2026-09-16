@@ -2926,6 +2926,18 @@ impl<'a> CastCommit<'a> {
         self.selected_casting_variant.as_ref()
     }
 
+    /// Accept optional ("you may") effects/costs during resolution (CR 608.2d).
+    pub fn accept_optional(mut self) -> Self {
+        self.optional = OptionalPolicy::Accept;
+        self
+    }
+
+    /// Decline optional ("you may") effects/costs during resolution.
+    pub fn decline_optional(mut self) -> Self {
+        self.optional = OptionalPolicy::Decline;
+        self
+    }
+
     /// Resolve the committed spell and return the usual behavior delta.
     pub fn resolve(self) -> CastOutcome {
         self.try_resolve()

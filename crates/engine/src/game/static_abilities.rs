@@ -7,10 +7,10 @@ use crate::game::functioning_abilities::{
     battlefield_active_statics, game_active_statics, game_functioning_statics, static_kind_present,
 };
 use crate::game::game_object::GameObject;
-use crate::game::layers::{evaluate_condition, evaluate_condition_with_recipient};
+use crate::game::layers::{evaluate_condition, evaluate_condition_with_context, ConditionContext};
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, CostCategory, StaticDefinition, TargetFilter,
-    TypedFilter,
+    ContinuousModification, ControllerRef, CostCategory, StaticCondition, StaticDefinition,
+    TargetFilter, TypedFilter,
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -810,6 +810,24 @@ fn static_ability_match_applies(
         if !static_filter_matches(state, context, affected, obj.id) {
             return false;
         }
+    }
+
+    // CR 506.2 + CR 508.1c + CR 508.5: a `CantAttack` restriction gated on the
+    // DEFENDING PLAYER's board cannot be answered without an attack target. An
+    // eligibility query (`combat::creature_cant_attack_gated`, display badges)
+    // carries none, so skip the static here and let the per-pairing authority
+    // `combat::attacker_can_attack_target` — which DOES carry one — decide. Same
+    // deferral the CR 508.1c (+ CR 508.1d for the cost form) `attack_defended`
+    // block below performs for target-SCOPED prohibitions, generalized to
+    // condition-CARRIED ones.
+    if matches!(mode, StaticMode::CantAttack | StaticMode::CantAttackOrBlock)
+        && context.attack_target.is_none()
+        && def
+            .condition
+            .as_ref()
+            .is_some_and(StaticCondition::needs_defending_player_anchor)
+    {
+        return false;
     }
 
     if !static_condition_matches_context(state, obj.id, obj.controller, def, context) {
@@ -1892,11 +1910,16 @@ fn static_condition_matches_context(
     context: &StaticCheckContext,
 ) -> bool {
     def.condition.as_ref().is_none_or(|condition| {
-        if let Some(recipient_id) = context.target_id {
-            evaluate_condition_with_recipient(state, condition, controller, source_id, recipient_id)
-        } else {
-            evaluate_condition(state, condition, controller, source_id)
+        // CR 611.3a: the affected object is the recipient anchor.
+        // CR 508.1c: the attack target under validation is the declaration-time
+        // defending-player anchor — carried here so a condition needing it can
+        // answer BEFORE CR 508.1k records the attacker in `state.combat`.
+        let anchors = match context.target_id {
+            Some(recipient) => ConditionContext::recipient(recipient),
+            None => ConditionContext::NONE,
         }
+        .with_declared_attack(context.attack_target);
+        evaluate_condition_with_context(state, condition, controller, source_id, anchors)
     })
 }
 

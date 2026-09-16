@@ -1863,16 +1863,24 @@ pub(crate) fn can_pay(
             if !cost.is_payable_for_activation(state, payer, source_id, *ability_index) {
                 return false;
             }
-            // CR 118.12a: disjunctive activation costs resolve via
-            // `ActivationCostOneOfChoice`, but each branch must still pass the
-            // same activation affordability authority (is_payable + dry-run) as a
-            // deterministic cost. `is_payable` alone does not catch tapped-source
-            // `{T}` legs — shard-style `OneOf([Composite([Mana, Tap]), …])` would
-            // otherwise surface as legal when every branch needs an untapped source.
-            if let AbilityCost::OneOf { costs } = cost {
-                return costs
-                    .iter()
-                    .any(|branch| can_pay(state, payer, source_id, branch, scope));
+            // CR 601.2h + CR 602.2b + CR 118.3: a disjunctive leg anywhere in the
+            // activation cost is payable iff some branch, substituted into the
+            // total cost, passes the same authority. Disjunctions resolve via
+            // `ActivationCostOneOfChoice`; `is_payable` alone does not catch
+            // tapped-source `{T}` legs (shard-style `OneOf([Composite([Mana, Tap]),
+            // …])`), nor sibling mana legs summed with a branch's mana (Camellia's
+            // `Composite([Mana {2}, OneOf([Exile, Sacrifice])])`).
+            if let Some(branches) = super::casting::find_one_of_cost(cost) {
+                return branches.iter().any(|branch| {
+                    super::casting::one_of_branch_payable_in(
+                        state,
+                        payer,
+                        source_id,
+                        cost,
+                        branch,
+                        *ability_index,
+                    )
+                });
             }
             // CR 701.67a: A bare Waterbend cost has no deterministic component
             // to dry-run — its affordability is fully answered by `is_payable`'s

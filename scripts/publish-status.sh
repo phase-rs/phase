@@ -126,7 +126,8 @@ clear_local() {
 # `--remote` and `--force` are both load-bearing: without --remote the delete hits
 # the local emulator and the LIVE object survives, so the operator believes a stale
 # banner is gone while every player still sees it. --force skips the confirmation
-# prompt. Precedent: .github/workflows/preview-server.yml:431.
+# prompt. Precedent: the expired-object `wrangler r2 object delete` in
+# .github/workflows/preview-server.yml's publish job.
 clear_remote() {
   local key="$1"
   if [ "$DRY_RUN" = true ]; then

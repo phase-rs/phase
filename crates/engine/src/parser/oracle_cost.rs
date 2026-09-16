@@ -829,8 +829,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 // CR 119.4 + CR 122.1: "Pay N life for each <clause>" — a
                 // per-object multiplier on the life cost (e.g. Tornado's
                 // "Pay 3 life for each velocity counter on this enchantment").
-                // Model on parse_unless_for_each_payment
-                // (oracle_effect/mod.rs:14482). `after_n` is
+                // Model on `oracle_effect::parse_unless_for_each_payment`.
+                // `after_n` is
                 // "life for each <clause>" because parse_number trim_start()s
                 // the remainder, so "life " / "for each " carry their
                 // separators on the TRAILING side.
@@ -2815,12 +2815,17 @@ mod tests {
     fn cost_explicit_count_continuation_with_unmodeled_rider_stays_unimplemented() {
         // Terminal explicit-count guard: a "<N>=2 …" continuation whose object
         // phrase carries an unmodeled rider that `parse_type_phrase_folding` cannot fully
-        // consume ("… that were dealt damage this turn") must stay honest
-        // `Unimplemented` — it must NOT fall through to the count-1 fallback,
-        // which would emit a broad supported cost that drops both the rider and
-        // the real count.
+        // consume must stay honest `Unimplemented` — it must NOT fall through to
+        // the count-1 fallback, which would emit a broad supported cost that
+        // drops both the rider and the real count. The rider here is a
+        // deliberately fabricated adjective (mirroring the "frobnicating"
+        // pattern above) rather than a real card phrase: "that were dealt
+        // damage this turn" used to serve this purpose, but the parser now
+        // models the `were` number-agreement sibling of `WasDealtDamageThisTurn`'s
+        // "was" row, which is the coverage gain that made this test's old
+        // example stop being an unmodeled rider.
         match parse_oracle_cost(
-            "Sacrifice a creature and two artifacts that were dealt damage this turn",
+            "Sacrifice a creature and two artifacts that are quantically entangled",
         ) {
             AbilityCost::Composite { costs } => {
                 assert!(

@@ -1310,6 +1310,7 @@ fn mad_wizards_lair(source_id: ObjectId, controller: PlayerId) -> ResolvedAbilit
             duration: None,
             driver: CastFromZoneDriver::DuringResolution,
             mana_spend_permission: None,
+            additional_cost: None,
         },
         source_id,
         controller,

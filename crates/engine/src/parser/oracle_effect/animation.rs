@@ -11,7 +11,7 @@ use nom::Parser;
 use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
-use super::super::oracle_util::split_around;
+use super::super::oracle_util::{parse_count_expr, split_around};
 use super::token::{
     map_token_keyword, push_unique_string, split_token_keyword_list, title_case_word,
 };
@@ -442,10 +442,22 @@ fn parse_dynamic_pt_clause(input: &str) -> OracleResult<'_, (&str, QuantityExpr)
         tag("base power and toughness are each equal to "),
     ))
     .parse(rest)?;
-    let (rest, qty) = nom_quantity::parse_quantity_ref.parse(rest)?;
+    let (rest, qty) = alt((
+        nom::combinator::map(nom_quantity::parse_quantity_ref, |qty| QuantityExpr::Ref {
+            qty,
+        }),
+        parse_animation_count_expr,
+    ))
+    .parse(rest)?;
     let (rest, _) = opt(tag(".")).parse(rest)?;
     let (rest, _) = eof.parse(rest)?;
-    Ok((rest, (descriptor, QuantityExpr::Ref { qty })))
+    Ok((rest, (descriptor, qty)))
+}
+
+fn parse_animation_count_expr(input: &str) -> OracleResult<'_, QuantityExpr> {
+    parse_count_expr(input)
+        .map(|(expression, rest)| (rest, expression))
+        .ok_or_else(|| oracle_err(input))
 }
 
 fn split_animation_dynamic_pt_clause(text: &str) -> Option<(&str, QuantityExpr)> {
@@ -1141,6 +1153,62 @@ mod test_den_bugbear {
         assert!(mods.contains(
             &crate::types::ability::ContinuousModification::SetToughnessDynamic { value: expected }
         ));
+    }
+
+    #[test]
+    fn animation_dynamic_pt_accepts_complete_numeric_count_expressions() {
+        for expression in [
+            "X",
+            "X plus 2",
+            "X minus 1",
+            "two plus X",
+            "three",
+            "twice X",
+        ] {
+            let spec = parse_animation_spec(
+                &format!(
+                    "a green Fractal with base power and toughness each equal to {expression}"
+                ),
+                &mut ParseContext::default(),
+            )
+            .unwrap_or_else(|| panic!("numeric expression must parse completely: {expression}"));
+            assert_eq!(spec.colors, Some(vec![ManaColor::Green]));
+            assert_eq!(spec.types, vec!["Creature", "Fractal"]);
+            assert_eq!(spec.dynamic_power, spec.dynamic_toughness);
+            assert!(spec.dynamic_power.is_some());
+        }
+    }
+
+    #[test]
+    fn animation_dynamic_pt_rejects_incomplete_or_unsupported_numeric_expressions() {
+        let prefix = "a green Fractal with base power and toughness each equal to ";
+        let accepted = format!("{prefix}X plus 1");
+        let (_, (descriptor, quantity)) = parse_dynamic_pt_clause(&accepted)
+            .expect("the complete X plus 1 control must reach the dynamic P/T parser");
+        assert_eq!(descriptor, "a green Fractal");
+        assert_eq!(
+            quantity,
+            QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_owned(),
+                    },
+                }),
+                offset: 1,
+            },
+            "X plus 1 must retain its dynamic quantity rather than only accepting the prefix"
+        );
+
+        for expression in [
+            "X plus X",
+            "X plus the number of creatures you control",
+            "X plus 1 and gains flying",
+        ] {
+            assert!(
+                parse_dynamic_pt_clause(&format!("{prefix}{expression}")).is_err(),
+                "unsupported or trailing expression must not parse cleanly: {expression}"
+            );
+        }
     }
 
     #[test]

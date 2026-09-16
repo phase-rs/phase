@@ -12368,9 +12368,11 @@ pub(super) struct ResolutionCastRequest {
 /// reject disposition, so a cast-time rejection can still bottom/hand the hit).
 /// The `request.cost` (`ResolutionCastCost`) drives the payment shape: `Free`
 /// zeroes the cost and continues on `Auto` (Cascade/Discover/Suspend);
-/// `FullCost` charges the card's live printed cost (`SelfManaCost`), forwards the
-/// any-type-mana concession onto the grant, and pauses on `Manual` payment so the
-/// caster spends mana (Quistis Trepe, Tinybones the Pickpocket — CR 609.4b);
+/// `FullCost` charges the card's live printed cost (`SelfManaCost`) plus any
+/// `additional_cost` the grant attached (Ogre Battlecaster's {R}{R} — CR 601.2b),
+/// forwards the any-type-mana concession onto the grant, and pauses on `Manual`
+/// payment so the caster spends mana (Quistis Trepe, Tinybones the Pickpocket —
+/// CR 609.4b);
 /// `AlternativeMana { cost }` stamps an explicit keyword-borrowed mana cost and
 /// drains the pool on `Auto` payment at that cost (The Face of Boe — CR 118.9). The
 /// returned `WaitingFor` falls through
@@ -12428,6 +12430,12 @@ pub(super) fn initiate_cast_during_resolution(
     } else {
         crate::types::ability::ExileGrantCostProvenance::Alternative
     };
+    // CR 601.2b: the additional mana cost a `FullCost` grant attaches (Ogre
+    // Battlecaster's "{R}{R} in addition to its other costs") is not part of
+    // the permission's cost — that is the card's own printed cost, restated —
+    // and is added to the prepared cast's base below, where a Fuse cast adds
+    // its second half.
+    let mut additional_cost = None;
     let (perm_cost, mana_spend_permission, payment_mode) = match cost {
         crate::types::ability::ResolutionCastCost::Free => {
             (ManaCost::zero(), None, CastPaymentMode::Auto)
@@ -12436,11 +12444,15 @@ pub(super) fn initiate_cast_during_resolution(
         // any-type concession rides the grant.
         crate::types::ability::ResolutionCastCost::FullCost {
             mana_spend_permission,
-        } => (
-            ManaCost::SelfManaCost,
-            mana_spend_permission,
-            CastPaymentMode::Manual,
-        ),
+            additional_cost: extra,
+        } => {
+            additional_cost = extra;
+            (
+                ManaCost::SelfManaCost,
+                mana_spend_permission,
+                CastPaymentMode::Manual,
+            )
+        }
         // CR 118.9 + CR 702.62a: explicit alternative mana cost borrowed from a
         // keyword (e.g. The Face of Boe's suspend cost). The cost is stamped
         // directly — not `SelfManaCost` — so the permission carries the exact
@@ -12504,6 +12516,23 @@ pub(super) fn initiate_cast_during_resolution(
         Some(casting_permission_index),
         CastingMode::Actual,
     )?;
+    // CR 601.2b + CR 601.2f: an additional cost joins the tax-inclusive base
+    // and the total is rebuilt from that base so every cost modifier applies
+    // to printed cost plus addition — the same order a Fuse cast's second half
+    // takes in `prepare_spell_cast_with_variant_override_inner`.
+    if let Some(extra) = additional_cost {
+        prepared.base_mana_cost = restrictions::add_mana_cost(&prepared.base_mana_cost, &extra);
+        let mut total = prepared.base_mana_cost.clone();
+        apply_all_cost_modifiers(
+            state,
+            player,
+            hit_card,
+            &mut total,
+            Some(prepared.casting_variant),
+            prepared.casting_permission_index,
+        );
+        prepared.mana_cost = total;
+    }
     prepared.payment_mode = payment_mode;
     continue_with_prepared(state, player, prepared, events)
 }
@@ -19398,23 +19427,69 @@ pub(super) fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> 
     }
 }
 
-/// CR 118.12a: Filter disjunctive activation-cost branches through the same
-/// affordability authority used by `can_activate_ability_now` and
-/// `handle_activate_ability`.
+/// CR 601.2h + CR 602.2b: Filter disjunctive activation-cost branches through the
+/// same affordability authority used by `can_activate_ability_now` and
+/// `handle_activate_ability`, each judged inside its `enclosing` total cost.
 pub(crate) fn payable_one_of_activation_branches(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
+    enclosing: &AbilityCost,
     costs: &[AbilityCost],
     ability_index: usize,
 ) -> Vec<AbilityCost> {
     costs
         .iter()
         .filter(|branch| {
-            can_pay_ability_cost_now(state, player, source_id, branch, Some(ability_index))
+            one_of_branch_payable_in(
+                state,
+                player,
+                source_id,
+                enclosing,
+                branch,
+                Some(ability_index),
+            )
         })
         .cloned()
         .collect()
+}
+
+/// CR 601.2h + CR 602.2b + CR 118.3: a disjunctive cost branch is payable iff the
+/// total activation cost, with that branch substituted for the first unresolved
+/// OneOf, passes the activation payability authority.
+pub(crate) fn one_of_branch_payable_in(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    enclosing: &AbilityCost,
+    branch: &AbilityCost,
+    ability_index: Option<usize>,
+) -> bool {
+    enclosing
+        .resolve_first_one_of(branch)
+        .is_some_and(|resolved| {
+            can_pay_ability_cost_now(state, player, source_id, &resolved, ability_index)
+        })
+}
+
+/// CR 601.2h: branch payability for a pending activation, judged against its
+/// current total cost.
+pub(crate) fn activation_one_of_branch_payable(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    branch: &AbilityCost,
+) -> bool {
+    pending.activation_cost.as_ref().is_some_and(|cost| {
+        one_of_branch_payable_in(
+            state,
+            player,
+            pending.object_id,
+            cost,
+            branch,
+            pending.activation_ability_index,
+        )
+    })
 }
 
 /// CR 601.2b early gate: disjunctive `OneOf` costs route through the activation
@@ -21176,12 +21251,13 @@ pub fn handle_activate_ability(
                 });
             }
 
-            // CR 118.12a: Pre-check for OneOf costs — detour to WaitingFor before any cost payment.
+            // CR 601.2h + CR 602.2b: Pre-check for OneOf costs — detour to WaitingFor before any cost payment.
             if let Some(costs) = find_one_of_cost(cost) {
                 let payable = payable_one_of_activation_branches(
                     state,
                     player,
                     source_id,
+                    cost,
                     costs,
                     ability_index,
                 );

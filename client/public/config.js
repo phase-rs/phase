@@ -3,7 +3,12 @@
 // compiled into the bundle.
 //
 // Self-hosting? Replace this file (the phase-server helm chart renders it from
-// `web.defaultMultiplayerServerUrl`) — the bundle needs no rebuild:
+// `web.defaultMultiplayerServerUrl` and `web.previewSiteUrl`) — the bundle needs
+// no rebuild. Every key is optional, and the app ignores a malformed value:
 //
-//   window.__PHASE_CONFIG__ = { multiplayerServerUrl: "wss://your-host/ws" };
+//   window.__PHASE_CONFIG__ = {
+//     multiplayerServerUrl: "wss://your-host/ws",
+//     // Where a release build's "Try Preview" badge points (http or https).
+//     previewSiteUrl: "https://preview.your-host/",
+//   };
 window.__PHASE_CONFIG__ = {};

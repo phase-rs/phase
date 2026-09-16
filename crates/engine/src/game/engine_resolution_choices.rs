@@ -1356,6 +1356,7 @@ struct VoteRoundState {
     candidate_objects: crate::im::Vector<ObjectId>,
     outcome_template: Option<Box<crate::types::ability::AbilityDefinition>>,
     visibility: crate::types::ability::VoteVisibility,
+    chain_root_targets: Vec<crate::types::ability::TargetRef>,
 }
 
 /// CR 701.38 + CR 608.2c: The single ballot-tally authority. Records one
@@ -1394,6 +1395,7 @@ fn append_vote_ballot_and_advance(
         candidate_objects,
         outcome_template,
         visibility,
+        chain_root_targets,
     } = round;
 
     let mut new_tallies = tallies;
@@ -1431,6 +1433,7 @@ fn append_vote_ballot_and_advance(
             candidate_objects,
             outcome_template,
             visibility,
+            chain_root_targets,
         };
         ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
     } else if let Some(((next_player, next_votes), rest)) = remaining_voters.split_first() {
@@ -1451,6 +1454,7 @@ fn append_vote_ballot_and_advance(
             candidate_objects,
             outcome_template,
             visibility,
+            chain_root_targets,
         };
         ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
     } else {
@@ -1477,6 +1481,7 @@ fn append_vote_ballot_and_advance(
             tally_mode,
             &candidate_object_ids,
             outcome_template.as_deref(),
+            &chain_root_targets,
             events,
         );
         ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, controller, events))
@@ -2317,11 +2322,14 @@ pub(super) fn handle_resolution_choice(
             }
         }
         // CR 608.2g + CR 609.4b: Paid during-resolution graveyard cast (Quistis
-        // Trepe, Tinybones the Pickpocket). Accept → cast the card at its real
-        // printed cost through `initiate_cast_during_resolution` with
-        // `ResolutionCastCost::FullCost`, which opens a manual mana-payment window
-        // and rides the any-type concession onto the grant. Decline → the card
-        // stays in the graveyard and resolution continues.
+        // Trepe, Tinybones the Pickpocket with the any-type concession; Ogre
+        // Battlecaster, Helmut Zemo, Toshiro Umezawa at normal mana — issue
+        // #8775). Accept → cast the card at its real printed cost, plus any
+        // `additional_cost` the grant attached (CR 601.2b), through
+        // `initiate_cast_during_resolution` with `ResolutionCastCost::FullCost`,
+        // which opens a manual mana-payment window and rides the any-type
+        // concession onto the grant. Decline → the card stays in the graveyard
+        // and resolution continues.
         (
             WaitingFor::CastOffer {
                 player,
@@ -2332,6 +2340,8 @@ pub(super) fn handle_resolution_choice(
                         graveyard_replacement,
                         cast_transformed,
                         constraint,
+                        additional_cost,
+                        installed_triggers,
                     },
             },
             GameAction::GraveyardPaidCastChoice { choice },
@@ -2355,6 +2365,7 @@ pub(super) fn handle_resolution_choice(
                         graveyard_replacement,
                         cost: crate::types::ability::ResolutionCastCost::FullCost {
                             mana_spend_permission,
+                            additional_cost,
                         },
                     },
                     events,
@@ -2362,6 +2373,16 @@ pub(super) fn handle_resolution_choice(
                 ResolutionChoiceOutcome::WaitingFor(result)
             } else {
                 // CR 608.2g decline: card stays in the graveyard; nothing is cast.
+                // CR 603.7: the "when you cast that spell" trigger the granting
+                // resolution installed ahead of this offer (its inline tail,
+                // `effects/mod.rs`) waits for the cast the offer would have made;
+                // withdrawn here, since it is keyed to the CARD and would otherwise
+                // fire on a later cast of that card by another route this turn
+                // (Helmut Zemo declined, the Bolt then cast under Kess). An
+                // accepted offer whose cast fails to initiate returns the error
+                // above and leaves the offer open, so the decline still reaches
+                // this withdrawal.
+                withdraw_declined_offer_cast_triggers(state, &installed_triggers);
                 ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
             }
         }
@@ -3560,6 +3581,7 @@ pub(super) fn handle_resolution_choice(
                 candidate_objects,
                 outcome_template,
                 visibility,
+                chain_root_targets,
             },
             GameAction::ChooseOption { choice },
         ) => {
@@ -3603,6 +3625,7 @@ pub(super) fn handle_resolution_choice(
                     candidate_objects,
                     outcome_template,
                     visibility,
+                    chain_root_targets,
                 },
             )
         }
@@ -3627,6 +3650,7 @@ pub(super) fn handle_resolution_choice(
                 candidate_objects,
                 outcome_template,
                 visibility,
+                chain_root_targets,
             },
             GameAction::SubmitVoteCandidate { candidate_index },
         ) => {
@@ -3657,6 +3681,7 @@ pub(super) fn handle_resolution_choice(
                     candidate_objects,
                     outcome_template,
                     visibility,
+                    chain_root_targets,
                 },
             )
         }
@@ -8326,6 +8351,41 @@ fn finish_effect_zone_put_at_library_position(
         subject: None,
     });
     finish_with_continuation(state, player, events);
+}
+
+/// CR 603.7 + CR 608.2g: withdraw the delayed triggers the granting resolution
+/// installed behind a during-resolution offer, after that offer was declined.
+/// Matched by installation instance — the identity the CR 603.7 install
+/// authority mints once per record — so exactly the records this resolution's
+/// tail installed leave, and a second delayed trigger of the same source on the
+/// same card (another offer, another effect) stays. Booked as `Removed`.
+fn withdraw_declined_offer_cast_triggers(
+    state: &mut GameState,
+    installed: &[crate::types::identifiers::DelayedTriggerInstanceId],
+) {
+    if installed.is_empty() {
+        return;
+    }
+    let mut survivors = Vec::new();
+    let mut withdrawn = Vec::new();
+    for trigger in std::mem::take(&mut state.delayed_triggers) {
+        let is_installed_here = trigger
+            .provenance
+            .origin()
+            .is_some_and(|origin| installed.contains(&origin.instance));
+        if is_installed_here {
+            withdrawn.push(trigger);
+        } else {
+            survivors.push(trigger);
+        }
+    }
+    state.delayed_triggers = survivors;
+    for trigger in withdrawn {
+        super::lifecycle::record_delayed_terminal(
+            trigger.provenance.firing(),
+            super::lifecycle::DelayedTerminalDisposition::Removed,
+        );
+    }
 }
 
 fn finish_with_continuation(

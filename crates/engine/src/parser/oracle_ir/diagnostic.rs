@@ -4,6 +4,7 @@
 //! machine-readable diagnostics carrying severity and source provenance.
 
 use std::fmt;
+use strum::IntoEnumIterator;
 
 // Source-identity types live in `doc` (the document IR that mints them). They are
 // re-exported here because they are part of this module's PUBLIC wire payload:
@@ -31,6 +32,77 @@ pub enum CascadeSlot {
     RepeatFor,
     PlayerScope,
     Duration,
+}
+
+/// Which sub-grammar rejected an unparsed clause.
+///
+/// CR 608.2c: the controller of a spell or ability follows its instructions in the
+/// order written — a clause the parser cannot read end to end is a gap, and this type
+/// names WHICH sub-grammar refused it, determined by replaying the engine's own
+/// combinators over the recorded text (never by a string heuristic on its first word).
+///
+/// The verdict is NOT stored on the gap node. `ClauseGapKind::unimplemented_name` is
+/// written into `Effect::Unimplemented.name`, and the phrase is re-derived by running
+/// `diagnose_clause_gap` over the same recorded `description`. That is what makes the
+/// function's context-freedom load-bearing.
+#[derive(Debug, Clone, PartialEq, Eq, strum::EnumDiscriminants)]
+#[strum_discriminants(name(ClauseGapKind), derive(strum::EnumIter))]
+pub enum ClauseGap {
+    /// CR 614.1 + CR 614.1a: an event antecedent ("would …", with or without
+    /// "instead") that no replacement lowering owns.
+    Replacement { antecedent: String },
+    /// CR 608.2c: a guard the single condition authority (`lower_instead_condition`)
+    /// rejected. CR 603.4 names the trigger-side intervening-"if"; elsewhere the word
+    /// still gates its clause.
+    Condition { guard: String },
+    /// CR 608.2h: a dynamic amount — the answer is determined only once, when the
+    /// effect is applied — whose operand the quantity authorities rejected.
+    Quantity { operand: String },
+    /// A clause-head verb the imperative dispatcher recognises, whose argument grammar
+    /// rejected the rest of the clause.
+    VerbArguments { verb: String, arguments: String },
+    /// A clause head that neither the verb vocabulary nor the subject grammar recognised.
+    UnrecognizedHead { head: String },
+}
+
+impl ClauseGap {
+    /// The verdict's kind, i.e. the wire-name authority's key for this gap.
+    pub fn kind(&self) -> ClauseGapKind {
+        self.into()
+    }
+}
+
+impl ClauseGapKind {
+    /// The stable `Effect::Unimplemented.name` this verdict is recorded under.
+    ///
+    /// This IS the single authority, in the exact sense
+    /// `OracleSemanticFeature::detector_label` is for swallow detectors: every clause
+    /// gap the parser records goes through `gap_diagnosis::clause_gap_unimplemented`,
+    /// which names it through this function and never as a string literal. That is what
+    /// makes the pin test below a pin on the WIRE FORMAT rather than merely on this
+    /// table — these strings reach `card-data.json`, the coverage report's
+    /// `Effect:<name>` handler keys, and the in-game unimplemented-mechanics badge.
+    ///
+    /// The match is exhaustive with no wildcard, so a sixth variant cannot ship unnamed.
+    pub fn unimplemented_name(self) -> &'static str {
+        match self {
+            Self::Replacement => "unparsed_replacement",
+            Self::Condition => "unparsed_condition",
+            Self::Quantity => "unparsed_quantity",
+            Self::VerbArguments => "unparsed_verb_arguments",
+            Self::UnrecognizedHead => "unrecognized_clause_head",
+        }
+    }
+
+    /// The inverse of [`Self::unimplemented_name`]: decode a recorded gap name back to
+    /// its verdict kind, or `None` when the name is a *category* key minted by some
+    /// other producer (`instead_condition`, `prevent`, `choose`, `unknown`, …).
+    ///
+    /// This decodes the engine's own wire key. It never parses Oracle text — the phrase
+    /// half is re-derived by running `diagnose_clause_gap` over the recorded description.
+    pub fn from_unimplemented_name(name: &str) -> Option<Self> {
+        Self::iter().find(|k| k.unimplemented_name() == name)
+    }
 }
 
 /// Typed Oracle parse diagnostic (D-04).
@@ -312,6 +384,86 @@ mod tests {
             "empty evidence must not be written"
         );
         assert_eq!(obj["line_index"], 0);
+    }
+
+    /// V8 — the clause-gap wire format. These five strings are written into
+    /// `Effect::Unimplemented.name`, exported in `card-data.json`, and read back by
+    /// `from_unimplemented_name`; a rename silently reclassifies every gap node in the
+    /// corpus. Modelled line-for-line on
+    /// `feature::detector_labels_are_distinct_and_pin_the_exported_wire_format`.
+    #[test]
+    fn clause_gap_names_are_distinct_and_pin_the_exported_wire_format() {
+        use ClauseGapKind as K;
+
+        // Hand-written on purpose: it is the pin. A generated table would only ever
+        // agree with whatever the code says.
+        let expected = [
+            (K::Replacement, "unparsed_replacement"),
+            (K::Condition, "unparsed_condition"),
+            (K::Quantity, "unparsed_quantity"),
+            (K::VerbArguments, "unparsed_verb_arguments"),
+            (K::UnrecognizedHead, "unrecognized_clause_head"),
+        ];
+        for (kind, name) in expected {
+            assert_eq!(kind.unimplemented_name(), name);
+            assert_eq!(K::from_unimplemented_name(name), Some(kind));
+        }
+
+        // Exhaustiveness comes from `EnumIter`, not from the array's length: a sixth
+        // variant must declare a name (the match forces that) AND a DISTINCT one, which
+        // only iterating the enum can check.
+        let every: Vec<K> = K::iter().collect();
+        assert_eq!(
+            every.len(),
+            expected.len(),
+            "a variant was added without pinning its exported name above"
+        );
+        let distinct: std::collections::BTreeSet<&str> =
+            every.iter().map(|k| k.unimplemented_name()).collect();
+        assert_eq!(
+            distinct.len(),
+            every.len(),
+            "every clause-gap kind must map to a DISTINCT name: a collapse rewrites the \
+             wire format and destroys per-kind gap attribution"
+        );
+
+        // Negative decodes: a CATEGORY key minted by some other producer must not decode
+        // as a clause-gap verdict. Measured at the phase base: no name in the exported
+        // corpus collides with the five above (M6).
+        for category_key in [
+            "deal",
+            "unknown",
+            "instead_condition",
+            "empty",
+            "choose",
+            "prevent",
+        ] {
+            assert_eq!(
+                K::from_unimplemented_name(category_key),
+                None,
+                "{category_key} is a category key, not a clause-gap verdict"
+            );
+        }
+    }
+
+    /// The discriminant is derived from the payload, never stored beside it.
+    #[test]
+    fn clause_gap_kind_is_derived_from_the_payload() {
+        assert_eq!(
+            ClauseGap::Quantity {
+                operand: "the excess".to_string(),
+            }
+            .kind(),
+            ClauseGapKind::Quantity
+        );
+        assert_eq!(
+            ClauseGap::VerbArguments {
+                verb: "deal".to_string(),
+                arguments: "that damage to it instead".to_string(),
+            }
+            .kind(),
+            ClauseGapKind::VerbArguments
+        );
     }
 
     #[test]

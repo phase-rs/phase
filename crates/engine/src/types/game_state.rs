@@ -5408,6 +5408,13 @@ pub struct PendingVoteBallotIteration {
     pub source_id: ObjectId,
     /// The controller of the vote spell/ability.
     pub controller: PlayerId,
+    /// CR 608.2h: the creating ability's chain-root target list, carried
+    /// across the per-ballot interactive suspension so a counter-gated "that
+    /// many" nested in `ability_template` still resolves against the live
+    /// chain-root target once the remaining ballots run. `#[serde(default)]`
+    /// for in-flight states serialized before this field existed.
+    #[serde(default)]
+    pub chain_root_targets: Vec<super::ability::TargetRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -9486,11 +9493,13 @@ pub enum CastOfferKind {
         member_pool: Vec<ObjectId>,
     },
     /// CR 608.2g + CR 609.4b: A during-resolution PAID cast of a single card
-    /// from a graveyard (Quistis Trepe, Tinybones the Pickpocket: "you may cast
-    /// target X card from a graveyard, and mana of any type can be spent to cast
-    /// that spell"). Unlike Cascade/Discover/Ripple this is not a free cast — on
-    /// accept the caster pays the card's real printed cost with the any-type
-    /// concession applied; on decline the card stays in the graveyard.
+    /// from a graveyard — "you may cast target X card from a graveyard", with
+    /// the any-type-mana concession (Quistis Trepe, Tinybones the Pickpocket)
+    /// or at normal mana (Ogre Battlecaster, Helmut Zemo, Toshiro Umezawa,
+    /// issue #8775). Unlike Cascade/Discover/Ripple this is not a free cast —
+    /// on accept the caster pays the card's real printed cost (plus any
+    /// `additional_cost`), with the concession applied when present; on
+    /// decline the card stays in the graveyard.
     GraveyardPaidCast {
         /// CR 601.2a: The graveyard card being offered for casting.
         hit_card: ObjectId,
@@ -9509,6 +9518,21 @@ pub enum CastOfferKind {
         /// CR 601.2b: Optional cast-time predicate gating the cast.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         constraint: Option<crate::types::ability::CastPermissionConstraint>,
+        /// CR 601.2b + CR 118.8: an additional mana cost the grant attaches to
+        /// this cast ("by paying {R}{R} in addition to its other costs", Ogre
+        /// Battlecaster), paid on top of the card's printed cost when the offer
+        /// is accepted. `None` for every other paid offer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        additional_cost: Option<crate::types::mana::ManaCost>,
+        /// CR 603.7: the delayed triggers the granting resolution installed
+        /// AFTER this offer opened — its "when you cast that spell" tail,
+        /// resolved inline before the offer is answered (`effects/mod.rs`) —
+        /// by installation instance. Declining the offer withdraws exactly
+        /// these records and no other, so a second delayed trigger of the same
+        /// source on the same card (a second offer, another effect) is left
+        /// alone. Empty for saved states predating the field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        installed_triggers: Vec<crate::types::identifiers::DelayedTriggerInstanceId>,
     },
 }
 
@@ -14250,6 +14274,13 @@ pub enum WaitingFor {
         /// unchanged.
         #[serde(default)]
         visibility: super::ability::VoteVisibility,
+        /// CR 608.2h: the creating ability's chain-root target list, carried
+        /// across the whole interactive voting session so `resolve_tally`
+        /// can propagate it into each per-choice/outcome sub-effect once the
+        /// last ballot is cast. `#[serde(default)]` for in-flight states
+        /// serialized before this field existed.
+        #[serde(default)]
+        chain_root_targets: Vec<super::ability::TargetRef>,
     },
     /// CR 608.2d + CR 700.3: "An opponent separates" — in multiplayer the
     /// controller chooses which opponent will perform the partition. With a

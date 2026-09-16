@@ -2439,6 +2439,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // boundary→link authority (`oracle_ir::ast::sub_link_after_boundary`),
         // which the referent walk in `oracle_effect::mod` also consults.
         def.sub_link = sub_link_after_boundary(prev_boundary);
+        // CR 608.2c + CR 614.1a: carry the clause seam's deferred guard verdict onto the
+        // def, so `parser::oracle::resolve_unlowered_guards` can settle it on the
+        // assembled tree — the only place the body's final parent is visible.
+        def.unlowered_guard = clause_ir.parsed.unlowered_guard.clone();
         // CR 608.2c: A mass zone move immediately followed by "deals that much
         // damage to each ..." reads ONE scalar result from the completed move,
         // not a different per-recipient event-context amount. Bind only this

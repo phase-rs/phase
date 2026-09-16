@@ -10696,6 +10696,7 @@ fn jhoira_granted_suspend_last_counter_cast_tags_suspend_variant() {
             constraint: None,
             duration: None,
             mana_spend_permission: None,
+            additional_cost: None,
             driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
         },
         vec![TargetRef::Object(suspended)],
@@ -10824,6 +10825,7 @@ fn jhoira_granted_suspend_creature_cast_gains_haste() {
             constraint: None,
             duration: None,
             mana_spend_permission: None,
+            additional_cost: None,
             driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
         },
         vec![TargetRef::Object(suspended)],
@@ -19510,6 +19512,7 @@ fn cast_from_zone_exile_rider_exiles_graveyard_cast_on_resolution() {
             constraint: None,
             duration: None,
             mana_spend_permission: None,
+            additional_cost: None,
             driver: CastFromZoneDriver::LingeringPermission,
         },
         vec![TargetRef::Object(instant)],
@@ -19652,6 +19655,7 @@ fn cast_from_exile_library_bottom_rider_bottoms_resolved_spell() {
             constraint: None,
             duration: None,
             mana_spend_permission: None,
+            additional_cost: None,
             driver: CastFromZoneDriver::LingeringPermission,
         },
         vec![TargetRef::Object(spell)],
@@ -19764,6 +19768,7 @@ fn graveyard_timed_alt_cost_grant_is_castable_in_place() {
             constraint: None,
             duration: Some(Duration::UntilEndOfTurn),
             mana_spend_permission: None,
+            additional_cost: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         },
         vec![TargetRef::Object(bauble)],
@@ -19856,6 +19861,7 @@ fn graveyard_timed_alt_cost_grant_omits_an_artifact_land_but_keeps_its_land_play
                 constraint: None,
                 duration: Some(Duration::UntilEndOfTurn),
                 mana_spend_permission: None,
+                additional_cost: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             vec![TargetRef::Object(target)],
@@ -20066,6 +20072,7 @@ fn graveyard_cast_this_way_enters_with_finality_counter() {
             constraint: None,
             duration: Some(Duration::UntilEndOfTurn),
             mana_spend_permission: None,
+            additional_cost: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         },
         vec![TargetRef::Object(creature)],
@@ -20167,6 +20174,7 @@ fn graveyard_cast_without_rider_has_no_finality_counter() {
             constraint: None,
             duration: Some(Duration::UntilEndOfTurn),
             mana_spend_permission: None,
+            additional_cost: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         },
         vec![TargetRef::Object(creature)],
@@ -20269,6 +20277,7 @@ fn graveyard_cast_this_way_enters_with_type_grant_rider() {
             constraint: None,
             duration: Some(Duration::UntilEndOfTurn),
             mana_spend_permission: None,
+            additional_cost: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         },
         vec![TargetRef::Object(creature)],
@@ -20386,6 +20395,7 @@ fn graveyard_cast_without_type_rider_is_not_a_vampire() {
             constraint: None,
             duration: Some(Duration::UntilEndOfTurn),
             mana_spend_permission: None,
+            additional_cost: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         },
         vec![TargetRef::Object(creature)],
@@ -52548,6 +52558,7 @@ fn quistis_class_grant_forwards_any_type_mana_and_pays_off_color_full_cost() {
             duration: Some(Duration::UntilEndOfTurn),
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+            additional_cost: None,
         },
         vec![TargetRef::Object(spell)],
         ObjectId(9200),
@@ -52866,6 +52877,7 @@ fn resolve_graveyard_paid_grant_with_permission(
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
             mana_spend_permission: Some(mana_spend_permission),
+            additional_cost: None,
         },
         vec![TargetRef::Object(spell)],
         ObjectId(9200),
@@ -52890,6 +52902,7 @@ fn resolve_graveyard_paid_grant_with_exile_rider(state: &mut GameState, spell: O
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
             mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+            additional_cost: None,
         },
         vec![TargetRef::Object(spell)],
         ObjectId(9200),
@@ -53013,6 +53026,93 @@ fn graveyard_paid_cast_router_opens_offer_not_lingering_permission() {
     );
 }
 
+/// CR 603.7 + CR 608.2g (issue #8775 review): declining a paid offer withdraws
+/// exactly the delayed triggers the granting resolution installed behind THAT
+/// offer — matched by installation instance, not by source and card. Two
+/// "when you cast that spell" triggers of the same source on the same card
+/// (a second offer for the same card, another effect): the offer records the
+/// second; declining leaves the first standing.
+///
+/// Revert-failing: matching by source + card shape withdraws both (`left: 0`).
+#[test]
+fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
+    use crate::types::ability::{
+        DelayedTriggerCondition, DelayedTriggerLifetime, TriggerDefinition,
+    };
+    use crate::types::game_state::{CastOfferKind, DelayedTrigger};
+    use crate::types::triggers::TriggerMode;
+
+    let mut state = setup_game_at_main_phase();
+    let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+    let source = ObjectId(9200);
+    let cast_of_spell = || {
+        let mut definition = TriggerDefinition::new(TriggerMode::SpellCast);
+        definition.valid_card = Some(TargetFilter::SpecificObject { id: spell });
+        DelayedTrigger::new(
+            DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(definition),
+                or_trigger: None,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
+            },
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )),
+            PlayerId(0),
+            source,
+            true,
+        )
+    };
+    let mut events = Vec::new();
+    crate::game::triggers::install_delayed_trigger(&mut state, cast_of_spell(), &mut events);
+    crate::game::triggers::install_delayed_trigger(&mut state, cast_of_spell(), &mut events);
+    let instance_of = |state: &GameState, index: usize| {
+        state.delayed_triggers[index]
+            .provenance
+            .origin()
+            .expect("a live install mints a receipt root")
+            .instance
+    };
+    let (first, second) = (instance_of(&state, 0), instance_of(&state, 1));
+    assert_ne!(first, second, "reach guard: two distinct installations");
+
+    state.waiting_for = WaitingFor::CastOffer {
+        player: PlayerId(0),
+        kind: CastOfferKind::GraveyardPaidCast {
+            hit_card: spell,
+            mana_spend_permission: None,
+            graveyard_replacement: None,
+            cast_transformed: false,
+            constraint: None,
+            additional_cost: None,
+            installed_triggers: vec![second],
+        },
+    };
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Decline,
+        },
+    )
+    .expect("declining the paid offer must succeed");
+
+    assert_eq!(
+        state.delayed_triggers.len(),
+        1,
+        "only the trigger recorded on the declined offer is withdrawn"
+    );
+    assert_eq!(
+        instance_of(&state, 0),
+        first,
+        "the other trigger of the same source on the same card stays"
+    );
+}
+
 #[test]
 fn paid_during_resolution_cast_router_is_independent_of_chosen_card_zone() {
     for zone in [Zone::Hand, Zone::Exile, Zone::Library] {
@@ -53058,6 +53158,7 @@ fn paid_cast_with_explicit_duration_remains_a_lingering_permission() {
             duration: Some(Duration::UntilEndOfTurn),
             driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
             mana_spend_permission: None,
+            additional_cost: None,
         },
         vec![TargetRef::Object(spell)],
         ObjectId(9200),
@@ -53881,6 +53982,7 @@ fn without_paying_graveyard_free_cast_bypasses_paid_offer() {
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
         },
         vec![TargetRef::Object(spell)],
         ObjectId(9201),

@@ -1745,7 +1745,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         // UNVALIDATED chain, not `execute_effect(state, &validated, ..)` at :1793.
         // That branch is UNREACHABLE by this change, not merely harmless: the only
         // writer of an inherited entry pushes `parent_creature_target`, a `find_map`
-        // over the HEAD's own `TargetRef::Object`s (ability_utils.rs:7911-7914), so
+        // over the HEAD's own `TargetRef::Object`s (`ability_utils::assign_targets_recursive`,
+        // mirrored in `assign_selected_slots_recursive`), so
         // an empty head pushes nothing and its sub is empty too. This flatten can
         // only be empty where the old one already was, so the gate is taken on
         // exactly the same chains as at BASE. Symmetry is safe by construction —
@@ -4855,9 +4856,9 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
 ///   differing context must not collapse).
 /// - `description` — IN KEY (distinguishes triggers from the same source).
 /// - `source_name` — RESOLUTION-IRRELEVANT: a display-only pre-resolved name
-///   (game_state.rs:3493-3500) the frontend renders; it derives from
-///   `source_id` (already in key) and is never read during resolution. Not in
-///   key by design.
+///   (the `source_name` field of `StackEntryKind::TriggeredAbility`) the frontend
+///   renders; it derives from `source_id` (already in key) and is never read
+///   during resolution. Not in key by design.
 /// - `subject_match_count` — RESOLUTION-RELEVANT but PROVABLY EQUAL across a
 ///   run: it is the CR 603.2c filtered subject count from the firing event
 ///   batch. `resolve_batched` lifts it into resolution scope from the run's top

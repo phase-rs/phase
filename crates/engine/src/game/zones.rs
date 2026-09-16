@@ -1217,15 +1217,17 @@ pub fn move_to_zone(
 /// stored/written `GameState` field.
 ///
 /// WHY a parameter rather than a transient `obj.transformed` marker: CR 712.8a
-/// (zones.rs:291-298) reverts a transformed permanent to its front face on any
-/// non-battlefield zone exit, and the post-move transform itself
-/// (zone_pipeline.rs:3670, `transform_permanent`, CR 712.14a) executes the same
+/// (the `obj_mut.transformed && obj_mut.back_face.is_some()` guard in
+/// `zones::apply_zone_exit_cleanup`) reverts a transformed permanent to its front face on any
+/// non-battlefield zone exit, and the post-move transform itself (the CR
+/// 712.14a `transform_permanent` call in
+/// `zone_pipeline::deliver_replaced_zone_change`) executes the same
 /// face swap when the object reaches the battlefield. A pre-move transient
 /// `transformed` flag would survive into that authoritative swap and
 /// double-corrupt the face (CR 712.8a exit revert + post-move transform both
 /// mutating `back_face`/the live face). The parameter carries the intent without
-/// touching object state. (The `modal_back_face` revert at zones.rs:301-310 is
-/// a SEPARATE MDFC mechanism and is not implicated.)
+/// touching object state. (The `modal_back_face` revert, also in
+/// `zones::apply_zone_exit_cleanup`, is a SEPARATE MDFC mechanism and is not implicated.)
 ///
 /// SF1 asymmetry: a single-faced object (`back_face.is_none()`) instructed to
 /// enter transformed can never enter that way — CR 712.14a (2nd sentence)
@@ -1236,8 +1238,8 @@ pub fn move_to_zone(
 /// A3 (no post-move re-assert): unlike the face-down entry profile's
 /// re-assertion authority (`apply_face_down_entry_profile` in zone_pipeline.rs),
 /// a transformed entry needs no analogous re-assert after the move.
-/// `transform_permanent` (zone_pipeline.rs:3687) is the SINGLE authoritative
-/// post-move face swap and already runs on `to == Zone::Battlefield`, so the
+/// The `transform_permanent` call in `zone_pipeline::deliver_replaced_zone_change`
+/// is the SINGLE authoritative post-move face swap and already runs on `to == Zone::Battlefield`, so the
 /// guard here only gates eligibility — it never mutates the face.
 pub(crate) fn move_to_zone_with_entry_flags(
     state: &mut GameState,
@@ -1738,12 +1740,12 @@ pub(crate) fn move_to_zone_with_entry_flags(
 /// those two `.expect(…)` its return.) Measured over this function's four direct callers with
 /// `rg -n 'record_and_emit_entry_from_no_zone\(' crates/engine/src`:
 ///
-/// * `effects/conjure.rs:218` — `.expect("conjured object was just created")`: PANICS on `None`.
-/// * `effects/incubate.rs:123` — `.expect("incubator token was just created")`: PANICS on `None`.
-/// * `effects/token.rs:1881` — `if record.is_some()`, which is how
+/// * `effects::conjure::resolve` — `.expect("conjured object was just created")`: PANICS on `None`.
+/// * `effects::incubate::resolve` — `.expect("incubator token was just created")`: PANICS on `None`.
+/// * `effects::token::push_committed_token_entry_events` — `if record.is_some()`, which is how
 ///   `push_committed_token_entry_events` gates its `GameEvent::TokenCreated` emit. This is the
 ///   object-existence predicate the token-creation ledger triple agrees on.
-/// * `effects/counters.rs:530` — statement position, discards.
+/// * `effects::counters::apply_pending_counter_post_action` — statement position, discards.
 ///
 /// So `None` is inert on exactly ONE of the four routes. The two `.expect` callers keep their
 /// pre-existing "just created" panic deliberately: each creates its object inside the same call, so

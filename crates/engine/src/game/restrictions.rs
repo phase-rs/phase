@@ -471,10 +471,10 @@ fn entry_type_filter_matches(
         TypeFilter::Card | TypeFilter::Any => true,
         TypeFilter::Non(inner) => !entry_type_filter_matches(record, inner, all_creature_types),
         // CR 702.73a + CR 205.3m: a Changeling entrant is every creature type. The entry
-        // snapshot is taken pre-layer (`record_zone_change`, `:616`), so `record.subtypes`
+        // snapshot is taken pre-layer (`record_zone_change`), so `record.subtypes`
         // is NOT layer-expanded — but `record.keywords` carries Changeling, which is all the
-        // single authority needs. Mirrors `zone_change_record_matches_type_filter`
-        // (`game/filter.rs:2871-2878`), the same helper over the sibling snapshot type.
+        // single authority needs. Mirrors `filter::zone_change_record_matches_type_filter`,
+        // the same helper over the sibling snapshot type.
         TypeFilter::Subtype(subtype) => {
             crate::game::filter::subtype_matches_with_changeling(
                 subtype,
@@ -492,7 +492,7 @@ fn entry_type_filter_matches(
         // record is never an instant or a sorcery. `false` is the correct verdict here,
         // not a fail-closed one, and `Non(Instant)` correctly inverts to `true`.
         // Exhaustive on purpose: a new `TypeFilter` variant must fail to compile rather
-        // than silently join this arm while `ledger_filter_is_evaluable` (`:570-572`)
+        // than silently join this arm while `ledger_filter_is_evaluable`
         // keeps reporting type filters evaluable.
         TypeFilter::Instant | TypeFilter::Sorcery => false,
     }
@@ -579,19 +579,22 @@ pub(crate) fn battlefield_entry_matches_filter(
 /// against a `BattlefieldEntryRecord`?
 ///
 /// The record is an entry-time snapshot carrying only `object_id / name / core_types / subtypes /
-/// supertypes / colors / keywords / controller` (`types/game_state.rs:1650-1670`). Every other
+/// supertypes / colors / keywords / controller` (`types::game_state::BattlefieldEntryRecord`). Every other
 /// characteristic a `FilterProp` can name is live-object state the snapshot never captured, so the
-/// matcher fails closed at its `FilterProp` arm (`:515`) and its outer `TargetFilter` arm
-/// (`:544`), and the whole tally reads a silent constant 0 — but see the `Or` exception
-/// documented at `:519-526`: an `Or` with one unsupported leaf yields a SILENT PARTIAL COUNT
-/// instead. Measured: 98
-/// `FilterProp` variants exist (`types/ability.rs:3609-4251`); the matcher answers 4.
+/// matcher fails closed at the `FilterProp` match's fail-closed arm inside
+/// `battlefield_entry_matches_filter`'s `TargetFilter::Typed` case, and at the fail-closed
+/// `_ => false` arm that closes out that function's outer `match`, and the whole tally reads
+/// a silent constant 0 — but see the `Or` exception documented beside that function's
+/// `TargetFilter::Or` arm: an `Or` with one unsupported leaf yields a SILENT PARTIAL COUNT
+/// instead. Measured: 100
+/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 4.
 ///
 /// This is an ALLOW-LIST, deliberately not an exhaustive `match`. A `FilterProp` added later is
 /// absent from the list and therefore defaults to "not evaluable" — the conservative side, which
 /// yields an honest `Effect::Unimplemented` at the parser guard and an honest `Unhandled` in the
 /// coverage classifier. A deny-list would need exhaustiveness; a positive allow-list does not.
-/// The list must name exactly the props the matcher answers at `:502-514`; the binder is
+/// The list (this function's own `TargetFilter::Typed` arm, below) must name exactly the props
+/// the matcher answers; the binder is
 /// `ledger_guard_agrees_with_matcher` (test, below).
 ///
 /// Upgrade path, ascending cost: `HasSupertype` and `Named` are answerable from `record.supertypes`
@@ -605,7 +608,7 @@ pub(crate) fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Any => true,
         TargetFilter::Typed(typed) => {
-            // CR 109.5: `entry_controller_matches` (`fn` at `:406`) answers only these two.
+            // CR 109.5: `entry_controller_matches` answers only these two.
             typed
                 .controller
                 .as_ref()
@@ -620,12 +623,14 @@ pub(crate) fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
                     )
                 })
         }
-        // CR 608.2i: mirrors the matcher's monotone connectives (`:538-543`); every leaf must be
+        // CR 608.2i: mirrors the monotone connectives (the `TargetFilter::Or` and
+        // `TargetFilter::And` arms) of `battlefield_entry_matches_filter`; every leaf must be
         // answerable, otherwise the composite silently drops one.
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().all(ledger_filter_is_evaluable)
         }
-        // Everything else is the matcher's outer `_ => false` at `:544`, including the anti-monotone
+        // Everything else is the fail-closed `_ => false` arm that closes out
+        // `battlefield_entry_matches_filter`'s outer `match`, including the anti-monotone
         // `TargetFilter::Not`.
         _ => false,
     }

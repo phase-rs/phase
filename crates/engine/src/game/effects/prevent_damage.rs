@@ -157,7 +157,10 @@ pub(crate) fn resolve_source_filter(
 /// `source_controller`, so a controller-relative gate on a player-scoped shield
 /// resolved against `state.active_player`. The authority latches it
 /// unconditionally (CR 113.8).
-fn push_player_scoped_shield(
+///
+/// Shared with `create_damage_replacement::resolve`, whose redirection shield
+/// for a PLAYER original recipient has the same storage shape.
+pub(crate) fn push_player_scoped_shield(
     state: &mut GameState,
     controller: PlayerId,
     source_id: ObjectId,
@@ -172,7 +175,7 @@ fn push_player_scoped_shield(
     );
 }
 
-fn player_damage_filter(player: PlayerId) -> DamageTargetFilter {
+pub(crate) fn player_damage_filter(player: PlayerId) -> DamageTargetFilter {
     DamageTargetFilter::Player {
         player: DamageTargetPlayerScope::Specific(player),
     }

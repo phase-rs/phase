@@ -623,6 +623,11 @@ pub enum ClientMessage {
         code: String,
         role: TournamentRole,
         token: String,
+        /// Mirrors `rotation_nonce` on the lobby variant: the client-minted,
+        /// per-attempt nonce that lets a lost renewal reply be recovered by an
+        /// idempotent replay. `#[serde(default)]` for the same wire tolerance.
+        #[serde(default)]
+        rotation_nonce: String,
     },
 }
 
@@ -2888,6 +2893,9 @@ mod tests {
                 },
             },
             launch_capability: DraftLaunchCapability::None,
+            // Read off the same procedure the kind above names, so the fixture
+            // stays a view the engine could actually have built.
+            distribution: DraftKind::Sealed.procedure().distribution,
             commanders_required: 0,
             current_pack_number: 0,
             pick_number: 2,
@@ -2921,6 +2929,13 @@ mod tests {
             pod_policy: PodPolicy::Competitive,
             pairings: Vec::new(),
             match_config: DraftKind::Sealed.match_config(),
+            // Sealed has no shared stack and no Winston play/draw election, so
+            // both are `None` -- which makes this round trip a free
+            // byte-compatibility assertion: with `skip_serializing_if` on both
+            // fields, this message's JSON is byte-identical to the pre-Winston
+            // wire shape.
+            shared_stack: None,
+            play_first_chooser: None,
         };
         let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
         let json = serde_json::to_string(&msg).unwrap();
@@ -3216,6 +3231,9 @@ mod tests {
             match_config: DraftKind::Premier.match_config(),
             pools: None,
             current_packs: None,
+            // Premier has no shared stack; `skip_serializing_if` keeps this
+            // frame byte-identical to the pre-Winston wire shape.
+            shared_stack: None,
         };
         let msg = ServerMessage::DraftSpectatorView { view };
         let json = serde_json::to_string(&msg).unwrap();
@@ -3230,18 +3248,20 @@ mod tests {
         }
     }
 
-    /// The bump this number is at: `OutsideGameChoiceSource::BoosterPack`
-    /// replaced `set_code` with a required `origin: PackOrigin`, so an opened
-    /// pack's `WaitingFor::OutsideGameChoice` is a shape a v69 peer cannot
-    /// decode and must be refused before it receives one.
+    /// The bump this number is at: the paid graveyard cast offer
+    /// (`CastOfferKind::GraveyardPaidCast`) carries an additional cost and the
+    /// delayed triggers its decline withdraws, and opens for seven more
+    /// printed cards that a v71 peer handled as a lingering permission. A v71
+    /// peer parses the v72 offer and then pays the wrong cost — so the pairing
+    /// must be refused before it receives one.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_70_for_booster_pack_origin() {
-        assert_eq!(PROTOCOL_VERSION, 70);
+    fn protocol_version_is_72_for_the_paid_graveyard_cast_offer() {
+        assert_eq!(PROTOCOL_VERSION, 72);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3252,7 +3272,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_70_for_booster_pack_origin` stays
+    /// `protocol_version_is_72_for_the_paid_graveyard_cast_offer` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

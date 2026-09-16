@@ -547,7 +547,7 @@ fn prompt_resolution_attachment_choice(
     }
 
     let ctx = FilterContext::from_ability(ability);
-    let effective = crate::game::effects::resolved_object_filter(ability, attachment_filter);
+    let effective = crate::game::effects::resolved_object_filter(state, ability, attachment_filter);
     let eligible: Vec<ObjectId> = state
         .battlefield
         .iter()
@@ -944,7 +944,7 @@ fn resolve_bound_attachment_targets(
             .collect();
     }
     let ctx = FilterContext::from_ability(ability);
-    let effective = crate::game::effects::resolved_object_filter(ability, filter);
+    let effective = crate::game::effects::resolved_object_filter(state, ability, filter);
     ability
         .attach_attachment_targets()
         .iter()
@@ -976,7 +976,7 @@ fn resolve_attach_target<'a>(
             return AttachHostTargetResolution::Found(host.object_id);
         }
         let ctx = FilterContext::from_ability(ability);
-        let effective = crate::game::effects::resolved_object_filter(ability, filter);
+        let effective = crate::game::effects::resolved_object_filter(state, ability, filter);
         return matches_target_filter(state, host.object_id, &effective, &ctx)
             .then_some(host.object_id)
             .map_or(
@@ -1099,7 +1099,7 @@ fn explicit_attachment_target_chosen(
     attachment_filter: &TargetFilter,
 ) -> bool {
     let ctx = FilterContext::from_ability(ability);
-    let effective = crate::game::effects::resolved_object_filter(ability, attachment_filter);
+    let effective = crate::game::effects::resolved_object_filter(state, ability, attachment_filter);
     ability.targets.iter().any(|target| {
         matches!(
             target,

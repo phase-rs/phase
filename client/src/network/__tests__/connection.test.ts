@@ -57,7 +57,8 @@ vi.mock("peerjs", () => {
       return {
         open: false,
         on: (event: string, handler: (arg?: unknown) => void) => {
-          peerState.connHandlers.set(event, handler);
+          const previous = peerState.connHandlers.get(event);
+          peerState.connHandlers.set(event, (arg) => { previous?.(arg); handler(arg); });
         },
       };
     }
@@ -65,7 +66,9 @@ vi.mock("peerjs", () => {
   return { default: FakePeer };
 });
 
-import { PEER_CONNECT_OPTIONS, hostRoom, joinRoom, logSelectedIceCandidate } from "../connection";
+import { dialPeer, fetchFreshTurnConfig, safePeerError, PEER_CONNECT_OPTIONS, hostRoom, joinRoom, logSelectedIceCandidate } from "../connection";
+
+import { getDiagnosticHistory } from "../../services/troubleshooting";
 
 // Fake RTCStatsReport: a Map<string, {type, ...}> with a forEach that matches
 // the browser API shape.
@@ -251,6 +254,8 @@ describe("joinRoom", () => {
     peerState.emitPeer("error", Object.assign(new Error("not registered"), { type: "socket-error" }));
     await expect(joining).rejects.toThrow("Failed to connect: not registered");
     expect(peerState.destroyCalls).toBe(1);
+    expect(getDiagnosticHistory()).toContainEqual(expect.objectContaining({ kind: "signaling", event: "error", error: "socket-error" }));
+    expect(JSON.stringify(getDiagnosticHistory())).not.toContain("not registered");
   });
 
   it("recovers guest signaling with backoff without redialing the initial game connection", async () => {
@@ -296,4 +301,93 @@ describe("joinRoom", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(peerState.reconnectCalls).toBe(1);
   });
+});
+
+
+describe("strict fresh TURN credentials", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("validates servers and forwards abort without caching or exporting secrets", async () => {
+    const controller = new AbortController();
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ iceServers: [
+      { urls: "stun:example.org:3478" },
+      { urls: ["turn:example.org:3478", "turns:example.org:443?transport=tcp"], username: "SECRET", credential: "SECRET" },
+    ] })));
+    vi.stubGlobal("fetch", fetcher);
+    const before = getDiagnosticHistory();
+    expect((await fetchFreshTurnConfig(controller.signal)).iceServers).toHaveLength(2);
+    expect(fetcher).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ signal: controller.signal, cache: "no-store" }));
+    expect(getDiagnosticHistory()).toEqual(before);
+  });
+  it.each([
+    [new Response(null, { status: 503 }), "http"],
+    [new Response("invalid JSON"), "invalid"],
+    [new Response(JSON.stringify({ iceServers: [{ urls: "stun:example.org" }] })), "no-turn"],
+    [new Response(JSON.stringify({ iceServers: [{ urls: "turn:example.org", credential: "SECRET" }] })), "invalid"],
+  ])("classifies failures without leaking response content", async (response, reason) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    await expect(fetchFreshTurnConfig()).rejects.toMatchObject({ reason });
+  });
+  it("classifies network errors and abort separately", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("SECRET")));
+    await expect(fetchFreshTurnConfig()).rejects.toMatchObject({ reason: "network", message: "TURN credentials: network" });
+    const controller = new AbortController();
+    controller.abort();
+    await expect(fetchFreshTurnConfig(controller.signal)).rejects.toMatchObject({ reason: "aborted" });
+    expect(safePeerError({ type: "SECRET", message: "SECRET" })).toBe("unknown");
+    expect(safePeerError({ type: "peer-unavailable" })).toBe("peer-unavailable");
+  });
+});
+
+
+describe("connection attempt observation", () => {
+  afterEach(() => vi.useRealTimers());
+  it("retains pre-open ICE errors and times out once without closing the channel", async () => {
+    vi.useFakeTimers();
+    const pc = new EventTarget();
+    const listeners = new Map<string, () => void>();
+    const conn = { peerConnection: pc, on: (event: string, callback: () => void) => listeners.set(event, callback), close: vi.fn() };
+    const peer = { connect: vi.fn().mockReturnValue(conn) };
+    expect(dialPeer(peer as never, "SECRET", 20)).toBe(conn);
+    pc.dispatchEvent(Object.assign(new Event("icecandidateerror"), { errorCode: 701, url: "SECRET", errorText: "SECRET" }));
+    await vi.advanceTimersByTimeAsync(20);
+    expect(getDiagnosticHistory().slice(-3)).toEqual([
+      expect.objectContaining({ kind: "connection-attempt", event: "started" }),
+      expect.objectContaining({ kind: "ice-candidate-error", code: 701 }),
+      expect.objectContaining({ kind: "connection-attempt", event: "timeout" }),
+    ]);
+    const before = getDiagnosticHistory();
+    listeners.get("open")!();
+    pc.dispatchEvent(Object.assign(new Event("icecandidateerror"), { errorCode: 701 }));
+    expect(getDiagnosticHistory()).toEqual(before);
+    expect(conn.close).not.toHaveBeenCalled();
+    expect(JSON.stringify(before)).not.toContain("SECRET");
+  });
+  it("clears the observation timer on open and reports undefined dials safely", () => {
+    vi.useFakeTimers();
+    const listeners = new Map<string, () => void>();
+    dialPeer({ connect: () => ({ on: (event: string, callback: () => void) => listeners.set(event, callback) }) } as never, "SECRET", 20);
+    listeners.get("open")!();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(getDiagnosticHistory().slice(-1)[0]).toMatchObject({ kind: "connection-attempt", event: "open" });
+    expect(() => dialPeer({ connect: () => undefined } as never, "SECRET", 20)).toThrow("Peer connection could not be created");
+    expect(getDiagnosticHistory().slice(-1)[0]).toMatchObject({ kind: "connection-attempt", event: "error" });
+  });
+});
+
+it("correlates interleaved setup and ICE failures by anonymous connection and Peer identity", () => {
+  const listeners = [new Map<string, (value?: unknown) => void>(), new Map<string, (value?: unknown) => void>()];
+  const connections = listeners.map((handlers) => ({ peerConnection: Object.assign(new EventTarget(), { connectionState: "failed", iceConnectionState: "failed" }), on: (event: string, handler: (value?: unknown) => void) => handlers.set(event, handler) }));
+  const peer = { connect: vi.fn().mockReturnValueOnce(connections[0]).mockReturnValueOnce(connections[1]) };
+  dialPeer(peer as never, "SECRET-1", 1000);
+  dialPeer(peer as never, "SECRET-2", 1000);
+  connections[0].peerConnection.dispatchEvent(Object.assign(new Event("icecandidateerror"), { errorCode: 701 }));
+  listeners[1].get("error")!({ type: "negotiation-failed", message: "SECRET" });
+  listeners[0].get("error")!({ type: "connection-closed", message: "SECRET" });
+  const events = getDiagnosticHistory().slice(-5);
+  expect(events[0].diagnosticId).not.toBe(events[1].diagnosticId);
+  expect(events[2].diagnosticId).toBe(events[0].diagnosticId);
+  expect(events[3]).toMatchObject({ diagnosticId: events[1].diagnosticId, error: "negotiation-failed", state: { connectionState: "failed", iceState: "failed" } });
+  expect(events[4]).toMatchObject({ diagnosticId: events[0].diagnosticId, error: "connection-closed" });
+  expect(new Set(events.map((event) => event.peerDiagnosticId)).size).toBe(1);
+  expect(JSON.stringify(events)).not.toContain("SECRET");
 });

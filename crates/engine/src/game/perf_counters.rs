@@ -107,6 +107,16 @@ pub struct AttackDeclarationSolverCounters {
     /// `per_permanent_defender_caps`). The constraints model caches all three at
     /// build time, so a validation run against a prebuilt model must add none.
     pub cap_static_sweeps: u64,
+    /// CR 508.1b: per-(attacker, defender) pairability evaluations
+    /// (`combat::attacker_can_attack_target`), the single predicate behind both
+    /// views of `combat::legal_attack_targets_iter`.
+    ///
+    /// Pins that the EXISTENTIAL view (CR 508.1d "if able", asked once per
+    /// must-attack creature by `AttackDeclarationConstraints::build` and by the
+    /// AI mandatory-attacker filter) short-circuits on the first legal pairing
+    /// instead of evaluating — and sorting — the whole defender universe. Only
+    /// the LIST view may spend one evaluation per defender.
+    pub pairability_evaluations: u64,
 }
 
 thread_local! {
@@ -187,6 +197,7 @@ thread_local! {
         Cell::new(AttackDeclarationSolverCounters {
             target_table_builds: 0,
             cap_static_sweeps: 0,
+            pairability_evaluations: 0,
         })
     };
     static LEGALITY_CLONE_PHASE: Cell<Option<LegalityClonePhase>> = const { Cell::new(None) };
@@ -537,6 +548,16 @@ pub fn record_attack_cap_static_sweep() {
     ATTACK_DECLARATION_SOLVER_COUNTERS.with(|cell| {
         let mut counters = cell.get();
         counters.cap_static_sweeps += 1;
+        cell.set(counters);
+    });
+}
+
+/// CR 508.1b: one per-pairing `attacker_can_attack_target` evaluation.
+#[cfg(feature = "test-support")]
+pub fn record_attack_pairability_evaluation() {
+    ATTACK_DECLARATION_SOLVER_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.pairability_evaluations += 1;
         cell.set(counters);
     });
 }

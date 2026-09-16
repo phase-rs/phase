@@ -806,6 +806,14 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         sub_link: _,
         iteration_kind_binding: _,
         sibling_condition: _,
+        // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
+        // deferred guard verdict before it hands a tree out, so this is `None` on
+        // every tree that pipeline produces — which is every tree a runtime walker
+        // sees — and cannot make a definition cast-unstable. (NOT a universal claim
+        // about the field: `parse_effect_chain` outside the pipeline leaves marks
+        // intact, and no runtime path reaches such a tree. See
+        // `types::ability::UnloweredGuard`.)
+        unlowered_guard: _,
     } = definition;
 
     activation_mana_payment_restriction.is_none()
@@ -923,6 +931,13 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         sub_link: _,
         iteration_kind_binding: _,
         sibling_condition: _,
+        // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
+        // deferred guard verdict before it hands a tree out, so this is `None` on
+        // every tree that pipeline produces — which is every tree a runtime walker
+        // sees — and carries no game-state payload. (NOT a universal claim about the
+        // field: `parse_effect_chain` outside the pipeline leaves marks intact, and
+        // no runtime path reaches such a tree. See `types::ability::UnloweredGuard`.)
+        unlowered_guard: _,
     } = definition
     else {
         return false;
@@ -1792,6 +1807,10 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             | ObjectScope::OwnedLinkedExileCard
             | ObjectScope::Demonstrative
             | ObjectScope::AmassedArmy
+            // CR 608.2h + CR 601.2c: the chain-root spell's target is read from
+            // the ability's own carried context during resolution, never as a
+            // static CDA read.
+            | ObjectScope::ChainRootTarget
             // CR 120.1: the per-iteration damage source of an
             // `EachSourceDealsDamage` batch is bound per batch member only at
             // resolution time, never as a static CDA read.
@@ -1809,6 +1828,13 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             | QuantityRef::ObjectNameWordCount { scope }
             | QuantityRef::ObjectTypelineComponentCount { scope }
             | QuantityRef::ManaSymbolsInManaCost { scope, .. } => scope_is_resolution_only(*scope),
+            // CR 608.2h: `QuantityRef::CountersOn` deliberately stays OUT of the
+            // list above. Its resolvers own their live-vs-LKI ladder, so a
+            // departed referent (a destroyed `ChainRootTarget`, an exiled
+            // `Source`) still reports a real recorded count; classifying it as a
+            // resolution-only object read would let
+            // `quantity_expr_missing_resolution_only_referent` gate that read
+            // `false` before the ladder ever runs.
             _ => false,
         },
         QuantityExpr::DivideRounded { inner, .. }
@@ -1952,6 +1978,16 @@ fn resolution_only_scope_referent_present(
             })
         }
         ObjectScope::AmassedArmy => ability.amassed_army_object.is_some(),
+        // CR 601.2c: referent presence mirrors the `Target` arm, but against the
+        // ability-carried chain-root list rather than this sub-ability's own
+        // targets. Unreachable for `QuantityRef::CountersOn` today (that variant
+        // is not in `quantity_expr_missing_resolution_only_referent`'s leaf
+        // list), but adjudicated rather than wildcarded.
+        ObjectScope::ChainRootTarget => ability
+            .context
+            .chain_root_targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Object(_))),
         // CR 120.1: the per-iteration batch member is bound only while the
         // per-source resolver runs; absent everywhere else.
         ObjectScope::BatchSource => ctx.damage_source.is_some(),
@@ -6877,6 +6913,11 @@ fn object_for_scope<'a>(
         | ObjectScope::OtherRevealedCard
         | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::Demonstrative
+        // CR 601.2c: `ChainRootTarget`'s identity is
+        // `ability.context.chain_root_targets`, carried by the resolving
+        // ability and therefore unavailable to this ability-free helper; it is
+        // resolved in `resolve_counters_on_scope`.
+        | ObjectScope::ChainRootTarget
         | ObjectScope::AmassedArmy => None,
         // CR 120.1: the per-iteration damage source of an `EachSourceDealsDamage`
         // batch is bound per batch member by the per-source resolver.
@@ -6955,6 +6996,9 @@ pub(crate) fn object_id_for_scope(
         | ObjectScope::OtherRevealedCard
         | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::Demonstrative
+        // CR 601.2c: identity is `ability.context.chain_root_targets` — see the
+        // matching arm in `object_for_scope`.
+        | ObjectScope::ChainRootTarget
         | ObjectScope::AmassedArmy => None,
         // CR 120.1: the per-iteration damage source of an `EachSourceDealsDamage`
         // batch is bound per batch member by the per-source resolver.
@@ -7244,6 +7288,42 @@ fn resolve_counters_on_scope(
                     .unwrap_or_else(|| {
                         counter_count_from_map(&snapshot.lki.counters, counter_type)
                     })
+            })
+            .unwrap_or(0),
+        // CR 608.2c + CR 122.2 + CR 400.7 + CR 608.2h: "that <permanent>" /
+        // "that many" back-reference to the chain-root spell's own target.
+        // LIVE counters while that target is still on the battlefield (an
+        // indestructible target that was NOT destroyed — CR 702.12b — still
+        // feeds the placement); its LKI counter map once it has left (CR 122.2:
+        // the counters ceased to exist; CR 400.7: it is a new object there).
+        // Identity is the ability-carried chain-root target list, NEVER this
+        // sub-ability's own (recipient) targets — mirrors the `CostPaidObject`
+        // and `AmassedArmy` arms above.
+        //
+        // This arm must stay EXPLICIT: the `_ =>` fall-through below would
+        // resolve `ChainRootTarget` through `object_for_scope`, which has no
+        // referent for it, and silently report 0.
+        ObjectScope::ChainRootTarget => ability
+            .and_then(|ability| {
+                ability
+                    .context
+                    .chain_root_targets
+                    .iter()
+                    .find_map(|target| match target {
+                        TargetRef::Object(id) => Some(*id),
+                        _ => None,
+                    })
+            })
+            .map(|id| {
+                let live = state.objects.get(&id);
+                let on_battlefield = live.is_some_and(|obj| obj.zone == Zone::Battlefield);
+                if !on_battlefield {
+                    if let Some(lki) = state.lki_cache.get(&id) {
+                        return counter_count_from_map(&lki.counters, counter_type);
+                    }
+                }
+                live.map(|obj| counter_count_from_map(&obj.counters, counter_type))
+                    .unwrap_or(0)
             })
             .unwrap_or(0),
         _ => object_for_scope(state, scope, ctx, targets)
@@ -7762,6 +7842,14 @@ where
         ObjectScope::OtherRevealedCard => 0,
         // MV-only referent; no P/T semantics.
         ObjectScope::OwnedLinkedExileCard => 0,
+        // CR 601.2c: `ChainRootTarget` is produced only for
+        // `QuantityRef::CountersOn` today (Dismantle / Rite of the Serpent). No
+        // card reads the chain-root target's P/T, so this is a fail-closed
+        // placeholder — never a silent wildcard. Extend by mirroring the
+        // `resolve_counters_on_scope` arm against
+        // `ability.context.chain_root_targets`; `game/coverage.rs` reports these
+        // characteristic readers as `Unhandled` until then.
+        ObjectScope::ChainRootTarget => 0,
         // CR 120.1 + CR 208.3 + CR 608.2h: the per-iteration damage source of an
         // `EachSourceDealsDamage` batch reads its OWN characteristic ("deals
         // damage equal to ITS power"). Guarded live-then-LKI read (a batch
@@ -8088,6 +8176,13 @@ fn resolve_object_mana_value(
                 current_mana_value.unwrap_or(0)
             }
         }
+        // CR 601.2c: `ChainRootTarget` is produced only for
+        // `QuantityRef::CountersOn` today (Dismantle / Rite of the Serpent). No
+        // card reads the chain-root target's mana value, so this is a
+        // fail-closed placeholder — never a silent wildcard. Extend by mirroring
+        // the `resolve_counters_on_scope` arm against
+        // `ability.context.chain_root_targets`.
+        ObjectScope::ChainRootTarget => 0,
         // CR 120.1 + CR 202.3 + CR 608.2h: the per-iteration damage source of an
         // `EachSourceDealsDamage` batch reads its OWN mana value. Live object
         // first, LKI fallback (mirrors the `EventSource` arm), so a batch member
@@ -9026,10 +9121,10 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, ActivationRestriction, AggregateFunction,
         ChoiceValue, Comparator, ControllerRef, CountScope, DamageChannel, DamageKindFilter,
-        DevotionColors, Duration, Effect, FilterProp, KickerVariant, ModalSelectionCondition,
-        ModalSelectionConstraint, ObjectProperty, ObjectScope, PlayerRelation, RepeatContinuation,
-        SharedQuality, StaticCondition, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
-        TypedFilter,
+        DelayedTriggerCondition, DevotionColors, DieResultBranch, Duration, Effect, FilterProp,
+        KickerVariant, ModalSelectionCondition, ModalSelectionConstraint, ObjectProperty,
+        ObjectScope, PlayerRelation, RepeatContinuation, SharedQuality, StaticCondition,
+        TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -9040,6 +9135,7 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+    use crate::types::phase::Phase;
     use crate::types::zones::Zone;
     use crate::types::{LandPlayRecord, SpellCastRecord};
 
@@ -21106,6 +21202,795 @@ mod tests {
         assert_eq!(
             got, 7,
             "an undeparted Army still reads its LIVE mana value (7), proving the negative above is not vacuous"
+        );
+    }
+
+    /// Build a spell whose chain-root target `T` is an artifact carrying
+    /// `{Plus1Plus1: 2, "oil": 1}`, plus the resolving ability that names it via
+    /// `SpellContext::chain_root_targets`.
+    fn chain_root_target_fixture() -> (GameState, ObjectId, ObjectId, ResolvedAbility) {
+        let mut state = GameState::new_two_player(7);
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dismantle".to_string(),
+            Zone::Stack,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Counter-Laden Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.counters.insert(CounterType::Plus1Plus1, 2);
+            obj.counters.insert(CounterType::Generic("oil".into()), 1);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: None,
+                    properties: vec![],
+                }),
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(target)],
+            spell,
+            PlayerId(0),
+        );
+        // The `finalize_cast` stamp, reproduced verbatim.
+        ability.context.chain_root_targets = vec![TargetRef::Object(target)];
+        (state, spell, target, ability)
+    }
+
+    fn chain_root_ctx(spell: ObjectId) -> QuantityContext {
+        QuantityContext {
+            entering: None,
+            source: spell,
+            trigger_source: None,
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+            event_amount: None,
+        }
+    }
+
+    /// P1a — CR 702.12b + CR 608.2h: an indestructible chain-root target that was
+    /// NOT destroyed is still on the battlefield, so "that many" reads its LIVE
+    /// counter map. (Dismantle ruling 2: "If the target is legal but not destroyed
+    /// … you do put counters on an artifact.")
+    #[test]
+    fn chain_root_target_counters_read_live_map_while_target_survives() {
+        let (state, spell, target, ability) = chain_root_target_fixture();
+
+        // Positive reach-guard: the live map really holds 3 counters of 2 kinds.
+        assert_eq!(
+            state.objects[&target]
+                .counters
+                .values()
+                .copied()
+                .sum::<u32>(),
+            3,
+            "reach-guard: the live target carries 3 counters before the read"
+        );
+        assert_eq!(state.objects[&target].zone, Zone::Battlefield);
+
+        // CR 122.1 (Dismantle ruling 3): kind is irrelevant, only the TOTAL.
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &[],
+                Some(&ability),
+                None,
+            ),
+            3,
+            "counter_type: None sums every kind on the surviving chain-root target"
+        );
+        // A typed read still selects one kind.
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &[],
+                Some(&ability),
+                Some(&CounterType::Plus1Plus1),
+            ),
+            2,
+            "Rite of the Serpent's typed gate reads only the +1/+1 counters"
+        );
+    }
+
+    /// P1b — CR 122.2 + CR 400.7 + CR 608.2h: once the chain-root target has been
+    /// destroyed its counters have ceased to exist, so the read falls to its LKI
+    /// counter map and still reports the pre-destruction total.
+    #[test]
+    fn chain_root_target_counters_fall_back_to_lki_once_target_is_destroyed() {
+        let (mut state, spell, target, ability) = chain_root_target_fixture();
+        let lki = state.objects[&target].snapshot_public_characteristics();
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.zone = Zone::Graveyard;
+            obj.counters.clear();
+        }
+        state.lki_cache.insert(target, lki);
+
+        // Positive reach-guards: the live map is now EMPTY and the LKI holds 3.
+        assert_eq!(
+            state.objects[&target]
+                .counters
+                .values()
+                .copied()
+                .sum::<u32>(),
+            0,
+            "reach-guard: the destroyed object's live counters are gone (CR 122.2)"
+        );
+        assert_eq!(
+            state.lki_cache[&target]
+                .counters
+                .values()
+                .copied()
+                .sum::<u32>(),
+            3,
+            "reach-guard: the LKI snapshot holds the pre-destruction total"
+        );
+
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &[],
+                Some(&ability),
+                None,
+            ),
+            3,
+            "a destroyed chain-root target reports its LKI counter total, not 0"
+        );
+    }
+
+    /// The arm is keyed off the ability-carried chain-root list, never off this
+    /// sub-ability's own targets and never off a turn-wide "what was destroyed"
+    /// ledger. With no chain-root target the read is a fail-closed 0, not a panic.
+    #[test]
+    fn chain_root_target_counters_ignore_sibling_targets_and_missing_referent() {
+        let (state, spell, target, ability) = chain_root_target_fixture();
+
+        let mut no_root = ability.clone();
+        no_root.context.chain_root_targets.clear();
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &[TargetRef::Object(target)],
+                Some(&no_root),
+                None,
+            ),
+            0,
+            "an empty chain_root_targets reads 0 even when `targets` names the artifact"
+        );
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &[],
+                None,
+                None,
+            ),
+            0,
+            "no ability at all is a fail-closed 0, never a panic"
+        );
+    }
+
+    /// P2 — CR 601.2c: the chain-root target is readable from a sub TWO levels
+    /// under the spell root, while that sub's OWN `targets` name a different
+    /// object (the resolution-chosen recipient). This is the whole point of the
+    /// scope: `ObjectScope::Target` would read the recipient.
+    #[test]
+    fn chain_root_target_survives_to_depth_two_while_sub_targets_differ() {
+        let (mut state, spell, target, root) = chain_root_target_fixture();
+        let recipient = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Recipient Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&recipient)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let leaf = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::ChainRootTarget,
+                        counter_type: None,
+                    },
+                },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }),
+            },
+            vec![TargetRef::Object(recipient)],
+            spell,
+            PlayerId(0),
+        );
+        let mid = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: crate::types::ability::PlayerFilter::Controller,
+                branches: vec![],
+            },
+            vec![],
+            spell,
+            PlayerId(0),
+        )
+        .sub_ability(leaf);
+        let mut chain = root.sub_ability(mid);
+        // Exactly what the cast pipeline does after `finalize_cast` stamps the
+        // context: one whole-struct copy down the entire chain.
+        chain.set_context_recursive(chain.context.clone());
+
+        let depth_two = chain
+            .sub_ability
+            .as_deref()
+            .and_then(|mid| mid.sub_ability.as_deref())
+            .expect("reach-guard: the depth-2 leaf exists");
+
+        // Positive reach-guard: the leaf carries the ROOT's chain-root target
+        // while its own `targets` name the recipient — two DIFFERENT ids.
+        assert_eq!(
+            depth_two.context.chain_root_targets,
+            vec![TargetRef::Object(target)],
+            "reach-guard: chain_root_targets rode the context clone to depth 2"
+        );
+        assert_eq!(depth_two.targets, vec![TargetRef::Object(recipient)]);
+        assert_ne!(target, recipient);
+
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &depth_two.targets,
+                Some(depth_two),
+                None,
+            ),
+            3,
+            "the depth-2 sub reads the ROOT's target counters, not its own recipient's"
+        );
+        // The discriminator: the recipient has no counters, so a `Target`-scoped
+        // read (the pre-fix binding) would report 0.
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::Target,
+                chain_root_ctx(spell),
+                &depth_two.targets,
+                Some(depth_two),
+                None,
+            ),
+            0,
+            "ObjectScope::Target reads the recipient (0) — this is the bug ChainRootTarget fixes"
+        );
+    }
+
+    /// Adjacent-sibling fail-closed contract: the object-characteristic readers
+    /// are deliberately NOT wired for `ChainRootTarget` (no card consumer). They
+    /// must return an explicit 0, never panic and never silently wildcard.
+    #[test]
+    fn chain_root_target_characteristic_reads_fail_closed_to_zero() {
+        let (state, spell, _target, ability) = chain_root_target_fixture();
+        let _ = spell;
+        assert_eq!(
+            resolve_quantity_with_targets(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::ChainRootTarget,
+                    },
+                },
+                &ability,
+            ),
+            0,
+            "no card reads the chain-root target's power; the arm fails closed"
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::ChainRootTarget,
+                    },
+                },
+                &ability,
+            ),
+            0,
+            "no card reads the chain-root target's mana value; the arm fails closed"
+        );
+    }
+
+    /// The counter gate must not be pre-empted by the resolution-only referent
+    /// check: `QuantityRef::CountersOn` owns its own live/LKI ladder, so a
+    /// DESTROYED chain-root target still reports a real recorded count.
+    #[test]
+    fn chain_root_target_counter_gate_is_not_gated_by_missing_referent_precheck() {
+        let (mut state, _spell, target, ability) = chain_root_target_fixture();
+        let lki = state.objects[&target].snapshot_public_characteristics();
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.zone = Zone::Graveyard;
+            obj.counters.clear();
+        }
+        state.lki_cache.insert(target, lki);
+
+        let gate = QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::ChainRootTarget,
+                counter_type: None,
+            },
+        };
+        assert!(
+            !quantity_expr_uses_resolution_only_object_scope(&gate),
+            "CountersOn stays out of the resolution-only object-scope list"
+        );
+        assert!(
+            !quantity_expr_missing_resolution_only_referent(&state, &gate, &ability),
+            "the counter gate must not be pre-gated false for a departed referent"
+        );
+        // Positive control: the same scope on a characteristic read IS classified
+        // resolution-only, so the negative above is not vacuous.
+        assert!(
+            quantity_expr_uses_resolution_only_object_scope(&QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::ChainRootTarget,
+                },
+            }),
+            "control: a characteristic read on the same scope IS resolution-only"
+        );
+    }
+
+    /// Serde round-trip for the new variant and the new `SpellContext` field.
+    #[test]
+    fn chain_root_target_scope_and_context_field_round_trip() {
+        let json = serde_json::to_string(&ObjectScope::ChainRootTarget).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ObjectScope>(&json).unwrap(),
+            ObjectScope::ChainRootTarget
+        );
+
+        let context = crate::types::ability::SpellContext {
+            chain_root_targets: vec![TargetRef::Object(ObjectId(1))],
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&context).unwrap();
+        assert!(
+            encoded.contains("chain_root_targets"),
+            "a populated chain-root list serializes: {encoded}"
+        );
+        assert_eq!(
+            serde_json::from_str::<crate::types::ability::SpellContext>(&encoded)
+                .unwrap()
+                .chain_root_targets,
+            vec![TargetRef::Object(ObjectId(1))]
+        );
+
+        // `skip_serializing_if = "Vec::is_empty"`: no other card's serialized
+        // SpellContext gains the field (card-data diff scope, plan gate G4).
+        let empty = serde_json::to_string(&crate::types::ability::SpellContext::default()).unwrap();
+        assert!(
+            !empty.contains("chain_root_targets"),
+            "an empty chain-root list is omitted: {empty}"
+        );
+    }
+
+    /// Production-path regression for the CR 608.2h + CR 603.7a nested-carrier
+    /// chain-root propagation fix: `build_resolved_from_def_with_chain_root`
+    /// (the authority `delayed_trigger::resolve` materializes a delayed
+    /// payload through) must carry the creating ability's
+    /// `chain_root_targets` onto the delayed payload it installs — with NO
+    /// manual stamping anywhere in this test, unlike the fixture's own
+    /// depth-two sibling test above, which builds its chain by hand precisely
+    /// because there was previously no propagating authority to call. Firing
+    /// the STORED ability (exactly the entry point real trigger dispatch uses
+    /// once a delayed trigger goes on the stack and resolves, CR 603.3b) must
+    /// then place the correct number of REAL counters, not 0.
+    #[test]
+    fn chain_root_target_counter_gate_survives_a_delayed_trigger_firing_in_production() {
+        let (mut state, spell, _target, root) = chain_root_target_fixture();
+        let expected_chain_root_targets = root.context.chain_root_targets.clone();
+        let recipient = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Recipient Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&recipient)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let gate_qty = QuantityRef::CountersOn {
+            scope: ObjectScope::ChainRootTarget,
+            counter_type: None,
+        };
+        // CR 608.2d: an untargeted, controller-scoped recipient filter — same
+        // shape Dismantle itself prints — with exactly one legal candidate
+        // (`recipient`; the fixture's own `target` is opponent-controlled and
+        // does not match), so resolution auto-picks it with no prompt.
+        let recipient_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+
+        // CR 608.2d: the recipient is a description, not a target (CR 115.10a —
+        // no literal "target" word), so it must be chosen AT RESOLUTION, not
+        // announced at stack time. Mirrors what `try_parse_put_counter_choice`
+        // stamps on the real parsed shape (`dismantle_chain_shape`'s
+        // `TargetChoiceTiming::Resolution` assertion above).
+        let mut inner_put_counter = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: recipient_filter,
+            },
+        );
+        inner_put_counter.target_choice_timing = TargetChoiceTiming::Resolution;
+        let mut payload = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(inner_put_counter),
+                uses_tracked_set: false,
+            },
+        );
+
+        // Exactly the chunk loop's counter-gate call site
+        // (`oracle_effect::mod.rs`): rebind the deferred payload's
+        // placeholder to the gate's own QuantityRef before it is stored for
+        // later resolution.
+        crate::parser::oracle_effect::rebind_event_context_amount_counts_in_ability(
+            &mut payload,
+            &gate_qty,
+        );
+
+        // Chain the (rebound) CreateDelayedTrigger effect under the SAME
+        // resolving Destroy ability the fixture built, exactly as the cast
+        // pipeline does after `finalize_cast` stamps `chain_root_targets`:
+        // one whole-struct context copy down the entire chain (same
+        // mechanism `chain_root_target_survives_to_depth_two_while_sub_
+        // targets_differ` above exercises).
+        let controller = root.controller;
+        let mut chain = root.sub_ability(crate::game::ability_utils::build_resolved_from_def(
+            &payload, spell, controller,
+        ));
+        chain.set_context_recursive(chain.context.clone());
+        let creating = chain.sub_ability.as_deref().expect("sub_ability present");
+
+        let mut events = Vec::new();
+        crate::game::effects::delayed_trigger::resolve(&mut state, creating, &mut events)
+            .expect("delayed trigger installation must not error");
+
+        let installed = state
+            .delayed_triggers
+            .first()
+            .expect("delayed trigger must install");
+        assert_eq!(
+            installed.ability.context.chain_root_targets, expected_chain_root_targets,
+            "the installed delayed trigger's payload must inherit chain_root_targets \
+             automatically — no manual stamping anywhere in this test"
+        );
+        let Effect::PutCounter { count, .. } = &installed.ability.effect else {
+            panic!(
+                "expected PutCounter as the installed payload, got {:?}",
+                installed.ability.effect
+            );
+        };
+        assert_eq!(
+            *count,
+            QuantityExpr::Ref {
+                qty: gate_qty.clone()
+            },
+            "the installed payload must still carry the rebound (not EventContextAmount) count"
+        );
+
+        // Fire it: resolve the stored ability through the SAME entry point
+        // production trigger dispatch uses once a delayed trigger goes on the
+        // stack and resolves (CR 603.3b).
+        let stored_ability = (*installed.ability).clone();
+        crate::game::effects::resolve_ability_chain(&mut state, &stored_ability, &mut events, 0)
+            .expect("firing the delayed trigger must not error");
+
+        assert_eq!(
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "firing the delayed trigger must place the chain-root target's real \
+             counter total (3) on the recipient, not 0"
+        );
+    }
+
+    /// Production-path regression for the CR 608.2h chain-root propagation
+    /// through a `RollDie` results-table branch, covering a RESUMED branch
+    /// specifically (per review: propagation must survive a mid-loop
+    /// suspension, not just a fresh roll). Rather than driving the unrelated
+    /// interactive-choice machinery that WOULD cause such a suspension, this
+    /// constructs the resume frame directly at `next_index: 1` — exactly the
+    /// shape `execute_roll` re-parks once an earlier die's own branch
+    /// suspends — and calls `resume_after_ignore`, the SAME entry point
+    /// `drain_active_die_roll` uses to continue a suspended roll. Only die
+    /// index 1 is unrolled by this call; the propagated `chain_root_targets`
+    /// must still reach its branch.
+    #[test]
+    fn chain_root_target_counter_gate_survives_a_resumed_roll_die_branch() {
+        let (mut state, spell, _target, root) = chain_root_target_fixture();
+        let recipient = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Recipient Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&recipient)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let gate_qty = QuantityRef::CountersOn {
+            scope: ObjectScope::ChainRootTarget,
+            counter_type: None,
+        };
+        let recipient_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+
+        let mut branch_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: recipient_filter,
+            },
+        );
+        branch_def.target_choice_timing = TargetChoiceTiming::Resolution;
+        crate::parser::oracle_effect::rebind_event_context_amount_counts_in_ability(
+            &mut branch_def,
+            &gate_qty,
+        );
+
+        let pending = crate::types::resolution::PendingDieRoll {
+            source_id: spell,
+            controller: root.controller,
+            roller: root.controller,
+            targets: Vec::new(),
+            sides: 6,
+            // Die 0 already resolved (skipped by next_index below); die 1 is
+            // what this resume call unrolls.
+            results: vec![3, 4],
+            ignore_rules: Vec::new(),
+            results_table: vec![DieResultBranch {
+                min: 1,
+                max: 6,
+                effect: Box::new(branch_def),
+            }],
+            modifier: None,
+            die_result: None,
+            next_index: 1,
+            running_total: 0,
+            rolled_any: true,
+            forced_ignored: Vec::new(),
+            chain_root_targets: root.context.chain_root_targets.clone(),
+        };
+
+        let mut events = Vec::new();
+        crate::game::effects::roll_die::resume_after_ignore(
+            &mut state,
+            pending,
+            Vec::new(),
+            &mut events,
+        )
+        .expect("resuming the die-roll loop must not error");
+
+        assert_eq!(
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "the resumed die's branch must place the chain-root target's real \
+             counter total, not 0"
+        );
+    }
+
+    /// Production-path regression for the CR 608.2h chain-root propagation
+    /// through a `FlipCoin` win/lose branch, covering the Krark's Thumb
+    /// RESUME path specifically (`resume_after_keep`) — the entry point real
+    /// trigger dispatch uses once the controller keeps one of the doubled
+    /// flips. `chain_root_targets` must survive on the `PendingCoinFlip`
+    /// frame across that suspension.
+    #[test]
+    fn chain_root_target_counter_gate_survives_a_resumed_coin_flip_branch() {
+        let (mut state, spell, _target, root) = chain_root_target_fixture();
+        let recipient = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Recipient Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&recipient)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let gate_qty = QuantityRef::CountersOn {
+            scope: ObjectScope::ChainRootTarget,
+            counter_type: None,
+        };
+        let recipient_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+
+        let mut win_effect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: recipient_filter,
+            },
+        );
+        win_effect.target_choice_timing = TargetChoiceTiming::Resolution;
+        crate::parser::oracle_effect::rebind_event_context_amount_counts_in_ability(
+            &mut win_effect,
+            &gate_qty,
+        );
+
+        let pending = crate::types::resolution::PendingCoinFlip {
+            source_id: spell,
+            controller: root.controller,
+            flipper: root.controller,
+            targets: Vec::new(),
+            win_effect: Some(Box::new(win_effect)),
+            lose_effect: None,
+            kind: crate::types::resolution::PendingCoinFlipKind::Single,
+            chain_root_targets: root.context.chain_root_targets.clone(),
+        };
+
+        let mut events = Vec::new();
+        crate::game::effects::flip_coin::resume_after_keep(
+            &mut state,
+            pending,
+            vec![true],
+            &mut events,
+        )
+        .expect("resuming after the keep choice must not error");
+
+        assert_eq!(
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "the resumed win branch must place the chain-root target's real \
+             counter total, not 0"
+        );
+    }
+
+    /// Production-path regression for the CR 608.2h chain-root propagation
+    /// through a `Vote` per-ballot body, covering the per-ballot RESUME path
+    /// specifically (`drain_active_vote_ballot`) — the entry point real vote
+    /// resolution uses once an earlier ballot's own interactive choice
+    /// resolves and the remaining voters continue. `chain_root_targets` must
+    /// survive on the `PendingVoteBallotIteration` frame across that
+    /// suspension.
+    #[test]
+    fn chain_root_target_counter_gate_survives_a_resumed_vote_ballot() {
+        let (mut state, spell, _target, root) = chain_root_target_fixture();
+        let recipient = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Recipient Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&recipient)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let gate_qty = QuantityRef::CountersOn {
+            scope: ObjectScope::ChainRootTarget,
+            counter_type: None,
+        };
+        let recipient_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+
+        let mut ballot_template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: recipient_filter,
+            },
+        );
+        ballot_template.target_choice_timing = TargetChoiceTiming::Resolution;
+        crate::parser::oracle_effect::rebind_event_context_amount_counts_in_ability(
+            &mut ballot_template,
+            &gate_qty,
+        );
+
+        state.push_vote_ballot(crate::types::game_state::PendingVoteBallotIteration {
+            ability_template: Box::new(ballot_template),
+            remaining_voters: vec![root.controller],
+            source_id: spell,
+            controller: root.controller,
+            chain_root_targets: root.context.chain_root_targets.clone(),
+        });
+
+        let mut events = Vec::new();
+        crate::game::effects::vote::drain_active_vote_ballot(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "the resumed ballot must place the chain-root target's real counter \
+             total, not 0"
         );
     }
 

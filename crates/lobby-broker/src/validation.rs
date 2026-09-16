@@ -373,15 +373,23 @@ pub fn validate_end_tournament_fields(fields: EndTournamentFields<'_>) -> Result
 pub struct RenewTournamentCredentialFields<'a> {
     pub code: &'a str,
     pub token: &'a str,
+    pub rotation_nonce: &'a str,
 }
 
 /// `role` is deliberately absent: it is a two-variant enum serde already
-/// refuses anything else for, so there is no size or shape left to bound.
+/// refuses anything else for, so there is no size or shape left to bound. The
+/// `rotation_nonce` IS bounded — it is a client-supplied string the broker
+/// stores in a rotation record, so an unbounded one is a memory-DoS vector,
+/// exactly like `token`. An empty nonce is allowed (it simply never matches a
+/// stored record, so it can only mint, never replay).
 pub fn validate_renew_tournament_credential_fields(
     fields: RenewTournamentCredentialFields<'_>,
 ) -> Result<(), String> {
     validate_token("code", fields.code, MAX_GAME_CODE_LEN)?;
     validate_token("token", fields.token, MAX_TOKEN_LEN)?;
+    // `validate_token` bounds length and rejects control chars but allows empty,
+    // which is exactly right for the nonce (empty = mint-only, never replays).
+    validate_token("rotation_nonce", fields.rotation_nonce, MAX_TOKEN_LEN)?;
     Ok(())
 }
 
@@ -549,10 +557,12 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
             code,
             role: _,
             token,
+            rotation_nonce,
         } => {
             validate_renew_tournament_credential_fields(RenewTournamentCredentialFields {
                 code,
                 token,
+                rotation_nonce,
             })?;
         }
         // No client-supplied bounded fields.
@@ -911,11 +921,13 @@ mod tests {
                 code: "TOUR01".into(),
                 role: TournamentRole::Organizer,
                 token: "tok".into(),
+                rotation_nonce: "nonce".into(),
             },
             M::RenewTournamentCredential {
                 code: "TOUR01".into(),
                 role: TournamentRole::Player,
                 token: "tok".into(),
+                rotation_nonce: String::new(),
             },
         ];
         for msg in valid {
@@ -1026,11 +1038,21 @@ mod tests {
                 code: "TOUR01".into(),
                 role: TournamentRole::Organizer,
                 token: long.clone(),
+                rotation_nonce: String::new(),
             },
             M::RenewTournamentCredential {
                 code: "t".repeat(MAX_GAME_CODE_LEN + 1),
                 role: TournamentRole::Player,
                 token: "tok".into(),
+                rotation_nonce: String::new(),
+            },
+            // An oversized nonce is refused on the same terms as an oversized
+            // token — it is a client-supplied string the broker would store.
+            M::RenewTournamentCredential {
+                code: "TOUR01".into(),
+                role: TournamentRole::Organizer,
+                token: "tok".into(),
+                rotation_nonce: long.clone(),
             },
         ] {
             assert!(validate_lobby_message(&msg).is_err(), "{msg:?}");

@@ -48,7 +48,12 @@ fn trigger_effects(parsed: &ParsedAbilities) -> Vec<Effect> {
 /// transform (CR 701.27), and that neither of those two effects degraded to
 /// `Unimplemented`. Unrelated clauses in the same card (e.g. a dynamic
 /// put-counter quantity) are intentionally not asserted here.
-fn assert_remove_all_then_transform(effects: &[Effect]) {
+///
+/// `remove_clause` is the card's OWN anaphoric removal clause, lowercased — the two
+/// phrasings in this file ("remove all of them" / "remove them") are different
+/// clauses, so the caller supplies the one its card prints rather than this helper
+/// keying on a bare verb that both happen to start with.
+fn assert_remove_all_then_transform(effects: &[Effect], remove_clause: &str) {
     assert!(
         effects.iter().any(|e| matches!(
             e,
@@ -66,13 +71,19 @@ fn assert_remove_all_then_transform(effects: &[Effect]) {
             .any(|e| matches!(e, Effect::Transform { .. })),
         "expected Transform; got {effects:#?}"
     );
-    // The anaphoric remove clause must no longer surface as Unimplemented.
+    // The anaphoric remove clause must no longer surface as a gap. Paired positive
+    // reach-guard: the `RemoveCounter` remove-all sentinel and the `Transform`
+    // assertions immediately above prove the clause produced its real typed effects.
+    // Keyed on the CLAUSE a gap would record, not on the gap's name — a name compare
+    // against the clause's old first word can never be true once gaps are named by
+    // verdict, and the guard would stop guarding silently. The key is the verb WITH
+    // its anaphoric object, so it cannot be satisfied by any other clause on the card
+    // that merely happens to contain "remove".
     assert!(
-        !effects.iter().any(|e| matches!(
-            e,
-            Effect::Unimplemented { name, .. } if name == "remove"
-        )),
-        "remove clause should not be Unimplemented; got {effects:#?}"
+        !effects.iter().any(|e| e
+            .unimplemented_description()
+            .is_some_and(|d| d.to_lowercase().contains(remove_clause))),
+        "the `{remove_clause}` clause should not be a gap node; got {effects:#?}"
     );
 }
 
@@ -91,7 +102,7 @@ another creature, remove all of them and transform it.",
             .any(|e| matches!(e, Effect::Unimplemented { .. })),
         "Ludevic: clause should not contain Unimplemented; got {effects:#?}"
     );
-    assert_remove_all_then_transform(&effects);
+    assert_remove_all_then_transform(&effects, "remove all of them");
 }
 
 #[test]
@@ -107,5 +118,5 @@ counters on ~ equal to the amount of mana spent to cast that spell. Then if it \
 has seven or more ember counters on it, remove them and transform it.",
     );
     let effects = trigger_effects(&parsed);
-    assert_remove_all_then_transform(&effects);
+    assert_remove_all_then_transform(&effects, "remove them");
 }

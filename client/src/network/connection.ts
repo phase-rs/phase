@@ -1,4 +1,6 @@
 import Peer from "peerjs";
+import { diagnosticIdFor, recordDiagnostic } from "../services/troubleshooting";
+import type { ConnectionDiagnosticError, ConnectionFailureSnapshot, PeerDiagnosticError, TurnCredentialFailure } from "../services/troubleshooting";
 import type { DataConnection, PeerConnectOption } from "peerjs";
 
 /** Unambiguous characters -- no 0/O, 1/I/L confusion */
@@ -117,26 +119,152 @@ const FALLBACK_ICE_CONFIG: RTCConfiguration = {
 const ICE_CONFIG_CACHE_MS = 6 * 60 * 60 * 1000;
 let cachedIceConfig: { config: RTCConfiguration; expiresAt: number } | null = null;
 
-/**
- * Fetch ephemeral ICE servers (STUN + short-lived TURN) from the lobby Worker.
- * Cached for {@link ICE_CONFIG_CACHE_MS}. Falls back to STUN-only on any error
- * so peer creation never blocks on the relay service being up.
- */
+export class TurnCredentialError extends Error {
+  constructor(readonly reason: TurnCredentialFailure, readonly httpStatus?: number) {
+    super(`TURN credentials: ${reason}`);
+  }
+}
+
+/** Strict, uncached retrieval for both game setup and isolated diagnostics. */
+export async function fetchFreshTurnConfig(signal?: AbortSignal): Promise<RTCConfiguration> {
+  try {
+    if (signal?.aborted) throw new TurnCredentialError("aborted");
+    const response = await fetch(TURN_CREDENTIALS_URL, {
+      signal, cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer",
+    });
+    if (!response.ok) throw new TurnCredentialError("http", response.status);
+    let data: unknown;
+    try { data = await response.json(); }
+    catch { throw new TurnCredentialError(signal?.aborted ? "aborted" : "invalid"); }
+    if (signal?.aborted) throw new TurnCredentialError("aborted");
+    if (!data || typeof data !== "object" || !("iceServers" in data) || !Array.isArray(data.iceServers)) {
+      throw new TurnCredentialError("invalid");
+    }
+    const iceServers: RTCIceServer[] = [];
+    let hasTurn = false;
+    for (const server of data.iceServers) {
+      if (!server || typeof server !== "object") throw new TurnCredentialError("invalid");
+      const urls: unknown[] = typeof server.urls === "string" ? [server.urls] : server.urls;
+      if (!Array.isArray(urls) || !urls.length || !urls.every((url) => typeof url === "string" && /^(stun|stuns|turn|turns):[^\s]+$/i.test(url))) throw new TurnCredentialError("invalid");
+      const relay = urls.some((url) => /^turns?:/i.test(url as string));
+      if (relay && (typeof server.username !== "string" || !server.username || typeof server.credential !== "string" || !server.credential)) throw new TurnCredentialError("invalid");
+      hasTurn ||= relay;
+      iceServers.push({ urls: urls as string[], ...(relay ? { username: server.username, credential: server.credential } : {}) });
+    }
+    if (!hasTurn) throw new TurnCredentialError("no-turn");
+    return { iceServers };
+  } catch (error) {
+    if (error instanceof TurnCredentialError) throw error;
+    throw new TurnCredentialError(signal?.aborted ? "aborted" : "network");
+  }
+}
+
 async function getPeerConfig(): Promise<RTCConfiguration> {
   const now = Date.now();
   if (cachedIceConfig && cachedIceConfig.expiresAt > now) {
+    recordDiagnostic({ kind: "credentials", observedAt: now, outcome: "cache" });
     return cachedIceConfig.config;
   }
   try {
-    const res = await fetch(TURN_CREDENTIALS_URL);
-    if (!res.ok) throw new Error(`turn-credentials HTTP ${res.status}`);
-    const data = (await res.json()) as { iceServers: RTCIceServer[] };
-    const config: RTCConfiguration = { iceServers: data.iceServers };
+    const config = await fetchFreshTurnConfig();
     cachedIceConfig = { config, expiresAt: now + ICE_CONFIG_CACHE_MS };
+    recordDiagnostic({ kind: "credentials", observedAt: Date.now(), outcome: "fresh" });
     return config;
-  } catch (err) {
-    console.warn("[P2P] TURN credential fetch failed; STUN-only fallback:", err);
+  } catch (error) {
+    recordDiagnostic({ kind: "credentials", observedAt: Date.now(), outcome: "stun-fallback",
+      failure: error instanceof TurnCredentialError ? error.reason : "network",
+      ...(error instanceof TurnCredentialError && error.httpStatus !== undefined ? { httpStatus: error.httpStatus } : {}),
+    });
     return FALLBACK_ICE_CONFIG;
+  }
+}
+
+export function safePeerError(error: unknown): PeerDiagnosticError {
+  const type = error && typeof error === "object" && "type" in error ? error.type : null;
+  switch (type) {
+    case "browser-incompatible": case "disconnected": case "invalid-id": case "invalid-key":
+    case "network": case "peer-unavailable": case "ssl-unavailable": case "server-error":
+    case "socket-error": case "socket-closed": case "unavailable-id": case "webrtc": return type;
+    default: return "unknown";
+  }
+}
+
+export function safeConnectionError(error: unknown): ConnectionDiagnosticError {
+  const type = error && typeof error === "object" && "type" in error ? error.type : null;
+  switch (type) {
+    case "negotiation-failed": case "connection-closed": case "message-too-big": return type;
+    default: return "unknown";
+  }
+}
+
+export function connectionFailureSnapshot(conn: DataConnection): ConnectionFailureSnapshot {
+  return { connectionState: conn.peerConnection?.connectionState ?? null,
+    iceState: conn.peerConnection?.iceConnectionState ?? null, channelState: conn.dataChannel?.readyState ?? null };
+}
+
+/** Observe the public emitter before registration, including failed registration. */
+function createObservedPeer(side: "Host" | "Guest", config: RTCConfiguration, id?: string): Peer {
+  const identity = {};
+  let peerDiagnosticId = diagnosticIdFor(identity);
+  const record = (event: "created" | "open" | "disconnected" | "close" | "timeout" | "error" | "constructor-error", error?: PeerDiagnosticError) => {
+    recordDiagnostic({ kind: "signaling", peerDiagnosticId, observedAt: Date.now(), side, event, ...(error ? { error } : {}) });
+  };
+  let peer: Peer;
+  try { peer = id ? new Peer(id, { config }) : new Peer({ config }); }
+  catch (error) { record("constructor-error", safePeerError(error)); throw error; }
+  peerDiagnosticId = diagnosticIdFor(peer);
+  record("created");
+  // Observation only: leave registration cancellation/retry policy with its owner.
+  const timer = setTimeout(() => record("timeout"), JOIN_CONNECT_TIMEOUT_MS);
+  peer.on("open", () => { clearTimeout(timer); record("open"); });
+  peer.on("disconnected", () => record("disconnected"));
+  peer.on("error", (error) => { clearTimeout(timer); record("error", safePeerError(error)); });
+  peer.on("close", () => { clearTimeout(timer); record("close"); });
+  peer.on("connection", (conn) => observeConnectionAttempt(conn, "incoming", JOIN_CONNECT_TIMEOUT_MS, peer));
+  return peer;
+}
+
+function observeConnectionAttempt(conn: DataConnection, direction: "incoming" | "outgoing", timeoutMs: number, peer: Peer, signal?: AbortSignal): void {
+  const diagnosticId = diagnosticIdFor(conn);
+  const peerDiagnosticId = diagnosticIdFor(peer);
+  const record = (event: "started" | "open" | "close" | "error" | "timeout" | "aborted", error?: ConnectionDiagnosticError) => recordDiagnostic({ kind: "connection-attempt", diagnosticId, peerDiagnosticId, observedAt: Date.now(), direction, event, ...(error ? { error } : {}), state: connectionFailureSnapshot(conn) });
+  record("started");
+  const pc = conn.peerConnection;
+  const onIceError = (event: RTCPeerConnectionIceErrorEvent) => {
+    if (Number.isInteger(event.errorCode) && event.errorCode >= 300 && event.errorCode <= 799) recordDiagnostic({ kind: "ice-candidate-error", diagnosticId, peerDiagnosticId, observedAt: Date.now(), code: event.errorCode });
+  };
+  pc?.addEventListener?.("icecandidateerror", onIceError);
+  let finished = false;
+  const finish = (event: "open" | "close" | "error" | "timeout" | "aborted", error?: ConnectionDiagnosticError) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timer);
+    pc?.removeEventListener?.("icecandidateerror", onIceError);
+    signal?.removeEventListener("abort", onAbort);
+    peer.off?.("close", onPeerClose);
+    record(event, error);
+  };
+  const onAbort = () => finish("aborted");
+  const onPeerClose = () => finish(signal?.aborted ? "aborted" : "close");
+  const timer = setTimeout(() => finish("timeout"), timeoutMs);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  peer.on?.("close", onPeerClose);
+  conn.on("open", () => finish("open"));
+  conn.on("error", (error) => finish("error", safeConnectionError(error)));
+  conn.on("close", () => finish(signal?.aborted ? "aborted" : "close"));
+  if (signal?.aborted) onAbort();
+}
+
+/** Every outgoing connection uses the same ordering and serialization contract. */
+export function dialPeer(peer: Peer, peerId: string, timeoutMs: number, signal?: AbortSignal): DataConnection {
+  try {
+    const conn = peer.connect(peerId, PEER_CONNECT_OPTIONS);
+    if (!conn) throw new Error("Peer connection could not be created");
+    observeConnectionAttempt(conn, "outgoing", timeoutMs, peer, signal);
+    return conn;
+  } catch (error) {
+    recordDiagnostic({ kind: "connection-attempt", diagnosticId: diagnosticIdFor({}), peerDiagnosticId: diagnosticIdFor(peer), observedAt: Date.now(), direction: "outgoing", event: "error", error: safeConnectionError(error) });
+    throw error;
   }
 }
 
@@ -341,7 +469,7 @@ async function openHostPeer(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-    const peer = new Peer(peerId, { config });
+    const peer = createObservedPeer("Host", config, peerId);
     traceP2P("Host", "create-peer", { roomCode, peerId, attempt });
 
     try {
@@ -534,7 +662,7 @@ export async function joinRoom(
       reject(new DOMException("Aborted", "AbortError"));
       return;
     }
-    const peer = new Peer({ config });
+    const peer = createObservedPeer("Guest", config);
     const peerId = PEER_ID_PREFIX + code;
     let opened = false;
     traceP2P("Guest", "create-peer", { code, peerId });
@@ -556,7 +684,7 @@ export async function joinRoom(
       }
       traceP2P("Guest", "peer-open", { peerId });
       console.log("[P2P Guest] registered on signaling server, connecting to:", peerId);
-      const conn = peer.connect(peerId, PEER_CONNECT_OPTIONS);
+      const conn = dialPeer(peer, peerId, timeoutMs, signal);
       traceP2P("Guest", "connect-called", { peerId, connOpen: conn.open });
 
       const timeout = setTimeout(() => {

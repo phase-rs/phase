@@ -3506,6 +3506,41 @@ fn sub_has_independent_object_target_slot(sub: &ResolvedAbility) -> bool {
             && !effect_requires_parent_target_object(&sub.effect))
         || (has_resolution_owned_zone_choice(sub)
             && !sub_ability_target_belongs_to_reflexive_context(sub))
+        || choose_one_of_branches_own_object_choice(sub)
+}
+
+/// CR 115.10a + CR 608.2d: whether a `ChooseOneOf` sub owns a fresh object
+/// choice made while the SELECTED BRANCH resolves.
+///
+/// `Effect::ChooseOneOf` is deliberately slot-less (see `Effect::target_filter`),
+/// so `extract_target_filter_from_effect` reports no filter for it and the
+/// caller would force the parent instruction's already-bound object onto the
+/// choice — and `choose_one_of::resolve_branch` then forwards that object to the
+/// selected branch as `parent_targets`. For a branch set that picks its OWN
+/// object at resolution ("Destroy target artifact. … put that many … counters on
+/// an artifact you control"), that inheritance is wrong twice over: it silently
+/// rebinds the recipient to the destroyed target (CR 122.2 — the object the
+/// earlier instruction consumed), and it suppresses the branch's own
+/// resolution-time recipient choice.
+///
+/// Narrow by construction — EVERY branch must be `Resolution`-timed AND name a
+/// described (non-context-ref) recipient. A branch produced by the counter-choice
+/// reader's shared-recipient LIFT carries `ParentTarget`/`ParentTargetSlot`
+/// (`is_context_ref() == true`) and `Stack` timing, so every shipping
+/// `ChooseOneOf`-of-`PutCounter` card fails both conjuncts and keeps today's
+/// inheritance.
+fn choose_one_of_branches_own_object_choice(sub: &ResolvedAbility) -> bool {
+    let Effect::ChooseOneOf { branches, .. } = &sub.effect else {
+        return false;
+    };
+    !branches.is_empty()
+        && branches.iter().all(|branch| {
+            branch.target_choice_timing == TargetChoiceTiming::Resolution
+                && branch
+                    .effect
+                    .target_filter()
+                    .is_some_and(|filter| !filter.is_context_ref())
+        })
 }
 
 /// CR 701.3a + CR 303.4f: `forward_result` ChangeZone nesting Attach→ParentTarget
@@ -3738,7 +3773,7 @@ pub(crate) fn optional_decline_branch(ability: &ResolvedAbility) -> Option<&Reso
             || (sub.sub_link == SubAbilityLink::SequentialSibling
                 && !sub_ability_is_reflexive(sub)
                 && !(matches!(&ability.effect, Effect::CastFromZone { .. })
-                    && (cast_from_zone::graveyard_destination_rider(sub).is_some()
+                    && (cast_from_zone::graveyard_destination_rider(&sub.effect).is_some()
                         || cast_from_zone::is_enters_with_counter_rider_subability(sub))));
         if !selected {
             return None;
@@ -6959,7 +6994,7 @@ fn affected_objects_from_events(
             if effect::generic_effect_affected_uses_inherited_targets(governing) {
                 return Vec::new();
             }
-            let filter = resolved_object_filter(ability, governing);
+            let filter = resolved_object_filter(state, ability, governing);
             let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter);
             // CR 107.3a + CR 601.2b: ability-context filter evaluation.
             let ctx = filter::FilterContext::from_ability(ability);
@@ -8313,10 +8348,20 @@ fn optional_head_declined_all_object_targets(ability: &ResolvedAbility) -> bool 
 ///    "when you lose control of this, unattach it" trigger rebinds the per-source
 ///    `attachment` through this hidden slot (Stolen Uniform, Ogre Geargrabber);
 ///    without the arm the `_ => {}` fallback snapshots nothing and it resolves inert.
-///  * `Effect::ChangeZoneAll` intentionally has no generic `target_filter()` slot:
-///    its filter selects a mass operation rather than a declared target. It still
-///    needs inspection here when it carries a delayed `ParentTarget` anaphor, so
-///    the delayed trigger snapshots and pins that object before the mass scan.
+///  * The MASS-POPULATION family (`ChangeZoneAll`, `DestroyAll`, `DamageAll`,
+///    `BounceAll`, `CounterAll`, `GainControlAll`, `PumpAll`, `PutCounterAll`,
+///    `DoublePTAll`) intentionally has no generic `target_filter()` slot: the
+///    filter selects a mass operation rather than a declared target, so
+///    `Effect::target_filter()` answers `None` for every one of them. They still
+///    need inspection here when the filter carries a context anaphor, so a
+///    delayed trigger snapshots and pins that object before the mass scan.
+///
+///    The whole family is listed because the PARSER treats it as one: the
+///    trigger rebind in `parser::oracle_trigger` converts a context filter to
+///    `EventTarget` across exactly these nine effects. Surfacing one of them and
+///    not its siblings is the sibling-cluster smell — an omitted member is not a
+///    compile error, it degrades silently into "this delayed effect does
+///    nothing".
 ///
 /// NOTE: the `_ => {}` arm means "no hidden object slot beyond `target_filter()`".
 /// Any FUTURE effect that hides an object slot behind `target_filter()` MUST add
@@ -8336,12 +8381,86 @@ fn effect_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
         Effect::UnattachAll { attachment, .. } if attachment.is_context_ref() => {
             slots.push(attachment)
         }
-        Effect::ChangeZoneAll { target, .. } if filter_refs_parent_target(target) => {
-            slots.push(target)
-        }
         _ => {}
     }
+    // The mass-population family, via the single authority below so this list
+    // and the delayed-trigger rewrite cannot diverge.
+    if let Some(target) = mass_population_target(effect) {
+        if filter_refs_parent_or_event_subject(target) {
+            slots.push(target);
+        }
+    }
     slots
+}
+
+/// CR 608.2k: The hidden `target` of a MASS-POPULATION effect, if this is one.
+///
+/// The single authority for "is this a mass-population effect, and where does it
+/// keep its population filter". `effect_parent_ref_slots` surfaces that filter
+/// and `delayed_trigger::concretize_mass_population_event_subject` rewrites it;
+/// both route through here so the family cannot be enumerated two ways and
+/// drift apart — which is exactly how one of them ends up handling a variant the
+/// other silently ignores.
+///
+/// The wildcard arm is deliberate: `Effect` has far too many variants to list
+/// exhaustively here, and a mass-population effect is identified by carrying a
+/// population `target` that `Effect::target_filter()` deliberately hides. The
+/// protection against a future variant being missed is therefore this function
+/// being the ONE place to add it — previously the family was enumerated twice,
+/// here and in the delayed-trigger rewrite, which is exactly how one site ends
+/// up handling a variant the other silently ignores.
+pub(crate) fn mass_population_target(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::ChangeZoneAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
+        | Effect::GainControlAll { target, .. }
+        | Effect::PumpAll { target, .. }
+        | Effect::PutCounterAll { target, .. }
+        | Effect::DoublePTAll { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
+/// Mutable counterpart of [`mass_population_target`]. Kept adjacent so the two
+/// variant lists are read and edited together.
+pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut TargetFilter> {
+    match effect {
+        Effect::ChangeZoneAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
+        | Effect::GainControlAll { target, .. }
+        | Effect::PumpAll { target, .. }
+        | Effect::PutCounterAll { target, .. }
+        | Effect::DoublePTAll { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
+/// CR 608.2c + CR 608.2k: True when the filter names a parent-target anaphor OR
+/// an event subject, at any depth.
+///
+/// The gate for the mass-population arm above. It is deliberately the UNION of
+/// what that arm's consumers ask for rather than the broader
+/// `TargetFilter::is_context_ref`: every caller of `effect_parent_ref_slots`
+/// re-filters the returned slots through its own predicate, so surfacing a slot
+/// that only one consumer recognizes cannot perturb the others — but surfacing
+/// filters no consumer asks about would be noise.
+///
+/// Previously this arm tested `filter_refs_parent_target` alone, which made a
+/// delayed mass move naming `TriggeringSource`/`EventTarget` invisible to
+/// `effect_refs_event_subject`: it took no creation-time snapshot and, at the
+/// later phase event (which carries no event subject), resolved against nothing.
+/// The `ParentTarget` half of the test is unchanged.
+pub(crate) fn filter_refs_parent_or_event_subject(filter: &TargetFilter) -> bool {
+    filter_refs_parent_target(filter)
+        || EVENT_SUBJECT_ANAPHORS
+            .iter()
+            .any(|anaphor| filter_refs_event_subject(filter, anaphor))
 }
 
 /// True if any object-target slot of the effect references the per-iteration
@@ -8420,42 +8539,129 @@ pub(crate) fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
     }
 }
 
-/// True if the filter directly or recursively references `TargetFilter::TriggeringSource`.
+/// CR 608.2k: The EVENT-SUBJECT anaphors — the target filters that name an
+/// object carried by the trigger EVENT itself rather than a target a player
+/// chose. There are exactly two, and they are the two halves of the same
+/// grammatical relation on a `DamageDealt`/`ZoneChanged`/… event:
+///
+/// * `TriggeringSource` — the event's SUBJECT (CR 120.1: on an active-voice
+///   damage condition, the damage dealer).
+/// * `EventTarget` — the event's OBJECT slot (CR 120.3: the damage recipient,
+///   the "that creature" of "deals damage to a creature, destroy that
+///   creature").
+///
+/// Listed once, in the order a chain that somehow names both should be read:
+/// `TriggeringSource` first, preserving the behaviour that predates
+/// `EventTarget` joining the set.
+///
+/// Consumers must take the whole slice rather than matching one member. Both
+/// are already members of `targeting::is_pure_event_context_filter`, and the
+/// bug class this constant exists to prevent is precisely a pass that handles
+/// one and silently no-ops on the other (issue #4229, Ohran Viper: the delayed
+/// destroy of "that creature at end of combat" was never snapshotted at
+/// creation because the snapshot pass named only `TriggeringSource`).
+pub(crate) const EVENT_SUBJECT_ANAPHORS: [TargetFilter; 2] =
+    [TargetFilter::TriggeringSource, TargetFilter::EventTarget];
+
+/// True if the filter directly or recursively references `anaphor`, one of
+/// [`EVENT_SUBJECT_ANAPHORS`].
 ///
 /// Used by `delayed_trigger::resolve()` to gate the event-context snapshot for
-/// delayed triggers whose inner effect targets the trigger's source object via
-/// the "it" anaphor (e.g. "return it to the battlefield").
+/// delayed triggers whose inner effect names the trigger event's subject or its
+/// object slot via the "it" / "that creature" anaphor (e.g. "return it to the
+/// battlefield", "destroy that creature at end of combat").
 ///
 /// Checks all object-target slots via `effect_parent_ref_slots`, including
 /// hidden slots that `effect_target_filter` does not surface (e.g.,
 /// `Attach.attachment`).
-fn filter_refs_triggering_source(filter: &TargetFilter) -> bool {
+///
+/// Traverses the same STRUCTURAL references as `filter_refs_parent_target`, not
+/// merely the boolean combinators: a `Typed` filter can bury the anaphor in a
+/// `DistinctFrom { reference }` property ("each OTHER creature that shares a
+/// color with it"), and `TrackedSetFiltered` wraps an inner filter. Missing
+/// either means the chain is not recognized as naming an event subject, no
+/// creation-time snapshot is taken, and the effect silently resolves against an
+/// empty target list at the later phase event — the exact failure this whole
+/// snapshot pass exists to prevent.
+fn filter_refs_event_subject(filter: &TargetFilter, anaphor: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::TriggeringSource => true,
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(filter_refs_triggering_source)
+        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| {
+            matches!(
+                prop,
+                FilterProp::DistinctFrom { reference }
+                    if filter_refs_event_subject(reference, anaphor)
+            )
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(|inner| filter_refs_event_subject(inner, anaphor)),
+        TargetFilter::Not { filter } => filter_refs_event_subject(filter, anaphor),
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            filter_refs_event_subject(filter, anaphor)
         }
-        TargetFilter::Not { filter } => filter_refs_triggering_source(filter),
-        _ => false,
+        other => other == anaphor,
     }
 }
 
-fn effect_refs_triggering_source(effect: &Effect) -> bool {
-    effect_parent_ref_slots(effect)
-        .iter()
-        .any(|f| filter_refs_triggering_source(f))
+/// True if the filter directly or recursively references
+/// `TargetFilter::TriggeringSource`.
+fn filter_refs_triggering_source(filter: &TargetFilter) -> bool {
+    filter_refs_event_subject(filter, &TargetFilter::TriggeringSource)
 }
 
-fn ability_refs_triggering_source(ability: &ResolvedAbility) -> bool {
-    effect_refs_triggering_source(&ability.effect)
+fn effect_refs_event_subject(effect: &Effect, anaphor: &TargetFilter) -> bool {
+    effect_parent_ref_slots(effect)
+        .iter()
+        .any(|f| filter_refs_event_subject(f, anaphor))
+}
+
+fn ability_refs_event_subject(ability: &ResolvedAbility, anaphor: &TargetFilter) -> bool {
+    effect_refs_event_subject(&ability.effect, anaphor)
         || ability
             .sub_ability
             .as_deref()
-            .is_some_and(ability_refs_triggering_source)
+            .is_some_and(|sub| ability_refs_event_subject(sub, anaphor))
         || ability
             .else_ability
             .as_deref()
-            .is_some_and(ability_refs_triggering_source)
+            .is_some_and(|alt| ability_refs_event_subject(alt, anaphor))
+}
+
+/// CR 608.2k: Which of the [`EVENT_SUBJECT_ANAPHORS`] this ability chain names,
+/// if any. The delayed-trigger creation snapshot resolves the returned filter
+/// against the CREATION event, so a phase-delayed trigger keeps the object its
+/// creation event named after that event is gone (CR 603.7c).
+///
+/// Chain-wide and first-match: this answers "what does the chain as a whole
+/// bind its shared `targets` slot to". A chain whose clauses name DIFFERENT
+/// anaphors cannot be represented by that one shared slot, so the divergent
+/// clauses are bound individually — see [`effect_event_subject_anaphor`] and
+/// `delayed_trigger`'s per-node rebind.
+pub(crate) fn ability_event_subject_anaphor(
+    ability: &ResolvedAbility,
+) -> Option<&'static TargetFilter> {
+    EVENT_SUBJECT_ANAPHORS
+        .iter()
+        .find(|anaphor| ability_refs_event_subject(ability, anaphor))
+}
+
+/// CR 608.2k: Which of the [`EVENT_SUBJECT_ANAPHORS`] THIS ONE effect names,
+/// ignoring the rest of its chain.
+///
+/// The node-local counterpart of [`ability_event_subject_anaphor`]. A delayed
+/// chain that names both anaphors — "destroy that creature and return it" —
+/// has one referent per clause (CR 120.1 makes the event's subject the damage
+/// DEALER; CR 120.3 makes its object slot the RECIPIENT), which the chain-wide
+/// first-match answer would collapse onto whichever appears first. Resolving
+/// per node is what keeps the dealer out of the recipient's slot.
+pub(crate) fn effect_event_subject_anaphor(effect: &Effect) -> Option<&'static TargetFilter> {
+    EVENT_SUBJECT_ANAPHORS
+        .iter()
+        .find(|anaphor| effect_refs_event_subject(effect, anaphor))
+}
+
+fn ability_refs_triggering_source(ability: &ResolvedAbility) -> bool {
+    ability_refs_event_subject(ability, &TargetFilter::TriggeringSource)
 }
 
 /// True when any effect in the ability chain references `ParentTarget`
@@ -9343,11 +9549,35 @@ fn rebind_iterated_counter_kind(
     }
 }
 
+/// CR 608.2c + CR 400.7 + CR 603.7c: Concretize an effect's contextual filter
+/// for a mass scan, honouring the creation-time incarnation pin.
+///
+/// Takes `state` so the parent-target exclusions this concretizes can be
+/// pin-checked. A delayed trigger's exclusion ("destroy each creature OTHER than
+/// that one") names a specific object, so the exclusion's LIFETIME is that
+/// referent's: once the permanent leaves and returns it is a NEW object the
+/// exclusion no longer names (CR 400.7), and it must be affected like any other.
+/// Without the check `Not(ParentTarget)` concretizes to `Not(SpecificObject)` —
+/// an id-only comparison — and keeps sparing the returned permanent forever.
+///
+/// This is inert for any ability whose referents are unpinned:
+/// `target_pin_is_current` is `is_none_or`, so an id with no recorded pin always
+/// reads live and normalization is byte-identical to before.
+///
+/// Pins are set by three authorities, all of which want this check — a pinned
+/// referent that became a new object should stop being named, whichever one
+/// recorded it: the delayed-trigger creation snapshot
+/// (`delayed_trigger::bind_event_subject_nodes`), zone-change triggers
+/// (`triggers::seed_event_context_parent_targets`), and forwarded-result
+/// rebinding (`bind_forwarded_result_targets_for_legacy_effect`).
 pub(crate) fn resolved_object_filter(
+    state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> TargetFilter {
-    filter::normalize_contextual_filter(target_filter, &ability.targets)
+    filter::normalize_contextual_filter_with_liveness(target_filter, &ability.targets, &|id| {
+        ability.target_pin_is_current(id, state)
+    })
 }
 
 fn filter_uses_relative_controller_you(filter: &TargetFilter) -> bool {
@@ -12379,6 +12609,35 @@ fn is_bound_attach_remainder_for(pending: &PendingContinuation, ability: &Resolv
 /// `GameScenario`, so neither repair can be measured here either (issue #8750).
 /// Adding a variant to this list without a test that fails when the branch is
 /// reverted is the mistake it was introduced to prevent.
+/// CR 603.7 + CR 608.2g: after a `CastFromZone` head's tail ran inline behind
+/// an open `CastOffer::GraveyardPaidCast`, note on that offer the delayed
+/// triggers the tail installed — every record whose installation instance is
+/// at or past `first_new_instance`, the counter value read before the tail
+/// ran. The offer's decline withdraws exactly these
+/// (`engine_resolution_choices::withdraw_declined_offer_cast_triggers`). No-op
+/// when the head left any other state.
+fn record_tail_installs_on_paid_offer(state: &mut GameState, first_new_instance: u64) {
+    let new_instances: Vec<_> = state
+        .delayed_triggers
+        .iter()
+        .filter_map(|trigger| trigger.provenance.origin())
+        .map(|origin| origin.instance)
+        .filter(|instance| instance.0 >= first_new_instance)
+        .collect();
+    if new_instances.is_empty() {
+        return;
+    }
+    if let WaitingFor::CastOffer {
+        kind: CastOfferKind::GraveyardPaidCast {
+            installed_triggers, ..
+        },
+        ..
+    } = &mut state.waiting_for
+    {
+        installed_triggers.extend(new_instances);
+    }
+}
+
 fn tail_family_has_runtime_evidence(effect: &Effect) -> bool {
     matches!(
         effect,
@@ -13843,7 +14102,17 @@ fn resolve_chain_body(
     // fallback in `counters.rs`; routing them through an interactive prompt
     // here would be wrong (and untested against that resolver's semantics).
     let needs_resolution_object_choice = match &ability.effect {
-        Effect::PutCounter { .. } => ability.targets.is_empty(),
+        // CR 115.10a: "no recipient chosen yet" means "no OBJECT target", not
+        // "no targets at all". A `PutCounter` reached as a `ChooseOneOf` branch
+        // carries the `TargetRef::Player` that `choose_one_of::resolve_branch`
+        // injects for the branch chooser, which is not a recipient. This is a
+        // strict superset of the former `targets.is_empty()` test (an empty
+        // target list contains no `TargetRef::Object` either), so every
+        // pre-existing `PutCounter` caller is unaffected.
+        Effect::PutCounter { .. } => !ability
+            .targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Object(_))),
         Effect::ChooseCounterKind { target, .. } => {
             !matches!(target, TargetFilter::SpecificObject { .. })
         }
@@ -13857,7 +14126,7 @@ fn resolve_chain_body(
             &ability.effect
         {
             if !target.contains_source_attachment_host() {
-                let effective_filter = resolved_object_filter(ability, target);
+                let effective_filter = resolved_object_filter(state, ability, target);
                 let filter_ctx = filter::FilterContext::from_ability(ability);
                 let legal: Vec<ObjectId> = state
                     .battlefield_phased_in_ids()
@@ -14759,7 +15028,7 @@ fn resolve_chain_body(
         // during `counter::resolve` (stack -> exile directly).
         let direct_cast_from_zone_graveyard_rider =
             matches!(&ability.effect, Effect::CastFromZone { .. })
-                && cast_from_zone::graveyard_destination_rider(sub).is_some();
+                && cast_from_zone::graveyard_destination_rider(&sub.effect).is_some();
         if direct_cast_from_zone_graveyard_rider {
             // The RIDER is metadata, but the chain does not end with it.
             // Whatever the parser hung after the rider as a `SequentialSibling`
@@ -14847,36 +15116,39 @@ fn resolve_chain_body(
             // has not answered yet would read a state that does not exist, so
             // park it behind that head instead.
             //
-            // NARROWER than the states a `CastFromZone` head can leave, and named
-            // rather than hidden: `cast_from_zone::resolve` can also leave a
-            // `CastOfferKind::GraveyardPaidCast`, an in-resolution cast from
-            // `initiate_cast_during_resolution`, or a
-            // `LingeringPermissionGrantResult::NeedsChoice`.
+            // The other window a `CastFromZone` head leaves here is the PAID
+            // during-resolution offer, `CastOfferKind::GraveyardPaidCast`
+            // (Helmut Zemo, Ogre Battlecaster — issue #8775; their
+            // `without_paying_mana_cost: false` head carries the
+            // `DuringResolution` driver the paid branch of
+            // `cast_from_zone::resolve` reads). For that window the tail is
+            // resolved INLINE, before the offer is answered, and that order is
+            // load-bearing: the tail is the `CreateDelayedTrigger` for "when you
+            // cast that spell" / "if you cast a spell this way", keyed to the
+            // chosen card (CR 603.7), and the cast the offer performs is the
+            // event it waits for — installed after the cast it would never fire.
+            // It reads nothing the unanswered offer decides: its referent is the
+            // chosen target, bound when the trigger went on the stack. The
+            // trigger is keyed to the CARD, not to the offer, so a declined
+            // offer WITHDRAWS it again
+            // (`engine_resolution_choices::withdraw_declined_offer_cast_triggers`);
+            // otherwise it would fire on a cast of that card by another route
+            // this turn (Zemo declined, the Bolt then cast under Kess). Pinned by
+            // `cast_this_way_gate_8721::zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast`
+            // and `ogre_battlecaster_8775`.
             //
-            // CORRECTED after review: an earlier version credited the driver for
-            // this ("all six carriers drive `LingeringPermission`"), which is not
-            // what gates those paths — `immediate_graveyard_free_cast` never
-            // consults the driver, and Finale of Promise satisfies its conditions.
-            // The load-bearing facts are per card, and only three heads reach this
-            // decision at all (the other three tails are stopped one step earlier
-            // by the two scope rules): Sins of the Past carries
-            // `duration: UntilEndOfTurn`, so the free-cast-during-resolution gate
-            // is false; Helmut Zemo and Ogre Battlecaster carry
-            // `without_paying_mana_cost: false`, so both free-cast gates are
-            // false; and all three target a card already in a graveyard, which
-            // `grant_lingering_permissions` routes in place, so `NeedsChoice`
-            // cannot fire.
+            // The remaining states are named rather than hidden:
+            // `cast_from_zone::resolve` can also leave an in-resolution cast
+            // from `initiate_cast_during_resolution`, or a
+            // `LingeringPermissionGrantResult::NeedsChoice`. Of the tail
+            // carriers only Sins of the Past reaches this decision through
+            // them: it carries `duration: UntilEndOfTurn`, so both
+            // during-resolution gates are false, and its target is already in
+            // a graveyard, which `grant_lingering_permissions` routes in place,
+            // so `NeedsChoice` cannot fire. (Finale of Promise satisfies the
+            // free gate's conditions but is stopped by the family allowlist.)
             //
-            // One correction to that correction, because over-correcting is its
-            // own failure: for the PAID offer (`CastOfferKind::GraveyardPaidCast`)
-            // `without_paying_mana_cost: false` is the SATISFIED first conjunct,
-            // not an exclusion. What keeps Zemo and Ogre out of that one is the
-            // driver after all — it also requires `driver.is_during_resolution()`,
-            // and both carry the default `LingeringPermission`. The driver is
-            // simply not what gates the two FREE-cast paths, which is what the
-            // first correction was about.
-            //
-            // Site without a demonstrated consequence, so this stays
+            // Site without a demonstrated consequence for those, so this stays
             // the pre-#8721 condition rather than being widened on speculation;
             // the broader idiom further down this function is
             // `!matches!(state.waiting_for, WaitingFor::Priority { .. })`.
@@ -14890,7 +15162,12 @@ fn resolve_chain_body(
                 ) {
                     prepend_to_pending_continuation(state, tail);
                 } else {
+                    // CR 603.7: every delayed trigger this tail installs is
+                    // recorded on the open paid offer by installation instance,
+                    // so a declined offer can withdraw exactly those records.
+                    let first_new_instance = state.next_delayed_trigger_instance;
                     resolve_ability_chain(state, &tail, events, depth + 1)?;
+                    record_tail_installs_on_paid_offer(state, first_new_instance);
                 }
             }
             return Ok(());
@@ -14973,7 +15250,7 @@ fn resolve_chain_body(
         // its condition reads none and grants nothing, while the spell stays
         // on the stack (measured: `delay_leaves_an_uncounterable_spell_alone`).
         if matches!(&ability.effect, Effect::Counter { .. })
-            && cast_from_zone::is_graveyard_exile_rider_subability(sub)
+            && cast_from_zone::is_graveyard_exile_rider_subability(&sub.effect)
         {
             // Not pinned by a test: no printed card reaches this state
             // (measured above), and returning here preserves `main`'s
@@ -15342,6 +15619,18 @@ fn resolve_chain_body(
                     {
                         else_resolved.targets =
                             inject_last_revealed_targets(state, ability, else_branch.as_ref());
+                    } else if else_resolved.targets.is_empty()
+                        && !state.last_zone_changed_ids.is_empty()
+                        && matches!(ability.effect, Effect::ExileTop { .. })
+                        && !effect_uses_implicit_tracked_set_targets(&else_resolved.effect)
+                    {
+                        // CR 309.4c + CR 607.1: Forward exiled card IDs to else-ability
+                        // (linked ability pair — second refers to cards exiled by the first).
+                        else_resolved.targets = state
+                            .last_zone_changed_ids
+                            .iter()
+                            .map(|&id| TargetRef::Object(id))
+                            .collect();
                     } else if should_propagate_parent_targets(ability, &else_resolved) {
                         else_resolved.targets = ability.targets.clone();
                     }
@@ -16486,6 +16775,7 @@ pub(crate) fn evaluate_condition(
             | crate::types::ability::ObjectScope::OwnedLinkedExileCard
             | crate::types::ability::ObjectScope::EventTarget
             | crate::types::ability::ObjectScope::AmassedArmy
+            | crate::types::ability::ObjectScope::ChainRootTarget
             | crate::types::ability::ObjectScope::BatchSource => false,
         },
         AbilityCondition::AlternativeManaCostPaid => ability.context.alternative_mana_cost_paid,
@@ -16739,6 +17029,7 @@ pub(crate) fn evaluate_condition(
                 | crate::types::ability::ObjectScope::OwnedLinkedExileCard
                 | crate::types::ability::ObjectScope::EventTarget
                 | crate::types::ability::ObjectScope::AmassedArmy
+                | crate::types::ability::ObjectScope::ChainRootTarget
                 | crate::types::ability::ObjectScope::BatchSource => None,
             };
             object_id
@@ -18116,6 +18407,7 @@ mod tests {
                         bounds: crate::types::ability::ResolutionCastWindow::UNBOUNDED,
                     },
                     mana_spend_permission: None,
+                    additional_cost: None,
                 },
                 vec![],
                 ObjectId(1),
@@ -18998,6 +19290,185 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, TargetFilter::Any)),
             "non-context-ref UnattachAll attachment must not be surfaced"
+        );
+    }
+
+    /// CR 120.1 + CR 120.3 + CR 608.2k: each clause resolves ITS OWN event
+    /// subject.
+    ///
+    /// `ResolvedAbility::targets` is one shared slot, and the chain-wide
+    /// `ability_event_subject_anaphor` fills it from the FIRST anaphor the chain
+    /// names. A chain naming both would therefore hand one clause the other's
+    /// object — CR 120.1 makes the event's subject the damage DEALER while
+    /// CR 120.3 makes its object slot the RECIPIENT, never the same object.
+    /// `delayed_trigger::bind_event_subject_nodes` keys off this node-local
+    /// answer to give each clause its own referent.
+    ///
+    /// No printed card reaches the both-anaphor shape today (a corpus scan finds
+    /// 6 delayed `EventTarget` cards and 76 delayed `TriggeringSource` cards,
+    /// and zero naming both), so this guards the primitive directly: the
+    /// collapse is silent, and the next card in either class would inherit it.
+    #[test]
+    fn effect_event_subject_anaphor_is_node_local() {
+        assert_eq!(
+            effect_event_subject_anaphor(&Effect::Destroy {
+                target: TargetFilter::EventTarget,
+                cant_regenerate: false,
+            }),
+            Some(&TargetFilter::EventTarget),
+            "CR 120.3: a clause naming the event's object slot resolves to the \
+             RECIPIENT, not to whichever anaphor the wider chain names first"
+        );
+        assert_eq!(
+            effect_event_subject_anaphor(&Effect::Destroy {
+                target: TargetFilter::TriggeringSource,
+                cant_regenerate: false,
+            }),
+            Some(&TargetFilter::TriggeringSource),
+            "CR 120.1: a clause naming the event's subject resolves to the DEALER"
+        );
+        assert_eq!(
+            effect_event_subject_anaphor(&Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            }),
+            None,
+            "a clause naming no event subject must stay unbound so it keeps \
+             inheriting its parent's targets"
+        );
+    }
+
+    /// CR 608.2k: an event-subject anaphor buried in a STRUCTURAL filter
+    /// reference is still detected, so the chain is snapshotted at creation.
+    ///
+    /// `filter_refs_event_subject` traverses the same references as
+    /// `filter_refs_parent_target`, not merely the boolean combinators. A chain
+    /// hiding the anaphor inside `Typed`'s `DistinctFrom { reference }` or
+    /// `TrackedSetFiltered`'s inner filter would otherwise go unrecognized, take
+    /// no creation-time snapshot, and silently resolve against an empty target
+    /// list at the later phase event.
+    #[test]
+    fn structurally_nested_event_subject_is_detected() {
+        let distinct_from = TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::EventTarget),
+            }],
+            ..TypedFilter::creature()
+        });
+        assert_eq!(
+            effect_event_subject_anaphor(&Effect::Destroy {
+                target: distinct_from,
+                cant_regenerate: false,
+            }),
+            Some(&TargetFilter::EventTarget),
+            "an EventTarget inside DistinctFrom must be detected — otherwise no \
+             creation snapshot is taken and the delayed effect resolves empty"
+        );
+
+        let tracked = TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::TriggeringSource),
+            caused_by: None,
+        };
+        assert_eq!(
+            effect_event_subject_anaphor(&Effect::Destroy {
+                target: tracked,
+                cant_regenerate: false,
+            }),
+            Some(&TargetFilter::TriggeringSource),
+            "a TriggeringSource inside TrackedSetFiltered must be detected"
+        );
+
+        assert_eq!(
+            effect_event_subject_anaphor(&Effect::Destroy {
+                target: TargetFilter::Not {
+                    filter: Box::new(TargetFilter::TriggeringSource),
+                },
+                cant_regenerate: false,
+            }),
+            Some(&TargetFilter::TriggeringSource),
+            "boolean nesting must keep working"
+        );
+    }
+
+    /// CR 608.2k: the MASS-POPULATION family hides its `target` behind
+    /// `target_filter()` (which answers `None` for all nine), so
+    /// `effect_parent_ref_slots` must surface it explicitly or a delayed mass
+    /// move naming an event subject is never snapshotted — at the later phase
+    /// event it has no event context left and affects nothing.
+    ///
+    /// The family is tested as a family on purpose. The parser's trigger rebind
+    /// (`parser::oracle_trigger`) converts a context filter to `EventTarget`
+    /// across exactly these nine effects, so surfacing one and not its siblings
+    /// is the sibling-cluster smell: an omitted member is not a compile error,
+    /// it degrades silently into "this delayed effect does nothing".
+    #[test]
+    fn mass_population_effects_surface_event_subject_targets() {
+        use crate::types::zones::{EtbTapState, Zone};
+
+        // One representative per constructor shape; the arm is a single `|`
+        // pattern, so covering the shapes covers the family.
+        let family: Vec<(&str, Effect)> = vec![
+            (
+                "ChangeZoneAll",
+                Effect::ChangeZoneAll {
+                    origin: None,
+                    destination: Zone::Graveyard,
+                    target: TargetFilter::EventTarget,
+                    enters_under: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: None,
+                    library_shuffle: crate::types::ability::MassLibraryShuffleMode::default(),
+                    random_order: false,
+                },
+            ),
+            (
+                "DestroyAll",
+                Effect::DestroyAll {
+                    target: TargetFilter::EventTarget,
+                    cant_regenerate: false,
+                },
+            ),
+            (
+                "BounceAll",
+                Effect::BounceAll {
+                    target: TargetFilter::TriggeringSource,
+                    destination: None,
+                    count: None,
+                },
+            ),
+        ];
+
+        for (name, effect) in &family {
+            let slots = effect_parent_ref_slots(effect);
+            assert!(
+                EVENT_SUBJECT_ANAPHORS
+                    .iter()
+                    .any(|anaphor| slots.iter().any(|s| filter_refs_event_subject(s, anaphor))),
+                "{name}: an event-subject target must surface as a hidden slot; got {slots:?}"
+            );
+            assert!(
+                effect_event_subject_anaphor(effect).is_some(),
+                "{name}: the detector must see the surfaced slot"
+            );
+        }
+
+        // Guard: a plain mass population filter is NOT a context anaphor and
+        // must not be surfaced, or every board wipe would look like one.
+        let plain = Effect::DestroyAll {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        };
+        assert!(
+            effect_parent_ref_slots(&plain).is_empty(),
+            "a plain Typed mass filter must not surface as a parent-ref slot"
+        );
+        assert!(
+            effect_event_subject_anaphor(&plain).is_none(),
+            "a plain Typed mass filter names no event subject"
         );
     }
 
@@ -36172,6 +36643,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
         );
         let ability = build_resolved_from_def(&pure_peek_definition(cast, 1), source, PlayerId(0));
@@ -36239,6 +36711,7 @@ mod tests {
                     duration: None,
                     driver: CastFromZoneDriver::DuringResolution,
                     mana_spend_permission: None,
+                    additional_cost: None,
                 },
             )
             .optional();
@@ -36361,6 +36834,7 @@ mod tests {
                         duration: Some(Duration::UntilEndOfTurn),
                         driver,
                         mana_spend_permission: None,
+                        additional_cost: None,
                     },
                     vec![],
                     ObjectId(900),
@@ -36395,6 +36869,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![],
             ObjectId(900),
@@ -36562,6 +37037,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(spell)],
             source,
@@ -36600,6 +37076,7 @@ mod tests {
                     duration: None,
                     driver: CastFromZoneDriver::DuringResolution,
                     mana_spend_permission: None,
+                    additional_cost: None,
                 },
                 vec![],
                 ObjectId(900),
@@ -36724,6 +37201,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
         )
         .optional();
@@ -36845,6 +37323,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
         );
         let dig_def = AbilityDefinition::new(

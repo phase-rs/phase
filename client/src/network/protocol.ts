@@ -106,6 +106,13 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  54 — game_setup and state_update carry GameState, whose
+ *       WaitingFor.CastOffer { kind: GraveyardPaidCast } now carries
+ *       additional_cost and installed_triggers (both serde-additive) and opens
+ *       for seven more printed cards that a v53 peer handled as a lingering
+ *       permission. A v53 guest parses the offer and pays the wrong cost, so
+ *       first contact rejects a v53 peer before state delivery. Bumped in
+ *       lockstep with full-game protocol 72.
  *  53 — game_setup and state_update carry GameState, whose OutsideGameChoice
  *       for an opened booster pack now names a required origin: PackOrigin in
  *       place of set_code. First contact therefore rejects a v52 peer before
@@ -377,7 +384,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 53 as const;
+export const WIRE_PROTOCOL_VERSION = 54 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

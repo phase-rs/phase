@@ -3402,6 +3402,10 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
         // CR 120.1: per-iteration batch source — a resolution-filtered object
         // with no event/sibling axis (mirrors Source/Target).
         ObjectScope::BatchSource => Axes::NONE,
+        // CR 601.2c: the chain-root spell's own declared target, carried on the
+        // resolving ability's context — no event/sibling projected axis
+        // (mirrors Target/Demonstrative).
+        ObjectScope::ChainRootTarget => Axes::NONE,
         ObjectScope::EventTarget => Axes {
             event: true,
             sibling: false,
@@ -5037,6 +5041,14 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         sub_link: _,
         iteration_kind_binding: _,
         sibling_condition: _,
+        // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
+        // deferred guard verdict before it hands a tree out, so this is `None` on
+        // every tree that pipeline produces — which is every tree a runtime walker
+        // sees — and expresses no resolution-time read. (NOT a universal claim about
+        // the field: `parse_effect_chain` outside the pipeline leaves marks intact,
+        // and no runtime path reaches such a tree. See
+        // `types::ability::UnloweredGuard`.)
+        unlowered_guard: _,
     } = def;
 
     let mut acc = scan_effect(effect, mode);

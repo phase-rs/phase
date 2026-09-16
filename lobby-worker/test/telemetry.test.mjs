@@ -147,8 +147,8 @@ test("P2P disconnect diagnostics preserve column order and discard payload field
   }]));
   assert.deepEqual(toDataPoint(event), {
     indexes: ["p2p_disconnect"],
-    blobs: ["p2p_disconnect", "0.42.1", "02b26c3", "web", "ping-timeout", "connected", "connected", "visible", "state_update"],
-    doubles: [10000, 50, 2, 1, 16300, 1],
+    blobs: ["p2p_disconnect", "0.42.1", "02b26c3", "web", "ping-timeout", "connected", "connected", "visible", "state_update", "", "", "", ""],
+    doubles: [10000, 50, 2, 1, 16300, 1, 0, 0, 0],
   });
 });
 
@@ -314,4 +314,14 @@ test("V-U13e: server_probe events land in the documented AE columns", () => {
   // together rather than leaving a stale literal here.
   assert.equal(point.blobs.length - 4, EVENT_SCHEMAS.server_probe.blobs.length);
   assert.equal(point.doubles.length, EVENT_SCHEMAS.server_probe.doubles.length);
+});
+
+
+test("WASM guard telemetry allows only bounded diagnostic fields", () => {
+  const [event] = sanitizeTelemetryBatch(batch([{
+    event: "wasm_not_initialized", operation: "getState", initializing: true,
+    disposed: false, observed_at: 123, message: "secret", stack: "secret",
+  }]));
+  assert.deepEqual(event.blobs, ["getState"]);
+  assert.deepEqual(event.doubles, [1, 0, 123]);
 });

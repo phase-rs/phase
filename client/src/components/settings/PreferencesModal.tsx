@@ -59,6 +59,8 @@ import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
 import { VisualPackManager } from "./visual-packs/VisualPackManager.tsx";
 import { OfflinePreparationSection } from "./OfflinePreparationSection.tsx";
 
+import { TroubleshootingDialog } from "../help/TroubleshootingDialog";
+
 export type SettingsHighlight = "board-background";
 
 interface PreferencesModalProps {
@@ -153,6 +155,8 @@ export function PreferencesModal({
   returnFocusRef,
 }: PreferencesModalProps) {
   const { t } = useTranslation("settings");
+  const [troubleshootingOpen, setTroubleshootingOpen] = useState(false);
+  const troubleshootingButtonRef = useRef<HTMLButtonElement>(null);
   const setFlexEditMode = useUiStore((s) => s.setFlexEditMode);
   const boardBackgroundRef = useRef<HTMLDivElement | null>(null);
   const visualTabRef = useRef<HTMLButtonElement>(null);
@@ -325,6 +329,8 @@ export function PreferencesModal({
   const [activeTab, setActiveTab] = useState<SettingsTabId>(initialTab);
 
   return (
+    <>
+    {troubleshootingOpen && <TroubleshootingDialog onClose={() => setTroubleshootingOpen(false)} returnFocusRef={troubleshootingButtonRef} />}
     <ModalPanelShell
       title={t("modal.title")}
       subtitle={t("modal.subtitle")}
@@ -351,6 +357,7 @@ export function PreferencesModal({
                   </button>
                 ))}
               </nav>
+              <button ref={troubleshootingButtonRef} type="button" onClick={() => setTroubleshootingOpen(true)} className="mt-2 min-h-11 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200 hover:bg-white/10 active:bg-white/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-300">{t("common:troubleshooting.title")}</button>
               <div className="hidden shrink-0 border-t border-white/5 pt-6 pb-8 md:block">
                 <ResetAllFooter resetAllPreferences={resetAllPreferences} />
               </div>
@@ -850,6 +857,7 @@ export function PreferencesModal({
             </div>
           </div>
     </ModalPanelShell>
+    </>
   );
 }
 
