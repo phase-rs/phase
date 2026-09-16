@@ -19,6 +19,11 @@ declare const __DEFAULT_MULTIPLAYER_SERVER_URL__: string;
 interface PhaseRuntimeConfig {
   /** `ws://`/`wss://` address new profiles default to. Ignored if malformed. */
   multiplayerServerUrl?: string;
+  /**
+   * `http://`/`https://` site a release web build's "Try Preview" badge opens.
+   * Ignored if malformed. The desktop shell always opens the build-time site.
+   */
+  previewSiteUrl?: string;
 }
 
 interface Window {

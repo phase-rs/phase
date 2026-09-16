@@ -18,7 +18,7 @@ import {
   type DraftPeerSession,
 } from "../network/draftPeerSession";
 import {
-  PEER_CONNECT_OPTIONS,
+  dialPeer,
   RECONNECT_DIAL_TIMEOUT_MS,
   parseRoomCode,
 } from "../network/connection";
@@ -998,7 +998,7 @@ export class P2PDraftGuest {
     // Ordered delivery is not the default: without `reliable: true` PeerJS
     // builds this channel with `ordered: false`, which a TURN relay will
     // actually exercise.
-    const conn = this.guestPeer.connect(this.hostPeerId, PEER_CONNECT_OPTIONS);
+    const conn = dialPeer(this.guestPeer, this.hostPeerId, RECONNECT_DIAL_TIMEOUT_MS, signal);
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(
         () => finish(() => reject(new Error("connect timed out"))),

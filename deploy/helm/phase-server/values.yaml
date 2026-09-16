@@ -157,6 +157,14 @@ web:
   # (the official lobby, which brokers browser-hosted P2P games). Set this to
   # this release's own public /ws endpoint to make server-run games the default.
   defaultMultiplayerServerUrl: ""
+  # Where a release build's "Try Preview" badge points, as an http:// or
+  # https:// URL: typically this site's own preview deployment. Rendered into
+  # /config.js like defaultMultiplayerServerUrl, and the render fails on an
+  # address the client would ignore. Empty = leave the image's build-time
+  # preview site. Only release-built images show the badge, and one built
+  # before this setting existed shows it but opens its built-in preview site
+  # whatever this holds.
+  previewSiteUrl: ""
   # Traefik rate limiting for the SPA route. The game API's limiter is sized for
   # API calls (20 req/s), and a cold SPA load is tens of asset requests at once,
   # so the web route deliberately does not share that bucket. Leave disabled

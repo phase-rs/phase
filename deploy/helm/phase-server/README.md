@@ -395,6 +395,14 @@ generic image points at any deployment with no rebuild. Leave it empty and the
 bundle keeps its build-time default (the public lobby). A malformed address is
 ignored rather than seeded into every profile.
 
+`web.previewSiteUrl` is where the site's "Try Preview" badge points, typically
+this site's own preview deployment, as an `http://` or `https://` address. The
+chart renders it into the same `/config.js` and refuses to render an address the
+client would ignore. Leave it empty and the badge keeps the image's build-time
+preview site. Only release-built images show the badge. A release image built
+before this setting existed shows the badge too, but opens its built-in preview
+site whatever `web.previewSiteUrl` holds.
+
 **Keep the two images on one version.** A client accepts a lobby only within one
 protocol version of its own build, and the server advertises its number without
 being asked — so a web image two releases from its server yields a site that

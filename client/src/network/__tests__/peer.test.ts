@@ -1,5 +1,6 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
+import { getDiagnosticHistory, getDiagnosticSources } from "../../services/troubleshooting";
 import { trackEvent } from "../../services/telemetry";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import { createPeerSession } from "../peer";
@@ -482,4 +483,111 @@ describe("PeerSession keep-alive", () => {
       vi.useRealTimers();
     }
   });
+});
+
+
+it("retains pre-teardown evidence after native state mutation and PeerJS field clearing", () => {
+  const pc = Object.assign(new EventTarget(), { connectionState: "connected", iceConnectionState: "completed" });
+  const channel = Object.assign(new EventTarget(), { readyState: "open", bufferedAmount: 2048 });
+  const removePc = vi.spyOn(pc, "removeEventListener");
+  const removeChannel = vi.spyOn(channel, "removeEventListener");
+  const conn = Object.assign(new FakeDataConnection(), { peerConnection: pc as typeof pc | null, dataChannel: channel as typeof channel | null });
+  const before = getDiagnosticSources().peers.length;
+  const session = createPeerSession(conn as never);
+  channel.dispatchEvent(new Event("error"));
+  pc.connectionState = "closed";
+  pc.iceConnectionState = "closed";
+  channel.readyState = "closed";
+  channel.bufferedAmount = 0;
+  pc.dispatchEvent(new Event("connectionstatechange"));
+  conn.peerConnection = null;
+  conn.dataChannel = null;
+  conn.simulateClose();
+  session.close();
+  expect(trackEvent).toHaveBeenCalledTimes(1);
+  expect(trackEvent).toHaveBeenCalledWith("p2p_disconnect", expect.objectContaining({ connection_state: "closed", last_connection_state: "connected", last_ice_state: "completed", last_channel_state: "open", last_buffered_bytes: 2048, channel_error: "data-channel-error" }));
+  expect(getDiagnosticHistory().slice(-1)[0]).toMatchObject({ kind: "disconnect", preClose: { bufferedBytes: 2048, receiveAgeMs: null, pongAgeMs: null } });
+  expect(getDiagnosticSources().peers).toHaveLength(before);
+  expect(removePc).toHaveBeenCalledTimes(2);
+  expect(removeChannel).toHaveBeenCalledTimes(4);
+});
+
+
+it("retains the selected route after disconnect and ignores late stats", async () => {
+  const report = new Map<string, Record<string, unknown>>([
+    ["transport", { type: "transport", selectedCandidatePairId: "pair" }],
+    ["pair", { type: "candidate-pair", localCandidateId: "local", remoteCandidateId: "remote" }],
+    ["local", { candidateType: "relay", protocol: "udp", address: "SECRET" }],
+    ["remote", { candidateType: "host", protocol: "udp" }],
+  ]);
+  let complete: ((value: unknown) => void) | undefined;
+  const getStats = vi.fn().mockResolvedValueOnce(report).mockImplementation(() => new Promise((resolve) => { complete = resolve; }));
+  const pc = Object.assign(new EventTarget(), { connectionState: "connected", iceConnectionState: "completed", getStats });
+  const conn = Object.assign(new FakeDataConnection(), { peerConnection: pc });
+  const session = createPeerSession(conn as never);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  pc.dispatchEvent(new Event("connectionstatechange"));
+  await Promise.resolve();
+  conn.simulateClose();
+  const before = getDiagnosticHistory();
+  expect(before.slice(-1)[0]).toMatchObject({ kind: "disconnect", candidates: { localType: "relay", remoteType: "host", localProtocol: "udp", observedAt: expect.any(Number) } });
+  complete?.(report);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(getDiagnosticHistory()).toEqual(before);
+  expect(JSON.stringify(before)).not.toContain("SECRET");
+  expect(getStats).toHaveBeenCalledTimes(2);
+  session.close();
+});
+
+
+it("does not start deferred route stats after immediate teardown or native closure", async () => {
+  const getStats = vi.fn().mockResolvedValue(new Map());
+  const pc = Object.assign(new EventTarget(), { connectionState: "connected", iceConnectionState: "completed", getStats });
+  const conn = Object.assign(new FakeDataConnection(), { peerConnection: pc });
+  const session = createPeerSession(conn as never);
+  session.close();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(getStats).not.toHaveBeenCalled();
+
+  const next = createPeerSession(Object.assign(new FakeDataConnection(), { peerConnection: pc }) as never);
+  pc.connectionState = "closed";
+  pc.dispatchEvent(new Event("connectionstatechange"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(getStats).not.toHaveBeenCalled();
+  next.close();
+});
+
+it("preserves typed established-connection errors with the same diagnostic identity", () => {
+  const conn = new FakeDataConnection();
+  const session = createPeerSession(conn as never);
+  const source = getDiagnosticSources().peers.slice(-1)[0];
+  conn.simulateError(Object.assign(new Error("SECRET"), { type: "negotiation-failed" }));
+  expect(getDiagnosticHistory().slice(-1)[0]).toMatchObject({ kind: "disconnect", diagnosticId: source.diagnosticId, error: "negotiation-failed" });
+  expect(JSON.stringify(getDiagnosticHistory().slice(-1)[0])).not.toContain("SECRET");
+  session.close();
+});
+
+it("coalesces route changes during an in-flight probe and shares the refreshed evidence", async () => {
+  const selected = new Map<string, Record<string, unknown>>([
+    ["transport", { type: "transport", selectedCandidatePairId: "pair" }],
+    ["pair", { localCandidateId: "local" }],
+    ["local", { candidateType: "relay", protocol: "udp", relayProtocol: "tcp" }],
+  ]);
+  let finish!: (value: Map<string, Record<string, unknown>>) => void;
+  const getStats = vi.fn().mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })).mockResolvedValue(selected);
+  const pc = Object.assign(new EventTarget(), { connectionState: "connecting", iceConnectionState: "checking", getStats });
+  const conn = Object.assign(new FakeDataConnection(), { peerConnection: pc });
+  const session = createPeerSession(conn as never);
+  await Promise.resolve();
+  pc.connectionState = "connected";
+  pc.iceConnectionState = "completed";
+  pc.dispatchEvent(new Event("connectionstatechange"));
+  pc.dispatchEvent(new Event("iceconnectionstatechange"));
+  const pending = getDiagnosticSources().peers.slice(-1)[0].stats();
+  finish(new Map());
+  expect(await pending).toMatchObject({ localType: "relay", relayProtocol: "tcp" });
+  expect(getStats).toHaveBeenCalledTimes(2);
+  conn.simulateClose();
+  expect(getDiagnosticHistory().slice(-1)[0]).toMatchObject({ kind: "disconnect", candidates: { localType: "relay", relayProtocol: "tcp" } });
+  session.close();
 });

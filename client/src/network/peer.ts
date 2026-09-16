@@ -1,6 +1,9 @@
 import type { DataConnection } from "peerjs";
 
 import { trackEvent } from "../services/telemetry";
+import { boundedDiagnosticProbe, diagnosticIdFor, projectCandidateStats, recordDiagnostic, registerPeerDiagnostics } from "../services/troubleshooting";
+import type { CandidateDiagnosticSnapshot, ConnectionDiagnosticError, DisconnectCause, TransportDiagnosticSnapshot } from "../services/troubleshooting";
+import { safeConnectionError } from "./connection";
 import type { P2PMessage } from "./protocol";
 import { decodeWireMessage, encodeWireMessage } from "./protocol";
 
@@ -38,15 +41,13 @@ export interface PeerSessionOptions {
   onLatency?: (latencyMs: number | null) => void;
 }
 
-type DisconnectCause = "send-error" | "connection-close"
-  | "connection-error" | "remote-disconnect" | "local-close";
-
 export function createPeerSession(
   conn: DataConnection,
   options: PeerSessionOptions = {},
 ): PeerSession {
   tracePeerSession("create-session", { connOpen: conn.open });
   const { onSessionEnd } = options;
+  const diagnosticId = diagnosticIdFor(conn);
   const messageHandlers = new Set<(msg: P2PMessage) => void | Promise<void>>();
   const disconnectHandlers = new Set<(reason: string) => void>();
   let closed = false;
@@ -66,6 +67,74 @@ export function createPeerSession(
   let pendingSends = 0;
   let pendingDecodes = 0;
 
+  // PeerJS clears these fields during close; native objects alone are also
+  // insufficient because their state mutates to "closed" before its callback.
+  const peerConnection = conn.peerConnection;
+  const dataChannel = conn.dataChannel;
+  let hasPong = false;
+  let connectionError: ConnectionDiagnosticError | undefined;
+  let channelError: TransportDiagnosticSnapshot["channelError"] = null;
+  let preClose: TransportDiagnosticSnapshot | null = null;
+  const sampleTransport = (): TransportDiagnosticSnapshot => {
+    const now = Date.now();
+    const snapshot: TransportDiagnosticSnapshot = {
+      observedAt: now,
+      connectionState: peerConnection?.connectionState ?? null,
+      iceState: peerConnection?.iceConnectionState ?? null,
+      channelState: dataChannel?.readyState ?? null,
+      bufferedBytes: dataChannel?.bufferedAmount ?? null,
+      pendingSends, pendingDecodes,
+      receiveAgeMs: lastReceivedAt === null ? null : Math.max(0, now - lastReceivedAt),
+      pongAgeMs: hasPong ? Math.max(0, now - lastPongAt) : null,
+      channelError,
+    };
+    if (!closed && snapshot.connectionState !== "closed"
+      && snapshot.iceState !== "closed" && snapshot.channelState !== "closed"
+      && snapshot.channelState !== "closing") preClose = snapshot;
+    return snapshot;
+  };
+  let retainedCandidates: CandidateDiagnosticSnapshot | null = null;
+  let statsPending: Promise<CandidateDiagnosticSnapshot | null> | null = null;
+  let statsRerun = false;
+  const transportClosed = () => closed || peerConnection?.connectionState === "closed"
+    || peerConnection?.iceConnectionState === "closed" || dataChannel?.readyState === "closing"
+    || dataChannel?.readyState === "closed";
+  const sampleCandidates = async (): Promise<CandidateDiagnosticSnapshot | null> => {
+    if (transportClosed() || !peerConnection?.getStats) return retainedCandidates;
+    if (statsPending) { statsRerun = true; return statsPending; }
+    statsPending = (async () => {
+      do {
+        statsRerun = false;
+        try {
+          const candidates = await boundedDiagnosticProbe(async () => {
+            // The bounded probe begins on a microtask; teardown can run before it.
+            if (transportClosed()) return null;
+            return projectCandidateStats(await peerConnection.getStats());
+          });
+          if (!transportClosed() && candidates) {
+            retainedCandidates = candidates;
+            recordDiagnostic({ kind: "candidate-route", diagnosticId, observedAt: candidates.observedAt ?? Date.now(), candidates });
+          }
+        } catch { /* Unsupported or already closed transports have no new route evidence. */ }
+      } while (statsRerun && !transportClosed());
+      return retainedCandidates;
+    })().finally(() => { statsPending = null; });
+    return statsPending;
+  };
+  const onTransportState = () => { sampleTransport(); void sampleCandidates(); };
+  const onChannelError = () => { channelError = "data-channel-error"; sampleTransport(); };
+  peerConnection?.addEventListener?.("connectionstatechange", onTransportState);
+  peerConnection?.addEventListener?.("iceconnectionstatechange", onTransportState);
+  for (const event of ["open", "closing", "close"]) dataChannel?.addEventListener?.(event, onTransportState);
+  dataChannel?.addEventListener?.("error", onChannelError);
+  sampleTransport();
+  void sampleCandidates();
+  const unregisterDiagnostics = registerPeerDiagnostics({
+    diagnosticId,
+    snapshot: sampleTransport,
+    stats: sampleCandidates,
+  });
+
   const clearKeepAlive = () => {
     if (pingInterval !== null) { clearInterval(pingInterval); pingInterval = null; }
   };
@@ -82,6 +151,7 @@ export function createPeerSession(
   const trySend = (msg: P2PMessage): Promise<boolean> => {
     if (closed || !conn.open) return Promise.resolve(false);
     pendingSends += 1;
+    sampleTransport();
     const entry = sendQueue.then(async () => {
       // Only gate on `conn.open` here, NOT `closed`. `close()` flips `closed`
       // to true synchronously so subsequent NEW `trySend` calls bail (the
@@ -108,6 +178,7 @@ export function createPeerSession(
       }
       try {
         conn.send(bytes);
+        sampleTransport();
         return true;
       } catch (err) {
         console.warn("[PeerSession] send failed:", err);
@@ -115,12 +186,13 @@ export function createPeerSession(
         return false;
       }
     });
-    sendQueue = entry.then(() => { pendingSends -= 1; });
+    sendQueue = entry.then(() => { pendingSends -= 1; sampleTransport(); });
     return entry;
   };
 
   const startKeepAlive = () => {
     pingInterval = setInterval(() => {
+      sampleTransport();
       if (!conn.open) return;
       const now = Date.now();
       if (!latencyStale && (now - lastPongAt >= LATENCY_STALE_MS || now < lastPongAt)) {
@@ -149,7 +221,14 @@ export function createPeerSession(
   //     sends to flush) or chained off `sendQueue` (from `close()`).
   const markDisconnected = (reason: string, cause: DisconnectCause) => {
     if (closed) return;
+    const transport = sampleTransport();
     closed = true;
+    recordDiagnostic({ kind: "disconnect", diagnosticId, observedAt: Date.now(), cause, ...(connectionError ? { error: connectionError } : {}), transport, preClose, candidates: retainedCandidates });
+    unregisterDiagnostics();
+    peerConnection?.removeEventListener?.("connectionstatechange", onTransportState);
+    peerConnection?.removeEventListener?.("iceconnectionstatechange", onTransportState);
+    for (const event of ["open", "closing", "close"]) dataChannel?.removeEventListener?.(event, onTransportState);
+    dataChannel?.removeEventListener?.("error", onChannelError);
     disconnectReason = reason;
     tracePeerSession("disconnect", { reason, connOpen: conn.open });
     console.warn("[PeerSession] disconnected:", reason);
@@ -158,16 +237,23 @@ export function createPeerSession(
     const now = Date.now();
     trackEvent("p2p_disconnect", {
       reason: cause,
-      connection_state: conn.peerConnection?.connectionState ?? "",
-      ice_state: conn.peerConnection?.iceConnectionState ?? "",
+      connection_state: peerConnection?.connectionState ?? "",
+      ice_state: peerConnection?.iceConnectionState ?? "",
       visibility: document.visibilityState,
       last_message_type: lastReceivedType,
       pong_age_ms: Math.max(0, now - lastPongAt),
       receive_age_ms: lastReceivedAt === null ? -1 : Math.max(0, now - lastReceivedAt),
       pending_sends: pendingSends,
       pending_decodes: pendingDecodes,
-      buffered_bytes: conn.dataChannel?.bufferedAmount ?? 0,
+      buffered_bytes: dataChannel?.bufferedAmount ?? 0,
       channel_open: conn.open,
+      last_connection_state: preClose?.connectionState ?? "",
+      last_ice_state: preClose?.iceState ?? "",
+      last_channel_state: preClose?.channelState ?? "",
+      channel_error: channelError ?? "",
+      transport_captured_at: preClose?.observedAt ?? 0,
+      last_buffered_bytes: preClose?.bufferedBytes ?? -1,
+      transport_age_ms: preClose === null ? -1 : Math.max(0, now - preClose.observedAt),
     });
     clearKeepAlive();
     window.removeEventListener("beforeunload", beforeUnloadHandler);
@@ -228,6 +314,7 @@ export function createPeerSession(
       }
       lastReceivedAt = Date.now();
       lastReceivedType = msg.type;
+      sampleTransport();
       // Skip ping/pong — they fire every 5s and drown the rest of the trace.
       if (msg.type !== "ping" && msg.type !== "pong") {
         tracePeerSession("data", { type: msg.type, queued: messageHandlers.size === 0 });
@@ -237,6 +324,8 @@ export function createPeerSession(
         const elapsed = Date.now() - msg.timestamp;
         if (!Number.isFinite(elapsed) || elapsed < 0) return;
         lastPongAt = Date.now();
+        hasPong = true;
+        sampleTransport();
         latencyStale = false;
         options.onLatency?.(Math.round(elapsed));
         return;
@@ -280,7 +369,10 @@ export function createPeerSession(
 
   conn.on("data", onData);
   conn.on("close", () => handleDisconnect("Connection closed", "connection-close"));
-  conn.on("error", (err) => handleDisconnect(`Connection error: ${err.message}`, "connection-error"));
+  conn.on("error", (err) => {
+    connectionError = safeConnectionError(err);
+    handleDisconnect(`Connection error: ${err.message}`, "connection-error");
+  });
 
   startKeepAlive();
 

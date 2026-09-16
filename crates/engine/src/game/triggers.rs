@@ -1260,6 +1260,70 @@ fn counter_added_fires_per_recipient(trig_def: &TriggerDefinition) -> bool {
     trig_def.batched && matches!(trig_def.mode, TriggerMode::CounterAdded)
 }
 
+/// CR 603.2c: this exact player-recipient phrasing fires once for each player
+/// recipient in a simultaneous damage event. Other recipient scopes retain
+/// their existing aggregate batching semantics.
+fn damage_done_once_by_controller_fires_per_player_recipient(trig_def: &TriggerDefinition) -> bool {
+    trig_def.batched
+        && matches!(trig_def.mode, TriggerMode::DamageDoneOnceByController)
+        && trig_def.valid_target == Some(TargetFilter::Player)
+}
+
+/// CR 510.2 + CR 120.4b + CR 603.2c: combat damage is dealt simultaneously,
+/// then player-recipient damage triggers fire once for each recipient. Preserve
+/// first-seen recipient order and normalize each candidate before retaining it,
+/// so resolution sees only the source amounts that satisfied the trigger.
+fn matching_damage_done_once_by_controller_events_by_player_recipient(
+    state: &GameState,
+    event_batch: &[GameEvent],
+    trig_def: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    controller: PlayerId,
+    matcher: TriggerMatcher,
+    active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+) -> Vec<Vec<GameEvent>> {
+    let mut groups: Vec<(PlayerId, Vec<GameEvent>)> = Vec::new();
+    for candidate in event_batch {
+        let player_id = match candidate {
+            GameEvent::CombatDamageDealtToPlayer { player_id, .. }
+            | GameEvent::DamageDealt {
+                target: TargetRef::Player(player_id),
+                ..
+            } => *player_id,
+            _ => continue,
+        };
+        if !candidate_passes_batched_filters(
+            state,
+            candidate,
+            trig_def,
+            source_context,
+            controller,
+            matcher,
+            active_suppress_triggers,
+        ) {
+            continue;
+        }
+        let Some(normalized) =
+            super::trigger_matchers::matching_damage_done_once_by_controller_event(
+                candidate,
+                trig_def,
+                source_context,
+                state,
+            )
+        else {
+            continue;
+        };
+        match groups
+            .iter_mut()
+            .find(|(recipient, _)| *recipient == player_id)
+        {
+            Some((_, events)) => events.push(normalized),
+            None => groups.push((player_id, vec![normalized])),
+        }
+    }
+    groups.into_iter().map(|(_, events)| events).collect()
+}
+
 /// CR 120.4b: a received-damage threshold with no source scoping reads the whole
 /// simultaneous damage event, so the trigger fires once per recipient with the
 /// batch summed — not once per damaging source. Class-level property of the
@@ -2730,6 +2794,20 @@ fn collect_matching_triggers_inner(
                     trig_def,
                     &source_context,
                     controller,
+                    active_suppress_triggers,
+                );
+                if batches.is_empty() {
+                    continue;
+                }
+                batches
+            } else if damage_done_once_by_controller_fires_per_player_recipient(trig_def) {
+                let batches = matching_damage_done_once_by_controller_events_by_player_recipient(
+                    state,
+                    event_batch,
+                    trig_def,
+                    &source_context,
+                    controller,
+                    matcher,
                     active_suppress_triggers,
                 );
                 if batches.is_empty() {
@@ -17308,6 +17386,257 @@ pub mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    #[test]
+    fn damage_done_once_by_controller_player_recipient_grouping_requires_exact_structure() {
+        let mut trigger = make_trigger(TriggerMode::DamageDoneOnceByController);
+        trigger.batched = true;
+        trigger.valid_target = Some(TargetFilter::Player);
+        assert!(damage_done_once_by_controller_fires_per_player_recipient(
+            &trigger
+        ));
+
+        trigger.valid_target = Some(TargetFilter::Opponent);
+        assert!(!damage_done_once_by_controller_fires_per_player_recipient(
+            &trigger
+        ));
+
+        trigger.valid_target = Some(TargetFilter::Controller);
+        assert!(!damage_done_once_by_controller_fires_per_player_recipient(
+            &trigger
+        ));
+
+        trigger.valid_target = Some(TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Battle],
+                    ..Default::default()
+                }),
+            ],
+        });
+        assert!(!damage_done_once_by_controller_fires_per_player_recipient(
+            &trigger
+        ));
+
+        trigger.valid_target = Some(TargetFilter::Player);
+        trigger.batched = false;
+        assert!(!damage_done_once_by_controller_fires_per_player_recipient(
+            &trigger
+        ));
+
+        trigger.batched = true;
+        trigger.mode = TriggerMode::DamageDoneOnce;
+        assert!(!damage_done_once_by_controller_fires_per_player_recipient(
+            &trigger
+        ));
+    }
+
+    #[test]
+    fn damage_done_once_by_controller_groups_combat_damage_by_player_after_source_filtering() {
+        let mut state = setup();
+        let watcher = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let hero = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Hero".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Other".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let hero_object = state.objects.get_mut(&hero).expect("Hero exists");
+            hero_object.card_types.core_types.push(CoreType::Creature);
+            hero_object.card_types.subtypes.push("Hero".to_string());
+        }
+        state
+            .objects
+            .get_mut(&other)
+            .expect("Other exists")
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::DamageDoneOnceByController);
+        trigger.batched = true;
+        trigger.valid_target = Some(TargetFilter::Player);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .subtype("Hero".to_string()),
+        ));
+        let source_context = trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&watcher).expect("Watcher exists"),
+        );
+        let event_batch = vec![
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(1),
+                source_amounts: vec![(hero, 2), (other, 3)],
+                total_damage: 5,
+            },
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(0),
+                source_amounts: vec![(hero, 1)],
+                total_damage: 1,
+            },
+        ];
+
+        let batches = matching_damage_done_once_by_controller_events_by_player_recipient(
+            &state,
+            &event_batch,
+            &trigger,
+            &source_context,
+            PlayerId(0),
+            super::super::trigger_matchers::match_damage_done_once_by_controller,
+            &[],
+        );
+
+        assert_eq!(batches.len(), 2, "each damaged player must keep one firing");
+        assert_eq!(
+            batches[0],
+            vec![GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(1),
+                source_amounts: vec![(hero, 2)],
+                total_damage: 2,
+            }],
+            "the normalized context must retain only matching sources and their total"
+        );
+        assert_eq!(
+            batches[1],
+            vec![GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(0),
+                source_amounts: vec![(hero, 1)],
+                total_damage: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn damage_done_once_by_controller_groups_noncombat_player_damage_and_excludes_objects() {
+        let mut state = setup();
+        let watcher = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let hero = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Hero".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Other".to_string(),
+            Zone::Battlefield,
+        );
+        let damaged_object = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Damaged object".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let hero_object = state.objects.get_mut(&hero).expect("Hero exists");
+            hero_object.card_types.core_types.push(CoreType::Creature);
+            hero_object.card_types.subtypes.push("Hero".to_string());
+        }
+        state
+            .objects
+            .get_mut(&other)
+            .expect("Other exists")
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::DamageDoneOnceByController);
+        trigger.batched = true;
+        trigger.valid_target = Some(TargetFilter::Player);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .subtype("Hero".to_string()),
+        ));
+        let source_context = trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&watcher).expect("Watcher exists"),
+        );
+        let player_one_hit = GameEvent::DamageDealt {
+            source_id: hero,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 1,
+            is_combat: false,
+            excess: 0,
+        };
+        let event_batch = vec![
+            player_one_hit.clone(),
+            player_one_hit.clone(),
+            GameEvent::DamageDealt {
+                source_id: hero,
+                target: TargetRef::Player(PlayerId(0)),
+                amount: 2,
+                is_combat: false,
+                excess: 0,
+            },
+            GameEvent::DamageDealt {
+                source_id: other,
+                target: TargetRef::Player(PlayerId(0)),
+                amount: 3,
+                is_combat: false,
+                excess: 0,
+            },
+            GameEvent::DamageDealt {
+                source_id: hero,
+                target: TargetRef::Object(damaged_object),
+                amount: 4,
+                is_combat: false,
+                excess: 0,
+            },
+        ];
+
+        let batches = matching_damage_done_once_by_controller_events_by_player_recipient(
+            &state,
+            &event_batch,
+            &trigger,
+            &source_context,
+            PlayerId(0),
+            super::super::trigger_matchers::match_damage_done_once_by_controller,
+            &[],
+        );
+
+        assert_eq!(batches.len(), 2, "only player recipients may form groups");
+        assert_eq!(batches[0], vec![player_one_hit.clone(), player_one_hit]);
+        assert_eq!(
+            batches[1],
+            vec![GameEvent::DamageDealt {
+                source_id: hero,
+                target: TargetRef::Player(PlayerId(0)),
+                amount: 2,
+                is_combat: false,
+                excess: 0,
+            }],
+            "a matching noncombat player hit must remain a positive group"
+        );
     }
 
     /// CR 102.3 + CR 805.4a: an opponent-turn trigger constraint must read the
