@@ -22545,10 +22545,10 @@ fn rebind_anaphoric_generic_effect_subject_to_parent(lower: &str, def: &mut Abil
     }
 }
 
-/// CR 115.10a + CR 601.2c: A damage clause whose recipient is a FRESH typed
-/// target structurally distinct from the anaphoric "It" subject an earlier
+/// CR 115.10a + CR 601.2c: A damage clause whose recipient is FRESH (a typed
+/// target, or a player) structurally distinct from the anaphoric "It" subject an earlier
 /// clause established — it declares its own recipient, not the boosted/
-/// counter'd object. Two shapes both witness this: (1) "creature an opponent
+/// counter'd object. Three shapes witness this: (1) "creature an opponent
 /// controls" / "creature you don't control" (canonicalize to
 /// `ControllerRef::Opponent`) — a different player's permanent can never be
 /// the subject's own controller's chosen object; (2) "each other creature" /
@@ -22556,14 +22556,28 @@ fn rebind_anaphoric_generic_effect_subject_to_parent(lower: &str, def: &mut Abil
 /// "another" exclusion excludes the referenced object *by definition*, so a
 /// board-sweep recipient (Chandra's Ignition class: "target creature you
 /// control deals damage equal to its power to each other creature") can never
-/// be the same object as "It" either. Per CR 601.2c each instance of the word
+/// be the same object as "It" either; (3) a PLAYER recipient
+/// (`TargetFilter::is_player_scope`) — CR 120.3a: damage dealt to a player makes
+/// that player lose life, so a printed player recipient is never the antecedent
+/// creature. Per CR 601.2c each instance of the word
 /// "target" is a separate target, and per CR 115.10a being affected (the
-/// source's power feeding the amount) does not make either recipient shape the
+/// source's power feeding the amount) does not make recipient shape (1) or (2) the
 /// same object as the boosted/counter'd creature. Recurses through
 /// `Or`/`And`/`Not` wrappers, mirroring `attach_controller_if_absent` /
-/// `rewrite_filter_controller`. `ParentTarget`/`SelfRef`/`Any`/
-/// `ParentTargetController` etc. are excluded (they are never `Typed` anyway).
+/// `rewrite_filter_controller`. Still excluded: `ParentTarget`, `SelfRef`, `Any`
+/// and `ParentTargetController`, none of which `is_player_scope` accepts
+/// and none of which is `Typed`.
 fn target_filter_is_distinct_recipient(filter: &TargetFilter) -> bool {
+    // CR 120.3a + CR 608.2c: a PLAYER recipient ("... to you", "... to target
+    // player") is printed by the clause itself, so it can never be the declared
+    // antecedent the anaphor names. Damage dealt to a player makes that player
+    // lose that much life (CR 120.3a); collapsing the recipient to `ParentTarget`
+    // would re-aim the clause at the antecedent creature instead. Decline the
+    // blanket anaphoric parent-rewrite for it exactly as for a fresh opponent
+    // target, and let the caller attribute the damage source to the antecedent.
+    if filter.is_player_scope() {
+        return true;
+    }
     match filter {
         TargetFilter::Typed(tf) => {
             tf.controller == Some(ControllerRef::Opponent)
@@ -22577,9 +22591,52 @@ fn target_filter_is_distinct_recipient(filter: &TargetFilter) -> bool {
     }
 }
 
-/// Returns true iff `effect` is a `DealDamage`/`DamageAll` whose recipient is a
-/// structurally distinct typed target (see `target_filter_is_distinct_recipient`
-/// — either opponent-controlled or an "other"/"another"-excluded board sweep).
+/// CR 120.2b + CR 608.2c: does this damage amount read a characteristic of the
+/// clause's ANAPHORIC subject, so that the subject the clause's own words name
+/// ("that creature" / "it") is the object dealing the damage?
+///
+/// CR 120.2b: the spell or ability specifies which object deals the damage.
+/// This is consulted only for a `ParentTargetController` recipient ("... to its
+/// controller"), which two printed grammars share while naming different
+/// sources:
+///   * "That creature deals damage equal to its power to its controller" - the
+///     subject is the anaphor and "its power" reads that same object, so the
+///     amount's scope is `Anaphoric` (`EventSource` inside a triggered ability,
+///     before `bind_anaphoric_damage_subject_keep_recipient` coerces it). The
+///     antecedent is the source.
+///   * "<card> deals damage equal to that creature's power to its controller" -
+///     the card names itself as the subject (CR 201.5), and the amount reads
+///     either the antecedent through a `Demonstrative` scope ("that creature's
+///     power") or the card itself through a `Source` scope ("this creature's
+///     power"). The card is the source, and stamping the antecedent would
+///     contradict it.
+///
+/// A printed constant ("<card> deals 2 damage to that creature's controller")
+/// has no object scope and is rejected with the second grammar.
+fn amount_reads_the_antecedent(amount: &QuantityExpr) -> bool {
+    let QuantityExpr::Ref { qty } = amount else {
+        return false;
+    };
+    let scope = match qty {
+        QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. }
+        | QuantityRef::CountersOn { scope, .. } => scope,
+        _ => return false,
+    };
+    matches!(scope, ObjectScope::Anaphoric | ObjectScope::EventSource)
+}
+
+/// Returns true iff `effect` is a `DealDamage`/`DamageAll` whose recipient
+/// `target_filter_is_distinct_recipient` accepts (an opponent-controlled typed
+/// target, an "other"/"another"-excluded board sweep, or a player), or whose
+/// recipient is `ParentTargetController` with an amount
+/// `amount_reads_the_antecedent` accepts.
 /// Used to DECLINE the blanket anaphoric parent-rewrite for the "one-sided
 /// fight" class (Ambuscade, Clear Shot, Rabid Gnaw, ...) and the "counter-then-
 /// sweep" class (Nova Flame: "Put X +1/+1 counters on target creature you
@@ -22588,8 +22645,10 @@ fn target_filter_is_distinct_recipient(filter: &TargetFilter) -> bool {
 /// to `ParentTarget`.
 fn damage_clause_has_distinct_recipient(effect: &Effect) -> bool {
     match effect {
-        Effect::DealDamage { target, .. } | Effect::DamageAll { target, .. } => {
+        Effect::DealDamage { target, amount, .. } | Effect::DamageAll { target, amount, .. } => {
             target_filter_is_distinct_recipient(target)
+                || (matches!(target, TargetFilter::ParentTargetController)
+                    && amount_reads_the_antecedent(amount))
         }
         _ => false,
     }
@@ -22601,9 +22660,11 @@ fn damage_clause_has_distinct_recipient(effect: &Effect) -> bool {
 /// "... That creature deals damage equal to its power to this creature."). Per
 /// CR 201.5 the self-reference names just the source object, so the blanket
 /// anaphoric parent-rewrite must not collapse it to `ParentTarget` (which would
-/// re-aim the fight-back at clause 1's chosen target). The `Anaphoric` amount is
-/// resolved by the resolver's CR 608.2c `effect_context_object` referent, so no
-/// source/amount rebind is needed here.
+/// re-aim the fight-back at clause 1's chosen target). This predicate only
+/// recognizes the recipient shape; `bind_anaphoric_damage_subject_keep_recipient`'s
+/// self-reference arm attributes the damage source to the declared object
+/// (CR 120.1) and coerces a triggered ability's `EventSource` amount to
+/// `Anaphoric`.
 fn damage_clause_has_self_ref_recipient(effect: &Effect) -> bool {
     matches!(
         effect,
@@ -22617,23 +22678,38 @@ fn damage_clause_has_self_ref_recipient(effect: &Effect) -> bool {
     )
 }
 
-/// Coerce a per-object `QuantityRef` whose scope is `ObjectScope::Source` to
-/// `target`. The mirror of `rebind_anaphoric_ref` for the one-sided fight class:
-/// a "Then it deals damage equal to its power" sub-clause whose subject was
-/// classified as `SelfRef` gets its "its power" anaphor prematurely rebound to
-/// `Source` (the ability source) by the subject-stamping pass (~mod.rs:12278).
-/// For this class the "it" is the boosted creature (the parent TARGET,
-/// `targets[0]` once `damage_source = Target`), never the spell source — so the
-/// amount must be retargeted to `Anaphoric` (resolved to `targets[0]` by the
-/// runtime one-sided-fight fallback in `game/quantity.rs`), keeping the export
-/// in sync with the Oracle "its".
 #[derive(Clone, Copy)]
 enum SourceRefRebind {
     AllObjectRefs,
     PowerOrToughness,
 }
 
-fn rebind_source_ref(qty: &mut QuantityRef, target: ObjectScope, rebind: SourceRefRebind) {
+/// Coerce a per-object `QuantityRef` whose scope is `from` to `target`.
+///
+/// CR 608.2c: an anaphoric per-object amount ("its power") names one object; this
+/// walk only retargets WHICH object, never which characteristic. Two `from`
+/// scopes:
+///   * `ObjectScope::Source` — an amount a subject-stamping pass bound to the
+///     ability source. In the one-sided-fight class, a "Then it deals damage
+///     equal to its power" sub-clause whose subject was classified `SelfRef` had
+///     "its power" prematurely bound to the ability source (power 0 for a spell).
+///     Retargeted to `Anaphoric`, whose runtime read order ends at the
+///     one-sided-fight `targets[0]` fallback, keeping the export in sync with
+///     the Oracle "its". `restore_this_way_trigger_anaphor` retargets it to
+///     `Anaphoric` too,
+///     and `wrap_target_subject_damage` retargets a power/toughness amount to
+///     `Target`.
+///   * `ObjectScope::EventSource` — the declared-target damage-source class,
+///     where a triggered ability had bound "its power" to the TRIGGERING object
+///     (Stalking Yeti, Form of the Dinosaur, Hunter's Bow, Cyclops Gladiator).
+///     Once the clause's damage source is the declared object, its amount must
+///     read that object.
+fn rebind_object_scope_ref(
+    qty: &mut QuantityRef,
+    from: ObjectScope,
+    target: ObjectScope,
+    rebind: SourceRefRebind,
+) {
     if matches!(rebind, SourceRefRebind::PowerOrToughness)
         && !matches!(
             qty,
@@ -22656,16 +22732,21 @@ fn rebind_source_ref(qty: &mut QuantityRef, target: ObjectScope, rebind: SourceR
         | QuantityRef::CountersOn { scope, .. } => scope,
         _ => return,
     };
-    if *scope == ObjectScope::Source {
+    if *scope == from {
         *scope = target;
     }
 }
 
-/// `QuantityExpr` walker for `rebind_source_ref` (mirrors
+/// `QuantityExpr` walker for `rebind_object_scope_ref` (mirrors
 /// `rebind_anaphoric_object_scope`'s recursion).
-fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope, rebind: SourceRefRebind) {
+fn rebind_object_scope_amount(
+    expr: &mut QuantityExpr,
+    from: ObjectScope,
+    target: ObjectScope,
+    rebind: SourceRefRebind,
+) {
     match expr {
-        QuantityExpr::Ref { qty } => rebind_source_ref(qty, target, rebind),
+        QuantityExpr::Ref { qty } => rebind_object_scope_ref(qty, from, target, rebind),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -22673,15 +22754,15 @@ fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope, rebind: So
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
             exponent: inner, ..
-        } => rebind_source_amount(inner, target, rebind),
+        } => rebind_object_scope_amount(inner, from, target, rebind),
         QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for inner in exprs {
-                rebind_source_amount(inner, target, rebind);
+                rebind_object_scope_amount(inner, from, target, rebind);
             }
         }
         QuantityExpr::Difference { left, right } => {
-            rebind_source_amount(left, target, rebind);
-            rebind_source_amount(right, target, rebind);
+            rebind_object_scope_amount(left, from, target, rebind);
+            rebind_object_scope_amount(right, from, target, rebind);
         }
         QuantityExpr::Fixed { .. } => {}
     }
@@ -22709,18 +22790,36 @@ fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope, rebind: So
 /// Gated to a `ZoneChangedThisWay` condition so only the reflexive-trigger body
 /// pronoun is touched; a true self-reference ("~ deals damage equal to its
 /// power") never carries this condition and keeps its `Source` scope. Mirrors
-/// the one-sided-fight `Source → Anaphoric` coercion (`rebind_source_amount`).
+/// the one-sided-fight `Source → Anaphoric` coercion (`rebind_object_scope_amount`).
 fn restore_this_way_trigger_anaphor(effect: &mut Effect) {
     match effect {
         Effect::DealDamage { amount, .. } | Effect::DamageEachPlayer { amount, .. } => {
-            rebind_source_amount(
+            rebind_object_scope_amount(
                 amount,
+                ObjectScope::Source,
                 ObjectScope::Anaphoric,
                 SourceRefRebind::AllObjectRefs,
             );
         }
         _ => {}
     }
+}
+
+/// CR 201.5 + CR 120.1: the self-reference arm of
+/// [`bind_anaphoric_damage_subject_keep_recipient`], exposed so the chunk-loop's
+/// GATED-clause rewrite can decline the blanket parent-rewrite for the same
+/// reason the two `condition.is_none()` pronoun rewrites already do. A damage
+/// clause whose recipient is the source object's own self-reference ("to this
+/// creature" / "to ~") is never aimed at the declared antecedent (CR 201.5), and
+/// its damage source IS that antecedent (CR 120.1) — and an "If you do" gate
+/// (CR 118.12) governs WHETHER the clause happens, not WHAT its anaphor names
+/// (CR 608.2c), so the gated form must bind identically. Restricted to this arm:
+/// a gated clause with any other recipient shape keeps the rewrite it has today.
+fn bind_self_ref_damage_subject(effect: &mut Effect) -> bool {
+    if !damage_clause_has_self_ref_recipient(effect) {
+        return false;
+    }
+    bind_anaphoric_damage_subject_keep_recipient(effect)
 }
 
 /// CR 120.1 + CR 608.2c: For a "one-sided fight" anaphoric damage clause
@@ -22736,54 +22835,116 @@ fn restore_this_way_trigger_anaphor(effect: &mut Effect) {
 /// controls" is a distinct target.
 ///
 /// The "its power" amount is left as `Power{Anaphoric}` (NOT rebound to
-/// `Target`): the runtime one-sided-fight fallback in `game/quantity.rs`
-/// resolves `Anaphoric` to that same `targets[0]` source object. Keeping the
+/// `Target`). `game/quantity.rs` reads an `Anaphoric` power or toughness from
+/// the earlier instruction's referent (`effect_context_object`) first, then
+/// from the trigger-event source and the cost referent, and last from the
+/// one-sided-fight fallback, which reads the first object target (`targets[0]`)
+/// only when `damage_source == Some(Target)`. Keeping the
 /// AST `Anaphoric` keeps the serialized export in sync with the Oracle "its"
 /// and avoids reintroducing #699 (where rebinding the source amount to `Target`
 /// alongside a clobbered recipient made the boosted creature damage itself).
-/// The only rebind here is `Source → Anaphoric`: the "Then it deals..." subject
-/// is classified `SelfRef`, so the subject-stamping pass (~mod.rs:12278)
+/// Two rebinds run here: `Source → Anaphoric` (the spell-subject case) and
+/// `EventSource → Anaphoric` (the triggered-ability case, Stalking Yeti / Form of
+/// the Dinosaur / Hunter's Bow / Cyclops Gladiator). The "Then it deals..."
+/// subject is classified `SelfRef`, so the subject-stamping pass
 /// prematurely binds "its power" to `Source` (the spell, power 0); coercing it
-/// to `Anaphoric` routes it back through the same runtime fallback. Returns true
+/// to `Anaphoric` puts it on that read order. Coercion alone does not make a
+/// triggered ability's amount read the declared object: when the earlier
+/// instruction leaves no referent (for example its damage was 0, CR 120.8, or
+/// its recipient can't be dealt damage) and the triggering object has a power,
+/// the trigger-event source is read before the fallback, so the amount reads
+/// the triggering object. Returns true
 /// (= decline the blanket `replace_target_with_parent`) when handled.
 ///
-/// Covers three recipient shapes: (1) the fresh-opponent recipient — attribute
+/// Covers five recipient shapes: (1) the fresh-opponent recipient — attribute
 /// the damage source to the parent target while preserving the recipient and
 /// the anaphoric amount; (2) the self-reference recipient ("to this
 /// creature"/"to ~", `TargetFilter::SelfRef`, the Karplusan Yeti fight-back
-/// class) — preserve the recipient verbatim with NO source/amount rebind;
+/// class) — preserve the recipient verbatim and attribute the damage source to
+/// the declared object (CR 120.1), coercing a triggered-ability `EventSource`
+/// amount to `Anaphoric`;
 /// (3) the "other"/"another"-excluded board-sweep recipient ("to each other
 /// creature", `FilterProp::Another` — the Chandra's Ignition / Nova Flame
 /// class, issue #4960) — same handling as (1): attribute the damage source to
 /// the parent target while preserving the sweep recipient and the anaphoric
-/// amount. Without this, `damage_source` stays `None` (the spell itself), so
+/// amount; (4) a printed PLAYER recipient (`TargetFilter::is_player_scope` —
+/// "to you": Form of the Dinosaur, Bind the Monster) — attribute the damage
+/// source to the declared object and preserve the player recipient (CR 120.3a);
+/// (5) the antecedent-relative player recipient (`ParentTargetController` with
+/// an amount `amount_reads_the_antecedent` accepts — Backlash, Traitor's Roar,
+/// Ana Battlemage) — the same handling. Shape (5) is admitted by
+/// `damage_clause_has_distinct_recipient`, not by
+/// `target_filter_is_distinct_recipient`, because the same recipient filter with
+/// a printed constant amount (Blur of Blades, Sonic Assault) has the SPELL as its
+/// source (CR 201.5) and must not be stamped. Without shape (3)'s handling,
+/// `damage_source` stays `None` (the spell itself), so
 /// the runtime one-sided-fight fallback in `game/quantity.rs` (gated on
 /// `damage_source == Some(Target)`) never fires and `Power{Anaphoric}`
 /// resolves to 0 — Nova Flame with any X dealt no damage.
 fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
     // CR 201.5 + CR 608.2c: a self-reference recipient ("to this creature"/"to ~")
-    // is the source itself and must be preserved verbatim (fight-back class). No
-    // source/amount rebind: the resolver seeds the `Anaphoric` amount from the
-    // prior clause's damaged-object event (effect_context_object).
+    // is the source object itself and must be preserved verbatim (fight-back
+    // class). The recipient is NOT rewritten here.
     if damage_clause_has_self_ref_recipient(effect) {
+        // CR 120.1 + CR 120.2b: the object that deals damage is the source of
+        // that damage — here the DECLARED object the earlier instruction chose,
+        // not the resolving ability's source. `damage_source = Target` routes the
+        // clause through the existing one-sided-fight descent
+        // (`effects/mod.rs::is_one_sided_fight_damage_sub`), which prepends the
+        // declared object so `targets[0]` IS the subject and
+        // `deal_damage.rs::target_damage_source` selects it. The `SelfRef`
+        // recipient is unaffected by that prepend.
+        set_damage_clause_source_only(effect, DamageSource::Target);
+        // CR 608.2c: inside a triggered ability the subject-stamping
+        // pass had bound "its power" to the TRIGGERING object
+        // (`ObjectScope::EventSource` — Stalking Yeti's ETB, Cyclops Gladiator's
+        // attack trigger). Once the source is the declared object, the amount must
+        // read that same object. `game/quantity.rs` reads an `Anaphoric` power or
+        // toughness from the earlier instruction's referent
+        // (`effect_context_object`) first, then from the trigger-event source and
+        // the cost referent, and last from the one-sided-fight fallback gated on
+        // the `damage_source = Target` just stamped.
+        if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } = effect {
+            rebind_object_scope_amount(
+                amount,
+                ObjectScope::EventSource,
+                ObjectScope::Anaphoric,
+                SourceRefRebind::AllObjectRefs,
+            );
+        }
         return true;
     }
     if !damage_clause_has_distinct_recipient(effect) {
         return false;
     }
     // CR 115.10a + CR 601.2c + CR 608.2c + CR 120.1: preserve the distinct
-    // recipient (fresh-opponent target OR "other"-excluded board sweep) and
-    // attribute damage source to targets[0] (the boosted/counter'd "It"); leave
-    // "its power" as Power{Anaphoric} — the runtime resolves it to that same
-    // source object. Do NOT rebind to Target (that desyncs the export from
+    // recipient (fresh-opponent target, "other"-excluded board sweep, printed
+    // player, or antecedent-relative player) and
+    // attribute damage source to targets[0] (the anaphoric "It", the declared
+    // antecedent); leave
+    // "its power" as Power{Anaphoric} — the runtime reads it in the order this
+    // function's doc gives, whose last slot is that same source object. Do NOT
+    // rebind to Target (that desyncs the export from
     // the Oracle "its" and reintroduces #699).
     set_damage_clause_source_only(effect, DamageSource::Target);
-    // Source → Anaphoric only (the SelfRef-subject "Then it deals..." variant);
-    // gated inside this fresh-opponent branch so it can't touch unrelated
-    // Source-amount cards. Anaphoric amounts are already correct and untouched.
+    // Source → Anaphoric (the SelfRef-subject "Then it deals..." variant) and
+    // EventSource → Anaphoric (a triggered ability's "its power");
+    // gated inside this distinct-recipient branch so it can't touch unrelated
+    // Source- or EventSource-amount cards. Anaphoric amounts are already correct and untouched.
     if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } = effect {
-        rebind_source_amount(
+        rebind_object_scope_amount(
             amount,
+            ObjectScope::Source,
+            ObjectScope::Anaphoric,
+            SourceRefRebind::AllObjectRefs,
+        );
+        // CR 608.2c: same coercion as arm 1 — a triggered ability's
+        // "its power" had been bound to the triggering object; the declared
+        // object is now the source, so the amount is re-scoped to `Anaphoric`
+        // with it (Form of the Dinosaur, Hunter's Bow).
+        rebind_object_scope_amount(
+            amount,
+            ObjectScope::EventSource,
             ObjectScope::Anaphoric,
             SourceRefRebind::AllObjectRefs,
         );
@@ -24960,8 +25121,9 @@ fn bind_damage_clause_source(
 
 /// CR 120.1: Set a damage clause's `damage_source` WITHOUT rebinding the
 /// anaphoric amount scope. The one-sided-fight fresh-opponent path keeps "its
-/// power" as `Power{Anaphoric}` (resolved to `targets[0]` by the runtime
-/// fallback) instead of collapsing it to `Target`, so it cannot reuse
+/// power" as `Power{Anaphoric}` (read in `game/quantity.rs`'s `Anaphoric` order,
+/// whose last slot is the `targets[0]` fallback) instead of collapsing it to
+/// `Target`, so it cannot reuse
 /// `bind_damage_clause_source` (which always rebinds the amount). Returns true
 /// iff the effect is a `DealDamage`/`DamageAll`.
 fn set_damage_clause_source_only(effect: &mut Effect, damage_source_ref: DamageSource) -> bool {
@@ -25177,8 +25339,9 @@ fn wrap_target_subject_damage(
         if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } =
             &mut clause.effect
         {
-            rebind_source_amount(
+            rebind_object_scope_amount(
                 amount,
+                ObjectScope::Source,
                 ObjectScope::Target,
                 SourceRefRebind::PowerOrToughness,
             );
@@ -38895,7 +39058,7 @@ pub(crate) fn parse_effect_chain_ir(
         // which is exactly why a head-only rewrite corrupts the chain.
         let is_distributed_chunk = text_is_compound_subject_distribution(&text);
         // Kicker clauses referencing "that creature"/"it" inherit the parent's target.
-        // CR 608.2c: untouched — its `!builder.is_empty()` gate is intentionally broad
+        // CR 608.2c: its `!builder.is_empty()` gate is intentionally broad
         // (many antecedent shapes reach this without a `target_filter()`, e.g. a typed
         // trigger subject rebind chain), and narrowing it here regressed dozens of
         // unrelated cards (Feather, the Redeemed's exile-return rider; Managorger
@@ -38919,6 +39082,7 @@ pub(crate) fn parse_effect_chain_ir(
                 &text_lower,
                 &mut clause.effect,
             )
+            && !bind_self_ref_damage_subject(&mut clause.effect)
         {
             replace_target_with_parent(&mut clause.effect);
         }

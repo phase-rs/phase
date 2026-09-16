@@ -29952,7 +29952,7 @@ fn granted_cost_axis_is_not_walked_and_no_parse_shape_reaches_it() {
 
 /// CR 603.2 + CR 608.2c: Cyclops Gladiator (verbatim MTGJSON Oracle text) —
 /// the "if you do" continuation's damage-back amount must keep reading the
-/// TARGET creature's power (`ObjectScope::EventSource`, the "that creature"
+/// TARGET creature's power (`ObjectScope::Anaphoric`, the "that creature"
 /// established by the first sentence), never the attacking Cyclops's own
 /// power.
 ///
@@ -29970,7 +29970,7 @@ fn granted_cost_axis_is_not_walked_and_no_parse_shape_reaches_it() {
 /// predecessor (Galion's shape), not `Effect::DealDamage`, so it returns
 /// `None` here and control reached the (then-unconstrained) rebind, clearing
 /// `ctx.subject` to `None` and silently flipping the damage-back amount's
-/// possessive "its power" from the target's power (`EventSource`) to the
+/// possessive "its power" from the target's power to the
 /// Cyclops's own power (`Source`) — a real rules regression, not just a
 /// cosmetic parse-tree diff. The fix scopes the rebind to the bare
 /// possessive-pronoun base-P/T-set clause shape only
@@ -30042,7 +30042,7 @@ fn cyclops_gladiator_if_you_do_damage_back_reads_targets_power_not_sources() {
         *back_amount,
         QuantityExpr::Ref {
             qty: QuantityRef::Power {
-                scope: ObjectScope::EventSource,
+                scope: ObjectScope::Anaphoric,
             },
         },
         "the damage-back amount must read the TARGET creature's ('that \

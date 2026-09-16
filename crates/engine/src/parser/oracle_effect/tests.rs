@@ -6000,8 +6000,9 @@ fn source_power_toughness_rebind_preserves_other_source_refs() {
         ],
     };
 
-    rebind_source_amount(
+    rebind_object_scope_amount(
         &mut amount,
+        ObjectScope::Source,
         ObjectScope::Target,
         SourceRefRebind::PowerOrToughness,
     );
@@ -66677,5 +66678,374 @@ fn bare_it_with_untargeted_antecedent_keeps_its_stamp() {
         target,
         &TargetFilter::SelfRef,
         "an untargeted sacrifice antecedent leaves \"it\" naming the source"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Declared-target damage source: SHAPE rows. Each constant is the card's
+// verbatim Oracle text; each row locks the stamp of the damage clause that
+// follows the head instruction.
+// ---------------------------------------------------------------------------
+
+/// `(damage_source, recipient, amount, condition)` of every `DealDamage` node
+/// reached through `sub_ability` / `else_ability` from a parsed ability or
+/// trigger body, in declaration order.
+fn follow_up_damage_stamps(
+    oracle_text: &str,
+    card_name: &str,
+    keywords: &[&str],
+    types: &[&str],
+    subtypes: &[&str],
+) -> Vec<(
+    Option<DamageSource>,
+    TargetFilter,
+    QuantityExpr,
+    Option<AbilityCondition>,
+)> {
+    fn walk(
+        def: &AbilityDefinition,
+        is_head: bool,
+        out: &mut Vec<(
+            Option<DamageSource>,
+            TargetFilter,
+            QuantityExpr,
+            Option<AbilityCondition>,
+        )>,
+    ) {
+        if let Effect::DealDamage {
+            amount,
+            target,
+            damage_source,
+            ..
+        } = def.effect.as_ref()
+        {
+            if !is_head {
+                out.push((
+                    *damage_source,
+                    target.clone(),
+                    amount.clone(),
+                    def.condition.clone(),
+                ));
+            }
+        }
+        for child in [&def.sub_ability, &def.else_ability].into_iter().flatten() {
+            walk(child, false, out);
+        }
+    }
+    let owned = |values: &[&str]| -> Vec<String> { values.iter().map(|v| v.to_string()).collect() };
+    let parsed = parse_oracle_text(
+        oracle_text,
+        card_name,
+        &owned(keywords),
+        &owned(types),
+        &owned(subtypes),
+    );
+    let mut out = Vec::new();
+    for def in parsed
+        .abilities
+        .iter()
+        .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+    {
+        walk(def, true, &mut out);
+    }
+    out
+}
+
+fn anaphoric_power() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::Power {
+            scope: ObjectScope::Anaphoric,
+        },
+    }
+}
+
+fn optional_effect_performed() -> Option<AbilityCondition> {
+    Some(AbilityCondition::EffectOutcome {
+        signal: EffectOutcomeSignal::OptionalEffectPerformed,
+    })
+}
+
+/// SHAPE (E-4.1). CR 120.1 + CR 201.5: Karplusan Yeti's second sentence is dealt
+/// BY the declared creature ("That creature deals damage") TO the Yeti ("to this
+/// creature"), so the clause's damage source is the declared target, its
+/// recipient stays the self-reference, and "its power" reads the declared
+/// creature.
+#[test]
+fn karplusan_yeti_fight_back_damage_source_is_the_declared_creature() {
+    assert_eq!(
+        follow_up_damage_stamps(
+            "{T}: This creature deals damage equal to its power to target creature. That creature deals damage equal to its power to this creature.",
+            "Karplusan Yeti",
+            &[],
+            &["Creature"],
+            &["Yeti"],
+        ),
+        vec![(
+            Some(DamageSource::Target),
+            TargetFilter::SelfRef,
+            anaphoric_power(),
+            None
+        )]
+    );
+}
+
+/// SHAPE (E-4.2). CR 120.1 + CR 608.2c: in Stalking Yeti's enters trigger,
+/// "that creature deals damage equal to its power to this creature" names the
+/// declared creature as the source, and "its power" reads that creature, not
+/// the triggering Yeti.
+#[test]
+fn stalking_yeti_trigger_fight_back_damage_source_is_the_declared_creature() {
+    assert_eq!(
+        follow_up_damage_stamps(
+            "When this creature enters, if it's on the battlefield, it deals damage equal to its power to target creature an opponent controls and that creature deals damage equal to its power to this creature.\n{2}{S}: Return this creature to its owner's hand. Activate only as a sorcery. ({S} can be paid with one mana from a snow source.)",
+            "Stalking Yeti",
+            &[],
+            &["Creature"],
+            &["Yeti"],
+        ),
+        vec![(
+            Some(DamageSource::Target),
+            TargetFilter::SelfRef,
+            anaphoric_power(),
+            None
+        )]
+    );
+}
+
+/// SHAPE (E-4.3). CR 120.1 + CR 120.3a: Form of the Dinosaur's upkeep trigger
+/// has the declared creature deal damage equal to its power "to you", so the
+/// recipient is the controller, not the declared creature.
+#[test]
+fn form_of_the_dinosaur_damage_back_is_dealt_by_the_declared_creature_to_you() {
+    assert_eq!(
+        follow_up_damage_stamps(
+            "When this enchantment enters, your life total becomes 15.\nAt the beginning of your upkeep, this enchantment deals 15 damage to target creature an opponent controls and that creature deals damage equal to its power to you.",
+            "Form of the Dinosaur",
+            &[],
+            &["Enchantment"],
+            &[],
+        ),
+        vec![(
+            Some(DamageSource::Target),
+            TargetFilter::Controller,
+            anaphoric_power(),
+            None
+        )]
+    );
+}
+
+/// SHAPE (E-4.4). CR 120.1 + CR 608.2c: Hunter's Bow's "That creature deals
+/// damage equal to its power" reads the power of the creature the Equipment was
+/// attached to, not the Equipment's (the trigger source's) power.
+#[test]
+fn hunters_bow_damage_amount_reads_the_declared_creatures_power() {
+    assert_eq!(
+        follow_up_damage_stamps(
+            "When this Equipment enters, attach it to target creature you control. That creature deals damage equal to its power to up to one target creature you don't control.\nEquipped creature has reach and ward {2}.\nEquip {1}",
+            "Hunter's Bow",
+            &["Equip"],
+            &["Artifact"],
+            &["Equipment"],
+        ),
+        vec![(
+            Some(DamageSource::Target),
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+            anaphoric_power(),
+            None
+        )]
+    );
+}
+
+/// SHAPE (E-4.5). CR 118.12 + CR 120.1 + CR 201.5: Cyclops Gladiator's "If you
+/// do" clause keeps its gate, and the gated clause binds like the ungated
+/// fight-back class: the declared creature is the source, the Gladiator ("this
+/// creature") is the recipient, and "its power" reads the declared creature.
+#[test]
+fn cyclops_gladiator_gated_damage_back_is_dealt_by_the_declared_creature() {
+    assert_eq!(
+        follow_up_damage_stamps(
+            "Whenever this creature attacks, you may have it deal damage equal to its power to target creature defending player controls. If you do, that creature deals damage equal to its power to this creature.",
+            "Cyclops Gladiator",
+            &[],
+            &["Creature"],
+            &["Cyclops", "Warrior"],
+        ),
+        vec![(
+            Some(DamageSource::Target),
+            TargetFilter::SelfRef,
+            anaphoric_power(),
+            optional_effect_performed()
+        )]
+    );
+}
+
+/// SHAPE (E-4.6), KNOWN-BAD LOCK for residue #30. Spirit Flare's gated clause
+/// has a recipient other than the self-reference, so the gated-clause binder
+/// leaves it on the reading it has today: no damage source and a `ParentTarget`
+/// recipient. That reading CONTRADICTS the card: "it deals damage equal to its
+/// power to target attacking or blocking creature an opponent controls" is
+/// dealt by the tapped creature (CR 120.1) to the second declared target. The
+/// row locks the current reading so a change to it is seen; the phase that
+/// fixes Spirit Flare (residue #30) inverts this row.
+#[test]
+fn spirit_flare_gated_clause_known_bad_lock_residue_30() {
+    assert_eq!(
+        follow_up_damage_stamps(
+            "Tap target untapped creature you control. If you do, it deals damage equal to its power to target attacking or blocking creature an opponent controls.\nFlashback—{1}{W}, Pay 3 life. (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+            "Spirit Flare",
+            &["Flashback"],
+            &["Instant"],
+            &[],
+        ),
+        vec![(
+            None,
+            TargetFilter::ParentTarget,
+            anaphoric_power(),
+            optional_effect_performed()
+        )]
+    );
+}
+
+/// SHAPE (E-4.7), preservation. CR 120.1: Electropotence's "that creature" is
+/// the creature whose entering triggered the ability, not a declared target, so
+/// its gated clause keeps the triggering-source reading.
+#[test]
+fn electropotence_gated_clause_keeps_the_triggering_source() {
+    assert_eq!(
+        follow_up_damage_stamps(
+            "Whenever a creature you control enters, you may pay {2}{R}. If you do, that creature deals damage equal to its power to any target.",
+            "Electropotence",
+            &[],
+            &["Enchantment"],
+            &[],
+        ),
+        vec![(
+            Some(DamageSource::TriggeringSource),
+            TargetFilter::Any,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::EventSource,
+                },
+            },
+            optional_effect_performed()
+        )]
+    );
+}
+
+/// SHAPE (E-4.8), shape-only for Ana Battlemage: the damage trigger is behind
+/// the {1}{B} kicker and an intervening-if (CR 603.4), which the runtime harness
+/// does not stage in one cast. CR 120.1 + CR 120.3a: the tapped creature deals
+/// damage equal to its power to its controller.
+#[test]
+fn ana_battlemage_kicked_trigger_damage_is_dealt_by_the_tapped_creature() {
+    assert_eq!(
+        follow_up_damage_stamps(
+            "Kicker {2}{U} and/or {1}{B} (You may pay an additional {2}{U} and/or {1}{B} as you cast this spell.)\nWhen this creature enters, if it was kicked with its {2}{U} kicker, target player discards three cards.\nWhen this creature enters, if it was kicked with its {1}{B} kicker, tap target untapped creature and that creature deals damage equal to its power to its controller.",
+            "Ana Battlemage",
+            &["Kicker"],
+            &["Creature"],
+            &["Human", "Wizard"],
+        ),
+        vec![(
+            Some(DamageSource::Target),
+            TargetFilter::ParentTargetController,
+            anaphoric_power(),
+            None
+        )]
+    );
+}
+
+/// SHAPE (E-4.9), preservation. CR 201.5: "Consign to the Pit deals 2 damage"
+/// names the spell as the source; only the recipient ("that creature's
+/// controller") refers back to the declared creature, so no damage source is
+/// stamped.
+#[test]
+fn consign_to_the_pit_constant_damage_keeps_the_spell_as_source() {
+    assert_eq!(
+        follow_up_damage_stamps(
+            "Destroy target creature. Consign to the Pit deals 2 damage to that creature's controller.",
+            "Consign to the Pit",
+            &[],
+            &["Sorcery"],
+            &[],
+        ),
+        vec![(
+            None,
+            TargetFilter::ParentTargetController,
+            QuantityExpr::Fixed { value: 2 },
+            None
+        )]
+    );
+}
+
+/// CR 120.2b + CR 608.2c: `amount_reads_the_antecedent` is a SOURCE rule over the
+/// amount's object scope. An amount read through the anaphoric subject
+/// (`Anaphoric`, or `EventSource` before a triggered ability's coercion) names
+/// the antecedent as the damage source. Every other object scope is rejected:
+/// `Demonstrative` reads the antecedent in a clause whose printed subject is the
+/// card itself, `Source` reads the card itself, and a printed constant has no
+/// object at all. The `Power` cases are every `ObjectScope` variant: one list
+/// feeds both the cases and a wildcard-free `match`, so a new variant stops this
+/// test compiling until the list names it, and a deny-list implementation that
+/// misses any rejected scope fails it.
+#[test]
+fn amount_reads_the_antecedent_accepts_only_anaphoric_subject_scopes() {
+    macro_rules! every_object_scope {
+        ($($scope:ident),+ $(,)?) => {{
+            let _exhaustive = |scope: ObjectScope| match scope {
+                $(ObjectScope::$scope)|+ => {}
+            };
+            [$((stringify!($scope), ObjectScope::$scope)),+]
+        }};
+    }
+    let power = |scope| QuantityExpr::Ref {
+        qty: QuantityRef::Power { scope },
+    };
+    let mana_value = |scope| QuantityExpr::Ref {
+        qty: QuantityRef::ObjectManaValue { scope },
+    };
+    let mut cases: Vec<(String, QuantityExpr)> = every_object_scope!(
+        Source,
+        Target,
+        Recipient,
+        EventSource,
+        CostPaidObject,
+        Anaphoric,
+        Demonstrative,
+        AmassedArmy,
+        EventTarget,
+        OtherRevealedCard,
+        OwnedLinkedExileCard,
+        BatchSource,
+        ChainRootTarget,
+    )
+    .into_iter()
+    .map(|(name, scope)| (format!("Power{{{name}}}"), power(scope)))
+    .collect();
+    cases.extend([
+        (
+            "ObjectManaValue{Anaphoric}".to_string(),
+            mana_value(ObjectScope::Anaphoric),
+        ),
+        (
+            "ObjectManaValue{Demonstrative}".to_string(),
+            mana_value(ObjectScope::Demonstrative),
+        ),
+        ("Fixed".to_string(), QuantityExpr::Fixed { value: 2 }),
+    ]);
+    let accepted: Vec<&str> = cases
+        .iter()
+        .filter(|(_, amount)| amount_reads_the_antecedent(amount))
+        .map(|(label, _)| label.as_str())
+        .collect();
+    assert_eq!(
+        accepted,
+        [
+            "Power{EventSource}",
+            "Power{Anaphoric}",
+            "ObjectManaValue{Anaphoric}"
+        ],
+        "only an amount read through the anaphoric subject names the antecedent as \
+         the damage source; every other object scope and a constant amount must be rejected"
     );
 }
