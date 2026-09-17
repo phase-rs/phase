@@ -1419,6 +1419,30 @@ pub(crate) fn freeze_resolution_cast_filter(
                 .map(|filter| freeze_resolution_cast_filter(state, ability, filter, selected_card))
                 .collect(),
         },
+        TargetFilter::TrackedSetFiltered {
+            id,
+            filter,
+            caused_by,
+        } => TargetFilter::TrackedSetFiltered {
+            id,
+            filter: Box::new(freeze_resolution_cast_filter(
+                state,
+                ability,
+                *filter,
+                selected_card,
+            )),
+            caused_by,
+        },
+        TargetFilter::ChosenDamageSource { filter } => TargetFilter::ChosenDamageSource {
+            filter: filter.map(|filter| {
+                Box::new(freeze_resolution_cast_filter(
+                    state,
+                    ability,
+                    *filter,
+                    selected_card,
+                ))
+            }),
+        },
         filter => filter,
     }
 }
@@ -2331,10 +2355,11 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         CardPlayMode, CastFromZoneDriver, CastPermissionConstraint, Comparator, ControllerRef,
-        Effect, FilterProp, QuantityExpr, ResolutionCastWindow, TargetFilter, TypeFilter,
-        TypedFilter,
+        Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef, ResolutionCastWindow,
+        TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
+    use crate::types::card::LayoutKind;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{ExileLink, ExileLinkKind, WaitingFor};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
@@ -2366,6 +2391,420 @@ mod tests {
         );
         state.objects.get_mut(&obj_id).unwrap().mana_cost = ManaCost::zero();
         obj_id
+    }
+
+    fn source_power_cmc_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            },
+        }]))
+    }
+
+    fn assert_cmc_was_frozen(filter: &TargetFilter, expected: i32) {
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a typed CMC filter, got {filter:?}");
+        };
+        assert!(
+            typed.properties.iter().any(|property| {
+                matches!(
+                    property,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value },
+                    } if *value == expected
+                )
+            }),
+            "expected the source-power CMC reference to freeze to {expected}, got {typed:?}"
+        );
+    }
+
+    /// The direct `TargetFilter` carriers owned by
+    /// `freeze_resolution_cast_filter` must all recurse into their nested
+    /// policies. `ChosenDamageSource::None` is deliberately a leaf: it carries
+    /// no filter to bind, while its `Some` sibling does.
+    #[test]
+    fn resolution_filter_freeze_recurses_through_every_direct_filter_carrier() {
+        let mut state = make_test_state();
+        let source = create_object(
+            &mut state,
+            CardId(8_001),
+            PlayerId(0),
+            "Filter Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().power = Some(4);
+        let ability = ResolvedAbility::new(Effect::NoOp, vec![], source, PlayerId(0));
+        let tracked_id = TrackedSetId(17);
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Not {
+                    filter: Box::new(source_power_cmc_filter()),
+                },
+                TargetFilter::Or {
+                    filters: vec![source_power_cmc_filter(), TargetFilter::Any],
+                },
+                TargetFilter::TrackedSetFiltered {
+                    id: tracked_id,
+                    filter: Box::new(source_power_cmc_filter()),
+                    caused_by: Some(ThisWayCause::Exiled),
+                },
+                TargetFilter::ChosenDamageSource {
+                    filter: Some(Box::new(source_power_cmc_filter())),
+                },
+                TargetFilter::ChosenDamageSource { filter: None },
+            ],
+        };
+
+        let frozen = freeze_resolution_cast_filter(&state, &ability, filter, None);
+        let TargetFilter::And { filters } = frozen else {
+            panic!("expected top-level And after freezing");
+        };
+        assert_eq!(filters.len(), 5, "all direct carrier branches survive");
+
+        let TargetFilter::Not { filter } = &filters[0] else {
+            panic!("Not carrier was not preserved: {:?}", filters[0]);
+        };
+        assert_cmc_was_frozen(filter, 4);
+
+        let TargetFilter::Or {
+            filters: or_filters,
+        } = &filters[1]
+        else {
+            panic!("Or carrier was not preserved: {:?}", filters[1]);
+        };
+        assert_eq!(or_filters.len(), 2, "Or sibling branch must survive");
+        assert_cmc_was_frozen(&or_filters[0], 4);
+        assert_eq!(or_filters[1], TargetFilter::Any, "Or sibling is retained");
+
+        let TargetFilter::TrackedSetFiltered {
+            id,
+            filter,
+            caused_by,
+        } = &filters[2]
+        else {
+            panic!(
+                "TrackedSetFiltered carrier was not preserved: {:?}",
+                filters[2]
+            );
+        };
+        assert_eq!(*id, tracked_id, "tracked-set identity must survive binding");
+        assert_eq!(
+            *caused_by,
+            Some(ThisWayCause::Exiled),
+            "tracked-set cause must survive binding"
+        );
+        assert_cmc_was_frozen(filter, 4);
+
+        let TargetFilter::ChosenDamageSource {
+            filter: Some(filter),
+        } = &filters[3]
+        else {
+            panic!(
+                "ChosenDamageSource(Some) carrier was not preserved: {:?}",
+                filters[3]
+            );
+        };
+        assert_cmc_was_frozen(filter, 4);
+        assert!(
+            matches!(
+                filters[4],
+                TargetFilter::ChosenDamageSource { filter: None }
+            ),
+            "ChosenDamageSource(None) must remain an unqualified leaf"
+        );
+    }
+
+    fn add_spell_mdfc(state: &mut GameState, zone: Zone) -> ObjectId {
+        let spell = create_object(
+            state,
+            CardId(8_002),
+            PlayerId(0),
+            "Frozen Front".to_string(),
+            zone,
+        );
+        let object = state.objects.get_mut(&spell).unwrap();
+        object.card_types.core_types.push(CoreType::Sorcery);
+        object.base_card_types = object.card_types.clone();
+        object.mana_cost = ManaCost::generic(3);
+        object.base_mana_cost = object.mana_cost.clone();
+        let mut back_types = crate::types::card_type::CardType::default();
+        back_types.core_types.push(CoreType::Instant);
+        object.back_face = Some(crate::game::game_object::BackFaceData {
+            name: "Frozen Back".to_string(),
+            card_types: back_types,
+            mana_cost: ManaCost::generic(4),
+            layout_kind: Some(LayoutKind::Modal),
+            ..Default::default()
+        });
+        spell
+    }
+
+    /// Keldon Flamesage's parsed attack trigger reaches its real optional
+    /// exile/cast path and preserves the parser's tracked-set provenance into
+    /// the MDFC face-choice policy.
+    #[test]
+    fn keldon_flamesage_parsed_trigger_reaches_modal_choice_with_tracked_policy() {
+        let mut state = make_test_state();
+        let source = create_object(
+            &mut state,
+            CardId(8_003),
+            PlayerId(0),
+            "Keldon Flamesage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&source).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.power = Some(4);
+            object.base_power = Some(4);
+        }
+        let spell = add_spell_mdfc(&mut state, Zone::Library);
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Enlist\nWhenever this creature attacks, look at the top X cards of your library, where X is this creature's power. You may exile an instant or sorcery card with mana value X or less from among them. Put the rest on the bottom of your library in a random order. You may cast the exiled card without paying its mana cost.",
+            "Keldon Flamesage",
+            &["Enlist".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Shaman".to_string()],
+        );
+        let attack_trigger = parsed
+            .triggers
+            .iter()
+            .find(|trigger| matches!(trigger.mode, crate::types::triggers::TriggerMode::Attacks))
+            .and_then(|trigger| trigger.execute.as_deref())
+            .expect("Keldon Flamesage must retain its parsed attack trigger");
+        let ability = crate::game::ability_utils::build_resolved_from_def(
+            attack_trigger,
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("parsed Keldon trigger must begin resolving");
+        for gate in 1..=2 {
+            match &state.waiting_for {
+                WaitingFor::OptionalEffectChoice
+                {
+                    player, source_id, ..
+                } => {
+                    assert_eq!(
+                        *player,
+                        PlayerId(0),
+                        "Keldon's optional gate {gate} must belong to its controller"
+                    );
+                    assert_eq!(
+                        *source_id, source,
+                        "Keldon's optional gate {gate} must belong to the parsed source"
+                    );
+                }
+                other => panic!(
+                    "expected Keldon's parsed optional gate {gate} before its face choice, got {other:?}"
+                ),
+            }
+            apply_as_current(
+                &mut state,
+                GameAction::DecideOptionalEffect { accept: true },
+            )
+            .expect("accepting Keldon's parsed optional gate must continue its trigger");
+        }
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Exile,
+            "reach guard: the parsed trigger exiled Keldon's selected MDFC"
+        );
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ModalFaceChoice {
+                    player: PlayerId(0),
+                    object_id,
+                    card_id: CardId(8_002),
+                    ..
+                } if object_id == spell
+            ),
+            "the parsed Keldon cast reaches the MDFC face election, got {:?}",
+            state.waiting_for
+        );
+        let cleanup = state.objects[&spell]
+            .casting_permissions
+            .last()
+            .and_then(|permission| match permission {
+                CastingPermission::ExileWithAltCost {
+                    resolution_cleanup: Some(cleanup),
+                    ..
+                } => Some(cleanup),
+                _ => None,
+            })
+            .expect("Keldon's modal election must retain its resolution cleanup policy");
+        let TargetFilter::TrackedSetFiltered {
+            id,
+            filter,
+            caused_by,
+        } = &cleanup.face_policy.filter
+        else {
+            panic!(
+                "Keldon's installed policy must retain its tracked-set filter, got {:?}",
+                cleanup.face_policy.filter
+            );
+        };
+        assert_eq!(
+            *id,
+            TrackedSetId(0),
+            "the parsed tracked-set sentinel is retained"
+        );
+        assert_eq!(
+            *caused_by,
+            Some(ThisWayCause::Exiled),
+            "the parsed exile cause is retained in the installed policy"
+        );
+        assert_eq!(
+            **filter,
+            TargetFilter::Any,
+            "Keldon's tracked-set membership is retained without an unrelated residual filter"
+        );
+        apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: true })
+            .expect("the player must be able to cast Keldon's eligible back face");
+        assert_eq!(state.objects[&spell].zone, Zone::Stack);
+        assert_eq!(state.objects[&spell].name, "Frozen Back");
+    }
+
+    /// A private hand pick must bind a nested `LastRevealed` anaphor to the
+    /// selected object before its modal-face prompt. Changing the live reveal
+    /// window after that binding must not invalidate the already selected card.
+    #[test]
+    fn hand_pick_binds_nested_last_revealed_before_modal_face_choice() {
+        let mut state = make_test_state();
+        let source = create_object(
+            &mut state,
+            CardId(8_004),
+            PlayerId(0),
+            "Private Pick Source".to_string(),
+            Zone::Battlefield,
+        );
+        let spell = add_spell_mdfc(&mut state, Zone::Hand);
+        let hostile_reveal = add_card_to_hand(&mut state, PlayerId(0), CardId(8_005));
+        let tracked_id = TrackedSetId(23);
+        state.tracked_object_sets.insert(tracked_id, vec![spell]);
+        state.last_revealed_ids = vec![spell];
+
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::default()
+                                .with_type(TypeFilter::Card)
+                                .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+                        ),
+                        TargetFilter::TrackedSetFiltered {
+                            id: tracked_id,
+                            filter: Box::new(TargetFilter::LastRevealed),
+                            caused_by: None,
+                        },
+                    ],
+                },
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
+                additional_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events)
+            .expect("private hand pick with a tracked revealed spell must open");
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::EffectZoneChoice {
+                    player: PlayerId(0),
+                    cards,
+                    count: 1,
+                    min_count: 0,
+                    up_to: true,
+                    effect_kind: EffectKind::CastFromZone,
+                    zone: Zone::Hand,
+                    ..
+                } if cards == &vec![spell]
+            ),
+            "the real private-zone prompt must expose only the tracked revealed spell, got {:?}",
+            state.waiting_for
+        );
+
+        apply_as_current(&mut state, GameAction::SelectCards { cards: vec![spell] })
+            .expect("selecting the eligible private-zone spell must begin its cast");
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ModalFaceChoice {
+                    player: PlayerId(0),
+                    object_id,
+                    card_id: CardId(8_002),
+                    ..
+                } if object_id == spell
+            ),
+            "the selected spell MDFC must pause at a real modal-face choice, got {:?}",
+            state.waiting_for
+        );
+        let cleanup = state.objects[&spell]
+            .casting_permissions
+            .last()
+            .and_then(|permission| match permission {
+                CastingPermission::ExileWithAltCost {
+                    resolution_cleanup: Some(cleanup),
+                    ..
+                } => Some(cleanup),
+                _ => None,
+            })
+            .expect("the modal election must retain its resolution cleanup policy");
+        let TargetFilter::And { filters } = &cleanup.face_policy.filter else {
+            panic!(
+                "the selected policy must retain both hand and tracked-set legs, got {:?}",
+                cleanup.face_policy.filter
+            );
+        };
+        let (bound_id, bound_filter, bound_cause) = filters
+            .iter()
+            .find_map(|filter| match filter {
+                TargetFilter::TrackedSetFiltered {
+                    id,
+                    filter,
+                    caused_by,
+                } => Some((*id, filter, *caused_by)),
+                _ => None,
+            })
+            .expect("the installed policy must retain its concrete tracked-set leg");
+        assert_eq!(
+            bound_id, tracked_id,
+            "tracked-set identity must be preserved"
+        );
+        assert_eq!(bound_cause, None, "tracked-set cause must be preserved");
+        assert!(
+            matches!(
+                &**bound_filter,
+                TargetFilter::SpecificObject { id } if *id == spell
+            ),
+            "the nested LastRevealed filter must bind to the selected object, got {bound_filter:?}"
+        );
+
+        state.last_revealed_ids = vec![hostile_reveal];
+        apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: true })
+            .expect("the bound private policy must not reread the hostile reveal window");
+        assert_eq!(state.objects[&spell].zone, Zone::Stack);
+        assert_eq!(state.objects[&spell].name, "Frozen Back");
     }
 
     #[test]
