@@ -1571,6 +1571,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             enters_modified_if,
             enter_attached_to,
             effect_kind,
+            mut forwarded_members,
         } = pending;
         // CR 608.2c: the object that paused this iteration on a replacement
         // choice was delivered out-of-band by the replacement resume, not by
@@ -1657,11 +1658,13 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 } else {
                     &[]
                 };
-                let delivered =
-                    crate::types::ability::ForwardedResultContext::from_object_ids(state, moved);
-                if let Some(frame) = state.continuation_beneath_active_change_zone_mut() {
-                    frame.publish_forwarded_producer_result(delivered);
-                }
+                // CR 608.2c: ACCUMULATE, don't publish. The awaiting marker is
+                // consumed by the first publish, and a multi-card selection can
+                // re-pause once per member (`remaining` is the untouched tail), so
+                // publishing here would hand the continuation only the first member
+                // to complete and silently drop every later one. The whole batch is
+                // published when the iteration terminally completes.
+                forwarded_members.extend_from_slice(moved);
             }
             if matches!(
                 paused_current.count,
@@ -1783,6 +1786,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     .expect("re-paused ChangeZone retains its explicit delivery segment");
                     state.replace_active_change_zone_iteration(
                         crate::types::game_state::PendingChangeZoneIteration {
+                            // CR 608.2c: carry the batch forward — a further
+                            // re-pause must not reset what earlier members delivered.
+                            forwarded_members,
                             logical_zone_change_group,
                             paused_current: anticipated_pause.map(|mut boundary| {
                                 boundary.append_delivery_events(&events[delivery_start..]);
@@ -1846,6 +1852,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     .expect("re-paused ChangeZone retains its explicit delivery segment");
                     state.replace_active_change_zone_iteration_after_child(
                         crate::types::game_state::PendingChangeZoneIteration {
+                            // CR 608.2c: carry the batch forward — a further
+                            // re-pause must not reset what earlier members delivered.
+                            forwarded_members,
                             logical_zone_change_group,
                             paused_current,
                             remaining: remaining[i + 1..].to_vec(),
@@ -1905,6 +1914,20 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             &logical_zone_change_group,
             events,
         );
+        // CR 608.2c + CR 400.7: the selection is terminally complete and the
+        // ChangeZone frame is STILL top-of-stack, so the continuation parked
+        // beneath it is reachable here — and only here. Publish the accumulated
+        // batch exactly once, which is what the single-consume marker allows.
+        // After the take below, the adjacency accessor no longer resolves.
+        {
+            let delivered = crate::types::ability::ForwardedResultContext::from_object_ids(
+                state,
+                &forwarded_members,
+            );
+            if let Some(frame) = state.continuation_beneath_active_change_zone_mut() {
+                frame.publish_forwarded_producer_result(delivered);
+            }
+        }
         // CR 614.13a: the resumed mass/targeted co-entry finished without pausing —
         // the whole ChangeZone entry event is complete, so clear the pre-entry
         // Devour snapshot. NOT cleared on the `paused` break above (a further

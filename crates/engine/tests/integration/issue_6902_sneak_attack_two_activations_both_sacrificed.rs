@@ -613,8 +613,125 @@ fn a_redirected_delivery_still_forwards_the_member_it_moved() {
     assert_eq!(
         runner.state().objects[&decoy].zone,
         Zone::Battlefield,
-        "CR 614.6 + CR 608.2c: a redirected member still MOVED, so the producer \
-         forwards it and the chain's declared target is never inherited"
+        "CR 614.6 + CR 608.2c: the redirected member never reached the requested \
+         destination, so the producer publishes a COMPLETED result rather than \
+         leaving it `None` — either way the chain's declared target is never inherited"
+    );
+}
+
+/// CR 608.2c + CR 303.4f: a MULTI-CARD selection whose members each re-pause must
+/// forward EVERY member, not just the first one to complete.
+///
+/// The awaiting marker is consumed by the first publish, and the pause records
+/// `remaining` as the untouched tail — so publishing at each re-paused member hands
+/// the continuation only the first and silently drops the rest. Two Auras selected
+/// together each pause on their own CR 303.4f host choice, so the producer completes
+/// in three legs (first member, second member, terminal), and the delayed "that
+/// permanent" rider must name both.
+///
+/// Revert-proof: publish per re-paused member instead of accumulating to the
+/// terminal completion and the SECOND Aura survives the end step.
+#[test]
+fn a_multi_card_selection_forwards_every_re_paused_member() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let source = scenario.add_creature(P0, "Forwarding Source", 2, 2).id();
+    let decoy = scenario.add_creature(P0, "Decoy Bear", 2, 2).id();
+    // CR 303.4f: two or more legal hosts per entry is what makes each Aura PAUSE
+    // rather than auto-attach.
+    let host = scenario.add_creature(P0, "Host Bear", 1, 1).id();
+    let auras: Vec<ObjectId> = ["Clinging Vines", "Creeping Vines"]
+        .iter()
+        .map(|name| {
+            scenario
+                .add_spell_to_hand(P0, name, false)
+                .as_enchantment()
+                .with_subtypes(vec!["Aura"])
+                .with_keyword(Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(
+                    TypeFilter::Creature,
+                ))))
+                .id()
+        })
+        .collect();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Red, source, false, Vec::new())],
+    );
+
+    let mut runner = scenario.build();
+    install_ability(
+        &mut runner,
+        source,
+        forwarding_producer_ability(TypeFilter::Enchantment),
+    );
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .expect("the constructed activation must be accepted");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(decoy)],
+        })
+        .expect("declaring the decoy as the chain's target must succeed");
+    pass_priority_to_prompt(&mut runner);
+
+    match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice { cards, .. } => assert!(
+            auras.iter().all(|aura| cards.contains(aura)),
+            "reach-guard: both Auras must be offered; got {cards:?}"
+        ),
+        other => panic!("reach-guard: expected the up-to zone choice; got {other:?}"),
+    }
+    runner
+        .act(GameAction::SelectCards {
+            cards: auras.clone(),
+        })
+        .expect("selecting BOTH Auras must be accepted");
+
+    // Each selected Aura pauses on its own host choice. Counting them is the
+    // reach-guard that proves this is a MULTI-member re-pause: with one prompt the
+    // test would reduce to the single-member sibling and prove nothing new.
+    let mut host_prompts = 0;
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReturnAsAuraTarget { .. }
+        ) {
+            host_prompts += 1;
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(host)),
+                })
+                .expect("answering each CR 303.4f host choice must be accepted");
+        } else {
+            break;
+        }
+    }
+    assert_eq!(
+        host_prompts, 2,
+        "reach-guard: each selected Aura must pause on its own host choice"
+    );
+    runner.advance_until_stack_empty();
+
+    pass_priority_into_end_step_of(&mut runner, P0);
+    runner.advance_until_stack_empty();
+
+    for aura in &auras {
+        assert_eq!(
+            runner.state().objects[aura].zone,
+            Zone::Graveyard,
+            "CR 608.2c: EVERY re-paused member of the selection must be forwarded, \
+             so the delayed rider sacrifices both Auras — not just the first to complete"
+        );
+    }
+    assert_eq!(
+        runner.state().objects[&decoy].zone,
+        Zone::Battlefield,
+        "the chain's DECLARED target must not be inherited when real members moved"
     );
 }
 

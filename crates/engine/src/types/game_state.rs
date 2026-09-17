@@ -3922,6 +3922,16 @@ impl PendingZoneChangeDelivery {
 /// to the live `resolve` path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingChangeZoneIteration {
+    /// CR 608.2c: every object this `forward_result` producer has delivered so
+    /// far across this one selection, accumulated over each re-pause.
+    ///
+    /// A selection can re-pause once per member (an as-enters copy choice, a
+    /// CR 303.4f Aura host choice), and the awaiting marker is consumed exactly
+    /// once. Publishing at the first re-pause would therefore forward only the
+    /// first member and drop the rest; the batch is published from here when the
+    /// iteration terminally completes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forwarded_members: Vec<ObjectId>,
     pub logical_zone_change_group: LogicalZoneChangeGroup,
     /// The chosen member that is currently completing outside the ordinary
     /// `remaining` loop. Required even when the tail is empty.
@@ -36378,6 +36388,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty immediately-before authority is still explicitly latched");
         let original = PendingChangeZoneIteration {
+            forwarded_members: Vec::new(),
             logical_zone_change_group,
             paused_current: None,
             remaining: vec![],

@@ -5684,6 +5684,7 @@ mod tests {
             .expect("empty logical group still needs its pre-delivery latch");
         ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
             pending: Some(PendingChangeZoneIteration {
+                forwarded_members: Vec::new(),
                 logical_zone_change_group,
                 paused_current: None,
                 remaining: Vec::new(),
