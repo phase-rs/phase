@@ -2471,19 +2471,74 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
-        // CR 712.12: Both MDFC land faces are playable — offer front or back
-        WaitingFor::ModalFaceChoice { player, .. } => vec![
-            candidate(
-                GameAction::ChooseModalFace { back_face: false },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-            candidate(
-                GameAction::ChooseModalFace { back_face: true },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-        ],
+        // CR 712.11b-c / CR 709.3-3a: a face election exposes only faces whose
+        // own characteristics can be cast. Ordinary MDFC land/spell prompts
+        // retain both actions. A resolution-owned prompt, however, exposes
+        // only faces the exact temporary permission can still cast; the handler
+        // independently enforces the same policy for forged direct submissions.
+        WaitingFor::ModalFaceChoice {
+            player,
+            object_id,
+            card_id,
+            ..
+        } => {
+            let resolution_permission =
+                crate::game::casting::current_resolution_cast_permission_index(
+                    state, *player, *object_id, *card_id,
+                );
+            let legal_faces = resolution_permission.and_then(|index| {
+                state
+                    .objects
+                    .get(object_id)
+                    .and_then(|object| object.casting_permissions.get(index.0))
+                    .and_then(|permission| match permission {
+                        crate::types::ability::CastingPermission::ExileWithAltCost {
+                            resolution_cleanup: Some(cleanup),
+                            ..
+                        } => Some(crate::game::casting::resolution_spell_face_legality_for_current_permission(
+                            state,
+                            *player,
+                            *object_id,
+                            &cleanup.face_policy,
+                            index,
+                        )),
+                        _ => None,
+                    })
+            });
+            let mut actions: Vec<_> = [false, true]
+                .into_iter()
+                .filter(|back_face| {
+                    legal_faces.is_none_or(
+                        |faces| {
+                            if *back_face {
+                                faces.back
+                            } else {
+                                faces.front
+                            }
+                        },
+                    )
+                })
+                .map(|back_face| {
+                    candidate(
+                        GameAction::ChooseModalFace { back_face },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect();
+            // A resolution-owned face election is pre-announcement, but it is
+            // still an elected cast transaction.  Surface its exact CancelCast
+            // authority; ordinary modal land/spell prompts intentionally have
+            // no such permission and remain uncancellable here.
+            if resolution_permission.is_some() {
+                actions.push(candidate(
+                    GameAction::CancelCast,
+                    TacticalClass::Pass,
+                    Some(*player),
+                ));
+            }
+            actions
+        }
         // CR 118.9: Alternative-cast prompt — surface both cost paths
         // uniformly across all keywords. The keyword discriminator lives on the
         // waiting state; the action shape is identical.

@@ -1024,7 +1024,8 @@ fn client_state_wire_value(
     state: &GameState,
     display_visible_object_ids: Option<&BTreeSet<ObjectId>>,
 ) -> serde_json::Result<serde_json::Value> {
-    let mut value = serde_json::to_value(state)?;
+    let projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
+    let mut value = serde_json::to_value(&projected_state)?;
     let Some(root) = value.as_object_mut() else {
         return Ok(value);
     };
@@ -1055,6 +1056,7 @@ fn client_state_wire_value(
 
     root.remove("next_delayed_trigger_token");
     root.remove("next_delayed_trigger_instance");
+    root.remove("next_resolution_cast_offer_id");
     root.remove("pending_trigger_firing");
     root.remove("stack_trigger_firings");
     root.remove("resolving_trigger_firing");
@@ -5416,6 +5418,7 @@ mod tests {
             token: DelayedTriggerToken(17),
             instance: DelayedTriggerInstanceId(23),
             source_id: source,
+            offer_id: None,
         };
         state.next_delayed_trigger_token = 18;
         state.next_delayed_trigger_instance = 24;
@@ -5578,6 +5581,304 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A paid cast during resolution is a public prompt, but its cleanup owner
+    /// and delayed-trigger receipts are server-only capabilities. Both the
+    /// direct WASM wire and the server viewer projection must drop them without
+    /// changing the authoritative offer.
+    #[test]
+    fn paid_cast_cleanup_authority_never_reaches_direct_or_viewer_wires() {
+        use crate::types::ability::{
+            ResolutionCastCleanup, ResolutionCastDelayedTriggerReceipt, ResolutionCastFacePolicy,
+            ResolutionCastSuccessAction, ResolutionMvRejectAction,
+        };
+        use crate::types::game_state::CastOfferKind;
+        use crate::types::identifiers::ResolutionCastOfferId;
+
+        let owner = PlayerId(0);
+        let observer = PlayerId(1);
+        let offer_id = ResolutionCastOfferId(73);
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(3_003),
+            owner,
+            "Paid-cast source".into(),
+            Zone::Battlefield,
+        );
+        let hit_card = create_object(
+            &mut state,
+            CardId(3_004),
+            owner,
+            "Paid-cast hit".into(),
+            Zone::Graveyard,
+        );
+        state.next_resolution_cast_offer_id = 74;
+        state.waiting_for = WaitingFor::CastOffer {
+            player: owner,
+            kind: CastOfferKind::GraveyardPaidCast {
+                hit_card,
+                mana_spend_permission: None,
+                graveyard_replacement: None,
+                cast_transformed: false,
+                additional_cost: None,
+                cleanup: ResolutionCastCleanup {
+                    source_id: source,
+                    offer_id: Some(offer_id),
+                    face_policy: ResolutionCastFacePolicy::new(
+                        TargetFilter::Any,
+                        source,
+                        owner,
+                        None,
+                    ),
+                    exiled_misses: Vec::new(),
+                    reject_action: ResolutionMvRejectAction::RemainExiled,
+                    success_action: ResolutionCastSuccessAction::BottomMisses,
+                    delayed_trigger_receipts: vec![ResolutionCastDelayedTriggerReceipt {
+                        offer_id,
+                        token: DelayedTriggerToken(37),
+                        instance: DelayedTriggerInstanceId(41),
+                        source_id: source,
+                    }],
+                },
+            },
+        };
+
+        let trusted = serde_json::to_value(&state).expect("trusted state serializes");
+        let trusted_cleanup = &trusted["waiting_for"]["data"]["kind"]["cleanup"];
+        assert_eq!(trusted["next_resolution_cast_offer_id"], 74);
+        assert_eq!(trusted_cleanup["offer_id"], 73);
+        assert_eq!(
+            trusted_cleanup["delayed_trigger_receipts"][0]["offer_id"], 73,
+            "test precondition: trusted state retains both cleanup authorities"
+        );
+
+        let owner_view = crate::game::visibility::filter_state_for_viewer(&state, owner);
+        let observer_view = crate::game::visibility::filter_state_for_viewer(&state, observer);
+        for (label, view) in [("owner", &owner_view), ("observer", &observer_view)] {
+            assert_eq!(view.next_resolution_cast_offer_id, 0);
+            let WaitingFor::CastOffer {
+                player,
+                kind:
+                    CastOfferKind::GraveyardPaidCast {
+                        hit_card: projected_hit,
+                        cleanup,
+                        ..
+                    },
+            } = &view.waiting_for
+            else {
+                panic!("{label} projection must retain the paid cast prompt");
+            };
+            assert_eq!(*player, owner);
+            assert_eq!(*projected_hit, hit_card);
+            assert_eq!(cleanup.offer_id, None);
+            assert!(cleanup.delayed_trigger_receipts.is_empty());
+        }
+
+        let projections = [
+            (
+                "direct",
+                serde_json::to_value(ClientGameStateRef::wrap(&state, None))
+                    .expect("direct client wire serializes"),
+            ),
+            (
+                "viewer owner",
+                serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                    &state,
+                    &owner_view,
+                    Some(owner),
+                ))
+                .expect("owner viewer wire serializes"),
+            ),
+            (
+                "viewer observer",
+                serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                    &state,
+                    &observer_view,
+                    Some(observer),
+                ))
+                .expect("observer viewer wire serializes"),
+            ),
+        ];
+        for (label, projection) in projections {
+            let client_state = &projection["state"];
+            let cleanup = &client_state["waiting_for"]["data"]["kind"]["cleanup"];
+            assert_eq!(client_state["waiting_for"]["type"], "CastOffer");
+            assert_eq!(client_state["waiting_for"]["data"]["player"], owner.0);
+            assert_eq!(
+                client_state["waiting_for"]["data"]["kind"]["hit_card"],
+                hit_card.0
+            );
+            assert!(
+                cleanup.get("offer_id").is_none()
+                    && cleanup.get("delayed_trigger_receipts").is_none(),
+                "{label} wire must not carry paid-offer cleanup authority: {cleanup}"
+            );
+            assert!(
+                client_state.get("next_resolution_cast_offer_id").is_none(),
+                "{label} client wire must not carry the paid-offer allocator"
+            );
+        }
+
+        let WaitingFor::CastOffer {
+            kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("projection must not alter the authoritative offer");
+        };
+        assert_eq!(state.next_resolution_cast_offer_id, 74);
+        assert_eq!(cleanup.offer_id, Some(offer_id));
+        assert_eq!(cleanup.delayed_trigger_receipts.len(), 1);
+    }
+
+    /// Once a paid resolution offer is accepted, its cleanup moves onto the
+    /// card's temporary permission. It stays private through both the modal
+    /// face election and the manual mana-payment continuation.
+    #[test]
+    fn paid_cast_cleanup_authority_never_reaches_continuation_wires() {
+        use crate::types::ability::{
+            CastingPermission, ExileGrantCostProvenance, ResolutionCastCleanup,
+            ResolutionCastDelayedTriggerReceipt, ResolutionCastFacePolicy,
+            ResolutionCastSuccessAction, ResolutionMvRejectAction,
+        };
+        use crate::types::game_state::{CastPaymentMode, CastingPermissionIndex};
+        use crate::types::identifiers::ResolutionCastOfferId;
+
+        let owner = PlayerId(0);
+        let offer_id = ResolutionCastOfferId(74);
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(3_013),
+            owner,
+            "Paid-cast source".into(),
+            Zone::Battlefield,
+        );
+        let hit_card = create_object(
+            &mut state,
+            CardId(3_014),
+            owner,
+            "Paid-cast hit".into(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&hit_card)
+            .unwrap()
+            .casting_permissions = vec![CastingPermission::ExileWithAltCost {
+            cost: ManaCost::SelfManaCost,
+            cost_provenance: ExileGrantCostProvenance::NormalCost,
+            cast_transformed: false,
+            constraint: None,
+            granted_to: Some(owner),
+            resolution_cleanup: Some(ResolutionCastCleanup {
+                source_id: source,
+                offer_id: Some(offer_id),
+                face_policy: ResolutionCastFacePolicy::new(TargetFilter::Any, source, owner, None),
+                exiled_misses: Vec::new(),
+                reject_action: ResolutionMvRejectAction::RemainExiled,
+                success_action: ResolutionCastSuccessAction::BottomMisses,
+                delayed_trigger_receipts: vec![ResolutionCastDelayedTriggerReceipt {
+                    offer_id,
+                    token: DelayedTriggerToken(38),
+                    instance: DelayedTriggerInstanceId(42),
+                    source_id: source,
+                }],
+            }),
+            duration: None,
+            source_id: None,
+            graveyard_replacement: None,
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission: None,
+        }];
+
+        let mut modal_state = state.clone();
+        modal_state.waiting_for = WaitingFor::ModalFaceChoice {
+            player: owner,
+            object_id: hit_card,
+            card_id: CardId(3_014),
+            payment_mode: CastPaymentMode::Manual,
+            resolution_additional_cost: None,
+        };
+        let mut mana_payment_state = state;
+        mana_payment_state.waiting_for = WaitingFor::ManaPayment {
+            player: owner,
+            convoke_mode: None,
+        };
+        let mut pending = PendingCast::new(
+            hit_card,
+            CardId(3_014),
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), hit_card, owner),
+            ManaCost::SelfManaCost,
+        )
+        .with_payment_mode(CastPaymentMode::Manual);
+        pending.origin_zone = Zone::Graveyard;
+        pending.casting_permission_index = Some(CastingPermissionIndex(0));
+        mana_payment_state.pending_cast = Some(Box::new(pending));
+
+        for (stage, stage_state) in [
+            ("modal face choice", modal_state),
+            ("manual mana payment", mana_payment_state),
+        ] {
+            let authoritative =
+                serde_json::to_value(&stage_state).expect("trusted continuation state serializes");
+            let trusted_cleanup = &authoritative["objects"][hit_card.0.to_string()]
+                ["casting_permissions"][0]["resolution_cleanup"];
+            assert_eq!(trusted_cleanup["offer_id"], offer_id.0);
+            assert_eq!(
+                trusted_cleanup["delayed_trigger_receipts"][0]["offer_id"], offer_id.0,
+                "{stage} precondition: authoritative permission retains cleanup authority"
+            );
+
+            let viewer_state =
+                crate::game::visibility::filter_state_for_viewer(&stage_state, owner);
+            let Some(CastingPermission::ExileWithAltCost {
+                resolution_cleanup: Some(cleanup),
+                ..
+            }) = viewer_state.objects[&hit_card].casting_permissions.first()
+            else {
+                panic!("{stage} viewer projection must retain the continuation permission");
+            };
+            assert_eq!(cleanup.offer_id, None);
+            assert!(cleanup.delayed_trigger_receipts.is_empty());
+
+            for (wire, projection) in [
+                (
+                    "direct",
+                    serde_json::to_value(ClientGameStateRef::wrap(&stage_state, None))
+                        .expect("direct continuation wire serializes"),
+                ),
+                (
+                    "viewer",
+                    serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                        &stage_state,
+                        &viewer_state,
+                        Some(owner),
+                    ))
+                    .expect("viewer continuation wire serializes"),
+                ),
+            ] {
+                let client_state = &projection["state"];
+                let object = client_state["objects"]
+                    .get(hit_card.0.to_string())
+                    .expect("cast card remains projected");
+                let cleanup = &object["casting_permissions"][0]["resolution_cleanup"];
+                assert!(
+                    cleanup.get("offer_id").is_none()
+                        && cleanup.get("delayed_trigger_receipts").is_none(),
+                    "{stage} {wire} wire must omit permission cleanup authority: {cleanup}"
+                );
+            }
+
+            assert_eq!(
+                serde_json::to_value(&stage_state).expect("authoritative state serializes"),
+                authoritative,
+                "{stage} projections must not alter authoritative state"
+            );
         }
     }
 

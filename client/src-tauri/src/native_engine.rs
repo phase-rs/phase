@@ -2146,20 +2146,56 @@ fn make_executable(_path: &Path) -> Result<(), NativeEngineError> {
     Ok(())
 }
 
-/// `(os, arch)` → the triple naming the `phase-server-slim-<triple>` release
-/// asset and the preview `binaries` key a desktop on that platform provisions.
-const SERVER_TARGET_TRIPLES: &[((&str, &str), &str)] = &[
-    (("macos", "aarch64"), "aarch64-apple-darwin"),
-    (("windows", "x86_64"), "x86_64-pc-windows-msvc"),
-    (("linux", "x86_64"), "x86_64-unknown-linux-musl"),
-    (("linux", "aarch64"), "aarch64-unknown-linux-musl"),
-];
+/// A desktop platform `shell-release.yml`'s `build-shell` matrix publishes.
+/// Each variant resolves to the triple naming the `phase-server-slim-<triple>`
+/// release asset and the preview `binaries` key a desktop on it provisions.
+#[derive(Clone, Copy, Debug)]
+enum ServerPlatform {
+    MacosAarch64,
+    WindowsX86_64,
+    LinuxX86_64,
+    LinuxAarch64,
+}
+
+impl ServerPlatform {
+    const ALL: [Self; 4] = [
+        Self::MacosAarch64,
+        Self::WindowsX86_64,
+        Self::LinuxX86_64,
+        Self::LinuxAarch64,
+    ];
+
+    /// The pair as `std::env::consts::{OS, ARCH}` spells it, which is also how
+    /// the `build-shell` matrix spells its `os` and `arch`.
+    /// `scripts/check_shell_platform_mapping.py` reads these arms to hold that
+    /// matrix to this enum.
+    fn os_arch(self) -> (&'static str, &'static str) {
+        match self {
+            Self::MacosAarch64 => ("macos", "aarch64"),
+            Self::WindowsX86_64 => ("windows", "x86_64"),
+            Self::LinuxX86_64 => ("linux", "x86_64"),
+            Self::LinuxAarch64 => ("linux", "aarch64"),
+        }
+    }
+
+    fn target_triple(self) -> &'static str {
+        match self {
+            Self::MacosAarch64 => "aarch64-apple-darwin",
+            Self::WindowsX86_64 => "x86_64-pc-windows-msvc",
+            Self::LinuxX86_64 => "x86_64-unknown-linux-musl",
+            Self::LinuxAarch64 => "aarch64-unknown-linux-musl",
+        }
+    }
+
+    fn from_os_arch(os: &str, arch: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|platform| platform.os_arch() == (os, arch))
+    }
+}
 
 fn server_target_triple(os: &str, arch: &str) -> Option<&'static str> {
-    SERVER_TARGET_TRIPLES
-        .iter()
-        .find(|(platform, _)| *platform == (os, arch))
-        .map(|(_, triple)| *triple)
+    ServerPlatform::from_os_arch(os, arch).map(ServerPlatform::target_triple)
 }
 
 fn target_triple() -> Result<&'static str, NativeEngineError> {
@@ -3450,9 +3486,10 @@ mod tests {
     fn signed_preview_fixture_lists_a_binary_for_every_server_target() {
         let manifest = PreviewManifest::parse(TEST_PREVIEW_MANIFEST).unwrap();
         let entry = manifest.entry_for("0123456789abcdef").unwrap();
-        for (platform, triple) in SERVER_TARGET_TRIPLES {
+        for platform in ServerPlatform::ALL {
+            let triple = platform.target_triple();
             assert!(
-                entry.binaries.contains_key(*triple),
+                entry.binaries.contains_key(triple),
                 "{platform:?}: no fixture binary for {triple}"
             );
         }

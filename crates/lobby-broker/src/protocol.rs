@@ -56,8 +56,27 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 72 — `WaitingFor::CastOffer { kind: CastOfferKind::GraveyardPaidCast }`
-///      carries two additive fields: `additional_cost: Option<ManaCost>` (Ogre
+/// 75 — `ResolutionCastCleanup`, its delayed-trigger receipts, and every
+///      receipt-eligible delayed-install origin now carry the producer-issued
+///      paid-offer owner. A pre-75 peer can confuse two otherwise equivalent
+///      paused offers, so full-game peers and P2P move in lockstep (wire 57);
+///      lobby messages are unchanged.
+///
+/// 74 — `ResolutionCastCleanup` now carries an exact delayed-trigger receipt
+///      (token, installed instance, and source) while a paid resolution cast is
+///      paused. A pre-74 peer cannot preserve that authority through a state
+///      handoff, so it could leave a cancelled offer's trigger armed. Full-game
+///      peers and P2P move in lockstep (wire 56); lobby messages are unchanged.
+///
+/// 73 — `CastingVariantChoiceOption` gained required `face`, making a paused
+///      Fuse split-card menu an exact `(variant, face)` tuple. The resumed
+///      choice also preserves an added paid-cast cost. Old snapshots cannot
+///      safely bind the face or cost, so full-game peers must refuse the skew.
+///      Lobby messages are unchanged.
+/// 72 — `ResolutionCastFacePolicy` replaces the legacy free-cast-window
+///      filter with a required serialized carrier. The same release added
+///      `WaitingFor::CastOffer { kind: CastOfferKind::GraveyardPaidCast }`,
+///      which carries two additive fields: `additional_cost: Option<ManaCost>` (Ogre
 ///      Battlecaster's "{R}{R} in addition to its other costs", CR 601.2b) and
 ///      `installed_triggers: Vec<DelayedTriggerInstanceId>` (the delayed
 ///      triggers a declined offer withdraws). Both are serde-defaulted and
@@ -530,7 +549,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 72;
+pub const PROTOCOL_VERSION: u32 = 75;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1652,12 +1671,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 72);
+        assert_eq!(PROTOCOL_VERSION, 75);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 71);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 74);
     }
 
     #[test]

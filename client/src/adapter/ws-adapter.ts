@@ -209,7 +209,13 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 72 — WaitingFor.CastOffer { kind: GraveyardPaidCast } carries two additive
+ * 73 — `CastingVariantChoiceOption` gained required `face`, making a paused
+ *      Fuse split-card menu an exact `(variant, face)` tuple. This integrated
+ *      state also carries a resolution-owned modal choice's additional cost so
+ *      a paid graveyard cast cannot lose it across face election. Old snapshots
+ *      cannot safely bind either payload, so full-game peers must refuse skew.
+ * 72 — `ResolutionCastFacePolicy` replaces the legacy free-cast-window filter,
+ *      and `WaitingFor.CastOffer { kind: GraveyardPaidCast }` carries two additive
  *      fields: additional_cost (Ogre Battlecaster's "{R}{R} in addition to its
  *      other costs", CR 601.2b) and installed_triggers (the delayed triggers a
  *      declined offer withdraws). Both are serde-defaulted, so a v71 peer
@@ -510,12 +516,20 @@ export class NativeEngineVersionMismatchError extends Error {
  * 17 — Dedicated companion deck slot and typed companion-reveal choices.
  * 16 — Meld pair/attacking-entry choices after the mana-payment preview variants.
  * 15 — Mana-payment preview request/response variants.
+ * 75 — ResolutionCastCleanup, its delayed-trigger receipts, and each
+ *      receipt-eligible delayed-install origin carry the producer-issued paid
+ *      offer owner. Older peers cannot preserve cross-offer isolation through
+ *      a paused state handoff.
+ * 74 — ResolutionCastCleanup now carries exact delayed-trigger receipts for a
+ *      paused paid resolution cast. Older peers cannot preserve the receipt
+ *      authority through a state handoff, so this is an exact-match boundary.
+ *
  * 14 — PrecastCopyShortcut action and its two WaitingFor variants.
  * 13 — WaitingFor::MulliganBottomCards removed; mulligan bottoming folded
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 72;
+export const PROTOCOL_VERSION = 75;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

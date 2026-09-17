@@ -132,6 +132,11 @@ const CATEGORY_1_ROWS: &[&str] = &[
 /// Grouped by class; each entry carries its one-line safety argument (§7 ledger
 /// source of truth).
 const DOCUMENTED_OVER_PROMPT: &[&str] = &[
+    // Adaptive Training Post: its source-local charge-counter intervening-if
+    // and the corresponding TriggeringSource counter write are disjoint for
+    // same-event sibling triggers, so they commute. The conservative prompt
+    // remains fail-closed until that per-source proof is structural.
+    "adaptive training post",
     // ---- L8-held: a self-scoped write can flip a sibling's re-checked
     // intervening-if (CR 603.4), but the flip is monotone/self-limiting, so
     // identical siblings still commute semantically. The L8 idempotence recognizer

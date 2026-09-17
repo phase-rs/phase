@@ -6215,8 +6215,11 @@ fn crosses_modal_boundary(node: &ResolvedAbility) -> bool {
 
 /// [`ability_or_branch_references_tracked_set`] applied to a branch that the
 /// caller is about to ENTER, with the mode-boundary stop of
-/// [`crosses_modal_boundary`]. Every descent in this family goes through here,
-/// so the stop cannot be applied at some entry points and forgotten at others.
+/// [`crosses_modal_boundary`]. One other descent in this family applies the same
+/// stop without routing through here: the `enters` closure in
+/// [`node_or_branch_references_tracked_set`], which has to thread a
+/// [`ParentAnaphor`] this signature does not carry. A change to the stop must be
+/// made in both places.
 fn branch_references_tracked_set(node: Option<&ResolvedAbility>) -> bool {
     node.is_some_and(|n| !crosses_modal_boundary(n) && ability_or_branch_references_tracked_set(n))
 }
@@ -6363,7 +6366,47 @@ fn node_or_later_is_publisher_position(node: &ResolvedAbility) -> bool {
             .is_some_and(node_or_later_is_publisher_position)
 }
 
+/// CR 608.2c: what a `ParentTarget` anaphor at a node names, relative to a
+/// publisher above it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParentAnaphor {
+    /// No nearer antecedent intervenes: the anaphor reads the chain's tracked
+    /// set, so the publisher above must record it (Najeela — "they gain").
+    NamesPublisher,
+    /// The node's parent declared its own object targets (CR 115.1), which are
+    /// the nearer antecedent; the anaphor names them, never the publisher's set.
+    NamesDeclaredTargets,
+}
+
+/// CR 608.2c: a continuous grant whose `affected` object is the
+/// `ParentTarget` anaphor ("that creature can't be blocked this turn").
+///
+/// CR 613: when no nearer antecedent intervenes
+/// ([`ParentAnaphor::NamesPublisher`]), such a grant CONSUMES the chain's
+/// tracked object set ("They gain trample…", Najeela — issue #2898):
+/// `ParentTarget` with no inherited targets resolves against
+/// `chain_tracked_set_id` in `effect.rs`, so the parent instruction (e.g.
+/// `Untap all attacking creatures`) must publish that set for the grant to bind
+/// to the affected permanents. That is the reason this predicate exists: without
+/// it, Najeela's grant binds to nothing.
+fn grant_affects_parent_target(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::GenericEffect { static_abilities, .. }
+            if static_abilities
+                .iter()
+                .any(|static_def| matches!(static_def.affected, Some(TargetFilter::ParentTarget)))
+    )
+}
+
 fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
+    node_or_branch_references_tracked_set(ability, ParentAnaphor::NamesPublisher)
+}
+
+fn node_or_branch_references_tracked_set(
+    ability: &ResolvedAbility,
+    anaphor: ParentAnaphor,
+) -> bool {
     let consumes = matches!(
         &ability.effect,
         Effect::CreateDelayedTrigger {
@@ -6403,9 +6446,32 @@ fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
     // at the highest index of its card. That corpus is a generated artifact and
     // its consumer side may be undercounted relative to this branch's parser;
     // regenerate `card-data.json` to close it.
+
+    // CR 608.2c + CR 601.2c: a node that declares its own object targets is the
+    // nearest antecedent of its continuation's "that creature" — even when the
+    // declaration was empty — so a grant below it never reaches an ancestor's
+    // population (Trygon Prime's declined sub target grants nothing). An optional
+    // single target ("up to one target creature") declares one only when it is
+    // chosen on the stack. A resolution-time "up to one" choice declares no
+    // target, so its grant still reads the tracked set.
+    let declares_optional_single_target = ability.optional_targeting
+        && ability.target_choice_timing == TargetChoiceTiming::Stack
+        && crate::game::triggers::extract_target_filter_from_effect(&ability.effect).is_some();
+    let child_anaphor = if ability.multi_target.is_some() || declares_optional_single_target {
+        ParentAnaphor::NamesDeclaredTargets
+    } else {
+        ParentAnaphor::NamesPublisher
+    };
+    let enters = |node: Option<&ResolvedAbility>| {
+        node.is_some_and(|n| {
+            !crosses_modal_boundary(n) && node_or_branch_references_tracked_set(n, child_anaphor)
+        })
+    };
     consumes
-        || branch_references_tracked_set(ability.sub_ability.as_deref())
-        || branch_references_tracked_set(ability.else_ability.as_deref())
+        || (anaphor == ParentAnaphor::NamesPublisher
+            && grant_affects_parent_target(&ability.effect))
+        || enters(ability.sub_ability.as_deref())
+        || enters(ability.else_ability.as_deref())
 }
 
 /// Returns true if the effect references the most recent tracked set through
@@ -6535,18 +6601,16 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         static_abilities, ..
     } = effect
     {
-        // CR 608.2c + CR 613: A continuous grant whose `affected` filter either
-        // names the tracked set directly (`TrackedSet`) or is the `ParentTarget`
-        // anaphor ("They gain trample…", Najeela — issue #2898) consumes the
-        // chain's tracked object set. `ParentTarget` with no inherited targets
-        // resolves against `chain_tracked_set_id` in `effect.rs`, so the parent
-        // instruction (e.g. `Untap all attacking creatures`) must publish that
-        // set for the grant to bind to the affected permanents.
+        // CR 608.2c + CR 613: A continuous grant consumes the chain's tracked
+        // object set when its `affected` filter NAMES that set (`TrackedSet`).
+        // The `ParentTarget` anaphor is NOT answered here: it is answered by
+        // `grant_affects_parent_target`, which the caller applies only when no
+        // nearer antecedent intervenes. That function's doc carries why.
         if static_abilities.iter().any(|static_def| {
-            static_def.affected.as_ref().is_some_and(|affected| {
-                filter_references_tracked_set(affected)
-                    || matches!(affected, TargetFilter::ParentTarget)
-            })
+            static_def
+                .affected
+                .as_ref()
+                .is_some_and(filter_references_tracked_set)
         }) {
             return true;
         }
@@ -7678,6 +7742,11 @@ fn first_tracked_set_consumer_mode(
             cause: ThisWayCause::OwnerLibraryShuffleSubject,
         });
     }
+    // CR 608.2c: a `ParentTarget`-affected grant is deliberately NOT treated as
+    // a consumer here — `grant_affects_parent_target` is applied only inside
+    // `node_or_branch_references_tracked_set`, so this search keeps its base
+    // classification. Phase 4 did not establish whether any chain reaches this
+    // site carrying such a grant.
     let consumes_here = matches!(
         &ability.effect,
         Effect::CreateDelayedTrigger {
@@ -12611,30 +12680,43 @@ fn is_bound_attach_remainder_for(pending: &PendingContinuation, ability: &Resolv
 /// reverted is the mistake it was introduced to prevent.
 /// CR 603.7 + CR 608.2g: after a `CastFromZone` head's tail ran inline behind
 /// an open `CastOffer::GraveyardPaidCast`, note on that offer the delayed
-/// triggers the tail installed — every record whose installation instance is
-/// at or past `first_new_instance`, the counter value read before the tail
-/// ran. The offer's decline withdraws exactly these
-/// (`engine_resolution_choices::withdraw_declined_offer_cast_triggers`). No-op
-/// when the head left any other state.
-fn record_tail_installs_on_paid_offer(state: &mut GameState, first_new_instance: u64) {
-    let new_instances: Vec<_> = state
+/// triggers the tail installed. The receipt is selected by the producer-issued
+/// owner already stamped by the sole installer, not by a counter range or
+/// equivalent-looking source/card fields; nested and later installations are
+/// ownerless once that marker is consumed.
+fn record_tail_installs_on_paid_offer(
+    state: &mut GameState,
+    offer_id: crate::types::identifiers::ResolutionCastOfferId,
+) {
+    let receipts: Vec<_> = state
         .delayed_triggers
         .iter()
         .filter_map(|trigger| trigger.provenance.origin())
-        .map(|origin| origin.instance)
-        .filter(|instance| instance.0 >= first_new_instance)
+        .filter(|origin| origin.offer_id == Some(offer_id))
+        .map(
+            |origin| crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+                offer_id,
+                token: origin.token,
+                instance: origin.instance,
+                source_id: origin.source_id,
+            },
+        )
         .collect();
-    if new_instances.is_empty() {
+    if receipts.is_empty() {
         return;
     }
     if let WaitingFor::CastOffer {
-        kind: CastOfferKind::GraveyardPaidCast {
-            installed_triggers, ..
-        },
+        kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
         ..
     } = &mut state.waiting_for
     {
-        installed_triggers.extend(new_instances);
+        if cleanup.offer_id == Some(offer_id) {
+            for receipt in receipts {
+                if !cleanup.delayed_trigger_receipts.contains(&receipt) {
+                    cleanup.delayed_trigger_receipts.push(receipt);
+                }
+            }
+        }
     }
 }
 
@@ -15162,12 +15244,37 @@ fn resolve_chain_body(
                 ) {
                     prepend_to_pending_continuation(state, tail);
                 } else {
-                    // CR 603.7: every delayed trigger this tail installs is
-                    // recorded on the open paid offer by installation instance,
-                    // so a declined offer can withdraw exactly those records.
-                    let first_new_instance = state.next_delayed_trigger_instance;
-                    resolve_ability_chain(state, &tail, events, depth + 1)?;
-                    record_tail_installs_on_paid_offer(state, first_new_instance);
+                    // A paid offer owns only its immediate, direct synchronous
+                    // trigger tail. Snapshot its producer ID before resolving;
+                    // do not infer ownership from whichever prompt may be open
+                    // after the call returns.
+                    let paid_offer_id = match &state.waiting_for {
+                        WaitingFor::CastOffer {
+                            kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
+                            ..
+                        } => cleanup.offer_id.filter(|offer_id| offer_id.0 != 0),
+                        _ => None,
+                    };
+                    if matches!(tail.effect, Effect::CreateDelayedTrigger { .. }) {
+                        let offer_id = paid_offer_id.ok_or_else(|| {
+                            EffectError::InvalidParam(
+                                "paid resolution offer has no producer identity".to_string(),
+                            )
+                        })?;
+                        state.active_paid_resolution_offer_tail = Some(offer_id);
+                        let result = resolve_ability_chain(state, &tail, events, depth + 1);
+                        // Clear before propagating every success/error/paused
+                        // result so no later or nested trigger can inherit it.
+                        state.active_paid_resolution_offer_tail = None;
+                        // If the direct trigger installed before a later chain
+                        // error, retain its receipt before returning that error:
+                        // the state has already acquired an owner-bearing live
+                        // root and its offer must still be able to withdraw it.
+                        record_tail_installs_on_paid_offer(state, offer_id);
+                        result?;
+                    } else {
+                        resolve_ability_chain(state, &tail, events, depth + 1)?;
+                    }
                 }
             }
             return Ok(());
@@ -15724,6 +15831,11 @@ fn resolve_chain_body(
             // `effect_references_tracked_set` discriminates the two: it is true
             // exactly for consumer riders (any `TrackedSet` quantity/filter
             // position, incl. `CopyTokenOf { target }`), false for producers.
+            // A `ParentTarget`-affected grant is deliberately NOT counted as a
+            // consumer rider here: `grant_affects_parent_target` is applied only
+            // inside `node_or_branch_references_tracked_set`. Phase 4 did not
+            // establish whether any chain reaches this site carrying such a
+            // grant.
             if matches!(
                 condition,
                 AbilityCondition::EffectOutcome {
@@ -19051,6 +19163,7 @@ mod tests {
             token: DelayedTriggerToken(7),
             instance: DelayedTriggerInstanceId(11),
             source_id: ObjectId(13),
+            offer_id: None,
         });
         state.resolving_trigger_firing = Some(live);
 
@@ -20416,6 +20529,62 @@ mod tests {
         assert!(
             ability_or_branch_references_tracked_set(&ability),
             "repeat_for: TrackedSetSize must mark the ability as referencing the tracked set"
+        );
+    }
+
+    /// CR 601.2c + CR 608.2c: a node that declares a single optional object target
+    /// ("up to one target creature", lowered with `optional_targeting` and no
+    /// `multi_target`) is the nearest antecedent of its continuation's "that
+    /// creature". When the player declines that target, the grant affects nothing.
+    /// It must not reach an ancestor's tracked set.
+    #[test]
+    fn optional_single_target_node_is_the_antecedent_of_a_parent_target_grant() {
+        let source = ObjectId(1);
+        let grant = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut pump = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(grant);
+        // Control: with no declared target on the pump, the grant names the
+        // chain's tracked set, so the instrument fires.
+        assert!(
+            chain_references_tracked_set(&pump),
+            "a ParentTarget grant with no nearer antecedent consumes the tracked set"
+        );
+        pump.optional_targeting = true;
+        assert!(
+            !chain_references_tracked_set(&pump),
+            "an optional single declared target is the grant's antecedent, so the \
+             grant must not consume an ancestor's tracked set"
+        );
+        // A resolution-time "up to one" choice declares no target, so the grant
+        // still names the chain's tracked set.
+        pump.target_choice_timing = TargetChoiceTiming::Resolution;
+        assert!(
+            chain_references_tracked_set(&pump),
+            "a resolution-time optional choice declares no target, so the grant \
+             must still consume the tracked set"
         );
     }
 

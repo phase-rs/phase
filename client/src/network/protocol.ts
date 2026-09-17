@@ -106,8 +106,19 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  57 — game_setup and state_update carry GameState, whose paid resolution
+ *       cleanup, receipt, and delayed-install origin now carry a
+ *       producer-issued offer owner. A v56 peer cannot preserve cross-offer
+ *       isolation across a paused offer, so first contact rejects the skew.
+ *       Bumped in lockstep with full-game protocol 75.
+ *  56 — game_setup and state_update carry GameState, whose
+ *       ResolutionCastCleanup can now carry exact delayed-trigger receipts.
+ *       A v55 peer cannot preserve the cancellation authority across a paused
+ *       paid offer, so first contact rejects the skew. Bumped in lockstep with
+ *       full-game protocol 74.
  *  54 — game_setup and state_update carry GameState, whose
- *       WaitingFor.CastOffer { kind: GraveyardPaidCast } now carries
+ *       FreeCastWindow requires `ResolutionCastFacePolicy` instead of the
+ *       legacy `filter`; WaitingFor.CastOffer { kind: GraveyardPaidCast } carries
  *       additional_cost and installed_triggers (both serde-additive) and opens
  *       for seven more printed cards that a v53 peer handled as a lingering
  *       permission. A v53 guest parses the offer and pays the wrong cost, so
@@ -384,7 +395,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 54 as const;
+export const WIRE_PROTOCOL_VERSION = 57 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

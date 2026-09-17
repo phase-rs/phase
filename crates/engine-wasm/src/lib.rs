@@ -152,6 +152,11 @@ struct PreparedRestoredGameState {
     debug_permitted_was_serialized: bool,
 }
 
+/// Stable machine-recognizable prefix for a paused cast menu created before a
+/// face was part of its selection tuple. Callers can offer recovery without
+/// parsing the human-facing guidance that follows it.
+const LEGACY_CASTING_VARIANT_FACE_RESTORE_ERROR: &str = "RESTORE_INCOMPATIBLE_CASTING_VARIANT_FACE";
+
 #[derive(Debug)]
 struct DecodedRestoredGameState {
     state: GameState,
@@ -165,6 +170,11 @@ fn prepare_restored_game_state(json_str: &str) -> Result<PreparedRestoredGameSta
         .get("state")
         .and_then(serde_json::Value::as_object)
         .or_else(|| serialized.as_object());
+    if state.is_some_and(legacy_casting_variant_choice_lacks_face) {
+        return Err(format!(
+            "{LEGACY_CASTING_VARIANT_FACE_RESTORE_ERROR}: Cannot restore paused CastingVariantChoice without required face; start a new game or undo to a state before this casting choice."
+        ));
+    }
     let debug_permitted_was_serialized =
         state.is_some_and(|state| state.contains_key("debug_permitted"));
     let state = serde_json::from_value::<PersistedGameState>(serialized)
@@ -175,6 +185,35 @@ fn prepare_restored_game_state(json_str: &str) -> Result<PreparedRestoredGameSta
         state,
         debug_permitted_was_serialized,
     })
+}
+
+/// Reject only the pre-face paused cast menu before generic serde reports a
+/// field-path error. A menu index cannot be recovered because Fuse now has two
+/// different Normal choices, so selecting a guessed face would change a cast.
+fn legacy_casting_variant_choice_lacks_face(
+    state: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    let Some(waiting_for) = state
+        .get("waiting_for")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    if waiting_for.get("type").and_then(serde_json::Value::as_str) != Some("CastingVariantChoice") {
+        return false;
+    }
+    waiting_for
+        .get("data")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|data| data.get("options"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|options| {
+            options.iter().any(|option| {
+                option
+                    .as_object()
+                    .is_some_and(|option| !option.contains_key("face"))
+            })
+        })
 }
 
 /// Native-only decode helper for restore-boundary tests that do not need card
@@ -235,6 +274,35 @@ mod external_format_config_tests {
 
     use super::*;
     use engine::types::format::RangeOfInfluenceConfig;
+
+    #[test]
+    fn restore_refuses_only_legacy_paused_casting_variant_menu_without_face() {
+        let mut paused =
+            serde_json::to_value(GameState::new_two_player(42)).expect("state serializes");
+        paused["waiting_for"] = serde_json::json!({
+            "type": "CastingVariantChoice",
+            "data": {
+                "player": 0,
+                "object_id": 1,
+                "card_id": 1,
+                "options": [{ "variant": "Normal", "mana_cost": { "type": "NoCost" } }]
+            }
+        });
+        let error = prepare_restored_game_state(&paused.to_string())
+            .expect_err("legacy paused menu must receive actionable refusal");
+        assert_eq!(
+            error,
+            format!(
+                "{LEGACY_CASTING_VARIANT_FACE_RESTORE_ERROR}: Cannot restore paused CastingVariantChoice without required face; start a new game or undo to a state before this casting choice."
+            )
+        );
+
+        paused["waiting_for"]["data"]["options"][0]["face"] = serde_json::json!("Left");
+        assert!(
+            prepare_restored_game_state(&paused.to_string()).is_ok(),
+            "a paused menu with an explicit face must continue through generic restore handling"
+        );
+    }
 
     #[test]
     fn object_id_records_serialize_with_json_string_keys() {
