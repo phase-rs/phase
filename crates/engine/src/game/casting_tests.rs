@@ -3768,7 +3768,9 @@ fn attacked_you_last_turn_condition_is_existential_over_players() {
 /// the same board, so the anchored `false` cell cannot be an empty ledger or an
 /// unreachable evaluator — and the anchored `true` cell is the reach-guard
 /// proving `evaluate_condition_with_context`'s designation-anchor entry reject
-/// does not fire on this scope.
+/// does not fire on this scope. The board carries a SECOND ledger row (P2
+/// attacked P1) so that the anchored `false` for P2 is a wrong-DEFENDER false
+/// (CR 508.6) and not merely a missing row.
 #[test]
 fn attacked_player_scope_anchors_to_the_declared_attack_target() {
     use crate::game::combat::AttackTarget;
@@ -3781,6 +3783,20 @@ fn attacked_player_scope_anchors_to_the_declared_attack_target() {
     state
         .attacked_defenders_last_turn
         .insert(PlayerId(1), [you].into_iter().collect());
+    // CR 508.6: "a player has 'attacked [a player]' if the first player declared
+    // one or more creatures as attackers attacking the SECOND player" — the
+    // relation is two-place, so the DEFENDER argument of the history query is
+    // load-bearing. P2 is a live attacker last turn, but of P1, not of you, so
+    // the anchored `false` for P2 below is a WRONG-DEFENDER false rather than an
+    // absent-ledger-row one: a query that asked only "did P2 attack anybody?"
+    // would answer true here and the assertion would fail. The existential
+    // sibling buys the same half of CR 508.6 the same way — see
+    // `attacked_you_last_turn_condition_is_existential_over_players`'s
+    // "opponents attacked each other but not you" board, which this row mirrors
+    // into the anchored scope.
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(2), [PlayerId(1)].into_iter().collect());
     let src = create_object(
         &mut state,
         CardId(9201),
@@ -3805,7 +3821,9 @@ fn attacked_player_scope_anchors_to_the_declared_attack_target() {
     );
     assert!(
         !eval(&anchored, bind(AttackTarget::Player(PlayerId(2)))),
-        "P2 never attacked you, so attacking P2 must NOT satisfy the anchored gate"
+        "P2 attacked P1 last turn, not you, so attacking P2 must NOT satisfy the \
+         anchored gate — the defender argument decides this cell, not the \
+         presence of a ledger row for P2"
     );
     assert!(
         eval(&default, bind(AttackTarget::Player(PlayerId(1)))),
@@ -3827,7 +3845,9 @@ fn attacked_player_scope_anchors_to_the_declared_attack_target() {
 /// once and are the only coverage of the bound-vs-latched PRECEDENCE — (i) being
 /// the only arm anywhere that binds a NON-player target over a live latch, and so
 /// the only guard that row 2's kind-preservation falses are not merely falses
-/// from an empty latch.
+/// from an empty latch. Arm (f2) is the only board anywhere that binds a
+/// RECIPIENT and a declaration at once, and so the only coverage of that pair's
+/// precedence (CR 508.1c).
 #[test]
 fn attacked_player_scope_falls_back_to_the_latched_attacker_record() {
     use crate::game::combat::{self, AttackTarget, AttackerInfo, CombatState};
@@ -3958,10 +3978,36 @@ fn attacked_player_scope_falls_back_to_the_latched_attacker_record() {
         "(f) the bound recipient IS the attacking creature, so its latch answers"
     );
 
-    // (g) and (h) BOTH anchors bound at once — the only arms that can express
-    // PRECEDENCE. Arms (a)-(f) each leave at most one anchor bindable, so any of
-    // them passes under a latch-first reading too; only a board where the two
-    // anchors DISAGREE makes the ordering the thing that decides the answer.
+    // (f2) BOTH a recipient and a declaration bound at once — the only board
+    // anywhere that binds the two sources together, and the only one on which
+    // they DISAGREE. Same combat state as (e)/(f): `other`'s latch says P1, who
+    // did attack you. The bound declaration names P2, who did not.
+    //
+    // CR 508.1c: the declaration under validation is what the restriction is
+    // being checked against, so it outranks the recipient's latched
+    // `AttackerInfo`; the recipient only selects WHOSE latch would answer in the
+    // unbound case (f). A form that preferred the recipient's latch whenever a
+    // recipient is bound reads P1 here and wrongly answers true. Phase 2's
+    // `attacker_can_attack_target` is the consumer that binds both at once.
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::recipient(other)
+                .with_declared_attack(Some(AttackTarget::Player(PlayerId(2)))),
+        ),
+        "(f2) with a recipient AND a declaration bound and disagreeing, the \
+         DECLARED target (P2, who never attacked you) outranks the recipient's \
+         latch (P1, who did)"
+    );
+
+    // (g) and (h) BOTH anchors bound at once with the SOURCE as the attacking
+    // creature — arms that express PRECEDENCE. Arms (a)-(f) each leave at most
+    // one anchor bindable, so any of them passes under a latch-first reading
+    // too; only a board where the two anchors DISAGREE — (f2), (g), (h), (i) —
+    // makes the ordering the thing that decides the answer.
     //
     // CR 508.1c: the declaration under validation is what the restriction is
     // being checked against, so a bound `declared_attack` is AUTHORITATIVE and

@@ -4874,9 +4874,9 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::AnyPlayerAttackedYouLastTurn {
             scope: AttackedYouScope::AnyPlayer,
         } => "a player attacked you during their last turn".into(),
-        SC::AnyPlayerAttackedYouLastTurn { .. } => {
-            "the attacked player attacked you during their last turn".into()
-        }
+        SC::AnyPlayerAttackedYouLastTurn {
+            scope: AttackedYouScope::AttackedPlayer,
+        } => "the attacked player attacked you during their last turn".into(),
         SC::OpponentPoisonAtLeast { count } => format!("an opponent has {count}+ poison"),
         SC::UnlessPay { .. } => "unless a cost is paid".into(),
         SC::Unrecognized { .. } => "unrecognized".into(),
