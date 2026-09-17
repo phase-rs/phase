@@ -9394,6 +9394,15 @@ pub(crate) fn zero_object_id() -> ObjectId {
 /// The specific kind of cast offer being presented to the player.
 /// Parameterizes `WaitingFor::CastOffer` — all variants share `player: PlayerId`
 /// at the outer level; the kind-specific payload lives here.
+//
+// `GraveyardPaidCast` deliberately carries its complete, owned cleanup inline:
+// it is the short-lived authority that must survive an accepted face choice,
+// manual-payment rehoming, and wire restoration without an extra ownership
+// layer. The prompt exists only while one offer is active, so boxing that
+// payload would add an allocation to this narrow lifecycle without reducing a
+// hot collection. This mirrors the documented intentional enum-size allows on
+// `CastingPermission` and `Effect`.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CastOfferKind {
@@ -10542,8 +10551,6 @@ pub(crate) fn normalize_resolution_cast_offer_allocator(
             }
         }
     }
-    drop(observe);
-
     let mut next = state.next_resolution_cast_offer_id.max(1);
     if high_water >= next {
         next = high_water
