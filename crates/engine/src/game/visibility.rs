@@ -36,6 +36,20 @@ fn redact_waiting_for_iteration_members(waiting_for: &mut WaitingFor) {
     }
 }
 
+/// A paid cast offered during resolution carries private ownership of the
+/// temporary cleanup and its delayed-trigger receipts. The offer remains the
+/// public prompt, but neither capability belongs in a viewer projection.
+fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
+    if let WaitingFor::CastOffer {
+        kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
+        ..
+    } = waiting_for
+    {
+        cleanup.offer_id = None;
+        cleanup.delayed_trigger_receipts.clear();
+    }
+}
+
 pub(crate) fn interaction_object_identity_is_visible(state: &GameState, id: ObjectId) -> bool {
     state
         .objects
@@ -843,6 +857,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         redact_parent_target_iteration_members(&mut pending.ability);
     }
     redact_waiting_for_iteration_members(&mut filtered.waiting_for);
+    redact_paid_cast_cleanup_authority(&mut filtered.waiting_for);
     // Interaction capability authority is trusted persistence state. Viewer
     // projections expose only the actor-scoped opaque opportunity IDs produced
     // by `game::interaction`, never the session/serial/slot minting ledger.
