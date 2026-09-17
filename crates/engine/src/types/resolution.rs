@@ -406,6 +406,36 @@ pub struct AbilityContinuationFrame {
     pub choose_zone_trigger_context: Option<ResolvingTriggerContext>,
 }
 
+impl AbilityContinuationFrame {
+    /// CR 608.2c + CR 400.7: Hand a COMPLETED `forward_result` producer's moved
+    /// objects to this parked continuation — but only when this continuation is
+    /// the one awaiting them.
+    ///
+    /// The forwarded-result contract distinguishes `None` (no producer ran at
+    /// all) from `Some([])` (a producer ran to completion and moved nothing).
+    /// Every completed producer must publish, including one that moved nothing:
+    /// a declined `up_to` selection, or a member whose delivery was prevented or
+    /// remained. Left at `None`, `parent_chain_referents` skips its
+    /// forwarded-result tier and falls through to the chain's DECLARED targets,
+    /// so a following "that creature" rider — and the delayed trigger that
+    /// snapshots it — names an object the producer never moved (issue #6902).
+    ///
+    /// Taking the marker is what scopes this. Only
+    /// `mark_continuation_awaits_forwarded_result` sets it, and consuming it
+    /// stops a later non-forwarding zone choice in the same resolution from
+    /// overwriting what was published. An unmarked frame belongs to a
+    /// non-forwarding producer and is left untouched, so a declared target is
+    /// never overridden.
+    pub fn publish_forwarded_producer_result(
+        &mut self,
+        delivered: crate::types::ability::ForwardedResultContext,
+    ) {
+        if self.pending.awaiting_forwarded_result.take().is_some() {
+            self.pending.chain.context.forwarded_result_context = Some(Box::new(delivered));
+        }
+    }
+}
+
 /// The per-category zone-choice owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PerCategoryZoneChoiceFrame {

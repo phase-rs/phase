@@ -9,15 +9,22 @@
 //! on the stack where the second carried an empty target list, stranding one
 //! creature on the battlefield.
 
+use std::sync::Arc;
+
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, DelayedTriggerCondition, Effect,
+    FilterProp, MultiTargetSpec, QuantityExpr, TargetChoiceTiming, TargetFilter, TargetRef,
+    TypeFilter, TypedFilter,
+};
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
+use engine::types::zones::{EtbTapState, Zone};
 
 // Verbatim Oracle text (Scryfall, 2026-09-15).
 const SNEAK_ATTACK: &str = "{R}: You may put a creature card from your hand onto the battlefield. That creature gains haste. Sacrifice the creature at the beginning of the next end step.";
@@ -81,6 +88,227 @@ fn resolve_putting(runner: &mut GameRunner, first: GameAction, pick: ObjectId) -
             .waiting_for;
     }
     panic!("activation did not settle; prompts: {seen:?}");
+}
+
+/// CR 608.2c + CR 400.7: a TERMINAL EMPTY `up_to` selection is a COMPLETED
+/// producer that moved nothing. The forwarded-result contract spells that
+/// `Some([])`, NOT `None` — and `targeting::parent_chain_referents` documents the
+/// distinction at its tier 1: *"a forward-result producer is the most recent
+/// antecedent. `Some([])` there is a real zero-result and must not fall through."*
+///
+/// Left at `None`, tier 1 is skipped and tier 2
+/// (`flatten_targets_in_chain(resolving_root_ability(..))`) hands the chain's
+/// DECLARED targets to a `ParentTarget` anaphor that names an object the selection
+/// never moved — the "incorrectly fall back to inherited targets" case.
+///
+/// The ability is constructed because the corpus has no card that reaches this:
+/// the producers that can be DECLINED (`ChangeZone` + `up_to` + `forward_result` —
+/// Journey to the Oracle, The Great Aurora, Worlds Within Worlds, Yawgmoth's Vile
+/// Offering) carry no `ParentTarget`/`CreateDelayedTrigger` consumer, while the
+/// cards that DO carry that consumer (Sneak Attack, Through the Breach) parse with
+/// no `up_to` and so cannot be declined. Everything beneath the ability is
+/// production: a real `ActivateAbility`, real target selection, the real
+/// `EffectZoneChoice` answered with an empty `SelectCards`, and the real delayed
+/// trigger firing at the end step.
+///
+/// The root's `PutCounter` is load-bearing twice over: it gives the chain a
+/// DECLARED target (so tier 2 is non-empty and the unfixed path has something
+/// wrong to inherit), and its counter is a reach-guard proving that target was
+/// really declared and resolved.
+///
+/// Revert-proof: drop the `Some([])` publish from the terminal-empty branch in
+/// `engine_resolution_choices` and the decoy — never put onto the battlefield by
+/// this spell — is SACRIFICED at the end step.
+#[test]
+fn a_declined_up_to_zone_choice_publishes_a_completed_empty_forwarded_result() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let source = scenario.add_creature(P0, "Forwarding Source", 2, 2).id();
+    let decoy = scenario.add_creature(P0, "Decoy Bear", 2, 2).id();
+    // Two creature cards in hand so the zone choice offers a real, non-empty pool
+    // — declining must be a genuine choice, not an empty-pool no-op.
+    let hand_a = scenario.add_creature_to_hand(P0, "Hand One", 1, 1).id();
+    let hand_b = scenario.add_creature_to_hand(P0, "Hand Two", 1, 1).id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Red, source, false, Vec::new())],
+    );
+
+    let mut runner = scenario.build();
+
+    let delayed_sacrifice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Sacrifice {
+                    target: TargetFilter::ParentTarget,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    // CR 107.1c: `min_count` is the floor for RANGED sacrifice
+                    // choices ("one or more"); a plain "sacrifice that creature"
+                    // takes the 0 default.
+                    min_count: 0,
+                },
+            )),
+            uses_tracked_set: false,
+        },
+    );
+    let mut producer = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: Some(Zone::Hand),
+            destination: Zone::Battlefield,
+            target: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature)
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+            ),
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: true,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    )
+    .sub_ability(delayed_sacrifice)
+    // CR 601.2c + CR 608.2c: "put a creature card from your hand onto the
+    // battlefield" is NOT targeting. Hand is a hidden zone with no legal
+    // stack-time targets, so under the default `Stack` timing the slot resolves
+    // empty and the producer completes having moved nothing — silently, with no
+    // prompt at all. Resolution timing plus an unlimited-from-zero spec is the
+    // shape the engine uses for a DECLINABLE zone selection; it is pinned by the
+    // `up_to` unit test in `effects/change_zone.rs`, which asserts the resulting
+    // `EffectZoneChoice` carries count = eligible, min_count = 0, up_to = true.
+    .target_choice_timing(TargetChoiceTiming::Resolution)
+    .multi_target(MultiTargetSpec::unlimited(0));
+    producer.forward_result = true;
+
+    let ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+            ),
+        },
+    )
+    .cost(AbilityCost::Mana {
+        cost: ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        },
+    })
+    .sub_ability(producer);
+    {
+        let obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .expect("the scenario source object exists");
+        // Layers reset `abilities` from `base_abilities` on every pass; set both.
+        obj.abilities = Arc::new(vec![ability.clone()]);
+        obj.base_abilities = Arc::new(vec![ability]);
+    }
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .expect("the constructed activation must be accepted");
+
+    // Declare the decoy as the chain's target. This is what the unfixed path
+    // inherits, so the test would prove nothing if the prompt never appeared.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "reach-guard: the root must declare a target; got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(decoy)],
+        })
+        .expect("declaring the decoy as the chain's target must succeed");
+
+    // CR 608.2: the activated ability is on the stack — it only reaches its
+    // sub-ability producer once both players pass. Stop at the first non-priority
+    // prompt (the zone choice) or at an empty stack (which the reach-guard below
+    // reports as the producer never having prompted at all).
+    for _ in 0..8 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority toward resolution must be accepted");
+            }
+            _ => break,
+        }
+    }
+
+    // The producer pauses on its up-to zone choice with a real pool; DECLINE it.
+    let offered = match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice { cards, .. } => cards.clone(),
+        other => panic!(
+            "reach-guard: expected the up-to zone choice; got {other:?} (stack {}, \
+             decoy +1/+1 {:?}, hand zones {:?} / {:?}). An empty eligible set \
+             completes an `up_to` producer with no prompt at all.",
+            runner.state().stack.len(),
+            runner.state().objects[&decoy]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            runner.state().objects[&hand_a].zone,
+            runner.state().objects[&hand_b].zone,
+        ),
+    };
+    assert!(
+        offered.contains(&hand_a) && offered.contains(&hand_b),
+        "reach-guard: both hand creatures must be offered; got {offered:?}"
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("declining an up-to zone choice must be accepted");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&decoy]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied(),
+        Some(1),
+        "reach-guard: the declared target really resolved, so tier 2 has something \
+         to inherit"
+    );
+    for card in [hand_a, hand_b] {
+        assert_eq!(
+            runner.state().objects[&card].zone,
+            Zone::Hand,
+            "reach-guard: declining moved nothing out of hand"
+        );
+    }
+
+    pass_priority_into_end_step_of(&mut runner, P0);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&decoy].zone,
+        Zone::Battlefield,
+        "CR 608.2c: a declined up-to selection is a COMPLETED producer that moved \
+         nothing, so the delayed \"that creature\" rider has no referent. Left at \
+         `None` it inherits the chain's declared target and sacrifices the decoy, \
+         which this spell never put onto the battlefield"
+    );
 }
 
 /// Pass priority on the real action path until `player`'s end step has begun.
@@ -299,10 +527,10 @@ fn sneak_attack_sacrifices_a_creature_whose_entry_paused_on_a_copy_choice() {
         "reach-guard: the creature was chosen through the selection prompt; {prompts:?}"
     );
     assert!(
-        prompts
-            .iter()
-            .any(|p| p.starts_with("ReplacementChoice") || p.starts_with("CopyTargetChoice")),
-        "reach-guard: the entry paused on the copy choice; {prompts:?}"
+        prompts.iter().any(|p| p.starts_with("CopyTargetChoice")),
+        "reach-guard: the entry paused on the COPY choice specifically. A bare \
+         `ReplacementChoice` is a different pause and would satisfy a disjunctive \
+         guard without ever exercising the as-enters copy path; {prompts:?}"
     );
     assert_eq!(
         runner.state().objects[&clone].zone,

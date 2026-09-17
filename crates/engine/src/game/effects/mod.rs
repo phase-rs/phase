@@ -1588,11 +1588,12 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 )
                 .expect("replacement-resumed ChangeZone delivery retains its exact segment");
             }
+            // CR 608.2c: classify this delivery ONCE. The completion recorded on
+            // the logical group and the forwarded result published just below it
+            // must agree on the same verdict for the same member.
+            let completion = paused_current.terminal_completion_after_resume();
             logical_zone_change_group
-                .record_delivery_completion(
-                    paused_current.member.object_id,
-                    paused_current.terminal_completion_after_resume(),
-                )
+                .record_delivery_completion(paused_current.member.object_id, completion)
                 .expect("resumed ChangeZone member records its exact terminal outcome");
             // CR 608.2c + CR 614.12a: the paused member's delivery is complete
             // here, and this is the ONE instant at which the moved object, the
@@ -1608,19 +1609,38 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             // The continuation sits directly BENEATH this iteration frame, so the
             // top-of-stack accessor cannot see it — hence the fixed two-frame
             // adjacency rather than `active_ability_continuation_frame_mut`.
-            // Consuming the marker stops a later non-forwarding zone choice from
-            // overwriting the bound result, and makes this a no-op on every route
-            // that is not awaiting a forwarded result.
             {
-                let delivered = crate::types::ability::ForwardedResultContext::from_object_ids(
-                    state,
-                    &[paused_current.member.object_id],
-                );
-                if let Some(frame) = state.continuation_beneath_active_change_zone_mut() {
-                    if frame.pending.awaiting_forwarded_result.take().is_some() {
-                        frame.pending.chain.context.forwarded_result_context =
-                            Some(Box::new(delivered));
+                // CR 400.7 + CR 608.2c: forward exactly what this delivery moved.
+                // A member EXPLICITLY classified as not having moved changed no
+                // zone, so its producer completed having moved nothing and must
+                // publish the completed-empty result — the same contract a
+                // declined `up_to` selection publishes — rather than a referent to
+                // an object that never moved. A REDIRECTED delivery is still
+                // `Moved`: the object did change zones, just not to the requested
+                // destination, so it stays forwarded.
+                //
+                // The gate reads the EXPLICIT `terminal_completion` sidecar, never
+                // `terminal_completion_after_resume()`. MEASURED on the
+                // copy-choice route: that paused record carries no sidecar AND an
+                // empty `delivery_events`, so the accessor's fallback classifies a
+                // member that really did enter the battlefield as `Remained`
+                // (`completion_from_delivery_events` returns `Remained` for an
+                // empty slice). Gating on that inference silently un-fixes #6902 —
+                // the creature stops being sacrificed. Absence of a recorded
+                // classification is not evidence of no move, so `None` forwards,
+                // exactly as this seam did before.
+                let moved_member = [paused_current.member.object_id];
+                let moved: &[_] = match paused_current.terminal_completion {
+                    Some(crate::types::game_state::ZoneMoveCompletion::Prevented)
+                    | Some(crate::types::game_state::ZoneMoveCompletion::Remained) => &[],
+                    Some(crate::types::game_state::ZoneMoveCompletion::Moved) | None => {
+                        &moved_member
                     }
+                };
+                let delivered =
+                    crate::types::ability::ForwardedResultContext::from_object_ids(state, moved);
+                if let Some(frame) = state.continuation_beneath_active_change_zone_mut() {
+                    frame.publish_forwarded_producer_result(delivered);
                 }
             }
             if matches!(

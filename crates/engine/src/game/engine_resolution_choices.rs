@@ -5841,6 +5841,25 @@ pub(super) fn handle_resolution_choice(
                 if let Some(result) = result {
                     effects::stamp_active_player_action_completion(state, source_id, result);
                 }
+                // CR 608.2c + CR 400.7: a TERMINAL empty `up_to` selection is a
+                // COMPLETED producer that moved nothing, which the forwarded-result
+                // contract spells `Some([])` — NOT `None`. `None` means no producer
+                // ran at all, so a marked continuation left at `None` falls back to
+                // inherited targets and a following "that creature" rider names an
+                // object this selection never moved. Publish the completed-empty
+                // context and consume the marker here, because the resume below
+                // drains the continuation immediately (the non-empty path does the
+                // same thing further down, after its moves).
+                //
+                // Self-scoping: `mark_continuation_awaits_forwarded_result` sets the
+                // marker only for a `forward_result` producer paused on a
+                // `ChangeZone`/`BounceAll` zone choice, so every other effect kind
+                // finds no marker and this is a no-op.
+                let forwarded_empty =
+                    crate::types::ability::ForwardedResultContext::from_object_ids(state, &[]);
+                if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                    frame.publish_forwarded_producer_result(forwarded_empty);
+                }
                 set_priority(state, player);
                 resume_with_error_propagation(state, events)?;
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -6759,10 +6778,7 @@ pub(super) fn handle_resolution_choice(
             // result, and consume the marker so a later non-forwarding zone
             // choice in the same resolution cannot overwrite it.
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                if frame.pending.awaiting_forwarded_result.take().is_some() {
-                    frame.pending.chain.context.forwarded_result_context =
-                        Some(Box::new(forwarded));
-                }
+                frame.publish_forwarded_producer_result(forwarded);
             }
 
             // Step B: resolve the reflexive `WhenYouDo` continuation (Grist's
