@@ -65678,23 +65678,15 @@ fn bow_of_nylea_mode_four_gains_up_to_four_target_set_shape() {
     );
 }
 
-/// A-10 — KNOWN-BAD LOCK. Lodestone Bauble's "from a player's graveyard" zone
-/// and owner qualifiers are NOT extracted by the parser at all: the filter is
-/// bare `Land + HasSupertype(Basic)`, with no `InZone` and no `Owned`. This
-/// phase widens the clause's cardinality from one object to four, which
-/// AMPLIFIES that pre-existing misparse rather than causing it.
-///
-/// This test exists to make the amplification visible in the tree instead of
-/// latent. The follow-up that extracts "from a player's X" must cite this test
-/// by name and DELETE it as part of the real fix.
-///
-/// The `multi_target` half is the reach guard for the "no `InZone` / no `Owned`"
-/// half, which is vacuous over a filter the locator failed to reach. Paired
-/// positive: `misinformation` is the same "up to N target … from an opponent's
-/// graveyard" family WITH the owner binding present, proving the extractor can
-/// produce one.
+/// A-10. Lodestone Bauble: "Put up to four target basic land cards from a player's
+/// graveyard on top of their library in any order." The announced target set is
+/// up to four (CR 115.1c, CR 601.2c), and every target is a basic land card in a
+/// graveyard (CR 404.1). "A player's" binds no owner, so the filter carries
+/// `InZone` and no `Owned` property. Before the zone qualifier was extracted, the
+/// filter admitted basic lands in any zone, and the four-target set widened that
+/// misparse.
 #[test]
-fn lodestone_bauble_known_bad_missing_zone_qualifier_lock() {
+fn lodestone_bauble_targets_up_to_four_basic_lands_in_a_graveyard() {
     let parsed = parse_oracle_text(
         "{1}, {T}, Sacrifice this artifact: Put up to four target basic land cards from a \
          player's graveyard on top of their library in any order. That player draws a card at \
@@ -65709,12 +65701,10 @@ fn lodestone_bauble_known_bad_missing_zone_qualifier_lock() {
         .first()
         .expect("Lodestone Bauble parses its activated ability");
 
-    // REACH GUARD: the phase fired on this card at all.
     assert_eq!(
         ability.multi_target,
         Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 4 })),
-        "reach guard: the announced target set must be present, or the filter \
-         assertions below prove nothing"
+        "the announced target set must be up to four"
     );
 
     let Effect::PutAtLibraryPosition { target, .. } = ability.effect.as_ref() else {
@@ -65726,24 +65716,28 @@ fn lodestone_bauble_known_bad_missing_zone_qualifier_lock() {
     assert_eq!(filter.type_filters, vec![TypeFilter::Land]);
     assert_eq!(
         filter.controller, None,
-        "KNOWN BAD: no controller/owner is bound"
+        "\"a player's\" binds no controller"
     );
     assert!(
         filter.properties.contains(&FilterProp::HasSupertype {
             value: Supertype::Basic
         }),
-        "the basic-land supertype IS extracted, got {:?}",
+        "the basic-land supertype is extracted, got {:?}",
         filter.properties
     );
     assert!(
-        !filter.properties.iter().any(|property| matches!(
-            property,
-            FilterProp::InZone { .. } | FilterProp::Owned { .. }
-        )),
-        "KNOWN BAD: \"from a player's graveyard\" contributes neither an InZone nor an \
-         Owned property, so this clause targets basic lands anywhere — a pre-existing \
-         misparse this phase amplifies from one object to four. Delete this test when \
-         that extraction is fixed. Got {:?}",
+        filter.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }),
+        "\"from a player's graveyard\" must bind the graveyard zone, got {:?}",
+        filter.properties
+    );
+    assert!(
+        !filter
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::Owned { .. })),
+        "\"a player's\" binds no owner, got {:?}",
         filter.properties
     );
 }
