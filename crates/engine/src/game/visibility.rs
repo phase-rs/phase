@@ -36,16 +36,177 @@ fn redact_waiting_for_iteration_members(waiting_for: &mut WaitingFor) {
     }
 }
 
+/// Produce a client-safe projection without changing the authoritative state.
+/// The public paid-cast prompt and permission remain intact; only the cleanup
+/// capability used to validate it is removed.  Both viewer filtering and the
+/// direct client serializer use this one typed boundary.
+pub(crate) fn project_paid_cast_cleanup_authority(state: &GameState) -> GameState {
+    let mut projected = state.clone();
+    redact_paid_cast_cleanup_authority(&mut projected.waiting_for);
+    let object_ids: Vec<_> = projected.objects.keys().copied().collect();
+    for object_id in object_ids {
+        if let Some(object) = projected.objects.get_mut(&object_id) {
+            redact_casting_permission_cleanup_authority(object);
+        }
+    }
+    projected
+}
+
 /// A paid cast offered during resolution carries private ownership of the
 /// temporary cleanup and its delayed-trigger receipts. The offer remains the
 /// public prompt, but neither capability belongs in a viewer projection.
 fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
-    if let WaitingFor::CastOffer {
-        kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
-        ..
-    } = waiting_for
-    {
-        redact_resolution_cleanup_authority(cleanup);
+    match waiting_for {
+        WaitingFor::CastOffer { kind, .. } => match kind {
+            CastOfferKind::Adventure { .. }
+            | CastOfferKind::Miracle { .. }
+            | CastOfferKind::Madness { .. }
+            | CastOfferKind::Paradigm { .. }
+            | CastOfferKind::Cascade { .. }
+            | CastOfferKind::Discover { .. }
+            | CastOfferKind::Ripple { .. }
+            | CastOfferKind::FreeCastWindow { .. } => {}
+            CastOfferKind::GraveyardPaidCast { cleanup, .. } => {
+                redact_resolution_cleanup_authority(cleanup);
+            }
+        },
+        // Keep this complete rather than using a catch-all: new pause states
+        // must explicitly decide whether they carry paid-cast authority.
+        WaitingFor::Priority { .. }
+        | WaitingFor::ResolveAllConsent { .. }
+        | WaitingFor::ResolveAllReady { .. }
+        | WaitingFor::MeldPairChoice { .. }
+        | WaitingFor::MeldAttackTargetChoice { .. }
+        | WaitingFor::EntryAttackTargetChoice { .. }
+        | WaitingFor::MulliganDecision { .. }
+        | WaitingFor::OpeningHandBottomCards { .. }
+        | WaitingFor::ManaPayment { .. }
+        | WaitingFor::ManaSourceSelection { .. }
+        | WaitingFor::AssistChoosePlayer { .. }
+        | WaitingFor::AssistPayment { .. }
+        | WaitingFor::ChooseXValue { .. }
+        | WaitingFor::TargetSelection { .. }
+        | WaitingFor::DeclareAttackers { .. }
+        | WaitingFor::DeclareBlockers { .. }
+        | WaitingFor::UntapChoice { .. }
+        | WaitingFor::ChooseUntapSubset { .. }
+        | WaitingFor::ExertChoice { .. }
+        | WaitingFor::EnlistChoice { .. }
+        | WaitingFor::GameOver { .. }
+        | WaitingFor::ReplacementChoice { .. }
+        | WaitingFor::EntryControllerChoice { .. }
+        | WaitingFor::OrderTriggers { .. }
+        | WaitingFor::CopyTargetChoice { .. }
+        | WaitingFor::ExploreChoice { .. }
+        | WaitingFor::ReturnAsAuraTarget { .. }
+        | WaitingFor::EquipTarget { .. }
+        | WaitingFor::CrewVehicle { .. }
+        | WaitingFor::StationTarget { .. }
+        | WaitingFor::SaddleMount { .. }
+        | WaitingFor::ScryChoice { .. }
+        | WaitingFor::RippleRevealChoice { .. }
+        | WaitingFor::RippleBottomOrder { .. }
+        | WaitingFor::ArrangePlanarDeckTopChoice { .. }
+        | WaitingFor::RedistributeLifeTotals { .. }
+        | WaitingFor::CoinFlipKeepChoice { .. }
+        | WaitingFor::DieKeepChoice { .. }
+        | WaitingFor::DigChoice { .. }
+        | WaitingFor::SurveilChoice { .. }
+        | WaitingFor::RevealChoice { .. }
+        | WaitingFor::SearchChoice { .. }
+        | WaitingFor::SearchPartitionChoice { .. }
+        | WaitingFor::OutsideGameChoice { .. }
+        | WaitingFor::ChooseFromZoneChoice { .. }
+        | WaitingFor::BeholdChoice { .. }
+        | WaitingFor::ChooseOneOfBranch { .. }
+        | WaitingFor::ConniveDiscard { .. }
+        | WaitingFor::DiscardChoice { .. }
+        | WaitingFor::EffectZoneChoice { .. }
+        | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
+        | WaitingFor::LearnChoice { .. }
+        | WaitingFor::ManifestDreadChoice { .. }
+        | WaitingFor::TriggerTargetSelection { .. }
+        | WaitingFor::BetweenGamesSideboard { .. }
+        | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::NamedChoice { .. }
+        | WaitingFor::OpponentGuess { .. }
+        | WaitingFor::SpellbookDraft { .. }
+        | WaitingFor::DamageSourceChoice { .. }
+        | WaitingFor::ModeChoice { .. }
+        | WaitingFor::DiscardToHandSize { .. }
+        | WaitingFor::OptionalCostChoice { .. }
+        | WaitingFor::ChooseGiftRecipient { .. }
+        | WaitingFor::SpliceOffer { .. }
+        | WaitingFor::DefilerPayment { .. }
+        | WaitingFor::ModalFaceChoice { .. }
+        | WaitingFor::AlternativeCastChoice { .. }
+        | WaitingFor::MutateMergeChoice { .. }
+        | WaitingFor::CipherEncodeChoice { .. }
+        | WaitingFor::CastingVariantChoice { .. }
+        | WaitingFor::ChoosePermanentTypeSlot { .. }
+        | WaitingFor::MultiTargetSelection { .. }
+        | WaitingFor::AbilityModeChoice { .. }
+        | WaitingFor::OptionalEffectChoice { .. }
+        | WaitingFor::ResolutionOptionalPaymentChoice { .. }
+        | WaitingFor::PairChoice { .. }
+        | WaitingFor::TributeChoice { .. }
+        | WaitingFor::MiracleReveal { .. }
+        | WaitingFor::OpponentMayChoice { .. }
+        | WaitingFor::LoopShortcut { .. }
+        | WaitingFor::RespondToShortcut { .. }
+        | WaitingFor::PrecastCopyShortcutOffer { .. }
+        | WaitingFor::RespondToPrecastCopyShortcut { .. }
+        | WaitingFor::UnlessPayment { .. }
+        | WaitingFor::UnlessPaymentChooseCost { .. }
+        | WaitingFor::WardDiscardChoice { .. }
+        | WaitingFor::WardSacrificeChoice { .. }
+        | WaitingFor::UnlessBounceChoice { .. }
+        | WaitingFor::ChooseRingBearer { .. }
+        | WaitingFor::ChooseRoomDoor { .. }
+        | WaitingFor::ChooseDungeon { .. }
+        | WaitingFor::ChooseDungeonRoom { .. }
+        | WaitingFor::SpecializeColor { .. }
+        | WaitingFor::PayCost { .. }
+        | WaitingFor::ActivationCostOneOfChoice { .. }
+        | WaitingFor::CostTypeChoice { .. }
+        | WaitingFor::BlightChoice { .. }
+        | WaitingFor::PayManaAbilityMana { .. }
+        | WaitingFor::ChooseManaColor { .. }
+        | WaitingFor::CollectEvidenceChoice { .. }
+        | WaitingFor::HarmonizeTapChoice { .. }
+        | WaitingFor::RevealUntilKeptChoice { .. }
+        | WaitingFor::RepeatDecision { .. }
+        | WaitingFor::TopOrBottomChoice { .. }
+        | WaitingFor::PopulateChoice { .. }
+        | WaitingFor::ClashChooseOpponent { .. }
+        | WaitingFor::ChooseFromZoneOpponentChooser { .. }
+        | WaitingFor::ChooseAnnouncingOpponent { .. }
+        | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::VoteChoice { .. }
+        | WaitingFor::SeparatePilesChooseOpponent { .. }
+        | WaitingFor::SeparatePilesPartition { .. }
+        | WaitingFor::SeparatePilesChoice { .. }
+        | WaitingFor::CompanionReveal { .. }
+        | WaitingFor::ChooseLegend { .. }
+        | WaitingFor::CommanderZoneChoice { .. }
+        | WaitingFor::BattleProtectorChoice { .. }
+        | WaitingFor::ProliferateChoice { .. }
+        | WaitingFor::TimeTravelChoice { .. }
+        | WaitingFor::ChooseObjectsSelection { .. }
+        | WaitingFor::CategoryChoice { .. }
+        | WaitingFor::EachPlayerCopyChosenSelection { .. }
+        | WaitingFor::KeepWithinTotalPowerChoice { .. }
+        | WaitingFor::KeepExactPermanentsChoice { .. }
+        | WaitingFor::CopyRetarget { .. }
+        | WaitingFor::AssignCombatDamage { .. }
+        | WaitingFor::AssignBlockerDamage { .. }
+        | WaitingFor::DistributeAmong { .. }
+        | WaitingFor::MoveCountersDistribution { .. }
+        | WaitingFor::RemoveCountersChoice { .. }
+        | WaitingFor::PayAmountChoice { .. }
+        | WaitingFor::RetargetChoice { .. }
+        | WaitingFor::CombatTaxPayment { .. }
+        | WaitingFor::PhyrexianPayment { .. } => {}
     }
 }
 
@@ -59,12 +220,22 @@ fn redact_resolution_cleanup_authority(cleanup: &mut crate::types::ability::Reso
 
 fn redact_casting_permission_cleanup_authority(object: &mut crate::game::game_object::GameObject) {
     for permission in &mut object.casting_permissions {
-        if let crate::types::ability::CastingPermission::ExileWithAltCost {
-            resolution_cleanup: Some(cleanup),
-            ..
-        } = permission
-        {
-            redact_resolution_cleanup_authority(cleanup);
+        match permission {
+            crate::types::ability::CastingPermission::AdventureCreature
+            | crate::types::ability::CastingPermission::PlayFromExile { .. }
+            | crate::types::ability::CastingPermission::ExileWithEnergyCost
+            | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
+            | crate::types::ability::CastingPermission::WarpExile { .. }
+            | crate::types::ability::CastingPermission::Plotted { .. }
+            | crate::types::ability::CastingPermission::Foretold { .. } => {}
+            crate::types::ability::CastingPermission::ExileWithAltCost {
+                resolution_cleanup,
+                ..
+            } => {
+                if let Some(cleanup) = resolution_cleanup {
+                    redact_resolution_cleanup_authority(cleanup);
+                }
+            }
         }
     }
 }
@@ -876,13 +1047,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         redact_parent_target_iteration_members(&mut pending.ability);
     }
     redact_waiting_for_iteration_members(&mut filtered.waiting_for);
-    redact_paid_cast_cleanup_authority(&mut filtered.waiting_for);
-    let object_ids: Vec<_> = filtered.objects.keys().copied().collect();
-    for object_id in object_ids {
-        if let Some(object) = filtered.objects.get_mut(&object_id) {
-            redact_casting_permission_cleanup_authority(object);
-        }
-    }
+    filtered = project_paid_cast_cleanup_authority(&filtered);
     // Interaction capability authority is trusted persistence state. Viewer
     // projections expose only the actor-scoped opaque opportunity IDs produced
     // by `game::interaction`, never the session/serial/slot minting ledger.

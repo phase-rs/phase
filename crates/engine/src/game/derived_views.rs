@@ -1024,7 +1024,8 @@ fn client_state_wire_value(
     state: &GameState,
     display_visible_object_ids: Option<&BTreeSet<ObjectId>>,
 ) -> serde_json::Result<serde_json::Value> {
-    let mut value = serde_json::to_value(state)?;
+    let projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
+    let mut value = serde_json::to_value(&projected_state)?;
     let Some(root) = value.as_object_mut() else {
         return Ok(value);
     };
@@ -1070,91 +1071,9 @@ fn client_state_wire_value(
     // their copy counts are pack-generation input the viewer filter also drops.
     root.remove("booster_pack_pool");
 
-    redact_pending_paid_cast_cleanup_authority(root);
-    redact_casting_permission_cleanup_authority(root);
-
     redact_private_trigger_firing(&mut value);
 
     Ok(value)
-}
-
-/// The direct client wire serializes the authoritative state it was handed, so
-/// mirror the viewer projection's paid-offer cleanup redaction here. The cast
-/// offer itself remains available for the prompt; its owner and delayed-trigger
-/// receipts are server-only capabilities.
-fn redact_pending_paid_cast_cleanup_authority(
-    root: &mut serde_json::Map<String, serde_json::Value>,
-) {
-    let Some(waiting_for) = root
-        .get_mut("waiting_for")
-        .and_then(serde_json::Value::as_object_mut)
-    else {
-        return;
-    };
-    if waiting_for.get("type").and_then(serde_json::Value::as_str) != Some("CastOffer") {
-        return;
-    }
-    let Some(kind) = waiting_for
-        .get_mut("data")
-        .and_then(serde_json::Value::as_object_mut)
-        .and_then(|data| data.get_mut("kind"))
-        .and_then(serde_json::Value::as_object_mut)
-    else {
-        return;
-    };
-    if kind.get("type").and_then(serde_json::Value::as_str) != Some("GraveyardPaidCast") {
-        return;
-    }
-    let Some(cleanup) = kind
-        .get_mut("cleanup")
-        .and_then(serde_json::Value::as_object_mut)
-    else {
-        return;
-    };
-    redact_resolution_cleanup_authority(cleanup);
-}
-
-/// The owner and delayed-trigger receipts travel inside the temporary
-/// `ExileWithAltCost` permission after a paid offer has been accepted. Direct
-/// client wires serialize authoritative state, so strip those capabilities
-/// from every projected object permission as well as the pending offer.
-fn redact_casting_permission_cleanup_authority(
-    root: &mut serde_json::Map<String, serde_json::Value>,
-) {
-    let Some(objects) = root
-        .get_mut("objects")
-        .and_then(serde_json::Value::as_object_mut)
-    else {
-        return;
-    };
-    for object in objects.values_mut() {
-        let Some(permissions) = object
-            .as_object_mut()
-            .and_then(|object| object.get_mut("casting_permissions"))
-            .and_then(serde_json::Value::as_array_mut)
-        else {
-            continue;
-        };
-        for permission in permissions {
-            let Some(cleanup) = permission
-                .as_object_mut()
-                .filter(|permission| {
-                    permission.get("type").and_then(serde_json::Value::as_str)
-                        == Some("ExileWithAltCost")
-                })
-                .and_then(|permission| permission.get_mut("resolution_cleanup"))
-                .and_then(serde_json::Value::as_object_mut)
-            else {
-                continue;
-            };
-            redact_resolution_cleanup_authority(cleanup);
-        }
-    }
-}
-
-fn redact_resolution_cleanup_authority(cleanup: &mut serde_json::Map<String, serde_json::Value>) {
-    cleanup.remove("offer_id");
-    cleanup.remove("delayed_trigger_receipts");
 }
 
 /// Removes every private firing/provenance carrier recursively. Resolution

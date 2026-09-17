@@ -1242,12 +1242,18 @@ fn complete_selected_cast(
     ))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceAdvance {
+    Offer,
+    NoOffer,
+}
+
 fn advance_source_to_candidate_window(
     state: &mut engine::types::game_state::GameState,
     source: ObjectId,
     profile: Profile,
     progress: RouteProgress,
-) -> Result<(), String> {
+) -> Result<SourceAdvance, String> {
     if progress.source_target_action && !progress.source_target_prompt {
         return Err("source target action occurred without its public prompt".to_string());
     }
@@ -1258,14 +1264,18 @@ fn advance_source_to_candidate_window(
     );
     while guard.steps < MAX_PUBLIC_ROUTE_ACTIONS {
         if candidate_offer_window_membership(state) {
-            return Ok(());
+            return Ok(SourceAdvance::Offer);
         }
         let source_on_stack = state
             .objects
             .get(&source)
             .is_some_and(|object| object.zone == Zone::Stack);
         if profile == Profile::TargetFree && !source_on_stack {
-            return target_free_stack_endpoint(state);
+            // This route is intentionally special: it casts directly to the
+            // stack. Keep the endpoint guard so an absent candidate remains a
+            // genuine route error rather than a fabricated no-offer row.
+            target_free_stack_endpoint(state)?;
+            return Ok(SourceAdvance::NoOffer);
         }
         if matches!(state.waiting_for, WaitingFor::RippleRevealChoice { .. }) {
             guard.apply(
@@ -1281,15 +1291,7 @@ fn advance_source_to_candidate_window(
         }
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             if !source_on_stack {
-                let route = match (progress.source_target_prompt, progress.source_target_action) {
-                    (true, true) => "source target selection",
-                    (false, false) => "source spell",
-                    (true, false) => "source target prompt",
-                    (false, true) => unreachable!("checked before source progression"),
-                };
-                return Err(format!(
-                    "{route} completed without a candidate offer window"
-                ));
+                return Ok(SourceAdvance::NoOffer);
             }
             let player = state.priority_player;
             guard.apply(
@@ -1383,10 +1385,11 @@ fn probe(
         }
         progress.source_target_action = true;
     }
-    if let Err(error) = advance_source_to_candidate_window(&mut initial, source, profile, progress)
+    let advance = match advance_source_to_candidate_window(&mut initial, source, profile, progress)
     {
-        return Ok(Probe::route_error(error));
-    }
+        Ok(advance) => advance,
+        Err(error) => return Ok(Probe::route_error(error)),
+    };
     if matches!(profile, Profile::Cascade | Profile::Discover)
         && initial.objects.get(&CANDIDATE).map(|object| object.zone) != Some(Zone::Exile)
     {
@@ -1395,21 +1398,26 @@ fn probe(
         ));
     }
 
-    let included = candidate_offer_window_membership(&initial);
-    if !included {
-        if profile == Profile::TargetFree {
+    let included = advance == SourceAdvance::Offer;
+    match advance {
+        SourceAdvance::Offer => {}
+        SourceAdvance::NoOffer if profile == Profile::TargetFree => {
             return match target_free_auto_stack_probe(&initial) {
                 Ok(probe) => Ok(probe),
                 Err(error) => Ok(Probe::route_error(error)),
             };
         }
-        return Ok(Probe {
-            included: false,
-            mask: 0,
-            front: Observation::NotOffered,
-            back: Observation::NotOffered,
-            diagnostic: None,
-        });
+        // A cleanly completed source route is census data. Every other route
+        // failure above remains an error instead of being collapsed here.
+        SourceAdvance::NoOffer => {
+            return Ok(Probe {
+                included: false,
+                mask: 0,
+                front: Observation::NotOffered,
+                back: Observation::NotOffered,
+                diagnostic: None,
+            });
+        }
     }
     if !matches!(initial.waiting_for, WaitingFor::ModalFaceChoice { .. }) {
         if let Err(error) = accept_offer(&mut initial, profile, &mut progress) {
@@ -2847,6 +2855,34 @@ mod tests {
             Ok(CandidateStackEndpoint::Spell(CastingVariant::Normal))
         ));
         assert_ne!(state.objects[&source].zone, Zone::Stack);
+    }
+
+    #[test]
+    fn source_advance_keeps_clean_no_offer_distinct_from_route_error() {
+        let mut state = canonical_witness();
+        assert_eq!(
+            advance_source_to_candidate_window(
+                &mut state,
+                ObjectId(9_999),
+                Profile::Cascade,
+                RouteProgress::default(),
+            ),
+            Ok(SourceAdvance::NoOffer),
+            "a clean priority endpoint without an offer is census data"
+        );
+
+        let error = advance_source_to_candidate_window(
+            &mut state,
+            ObjectId(9_999),
+            Profile::Cascade,
+            RouteProgress {
+                source_target_action: true,
+                source_target_prompt: false,
+                ..RouteProgress::default()
+            },
+        )
+        .expect_err("an impossible public route remains an error");
+        assert!(error.contains("target action occurred without its public prompt"));
     }
 
     #[test]

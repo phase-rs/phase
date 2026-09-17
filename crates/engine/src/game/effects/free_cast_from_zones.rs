@@ -253,6 +253,10 @@ pub(in crate::game) fn eligible_candidates(
     let Some(player) = state.players.iter().find(|p| p.id == controller) else {
         return Vec::new();
     };
+    // One immutable, layer-flushed baseline serves this entire enumeration.
+    // Each card/face probe below derives its own projection, so neither a
+    // rejected candidate nor a swapped face can contaminate a later candidate.
+    let projection = crate::game::casting::ResolutionCastProjection::new(state);
 
     let mut candidates = Vec::new();
     let candidate_ids: Vec<ObjectId> = if member_pool.is_empty() {
@@ -291,13 +295,9 @@ pub(in crate::game) fn eligible_candidates(
         // spell face through the exact request that will be announced. A
         // policy-only front check would admit a spell with no legal targets or
         // erase a legal back-only spell before it could be elected.
-        if crate::game::casting::resolution_spell_face_legality(
-            state,
-            face_policy.controller,
-            id,
-            request,
-        )
-        .count()
+        if projection
+            .spell_face_legality(face_policy.controller, id, request)
+            .count()
             == 0
         {
             continue;
@@ -307,13 +307,11 @@ pub(in crate::game) fn eligible_candidates(
         // be announced as 0, so the card's printed mana_value() is the same
         // value used when the choice is submitted.
         if let Some(budget) = max_total_mv {
-            let mv = state
-                .objects
-                .get(&id)
-                // CR 202.3d + CR 709.4b: candidate cards are in a non-stack
-                // zone, so a split card's MV budget is its combined halves.
-                .map(|obj| obj.effective_mana_value())
-                .unwrap_or(0);
+            // CR 202.3d + CR 709.4b: candidate cards are in a non-stack zone,
+            // so a split card's budget is its combined halves. Read that MV
+            // from the immutable flushed baseline, never from an earlier
+            // candidate or the caller's unflushed state.
+            let mv = projection.candidate_mana_value(id).unwrap_or(0);
             if mv > budget {
                 continue;
             }
@@ -363,6 +361,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{SpellStackToGraveyardReplacement, TypeFilter, TypedFilter};
+    use crate::types::card::LayoutKind;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -431,6 +430,65 @@ mod tests {
         obj.card_types.core_types.push(core);
         obj.mana_cost = ManaCost::generic(mv);
         id
+    }
+
+    fn add_modal_spell_card(state: &mut GameState, front: CoreType, back: CoreType) -> ObjectId {
+        let id = add_card(state, PlayerId(0), Zone::Graveyard, front, 1);
+        let mut back_types = crate::types::card_type::CardType::default();
+        back_types.core_types.push(back);
+        state.objects.get_mut(&id).unwrap().back_face =
+            Some(crate::game::game_object::BackFaceData {
+                name: format!("Back face {id:?}"),
+                card_types: back_types,
+                mana_cost: ManaCost::generic(1),
+                layout_kind: Some(LayoutKind::Modal),
+                ..Default::default()
+            });
+        id
+    }
+
+    #[test]
+    fn candidate_projections_isolate_rejected_and_face_swapped_siblings() {
+        let mut state = GameState::new_two_player(1);
+        let rejected = add_card(
+            &mut state,
+            PlayerId(0),
+            Zone::Graveyard,
+            CoreType::Creature,
+            1,
+        );
+        let back_only = add_modal_spell_card(&mut state, CoreType::Sorcery, CoreType::Instant);
+        let later = add_card(
+            &mut state,
+            PlayerId(0),
+            Zone::Graveyard,
+            CoreType::Instant,
+            1,
+        );
+
+        let candidates = test_eligible_candidates(
+            &state,
+            &[Zone::Graveyard],
+            None,
+            &[],
+            test_face_policy(
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                ObjectId(900),
+                PlayerId(0),
+            ),
+        );
+
+        assert_eq!(candidates, vec![back_only, later]);
+        assert_eq!(
+            state.objects[&back_only].name, "Spell",
+            "the back-face probe must not swap the authoritative candidate"
+        );
+        assert!(
+            !state.objects[&back_only].modal_back_face,
+            "the next candidate must not inherit the prior face projection"
+        );
+        assert_eq!(state.objects[&rejected].name, "Spell");
+        assert_eq!(state.objects[&later].name, "Spell");
     }
 
     /// CR 601.2a: Candidates are gathered from BOTH the graveyard and the hand,

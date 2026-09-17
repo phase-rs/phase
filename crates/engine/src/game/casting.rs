@@ -10526,6 +10526,49 @@ impl ResolutionSpellFaceLegality {
     }
 }
 
+/// Immutable starting point for prospective resolution casts.  A resolution
+/// offer may enumerate several cards and two spell faces per card; flush once
+/// before that enumeration, then let each candidate and face derive its own
+/// clone.  In particular, a rejected face must never leave its swapped
+/// characteristics behind for the next face or candidate.
+pub(in crate::game) struct ResolutionCastProjection {
+    baseline: GameState,
+}
+
+impl ResolutionCastProjection {
+    pub(in crate::game) fn new(state: &GameState) -> Self {
+        let mut baseline = state.clone();
+        super::layers::flush_layers(&mut baseline);
+        Self { baseline }
+    }
+
+    pub(in crate::game) fn spell_face_legality(
+        &self,
+        player: PlayerId,
+        object_id: ObjectId,
+        request: &ResolutionCastRequest,
+    ) -> ResolutionSpellFaceLegality {
+        resolution_spell_face_legality_from_baseline(&self.baseline, player, object_id, request)
+    }
+
+    /// Candidate-level reads (such as a free-cast window's MV budget) must use
+    /// the same flushed baseline as its face probes.  Do not expose the
+    /// baseline mutably: a face still starts from a new clone below.
+    pub(in crate::game) fn candidate_mana_value(&self, object_id: ObjectId) -> Option<u32> {
+        self.baseline
+            .objects
+            .get(&object_id)
+            .map(crate::game::game_object::GameObject::effective_mana_value)
+    }
+
+    /// Build candidate-specific immutable inputs from this same flushed
+    /// baseline.  The callback receives no mutable access, so a request for one
+    /// candidate cannot contaminate another candidate or either face probe.
+    pub(in crate::game) fn from_baseline<T>(&self, build: impl FnOnce(&GameState) -> T) -> T {
+        build(&self.baseline)
+    }
+}
+
 /// The structural prospective gate used by deferred and play permissions.  An
 /// immediate resolution offer uses [`resolution_spell_face_legality`] with its
 /// exact request instead, because timing, targets, costs, and the temporary
@@ -10609,8 +10652,21 @@ pub(crate) fn resolution_spell_face_admission(
 /// deliberately read-only: the cloned request preserves the concrete cleanup,
 /// rider, cost provenance, and policy without creating announcement state in
 /// the real game.
+#[cfg(test)]
 pub(super) fn resolution_spell_face_legality(
     state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    request: &ResolutionCastRequest,
+) -> ResolutionSpellFaceLegality {
+    ResolutionCastProjection::new(state).spell_face_legality(player, object_id, request)
+}
+
+/// Candidate-local portion of [`ResolutionCastProjection::spell_face_legality`].
+/// The exact request is installed only on this candidate projection; each face
+/// below then receives an independent clone of it.
+fn resolution_spell_face_legality_from_baseline(
+    baseline: &GameState,
     player: PlayerId,
     object_id: ObjectId,
     request: &ResolutionCastRequest,
@@ -10620,7 +10676,7 @@ pub(super) fn resolution_spell_face_legality(
     // that the real path will elect, so the projector takes every
     // zone-admission, casting-prohibition, target, cost, cleanup, and rider
     // gate rather than approximating that path from policy alone.
-    let mut projected = state.clone();
+    let mut projected = baseline.clone();
     if !projected.objects.contains_key(&object_id) {
         return ResolutionSpellFaceLegality {
             front: false,

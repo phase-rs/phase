@@ -226,6 +226,11 @@ fn compute_hand_pick_eligible(
             ..
         } if driver.is_during_resolution()
     );
+    // The private pick scans a complete card pool.  Build one immutable,
+    // layer-flushed baseline for the whole immediate-cast traversal; every
+    // candidate request and elected face receives an isolated clone from it.
+    let projection =
+        private_immediate_cast.then(|| crate::game::casting::ResolutionCastProjection::new(state));
     cards
         .into_iter()
         .filter(|id| {
@@ -236,18 +241,18 @@ fn compute_hand_pick_eligible(
                 // eligibility check: their later permission/land route is not
                 // this immediate resolution-cast transaction.
                 if private_immediate_cast {
-                    return private_resolution_cast_request(state, ability, *id).is_some_and(
-                        |request| {
-                            crate::game::casting::resolution_spell_face_legality(
-                                state,
-                                ability.controller,
-                                *id,
-                                &request,
-                            )
-                            .count()
-                                != 0
-                        },
-                    );
+                    return projection.as_ref().is_some_and(|projection| {
+                        projection
+                            .from_baseline(|baseline| {
+                                private_resolution_cast_request(baseline, ability, *id)
+                            })
+                            .is_some_and(|request| {
+                                projection
+                                    .spell_face_legality(ability.controller, *id, &request)
+                                    .count()
+                                    != 0
+                            })
+                    });
                 }
                 return crate::game::casting::resolution_spell_face_admission(
                     state,
@@ -1447,7 +1452,53 @@ pub(crate) fn freeze_resolution_cast_filter(
                 ))
             }),
         },
-        filter => filter,
+        // Keep this leaf inventory explicit.  A new top-level TargetFilter
+        // variant must make the resolution-boundary freezer decide whether it
+        // carries contextual state, rather than quietly retaining live state
+        // through a catch-all arm.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => filter,
     }
 }
 
@@ -1477,13 +1528,51 @@ fn freeze_resolution_filter_prop(
 ) -> crate::types::ability::FilterProp {
     use crate::types::ability::FilterProp;
 
+    let freeze_quantity = |value: QuantityExpr, nonnegative: bool| {
+        let value = crate::game::quantity::resolve_quantity_with_targets(state, &value, ability);
+        QuantityExpr::Fixed {
+            value: if nonnegative { value.max(0) } else { value },
+        }
+    };
+
     match prop {
         FilterProp::Cmc { comparator, value } => FilterProp::Cmc {
             comparator,
-            value: QuantityExpr::Fixed {
-                value: crate::game::quantity::resolve_quantity_with_targets(state, &value, ability)
-                    .max(0),
-            },
+            value: freeze_quantity(value, true),
+        },
+        // CR 122.1: a counter count cannot be negative.  Unlike CMC, this
+        // is not merely a shared numeric convenience: Counter and P/T filters
+        // have different domains at the resolution snapshot boundary.
+        FilterProp::Counters {
+            counters,
+            comparator,
+            count,
+        } => FilterProp::Counters {
+            counters,
+            comparator,
+            count: freeze_quantity(count, true),
+        },
+        // CR 208: power and toughness may be negative, so preserve the signed
+        // resolved threshold rather than applying the CMC/counter clamp.
+        FilterProp::PtComparison {
+            stat,
+            scope,
+            comparator,
+            value,
+        } => FilterProp::PtComparison {
+            stat,
+            scope,
+            comparator,
+            value: freeze_quantity(value, false),
+        },
+        FilterProp::AnyOf { props } => FilterProp::AnyOf {
+            props: props
+                .into_iter()
+                .map(|prop| freeze_resolution_filter_prop(state, ability, prop))
+                .collect(),
+        },
+        FilterProp::Not { prop } => FilterProp::Not {
+            prop: Box::new(freeze_resolution_filter_prop(state, ability, *prop)),
         },
         prop => prop,
     }
@@ -2360,12 +2449,13 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         CardPlayMode, CastFromZoneDriver, CastPermissionConstraint, Comparator, ControllerRef,
-        Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef, ResolutionCastWindow,
-        TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
+        Effect, FilterProp, ObjectScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+        ResolutionCastWindow, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
     use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterMatch;
     use crate::types::game_state::{ExileLink, ExileLinkKind, WaitingFor};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::player::PlayerId;
@@ -2425,6 +2515,179 @@ mod tests {
             }),
             "expected the source-power CMC reference to freeze to {expected}, got {typed:?}"
         );
+    }
+
+    #[test]
+    fn resolution_filter_freeze_preserves_pt_sign_and_clamps_counter_count() {
+        let mut state = make_test_state();
+        let source = create_object(
+            &mut state,
+            CardId(8_009),
+            PlayerId(0),
+            "Negative power source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().power = Some(-3);
+        let ability = ResolvedAbility::new(Effect::NoOp, vec![], source, PlayerId(0));
+        let source_power = || QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+        };
+        let filter = TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::Counters {
+                counters: CounterMatch::Any,
+                comparator: Comparator::GE,
+                count: source_power(),
+            },
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: source_power(),
+            },
+            FilterProp::AnyOf {
+                props: vec![FilterProp::Not {
+                    prop: Box::new(FilterProp::PtComparison {
+                        stat: PtStat::Toughness,
+                        scope: PtValueScope::Base,
+                        comparator: Comparator::GT,
+                        value: source_power(),
+                    }),
+                }],
+            },
+        ]));
+
+        let frozen = freeze_resolution_cast_filter(&state, &ability, filter, None);
+        let TargetFilter::Typed(typed) = frozen else {
+            panic!("expected typed filter after freezing");
+        };
+        assert!(matches!(
+            typed.properties[0],
+            FilterProp::Counters {
+                count: QuantityExpr::Fixed { value: 0 },
+                ..
+            }
+        ));
+        assert!(matches!(
+            typed.properties[1],
+            FilterProp::PtComparison {
+                value: QuantityExpr::Fixed { value: -3 },
+                ..
+            }
+        ));
+        assert!(matches!(
+            typed.properties[2],
+            FilterProp::AnyOf { ref props }
+                if matches!(
+                    props.as_slice(),
+                    [FilterProp::Not { prop }]
+                        if matches!(
+                            prop.as_ref(),
+                            FilterProp::PtComparison {
+                                value: QuantityExpr::Fixed { value: -3 },
+                                ..
+                            }
+                        )
+                )
+        ));
+    }
+
+    #[test]
+    fn paused_private_pick_freezes_counter_and_signed_pt_policy_before_resume() {
+        for changed_source_power in [5, -5] {
+            let mut state = make_test_state();
+            let source = create_object(
+                &mut state,
+                CardId(8_020),
+                PlayerId(0),
+                "Dynamic filter source".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&source).unwrap().power = Some(-3);
+            let spell = add_card_to_hand(&mut state, PlayerId(0), CardId(8_021));
+            {
+                let object = state.objects.get_mut(&spell).unwrap();
+                object.card_types.core_types = vec![CoreType::Creature];
+                object.base_card_types = object.card_types.clone();
+                object.power = Some(-3);
+                object.base_power = Some(-3);
+            }
+            let source_power = || QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            };
+            let target =
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                    FilterProp::InZone { zone: Zone::Hand },
+                    FilterProp::Counters {
+                        counters: CounterMatch::Any,
+                        comparator: Comparator::GE,
+                        count: source_power(),
+                    },
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::LE,
+                        value: source_power(),
+                    },
+                ]));
+            let ability = ResolvedAbility::new(
+                Effect::CastFromZone {
+                    target: target.clone(),
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Cast,
+                    cast_transformed: false,
+                    alt_ability_cost: None,
+                    constraint: None,
+                    duration: None,
+                    driver: CastFromZoneDriver::LingeringPermission,
+                    mana_spend_permission: None,
+                    additional_cost: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events)
+                .expect("the production private cast path must open a pause");
+            let pending = state
+                .active_ability_continuation()
+                .expect("the private choice must retain its frozen continuation");
+            let Effect::CastFromZone {
+                target: TargetFilter::Typed(frozen),
+                driver: CastFromZoneDriver::DuringResolution,
+                ..
+            } = &pending.chain.effect
+            else {
+                panic!("the pause must retain a frozen during-resolution CastFromZone policy");
+            };
+            assert!(matches!(
+                frozen.properties.as_slice(),
+                [
+                    FilterProp::InZone { .. },
+                    FilterProp::Counters {
+                        count: QuantityExpr::Fixed { value: 0 },
+                        ..
+                    },
+                    FilterProp::PtComparison {
+                        value: QuantityExpr::Fixed { value: -3 },
+                        ..
+                    }
+                ]
+            ));
+
+            // A positive mutation would make a live counter threshold 5; a
+            // more-negative mutation would make a live P/T threshold -5. The
+            // same paused policy must survive either hostile change.
+            state.objects.get_mut(&source).unwrap().power = Some(changed_source_power);
+            apply_as_current(&mut state, GameAction::SelectCards { cards: vec![spell] })
+                .expect("the frozen private policy must accept its selected spell after resume");
+            assert_eq!(state.objects[&spell].zone, Zone::Stack);
+        }
     }
 
     /// The direct `TargetFilter` carriers owned by
@@ -2546,6 +2809,53 @@ mod tests {
             ..Default::default()
         });
         spell
+    }
+
+    #[test]
+    fn private_immediate_candidates_isolate_rejected_and_face_swapped_siblings() {
+        let mut state = make_test_state();
+        let source = create_object(
+            &mut state,
+            CardId(8_010),
+            PlayerId(0),
+            "Immediate cast source".to_string(),
+            Zone::Battlefield,
+        );
+        let rejected = add_card_to_hand(&mut state, PlayerId(0), CardId(8_011));
+        state
+            .objects
+            .get_mut(&rejected)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        let back_only = add_spell_mdfc(&mut state, Zone::Hand);
+        let later = add_card_to_hand(&mut state, PlayerId(0), CardId(8_012));
+        state.objects.get_mut(&later).unwrap().card_types.core_types = vec![CoreType::Instant];
+        let target = TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant));
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: target.clone(),
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+                additional_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let eligible = compute_hand_pick_eligible(&state, &ability, &target, Zone::Hand);
+        assert_eq!(eligible, vec![back_only, later]);
+        assert_eq!(state.objects[&back_only].name, "Frozen Front");
+        assert!(!state.objects[&back_only].modal_back_face);
+        assert_eq!(state.objects[&rejected].name, "Hand Spell");
+        assert_eq!(state.objects[&later].name, "Hand Spell");
     }
 
     /// Keldon Flamesage's parsed attack trigger reaches its real optional

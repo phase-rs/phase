@@ -25,6 +25,10 @@ pub(super) fn cancel_pending_cast(
             "Cannot cancel an activation after a cost is paid".to_string(),
         ));
     }
+    // CR 601.2: if a player cannot comply with a casting step, that illegal
+    // cast returns to the moment before the spell was proposed. This rules
+    // note covers only that incomplete-casting rollback fact.
+    //
     // Capture and consume the exact resolution-owned grant before generic
     // rollback removes the placeholder stack entry.  A normal pending cast
     // has no such cleanup and retains the historical Priority result; a

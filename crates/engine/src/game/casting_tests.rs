@@ -53996,6 +53996,26 @@ fn resolution_test_two_spell_faces(
     spell
 }
 
+/// Jennifer Walters // The Sensational She-Hulk is represented as a spell/spell
+/// Modal DFC. Her transform text does not turn that card layout into the
+/// transform-only class, so an effect that casts either spell face still has to
+/// ask the controller which spell to cast.
+fn jennifer_walters_spell_faces(state: &mut GameState) -> ObjectId {
+    let spell = resolution_test_two_spell_faces(state, CoreType::Sorcery, CoreType::Instant);
+    let object = state
+        .objects
+        .get_mut(&spell)
+        .expect("Jennifer fixture exists");
+    object.name = "Jennifer Walters".to_string();
+    object.base_name = object.name.clone();
+    object
+        .back_face
+        .as_mut()
+        .expect("Jennifer fixture has a spell back face")
+        .name = "The Sensational She-Hulk".to_string();
+    spell
+}
+
 fn resolution_test_request(filter: TargetFilter) -> ResolutionCastRequest {
     let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
         filter,
@@ -54275,6 +54295,15 @@ fn resolution_cast_transformed_keeps_front_on_stack_and_enters_back() {
     let mut request = resolution_test_request(TargetFilter::Any);
     request.cast_transformed = true;
 
+    assert_eq!(
+        resolution_spell_face_legality(&state, PlayerId(0), spell, &request),
+        ResolutionSpellFaceLegality {
+            front: true,
+            back: false,
+        },
+        "a true transform-only DFC never opens the spell-face election"
+    );
+
     let initiation =
         initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
             .expect("the transformed resolution cast must be prepared");
@@ -54349,6 +54378,57 @@ fn resolution_cast_two_legal_faces_issues_and_completes_exact_face_choice() {
         .expect("the elected back face must consume the appended resolution permission");
     assert!(state.stack.iter().any(|entry| entry.source_id == spell));
     assert_eq!(state.objects[&spell].name, "Resolution Back");
+}
+
+#[test]
+fn jennifer_walters_modal_resolution_choice_elects_only_the_selected_spell_face() {
+    for (back_face, expected_name) in [
+        (false, "Jennifer Walters"),
+        (true, "The Sensational She-Hulk"),
+    ] {
+        let mut state = setup_game_at_main_phase();
+        let spell = jennifer_walters_spell_faces(&mut state);
+        let request = resolution_test_request(TargetFilter::Any);
+        assert_eq!(
+            resolution_spell_face_legality(&state, PlayerId(0), spell, &request),
+            ResolutionSpellFaceLegality {
+                front: true,
+                back: true,
+            },
+            "Jennifer's Modal layout exposes both independently legal spell faces"
+        );
+
+        let initiation = initiate_cast_during_resolution(
+            &mut state,
+            PlayerId(0),
+            spell,
+            request,
+            &mut Vec::new(),
+        )
+        .expect("Jennifer's resolution cast must begin");
+        let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+            panic!("two legal Jennifer faces must prompt for a face");
+        };
+        assert!(matches!(
+            waiting_for.as_ref(),
+            WaitingFor::ModalFaceChoice { .. }
+        ));
+        state.waiting_for = *waiting_for;
+
+        apply_as_current(&mut state, GameAction::ChooseModalFace { back_face })
+            .expect("the elected Jennifer face must be cast");
+        assert_eq!(state.objects[&spell].name, expected_name);
+        assert_eq!(state.objects[&spell].modal_back_face, back_face);
+        assert_eq!(
+            state
+                .stack
+                .iter()
+                .filter(|entry| entry.source_id == spell)
+                .count(),
+            1,
+            "only the elected face is announced"
+        );
+    }
 }
 
 /// A forged/stale modal action must not consume the resolution-owned delayed
