@@ -64,6 +64,91 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 const FORETELL_SPECIAL_ACTION_COST: u32 = 2;
 
+/// Test-only accounting for the deliberately narrow resolution-cast
+/// projection. These are local to Casting rather than the product perf
+/// counters: the assertion is about this projection's clone boundary, not a
+/// serialized or cross-feature performance metric.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolutionCastProjectionMeasurements {
+    pub(crate) baseline_clones: u32,
+    pub(crate) baseline_flushes: u32,
+    pub(crate) candidate_clones: u32,
+    pub(crate) face_clones: u32,
+    pub(crate) projected_target_checks: u32,
+    pub(crate) target_helper_fallback_clone_flushes: u32,
+}
+
+#[cfg(test)]
+impl ResolutionCastProjectionMeasurements {
+    const ZERO: Self = Self {
+        baseline_clones: 0,
+        baseline_flushes: 0,
+        candidate_clones: 0,
+        face_clones: 0,
+        projected_target_checks: 0,
+        target_helper_fallback_clone_flushes: 0,
+    };
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static RESOLUTION_CAST_PROJECTION_MEASUREMENTS: std::cell::Cell<ResolutionCastProjectionMeasurements> =
+        const { std::cell::Cell::new(ResolutionCastProjectionMeasurements::ZERO) };
+    // This depth guard makes a fallback count attributable only to an elected
+    // resolution-face probe, even when unrelated target checks share a test.
+    static RESOLUTION_CAST_PROJECTION_TARGET_DEPTH: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_resolution_cast_projection_measurements() {
+    RESOLUTION_CAST_PROJECTION_MEASUREMENTS.with(|measurements| {
+        measurements.set(ResolutionCastProjectionMeasurements::ZERO);
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn resolution_cast_projection_measurements() -> ResolutionCastProjectionMeasurements {
+    RESOLUTION_CAST_PROJECTION_MEASUREMENTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_resolution_cast_projection_measurement(
+    update: impl FnOnce(&mut ResolutionCastProjectionMeasurements),
+) {
+    RESOLUTION_CAST_PROJECTION_MEASUREMENTS.with(|measurements| {
+        let mut current = measurements.get();
+        update(&mut current);
+        measurements.set(current);
+    });
+}
+
+#[cfg(test)]
+struct ResolutionCastProjectionTargetDepthGuard;
+
+#[cfg(test)]
+impl ResolutionCastProjectionTargetDepthGuard {
+    fn enter() -> Self {
+        RESOLUTION_CAST_PROJECTION_TARGET_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ResolutionCastProjectionTargetDepthGuard {
+    fn drop(&mut self) {
+        RESOLUTION_CAST_PROJECTION_TARGET_DEPTH.with(|depth| {
+            depth.set(
+                depth
+                    .get()
+                    .checked_sub(1)
+                    .expect("resolution projection target-depth guard underflow"),
+            );
+        });
+    }
+}
+
 /// An engine-authored Foretell announcement for the Priority preflight. The
 /// hand object and card identity remain private to Casting until the Priority
 /// facade reconstructs the ordinary special-action primer.
@@ -10537,6 +10622,11 @@ pub(in crate::game) struct ResolutionCastProjection {
 
 impl ResolutionCastProjection {
     pub(in crate::game) fn new(state: &GameState) -> Self {
+        #[cfg(test)]
+        record_resolution_cast_projection_measurement(|measurements| {
+            measurements.baseline_clones += 1;
+            measurements.baseline_flushes += 1;
+        });
         let mut baseline = state.clone();
         super::layers::flush_layers(&mut baseline);
         Self { baseline }
@@ -10548,6 +10638,8 @@ impl ResolutionCastProjection {
         object_id: ObjectId,
         request: &ResolutionCastRequest,
     ) -> ResolutionSpellFaceLegality {
+        #[cfg(test)]
+        let _target_depth = ResolutionCastProjectionTargetDepthGuard::enter();
         resolution_spell_face_legality_from_baseline(&self.baseline, player, object_id, request)
     }
 
@@ -10564,7 +10656,10 @@ impl ResolutionCastProjection {
     /// Build candidate-specific immutable inputs from this same flushed
     /// baseline.  The callback receives no mutable access, so a request for one
     /// candidate cannot contaminate another candidate or either face probe.
-    pub(in crate::game) fn with_baseline<T>(&self, build: impl FnOnce(&GameState) -> T) -> T {
+    pub(in crate::game) fn with_flushed_baseline<T>(
+        &self,
+        build: impl FnOnce(&GameState) -> T,
+    ) -> T {
         build(&self.baseline)
     }
 }
@@ -10676,6 +10771,10 @@ fn resolution_spell_face_legality_from_baseline(
     // that the real path will elect, so the projector takes every
     // zone-admission, casting-prohibition, target, cost, cleanup, and rider
     // gate rather than approximating that path from policy alone.
+    #[cfg(test)]
+    record_resolution_cast_projection_measurement(|measurements| {
+        measurements.candidate_clones += 1;
+    });
     let mut projected = baseline.clone();
     if !projected.objects.contains_key(&object_id) {
         return ResolutionSpellFaceLegality {
@@ -10691,7 +10790,7 @@ fn resolution_spell_face_legality_from_baseline(
             back: false,
         };
     };
-    resolution_spell_face_legality_for_permission(
+    resolution_spell_face_legality_for_permission_from_flushed_state(
         &projected,
         player,
         object_id,
@@ -10707,6 +10806,31 @@ fn resolution_spell_face_legality_from_baseline(
 /// preparation call in the projector is what prevents a legal action from
 /// being issued for a face that the real cast would reject before announcement.
 fn resolution_spell_face_legality_for_permission(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+    permission_index: CastingPermissionIndex,
+) -> ResolutionSpellFaceLegality {
+    // This entry point can be given arbitrary live state by the actual
+    // resolution reducer. Establish the same clone-and-flush boundary that the
+    // shared enumerator establishes once, then keep all face-local reads on it.
+    let projection = ResolutionCastProjection::new(state);
+    projection.with_flushed_baseline(|baseline| {
+        resolution_spell_face_legality_for_permission_from_flushed_state(
+            baseline,
+            player,
+            object_id,
+            policy,
+            permission_index,
+        )
+    })
+}
+
+/// The caller has already cloned and layer-flushed its immutable baseline.
+/// Candidate and elected-face state are still cloned below; only the generic
+/// target helper's redundant clone-and-flush fallback is bypassed.
+fn resolution_spell_face_legality_for_permission_from_flushed_state(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
@@ -10740,6 +10864,10 @@ fn resolution_spell_face_legality_for_permission(
         if back_face && !may_choose_back {
             continue;
         }
+        #[cfg(test)]
+        record_resolution_cast_projection_measurement(|measurements| {
+            measurements.face_clones += 1;
+        });
         let mut projected = state.clone();
         let zone = {
             let Some(object) = projected.objects.get_mut(&object_id) else {
@@ -10797,7 +10925,13 @@ fn resolution_spell_face_legality_for_permission(
                 &policy.constraint,
                 Some(object.spell_mana_value()),
             )
-            && spell_has_legal_targets(&projected, object, player)
+            && {
+                #[cfg(test)]
+                record_resolution_cast_projection_measurement(|measurements| {
+                    measurements.projected_target_checks += 1;
+                });
+                spell_has_legal_targets_in_flushed_state(&projected, object.id, player)
+            }
             // Preparation owns zone admission and every live "can't cast"
             // rule.  It is intentionally run on this clone after the exact
             // indexed grant and prospective face have been installed.
@@ -15752,6 +15886,14 @@ pub fn spell_has_legal_targets_with_probe(
     {
         return spell_has_legal_targets_in_flushed_state(probe.state(), object_id, player);
     }
+    #[cfg(test)]
+    RESOLUTION_CAST_PROJECTION_TARGET_DEPTH.with(|depth| {
+        if depth.get() != 0 {
+            record_resolution_cast_projection_measurement(|measurements| {
+                measurements.target_helper_fallback_clone_flushes += 1;
+            });
+        }
+    });
     let mut simulated = state.clone();
     super::layers::flush_layers(&mut simulated);
     spell_has_legal_targets_in_flushed_state(&simulated, object_id, player)

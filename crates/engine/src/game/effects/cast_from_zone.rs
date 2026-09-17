@@ -243,7 +243,7 @@ fn compute_hand_pick_eligible(
                 if private_immediate_cast {
                     return projection.as_ref().is_some_and(|projection| {
                         projection
-                            .with_baseline(|baseline| {
+                            .with_flushed_baseline(|baseline| {
                                 private_resolution_cast_request(baseline, ability, *id)
                             })
                             .is_some_and(|request| {
@@ -2811,6 +2811,63 @@ mod tests {
         spell
     }
 
+    fn add_targeted_aura_to_hand(state: &mut GameState, card_id: CardId) -> ObjectId {
+        let aura = add_card_to_hand(state, PlayerId(0), card_id);
+        let object = state.objects.get_mut(&aura).unwrap();
+        object.card_types.core_types = vec![CoreType::Enchantment];
+        object.card_types.subtypes.push("Aura".to_string());
+        object.base_card_types = object.card_types.clone();
+        object.base_mana_cost = object.mana_cost.clone();
+        object
+            .keywords
+            .push(crate::types::keywords::Keyword::Enchant(
+                TargetFilter::Typed(TypedFilter::creature()),
+            ));
+        object.base_keywords = object.keywords.clone();
+        aura
+    }
+
+    fn add_targeted_modal_aura_to_hand(state: &mut GameState, card_id: CardId) -> ObjectId {
+        let aura = add_targeted_aura_to_hand(state, card_id);
+        let mut back_types = crate::types::card_type::CardType::default();
+        back_types.core_types.push(CoreType::Enchantment);
+        back_types.subtypes.push("Aura".to_string());
+        state.objects.get_mut(&aura).unwrap().back_face =
+            Some(crate::game::game_object::BackFaceData {
+                name: "Targeted Aura Back".to_string(),
+                card_types: back_types,
+                mana_cost: ManaCost::generic(2),
+                keywords: vec![crate::types::keywords::Keyword::Enchant(
+                    TargetFilter::Typed(TypedFilter::creature()),
+                )],
+                layout_kind: Some(LayoutKind::Modal),
+                ..Default::default()
+            });
+        aura
+    }
+
+    fn immediate_hand_aura_ability(source: ObjectId) -> (TargetFilter, ResolvedAbility) {
+        let target = TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment));
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: target.clone(),
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+                additional_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        (target, ability)
+    }
+
     #[test]
     fn private_immediate_candidates_isolate_rejected_and_face_swapped_siblings() {
         let mut state = make_test_state();
@@ -2856,6 +2913,75 @@ mod tests {
         assert!(!state.objects[&back_only].modal_back_face);
         assert_eq!(state.objects[&rejected].name, "Hand Spell");
         assert_eq!(state.objects[&later].name, "Hand Spell");
+    }
+
+    /// The private immediate-cast traversal shares one flushed projection
+    /// baseline across its hand pool. Targeted one- and two-face cards still
+    /// get isolated candidate/face clones, but must not re-enter the public
+    /// target helper's clone-and-flush fallback for every face.
+    #[test]
+    fn private_immediate_targeted_candidates_use_one_baseline_without_target_fallback() {
+        for (face_count, make_card) in [
+            (
+                1_u32,
+                add_targeted_aura_to_hand as fn(&mut GameState, CardId) -> ObjectId,
+            ),
+            (2_u32, add_targeted_modal_aura_to_hand),
+        ] {
+            for candidate_count in [1_u32, 3] {
+                let mut state = make_test_state();
+                let source = create_object(
+                    &mut state,
+                    CardId(8_100),
+                    PlayerId(0),
+                    "Immediate target-cast source".to_string(),
+                    Zone::Battlefield,
+                );
+                let target_creature = create_object(
+                    &mut state,
+                    CardId(8_101),
+                    PlayerId(1),
+                    "Target creature".to_string(),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&target_creature)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+                {
+                    let object = state.objects.get_mut(&target_creature).unwrap();
+                    object.base_card_types = object.card_types.clone();
+                }
+                let expected: Vec<_> = (0..candidate_count)
+                    .map(|index| make_card(&mut state, CardId(8_110 + u64::from(index))))
+                    .collect();
+                let (filter, ability) = immediate_hand_aura_ability(source);
+                let original_state = serde_json::to_value(&state).unwrap();
+
+                crate::game::casting::reset_resolution_cast_projection_measurements();
+                let eligible = compute_hand_pick_eligible(&state, &ability, &filter, Zone::Hand);
+                let measurements = crate::game::casting::resolution_cast_projection_measurements();
+
+                assert_eq!(eligible, expected, "all targeted faces stay eligible");
+                assert_eq!(measurements.baseline_clones, 1);
+                assert_eq!(measurements.baseline_flushes, 1);
+                assert_eq!(measurements.candidate_clones, candidate_count);
+                assert_eq!(measurements.face_clones, candidate_count * face_count);
+                assert_eq!(
+                    measurements.projected_target_checks,
+                    candidate_count * face_count
+                );
+                assert_eq!(measurements.target_helper_fallback_clone_flushes, 0);
+                assert_eq!(
+                    serde_json::to_value(&state).unwrap(),
+                    original_state,
+                    "projection must be read-only"
+                );
+            }
+        }
     }
 
     /// Keldon Flamesage's parsed attack trigger reaches its real optional
