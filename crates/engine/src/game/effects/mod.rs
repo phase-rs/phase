@@ -1589,17 +1589,22 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 )
                 .expect("replacement-resumed ChangeZone delivery retains its exact segment");
             }
-            // CR 608.2c: classify this delivery ONCE. The completion recorded on
-            // the logical group and the forwarded result published just below it
-            // must agree on the same verdict for the same member.
-            // CR 608.2c: derive ONE authoritative completion here and hand it to
-            // BOTH consumers — the logical group's record immediately below, and
-            // the forwarded result further down. Deriving them independently let
-            // the group record `Remained` while the forward treated the same
-            // delivery as moved; for a battlefield-sourced member (a `BounceAll`
-            // producer, which sets the same marker) that member IS a prospective
-            // member, so settlement would then read a survivor for an object the
-            // chain had already forwarded as moved.
+            // CR 608.2c + CR 603.10: settlement and forwarding ask DIFFERENT
+            // questions about the same delivery, and collapsing them into one
+            // verdict is itself a bug:
+            //
+            //   * the logical group asks "did this incarnation move AT ALL?" — a
+            //     CR 614.6 redirect to exile IS a move, and recording it as
+            //     `Remained` would drop the departure bookkeeping settlement owes
+            //     a permanent that left the battlefield;
+            //   * the producer asks "did it arrive where I SAID?" — a redirect did
+            //     not, so "that creature" has no referent and nothing is forwarded.
+            //
+            // MEASURED on the redirect fixture: `events=1 sidecar=Some(Moved)
+            // live_zone=Exile arrived=false`. `append_delivery_events` stamps
+            // `Moved` for ANY `ZoneChanged` on the incarnation, so the sidecar is
+            // correct for settlement and wrong for forwarding. Deriving one from
+            // the other forwarded a member that never reached the destination.
             let arrived_at_destination = paused_current.delivery_events.iter().any(|event| {
                 matches!(
                     event,
@@ -1644,42 +1649,26 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             // top-of-stack accessor cannot see it — hence the fixed two-frame
             // adjacency rather than `active_ability_continuation_frame_mut`.
             {
-                // CR 400.7 + CR 608.2c: forward exactly what this delivery moved.
-                // A member EXPLICITLY classified as not having moved changed no
-                // zone, so its producer completed having moved nothing and must
-                // publish the completed-empty result — the same contract a
-                // declined `up_to` selection publishes — rather than a referent to
-                // an object that never moved. A REDIRECTED delivery is still
-                // `Moved`: the object did change zones, just not to the requested
-                // destination, so it stays forwarded.
+                // CR 400.7 + CR 608.2c: a producer forwards only what arrived at the
+                // destination it NAMED. This deliberately is not the settlement
+                // completion decided above, and the difference is load-bearing: a
+                // CR 614.6 redirect is `Moved` for settlement — the object really
+                // did leave — yet forwards nothing, because nothing was put where
+                // the producer said it would go, so "that creature" has no referent.
+                // MEASURED: reusing the settlement completion here handed the exiled
+                // card to the delayed rider.
                 //
-                // The gate withholds ONLY on positive contrary evidence.
-                //
-                // With evidence, the test is arrival at the REQUESTED destination,
-                // mirroring the `moved_to_destination` count just below: a delivery
-                // that was prevented, that remained, or that a CR 614.6 replacement
-                // redirected elsewhere did not put this object where the producer
-                // said it would go, so "that creature" has no referent and the
-                // producer publishes the completed-empty result instead.
-                //
-                // Without evidence, it forwards. MEASURED on the copy-choice route:
-                // that paused record carries no sidecar AND an empty
-                // `delivery_events`, so every classifier that INFERS from it —
-                // `terminal_completion_after_resume()` included, which returns
-                // `Remained` for an empty slice — reports "did not move" for a
-                // member that really did enter the battlefield. Gating on such an
-                // inference silently un-fixes #6902: the creature stops being
-                // sacrificed. Absence of evidence is not evidence of no move.
-                // The SAME authoritative completion decided above. A member that
-                // arrived at the requested destination is forwarded; one that was
-                // prevented, remained, or was redirected elsewhere by a CR 614.6
-                // replacement did not go where the producer said, so "that
-                // creature" has no referent and the producer contributes nothing.
+                // With no evidence at all the member forwards. MEASURED on the
+                // copy-choice route (`events=0 sidecar=None`): that delivery is
+                // recorded out of band, so every classifier that INFERS from the
+                // paused record reports "did not move" for a member that really did
+                // enter the battlefield, and gating on such an inference silently
+                // un-fixes #6902. Absence of evidence is not evidence of no move.
                 let moved_member = [paused_current.member.object_id];
-                let moved: &[_] = match completion {
-                    crate::types::game_state::ZoneMoveCompletion::Moved => &moved_member,
-                    crate::types::game_state::ZoneMoveCompletion::Prevented
-                    | crate::types::game_state::ZoneMoveCompletion::Remained => &[],
+                let moved: &[_] = if arrived_at_destination || !has_delivery_evidence {
+                    &moved_member
+                } else {
+                    &[]
                 };
                 // CR 608.2c: ACCUMULATE, don't publish. The awaiting marker is
                 // consumed by the first publish, and a multi-card selection can

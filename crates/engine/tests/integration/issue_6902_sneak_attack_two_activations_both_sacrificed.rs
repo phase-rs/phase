@@ -92,18 +92,42 @@ fn resolve_putting(runner: &mut GameRunner, first: GameAction, pick: ObjectId) -
     panic!("activation did not settle; prompts: {seen:?}");
 }
 
+/// The delayed rider for tests that only need the referent ACTED ON.
+fn sacrifice_rider() -> Effect {
+    Effect::Sacrifice {
+        target: TargetFilter::ParentTarget,
+        count: QuantityExpr::Fixed { value: 1 },
+        // CR 107.1c: `min_count` is the floor for RANGED sacrifice choices ("one
+        // or more"); a plain "sacrifice that permanent" takes the 0 default.
+        min_count: 0,
+    }
+}
+
+/// The delayed rider that makes the referent OBSERVABLE rather than merely acted
+/// on. Sacrificing an object a CR 614.6 replacement redirected to exile is a
+/// no-op, so a sacrifice rider cannot separate "forwarded the redirected object"
+/// from "published `Some([])`" — both leave the board identical. A counter on the
+/// referent is visible either way.
+fn counter_rider() -> Effect {
+    Effect::PutCounter {
+        counter_type: CounterType::Plus1Plus1,
+        count: QuantityExpr::Fixed { value: 1 },
+        target: TargetFilter::ParentTarget,
+    }
+}
+
 /// The constructed `forward_result` producer these forwarding tests drive.
 ///
 /// Root: `PutCounter` on a DECLARED creature target. That declared target is
 /// exactly what tier 2 of `parent_chain_referents` inherits when tier 1 is left
 /// empty, and its counter doubles as a reach-guard proving the target really
 /// resolved. Sub-ability: a hand-to-battlefield `ChangeZone` carrying
-/// `forward_result`, whose own sub-ability installs the delayed "sacrifice that
-/// permanent" rider.
+/// `forward_result`, whose own sub-ability installs `rider` as a delayed trigger
+/// at the next end step.
 ///
-/// `hand_type` selects what the zone choice offers, so one producer serves both
-/// a creature put (the declined-selection case) and an Aura put (the CR 303.4f
-/// host-pause sibling) without duplicating the chain.
+/// `hand_type` selects what the zone choice offers and `rider` what the delayed
+/// trigger does to the forwarded referent, so one producer serves a creature put,
+/// an Aura put, and the redirect case that needs an OBSERVABLE referent.
 ///
 /// CR 601.2c + CR 608.2c: "put a card from your hand onto the battlefield" is
 /// NOT targeting. Hand is a hidden zone with no legal stack-time targets, so
@@ -113,22 +137,12 @@ fn resolve_putting(runner: &mut GameRunner, first: GameAction, pick: ObjectId) -
 /// DECLINABLE zone selection; it is pinned by the `up_to` unit test in
 /// `effects/change_zone.rs`, which asserts the resulting `EffectZoneChoice`
 /// carries count = eligible, min_count = 0, up_to = true.
-fn forwarding_producer_ability(hand_type: TypeFilter) -> AbilityDefinition {
-    let delayed_sacrifice = AbilityDefinition::new(
+fn forwarding_producer_ability(hand_type: TypeFilter, rider: Effect) -> AbilityDefinition {
+    let delayed_rider = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-            effect: Box::new(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Sacrifice {
-                    target: TargetFilter::ParentTarget,
-                    count: QuantityExpr::Fixed { value: 1 },
-                    // CR 107.1c: `min_count` is the floor for RANGED sacrifice
-                    // choices ("one or more"); a plain "sacrifice that permanent"
-                    // takes the 0 default.
-                    min_count: 0,
-                },
-            )),
+            effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, rider)),
             uses_tracked_set: false,
         },
     );
@@ -154,7 +168,7 @@ fn forwarding_producer_ability(hand_type: TypeFilter) -> AbilityDefinition {
             enters_modified_if: None,
         },
     )
-    .sub_ability(delayed_sacrifice)
+    .sub_ability(delayed_rider)
     .target_choice_timing(TargetChoiceTiming::Resolution)
     .multi_target(MultiTargetSpec::unlimited(0));
     producer.forward_result = true;
@@ -240,7 +254,7 @@ fn a_declined_up_to_zone_choice_publishes_a_completed_empty_forwarded_result() {
     install_ability(
         &mut runner,
         source,
-        forwarding_producer_ability(TypeFilter::Creature),
+        forwarding_producer_ability(TypeFilter::Creature, sacrifice_rider()),
     );
 
     runner
@@ -397,7 +411,7 @@ fn an_aura_host_pause_still_forwards_the_member_it_moved() {
     install_ability(
         &mut runner,
         source,
-        forwarding_producer_ability(TypeFilter::Enchantment),
+        forwarding_producer_ability(TypeFilter::Enchantment, sacrifice_rider()),
     );
 
     runner
@@ -471,14 +485,16 @@ fn an_aura_host_pause_still_forwards_the_member_it_moved() {
 /// this effect and the delayed "that creature" rider has no referent — it must not
 /// name the chain's DECLARED target instead.
 ///
-/// Scope, stated precisely because it is narrower than it looks: this test
-/// discriminates against the `None` fallback only. Both correct policies — publish
-/// `Some([])` (what this seam does: the redirect's delivery events show no arrival
-/// at the requested destination) and forwarding the redirected object — block the
-/// tier-2 fallback identically, and `ParentTarget` resolves at trigger-resolution
-/// time, so neither board state nor the installed `DelayedTrigger` can tell them
-/// apart. MEASURED: this test stays green when the seam publishes `&[]` for every
-/// paused member.
+/// The rider is a COUNTER, not a sacrifice, and that is what makes the test
+/// discriminating. Sacrificing an object a replacement already sent to exile is a
+/// no-op, so under a sacrifice rider "forwarded the redirected object" and
+/// "published `Some([])`" left identical board state and the test could only rule
+/// out the `None` fallback. A counter placed on whatever the forwarded result names
+/// separates all three:
+///
+/// * published `Some([])` — nothing gains a rider counter (the intended policy);
+/// * forwarded the redirect — the EXILED card gains one;
+/// * left at `None` — the DECLARED target gains a SECOND one, on top of the root's.
 ///
 /// Reaching the paused-member seam takes BOTH replacements. A lone redirect takes
 /// the `candidates.len() == 1` path and applies synchronously, never pausing; the
@@ -488,8 +504,11 @@ fn an_aura_host_pause_still_forwards_the_member_it_moved() {
 /// destination differs from the proposed one (`proposed_to != Some(destination)`),
 /// and a degenerate ordering would auto-resolve with no prompt at all.
 ///
-/// Revert-proof: publish `&[]` for a redirected member and the delayed rider falls
-/// back to the chain's declared target, sacrificing the decoy.
+/// Revert-proof against the two failure modes that matter here: forward a member
+/// whose delivery was redirected elsewhere and the exiled card gains a counter;
+/// leave the result at `None` and the decoy gains a second one. Publishing `&[]`
+/// for every paused member leaves this test green — that revert is caught by the
+/// copy-choice and Aura siblings instead, which is why all three are kept.
 #[test]
 fn a_redirected_delivery_still_forwards_the_member_it_moved() {
     let mut scenario = GameScenario::new_n_player(2, 42);
@@ -547,7 +566,7 @@ fn a_redirected_delivery_still_forwards_the_member_it_moved() {
     install_ability(
         &mut runner,
         source,
-        forwarding_producer_ability(TypeFilter::Creature),
+        forwarding_producer_ability(TypeFilter::Creature, counter_rider()),
     );
 
     runner
@@ -615,7 +634,33 @@ fn a_redirected_delivery_still_forwards_the_member_it_moved() {
         Zone::Battlefield,
         "CR 614.6 + CR 608.2c: the redirected member never reached the requested \
          destination, so the producer publishes a COMPLETED result rather than \
-         leaving it `None` — either way the chain's declared target is never inherited"
+         leaving it `None` — the chain's declared target is never inherited"
+    );
+
+    // The OBSERVABLE half. The rider puts a counter on whatever the forwarded
+    // result names, so the three candidate behaviours now differ on the board:
+    //   * published `Some([])`   -> nothing gains a rider counter (this seam);
+    //   * forwarded the redirect -> the EXILED card gains one;
+    //   * left at `None`         -> the DECLARED target gains a SECOND one.
+    // The decoy already carries exactly one counter from the root `PutCounter`
+    // that declared it, so the COUNT, not its presence, is the discriminator.
+    assert_eq!(
+        runner.state().objects[&decoy]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied(),
+        Some(1),
+        "the declared target must keep ONLY the root's counter; a second one means \
+         the delayed rider inherited it as the referent"
+    );
+    assert_eq!(
+        runner.state().objects[&redirected]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied(),
+        None,
+        "a member a CR 614.6 replacement sent elsewhere is not the referent, so it \
+         gains no rider counter"
     );
 }
 
@@ -663,7 +708,7 @@ fn a_multi_card_selection_forwards_every_re_paused_member() {
     install_ability(
         &mut runner,
         source,
-        forwarding_producer_ability(TypeFilter::Enchantment),
+        forwarding_producer_ability(TypeFilter::Enchantment, sacrifice_rider()),
     );
 
     runner
