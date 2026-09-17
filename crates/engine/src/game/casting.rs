@@ -2940,6 +2940,8 @@ pub(super) fn build_spell_meta(
     caster: PlayerId,
     object_id: ObjectId,
 ) -> Option<SpellMeta> {
+    let (spend_only_on_x_colors, spend_only_on_x_generic_count) =
+        spend_only_on_x_info(state, object_id);
     state.objects.get(&object_id).map(|obj| SpellMeta {
         types: object_type_names(obj),
         subtypes: obj.card_types.subtypes.clone(),
@@ -2959,7 +2961,7 @@ pub(super) fn build_spell_meta(
         has_x_in_cost: obj.mana_cost.has_x(),
         // CR 708.4 + CR 702.37c / CR 702.168b: `is_face_down` means "this spell is
         // being CAST FACE DOWN" (morph/disguise — paying {3} to cast as a 2/2
-        // face-down creature spell), NOT merely "the object has `face_down = true`".
+        // face-down creature), NOT merely "the object has `face_down = true`".
         // `spell_is_cast_face_down` is the single authority for that distinction and
         // carries the full CR argument; the spell-filter projection asks the same
         // question there, so the two seams cannot answer it differently. Guarded by
@@ -2971,6 +2973,8 @@ pub(super) fn build_spell_meta(
         cant_spend_mana: obj
             .casting_restrictions
             .contains(&crate::types::ability::CastingRestriction::CantSpendMana),
+        spend_only_on_x_colors,
+        spend_only_on_x_generic_count,
     })
 }
 
@@ -8615,6 +8619,177 @@ pub(super) fn apply_target_dependent_cost_modifiers(
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
 
+/// CR 601.2b / CR 601.2f / CR 601.2h: Calculate how many generic mana pips in the
+/// final cost correspond to restricted {X} contributions rather than unrestricted base/tax generic.
+pub(crate) fn compute_spend_only_on_x_generic_count(
+    state: &GameState,
+    obj: &GameObject,
+    pending: &PendingCast,
+) -> u32 {
+    let chosen_x = pending.ability.chosen_x.unwrap_or(0);
+    if chosen_x == 0 {
+        return 0;
+    }
+
+    let final_generic = match &pending.cost {
+        ManaCost::Cost { generic, .. } => *generic,
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => 0,
+    };
+    if final_generic == 0 {
+        return 0;
+    }
+
+    // CR 601.2f: Concretize the spell cost with chosen X and declared additions,
+    // then apply increases first, then all reductions in production order (including
+    // colored-reducer spillover via `apply_shard_reduction`, affinity, undaunted, etc.)
+    // to measure the true generic reduction applied to the spell.
+    let mut cost = pending
+        .base_cost
+        .clone()
+        .unwrap_or_else(|| obj.mana_cost.clone());
+    cost.concretize_x(chosen_x);
+    for addition in &pending.declared_mana_additions {
+        cost = super::restrictions::add_mana_cost(&cost, addition);
+    }
+
+    let casting_variant = Some(pending.casting_variant);
+
+    if let Some(raise) = exile_play_cast_cost_raise(
+        state,
+        obj,
+        pending.ability.controller,
+        pending.casting_permission_index,
+        casting_variant,
+    ) {
+        cost = super::restrictions::add_mana_cost(&cost, &raise);
+    }
+
+    let mut collected = collect_self_spell_cost_modifiers(
+        state,
+        pending.ability.controller,
+        pending.object_id,
+        Some(&pending.ability),
+        false,
+        casting_variant,
+    );
+    collected.extend(collect_battlefield_cost_modifiers(
+        state,
+        pending.ability.controller,
+        pending.object_id,
+        Some(&pending.ability),
+        false,
+        casting_variant,
+    ));
+
+    // Apply all raises first (CR 601.2f increases before reductions)
+    for modification in collected.iter().filter(|m| m.is_raise) {
+        apply_cost_mod_to_mana(
+            &mut cost,
+            &modification.amount,
+            modification.multiplier,
+            true,
+        );
+    }
+    if let Some(strive_cost) = obj.strive_cost.clone() {
+        let target_count = super::ability_utils::flatten_targets_in_chain(&pending.ability).len();
+        for _ in 1..target_count {
+            cost = super::restrictions::add_mana_cost(&cost, &strive_cost);
+        }
+    }
+
+    let generic_after_increases = match &cost {
+        ManaCost::Cost { generic, .. } => *generic,
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => 0,
+    };
+
+    // Apply all reductions (including colored spillover to generic per CR 118.7b/c/d)
+    for modification in collected.iter().filter(|m| !m.is_raise) {
+        apply_cost_mod_to_mana(
+            &mut cost,
+            &modification.amount,
+            modification.multiplier,
+            false,
+        );
+    }
+    let fused = pending.casting_variant == CastingVariant::Fuse;
+    apply_affinity_reduction(
+        state,
+        pending.ability.controller,
+        pending.object_id,
+        &mut cost,
+        fused,
+    );
+    apply_undaunted_reduction(
+        state,
+        pending.ability.controller,
+        pending.object_id,
+        &mut cost,
+        fused,
+    );
+    apply_pending_spell_cost_reductions(
+        state,
+        pending.ability.controller,
+        pending.object_id,
+        &mut cost,
+        fused,
+    );
+
+    let generic_after_reductions = match &cost {
+        ManaCost::Cost { generic, .. } => *generic,
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => 0,
+    };
+
+    let total_generic_reductions = generic_after_increases.saturating_sub(generic_after_reductions);
+    let x_after_reductions = chosen_x.saturating_sub(total_generic_reductions);
+    x_after_reductions.min(final_generic)
+}
+
+/// CR 601.2b / CR 601.2h: Return any color restrictions on paying {X} and the count of
+/// generic mana pips that must satisfy the restriction for the given spell.
+pub(crate) fn spend_only_on_x_info(
+    state: &GameState,
+    object_id: ObjectId,
+) -> (Option<Vec<ManaColor>>, u32) {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return (None, 0);
+    };
+    let colors = obj.casting_restrictions.iter().find_map(|r| match r {
+        crate::types::ability::CastingRestriction::SpendOnlyOnX { colors } => Some(colors.clone()),
+        _ => None,
+    });
+    let Some(colors) = colors else {
+        return (None, 0);
+    };
+    if let Some((active_oid, count)) = state.active_spend_only_on_x_count {
+        if active_oid == object_id {
+            return (Some(colors), count);
+        }
+    }
+    let pending = state
+        .pending_cast
+        .as_deref()
+        .or_else(|| state.waiting_for.pending_cast_ref());
+    let Some(pending) = pending else {
+        return (Some(colors), 0);
+    };
+    if pending.object_id != object_id {
+        return (Some(colors), 0);
+    }
+    (
+        Some(colors),
+        compute_spend_only_on_x_generic_count(state, obj, pending),
+    )
+}
+
 /// CR 601.2f: Recompute the FULL concrete pending cost for a known X. Floors
 /// run LAST so they lock in against the real total (CR 601.2f "locked in").
 /// Order: base (tax-inclusive) → concretize_x (CR 107.1b) → non-target
@@ -9412,6 +9587,7 @@ fn evaluate_cost_mod_static_condition(
     caster: PlayerId,
     source_controller: PlayerId,
     source_id: ObjectId,
+    casting_variant: Option<CastingVariant>,
 ) -> bool {
     use crate::types::ability::StaticCondition;
 
@@ -9420,10 +9596,24 @@ fn evaluate_cost_mod_static_condition(
             super::layers::evaluate_condition(state, condition, source_controller, source_id)
         }
         StaticCondition::And { conditions } => conditions.iter().all(|c| {
-            evaluate_cost_mod_static_condition(state, c, caster, source_controller, source_id)
+            evaluate_cost_mod_static_condition(
+                state,
+                c,
+                caster,
+                source_controller,
+                source_id,
+                casting_variant,
+            )
         }),
         StaticCondition::Or { conditions } => conditions.iter().any(|c| {
-            evaluate_cost_mod_static_condition(state, c, caster, source_controller, source_id)
+            evaluate_cost_mod_static_condition(
+                state,
+                c,
+                caster,
+                source_controller,
+                source_id,
+                casting_variant,
+            )
         }),
         StaticCondition::Not { condition } => !evaluate_cost_mod_static_condition(
             state,
@@ -9431,7 +9621,9 @@ fn evaluate_cost_mod_static_condition(
             caster,
             source_controller,
             source_id,
+            casting_variant,
         ),
+        StaticCondition::CastingAsVariant { variant } => casting_variant == Some(*variant),
         _ => super::layers::evaluate_condition(state, condition, caster, source_id),
     }
 }
@@ -9446,6 +9638,7 @@ fn battlefield_cost_modifier_applies_before_targets(
     source: &GameObject,
     definition: &StaticDefinition,
     fused: bool,
+    casting_variant: Option<CastingVariant>,
 ) -> bool {
     let Some(modifier) = definition.board_wide_cost_modifier() else {
         return false;
@@ -9461,7 +9654,14 @@ fn battlefield_cost_modifier_applies_before_targets(
         return false;
     }
     if definition.condition.as_ref().is_some_and(|condition| {
-        !evaluate_cost_mod_static_condition(state, condition, caster, source.controller, source.id)
+        !evaluate_cost_mod_static_condition(
+            state,
+            condition,
+            caster,
+            source.controller,
+            source.id,
+            casting_variant,
+        )
     }) {
         return false;
     }
@@ -9513,7 +9713,13 @@ fn collect_battlefield_cost_modifiers(
 
         {
             if !battlefield_cost_modifier_applies_before_targets(
-                state, caster, spell_id, src_obj, def, fused,
+                state,
+                caster,
+                spell_id,
+                src_obj,
+                def,
+                fused,
+                casting_variant,
             ) {
                 continue;
             }
@@ -16921,6 +17127,7 @@ pub(crate) fn pending_mana_obligation_is_stable_before_targets(
                 source,
                 definition,
                 fused,
+                Some(pending.casting_variant),
             ) || battlefield_cost_floor_applies_before_targets(
                 state,
                 player,

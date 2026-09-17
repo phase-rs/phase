@@ -1011,13 +1011,24 @@ fn parse_attack_verb(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+fn parse_one_of_your_opponents(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            opt(tag::<_, _, OracleError<'_>>("another ")),
+            tag("one of your opponents"),
+        ),
+    )
+    .parse(input)
+}
+
 fn parse_referenced_player_phrase(input: &str) -> OracleResult<'_, ()> {
     alt((
         value(
             (),
             tag::<_, _, OracleError<'_>>("one or more of your opponents"),
         ),
-        value((), tag("one of your opponents")),
+        parse_one_of_your_opponents,
         value((), tag("another player")),
         value((), tag("an opponent")),
         value((), tag("a player")),
@@ -13155,7 +13166,10 @@ fn try_parse_event(
                     )),
                 ),
                 value(AttackTargetFilter::Planeswalker, tag(" a planeswalker")),
-                value(AttackTargetFilter::Player, tag(" one of your opponents")),
+                value(
+                    AttackTargetFilter::Player,
+                    preceded(tag(" "), parse_one_of_your_opponents),
+                ),
                 value(AttackTargetFilter::Player, tag(" a player")),
                 value(AttackTargetFilter::Player, tag(" you")),
                 // CR 303.4e: "attacks enchanted player" — a Curse Aura trigger
@@ -13180,9 +13194,12 @@ fn try_parse_event(
         // eight or more lands" (Owlbear Cub) from the trigger event clause.
         let attack_target_parsed = parse_attack_target.parse(after).ok();
         let attack_target_filter = attack_target_parsed.as_ref().map(|(_, f)| f.clone());
-        let attacks_one_of_your_opponents = tag::<_, _, OracleError<'_>>(" one of your opponents")
-            .parse(after)
-            .is_ok();
+        let attacks_one_of_your_opponents = preceded(
+            tag::<_, _, OracleError<'_>>(" "),
+            parse_one_of_your_opponents,
+        )
+        .parse(after)
+        .is_ok();
         let mut def = make_base();
         // CR 508.3d: "Whenever [a player] attacks" triggers fire once per attack declaration,
         // not once per attacker. This applies to "opponent attacks you" patterns (e.g., Lulu,

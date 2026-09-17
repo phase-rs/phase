@@ -17848,6 +17848,11 @@ declare_game_state! {
     /// `CreateDelayedTrigger` tail to the installer. It is never persisted.
     #[serde(skip)]
     pub(crate) active_paid_resolution_offer_tail: Option<ResolutionCastOfferId>,
+    /// CR 601.2b / CR 601.2h: transient copy of the spend-only-on-X generic count
+    /// while finalization owns the `PendingCast` by value. Payment consults it only
+    /// inside that synchronous window; it is never serialized.
+    #[serde(skip)]
+    pub active_spend_only_on_x_count: Option<(ObjectId, u32)>,
 
     // Shared zones
     pub battlefield: im::Vector<ObjectId>,
@@ -24747,6 +24752,7 @@ impl GameState {
             active_rules_execution_node: None,
             active_casting_permission_index: None,
             active_paid_resolution_offer_tail: None,
+            active_spend_only_on_x_count: None,
             battlefield: im::Vector::new(),
             stack: im::Vector::new(),
             stack_paid_facts: HashMap::new(),
@@ -26945,6 +26951,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_rules_execution_node: _,
         active_casting_permission_index: _,
         active_paid_resolution_offer_tail: _,
+        active_spend_only_on_x_count: _,
         battlefield: _,
         stack: _,
         stack_paid_facts: _,
@@ -39651,6 +39658,36 @@ mod tests {
             !produced.contains(&ResourceAxis::Mana(ManaType::Colorless)),
             "no batched item can schedule a mana axis — which is why a batched collapse preserved \
              mana by construction long before the DriveSequence route did"
+        );
+    }
+
+    /// CR 601.2a / CR 601.2b / CR 601.2h: transient active casting fields are only used during
+    /// the synchronous payment/finalization window and must never be serialized to JSON.
+    #[test]
+    fn transient_active_casting_fields_are_skipped_by_serde() {
+        let mut state = GameState::new_two_player(7);
+        state.active_casting_permission_index = Some(CastingPermissionIndex(42));
+        state.active_spend_only_on_x_count = Some((ObjectId(123), 5));
+
+        let serialized = serde_json::to_string(&state).expect("state must serialize");
+        assert!(
+            !serialized.contains("active_casting_permission_index"),
+            "active_casting_permission_index must be skipped by serde: {serialized}"
+        );
+        assert!(
+            !serialized.contains("active_spend_only_on_x_count"),
+            "active_spend_only_on_x_count must be skipped by serde: {serialized}"
+        );
+
+        let deserialized: GameState =
+            serde_json::from_str(&serialized).expect("state must deserialize");
+        assert_eq!(
+            deserialized.active_casting_permission_index, None,
+            "deserialized active_casting_permission_index must be None"
+        );
+        assert_eq!(
+            deserialized.active_spend_only_on_x_count, None,
+            "deserialized active_spend_only_on_x_count must be None"
         );
     }
 }

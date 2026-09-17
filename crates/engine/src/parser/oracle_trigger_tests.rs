@@ -21771,6 +21771,28 @@ fn trigger_one_of_your_opponents_is_attacked() {
 }
 
 #[test]
+fn karazikar_attack_trigger_scopes_both_opponents() {
+    let def = parse_trigger_line(
+        "Whenever an opponent attacks another one of your opponents, you and the attacking player each draw a card and lose 1 life.",
+        "Karazikar, the Eye Tyrant",
+    );
+    let opponent = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+
+    // CR 508.3e: both players named by the attack trigger are opponents of
+    // Karazikar's controller, and the attacked object must be a player.
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_source, Some(opponent.clone()));
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    assert_eq!(def.valid_target, Some(opponent));
+    assert!(matches!(
+        def.execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::Unimplemented { .. })
+    ));
+}
+
+#[test]
 fn trigger_two_or_more_creatures_attack() {
     // CR 508.1a + CR 603.2c: head-noun counts use the full attackers-declared
     // batch, not source-relative co-attacker counting.

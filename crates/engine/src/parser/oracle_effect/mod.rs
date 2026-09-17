@@ -17475,45 +17475,74 @@ fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
     }
 }
 
-/// Peel an optional cardinality prefix from the noun phrase that precedes a
-/// positional placement terminator ("on top of" / "on the bottom of" / "into").
-///
-/// Returns `Some((Some(count), remainder))` when an explicit cardinality is
-/// recognized (e.g. "two cards from your hand" → `Fixed(2)` + "cards from your
-/// hand"), or `Some((None, input))` when the noun phrase has no leading
-/// quantity (the patcher leaves the existing `count: Fixed(1)` untouched).
-///
-/// Recognized prefixes for positional library placement:
-///   - `"x "` (with X-cost)     → `QuantityExpr::Ref { Variable("X") }`
-///   - numeric word/digit + " " → `QuantityExpr::Fixed { value: N }`
-///
-/// Cards like "put it on top" / "put that card on top" / "put target X on top"
-/// have no leading numeral and fall through to the `None` arm — the existing
-/// `count: Fixed(1)` is preserved. "Any number of …" forms are out of scope
-/// here; they involve a player-choice cardinality that is paired with a
-/// matching `MultiTargetSpec` and currently route through other effect
-/// paths (Brainstorm-class effects are handled at the trigger / sub-clause
-/// level, not by this patcher).
-fn peel_put_at_library_count(input: &str) -> Option<(Option<QuantityExpr>, &str)> {
+/// CR 115.1 (+ CR 115.1d for the trigger cohort) + CR 601.2c: the cardinality of
+/// the noun phrase in a positional library placement ("put <noun phrase> on top
+/// of / on the bottom of / into <library>"). Each shape names a DISTINCT rules
+/// concept, which is why this is a typed enum rather than a pair of `Option`s —
+/// a tuple would admit combinations the grammar cannot produce. `Exact` and
+/// `AnyNumber` both write the effect's own count, but with different semantics:
+///   * `Unstated`  — "target X" / "it" / "that card": no leading cardinality,
+///     so the lowering default of `count: Fixed(1)` stands.
+///   * `Exact`     — "two cards", "x cards": a concrete count on the effect.
+///   * `TargetSet` — "any number of [other|another] target …" / "up to N target
+///     …": an ANNOUNCED target set (CR 601.2c). The number of targets is fixed
+///     at announcement, so the placement set is the chosen targets and `count`
+///     is deliberately left alone.
+#[derive(Debug, PartialEq)]
+enum LibraryPlacementCardinality {
+    Unstated,
+    Exact(QuantityExpr),
+    TargetSet(MultiTargetSpec),
+    /// `AnyNumber` — "any number of <population>" with NO `target` word
+    /// (CR 115.10 + CR 115.10a: untargeted). A resolution-time choice of zero
+    /// through all eligible objects (CR 107.1c + CR 608.2d), written to the
+    /// effect's own `count` as the same `UpTo` wrapper the sacrifice class uses.
+    AnyNumber,
+}
+
+/// Peel the cardinality prefix from the noun phrase that precedes a positional
+/// placement terminator ("on top of" / "on the bottom of" / "into"), returning
+/// it alongside the remainder to hand to `parse_target`.
+fn peel_library_placement_cardinality(input: &str) -> (LibraryPlacementCardinality, &str) {
+    // CR 115.1 (+ CR 115.1d for the trigger cohort): `strip_optional_target_prefix`
+    // is the SINGLE authority for the announced target-set quantifiers, article
+    // guard included — it declines "any number of cards" and "up to one of them"
+    // without consuming. Tried FIRST because that is the precedence the grammar
+    // has; the numeral arms below could never see these inputs anyway, since
+    // they start with a word rather than a numeral.
+    if let (rest, Some(spec)) = strip_optional_target_prefix(input) {
+        return (LibraryPlacementCardinality::TargetSet(spec), rest);
+    }
+    // CR 107.1c + CR 115.10: untargeted "any number of <noun phrase>". Tried only
+    // AFTER the target-set authority above has declined, so "any number of target
+    // …" can never reach this arm. The pronoun form ("any number of them") is
+    // peeled here too; it is refused at the routing site, where the parsed
+    // recipient is known.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("any number of ").parse(input) {
+        return (LibraryPlacementCardinality::AnyNumber, rest);
+    }
     // "x " — variable quantity bound to the spell's chosen X.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("x ").parse(input) {
-        return Some((
-            Some(QuantityExpr::Ref {
+        return (
+            LibraryPlacementCardinality::Exact(QuantityExpr::Ref {
                 qty: QuantityRef::Variable {
                     name: "X".to_string(),
                 },
             }),
             rest,
-        ));
+        );
     }
     // Numeric ("two ", "three ", "1 ", …). `parse_number` accepts both English
     // number words and digits per the oracle-parser SKILL.
     if let Ok((after_num, n)) = nom_primitives::parse_number.parse(input) {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" ").parse(after_num) {
-            return Some((Some(QuantityExpr::Fixed { value: n as i32 }), rest));
+            return (
+                LibraryPlacementCardinality::Exact(QuantityExpr::Fixed { value: n as i32 }),
+                rest,
+            );
         }
     }
-    Some((None, input))
+    (LibraryPlacementCardinality::Unstated, input)
 }
 
 fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
@@ -17579,6 +17608,9 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
             //   - "put target X into Y's library Nth from top"   (count = 1)
             //   - "put two cards from your hand on top of your library in any order"
             //     (Cavalier of Gales / Brainstorm class — count = N, filter = Card+InZone:Hand)
+            // CR 115.1: an announced target set is a CLAUSE-level property, so it
+            // is carried out of the effect-shaped block below and attached after it.
+            let mut placement_target_set: Option<MultiTargetSpec> = None;
             if let Effect::PutAtLibraryPosition {
                 ref mut target,
                 ref mut count,
@@ -17603,53 +17635,112 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
                         };
                     }
                 }
-                let extracted = (|| -> Option<(Option<TargetFilter>, Option<QuantityExpr>)> {
-                    let lower = text.to_lowercase();
-                    let (after_put, _) = tag::<_, _, OracleError<'_>>("put ")
-                        .parse(lower.as_str())
-                        .ok()?;
-                    // Isolate the noun phrase before the first positional terminator.
-                    let before = [" on top of", " on the bottom of", " into "]
-                        .iter()
-                        .find_map(|term| {
-                            take_until::<_, _, OracleError<'_>>(*term)
-                                .parse(after_put)
-                                .ok()
-                                .map(|(_, before)| before)
-                        })?;
-                    // Peel a leading cardinality, if present. Recognized forms:
-                    //   - "two cards ..."          → Fixed(2)
-                    //   - "x cards ..."            → Variable("X")
-                    //   - "any number of cards"   → AnyNumberOf
-                    // The remainder (e.g. "cards from your hand") is then handed to
-                    // `parse_target` for filter extraction. If no quantity prefix
-                    // matches, the noun phrase is fed to `parse_target` unchanged
-                    // (covers "target X" / "it" / "that card" — count stays 1).
-                    let (count_expr, after_count) =
-                        peel_put_at_library_count(before).unwrap_or((None, before));
-                    // CR 608.2k: thread the real trigger context so a bare object
-                    // pronoun ("put it on the bottom …") binds to the trigger's
-                    // `object_pronoun_ref` (the cast spell for spell-cast triggers)
-                    // rather than defaulting to `ParentTarget`. `parse_target`
-                    // spins up a fresh empty context, which loses that antecedent.
-                    let (filter, _) = parse_target_with_ctx(after_count, ctx);
-                    let new_target = if matches!(filter, TargetFilter::Any) {
-                        None
-                    } else {
-                        Some(filter)
-                    };
-                    Some((new_target, count_expr))
-                })();
-                if let Some((maybe_filter, maybe_count)) = extracted {
+                let extracted =
+                    (|| -> Option<(Option<TargetFilter>, LibraryPlacementCardinality)> {
+                        let lower = text.to_lowercase();
+                        let (after_put, _) = tag::<_, _, OracleError<'_>>("put ")
+                            .parse(lower.as_str())
+                            .ok()?;
+                        // Isolate the noun phrase before the first positional terminator.
+                        let before = [" on top of", " on the bottom of", " into "]
+                            .iter()
+                            .find_map(|term| {
+                                take_until::<_, _, OracleError<'_>>(*term)
+                                    .parse(after_put)
+                                    .ok()
+                                    .map(|(_, before)| before)
+                            })?;
+                        // Peel the leading cardinality. Recognized forms:
+                        //   - "two cards ..."            → Exact(Fixed(2))
+                        //   - "x cards ..."              → Exact(Variable("X"))
+                        //   - "any number of target ..." → TargetSet(unlimited(0))
+                        //   - "up to N target ..."       → TargetSet(up_to(N))
+                        //   - "any number of cards ..."  → AnyNumber (count = UpTo(ObjectCount))
+                        // The remainder (e.g. "cards from your hand", "target creature
+                        // card from your graveyard" — the article is deliberately left
+                        // in place) is then handed to `parse_target` for filter
+                        // extraction. With no cardinality prefix the noun phrase is fed
+                        // to `parse_target` unchanged (covers "target X" / "it" / "that
+                        // card" — count stays 1).
+                        let (cardinality, after_count) = peel_library_placement_cardinality(before);
+                        // CR 608.2k: thread the real trigger context so a bare object
+                        // pronoun ("put it on the bottom …") binds to the trigger's
+                        // `object_pronoun_ref` (the cast spell for spell-cast triggers)
+                        // rather than defaulting to `ParentTarget`. `parse_target`
+                        // spins up a fresh empty context, which loses that antecedent.
+                        let (filter, _) = parse_target_with_ctx(after_count, ctx);
+                        let new_target = if matches!(filter, TargetFilter::Any) {
+                            None
+                        } else {
+                            Some(filter)
+                        };
+                        Some((new_target, cardinality))
+                    })();
+                if let Some((maybe_filter, cardinality)) = extracted {
                     if *target == TargetFilter::Any {
                         if let Some(filter) = maybe_filter {
                             *target = filter;
                         }
                     }
-                    if let Some(c) = maybe_count {
-                        *count = c;
+                    match cardinality {
+                        LibraryPlacementCardinality::Unstated => {}
+                        LibraryPlacementCardinality::Exact(c) => *count = c,
+                        // CR 601.2c + CR 115.1 (CR 115.1a spells / CR 115.1d
+                        // triggers; activated abilities via CR 602.2b): the
+                        // announced target set owns the cardinality. `count` stays
+                        // at the lowering default and is deliberately NOT consulted
+                        // by `put_on_top::resolve` for such an ability (see its
+                        // `multi_target` rule).
+                        LibraryPlacementCardinality::TargetSet(spec) => {
+                            placement_target_set = Some(spec)
+                        }
+                        // CR 107.1c + CR 115.10a + CR 608.2d: an untargeted "any
+                        // number of <population>" is a resolution-time choice of
+                        // zero through every eligible object — the same `UpTo`
+                        // encoding as "sacrifice any number of …". The recipient
+                        // must NAME a population: a deterministic anaphor ("any
+                        // number of them" → `ParentTarget`, the Dig-tail partition
+                        // owned by the Dig continuation grammar) or an unclassified
+                        // recipient (`Any` / a contentless `Typed`) keeps its base
+                        // shape. `names_enumerable_population` is the authored
+                        // population predicate for exactly that question.
+                        LibraryPlacementCardinality::AnyNumber => {
+                            if target.names_enumerable_population() {
+                                *count = QuantityExpr::up_to(QuantityExpr::Ref {
+                                    qty: QuantityRef::ObjectCount {
+                                        filter: target.clone(),
+                                    },
+                                });
+                            }
+                        }
                     }
                 }
+            }
+            // CR 115.1 (+ CR 115.1d for the trigger cohort): attach the announced
+            // target-set spec. This is a CLAUSE-level spec, consulted LAST in
+            // `assembly`'s six-arm precedence chain (four `MULTI_TARGET_VERBS`-gated
+            // text extractors, then the CHUNK-level `clause_ir.multi_target` — the
+            // per-opponent fanout spec — then this one), so an outer authority wins
+            // without this seam having to know about it.
+            //
+            // The `is_none()` check ENCODES THAT PRECEDENCE — it is not input
+            // validation, so do not delete it as unreachable-therefore-dead. It
+            // is the rule itself: a clause-level spec must never overwrite a
+            // spec an outer authority already set.
+            //
+            // It is also unreachable TODAY, and that is a separate fact about
+            // the current call graph rather than a reason to drop the rule:
+            // `lower_imperative_clause` above runs the post-parse multi-target
+            // fixups, but each of them gates on
+            // `MULTI_TARGET_VERBS` — three (`extract_exact_target_multi_target`,
+            // `extract_bounded_target_multi_target`,
+            // `extract_optional_target_multi_target`) directly, and
+            // `extract_verb_up_to_multi_target` indirectly through
+            // `strip_any_number_quantifier`'s first-word check — and that list (in
+            // `lower.rs`) contains no `put`, so a placement clause reaches here with
+            // the field unset.
+            if clause.multi_target.is_none() {
+                clause.multi_target = placement_target_set;
             }
             clause
         }
@@ -19420,8 +19511,20 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     {
         if let Some(verb) = extract_effect_verb(&primary_effect) {
             let reparsed_text = format!("{verb} {sub_text}");
-            let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
+            let mut reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
             if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
+                // CR 601.2c + CR 115.1: each instance of "target" announces its own
+                // target set, so this conjunct ("… and a charge counter on each of any
+                // number of target artifacts") recovers its own quantifier from its own
+                // reparsed text through the counter-path authority. The reparse does
+                // not run `lower_imperative_clause`'s recovery; without this the
+                // conjunct's slot is mandatory, although CR 107.1c + CR 115.6 allow
+                // zero targets.
+                if matches!(reparsed.effect, Effect::PutCounter { .. })
+                    && reparsed.multi_target.is_none()
+                {
+                    reparsed.multi_target = extract_put_counter_multi_target(&reparsed_text);
+                }
                 sub_clause = reparsed;
             }
         }
@@ -22442,10 +22545,10 @@ fn rebind_anaphoric_generic_effect_subject_to_parent(lower: &str, def: &mut Abil
     }
 }
 
-/// CR 115.10a + CR 601.2c: A damage clause whose recipient is a FRESH typed
-/// target structurally distinct from the anaphoric "It" subject an earlier
+/// CR 115.10a + CR 601.2c: A damage clause whose recipient is FRESH (a typed
+/// target, or a player) structurally distinct from the anaphoric "It" subject an earlier
 /// clause established — it declares its own recipient, not the boosted/
-/// counter'd object. Two shapes both witness this: (1) "creature an opponent
+/// counter'd object. Three shapes witness this: (1) "creature an opponent
 /// controls" / "creature you don't control" (canonicalize to
 /// `ControllerRef::Opponent`) — a different player's permanent can never be
 /// the subject's own controller's chosen object; (2) "each other creature" /
@@ -22453,14 +22556,28 @@ fn rebind_anaphoric_generic_effect_subject_to_parent(lower: &str, def: &mut Abil
 /// "another" exclusion excludes the referenced object *by definition*, so a
 /// board-sweep recipient (Chandra's Ignition class: "target creature you
 /// control deals damage equal to its power to each other creature") can never
-/// be the same object as "It" either. Per CR 601.2c each instance of the word
+/// be the same object as "It" either; (3) a PLAYER recipient
+/// (`TargetFilter::is_player_scope`) — CR 120.3a: damage dealt to a player makes
+/// that player lose life, so a printed player recipient is never the antecedent
+/// creature. Per CR 601.2c each instance of the word
 /// "target" is a separate target, and per CR 115.10a being affected (the
-/// source's power feeding the amount) does not make either recipient shape the
+/// source's power feeding the amount) does not make recipient shape (1) or (2) the
 /// same object as the boosted/counter'd creature. Recurses through
 /// `Or`/`And`/`Not` wrappers, mirroring `attach_controller_if_absent` /
-/// `rewrite_filter_controller`. `ParentTarget`/`SelfRef`/`Any`/
-/// `ParentTargetController` etc. are excluded (they are never `Typed` anyway).
+/// `rewrite_filter_controller`. Still excluded: `ParentTarget`, `SelfRef`, `Any`
+/// and `ParentTargetController`, none of which `is_player_scope` accepts
+/// and none of which is `Typed`.
 fn target_filter_is_distinct_recipient(filter: &TargetFilter) -> bool {
+    // CR 120.3a + CR 608.2c: a PLAYER recipient ("... to you", "... to target
+    // player") is printed by the clause itself, so it can never be the declared
+    // antecedent the anaphor names. Damage dealt to a player makes that player
+    // lose that much life (CR 120.3a); collapsing the recipient to `ParentTarget`
+    // would re-aim the clause at the antecedent creature instead. Decline the
+    // blanket anaphoric parent-rewrite for it exactly as for a fresh opponent
+    // target, and let the caller attribute the damage source to the antecedent.
+    if filter.is_player_scope() {
+        return true;
+    }
     match filter {
         TargetFilter::Typed(tf) => {
             tf.controller == Some(ControllerRef::Opponent)
@@ -22474,9 +22591,52 @@ fn target_filter_is_distinct_recipient(filter: &TargetFilter) -> bool {
     }
 }
 
-/// Returns true iff `effect` is a `DealDamage`/`DamageAll` whose recipient is a
-/// structurally distinct typed target (see `target_filter_is_distinct_recipient`
-/// — either opponent-controlled or an "other"/"another"-excluded board sweep).
+/// CR 120.2b + CR 608.2c: does this damage amount read a characteristic of the
+/// clause's ANAPHORIC subject, so that the subject the clause's own words name
+/// ("that creature" / "it") is the object dealing the damage?
+///
+/// CR 120.2b: the spell or ability specifies which object deals the damage.
+/// This is consulted only for a `ParentTargetController` recipient ("... to its
+/// controller"), which two printed grammars share while naming different
+/// sources:
+///   * "That creature deals damage equal to its power to its controller" - the
+///     subject is the anaphor and "its power" reads that same object, so the
+///     amount's scope is `Anaphoric` (`EventSource` inside a triggered ability,
+///     before `bind_anaphoric_damage_subject_keep_recipient` coerces it). The
+///     antecedent is the source.
+///   * "<card> deals damage equal to that creature's power to its controller" -
+///     the card names itself as the subject (CR 201.5), and the amount reads
+///     either the antecedent through a `Demonstrative` scope ("that creature's
+///     power") or the card itself through a `Source` scope ("this creature's
+///     power"). The card is the source, and stamping the antecedent would
+///     contradict it.
+///
+/// A printed constant ("<card> deals 2 damage to that creature's controller")
+/// has no object scope and is rejected with the second grammar.
+fn amount_reads_the_antecedent(amount: &QuantityExpr) -> bool {
+    let QuantityExpr::Ref { qty } = amount else {
+        return false;
+    };
+    let scope = match qty {
+        QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. }
+        | QuantityRef::CountersOn { scope, .. } => scope,
+        _ => return false,
+    };
+    matches!(scope, ObjectScope::Anaphoric | ObjectScope::EventSource)
+}
+
+/// Returns true iff `effect` is a `DealDamage`/`DamageAll` whose recipient
+/// `target_filter_is_distinct_recipient` accepts (an opponent-controlled typed
+/// target, an "other"/"another"-excluded board sweep, or a player), or whose
+/// recipient is `ParentTargetController` with an amount
+/// `amount_reads_the_antecedent` accepts.
 /// Used to DECLINE the blanket anaphoric parent-rewrite for the "one-sided
 /// fight" class (Ambuscade, Clear Shot, Rabid Gnaw, ...) and the "counter-then-
 /// sweep" class (Nova Flame: "Put X +1/+1 counters on target creature you
@@ -22485,8 +22645,10 @@ fn target_filter_is_distinct_recipient(filter: &TargetFilter) -> bool {
 /// to `ParentTarget`.
 fn damage_clause_has_distinct_recipient(effect: &Effect) -> bool {
     match effect {
-        Effect::DealDamage { target, .. } | Effect::DamageAll { target, .. } => {
+        Effect::DealDamage { target, amount, .. } | Effect::DamageAll { target, amount, .. } => {
             target_filter_is_distinct_recipient(target)
+                || (matches!(target, TargetFilter::ParentTargetController)
+                    && amount_reads_the_antecedent(amount))
         }
         _ => false,
     }
@@ -22498,9 +22660,11 @@ fn damage_clause_has_distinct_recipient(effect: &Effect) -> bool {
 /// "... That creature deals damage equal to its power to this creature."). Per
 /// CR 201.5 the self-reference names just the source object, so the blanket
 /// anaphoric parent-rewrite must not collapse it to `ParentTarget` (which would
-/// re-aim the fight-back at clause 1's chosen target). The `Anaphoric` amount is
-/// resolved by the resolver's CR 608.2c `effect_context_object` referent, so no
-/// source/amount rebind is needed here.
+/// re-aim the fight-back at clause 1's chosen target). This predicate only
+/// recognizes the recipient shape; `bind_anaphoric_damage_subject_keep_recipient`'s
+/// self-reference arm attributes the damage source to the declared object
+/// (CR 120.1) and coerces a triggered ability's `EventSource` amount to
+/// `Anaphoric`.
 fn damage_clause_has_self_ref_recipient(effect: &Effect) -> bool {
     matches!(
         effect,
@@ -22514,23 +22678,38 @@ fn damage_clause_has_self_ref_recipient(effect: &Effect) -> bool {
     )
 }
 
-/// Coerce a per-object `QuantityRef` whose scope is `ObjectScope::Source` to
-/// `target`. The mirror of `rebind_anaphoric_ref` for the one-sided fight class:
-/// a "Then it deals damage equal to its power" sub-clause whose subject was
-/// classified as `SelfRef` gets its "its power" anaphor prematurely rebound to
-/// `Source` (the ability source) by the subject-stamping pass (~mod.rs:12278).
-/// For this class the "it" is the boosted creature (the parent TARGET,
-/// `targets[0]` once `damage_source = Target`), never the spell source — so the
-/// amount must be retargeted to `Anaphoric` (resolved to `targets[0]` by the
-/// runtime one-sided-fight fallback in `game/quantity.rs`), keeping the export
-/// in sync with the Oracle "its".
 #[derive(Clone, Copy)]
 enum SourceRefRebind {
     AllObjectRefs,
     PowerOrToughness,
 }
 
-fn rebind_source_ref(qty: &mut QuantityRef, target: ObjectScope, rebind: SourceRefRebind) {
+/// Coerce a per-object `QuantityRef` whose scope is `from` to `target`.
+///
+/// CR 608.2c: an anaphoric per-object amount ("its power") names one object; this
+/// walk only retargets WHICH object, never which characteristic. Two `from`
+/// scopes:
+///   * `ObjectScope::Source` — an amount a subject-stamping pass bound to the
+///     ability source. In the one-sided-fight class, a "Then it deals damage
+///     equal to its power" sub-clause whose subject was classified `SelfRef` had
+///     "its power" prematurely bound to the ability source (power 0 for a spell).
+///     Retargeted to `Anaphoric`, whose runtime read order ends at the
+///     one-sided-fight `targets[0]` fallback, keeping the export in sync with
+///     the Oracle "its". `restore_this_way_trigger_anaphor` retargets it to
+///     `Anaphoric` too,
+///     and `wrap_target_subject_damage` retargets a power/toughness amount to
+///     `Target`.
+///   * `ObjectScope::EventSource` — the declared-target damage-source class,
+///     where a triggered ability had bound "its power" to the TRIGGERING object
+///     (Stalking Yeti, Form of the Dinosaur, Hunter's Bow, Cyclops Gladiator).
+///     Once the clause's damage source is the declared object, its amount must
+///     read that object.
+fn rebind_object_scope_ref(
+    qty: &mut QuantityRef,
+    from: ObjectScope,
+    target: ObjectScope,
+    rebind: SourceRefRebind,
+) {
     if matches!(rebind, SourceRefRebind::PowerOrToughness)
         && !matches!(
             qty,
@@ -22553,16 +22732,21 @@ fn rebind_source_ref(qty: &mut QuantityRef, target: ObjectScope, rebind: SourceR
         | QuantityRef::CountersOn { scope, .. } => scope,
         _ => return,
     };
-    if *scope == ObjectScope::Source {
+    if *scope == from {
         *scope = target;
     }
 }
 
-/// `QuantityExpr` walker for `rebind_source_ref` (mirrors
+/// `QuantityExpr` walker for `rebind_object_scope_ref` (mirrors
 /// `rebind_anaphoric_object_scope`'s recursion).
-fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope, rebind: SourceRefRebind) {
+fn rebind_object_scope_amount(
+    expr: &mut QuantityExpr,
+    from: ObjectScope,
+    target: ObjectScope,
+    rebind: SourceRefRebind,
+) {
     match expr {
-        QuantityExpr::Ref { qty } => rebind_source_ref(qty, target, rebind),
+        QuantityExpr::Ref { qty } => rebind_object_scope_ref(qty, from, target, rebind),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -22570,15 +22754,15 @@ fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope, rebind: So
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
             exponent: inner, ..
-        } => rebind_source_amount(inner, target, rebind),
+        } => rebind_object_scope_amount(inner, from, target, rebind),
         QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for inner in exprs {
-                rebind_source_amount(inner, target, rebind);
+                rebind_object_scope_amount(inner, from, target, rebind);
             }
         }
         QuantityExpr::Difference { left, right } => {
-            rebind_source_amount(left, target, rebind);
-            rebind_source_amount(right, target, rebind);
+            rebind_object_scope_amount(left, from, target, rebind);
+            rebind_object_scope_amount(right, from, target, rebind);
         }
         QuantityExpr::Fixed { .. } => {}
     }
@@ -22606,18 +22790,36 @@ fn rebind_source_amount(expr: &mut QuantityExpr, target: ObjectScope, rebind: So
 /// Gated to a `ZoneChangedThisWay` condition so only the reflexive-trigger body
 /// pronoun is touched; a true self-reference ("~ deals damage equal to its
 /// power") never carries this condition and keeps its `Source` scope. Mirrors
-/// the one-sided-fight `Source → Anaphoric` coercion (`rebind_source_amount`).
+/// the one-sided-fight `Source → Anaphoric` coercion (`rebind_object_scope_amount`).
 fn restore_this_way_trigger_anaphor(effect: &mut Effect) {
     match effect {
         Effect::DealDamage { amount, .. } | Effect::DamageEachPlayer { amount, .. } => {
-            rebind_source_amount(
+            rebind_object_scope_amount(
                 amount,
+                ObjectScope::Source,
                 ObjectScope::Anaphoric,
                 SourceRefRebind::AllObjectRefs,
             );
         }
         _ => {}
     }
+}
+
+/// CR 201.5 + CR 120.1: the self-reference arm of
+/// [`bind_anaphoric_damage_subject_keep_recipient`], exposed so the chunk-loop's
+/// GATED-clause rewrite can decline the blanket parent-rewrite for the same
+/// reason the two `condition.is_none()` pronoun rewrites already do. A damage
+/// clause whose recipient is the source object's own self-reference ("to this
+/// creature" / "to ~") is never aimed at the declared antecedent (CR 201.5), and
+/// its damage source IS that antecedent (CR 120.1) — and an "If you do" gate
+/// (CR 118.12) governs WHETHER the clause happens, not WHAT its anaphor names
+/// (CR 608.2c), so the gated form must bind identically. Restricted to this arm:
+/// a gated clause with any other recipient shape keeps the rewrite it has today.
+fn bind_self_ref_damage_subject(effect: &mut Effect) -> bool {
+    if !damage_clause_has_self_ref_recipient(effect) {
+        return false;
+    }
+    bind_anaphoric_damage_subject_keep_recipient(effect)
 }
 
 /// CR 120.1 + CR 608.2c: For a "one-sided fight" anaphoric damage clause
@@ -22633,54 +22835,116 @@ fn restore_this_way_trigger_anaphor(effect: &mut Effect) {
 /// controls" is a distinct target.
 ///
 /// The "its power" amount is left as `Power{Anaphoric}` (NOT rebound to
-/// `Target`): the runtime one-sided-fight fallback in `game/quantity.rs`
-/// resolves `Anaphoric` to that same `targets[0]` source object. Keeping the
+/// `Target`). `game/quantity.rs` reads an `Anaphoric` power or toughness from
+/// the earlier instruction's referent (`effect_context_object`) first, then
+/// from the trigger-event source and the cost referent, and last from the
+/// one-sided-fight fallback, which reads the first object target (`targets[0]`)
+/// only when `damage_source == Some(Target)`. Keeping the
 /// AST `Anaphoric` keeps the serialized export in sync with the Oracle "its"
 /// and avoids reintroducing #699 (where rebinding the source amount to `Target`
 /// alongside a clobbered recipient made the boosted creature damage itself).
-/// The only rebind here is `Source → Anaphoric`: the "Then it deals..." subject
-/// is classified `SelfRef`, so the subject-stamping pass (~mod.rs:12278)
+/// Two rebinds run here: `Source → Anaphoric` (the spell-subject case) and
+/// `EventSource → Anaphoric` (the triggered-ability case, Stalking Yeti / Form of
+/// the Dinosaur / Hunter's Bow / Cyclops Gladiator). The "Then it deals..."
+/// subject is classified `SelfRef`, so the subject-stamping pass
 /// prematurely binds "its power" to `Source` (the spell, power 0); coercing it
-/// to `Anaphoric` routes it back through the same runtime fallback. Returns true
+/// to `Anaphoric` puts it on that read order. Coercion alone does not make a
+/// triggered ability's amount read the declared object: when the earlier
+/// instruction leaves no referent (for example its damage was 0, CR 120.8, or
+/// its recipient can't be dealt damage) and the triggering object has a power,
+/// the trigger-event source is read before the fallback, so the amount reads
+/// the triggering object. Returns true
 /// (= decline the blanket `replace_target_with_parent`) when handled.
 ///
-/// Covers three recipient shapes: (1) the fresh-opponent recipient — attribute
+/// Covers five recipient shapes: (1) the fresh-opponent recipient — attribute
 /// the damage source to the parent target while preserving the recipient and
 /// the anaphoric amount; (2) the self-reference recipient ("to this
 /// creature"/"to ~", `TargetFilter::SelfRef`, the Karplusan Yeti fight-back
-/// class) — preserve the recipient verbatim with NO source/amount rebind;
+/// class) — preserve the recipient verbatim and attribute the damage source to
+/// the declared object (CR 120.1), coercing a triggered-ability `EventSource`
+/// amount to `Anaphoric`;
 /// (3) the "other"/"another"-excluded board-sweep recipient ("to each other
 /// creature", `FilterProp::Another` — the Chandra's Ignition / Nova Flame
 /// class, issue #4960) — same handling as (1): attribute the damage source to
 /// the parent target while preserving the sweep recipient and the anaphoric
-/// amount. Without this, `damage_source` stays `None` (the spell itself), so
+/// amount; (4) a printed PLAYER recipient (`TargetFilter::is_player_scope` —
+/// "to you": Form of the Dinosaur, Bind the Monster) — attribute the damage
+/// source to the declared object and preserve the player recipient (CR 120.3a);
+/// (5) the antecedent-relative player recipient (`ParentTargetController` with
+/// an amount `amount_reads_the_antecedent` accepts — Backlash, Traitor's Roar,
+/// Ana Battlemage) — the same handling. Shape (5) is admitted by
+/// `damage_clause_has_distinct_recipient`, not by
+/// `target_filter_is_distinct_recipient`, because the same recipient filter with
+/// a printed constant amount (Blur of Blades, Sonic Assault) has the SPELL as its
+/// source (CR 201.5) and must not be stamped. Without shape (3)'s handling,
+/// `damage_source` stays `None` (the spell itself), so
 /// the runtime one-sided-fight fallback in `game/quantity.rs` (gated on
 /// `damage_source == Some(Target)`) never fires and `Power{Anaphoric}`
 /// resolves to 0 — Nova Flame with any X dealt no damage.
 fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
     // CR 201.5 + CR 608.2c: a self-reference recipient ("to this creature"/"to ~")
-    // is the source itself and must be preserved verbatim (fight-back class). No
-    // source/amount rebind: the resolver seeds the `Anaphoric` amount from the
-    // prior clause's damaged-object event (effect_context_object).
+    // is the source object itself and must be preserved verbatim (fight-back
+    // class). The recipient is NOT rewritten here.
     if damage_clause_has_self_ref_recipient(effect) {
+        // CR 120.1 + CR 120.2b: the object that deals damage is the source of
+        // that damage — here the DECLARED object the earlier instruction chose,
+        // not the resolving ability's source. `damage_source = Target` routes the
+        // clause through the existing one-sided-fight descent
+        // (`effects/mod.rs::is_one_sided_fight_damage_sub`), which prepends the
+        // declared object so `targets[0]` IS the subject and
+        // `deal_damage.rs::target_damage_source` selects it. The `SelfRef`
+        // recipient is unaffected by that prepend.
+        set_damage_clause_source_only(effect, DamageSource::Target);
+        // CR 608.2c: inside a triggered ability the subject-stamping
+        // pass had bound "its power" to the TRIGGERING object
+        // (`ObjectScope::EventSource` — Stalking Yeti's ETB, Cyclops Gladiator's
+        // attack trigger). Once the source is the declared object, the amount must
+        // read that same object. `game/quantity.rs` reads an `Anaphoric` power or
+        // toughness from the earlier instruction's referent
+        // (`effect_context_object`) first, then from the trigger-event source and
+        // the cost referent, and last from the one-sided-fight fallback gated on
+        // the `damage_source = Target` just stamped.
+        if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } = effect {
+            rebind_object_scope_amount(
+                amount,
+                ObjectScope::EventSource,
+                ObjectScope::Anaphoric,
+                SourceRefRebind::AllObjectRefs,
+            );
+        }
         return true;
     }
     if !damage_clause_has_distinct_recipient(effect) {
         return false;
     }
     // CR 115.10a + CR 601.2c + CR 608.2c + CR 120.1: preserve the distinct
-    // recipient (fresh-opponent target OR "other"-excluded board sweep) and
-    // attribute damage source to targets[0] (the boosted/counter'd "It"); leave
-    // "its power" as Power{Anaphoric} — the runtime resolves it to that same
-    // source object. Do NOT rebind to Target (that desyncs the export from
+    // recipient (fresh-opponent target, "other"-excluded board sweep, printed
+    // player, or antecedent-relative player) and
+    // attribute damage source to targets[0] (the anaphoric "It", the declared
+    // antecedent); leave
+    // "its power" as Power{Anaphoric} — the runtime reads it in the order this
+    // function's doc gives, whose last slot is that same source object. Do NOT
+    // rebind to Target (that desyncs the export from
     // the Oracle "its" and reintroduces #699).
     set_damage_clause_source_only(effect, DamageSource::Target);
-    // Source → Anaphoric only (the SelfRef-subject "Then it deals..." variant);
-    // gated inside this fresh-opponent branch so it can't touch unrelated
-    // Source-amount cards. Anaphoric amounts are already correct and untouched.
+    // Source → Anaphoric (the SelfRef-subject "Then it deals..." variant) and
+    // EventSource → Anaphoric (a triggered ability's "its power");
+    // gated inside this distinct-recipient branch so it can't touch unrelated
+    // Source- or EventSource-amount cards. Anaphoric amounts are already correct and untouched.
     if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } = effect {
-        rebind_source_amount(
+        rebind_object_scope_amount(
             amount,
+            ObjectScope::Source,
+            ObjectScope::Anaphoric,
+            SourceRefRebind::AllObjectRefs,
+        );
+        // CR 608.2c: same coercion as arm 1 — a triggered ability's
+        // "its power" had been bound to the triggering object; the declared
+        // object is now the source, so the amount is re-scoped to `Anaphoric`
+        // with it (Form of the Dinosaur, Hunter's Bow).
+        rebind_object_scope_amount(
+            amount,
+            ObjectScope::EventSource,
             ObjectScope::Anaphoric,
             SourceRefRebind::AllObjectRefs,
         );
@@ -23072,16 +23336,23 @@ fn chain_prior_chosen_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
 /// overwritten by most-recent-only chain propagation"), which is why Malamet's
 /// two-target counter chain must re-key its condition to `Some(0)`
 /// (`lower::rekey_counter_slot_in_chain`: bind slot 0, "not the most-recent
-/// opponent target"). This walk is fail-closed in exactly the way that makes the
-/// two agree at EVERY declared index: it stops at the NEAREST declaring clause
-/// and blocks on anything nearer that is not a `ParentTarget` carrier, and a
+/// opponent target"). This walk stops at the NEAREST declaring clause, and a
 /// `ParentTarget` carrier declares no slot at all
-/// (`TargetFilter::is_context_ref`), so it cannot move "most recent". The
-/// antecedent returned here is therefore always the chain's most-recent declared
-/// object target — the object `None` already resolves. A multi-slot declaration
-/// head can never BE the antecedent either: `Effect::target_filter()` is `None`
-/// for a paired-subject effect by design, so the `_ => return None` arm blocks
-/// on it.
+/// (`TargetFilter::is_context_ref`), so it cannot move "most recent". Whether
+/// the antecedent returned here agrees with what `subject_slot: None` resolves
+/// at EVERY declared index is not characterised here. A multi-slot declaration
+/// head can never BE the antecedent, and that rests on the walk's return points,
+/// which are enumerable from the two arms below: `Effect::target_filter()` is
+/// `None` for a paired-subject effect by design, so the head node itself is
+/// never returned — one arm continues past a grant carrying a
+/// `ParentTarget`-affected static, and the other returns the last typed target
+/// of the clause's OWN sub-chain. Note what that does not say: a paired-subject
+/// head's sub-chain target CAN be returned; it is the head node that cannot.
+/// Corroboration measured during phase 4's implementation over the full card
+/// corpus: the recovering arm returned `Some` at 48 sites over 22 clause shapes,
+/// none of them a head. To re-measure, print `ClauseIr.source` from that arm
+/// when it returns `Some` and run `cargo export-cards data` over the full card
+/// corpus.
 ///
 /// Emitting `Some(index)` instead would be a regression, not a tightening: it
 /// indexes the FLATTENED root chain through
@@ -23108,20 +23379,62 @@ fn chain_prior_chosen_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
 /// BASE is equally wrong on it (its condition just evaluates false) and the same
 /// gap already exists untouched for the three overlap nouns. If a card ever
 /// prints it, the fix is to DECLINE: have the caller skip seeding when the
-/// current chunk's own clause declares a non-`ParentTarget` object target, which
-/// keeps the fail-closed contract instead of binding the wrong referent.
+/// current chunk's own clause declares a non-`ParentTarget` object target,
+/// instead of binding the wrong referent.
 /// Malamet is the standing proof the shape is real —
 /// `lower::rekey_counter_slot_in_chain` must re-key to `Some(0)` precisely
 /// because its condition node has its own local target.
 fn chain_declared_object_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
     for prev in clauses.iter().rev() {
-        if prev.condition.is_some() {
+        // CR 608.2c + CR 118.12 / CR 603.12: an affirmative "if you do" / "when you do" gate decides whether its
+        // instruction happens, not what that instruction declared, so its declared
+        // target stays the nearest antecedent of a later "that creature" (Magitek
+        // Scythe; Neyith of the Dire Hunt). Every other condition still blocks.
+        if prev
+            .condition
+            .as_ref()
+            .is_some_and(|condition| !condition.is_affirmative_reflexive_gate())
+        {
             return None;
         }
         match prev.parsed.effect.target_filter() {
             Some(TargetFilter::ParentTarget) => continue,
+            // CR 115.1 + CR 701.21a: a typed filter the slot collector does not
+            // announce as a target ("sacrifice a Blood token") declares no object
+            // target, so it is no antecedent of a later anaphor.
+            Some(TargetFilter::Typed(_))
+                if triggers::extract_target_filter_from_effect(&prev.parsed.effect).is_none() =>
+            {
+                return None
+            }
             Some(t @ TargetFilter::Typed(_)) if !t.is_player_scope() => return Some(t),
-            _ => return None,
+            Some(TargetFilter::Typed(_)) => return None,
+            // CR 608.2c: an earlier anaphor already bound to the declared target
+            // ("That land becomes a 0/0 Elemental creature") names the same object,
+            // so the walk passes it on to that target.
+            None if matches!(
+                &prev.parsed.effect,
+                Effect::GenericEffect { target: None, static_abilities, .. }
+                    if static_abilities
+                        .iter()
+                        .any(|s| matches!(s.affected, Some(TargetFilter::ParentTarget)))
+            ) =>
+            {
+                continue
+            }
+            // CR 608.2c + CR 115.1: a compound clause whose head names no typed target
+            // ("put a counter on it and a counter on up to one other target attacking
+            // creature") declares its object target on the compound remainder.
+            _ => {
+                return std::iter::successors(prev.parsed.sub_ability.as_deref(), |def| {
+                    def.sub_ability.as_deref()
+                })
+                .filter_map(|def| match def.effect.target_filter() {
+                    Some(t @ TargetFilter::Typed(_)) if !t.is_player_scope() => Some(t),
+                    _ => None,
+                })
+                .last();
+            }
         }
     }
     None
@@ -24808,8 +25121,9 @@ fn bind_damage_clause_source(
 
 /// CR 120.1: Set a damage clause's `damage_source` WITHOUT rebinding the
 /// anaphoric amount scope. The one-sided-fight fresh-opponent path keeps "its
-/// power" as `Power{Anaphoric}` (resolved to `targets[0]` by the runtime
-/// fallback) instead of collapsing it to `Target`, so it cannot reuse
+/// power" as `Power{Anaphoric}` (read in `game/quantity.rs`'s `Anaphoric` order,
+/// whose last slot is the `targets[0]` fallback) instead of collapsing it to
+/// `Target`, so it cannot reuse
 /// `bind_damage_clause_source` (which always rebinds the amount). Returns true
 /// iff the effect is a `DealDamage`/`DamageAll`.
 fn set_damage_clause_source_only(effect: &mut Effect, damage_source_ref: DamageSource) -> bool {
@@ -25025,8 +25339,9 @@ fn wrap_target_subject_damage(
         if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } =
             &mut clause.effect
         {
-            rebind_source_amount(
+            rebind_object_scope_amount(
                 amount,
+                ObjectScope::Source,
                 ObjectScope::Target,
                 SourceRefRebind::PowerOrToughness,
             );
@@ -37975,6 +38290,7 @@ pub(crate) fn parse_effect_chain_ir(
             // creature") resolves to the slot the "Choose target X and target Y"
             // head declared. Refreshed from the chunk after parse.
             declared_target_slots: chain_declared_target_slots.clone(),
+            chain_declared_object_target: ctx.chain_declared_object_target.clone(),
             // CR 116.2b + CR 708.7: a granted activated-ability body context is a
             // property of the whole ability, not of an individual chunk, so all
             // chunks inside it share the flag — the head "turn this creature face
@@ -38742,7 +39058,7 @@ pub(crate) fn parse_effect_chain_ir(
         // which is exactly why a head-only rewrite corrupts the chain.
         let is_distributed_chunk = text_is_compound_subject_distribution(&text);
         // Kicker clauses referencing "that creature"/"it" inherit the parent's target.
-        // CR 608.2c: untouched — its `!builder.is_empty()` gate is intentionally broad
+        // CR 608.2c: its `!builder.is_empty()` gate is intentionally broad
         // (many antecedent shapes reach this without a `target_filter()`, e.g. a typed
         // trigger subject rebind chain), and narrowing it here regressed dozens of
         // unrelated cards (Feather, the Redeemed's exile-return rider; Managorger
@@ -38766,6 +39082,7 @@ pub(crate) fn parse_effect_chain_ir(
                 &text_lower,
                 &mut clause.effect,
             )
+            && !bind_self_ref_damage_subject(&mut clause.effect)
         {
             replace_target_with_parent(&mut clause.effect);
         }
@@ -42440,7 +42757,7 @@ mod change_targets_stack_object_tests {
 }
 
 /// CR 601.2c + CR 608.2c — unit tests for [`chain_declared_object_target`], the
-/// fail-closed reverse walk that supplies a demonstrative anaphor's antecedent.
+/// reverse walk that supplies a demonstrative anaphor's antecedent.
 ///
 /// **UNIT, explicitly labelled.** These do NOT satisfy the runtime-semantics
 /// requirement — the integration tests `hazel_end_step_copies_squirrel_token_twice`
@@ -42448,10 +42765,9 @@ mod change_targets_stack_object_tests {
 /// `thieving_skydiver_equipment_rider_condition_becomes_live` /
 /// `jackknight_contraption_rider_still_reads_the_entering_artifact` do.
 ///
-/// This module exists because **no corpus card distinguishes fail-closed from
-/// skip**: every card whose rider reaches the walk has exactly ONE prior clause,
-/// so `return None` and `continue` terminate identically there. A synthetic
-/// two-clause chain is the only fixture that separates them.
+/// This module covers the walk's behaviour directly, with no claim about what
+/// the corpus does or does not distinguish. A synthetic two-clause chain is the
+/// fixture these tests use to separate returning from continuing.
 #[cfg(test)]
 mod chain_declared_object_target_tests {
     use super::chain_declared_object_target;
@@ -42517,10 +42833,10 @@ mod chain_declared_object_target_tests {
     /// `SelfRef` (non-`Typed`), so the walk BLOCKS and never hands back the
     /// FARTHER clause's `Typed[Artifact]`.
     ///
-    /// Revert probe: change the walk's `_ => return None` arm to `_ => continue`
-    /// and this returns `Some(Typed[Artifact])` — the farther clause's target
-    /// becoming a nearer demonstrative's antecedent, the exact provenance error
-    /// the fail-closed arm exists to forbid.
+    /// Revert probe: make `chain_declared_object_target` continue past a node
+    /// that declares no typed target and this returns `Some(Typed[Artifact])` —
+    /// the farther clause's target becoming a nearer demonstrative's antecedent,
+    /// the exact provenance error the walk exists to forbid.
     #[test]
     fn chain_declared_object_target_blocks_at_a_non_typed_nearer_clause() {
         let mut builder = ClauseIrBuilder::new(
@@ -42609,22 +42925,20 @@ mod chain_declared_object_target_tests {
     /// `lower::rekey_counter_slot_in_chain` ("must bind slot 0 …, **not the
     /// most-recent** opponent target"), which is why Malamet's two-target
     /// counter chain has to re-key its condition to `Some(0)` at all. This walk
-    /// is fail-closed in exactly the way that makes the two agree at EVERY
-    /// index: it returns the NEAREST declaring clause and blocks on anything
-    /// nearer that is not a slot-less `ParentTarget` carrier
-    /// (`TargetFilter::is_context_ref` covers `ParentTarget`, so such a carrier
-    /// declares no slot and cannot move "most recent"). The antecedent it hands
-    /// back is therefore always the chain's most-recent declared object target
-    /// — the very object `None` resolves.
+    /// returns the NEAREST declaring clause, and a slot-less `ParentTarget`
+    /// carrier declares no slot (`TargetFilter::is_context_ref` covers
+    /// `ParentTarget`), so it cannot move "most recent". Whether the antecedent
+    /// returned here agrees with what `subject_slot: None` resolves at EVERY
+    /// declared index is not characterised here.
     ///
     /// Revert probe: make the walk return an index and the gate emit
     /// `subject_slot: Some(index)` for a non-zero antecedent, and the paired
     /// assertion in
     /// `conditions::tests::a_non_zero_slot_antecedent_still_emits_no_subject_slot`
-    /// fails. Change this walk's `_ => return None` arm to `_ => continue` (or
-    /// let a nearer non-`ParentTarget` clause through) and the "most recent"
-    /// guarantee this rests on is gone, so the nearest-declarer assertion below
-    /// fails too.
+    /// fails. Make `chain_declared_object_target` continue past a node that
+    /// declares no typed target instead of returning (or let a nearer
+    /// non-`ParentTarget` clause through) and the "most recent" guarantee this
+    /// rests on is gone, so the nearest-declarer assertion below fails too.
     #[test]
     fn the_antecedent_at_a_non_zero_declared_slot_is_the_most_recent_declarer() {
         let artifact = artifact_filter();

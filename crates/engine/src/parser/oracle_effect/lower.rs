@@ -7139,11 +7139,33 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
     (text, None)
 }
 
-/// CR 115.1d: Extract multi_target spec from PutCounter text.
-/// Looks for "counter on up to N" pattern and returns the spec.
+/// CR 115.1 + CR 601.2c: Extract the announced target-set spec from counter-placement text.
+/// Recovers "counter(s) on [each of ]any number of [other|another] target …" (`unlimited(0)`)
+/// and "counter(s) on [each of ]up to N [other|another] target …" (`up_to(N)`) through
+/// `strip_optional_target_prefix`, then falls back to the article-less
+/// "counter(s) on [each of ]up to N <noun>" markers (`up_to(N)`).
 /// Used as a post-parse fixup when the AST→Effect lowering loses multi_target info.
 pub(super) fn extract_put_counter_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
+    // CR 115.1 + CR 601.2c: recover the announced target-set spec for
+    // "counter(s) on [each of ]<quantifier> target …" through the single quantifier
+    // authority; article-less "up to N <noun>" forms fall through to the markers below.
+    if let Some(spec) = nom_primitives::scan_at_word_boundaries(lower.as_str(), |input| {
+        let (after_on, _) = (
+            alt((
+                tag::<_, _, OracleError<'_>>("counters on "),
+                tag("counter on "),
+            )),
+            opt(tag("each of ")),
+        )
+            .parse(input)?;
+        match strip_optional_target_prefix(after_on) {
+            (rest, Some(spec)) => Ok((rest, spec)),
+            (_, None) => Err(oracle_err(input)),
+        }
+    }) {
+        return Some(spec);
+    }
     let after = [
         "counter on up to ",
         "counters on up to ",

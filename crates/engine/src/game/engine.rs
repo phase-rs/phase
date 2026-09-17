@@ -12596,9 +12596,9 @@ fn apply_non_priority_pass_action(
             let player = *player;
             let convoke_mode = *convoke_mode;
             if let Some(pending) = state.pending_cast.as_ref() {
-                // CR 602.2b + CR 601.2b/h: An activation's announced X must
-                // make its full cost payable before the announcement commits,
-                // whether or not the ability has deferred targets.
+                // CR 602.2b + CR 601.2b/f/h: Concretize {X} into generic mana in the cost structure.
+                // Payment restrictions ("Spend only [colors] mana on X") are carried as payment-allocation
+                // metadata in SpellMeta and enforced during mana payment.
                 let mut trial = pending.as_ref().clone();
                 trial.ability.set_chosen_x_recursive(value);
                 trial.cost.concretize_x(value);
@@ -12646,9 +12646,15 @@ fn apply_non_priority_pass_action(
                     }
                 }
             }
-            let pending = state.pending_cast.as_mut().ok_or_else(|| {
-                EngineError::InvalidAction("No pending cast awaiting X".to_string())
-            })?;
+            let pending = state
+                .pending_cast
+                .as_mut()
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("No pending cast awaiting X".to_string())
+                })?;
+            // CR 601.2b + CR 601.2f + CR 601.2h: Concretize {X} into generic mana in the cost structure.
+            // Payment restrictions ("Spend only [colors] mana on X") are carried as payment-allocation
+            // metadata in SpellMeta and enforced during mana payment.
             pending.ability.set_chosen_x_recursive(value);
             pending.cost.concretize_x(value);
             let object_id = pending.object_id;

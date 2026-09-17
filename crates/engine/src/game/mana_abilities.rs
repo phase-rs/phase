@@ -7517,14 +7517,7 @@ mod tests {
         let goblin_spell = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Goblin".to_string()],
-            keyword_kinds: vec![],
-            cast_from_zone: None,
-            mana_value: None,
-            color_count: None,
-            colors: vec![],
-            has_x_in_cost: false,
-            is_face_down: false,
-            cant_spend_mana: false,
+            ..Default::default()
         };
         let goblin_ctx = PaymentContext::Spell(&goblin_spell);
         let mut pool_clone = pool.clone();
@@ -7538,14 +7531,7 @@ mod tests {
         let elemental_spell = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Elemental".to_string()],
-            keyword_kinds: vec![],
-            cast_from_zone: None,
-            mana_value: None,
-            color_count: None,
-            colors: vec![],
-            has_x_in_cost: false,
-            is_face_down: false,
-            cant_spend_mana: false,
+            ..Default::default()
         };
         let elemental_ctx = PaymentContext::Spell(&elemental_spell);
         assert!(

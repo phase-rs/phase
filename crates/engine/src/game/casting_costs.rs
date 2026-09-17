@@ -13513,6 +13513,12 @@ fn finalize_mana_payment_with_resume(
     // a later spend.)
     state.active_payment_pins = pending.pinned_pool_units.clone();
     state.active_casting_permission_index = pending.casting_permission_index;
+    let spend_only_on_x_count = state
+        .objects
+        .get(&pending.object_id)
+        .map(|obj| super::casting::compute_spend_only_on_x_generic_count(state, obj, &pending))
+        .unwrap_or(0);
+    state.active_spend_only_on_x_count = Some((pending.object_id, spend_only_on_x_count));
     let finalize_result = (|| -> Result<WaitingFor, EngineError> {
         // CR 702.132a + CR 601.2h: payment has reached the Assist contribution;
         // helper resources begin changing only inside this final payment step.
@@ -13859,6 +13865,7 @@ fn finalize_mana_payment_with_resume(
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
     state.active_casting_permission_index = None;
+    state.active_spend_only_on_x_count = None;
     match finalize_result {
         Ok(waiting_for) => Ok(waiting_for),
         Err(err) if is_abandoned_cast_finalization(&err) => Err(err),
@@ -13937,6 +13944,12 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     // empty outside an in-progress finalize spend".
     state.active_payment_pins = pending.pinned_pool_units.clone();
     state.active_casting_permission_index = pending.casting_permission_index;
+    let spend_only_on_x_count = state
+        .objects
+        .get(&pending.object_id)
+        .map(|obj| super::casting::compute_spend_only_on_x_generic_count(state, obj, &pending))
+        .unwrap_or(0);
+    state.active_spend_only_on_x_count = Some((pending.object_id, spend_only_on_x_count));
     let finalize_result = (|| -> Result<WaitingFor, EngineError> {
         // CR 702.132a + CR 601.2h: payment has reached the Assist contribution;
         // helper resources begin changing only inside this final payment step.
@@ -14294,6 +14307,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
     state.active_casting_permission_index = None;
+    state.active_spend_only_on_x_count = None;
     match finalize_result {
         Ok(waiting_for) => Ok(waiting_for),
         Err(err) if is_abandoned_cast_finalization(&err) => Err(err),

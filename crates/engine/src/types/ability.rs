@@ -23708,6 +23708,11 @@ pub enum CastingRestriction {
     /// `restrictions.rs` treats it as always-satisfied for the timing check and
     /// the mana-payment path excludes real pool mana when it is present.
     CantSpendMana,
+    /// CR 601.2b / CR 601.2h: "Spend only [color(s)] mana on X."
+    /// Parameterized over the allowed mana colors for paying {X}.
+    SpendOnlyOnX {
+        colors: Vec<ManaColor>,
+    },
 }
 
 /// CR 602.2b + CR 601.2f: Self-referential activation/cast cost modification.
@@ -28163,25 +28168,20 @@ pub struct StaticDefinition {
     pub characteristic_defining: bool,
     #[serde(default)]
     pub description: Option<String>,
-    /// CR 506.3 + CR 508.1d: When set on `CantAttack` / `CantAttackOrBlock`, the
+    /// CR 506.3 + CR 508.1c: When set on `CantAttack` / `CantAttackOrBlock`, the
     /// prohibition applies only to attacks whose `AttackTarget` matches this filter,
     /// scoped to the static's source controller (Propaganda's `UnlessPay::defended`
     /// uses the same axis). `None` means the creature cannot attack at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attack_defended: Option<crate::types::triggers::AttackTargetFilter>,
-    /// CR 611.2c + CR 109.5: Installing-player anchor for a controller-relative
-    /// blocker filter granted onto another object. When a one-shot effect grafts
-    /// a `MustBeBlockedByAll` / `MustBeBlocked` static whose blocker filter is
-    /// controller-relative (`ControllerRef::You`/`Opponent`) onto a TARGET
-    /// permanent (You Look Upon the Tarrasque), CR 109.5's "the current
-    /// controller of the object it's on" would evaluate "your opponents"
-    /// relative to the target's controller, not the spell controller. Per
-    /// CR 611.2c the resolving continuous effect's anchor is locked at
-    /// materialization, so this field snapshots the installing player's id so
-    /// combat re-derives the filter context via
-    /// `FilterContext::from_source_with_controller`. `None` = resolve the
-    /// controller from the carrier object (every permanent-static lure; Talruum
-    /// Piper, Marble Priest; unchanged).
+    /// Optional installing-player anchor for the grafted combat modes that
+    /// explicitly materialize one. `GrantStaticAbility` sets it only for an
+    /// unconditional, bare-`SelfRef` `CantAttack` / `CantAttackOrBlock` with an
+    /// eligible controller-relative defended scope. `AddStaticMode` separately
+    /// sets it for controller-relative `MustBeBlocked*` filters and
+    /// `MustAttackAwayFromSource`. Other granted statics, including quoted
+    /// statics with a nontrivial scope or condition, retain the carrier
+    /// controller fallback when this is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_controller: Option<crate::types::player::PlayerId>,
     /// CR 508.1d + CR 611.2c: The object that grafted this static onto its
@@ -28472,9 +28472,10 @@ impl StaticDefinition {
         self
     }
 
-    /// CR 611.2c + CR 109.5: Snapshot the installing player as the anchor for a
-    /// controller-relative granted blocker filter (see the `source_controller`
-    /// field doc). Set at graft time by the `AddStaticMode` layer arm.
+    /// Set an installing-player anchor when the applicable materialization gate
+    /// has established that the grafted combat mode needs one. The narrow
+    /// `GrantStaticAbility` and `AddStaticMode` gates are documented on
+    /// `source_controller`; this builder does not make that decision itself.
     pub fn source_controller(mut self, controller: crate::types::player::PlayerId) -> Self {
         self.source_controller = Some(controller);
         self

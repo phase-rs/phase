@@ -343,8 +343,9 @@ where
     // `affected`. So `None` is inert on this path rather than a new gap; the
     // point of carrying it is that a future predicate kind which DOES read the
     // filter cannot silently inherit a permissive default.
-    let application = extract_subject_text(text)
-        .and_then(|subject_text| parse_subject_application(&subject_text, ctx));
+    let application = extract_subject_text(text).and_then(|subject_text| {
+        parse_subject_application_for(&subject_text, ctx, AnaphorConsumer::AffectedObject)
+    });
 
     ClauseAst::SubjectPredicate {
         subject: Box::new(subject_phrase_ast(application)),
@@ -620,7 +621,7 @@ fn try_parse_subject_continuous_clause(
     if let Some(clause) = try_parse_additive_type_continuous_clause(subject, predicate, ctx) {
         return Some(clause);
     }
-    let application = parse_subject_application(subject, ctx)?;
+    let application = parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
     build_continuous_clause(application, predicate, ctx)
 }
 
@@ -645,7 +646,7 @@ pub(super) fn try_parse_conditional_protection_grant_clause(
     if subject.eq_ignore_ascii_case("you") {
         return None;
     }
-    let application = parse_subject_application(subject, ctx)?;
+    let application = parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
     build_conditional_protection_grant_clause(&application, predicate, leading_duration)
 }
 
@@ -711,7 +712,7 @@ fn additive_type_subject_application(
         return subject_filter_application(parsed_subject, false);
     }
 
-    parse_subject_application(subject, ctx)
+    parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)
 }
 
 fn try_parse_additive_type_continuous_clause(
@@ -861,9 +862,9 @@ fn try_parse_subject_become_clause(
     // anaphor the explicit "it becomes …" form uses (parent target / triggering
     // source), so the second animation binds to the same object as the first.
     let application = if subject.is_empty() {
-        parse_subject_application("it", ctx)?
+        parse_subject_application_for("it", ctx, AnaphorConsumer::AffectedObject)?
     } else {
-        parse_subject_application(subject, ctx)?
+        parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?
     };
     build_become_clause(application, &predicate, ctx)
 }
@@ -937,7 +938,7 @@ fn try_parse_subject_supertype_removal_clause(
     // Only a genuinely targeted subject reaches the shared AddSupertype runtime
     // as `ParentTarget`; decline anaphoric / self-referential subjects (no
     // target) so an out-of-context "it isn't legendary" cannot animate here.
-    let application = parse_subject_application(subject, ctx)?;
+    let application = parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
     application.target.as_ref()?;
     let affected = static_affected_for_application(&application);
     let duration = duration.or(Some(Duration::Permanent));
@@ -1383,7 +1384,8 @@ fn try_parse_subject_base_pt_set_clause_ast(
     // Parse the optional trailing keyword-grant conjunct ("and they gain trample").
     let keywords = parse_base_pt_set_trailing_keywords(after_pt);
 
-    let application = target_application.or_else(|| parse_subject_application(subject, ctx))?;
+    let application = target_application
+        .or_else(|| parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject))?;
     let affected = static_affected_for_application(&application);
 
     // CR 208.4a + CR 613.4b: emit per-axis layer-7b set modifications. Fixed
@@ -1631,8 +1633,16 @@ fn try_parse_source_and_other_restriction_clause(
     let subject_lower = subject.to_lowercase();
     let subject_pair = TextPair::new(subject, &subject_lower);
     let (primary_tp, secondary_tp) = subject_pair.split_around(" and ")?;
-    let primary_application = parse_subject_application(primary_tp.original.trim(), ctx)?;
-    let secondary_application = parse_subject_application(secondary_tp.original.trim(), ctx)?;
+    let primary_application = parse_subject_application_for(
+        primary_tp.original.trim(),
+        ctx,
+        AnaphorConsumer::AffectedObject,
+    )?;
+    let secondary_application = parse_subject_application_for(
+        secondary_tp.original.trim(),
+        ctx,
+        AnaphorConsumer::AffectedObject,
+    )?;
     // The secondary conjunct must carry its own target slot ("up to one other
     // target creature"); a bare conjunction with no second target is not this
     // class and is left to the generic subject split. The primary conjunct, by
@@ -1706,7 +1716,11 @@ fn try_parse_target_and_same_name_pump_clause(
 
     // Primary conjunct must announce a target ("target creature") — this is what
     // carries the CR 115.1 target slot the mass sub-ability inherits.
-    let primary = parse_subject_application(primary_tp.original.trim(), ctx)?;
+    let primary = parse_subject_application_for(
+        primary_tp.original.trim(),
+        ctx,
+        AnaphorConsumer::AffectedObject,
+    )?;
     primary.target.as_ref()?;
 
     // Secondary conjunct must be the same-name mass ("all other creatures with
@@ -1856,7 +1870,8 @@ fn try_parse_subject_restriction_clause(
 
     if let Some((before, _)) = tp.split_around(" must be blocked") {
         let subject = before.original.trim();
-        let application = parse_subject_application(subject, ctx)?;
+        let application =
+            parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
         let affected = static_affected_for_application(&application);
         return Some(ParsedEffectClause {
             unlowered_guard: None,
@@ -1905,7 +1920,8 @@ fn try_parse_subject_restriction_clause(
         if let Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect { duration, .. })) =
             imperative::try_parse_attack_or_block_if_able(&predicate)
         {
-            let application = parse_subject_application(subject, ctx)?;
+            let application =
+                parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
             let affected = static_affected_for_application(&application);
             let static_abilities = imperative::must_attack_or_block_static_definitions()
                 .into_iter()
@@ -1941,7 +1957,8 @@ fn try_parse_subject_restriction_clause(
         // next turn,") arrives on `ability.duration` and wins in
         // `effects/effect.rs::resolve`.
         if imperative::try_parse_attack_away_requirement(&predicate) {
-            let application = parse_subject_application(subject, ctx)?;
+            let application =
+                parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
             let affected = static_affected_for_application(&application);
             return Some(ParsedEffectClause {
                 unlowered_guard: None,
@@ -1996,13 +2013,15 @@ fn try_parse_subject_restriction_clause(
             // `is_broadcast_population_filter` is the single authority for that
             // distinction; re-deriving it as "did a target get declared" would
             // misclassify every `SelfRef` subject.
-            let broadcast = parse_subject_application(subject, ctx).filter(|application| {
-                application.target.is_none()
-                    && !application.inherits_parent
-                    && super::is_broadcast_population_filter(&static_affected_for_application(
-                        application,
-                    ))
-            });
+            let broadcast =
+                parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)
+                    .filter(|application| {
+                        application.target.is_none()
+                            && !application.inherits_parent
+                            && super::is_broadcast_population_filter(
+                                &static_affected_for_application(application),
+                            )
+                    });
             if let Some(application) = broadcast {
                 return Some(ParsedEffectClause {
                     unlowered_guard: None,
@@ -2033,7 +2052,8 @@ fn try_parse_subject_restriction_clause(
             // `?` here makes a bare/source-granted "attacks this turn if able"
             // (empty subject, granted ability) fall through to None, preserving
             // the existing target:None behavior for that class.
-            let application = parse_subject_application(subject, ctx)?;
+            let application =
+                parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
             let affected = static_affected_for_application(&application);
             return Some(ParsedEffectClause {
                 unlowered_guard: None,
@@ -2196,7 +2216,8 @@ fn try_parse_subject_restriction_clause(
     // Transient rule modification that prevents combat damage assignment.
     if let Some((before, after)) = tp.split_around(" assigns no combat damage") {
         let subject = before.original.trim();
-        let application = parse_subject_application(subject, ctx)?;
+        let application =
+            parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
         // CR 514.2: "this combat" → UntilEndOfCombat; default "this turn" → UntilEndOfTurn.
         let after_lower = after.lower.trim_start();
         let duration = if after_lower.starts_with("this combat") {
@@ -2240,7 +2261,7 @@ fn try_parse_subject_restriction_clause(
         let (before, after) = tp.split_at(pos);
         (before.original.trim(), after.original[1..].trim())
     };
-    let application = parse_subject_application(subject, ctx)?;
+    let application = parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
     build_restriction_clause(application, predicate)
 }
 
@@ -2257,7 +2278,7 @@ fn try_parse_can_attack_with_defender(
         return None;
     }
     let subject = text[..pos].trim();
-    let application = parse_subject_application(subject, ctx)?;
+    let application = parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
     // Determine duration: "this turn" implies UntilEndOfTurn.
     let duration = if lower.contains("this turn") {
         Some(Duration::UntilEndOfTurn)
@@ -2309,7 +2330,7 @@ fn try_parse_can_block_additional(
             is_optional: false,
         }
     } else {
-        parse_subject_application(subject_text.trim(), ctx)?
+        parse_subject_application_for(subject_text.trim(), ctx, AnaphorConsumer::AffectedObject)?
     };
 
     let (_rest, (_, _, _, _, _, count, duration, _)) = all_consuming((
@@ -2508,9 +2529,30 @@ enum PlayerSubjectAnaphor {
     AttackingPlayer,
 }
 
+/// CR 608.2c: which consumer reads a subject's "that [type]" anaphor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AnaphorConsumer {
+    /// The affected object of a continuous grant, restriction or type/P&T change
+    /// ("That creature can't be blocked this turn"): an anaphor naming the chain's
+    /// declared object target binds that target (CR 601.2c), and nothing when the
+    /// optional target was declined (CR 115.6).
+    AffectedObject,
+    /// Every other reader (the imperative fallback, damage source and recipient
+    /// stamps): keeps the trigger-source stamp.
+    Other,
+}
+
 pub(super) fn parse_subject_application(
     subject: &str,
     ctx: &mut ParseContext,
+) -> Option<SubjectApplication> {
+    parse_subject_application_for(subject, ctx, AnaphorConsumer::Other)
+}
+
+fn parse_subject_application_for(
+    subject: &str,
+    ctx: &mut ParseContext,
+    consumer: AnaphorConsumer,
 ) -> Option<SubjectApplication> {
     if subject.trim().is_empty() {
         return None;
@@ -3246,6 +3288,33 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
+    // CR 115.1 + CR 608.2c: "[that|the] <noun>'s controller or that player" —
+    // the disjunctive restatement of a damage recipient (Acorn Catapult: "That
+    // permanent's controller or that player creates a 1/1 green Squirrel
+    // creature token"). Both arms name one player — the parent target's
+    // controller for a permanent target (CR 109.4: only objects on the stack
+    // or battlefield have a controller), the target itself for a player
+    // target — which is exactly what `TargetFilter::ParentTargetController`
+    // resolves to (`parent_target_controller` matches both `TargetRef` kinds).
+    // Mirrors the unless-payer arm in `parse_resolution_unless_payer`
+    // (oracle_effect/mod.rs), which collapses the same phrase for Rhystic
+    // Lightning's "unless … pays" clause.
+    if all_consuming((
+        alt((tag::<_, _, OracleError<'_>>("that "), tag("the "))),
+        take_until("'s controller or that player"),
+        tag("'s controller or that player"),
+    ))
+    .parse(lower.as_str())
+    .is_ok()
+    {
+        return Some(SubjectApplication {
+            affected: TargetFilter::ParentTargetController,
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+        });
+    }
     // CR 608.2c: Definite/anaphoric "[the|that] <noun>'s controller" /
     // "[the|that] <noun>'s owner" — the parent target's controller/owner.
     // Mirrors the generic "the <noun>'s controller" path in `parse_target`
@@ -3342,6 +3411,29 @@ pub(super) fn parse_subject_application(
     // be reinterpreted as some unrelated typed referent). See
     // `chunk_subject`/`prior_typed_referent` in `parse_effect_chain_ir`.
     if lower == "it" {
+        // CR 608.2c + CR 601.2c: a bare "it" whose nearest antecedent in this
+        // ability is an earlier declared object target (or that target's own bound
+        // anaphor) names that target when it is the affected object of a grant,
+        // restriction or type/P&T change; nothing when the optional target was
+        // declined (CR 115.6). `chain_declared_object_target` stops at a
+        // self-reference, a non-target event object and any non-reflexive
+        // condition, and a nearer object this chain created is excluded below,
+        // so those antecedents keep the stamps below.
+        if consumer == AnaphorConsumer::AffectedObject
+            && matches!(ctx.chain_declared_object_target, Some(TargetFilter::Typed(_)))
+            // CR 608.2c + CR 111.1 + CR 707.2: an object this chain created (a token, a
+            // copy of the declared target included) is the nearer antecedent, so "it"
+            // keeps the created-object stamp.
+            && !ctx.token_created_in_chain
+        {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTarget,
+                target: None,
+                multi_target: None,
+                inherits_parent: true,
+                is_optional: false,
+            });
+        }
         if ctx.subject.is_none() && ctx.parent_target_available {
             return Some(SubjectApplication {
                 affected: TargetFilter::ParentTarget,
@@ -3432,7 +3524,24 @@ pub(super) fn parse_subject_application(
             // the transient effect to the specific triggering object via SpecificObject.
             // Outside triggers, fall back to the type filter (anaphor resolves via
             // `inherits_parent` + ParentTarget at the call site).
-            if ctx.subject.is_some() {
+            // CR 608.2c: "that [type]" names an earlier instruction's declared target
+            // when that target's filter carries every type the anaphor names; an
+            // affected-object consumer then binds the declared object (nothing when the
+            // optional target was declined, CR 115.6). Any other antecedent or consumer
+            // keeps the trigger-source stamp (Spiked Ripsaw's attacker; "that creature
+            // deals damage", phase 5).
+            let names_declared_target = matches!(
+                (ctx.chain_declared_object_target.as_ref(), &filter),
+                (Some(TargetFilter::Typed(antecedent)), TargetFilter::Typed(anaphor))
+                    if !anaphor.type_filters.is_empty()
+                        && anaphor
+                            .type_filters
+                            .iter()
+                            .all(|t| antecedent.type_filters.contains(t))
+            );
+            let binds_declared_target =
+                consumer == AnaphorConsumer::AffectedObject && names_declared_target;
+            if ctx.subject.is_some() && !binds_declared_target {
                 return Some(SubjectApplication {
                     affected: filter,
                     target: Some(TargetFilter::TriggeringSource),
@@ -3782,7 +3891,7 @@ fn subject_application_for_cant_be_activated(
     // "~'s", "each creature you control's"). Strip the possessive marker so the
     // remaining noun phrase routes through the full subject grammar.
     let possessor = strip_possessive_subject_suffix(subject);
-    parse_subject_application(possessor, ctx)
+    parse_subject_application_for(possessor, ctx, AnaphorConsumer::AffectedObject)
 }
 
 fn strip_possessive_subject_suffix(subject: &str) -> &str {
