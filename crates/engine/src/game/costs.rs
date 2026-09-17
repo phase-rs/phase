@@ -928,12 +928,49 @@ fn pay_ability_cost_inner(
             }
         },
         AbilityCost::Composite { costs } => {
+            // CR 601.2h + CR 602.2b: "First, they pay all costs that don't involve
+            // random elements or moving objects from the library to a public zone,
+            // in any order. Then they pay all remaining costs in any order." CR
+            // 602.2b binds 601.2b-i to activated abilities, so a composite
+            // activation cost must pay its library-to-public-zone components LAST.
+            //
+            // CR 400.2 fixes what "public" means: graveyard, battlefield, stack,
+            // exile, ante and command are public; LIBRARY AND HAND ARE HIDDEN. So a
+            // hypothetical library->hand cost is NOT deferred — only moves out of a
+            // library into a public zone are.
+            fn is_library_to_public_zone_cost(cost: &AbilityCost) -> bool {
+                matches!(
+                    cost,
+                    AbilityCost::Exile {
+                        zone: Some(Zone::Library),
+                        ..
+                    } | AbilityCost::ExileWithAggregate {
+                        zone: Zone::Library,
+                        ..
+                    }
+                )
+            }
+
+            // A STABLE partition: relative order within each tier is preserved, so a
+            // mana-leading composite stays mana-leading and
+            // `resume_cost_with_concrete_mana`'s "a mana payment root must begin with
+            // mana" invariant still holds. Payment order is reordered here rather
+            // than at parse time because a CONSTRUCTED `Composite` never passes
+            // through the parser, and the suffixes below are derived from this same
+            // vector so iteration order and the unpaid-suffix slices cannot drift —
+            // `enclosing_composite_suffix` asserts exactly that agreement.
+            let ordered: Vec<AbilityCost> = costs
+                .iter()
+                .filter(|sub| !is_library_to_public_zone_cost(sub))
+                .chain(costs.iter().filter(|sub| is_library_to_public_zone_cost(sub)))
+                .cloned()
+                .collect();
             let enclosing_suffix = enclosing_composite_suffix(cost, resume_cost);
-            for (index, sub_cost) in costs.iter().enumerate() {
+            for (index, sub_cost) in ordered.iter().enumerate() {
                 let prior_waiting_for = state.waiting_for.clone();
                 let sub_resume_cost = composite_cost_suffix(
                     Some(sub_cost),
-                    &costs[index + 1..],
+                    &ordered[index + 1..],
                     &enclosing_suffix,
                 )
                 .expect("a composite component always has an unpaid suffix");
@@ -959,7 +996,7 @@ fn pay_ability_cost_inner(
                             return Ok(PaymentOutcome::Paused {
                                 remaining_cost: composite_cost_suffix(
                                     None,
-                                    &costs[index + 1..],
+                                    &ordered[index + 1..],
                                     &enclosing_suffix,
                                 ),
                             });
@@ -982,7 +1019,7 @@ fn pay_ability_cost_inner(
                         return Ok(PaymentOutcome::Paused {
                             remaining_cost: composite_cost_suffix(
                                 remaining_cost.as_ref(),
-                                &costs[index + 1..],
+                                &ordered[index + 1..],
                                 &enclosing_suffix,
                             ),
                         });
@@ -3506,6 +3543,68 @@ mod tests {
         assert!(
             can_pay_activation(&scenario.state, src, &cost),
             "hand-exile composite must keep its unchanged (payable) dry-run verdict"
+        );
+    }
+
+    /// CR 601.2h + CR 602.2b: "First, they pay all costs that don't involve random
+    /// elements or moving objects from the library to a public zone, in any order.
+    /// Then they pay all remaining costs in any order." CR 602.2b binds 601.2b-i to
+    /// activated abilities, so a composite that STORES its library-exile leg first
+    /// must still pay the mana leg first.
+    ///
+    /// Constructed deliberately: no printed card reaches this state. All seven
+    /// library-exile activation costs in the corpus store `['Mana','Exile']`, so
+    /// stored order happened to satisfy CR 601.2h already and the defect was latent
+    /// — which is exactly why a card-driven test cannot cover it.
+    ///
+    /// The discriminator is CR 601.2h's other half, "partial payments are not
+    /// allowed". With an unpayable mana leg, paying in STORED order exiles the top
+    /// card and only then fails, leaving the library permanently one card short;
+    /// paying in TIER order fails on mana first and the library is untouched.
+    #[test]
+    fn a_composite_pays_mana_before_its_library_exile_leg() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Library Exiler", 0, 1).id();
+        let top = scenario.add_card_to_library_top(P0, "Top Card");
+        // Reach-guard: the card really starts in the library, so the assertion below
+        // cannot pass merely because it was never there.
+        assert_eq!(
+            scenario.state.objects[&top].zone,
+            Zone::Library,
+            "reach-guard: the cost's library card starts in the library"
+        );
+
+        // Library-exile leg STORED FIRST; the mana leg is unpayable (no sources).
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Library),
+                    filter: None,
+                },
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+            ],
+        };
+
+        let outcome = pay_ability_cost_for_activation(
+            &mut scenario.state,
+            P0,
+            src,
+            &cost,
+            Some(0),
+            &mut Vec::new(),
+        );
+        assert!(
+            !matches!(outcome, Ok(PaymentOutcome::Paid)),
+            "an unpayable mana leg must not report a paid cost, got {outcome:?}"
+        );
+        assert_eq!(
+            scenario.state.objects[&top].zone,
+            Zone::Library,
+            "CR 601.2h: mana is tier 1 and is attempted first; it fails, and partial \
+             payments are not allowed, so the library-to-public-zone leg must never run"
         );
     }
 

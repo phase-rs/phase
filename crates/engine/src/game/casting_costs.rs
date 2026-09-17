@@ -2224,9 +2224,14 @@ fn finish_cost_object_moves(
                 // CR 406.6: the resumed leg delivers like the direct one, so it
                 // must index the same "exiled with [source] this turn" relation.
                 // Without this a replacement-paused cost move lost its provenance.
-                if destination == Zone::Exile {
-                    super::costs::record_delivered_cost_exile(state, object_id, pending.object_id);
-                }
+                //
+                // Unconditional by design: `record_delivered_cost_exile` already
+                // self-guards on the object's LIVE zone, so gating here on the
+                // REQUESTED destination could only ever drop a correct link, never
+                // prevent a wrong one. `finish_cost_object_moves` is also called
+                // with `Zone::Hand`, and a `Moved` replacement can deliver such a
+                // cost object to exile instead — which this site then skipped.
+                super::costs::record_delivered_cost_exile(state, object_id, pending.object_id);
             }
             ZoneMoveResult::NeedsChoice(choice_player) => {
                 state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
@@ -2521,10 +2526,12 @@ pub(crate) fn resume_interrupted_cost_payment(
         // A one-card deterministic library-exile cost (Thought Lash, Phyrexian
         // Devourer) that pauses and ends in exile would otherwise lose its
         // "exiled with [source] this turn" link entirely.
-        if destination == Zone::Exile {
-            if let Some(&paused_object) = chosen.get(paused_at_index) {
-                super::costs::record_delivered_cost_exile(state, paused_object, pending.object_id);
-            }
+        //
+        // Unconditional for the same reason as the delivery site above: the
+        // recorder self-guards on the live zone, so keying on the requested
+        // destination can only drop correct links.
+        if let Some(&paused_object) = chosen.get(paused_at_index) {
+            super::costs::record_delivered_cost_exile(state, paused_object, pending.object_id);
         }
         return finish_cost_object_moves(
             state,
