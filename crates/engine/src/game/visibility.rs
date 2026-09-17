@@ -45,8 +45,27 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         ..
     } = waiting_for
     {
-        cleanup.offer_id = None;
-        cleanup.delayed_trigger_receipts.clear();
+        redact_resolution_cleanup_authority(cleanup);
+    }
+}
+
+/// A resolution-cast cleanup is carried from a paid offer onto the temporary
+/// casting permission while its face choice or mana payment is pending. The
+/// owner and receipts remain server-only capabilities at that later stage too.
+fn redact_resolution_cleanup_authority(cleanup: &mut crate::types::ability::ResolutionCastCleanup) {
+    cleanup.offer_id = None;
+    cleanup.delayed_trigger_receipts.clear();
+}
+
+fn redact_casting_permission_cleanup_authority(object: &mut crate::game::game_object::GameObject) {
+    for permission in &mut object.casting_permissions {
+        if let crate::types::ability::CastingPermission::ExileWithAltCost {
+            resolution_cleanup: Some(cleanup),
+            ..
+        } = permission
+        {
+            redact_resolution_cleanup_authority(cleanup);
+        }
     }
 }
 
@@ -858,6 +877,12 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     }
     redact_waiting_for_iteration_members(&mut filtered.waiting_for);
     redact_paid_cast_cleanup_authority(&mut filtered.waiting_for);
+    let object_ids: Vec<_> = filtered.objects.keys().copied().collect();
+    for object_id in object_ids {
+        if let Some(object) = filtered.objects.get_mut(&object_id) {
+            redact_casting_permission_cleanup_authority(object);
+        }
+    }
     // Interaction capability authority is trusted persistence state. Viewer
     // projections expose only the actor-scoped opaque opportunity IDs produced
     // by `game::interaction`, never the session/serial/slot minting ledger.
