@@ -526,16 +526,34 @@ single-elim or pod pairing. R9 pins this down per bracket:
   `TournamentUpdate` outbound (R1). Both no-shows score 0-0, exactly as a played
   draw would.
 - **Single-elimination and pods (where `Draw`/drop-all is not bracket-safe):**
-  hosted mode does **not** invent an auto-winner. The pairing enters an explicit
-  **organizer-resolution** state (surfaced in the view, *not* left silently
-  pending), and resolution falls to the organizer via the retained manual path
-  (R1's manual mode) — a deterministic auto-rule (e.g. higher seed) is rejected
-  because it credits an abandoning player. Whether hosted v1 instead simply
-  **excludes** the un-resolvable combination is the §9.7 scope question.
+  hosted mode does **not** invent an auto-winner (a deterministic rule like "higher
+  seed advances" is rejected — it credits an abandoning player). But — **corrected
+  from the prior draft** — there is **no organizer-authored resolution path today**
+  to fall back on: `TournamentAction` is only `StartRound`/`EndTournament`/`Drop`
+  (`tournament.rs:705-712`), the sole outcome-writer `report_result` requires a
+  **seated player** (`broker.rs:1465-1487`), and R1's retained manual mode is
+  `SeatedPlayer`/non-hosted only. So an all-expired single-elim/pod pairing has **no
+  legal way to resolve or advance** — a hard scope fork, not a "surface it to the
+  organizer" hand-wave:
+  - **(a) Build an organizer-resolution subsystem** — atomically-persisted
+    organizer-resolution state that clears/changes the hosted authority, plus an
+    **organizer-authorized** resolution action, with its view, `TournamentUpdate`
+    outbound, receipt (§4.4), and recovery/reconnect/race tests. A real new surface
+    (new authority + action + state), not a reuse.
+  - **(b) Firm v1 exclusion** — hosted v1 supports only brackets whose *every*
+    terminal is representable. Simultaneous expiry is representable only as a Swiss
+    `Draw`, so (b) means **hosted v1 = Swiss head-to-head only**, excluding
+    single-elim and pods from hosting. This also subsumes §9.6 (the Bo1/pod
+    trusted-terminal gap, R6) — same brackets — so one exclusion closes R6, R9, and
+    this blocker together.
 
-Either way the transition is representable, serialized through the same atomic claim
-(R8) and receipt/outbound (R7/R1), and covered by tests — never an implicit `None`
-or a stranded pairing.
+  This is the §9.7 decision; recommendation **(b)** for v1 (smallest honest scope),
+  (a) as a later expansion. Until decided, the doc does **not** claim a resolution
+  path that does not exist.
+
+For the representable case (Swiss `Draw`) the transition is serialized through the
+same atomic claim (R8) and receipt/outbound (R7/R1) and covered by tests — never an
+implicit `None` or a stranded pairing. The un-representable case is gated by §9.7.
 
 ---
 
@@ -583,9 +601,12 @@ checklist the implementation PR must satisfy:
   `terminal_artifact(…, None, …)` + remove (§6.2).
 - **R9 — Bracket-safe simultaneous-expiry outcome** — when all live seats expire
   together, use a *representable* transition: `PodOutcome::Draw` where a draw
-  scores/advances (Swiss); for single-elim/pods (where `Draw`/drop-all is not
-  bracket-safe) an explicit organizer-resolution state, never an implicit `None` or a
-  silently stranded pairing (§6.3; scope choice §9.7).
+  scores/advances (Swiss). Single-elim/pods have **no legal resolution path today**
+  (no organizer report authority; `report_result` is seated-player-only), so v1 must
+  **(a)** build an organizer-authored resolution subsystem (persisted state +
+  authorized action + view/outbound/receipt/recovery/reconnect tests) or **(b)** firm
+  the exclusion (hosted v1 = Swiss head-to-head only, closing R6+R9 together). Never
+  an implicit `None` or a stranded pairing (§6.3; decision §9.7).
 
 Genuinely open **sub-decisions** (do not block recording the design, resolved in
 the implementation PR):
@@ -612,7 +633,7 @@ the implementation PR):
 | Disconnect — 2-seat Bo3 | `apply_trusted_match_forfeit` → `Completed` | same idempotent path (R2) | generation (R3) |
 | Disconnect — Bo1 / pod | generic trusted-terminal (§6.1, **new**) or scoped out (§9.6) | same idempotent path (R2) | generation (R3) |
 | Reconnect-grace expiry (single) | grace-expiry hook, atomic claim vs. reconnect (§6.2, R8) | same idempotent path (R2) | epoch claim (R8) + generation (R3) |
-| Simultaneous full expiry | Swiss ⇒ `Draw`; SE/pod ⇒ organizer-resolution (§6.3, R9) | receipt + outbound (R1/R7) | epoch claim (R8) |
+| Simultaneous full expiry | Swiss ⇒ `Draw`; SE/pod ⇒ **no legal path today** → build (a) or exclude (b), §9.7 | receipt + outbound (R1/R7) | epoch claim (R8) |
 | Restart recovery | `finish_restored_full_startup` (`main.rs:249`) after tournament rehydration (R7) | durable receipt → same path (R2) | generation, durably (R3+R7) |
 | No-show / never-connects | start-timeout (new, §9.2) | forfeit / `drop_player` | n/a (no game) |
 | Bye / pre-resolved | `generate_pairings` | never hosted | n/a |
@@ -641,7 +662,8 @@ the implementation PR):
    `apply_trusted_match_forfeit` does not apply. Add a **generic trusted-terminal**
    primitive in `match_flow` (recommended — keeps single-elim/pod hosting), or
    **restrict hosted v1 to 2-seat Bo3** and defer the rest?
-7. **Simultaneous-expiry scope (§6.3, R9).** For single-elim/pods where a double
-   no-show has no bracket-safe representable outcome, should hosted v1 route it to
-   explicit **organizer resolution** (recommended), or simply **exclude** those
-   bracket/expiry combinations from hosting for v1?
+7. **Simultaneous-expiry scope (§6.3, R9).** A double no-show in single-elim/pods
+   has no legal resolution path today (no organizer report authority). Should hosted
+   v1 **(a)** build an organizer-authored resolution subsystem, or **(b)** firm the
+   exclusion — **hosted v1 = Swiss head-to-head only** (recommended; also closes the
+   §9.6 R6 gap, since it excludes the same brackets)? Note (b) makes §9.6 moot.
