@@ -2335,6 +2335,7 @@ mod tests {
             token: DelayedTriggerToken(702),
             instance: DelayedTriggerInstanceId(702),
             source_id: source,
+            offer_id: None,
         };
         install_receipt_eligible_resolution_sacrifice(
             &mut state,
@@ -2372,6 +2373,7 @@ mod tests {
             token: DelayedTriggerToken(703),
             instance: DelayedTriggerInstanceId(703),
             source_id: source,
+            offer_id: None,
         };
         install_receipt_eligible_resolution_sacrifice(
             &mut state,

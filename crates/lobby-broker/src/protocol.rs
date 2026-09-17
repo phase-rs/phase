@@ -56,6 +56,12 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 75 — `ResolutionCastCleanup`, its delayed-trigger receipts, and every
+///      receipt-eligible delayed-install origin now carry the producer-issued
+///      paid-offer owner. A pre-75 peer can confuse two otherwise equivalent
+///      paused offers, so full-game peers and P2P move in lockstep (wire 57);
+///      lobby messages are unchanged.
+///
 /// 74 — `ResolutionCastCleanup` now carries an exact delayed-trigger receipt
 ///      (token, installed instance, and source) while a paid resolution cast is
 ///      paused. A pre-74 peer cannot preserve that authority through a state
@@ -543,7 +549,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 74;
+pub const PROTOCOL_VERSION: u32 = 75;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1665,7 +1671,7 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 74);
+        assert_eq!(PROTOCOL_VERSION, 75);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact

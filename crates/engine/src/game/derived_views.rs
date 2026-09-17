@@ -1055,6 +1055,7 @@ fn client_state_wire_value(
 
     root.remove("next_delayed_trigger_token");
     root.remove("next_delayed_trigger_instance");
+    root.remove("next_resolution_cast_offer_id");
     root.remove("pending_trigger_firing");
     root.remove("stack_trigger_firings");
     root.remove("resolving_trigger_firing");
@@ -5416,6 +5417,7 @@ mod tests {
             token: DelayedTriggerToken(17),
             instance: DelayedTriggerInstanceId(23),
             source_id: source,
+            offer_id: None,
         };
         state.next_delayed_trigger_token = 18;
         state.next_delayed_trigger_instance = 24;

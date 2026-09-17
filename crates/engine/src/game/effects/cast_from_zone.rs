@@ -975,6 +975,9 @@ pub fn resolve(
             )
         });
     if paid_during_resolution_cast {
+        // Mint before publishing the offer. The ID is cleanup authority, not a
+        // presentation detail of the selected card/source.
+        let offer_id = state.allocate_resolution_cast_offer_id();
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CastFromZone,
             source_id: ability.source_id,
@@ -992,6 +995,7 @@ pub fn resolve(
                 additional_cost,
                 cleanup: crate::types::ability::ResolutionCastCleanup {
                     source_id: ability.source_id,
+                    offer_id: Some(offer_id),
                     face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                         freeze_resolution_cast_filter(
                             state,
@@ -1701,6 +1705,7 @@ fn resolution_cast_request_for_single_target(
     );
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: ability.source_id,
+        offer_id: None,
         face_policy: face_policy.clone(),
         exiled_misses,
         reject_action,

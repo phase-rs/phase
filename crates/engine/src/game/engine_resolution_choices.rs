@@ -2275,6 +2275,7 @@ pub(super) fn handle_resolution_choice(
                 );
                 let cleanup = crate::types::ability::ResolutionCastCleanup {
                     source_id,
+                    offer_id: None,
                     face_policy: face_policy.clone(),
                     exiled_misses,
                     reject_action: crate::types::ability::ResolutionMvRejectAction::ToHand,
@@ -2617,6 +2618,7 @@ pub(super) fn handle_resolution_choice(
                 );
                 let cleanup = crate::types::ability::ResolutionCastCleanup {
                     source_id,
+                    offer_id: None,
                     face_policy: face_policy.clone(),
                     exiled_misses,
                     reject_action:
@@ -2695,6 +2697,7 @@ pub(super) fn handle_resolution_choice(
                 );
                 let cleanup = crate::types::ability::ResolutionCastCleanup {
                     source_id,
+                    offer_id: None,
                     face_policy: face_policy.clone(),
                     exiled_misses: revealed_misses,
                     reject_action:
@@ -8394,6 +8397,7 @@ pub(crate) fn abort_resolution_cast(
 
     let crate::types::ability::ResolutionCastCleanup {
         source_id,
+        offer_id: _,
         face_policy: _,
         exiled_misses,
         reject_action,
@@ -8524,8 +8528,18 @@ pub(crate) fn validate_resolution_cast_delayed_trigger_receipts(
 ) -> Result<(), EngineError> {
     let mut seen = HashSet::new();
     for receipt in &cleanup.delayed_trigger_receipts {
-        let identity = (receipt.token, receipt.instance, receipt.source_id);
-        if receipt.token.0 == 0 || receipt.instance.0 == 0 || !seen.insert(identity) {
+        let identity = (
+            receipt.offer_id,
+            receipt.token,
+            receipt.instance,
+            receipt.source_id,
+        );
+        if cleanup.offer_id != Some(receipt.offer_id)
+            || receipt.offer_id.0 == 0
+            || receipt.token.0 == 0
+            || receipt.instance.0 == 0
+            || !seen.insert(identity)
+        {
             return Err(EngineError::InvalidAction(
                 "invalid resolution-cast delayed-trigger receipt".to_string(),
             ));
@@ -8539,10 +8553,29 @@ pub(crate) fn validate_resolution_cast_delayed_trigger_receipts(
                         origin.token == receipt.token
                             && origin.instance == receipt.instance
                             && origin.source_id == receipt.source_id
+                            && origin.offer_id == Some(receipt.offer_id)
                     })
             })
             .count();
-        if matches != 1 {
+        let journal_matches = state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.command.as_ref())
+            .filter_map(|command| match command {
+                crate::types::resolved_commands::ResolvedRulesCommand::DelayedTriggerInstall(
+                    command,
+                ) => command.trigger.provenance.origin(),
+                _ => None,
+            })
+            .filter(|origin| {
+                origin.token == receipt.token
+                    && origin.instance == receipt.instance
+                    && origin.source_id == receipt.source_id
+                    && origin.offer_id == Some(receipt.offer_id)
+            })
+            .count();
+        if matches != 1 || journal_matches != 1 {
             return Err(EngineError::InvalidAction(
                 "resolution-cast delayed-trigger receipt is stale".to_string(),
             ));
@@ -8562,14 +8595,25 @@ pub(crate) fn withdraw_resolution_cast_delayed_triggers(
     let receipts: HashSet<_> = cleanup
         .delayed_trigger_receipts
         .iter()
-        .map(|receipt| (receipt.token, receipt.instance, receipt.source_id))
+        .map(|receipt| {
+            (
+                receipt.offer_id,
+                receipt.token,
+                receipt.instance,
+                receipt.source_id,
+            )
+        })
         .collect();
     let mut survivors = Vec::new();
     let mut withdrawn = Vec::new();
     for trigger in std::mem::take(&mut state.delayed_triggers) {
         let is_installed_here = trigger.provenance.origin().is_some_and(|origin| {
-            receipts.contains(&(origin.token, origin.instance, origin.source_id))
-                && trigger.source_id == origin.source_id
+            receipts.contains(&(
+                origin.offer_id.unwrap_or_default(),
+                origin.token,
+                origin.instance,
+                origin.source_id,
+            )) && trigger.source_id == origin.source_id
         });
         if is_installed_here {
             withdrawn.push(trigger);
@@ -9625,6 +9669,7 @@ mod tests {
                 granted_to: Some(PlayerId(0)),
                 resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
                     source_id: sibling_source,
+                    offer_id: None,
                     face_policy: sibling_policy,
                     exiled_misses: Vec::new(),
                     reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,

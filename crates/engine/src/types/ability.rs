@@ -4964,6 +4964,9 @@ impl ResolutionCastFacePolicy {
 /// same source installs several otherwise similar triggers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolutionCastDelayedTriggerReceipt {
+    /// The producer-issued paid offer that owns this receipt. Never inferred
+    /// from its otherwise equivalent-looking trigger fields.
+    pub offer_id: super::identifiers::ResolutionCastOfferId,
     pub token: super::identifiers::DelayedTriggerToken,
     pub instance: super::identifiers::DelayedTriggerInstanceId,
     pub source_id: super::identifiers::ObjectId,
@@ -4985,6 +4988,10 @@ pub struct ResolutionCastCleanup {
     /// post-offer library placement. The during-resolution cast can outlive the
     /// original `CastOffer`, so its cleanup payload is the typed source carrier.
     pub source_id: super::identifiers::ObjectId,
+    /// Set for a paid `GraveyardPaidCast` offer and retained through the
+    /// temporary manual-payment permission. Free cleanup remains ownerless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer_id: Option<super::identifiers::ResolutionCastOfferId>,
     /// Exact policy from the window/request that elected this temporary
     /// permission.  It remains mandatory after the original offer has been
     /// consumed so cancellation, payment pauses, and cleanup cannot rebuild a
@@ -5148,6 +5155,7 @@ mod resolution_cast_face_policy_serde_tests {
         let policy = policy();
         let cleanup = ResolutionCastCleanup {
             source_id: ObjectId(701),
+            offer_id: None,
             face_policy: policy.clone(),
             exiled_misses: Vec::new(),
             reject_action: ResolutionMvRejectAction::RemainExiled,
@@ -5195,6 +5203,7 @@ mod resolution_cast_face_policy_serde_tests {
 
         let mut cleanup = serde_json::to_value(ResolutionCastCleanup {
             source_id: ObjectId(701),
+            offer_id: None,
             face_policy: policy(),
             exiled_misses: Vec::new(),
             reject_action: ResolutionMvRejectAction::RemainExiled,

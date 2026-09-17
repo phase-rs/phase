@@ -10996,6 +10996,15 @@ fn evaluate_cascade_constraint_with_resulting_mv(
         Some(resulting_mv),
     );
 
+    // This permission can be rehomed into a normal-cost manual payment or
+    // removed on rejection. Validate its immutable cleanup authority before
+    // either mutation so forged receipts cannot alter permissions, objects, or
+    // the parent resolution state.
+    super::engine_resolution_choices::validate_resolution_cast_cleanup_authority(player, &cleanup)?;
+    super::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
+        state, &cleanup,
+    )?;
+
     if accepted {
         // CR 609.4b: A during-resolution PAID cast (Quistis Trepe, Tinybones the
         // Pickpocket) carries a "mana of any type can be spent to cast that spell"
@@ -11045,9 +11054,6 @@ fn evaluate_cascade_constraint_with_resulting_mv(
             waiting_for,
         })
     } else {
-        super::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
-            state, &cleanup,
-        )?;
         state
             .objects
             .get_mut(&object_id)
@@ -14699,6 +14705,7 @@ mod tests {
             token: DelayedTriggerToken(token),
             instance: DelayedTriggerInstanceId(token),
             source_id,
+            offer_id: None,
         }
     }
 
@@ -20277,6 +20284,7 @@ mod tests {
                     granted_to: None,
                     resolution_cleanup: Some(ResolutionCastCleanup {
                         source_id: hit,
+                        offer_id: None,
                         face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                             crate::types::ability::TargetFilter::Any,
                             hit,
@@ -20406,6 +20414,7 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: Some(ResolutionCastCleanup {
                         source_id: hit,
+                        offer_id: None,
                         face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                             crate::types::ability::TargetFilter::Any,
                             hit,
@@ -20487,6 +20496,7 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: Some(ResolutionCastCleanup {
                         source_id: hit,
+                        offer_id: None,
                         face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                             crate::types::ability::TargetFilter::Any,
                             hit,
@@ -20769,6 +20779,7 @@ mod tests {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: Some(ResolutionCastCleanup {
                         source_id: hit,
+                        offer_id: None,
                         face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                             crate::types::ability::TargetFilter::Any,
                             hit,
@@ -20839,6 +20850,7 @@ mod tests {
                     granted_to: Some(PlayerId(1)),
                     resolution_cleanup: Some(ResolutionCastCleanup {
                         source_id: hit,
+                        offer_id: None,
                         face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                             crate::types::ability::TargetFilter::Any,
                             hit,
@@ -20995,6 +21007,7 @@ mod tests {
                 hit,
                 ResolutionCastCleanup {
                     source_id: hit,
+                    offer_id: None,
                     face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                         crate::types::ability::TargetFilter::Any,
                         hit,

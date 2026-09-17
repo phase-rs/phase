@@ -13128,14 +13128,14 @@ pub(super) fn continue_resolution_modal_face_choice(
     choice: ResolutionModalFaceChoice,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let (graveyard_replacement, force_normal_cost) = state
+    let (graveyard_replacement, force_normal_cost, cleanup) = state
         .objects
         .get(&object_id)
         .and_then(|object| object.casting_permissions.get(choice.permission_index.0))
         .and_then(|permission| match permission {
             CastingPermission::ExileWithAltCost {
                 granted_to: Some(grantee),
-                resolution_cleanup: Some(_),
+                resolution_cleanup: Some(cleanup),
                 graveyard_replacement,
                 cost_provenance,
                 ..
@@ -13145,6 +13145,7 @@ pub(super) fn continue_resolution_modal_face_choice(
                     cost_provenance,
                     crate::types::ability::ExileGrantCostProvenance::NormalCost
                 ),
+                cleanup.clone(),
             )),
             _ => None,
         })
@@ -13153,6 +13154,13 @@ pub(super) fn continue_resolution_modal_face_choice(
                 "Resolution face choice permission provenance is stale or mismatched".to_string(),
             )
         })?;
+    // Defense in depth for callers that arrive after the prompt boundary: no
+    // face legality, replacement rider, preparation, or payment mutation may
+    // happen before the exact owner-bearing receipt/root check succeeds.
+    super::engine_resolution_choices::validate_resolution_cast_cleanup_authority(player, &cleanup)?;
+    super::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
+        state, &cleanup,
+    )?;
     if !selected_resolution_spell_face_is_allowed(state, player, object_id, choice.permission_index)
     {
         return Err(EngineError::ActionNotAllowed(
@@ -23896,6 +23904,7 @@ mod castable_zone_authority_tests {
             };
             *resolution_cleanup = Some(crate::types::ability::ResolutionCastCleanup {
                 source_id: ObjectId(2),
+                offer_id: None,
                 face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                     crate::types::ability::TargetFilter::Any,
                     ObjectId(2),

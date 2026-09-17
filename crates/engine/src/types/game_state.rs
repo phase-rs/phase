@@ -13,16 +13,16 @@ use super::ability::{
     default_target_filter_permanent, legacy_trigger_entry_list,
     materialize_legacy_printed_trigger_entries, AbilityCost, AbilityDefinition, AdditionalCost,
     AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
-    CastTimingPermission, CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue,
-    ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification,
-    ControlWindow, CopiableValues, CopyChooseScope, CopyScale, CopyTargetPurpose,
-    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, DigRestOrder, Duration,
-    EffectKind, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition,
-    ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility,
-    SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint, StackAbilityKind,
-    StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause,
-    TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef,
-    TriggerDefinitionRef, TriggerEntry,
+    CastTimingPermission, CastVariantPaid, CastingPermission, CategoryChooserScope, ChoiceType,
+    ChoiceValue, ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, Comparator,
+    ContinuousModification, ControlWindow, CopiableValues, CopyChooseScope, CopyScale,
+    CopyTargetPurpose, CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition,
+    DigRestOrder, Duration, EffectKind, FaceDownProfile, GameRestriction, KeywordAction,
+    KickerVariant, LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
+    ResolvedAbility, SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint,
+    StackAbilityKind, StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef,
+    ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition,
+    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
 };
 use super::actions::{DebugCardCreationKind, ResolveAllScope};
 use super::attribution::ObjectAttribution;
@@ -36,7 +36,8 @@ use super::events::{
 use super::format::FormatConfig;
 use super::identifiers::{
     CardId, DelayedInstallIdentity, DelayedTriggerOrigin, LogicalZoneChangeGroupId, ObjectId,
-    ObjectIdentityBinding, ObjectIncarnationRef, TrackedSetId, TriggerFiring,
+    ObjectIdentityBinding, ObjectIncarnationRef, ResolutionCastOfferId, TrackedSetId,
+    TriggerFiring,
 };
 use super::interaction::{ActiveInteractionSlot, InteractionSessionId};
 use super::keywords::{Keyword, KeywordKind};
@@ -7696,6 +7697,17 @@ impl PendingCast {
 }
 
 impl GameState {
+    /// Mint the nonzero producer identity for one paid resolution-cast offer.
+    /// The allocator is persisted so a restored offer never shares authority
+    /// with a later one, even when their card/source fields collide.
+    pub(crate) fn allocate_resolution_cast_offer_id(&mut self) -> ResolutionCastOfferId {
+        let id = self.next_resolution_cast_offer_id.max(1);
+        self.next_resolution_cast_offer_id = id
+            .checked_add(1)
+            .expect("resolution-cast offer allocator exhausted");
+        ResolutionCastOfferId(id)
+    }
+
     /// Records durable product knowledge at the instant a viewer is shown card
     /// identities. This deliberately does not mutate rules-visible reveal
     /// markers or any current interaction state.
@@ -10465,6 +10477,115 @@ fn normalize_delayed_trigger_allocators(state: &mut GameState) -> Result<(), Str
     Ok(())
 }
 
+/// Normalize and validate the producer allocator for active paid
+/// during-resolution offers. A historical paid cleanup with no receipt can be
+/// assigned a fresh ID safely; an ownerless receipt cannot be proved to belong
+/// to any particular offer and is therefore rejected rather than reconstructed.
+pub(crate) fn normalize_resolution_cast_offer_allocator(
+    state: &mut GameState,
+) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    let mut high_water = 0u64;
+
+    // A completed offer can leave its owner only on the delayed-install roots.
+    // Keep the allocator above those durable attestations too, so a restored
+    // game never reissues an owner that still identifies a live or journaled
+    // trigger even after its cleanup has been consumed.
+    for origin in delayed_install_origins(state) {
+        if let Some(offer_id) = origin.offer_id {
+            if offer_id.0 == 0 {
+                return Err("delayed-trigger provenance has a zero paid offer owner".to_string());
+            }
+            high_water = high_water.max(offer_id.0);
+        }
+    }
+
+    let mut observe = |cleanup: &crate::types::ability::ResolutionCastCleanup| {
+        let Some(offer_id) = cleanup.offer_id else {
+            if cleanup.delayed_trigger_receipts.is_empty() {
+                return Ok(());
+            }
+            return Err("active paid resolution cleanup has ownerless receipts".to_string());
+        };
+        if offer_id.0 == 0 || !seen.insert(offer_id) {
+            return Err("active paid resolution cleanup has zero or duplicate owner".to_string());
+        }
+        for receipt in &cleanup.delayed_trigger_receipts {
+            if receipt.offer_id != offer_id || receipt.offer_id.0 == 0 {
+                return Err(
+                    "paid resolution cleanup receipt does not carry its exact offer owner"
+                        .to_string(),
+                );
+            }
+        }
+        high_water = high_water.max(offer_id.0);
+        Ok(())
+    };
+
+    if let WaitingFor::CastOffer {
+        kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
+        ..
+    } = &state.waiting_for
+    {
+        observe(cleanup)?;
+    }
+    for object in state.objects.values() {
+        for permission in &object.casting_permissions {
+            if let CastingPermission::ExileWithAltCost {
+                cost: ManaCost::SelfManaCost,
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::NormalCost,
+                resolution_cleanup: Some(cleanup),
+                ..
+            } = permission
+            {
+                observe(cleanup)?;
+            }
+        }
+    }
+    drop(observe);
+
+    let mut next = state.next_resolution_cast_offer_id.max(1);
+    if high_water >= next {
+        next = high_water
+            .checked_add(1)
+            .ok_or_else(|| "resolution-cast offer allocator overflow".to_string())?;
+    }
+    let mut allocate_missing =
+        |cleanup: &mut crate::types::ability::ResolutionCastCleanup| -> Result<(), String> {
+            if cleanup.offer_id.is_none() {
+                // This branch was admitted only after the first pass proved the
+                // cleanup has no receipts, so allocating cannot rebind authority.
+                cleanup.offer_id = Some(ResolutionCastOfferId(next));
+                next = next
+                    .checked_add(1)
+                    .ok_or_else(|| "resolution-cast offer allocator overflow".to_string())?;
+            }
+            Ok(())
+        };
+    if let WaitingFor::CastOffer {
+        kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
+        ..
+    } = &mut state.waiting_for
+    {
+        allocate_missing(cleanup)?;
+    }
+    for (_, object) in state.objects.iter_mut() {
+        for permission in &mut object.casting_permissions {
+            if let CastingPermission::ExileWithAltCost {
+                cost: ManaCost::SelfManaCost,
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::NormalCost,
+                resolution_cleanup: Some(cleanup),
+                ..
+            } = permission
+            {
+                allocate_missing(cleanup)?;
+            }
+        }
+    }
+    state.next_resolution_cast_offer_id = next;
+    Ok(())
+}
+
 /// Validates the private CR 603.7 identity transport after raw-state migration.
 ///
 /// A delayed-install command is the durable installation root. A still-live
@@ -10473,7 +10594,8 @@ fn normalize_delayed_trigger_allocators(state: &mut GameState) -> Result<(), Str
 /// left `delayed_triggers`. No carrier may invent an identity or rebind one to
 /// a source with the same object id.
 pub(crate) fn validate_trigger_firing_coherence(state: &GameState) -> Result<(), String> {
-    let mut roots = BTreeMap::<(u64, u64), ObjectId>::new();
+    let mut roots = BTreeMap::<(u64, u64), DelayedTriggerOrigin>::new();
+    let mut journal_roots = HashSet::new();
 
     let mut register_root = |provenance: DelayedTriggerOrigin,
                              source_id: ObjectId,
@@ -10489,9 +10611,14 @@ pub(crate) fn validate_trigger_firing_coherence(state: &GameState) -> Result<(),
                 "{carrier} delayed-trigger provenance does not match its install root"
             ));
         }
+        if provenance.offer_id.is_some_and(|offer_id| offer_id.0 == 0) {
+            return Err(format!(
+                "{carrier} delayed-trigger provenance has a zero paid offer owner"
+            ));
+        }
         let key = (provenance.token.0, provenance.instance.0);
         match roots.get(&key) {
-            Some(existing_source) if *existing_source == source_id => Ok(()),
+            Some(existing) if *existing == provenance => Ok(()),
             Some(_) => Err(format!(
                 "{carrier} delayed-trigger provenance aliases a different install root"
             )),
@@ -10509,7 +10636,7 @@ pub(crate) fn validate_trigger_firing_coherence(state: &GameState) -> Result<(),
                         "{carrier} delayed-trigger provenance reuses an instance"
                     ));
                 }
-                roots.insert(key, source_id);
+                roots.insert(key, provenance);
                 Ok(())
             }
         }
@@ -10536,11 +10663,18 @@ pub(crate) fn validate_trigger_firing_coherence(state: &GameState) -> Result<(),
                     );
                 }
                 register_root(provenance, command.trigger.source_id, "journal")?;
+                journal_roots.insert(provenance);
             }
         }
     }
     for trigger in &state.delayed_triggers {
         if let Some(provenance) = trigger.provenance.origin() {
+            if provenance.offer_id.is_some() && !journal_roots.contains(&provenance) {
+                return Err(
+                    "paid delayed-trigger provenance has no matching journal install root"
+                        .to_string(),
+                );
+            }
             register_root(provenance, trigger.source_id, "live delayed trigger")?;
         }
     }
@@ -10559,7 +10693,7 @@ pub(crate) fn validate_trigger_firing_coherence(state: &GameState) -> Result<(),
                         ));
                     }
                     match roots.get(&(provenance.token.0, provenance.instance.0)) {
-                        Some(root_source) if *root_source == source_id => Ok(()),
+                        Some(root) if *root == provenance => Ok(()),
                         Some(_) => Err(format!(
                             "{carrier} delayed-trigger provenance aliases a different install root"
                         )),
@@ -17666,6 +17800,9 @@ declare_game_state! {
     /// installation provenance. Legacy saves begin at one during migration.
     #[serde(default = "initial_delayed_trigger_instance_id")]
     pub(crate) next_delayed_trigger_instance: u64,
+    /// Persisted producer allocator for paid resolution-cast cleanup authority.
+    #[serde(default)]
+    pub(crate) next_resolution_cast_offer_id: u64,
     /// Monotonic allocator for [`LogicalZoneChangeGroupId`]. It is pure
     /// identity, so equality intentionally compares the active owner rather
     /// than this historical counter.
@@ -17700,6 +17837,10 @@ declare_game_state! {
     /// consults it only inside that synchronous window; it is never serialized.
     #[serde(skip)]
     pub active_casting_permission_index: Option<CastingPermissionIndex>,
+    /// The single synchronous handoff from a paid offer's immediate direct
+    /// `CreateDelayedTrigger` tail to the installer. It is never persisted.
+    #[serde(skip)]
+    pub(crate) active_paid_resolution_offer_tail: Option<ResolutionCastOfferId>,
 
     // Shared zones
     pub battlefield: im::Vector<ObjectId>,
@@ -20251,6 +20392,11 @@ fn migrate_legacy_graveyard_paid_cast_cleanup(value: &mut serde_json::Value) -> 
                 continue;
             };
             let receipt = crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+                // Historical receipts had no paid-offer owner. Keep the
+                // impossible zero sentinel through field migration so the
+                // post-materialization validator rejects the active ambiguity
+                // rather than rebinding it from source/token/instance.
+                offer_id: crate::types::identifiers::ResolutionCastOfferId(0),
                 token: origin.token,
                 instance: origin.instance,
                 source_id: origin.source_id,
@@ -20426,6 +20572,7 @@ impl GameStateDecode {
             .map_err(|error| error.to_string())?;
         validate_restored_zone_change_replay_keys(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
+        normalize_resolution_cast_offer_allocator(&mut state)?;
         // The PERSISTED half of the projection gate; `decode` below carries the other.
         // See the pairing comment there for why one site is not enough.
         reject_viewer_projection_as_authority(&state)?;
@@ -20457,6 +20604,7 @@ impl GameStateDecode {
         migrate_legacy_graveyard_paid_cast_cleanup(&mut value)?;
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
+        normalize_resolution_cast_offer_allocator(&mut state)?;
         // NO viewer-projection guard here, deliberately. This is the TRANSPORT decode
         // path as much as a restore path: `ServerMessage::GameStarted { state, .. }`
         // (`server-core/src/protocol.rs`) carries a `filter_state_for_viewer` projection
@@ -24582,6 +24730,7 @@ impl GameState {
             next_object_id: 1,
             next_delayed_trigger_token: 1,
             next_delayed_trigger_instance: initial_delayed_trigger_instance_id(),
+            next_resolution_cast_offer_id: 1,
             next_logical_zone_change_group_id: initial_logical_zone_change_group_id(),
             // CR 118.3a: start at 1 so minted pip ids never collide with the
             // `ManaPipId(0)` unstamped sentinel.
@@ -24590,6 +24739,7 @@ impl GameState {
             active_payment_pins: Vec::new(),
             active_rules_execution_node: None,
             active_casting_permission_index: None,
+            active_paid_resolution_offer_tail: None,
             battlefield: im::Vector::new(),
             stack: im::Vector::new(),
             stack_paid_facts: HashMap::new(),
@@ -25761,6 +25911,8 @@ impl GameState {
         clone.next_object_id = 0;
         clone.next_delayed_trigger_token = 0;
         clone.next_delayed_trigger_instance = 0;
+        clone.next_resolution_cast_offer_id = 0;
+        clone.active_paid_resolution_offer_tail = None;
         // CR 104.4b: pip-id counter is a volatile monotonic field; zero it (like
         // next_object_id) so two otherwise-identical loop states compare equal.
         clone.next_pip_id = 0;
@@ -26778,12 +26930,14 @@ fn _gamestate_partition_is_total(s: &GameState) {
         next_object_id: _,
         next_delayed_trigger_token: _,
         next_delayed_trigger_instance: _,
+        next_resolution_cast_offer_id: _,
         next_logical_zone_change_group_id: _,
         next_pip_id: _,
         resolved_rules_journal: _,
         active_payment_pins: _,
         active_rules_execution_node: _,
         active_casting_permission_index: _,
+        active_paid_resolution_offer_tail: _,
         battlefield: _,
         stack: _,
         stack_paid_facts: _,
@@ -27175,6 +27329,7 @@ impl PartialEq for GameState {
             && self.next_object_id == other.next_object_id
             && self.next_delayed_trigger_token == other.next_delayed_trigger_token
             && self.next_delayed_trigger_instance == other.next_delayed_trigger_instance
+            && self.next_resolution_cast_offer_id == other.next_resolution_cast_offer_id
             && self.next_pip_id == other.next_pip_id
             && self.resolved_rules_journal == other.resolved_rules_journal
             && self.battlefield == other.battlefield
@@ -28660,12 +28815,16 @@ mod tests {
             source,
             true,
         );
+        let offer_id = state.allocate_resolution_cast_offer_id();
+        state.active_paid_resolution_offer_tail = Some(offer_id);
         crate::game::triggers::install_delayed_trigger(&mut state, delayed, &mut Vec::new());
+        state.active_paid_resolution_offer_tail = None;
         let origin = state.delayed_triggers[0]
             .provenance
             .origin()
             .expect("live delayed installation has an exact receipt");
         let receipt = crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+            offer_id: origin.offer_id.expect("paid fixture stamps offer owner"),
             token: origin.token,
             instance: origin.instance,
             source_id: origin.source_id,
@@ -28693,6 +28852,7 @@ mod tests {
                 additional_cost: None,
                 cleanup: crate::types::ability::ResolutionCastCleanup {
                     source_id: source,
+                    offer_id: Some(offer_id),
                     face_policy,
                     exiled_misses: Vec::new(),
                     reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
@@ -28715,7 +28875,8 @@ mod tests {
         let constraint = cleanup["face_policy"]["constraint"].clone();
         let receipts = cleanup["delayed_trigger_receipts"]
             .as_array()
-            .expect("modern fixture has receipt list");
+            .cloned()
+            .unwrap_or_default();
         let installed = receipts
             .iter()
             .map(|receipt| receipt["instance"].clone())
@@ -28727,73 +28888,74 @@ mod tests {
         );
     }
 
-    fn assert_migrated_paid_offer_cleanup(
-        state: &GameState,
-        hit_card: ObjectId,
-        constraint: &crate::types::ability::CastPermissionConstraint,
-        receipt: &crate::types::ability::ResolutionCastDelayedTriggerReceipt,
-    ) {
-        let WaitingFor::CastOffer {
-            player: PlayerId(1),
-            kind:
-                CastOfferKind::GraveyardPaidCast {
-                    hit_card: restored_hit,
-                    cleanup,
-                    ..
-                },
-        } = &state.waiting_for
-        else {
-            panic!(
-                "legacy paid offer must decode as its canonical CastOffer: {:?}",
-                state.waiting_for
-            );
-        };
-        assert_eq!(*restored_hit, hit_card);
-        assert_eq!(cleanup.source_id, hit_card);
-        assert_eq!(cleanup.face_policy.source_id, hit_card);
-        assert_eq!(
-            cleanup.face_policy.controller,
-            PlayerId(1),
-            "the outer CastOffer.player, not a live source or hit-card owner, owns legacy policy authority"
-        );
-        assert_eq!(cleanup.face_policy.constraint.as_ref(), Some(constraint));
-        assert_eq!(cleanup.delayed_trigger_receipts, vec![receipt.clone()]);
-    }
-
     #[test]
-    fn legacy_paid_offer_cleanup_migrates_across_raw_trusted_and_versioned_ingresses() {
-        let (state, _source, hit_card, constraint, receipt) = paid_offer_cleanup_fixture();
+    fn legacy_paid_offer_with_ownerless_receipts_fails_closed_across_ingresses() {
+        let (state, _source, _hit_card, _constraint, _receipt) = paid_offer_cleanup_fixture();
 
         // Bare current-state serde is the direct raw ingress. It does not have
         // a resolution wire discriminator, so it exercises GameStateDecode's
         // raw migration path directly.
         let mut direct_raw = serde_json::to_value(&state).expect("fixture serializes");
         downgrade_paid_offer_cleanup_to_legacy(&mut direct_raw);
-        let restored: GameState = serde_json::from_value(direct_raw.clone())
-            .expect("direct raw legacy paid offer migrates");
-        assert_migrated_paid_offer_cleanup(&restored, hit_card, &constraint, &receipt);
+        let direct_error = serde_json::from_value::<GameState>(direct_raw.clone())
+            .expect_err("direct raw ownerless receipt must fail closed")
+            .to_string();
+        assert!(direct_error.contains("ownerless receipts"));
 
         // An unversioned persisted raw save declares its historical wire mode
         // at the persistence boundary before running the same migration.
-        let restored = serde_json::from_value::<PersistedGameState>(direct_raw)
-            .expect("persisted raw legacy paid offer migrates")
-            .into_game_state_unchecked();
-        assert_migrated_paid_offer_cleanup(&restored, hit_card, &constraint, &receipt);
+        let raw_error = serde_json::from_value::<PersistedGameState>(direct_raw)
+            .expect_err("persisted raw ownerless receipt must fail closed")
+            .to_string();
+        assert!(raw_error.contains("ownerless receipts"));
 
         let mut versioned = serde_json::to_value(ResolutionStateWire::from_game_state(state))
             .expect("versioned fixture serializes");
         downgrade_paid_offer_cleanup_to_legacy(&mut versioned);
-        let restored = serde_json::from_value::<ResolutionStateWire>(versioned.clone())
-            .expect("declared resolution wire migrates legacy paid offer")
-            .into_game_state();
-        assert_migrated_paid_offer_cleanup(&restored, hit_card, &constraint, &receipt);
+        let wire_error = serde_json::from_value::<ResolutionStateWire>(versioned.clone())
+            .expect_err("declared wire ownerless receipt must fail closed")
+            .to_string();
+        assert!(wire_error.contains("ownerless receipts"));
 
-        let restored = serde_json::from_value::<PersistedGameState>(serde_json::json!({
+        let trusted_error = serde_json::from_value::<PersistedGameState>(serde_json::json!({
             "state": versioned,
         }))
-        .expect("trusted envelope migrates legacy paid offer")
-        .into_game_state_unchecked();
-        assert_migrated_paid_offer_cleanup(&restored, hit_card, &constraint, &receipt);
+        .expect_err("trusted ownerless receipt must fail closed")
+        .to_string();
+        assert!(trusted_error.contains("ownerless receipts"));
+    }
+
+    #[test]
+    fn legacy_paid_offer_without_receipts_gets_a_fresh_owner() {
+        let (mut state, _source, _hit_card, _constraint, _receipt) = paid_offer_cleanup_fixture();
+        // Simulate a pre-owner payload: its allocator field was absent (and
+        // therefore defaults to zero), while the already-installed trigger is
+        // the only durable high-water mark for a completed prior offer.
+        state.next_resolution_cast_offer_id = 0;
+        let WaitingFor::CastOffer {
+            kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
+            ..
+        } = &mut state.waiting_for
+        else {
+            panic!("fixture has a paid offer");
+        };
+        cleanup.delayed_trigger_receipts.clear();
+        cleanup.offer_id = None;
+        let mut raw = serde_json::to_value(state).expect("fixture serializes");
+        downgrade_paid_offer_cleanup_to_legacy(&mut raw);
+        let restored: GameState = serde_json::from_value(raw)
+            .expect("ownerless legacy cleanup without receipts is migratable");
+        let WaitingFor::CastOffer {
+            kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
+            ..
+        } = restored.waiting_for
+        else {
+            panic!("migration retains the paid offer");
+        };
+        let offer_id = cleanup.offer_id.expect("migration allocates an owner");
+        assert_eq!(offer_id, ResolutionCastOfferId(2));
+        assert_eq!(restored.next_resolution_cast_offer_id, 3);
+        assert!(cleanup.delayed_trigger_receipts.is_empty());
     }
 
     #[test]
@@ -29860,6 +30022,7 @@ mod tests {
             token,
             instance: DelayedTriggerInstanceId(1),
             source_id: source,
+            offer_id: None,
         });
         let command = ResolvedDelayedTriggerCommand {
             trigger,
@@ -31668,17 +31831,18 @@ mod tests {
         );
     }
 
-    /// The three fields `client_state_wire_value` removes that are
+    /// The four fields `client_state_wire_value` removes that are
     /// UNCONDITIONALLY serialized. Local mirror of
     /// `CLIENT_WIRE_UNCONDITIONAL_FIELDS` in `types/resolution.rs`, which is
     /// private to that module. The mirror is deliberate: it is exactly what
     /// mutation B of
     /// `redaction_fingerprint_is_conjunctive_over_every_unconditional_field`
     /// detects — dropping an entry from the production `const` leaves this list
-    /// three-wide and reddens the loop iteration for the dropped key.
+    /// four-wide and reddens the loop iteration for the dropped key.
     const FINGERPRINT_FIELDS: &[&str] = &[
         "next_delayed_trigger_token",
         "next_delayed_trigger_instance",
+        "next_resolution_cast_offer_id",
         "resolved_rules_journal",
     ];
 
@@ -31801,23 +31965,23 @@ mod tests {
     }
 
     /// V14. Pins the OTHER half of the premise
-    /// `client_wire_still_carries_resolution_stack` pins: the three fields whose
+    /// `client_wire_still_carries_resolution_stack` pins: the four fields whose
     /// absence `declare_raw_resolution_wire` reads as a client-wire redaction
     /// fingerprint are removed by `client_state_wire_value` and by nothing else.
     ///
-    /// Mutation (i) — delete any one `root.remove(k)` for these three keys in
+    /// Mutation (i) — delete any one `root.remove(k)` for these four keys in
     /// `client_state_wire_value`. Reddens at the WIRE-ABSENT assertion for that
     /// key; the reach-guard is untouched, because the three siblings it names are
     /// not in the removal list.
     ///
-    /// Mutation (ii) — give any of the three declarations a
+    /// Mutation (ii) — give any of the four declarations a
     /// `skip_serializing_if`. This is a mutation CLASS, and whether it is
     /// detected is VALUE-dependent: a predicate that skips the value the fixture
     /// happens to hold reddens the BARE-PRESENT assertion (which runs before its
     /// wire-absent sibling), and a predicate that does not skip it leaves this row
     /// green while the guard's premise has in fact been broken. The
     /// serde-default control below closes the realistic `is_default` / `is_zero` /
-    /// `is_empty` family for all three fields at once; it does not close an
+    /// `is_empty` family for all four fields at once; it does not close an
     /// arbitrary predicate, and no test can.
     ///
     /// Do not delete these assertions: the fingerprint is a fact about a MUTABLE
@@ -31861,18 +32025,19 @@ mod tests {
                 wire.get(*field).is_none(),
                 "`client_state_wire_value` no longer removes {field}. \
                  `is_redacted_client_wire_projection` (types/resolution.rs) reads the \
-                 absence of all three as the client-wire redaction fingerprint, and \
+                 absence of all four as the client-wire redaction fingerprint, and \
                  that inference silently stops applying if the removal list changes. \
                  Fix the redactor or re-derive the rule — do not delete this assertion."
             );
         }
 
         // Mutation (ii)'s serde-default control: a state holding exactly the
-        // values an absent key decodes to must STILL emit all three. Any
+        // values an absent key decodes to must STILL emit all four. Any
         // skip-when-default predicate added to a declaration reddens here.
         let mut serde_defaults = GameState::new_two_player(7);
         serde_defaults.next_delayed_trigger_token = 0;
         serde_defaults.next_delayed_trigger_instance = initial_delayed_trigger_instance_id();
+        serde_defaults.next_resolution_cast_offer_id = 0;
         serde_defaults.resolved_rules_journal = ResolvedRulesJournal::default();
         let defaulted = bare_value(&serde_defaults);
         for field in FINGERPRINT_FIELDS {
@@ -32029,6 +32194,7 @@ mod tests {
             token: DelayedTriggerToken(1),
             instance: DelayedTriggerInstanceId(1),
             source_id: source,
+            offer_id: None,
         };
         // The install root, without which the BARE reach-guard cannot be
         // established. `register_root` accepts a live delayed trigger's
@@ -32121,30 +32287,31 @@ mod tests {
     /// shape — because a fully restored one satisfies neither `.all(…)` nor
     /// `.any(…)` and is blind to every mutation of the conjunction.
     ///
-    /// Removing two keys does not change the decode for an unrelated reason:
+    /// Removing three keys does not change the decode for an unrelated reason:
     /// the serde defaults are `next_delayed_trigger_token → 0`,
-    /// `next_delayed_trigger_instance → 1`, `resolved_rules_journal → default`,
+    /// `next_delayed_trigger_instance → 1`,
+    /// `next_resolution_cast_offer_id → 0`, `resolved_rules_journal → default`,
     /// this fixture holds no delayed triggers and an empty journal, and
     /// `normalize_delayed_trigger_allocators` collapses both `0` and `1` to `1`
     /// with no install roots. The decoded state is identical either way.
     ///
     /// Mutation A — `.any(…)` instead of `.all(…)` in
-    /// `is_redacted_client_wire_projection`. Every loop iteration has two of the
-    /// three absent, so `any` is true and the guard fires. Reddens at the
+    /// `is_redacted_client_wire_projection`. Every loop iteration has three of
+    /// the four absent, so `any` is true and the guard fires. Reddens at the
     /// `expect`/`unwrap_or_else` INSIDE the loop, on the first iteration. The
-    /// reach-guard stays green (all three absent means `any` is true too).
+    /// reach-guard stays green (all four absent means `any` is true too).
     ///
     /// Mutation B — drop any one key `k` from `CLIENT_WIRE_UNCONDITIONAL_FIELDS`.
     /// The iteration whose only present key is `k` then evaluates the conjunction
-    /// over the other two, both of which it removed, so the guard fires. Reddens
-    /// on exactly that iteration; the other two stay green. Together the two
-    /// mutations pin the conjunction AND each of the three entries independently.
+    /// over the other three, all of which it removed, so the guard fires. Reddens
+    /// on exactly that iteration; the other three stay green. Together the two
+    /// mutations pin the conjunction AND each of the four entries independently.
     #[test]
     fn redaction_fingerprint_is_conjunctive_over_every_unconditional_field() {
         let base = bare_value(&parked_continuation_fixture(None));
 
-        // Paired positive reach-guard, asserted FIRST: with ALL three absent this
-        // payload family IS refused. Without it the three greens below would be
+        // Paired positive reach-guard, asserted FIRST: with ALL four absent this
+        // payload family IS refused. Without it the greens below would be
         // vacuous — they would pass for a payload the guard could never fire on.
         let error = serde_json::from_value::<PersistedGameState>(without_keys(
             base.clone(),

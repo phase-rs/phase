@@ -937,6 +937,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // root carrier here as well as in the dedicated WASM client projection.
     filtered.next_delayed_trigger_token = 0;
     filtered.next_delayed_trigger_instance = 0;
+    filtered.next_resolution_cast_offer_id = 0;
     filtered.pending_trigger_firing = None;
     filtered.stack_trigger_firings.clear();
     filtered.resolving_trigger_firing = None;
@@ -8455,6 +8456,7 @@ mod tests {
                 granted_to: Some(PlayerId(0)),
                 resolution_cleanup: Some(ResolutionCastCleanup {
                     source_id: ObjectId(998),
+                    offer_id: None,
                     face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                         crate::types::ability::TargetFilter::Any,
                         ObjectId(998),

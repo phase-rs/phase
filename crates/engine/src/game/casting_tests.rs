@@ -20650,6 +20650,7 @@ fn exact_permission_does_not_inherit_sibling_etb_counter() {
                     resolution_cleanup: (index == 1).then(|| {
                         crate::types::ability::ResolutionCastCleanup {
                             source_id: creature,
+                            offer_id: None,
                             face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                                 TargetFilter::Any,
                                 creature,
@@ -20743,6 +20744,7 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
                     resolution_cleanup: (index == 1).then(|| {
                         crate::types::ability::ResolutionCastCleanup {
                             source_id: creature,
+                            offer_id: None,
                             face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                                 TargetFilter::Any,
                                 creature,
@@ -46200,6 +46202,7 @@ fn resolution_offer_grant(
         granted_to: Some(player),
         resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
             source_id,
+            offer_id: None,
             face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                 TargetFilter::Any,
                 source_id,
@@ -53030,6 +53033,7 @@ fn install_paid_offer_spell_cast_receipt(
     state: &mut GameState,
     spell: ObjectId,
     source: ObjectId,
+    offer_id: crate::types::identifiers::ResolutionCastOfferId,
 ) -> crate::types::ability::ResolutionCastDelayedTriggerReceipt {
     use crate::types::ability::{
         DelayedTriggerCondition, DelayedTriggerLifetime, TriggerDefinition,
@@ -53066,7 +53070,10 @@ fn install_paid_offer_spell_cast_receipt(
         source,
         true,
     );
+    assert!(state.active_paid_resolution_offer_tail.is_none());
+    state.active_paid_resolution_offer_tail = Some(offer_id);
     crate::game::triggers::install_delayed_trigger(state, delayed, &mut Vec::new());
+    state.active_paid_resolution_offer_tail = None;
     let origin = state
         .delayed_triggers
         .last()
@@ -53075,6 +53082,9 @@ fn install_paid_offer_spell_cast_receipt(
         .origin()
         .expect("production delayed-trigger installation must mint an exact receipt");
     crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+        offer_id: origin
+            .offer_id
+            .expect("paid tail marker stamps its exact owner"),
         token: origin.token,
         instance: origin.instance,
         source_id: origin.source_id,
@@ -53090,6 +53100,7 @@ fn receipt_is_installed(
             origin.token == receipt.token
                 && origin.instance == receipt.instance
                 && origin.source_id == receipt.source_id
+                && origin.offer_id == Some(receipt.offer_id)
         })
     })
 }
@@ -53105,7 +53116,20 @@ fn attach_paid_offer_receipt(
     else {
         panic!("fixture must be parked on a paid graveyard cast offer");
     };
+    assert_eq!(cleanup.offer_id, Some(receipt.offer_id));
     cleanup.delayed_trigger_receipts = vec![receipt];
+}
+
+fn paid_offer_id(state: &GameState) -> crate::types::identifiers::ResolutionCastOfferId {
+    match &state.waiting_for {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
+            ..
+        } => cleanup
+            .offer_id
+            .expect("paid offer must have a producer identity"),
+        _ => panic!("fixture must be parked on a paid graveyard cast offer"),
+    }
 }
 
 /// Count the synthetic self-scoped spell→graveyard redirect replacements
@@ -53248,14 +53272,23 @@ fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
         )
     };
     let mut events = Vec::new();
+    let first_offer_id = crate::types::identifiers::ResolutionCastOfferId(1);
+    state.active_paid_resolution_offer_tail = Some(first_offer_id);
     crate::game::triggers::install_delayed_trigger(&mut state, cast_of_spell(), &mut events);
+    state.active_paid_resolution_offer_tail = None;
+    let second_offer_id = crate::types::identifiers::ResolutionCastOfferId(2);
+    state.active_paid_resolution_offer_tail = Some(second_offer_id);
     crate::game::triggers::install_delayed_trigger(&mut state, cast_of_spell(), &mut events);
+    state.active_paid_resolution_offer_tail = None;
     let receipt_of = |state: &GameState, index: usize| {
         let origin = state.delayed_triggers[index]
             .provenance
             .origin()
             .expect("a live install mints a receipt root");
         crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+            offer_id: origin
+                .offer_id
+                .expect("paid tail marker stamps its exact owner"),
             token: origin.token,
             instance: origin.instance,
             source_id: origin.source_id,
@@ -53265,6 +53298,10 @@ fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
     assert_ne!(
         first.instance, second.instance,
         "reach guard: two distinct installations"
+    );
+    assert_ne!(
+        first.offer_id, second.offer_id,
+        "reach guard: colliding visible offers retain distinct producer identities"
     );
 
     state.waiting_for = WaitingFor::CastOffer {
@@ -53277,6 +53314,7 @@ fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
             additional_cost: None,
             cleanup: crate::types::ability::ResolutionCastCleanup {
                 source_id: source,
+                offer_id: Some(second_offer_id),
                 face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                     TargetFilter::Any,
                     source,
@@ -53347,7 +53385,10 @@ fn cancelling_an_accepted_paid_offer_withdraws_its_tail_receipt() {
         source,
         true,
     );
+    let offer_id = crate::types::identifiers::ResolutionCastOfferId(1);
+    state.active_paid_resolution_offer_tail = Some(offer_id);
     crate::game::triggers::install_delayed_trigger(&mut state, delayed, &mut Vec::new());
+    state.active_paid_resolution_offer_tail = None;
     let origin = state.delayed_triggers[0]
         .provenance
         .origin()
@@ -53362,6 +53403,7 @@ fn cancelling_an_accepted_paid_offer_withdraws_its_tail_receipt() {
             additional_cost: None,
             cleanup: crate::types::ability::ResolutionCastCleanup {
                 source_id: source,
+                offer_id: Some(offer_id),
                 face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                     TargetFilter::Any,
                     source,
@@ -53373,6 +53415,9 @@ fn cancelling_an_accepted_paid_offer_withdraws_its_tail_receipt() {
                 success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 delayed_trigger_receipts: vec![
                     crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+                        offer_id: origin
+                            .offer_id
+                            .expect("paid tail marker stamps its exact owner"),
                         token: origin.token,
                         instance: origin.instance,
                         source_id: origin.source_id,
@@ -53407,8 +53452,9 @@ fn cancelling_an_accepted_paid_offer_withdraws_its_tail_receipt() {
 fn graveyard_paid_final_rejection_withdraws_delayed_tail_receipt() {
     let mut state = setup_game_at_main_phase();
     let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
-    let receipt = install_paid_offer_spell_cast_receipt(&mut state, spell, spell);
     resolve_graveyard_paid_grant(&mut state, spell);
+    let offer_id = paid_offer_id(&state);
+    let receipt = install_paid_offer_spell_cast_receipt(&mut state, spell, spell, offer_id);
     attach_paid_offer_receipt(&mut state, receipt.clone());
 
     // The router already opened its offer.  Making its target a land causes
@@ -53441,10 +53487,11 @@ fn graveyard_paid_final_rejection_withdraws_delayed_tail_receipt() {
 fn accepted_paid_offer_retains_then_fires_delayed_tail_receipt() {
     let mut state = setup_game_at_main_phase();
     let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
-    let receipt = install_paid_offer_spell_cast_receipt(&mut state, spell, spell);
     let life_before = state.players[0].life;
     add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
     resolve_graveyard_paid_grant(&mut state, spell);
+    let offer_id = paid_offer_id(&state);
+    let receipt = install_paid_offer_spell_cast_receipt(&mut state, spell, spell, offer_id);
     attach_paid_offer_receipt(&mut state, receipt.clone());
 
     apply_as_current(
@@ -53737,6 +53784,7 @@ fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling(
             granted_to: Some(PlayerId(0)),
             resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
                 source_id: spell,
+                offer_id: None,
                 face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                     TargetFilter::Any,
                     spell,
@@ -53866,6 +53914,7 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
     );
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: spell,
+        offer_id: None,
         face_policy: face_policy.clone(),
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
@@ -53957,6 +54006,7 @@ fn resolution_test_request(filter: TargetFilter) -> ResolutionCastRequest {
     ResolutionCastRequest {
         cleanup: crate::types::ability::ResolutionCastCleanup {
             source_id: ObjectId(83_021),
+            offer_id: None,
             face_policy: face_policy.clone(),
             exiled_misses: Vec::new(),
             reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
@@ -54308,8 +54358,10 @@ fn resolution_cast_two_legal_faces_issues_and_completes_exact_face_choice() {
 fn resolution_modal_forged_late_rejection_preserves_delayed_tail_receipt_and_state() {
     let mut state = setup_game_at_main_phase();
     let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
-    let receipt = install_paid_offer_spell_cast_receipt(&mut state, spell, spell);
+    let offer_id = crate::types::identifiers::ResolutionCastOfferId(1);
+    let receipt = install_paid_offer_spell_cast_receipt(&mut state, spell, spell, offer_id);
     let mut request = resolution_test_request(TargetFilter::Any);
+    request.cleanup.offer_id = Some(offer_id);
     request.cleanup.delayed_trigger_receipts = vec![receipt.clone()];
     let initiation =
         initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
@@ -54851,6 +54903,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
     );
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: spell,
+        offer_id: None,
         face_policy: face_policy.clone(),
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
@@ -54924,6 +54977,7 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
     );
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: spell,
+        offer_id: None,
         face_policy: face_policy.clone(),
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
@@ -54990,6 +55044,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
                 granted_to: Some(PlayerId(0)),
                 resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
                     source_id: spell,
+                    offer_id: None,
                     face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
                         TargetFilter::Any,
                         spell,

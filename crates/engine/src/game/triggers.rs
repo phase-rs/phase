@@ -943,6 +943,11 @@ pub fn install_delayed_trigger(
         token,
         instance,
         source_id: trigger.source_id,
+        // Consume the marker at the one installation it authorizes. The
+        // caller clears it on every no-install/error exit; taking it here
+        // ensures a nested or later installation in the same chain cannot
+        // inherit the paid offer's authority.
+        offer_id: state.active_paid_resolution_offer_tail.take(),
     });
     let command = ResolvedDelayedTriggerCommand {
         token,
@@ -16455,6 +16460,7 @@ pub mod tests {
             token: DelayedTriggerToken(1),
             instance: DelayedTriggerInstanceId(1),
             source_id: source,
+            offer_id: None,
         };
         let source_ability = ResolvedAbility::new(
             Effect::Draw {
@@ -16527,6 +16533,7 @@ pub mod tests {
                     token: DelayedTriggerToken(1),
                     instance: DelayedTriggerInstanceId(1),
                     source_id: ObjectId(99),
+                    offer_id: None,
                 }),
             ),
             &mut Vec::new(),
@@ -38411,6 +38418,7 @@ pub mod tests {
             token: DelayedTriggerToken(token),
             instance: DelayedTriggerInstanceId(token),
             source_id,
+            offer_id: None,
         };
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
@@ -38755,6 +38763,7 @@ pub mod tests {
             token: DelayedTriggerToken(60_313),
             instance: DelayedTriggerInstanceId(60_313),
             source_id,
+            offer_id: None,
         };
         state.delayed_triggers.push(DelayedTrigger {
             condition: DelayedTriggerCondition::WhenDies {

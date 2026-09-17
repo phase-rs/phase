@@ -12596,31 +12596,22 @@ fn is_bound_attach_remainder_for(pending: &PendingContinuation, ability: &Resolv
 /// reverted is the mistake it was introduced to prevent.
 /// CR 603.7 + CR 608.2g: after a `CastFromZone` head's tail ran inline behind
 /// an open `CastOffer::GraveyardPaidCast`, note on that offer the delayed
-/// triggers the tail installed.  The receipt is an actual before/after
-/// provenance delta, not a counter range: a restored state or another nested
-/// installation may otherwise make an unrelated trigger look newly installed.
-fn paid_offer_tail_provenance(
-    state: &GameState,
-) -> std::collections::HashSet<(u64, u64, ObjectId)> {
-    state
-        .delayed_triggers
-        .iter()
-        .filter_map(|trigger| trigger.provenance.origin())
-        .map(|origin| (origin.token.0, origin.instance.0, origin.source_id))
-        .collect()
-}
-
+/// triggers the tail installed. The receipt is selected by the producer-issued
+/// owner already stamped by the sole installer, not by a counter range or
+/// equivalent-looking source/card fields; nested and later installations are
+/// ownerless once that marker is consumed.
 fn record_tail_installs_on_paid_offer(
     state: &mut GameState,
-    before: &std::collections::HashSet<(u64, u64, ObjectId)>,
+    offer_id: crate::types::identifiers::ResolutionCastOfferId,
 ) {
     let receipts: Vec<_> = state
         .delayed_triggers
         .iter()
         .filter_map(|trigger| trigger.provenance.origin())
-        .filter(|origin| !before.contains(&(origin.token.0, origin.instance.0, origin.source_id)))
+        .filter(|origin| origin.offer_id == Some(offer_id))
         .map(
             |origin| crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+                offer_id,
                 token: origin.token,
                 instance: origin.instance,
                 source_id: origin.source_id,
@@ -12635,7 +12626,13 @@ fn record_tail_installs_on_paid_offer(
         ..
     } = &mut state.waiting_for
     {
-        cleanup.delayed_trigger_receipts.extend(receipts);
+        if cleanup.offer_id == Some(offer_id) {
+            for receipt in receipts {
+                if !cleanup.delayed_trigger_receipts.contains(&receipt) {
+                    cleanup.delayed_trigger_receipts.push(receipt);
+                }
+            }
+        }
     }
 }
 
@@ -15163,12 +15160,37 @@ fn resolve_chain_body(
                 ) {
                     prepend_to_pending_continuation(state, tail);
                 } else {
-                    // CR 603.7: every delayed trigger this tail installs is
-                    // recorded on the open paid offer by provenance delta,
-                    // so a declined offer can withdraw exactly those records.
-                    let tail_before = paid_offer_tail_provenance(state);
-                    resolve_ability_chain(state, &tail, events, depth + 1)?;
-                    record_tail_installs_on_paid_offer(state, &tail_before);
+                    // A paid offer owns only its immediate, direct synchronous
+                    // trigger tail. Snapshot its producer ID before resolving;
+                    // do not infer ownership from whichever prompt may be open
+                    // after the call returns.
+                    let paid_offer_id = match &state.waiting_for {
+                        WaitingFor::CastOffer {
+                            kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
+                            ..
+                        } => cleanup.offer_id.filter(|offer_id| offer_id.0 != 0),
+                        _ => None,
+                    };
+                    if matches!(tail.effect, Effect::CreateDelayedTrigger { .. }) {
+                        let offer_id = paid_offer_id.ok_or_else(|| {
+                            EffectError::InvalidParam(
+                                "paid resolution offer has no producer identity".to_string(),
+                            )
+                        })?;
+                        state.active_paid_resolution_offer_tail = Some(offer_id);
+                        let result = resolve_ability_chain(state, &tail, events, depth + 1);
+                        // Clear before propagating every success/error/paused
+                        // result so no later or nested trigger can inherit it.
+                        state.active_paid_resolution_offer_tail = None;
+                        // If the direct trigger installed before a later chain
+                        // error, retain its receipt before returning that error:
+                        // the state has already acquired an owner-bearing live
+                        // root and its offer must still be able to withdraw it.
+                        record_tail_installs_on_paid_offer(state, offer_id);
+                        result?;
+                    } else {
+                        resolve_ability_chain(state, &tail, events, depth + 1)?;
+                    }
                 }
             }
             return Ok(());
@@ -19052,6 +19074,7 @@ mod tests {
             token: DelayedTriggerToken(7),
             instance: DelayedTriggerInstanceId(11),
             source_id: ObjectId(13),
+            offer_id: None,
         });
         state.resolving_trigger_firing = Some(live);
 

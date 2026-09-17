@@ -70,6 +70,15 @@ pub struct DelayedTriggerToken(pub u64);
 #[serde(transparent)]
 pub struct DelayedTriggerInstanceId(pub u64);
 
+/// Producer-issued identity for one paid cast offer made while an ability is
+/// resolving. It is distinct from the card and delayed-trigger identifiers so
+/// two otherwise equivalent offers cannot share cleanup authority.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct ResolutionCastOfferId(pub u64);
+
 /// Private durable origin for a delayed-trigger installation.
 ///
 /// This belongs to engine scheduling state, never to a public `GameEvent`.
@@ -80,6 +89,10 @@ pub(crate) struct DelayedTriggerOrigin {
     pub(crate) token: DelayedTriggerToken,
     pub(crate) instance: DelayedTriggerInstanceId,
     pub(crate) source_id: ObjectId,
+    /// Present only when the trigger was installed by a paid offer's immediate
+    /// direct synchronous tail; legacy and ordinary triggers stay ownerless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) offer_id: Option<ResolutionCastOfferId>,
 }
 
 /// Durable identity carried by a CR 603.7 delayed-trigger installation.

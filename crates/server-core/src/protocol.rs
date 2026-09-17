@@ -3250,17 +3250,18 @@ mod tests {
 
     /// `CastingVariantChoiceOption` now serializes a required `face`; the
     /// resumed `ModalFaceChoice` also preserves an added paid-cast cost. The
-    /// cleanup now also carries exact delayed-trigger receipts; a v73 peer
-    /// cannot preserve them through a paused paid offer, so it must be refused
-    /// before it receives v74 state.
+    /// cleanup, its delayed-trigger receipts, and receipt-eligible origins now
+    /// carry the producer-issued paid-offer owner; a v74 peer cannot preserve
+    /// that cross-offer isolation through a paused offer, so it must be refused
+    /// before it receives v75 state.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_74_for_resolution_cast_receipts() {
-        assert_eq!(PROTOCOL_VERSION, 74);
+    fn protocol_version_is_75_for_resolution_cast_offer_owners() {
+        assert_eq!(PROTOCOL_VERSION, 75);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3271,7 +3272,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_74_for_resolution_cast_receipts` stays
+    /// `protocol_version_is_75_for_resolution_cast_offer_owners` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

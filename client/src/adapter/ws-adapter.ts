@@ -516,6 +516,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * 17 — Dedicated companion deck slot and typed companion-reveal choices.
  * 16 — Meld pair/attacking-entry choices after the mana-payment preview variants.
  * 15 — Mana-payment preview request/response variants.
+ * 75 — ResolutionCastCleanup, its delayed-trigger receipts, and each
+ *      receipt-eligible delayed-install origin carry the producer-issued paid
+ *      offer owner. Older peers cannot preserve cross-offer isolation through
+ *      a paused state handoff.
  * 74 — ResolutionCastCleanup now carries exact delayed-trigger receipts for a
  *      paused paid resolution cast. Older peers cannot preserve the receipt
  *      authority through a state handoff, so this is an exact-match boundary.
@@ -525,7 +529,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 74;
+export const PROTOCOL_VERSION = 75;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

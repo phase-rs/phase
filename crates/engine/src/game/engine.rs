@@ -11054,6 +11054,36 @@ fn apply_non_priority_pass_action(
                 *object_id,
                 *card_id,
             );
+            // Validate the exact indexed paid-cleanup root before changing the
+            // visible face or its election flags. A forged receipt must leave
+            // the prompt, object, permissions, triggers, journal, and events
+            // byte-for-byte untouched.
+            if let Some(permission_index) = resolution_permission {
+                let cleanup = state
+                    .objects
+                    .get(object_id)
+                    .and_then(|object| object.casting_permissions.get(permission_index.0))
+                    .and_then(|permission| match permission {
+                        crate::types::ability::CastingPermission::ExileWithAltCost {
+                            granted_to: Some(grantee),
+                            resolution_cleanup: Some(cleanup),
+                            ..
+                        } if *grantee == *player => Some(cleanup.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        EngineError::InvalidAction(
+                            "Resolution face choice permission provenance is stale or mismatched"
+                                .to_string(),
+                        )
+                    })?;
+                crate::game::engine_resolution_choices::validate_resolution_cast_cleanup_authority(
+                    *player, &cleanup,
+                )?;
+                crate::game::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
+                    state, &cleanup,
+                )?;
+            }
             // A resolution-owned election has not announced anything yet.  If
             // the selected face later fails its exact permission policy, put
             // the object (including the appended temporary permission) back

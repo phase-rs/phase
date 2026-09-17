@@ -33,6 +33,7 @@ pub(in crate::game) fn free_cast_window_resolution_request(
 ) -> crate::game::casting::ResolutionCastRequest {
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: face_policy.source_id,
+        offer_id: None,
         face_policy: face_policy.clone(),
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
