@@ -47,7 +47,7 @@ These are non-negotiable judgement-call anchors. When tempted to bend one, **sto
 - Use targeted `Edit` calls. Never `Write` to replace a whole file when `Edit` would suffice — whole-file writes destroy concurrent agent work.
 - If a file you planned to touch has changed in unexpected ways, stop and return that as a "current code contradicts the plan" finding.
 - Never stage, commit, amend, or move `HEAD`. The orchestrator exclusively owns frozen scope paths and checkpoint commits.
-- In `implementation/fix` mode, stop and return if the start check is not a clean `HEAD == START_SHA`, or if the end-of-edit stable-HEAD check has a changed `HEAD`, executor-owned staging, or a delta outside the declared authorized paths. In `measurement-only` mode, source edits are prohibited. A dirty or non-detached measurement worktree is `CANNOT_ANSWER`.
+- In `implementation/fix` mode, stop and return before editing if inputs 2 and 4 are not both in hand (a plan that reviewed clean and the frozen scope paths), if the start check is not a clean `HEAD == START_SHA`, or if the end-of-edit stable-HEAD check has a changed `HEAD`, executor-owned staging, or a delta outside the declared authorized paths. In `measurement-only` mode, source edits are prohibited. A dirty or non-detached measurement worktree is `CANNOT_ANSWER`.
 
 ### Parser nom mandate
 

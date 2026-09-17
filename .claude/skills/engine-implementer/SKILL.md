@@ -79,7 +79,7 @@ These terminal stops join the unbounded loops' enumerated stop-condition list.
 
 ### T5 — the loop counter
 
-T4 counts rounds within a loop; nothing counts loops, so a phase can close several honest loops and still ship nothing. T5 fires when a phase closes its **third** review loop — charter, sizing-audit, plan, or implementation-review, in any combination — with zero accepted candidates, and it is a terminal stop: surface to the user, who chooses between dispatching the executor against the artifacts that exist and abandoning the phase. A loop closes on a clean round; one abandoned mid-flight counts as closed, its cost being paid. Evaluate only at a closure, reading the closure entries the phase-fit record carries (below) — never maintain the count as a running figure, which would be another prohibited parallel ledger.
+T4 counts rounds within a loop; nothing counts loops, so a phase can close several honest loops and still ship nothing. T5 fires when a phase closes its **third** review loop — charter, sizing-audit, plan, or implementation-review, in any combination — with zero accepted candidates, and it is a terminal stop: surface to the user, who abandons the phase or, where its plan has already reviewed clean, dispatches the executor through the phase's ordinary scope-freeze — the executor's inputs being that reviewed plan and a frozen `SCOPE_PATHS`, never whichever artifacts happen to exist. Where no reviewed plan exists — any charter or sizing-audit closure preceding the phase's plan — the choice is abandonment or completing the run at what has already been accepted. A loop closes on a clean round; one abandoned mid-flight counts as closed, its cost being paid. Evaluate only at a closure, reading the closure entries the phase-fit record carries (below) — never maintain the count as a running figure, which would be another prohibited parallel ledger.
 
 ### Process records (append-only, by phase index only, never a commit SHA)
 
@@ -204,7 +204,7 @@ The full suite is owed at the tree being shipped. An intermediate fix round may 
 
 ### Step 6 — Review the immutable candidate
 
-Spawn a fresh `general-purpose` agent to invoke `/review-impl` against `BASE_SHA..CANDIDATE_SHA`, with the original task, the reviewed plan, the in-scope paths, and any prior findings. It reviews the diff and the checks that were run; it re-runs whatever it needs to trust. Findings dispatch a fix round. Evaluate T5 at this loop's closure, however it closes — clean, into a T4 route, or into the Step 3 stop-and-return that sends the run back to Step 1 — and follow its handoff.
+Spawn a fresh `general-purpose` agent to invoke `/review-impl` against `BASE_SHA..CANDIDATE_SHA`, with the original task, the reviewed plan, the in-scope paths, and any prior findings. It reviews the diff and the checks that were run; it re-runs whatever it needs to trust. Findings dispatch a fix round. A clean round's closure completes through Step 7, so its closure entry records the candidate accepted there and cannot fire T5 — a Step 7 check that does not pass dispatches a fix round instead of closing the loop. Evaluate T5 at this loop's other closures — into a T4 route, or into the Step 3 stop-and-return that sends the run back to Step 1 — and follow its handoff.
 
 ### Step 7 — Final acceptance
 
