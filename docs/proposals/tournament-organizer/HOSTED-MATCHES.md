@@ -279,7 +279,10 @@ So the design requires:
 Because `report_result` is itself a replay-safe overwrite (`tournament.rs`:
 "re-reporting is a correction, not a refusal"), idempotency must be enforced at
 the **handoff** layer via the generation fence (§4.3), not assumed from
-`report_result`.
+`report_result`. The persisted payload here is not free-standing: it is the
+crash-surviving receipt whose durable home and rehydration ordering §4.4
+specifies — without which this recovery handoff cannot run at all on the native
+server.
 
 ### 4.3. Current-game fencing for rehost/correction
 
@@ -320,6 +323,49 @@ still publish and overwrite the rehosted result — a TOCTOU race. So:
   replay after a crash is already a no-op, but that only covers *duplicate* reports
   of the *same* generation — it does nothing against the *cross-generation* race,
   which only the atomic section closes.
+
+### 4.4. Durable tournament ownership across restart (raised in review)
+
+**The gap.** §4.2's recovery handoff assumes a live `TournamentManager` exists to
+receive `report_result` after a restart. On the native `phase-server` — the **only**
+place hosted tournaments run (§3) — it does not:
+
+- Startup builds a **fresh** `Broker` (`main.rs:2166`, `Broker::new()`); the restore
+  pass loads **only persisted game sessions** (`main.rs:2170-2195`,
+  `load_active_full_sessions` → `finish_restored_full_startup`). Tournament state is
+  never rehydrated.
+- `tournament.rs` has **no persistence hooks**. Its "durable" design target is the
+  Cloudflare **Durable Object** (the Worker) — but the Worker cannot host games, so
+  that durability does not apply to hosted tournaments.
+- The persisted terminal artifact stores only key / revision / display / recipients
+  (`persistence.rs:54-63`) and the terminal table keys only `game_code` +
+  `generation` (`persistence.rs:1013-1020`) — no tournament/pairing identity.
+
+So after a restart a recovered hosted game can be terminalized and retired with **no
+authoritative pairing to update** — making R2/R3 recovery *impossible*, not merely
+unimplemented, and green CI does not exercise this cross-process boundary.
+
+**Requirement (R7).** The implementation must establish **durable tournament state
+plus a per-`(pairing, generation)` hosted receipt**, rehydrated **before** the
+game-session restore pass runs, with report publication **transactionally coupled**
+to the receipt. Two acceptable shapes (implementation sub-decision, both blessed in
+review):
+
+1. **Durable registry + receipt, rehydrated first.** Persist the tournament
+   (pairings + hosting authority) and a hosted receipt `(tournament_code,
+   pairing_id, generation, game_code) → optional PodOutcome`. On startup, rehydrate
+   the `TournamentManager` and open receipts **before** the session-restore pass, so
+   `finish_restored_full_startup` finds a live authority; mark the receipt applied
+   in the **same transaction** as `report_result` (the atomic section of §4.3
+   extended across the process boundary).
+2. **Transactional outbox / reconciler.** Persist the terminal as an outbox row
+   owning the same identity + generation fence + idempotent `PodOutcome`; a
+   post-restart reconciler drains unresolved rows into the rehydrated tournament,
+   exactly-once. The receipt/outbox owns *what* to report; rehydration owns *where*.
+
+Either way, the durable receipt — not the in-memory `active_matches` map — is the
+crash-surviving source of truth for the generation fence (§4.3), and session
+recovery must not retire a hosted game before its receipt is reconciled.
 
 ---
 
@@ -423,6 +469,11 @@ checklist the implementation PR must satisfy:
 - **R6 — Uniform trusted-terminal for disconnect** — the disconnect path must cover
   every hosted match class, not just 2-seat Bo3 (`apply_trusted_match_forfeit`'s
   limit); resolve via §9.6 (generic primitive vs. Bo3-only scope) (§6.1).
+- **R7 — Durable tournament ownership across restart** — persist tournament state +
+  a per-`(pairing, generation)` receipt, rehydrated **before** session recovery,
+  with report publication transactionally coupled to the receipt (or an equivalent
+  transactional outbox/reconciler). Without it, R2/R3 recovery is impossible on the
+  native server, where the `Broker` is rebuilt fresh (§4.4).
 
 Genuinely open **sub-decisions** (do not block recording the design, resolved in
 the implementation PR):
@@ -434,10 +485,13 @@ the implementation PR):
    mirror.)
 3. **Single-game single-elim H2H** — confirm hosted mode honors the per-event
    `match_type` path (lobby v8, PR #8723) so a Bo1 1-0 result validates.
+4. **Durable-ownership shape (R7)** — durable tournament registry + receipt
+   rehydrated before session restore, vs. a transactional outbox/reconciler
+   (§4.4). Both are acceptable; pick one in the implementation PR.
 
 ---
 
-## 8. Failure matrix (how each ending is reported, under R1–R3)
+## 8. Failure matrix (how each ending is reported, under R1–R7)
 
 | Ending | Detector | Reports via | Fenced by |
 |---|---|---|---|
@@ -445,7 +499,7 @@ the implementation PR):
 | Concede / concede-match | existing concede sites | same idempotent path (R2) | generation (R3) |
 | Disconnect — 2-seat Bo3 | `apply_trusted_match_forfeit` → `Completed` | same idempotent path (R2) | generation (R3) |
 | Disconnect — Bo1 / pod | generic trusted-terminal (§6.1, **new**) or scoped out (§9.6) | same idempotent path (R2) | generation (R3) |
-| Restart recovery | `finish_restored_full_startup` (`main.rs:249`) | persisted terminal payload → same path (R2) | generation (R3) |
+| Restart recovery | `finish_restored_full_startup` (`main.rs:249`) after tournament rehydration (R7) | durable receipt → same path (R2) | generation, durably (R3+R7) |
 | No-show / never-connects | start-timeout (new, §9.2) | forfeit / `drop_player` | n/a (no game) |
 | Bye / pre-resolved | `generate_pairings` | never hosted | n/a |
 | Client below floor | capability gate (R4) | manual self-report (§4.1) | n/a |
