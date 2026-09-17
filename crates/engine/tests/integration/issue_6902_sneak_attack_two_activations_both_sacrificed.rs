@@ -14,16 +14,18 @@ use std::sync::Arc;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, DelayedTriggerCondition, Effect,
-    FilterProp, MultiTargetSpec, QuantityExpr, TargetChoiceTiming, TargetFilter, TargetRef,
-    TypeFilter, TypedFilter,
+    EffectScope, FilterProp, MultiTargetSpec, QuantityExpr, ReplacementDefinition, TapStateChange,
+    TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::{EtbTapState, Zone};
 
 // Verbatim Oracle text (Scryfall, 2026-09-15).
@@ -90,6 +92,104 @@ fn resolve_putting(runner: &mut GameRunner, first: GameAction, pick: ObjectId) -
     panic!("activation did not settle; prompts: {seen:?}");
 }
 
+/// The constructed `forward_result` producer these forwarding tests drive.
+///
+/// Root: `PutCounter` on a DECLARED creature target. That declared target is
+/// exactly what tier 2 of `parent_chain_referents` inherits when tier 1 is left
+/// empty, and its counter doubles as a reach-guard proving the target really
+/// resolved. Sub-ability: a hand-to-battlefield `ChangeZone` carrying
+/// `forward_result`, whose own sub-ability installs the delayed "sacrifice that
+/// permanent" rider.
+///
+/// `hand_type` selects what the zone choice offers, so one producer serves both
+/// a creature put (the declined-selection case) and an Aura put (the CR 303.4f
+/// host-pause sibling) without duplicating the chain.
+///
+/// CR 601.2c + CR 608.2c: "put a card from your hand onto the battlefield" is
+/// NOT targeting. Hand is a hidden zone with no legal stack-time targets, so
+/// under the default `Stack` timing the slot resolves empty and the producer
+/// completes having moved nothing — silently, with no prompt at all. Resolution
+/// timing plus an unlimited-from-zero spec is the shape the engine uses for a
+/// DECLINABLE zone selection; it is pinned by the `up_to` unit test in
+/// `effects/change_zone.rs`, which asserts the resulting `EffectZoneChoice`
+/// carries count = eligible, min_count = 0, up_to = true.
+fn forwarding_producer_ability(hand_type: TypeFilter) -> AbilityDefinition {
+    let delayed_sacrifice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Sacrifice {
+                    target: TargetFilter::ParentTarget,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    // CR 107.1c: `min_count` is the floor for RANGED sacrifice
+                    // choices ("one or more"); a plain "sacrifice that permanent"
+                    // takes the 0 default.
+                    min_count: 0,
+                },
+            )),
+            uses_tracked_set: false,
+        },
+    );
+    let mut producer = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: Some(Zone::Hand),
+            destination: Zone::Battlefield,
+            target: TargetFilter::Typed(
+                TypedFilter::new(hand_type)
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+            ),
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: true,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    )
+    .sub_ability(delayed_sacrifice)
+    .target_choice_timing(TargetChoiceTiming::Resolution)
+    .multi_target(MultiTargetSpec::unlimited(0));
+    producer.forward_result = true;
+
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+            ),
+        },
+    )
+    .cost(AbilityCost::Mana {
+        cost: ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        },
+    })
+    .sub_ability(producer)
+}
+
+/// Install `ability` as `source`'s only activated ability. Layers reset
+/// `abilities` from `base_abilities` on every pass, so both must be set.
+fn install_ability(runner: &mut GameRunner, source: ObjectId, ability: AbilityDefinition) {
+    let obj = runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .expect("the scenario source object exists");
+    obj.abilities = Arc::new(vec![ability.clone()]);
+    obj.base_abilities = Arc::new(vec![ability]);
+}
+
 /// CR 608.2c + CR 400.7: a TERMINAL EMPTY `up_to` selection is a COMPLETED
 /// producer that moved nothing. The forwarded-result contract spells that
 /// `Some([])`, NOT `None` — and `targeting::parent_chain_referents` documents the
@@ -137,86 +237,11 @@ fn a_declined_up_to_zone_choice_publishes_a_completed_empty_forwarded_result() {
 
     let mut runner = scenario.build();
 
-    let delayed_sacrifice = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::CreateDelayedTrigger {
-            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-            effect: Box::new(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Sacrifice {
-                    target: TargetFilter::ParentTarget,
-                    count: QuantityExpr::Fixed { value: 1 },
-                    // CR 107.1c: `min_count` is the floor for RANGED sacrifice
-                    // choices ("one or more"); a plain "sacrifice that creature"
-                    // takes the 0 default.
-                    min_count: 0,
-                },
-            )),
-            uses_tracked_set: false,
-        },
+    install_ability(
+        &mut runner,
+        source,
+        forwarding_producer_ability(TypeFilter::Creature),
     );
-    let mut producer = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::ChangeZone {
-            origin: Some(Zone::Hand),
-            destination: Zone::Battlefield,
-            target: TargetFilter::Typed(
-                TypedFilter::new(TypeFilter::Creature)
-                    .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
-            ),
-            owner_library: false,
-            enter_transformed: false,
-            enters_under: None,
-            enter_tapped: EtbTapState::Unspecified,
-            enters_attacking: false,
-            up_to: true,
-            enter_with_counters: vec![],
-            conditional_enter_with_counters: vec![],
-            face_down_profile: None,
-            enters_modified_if: None,
-        },
-    )
-    .sub_ability(delayed_sacrifice)
-    // CR 601.2c + CR 608.2c: "put a creature card from your hand onto the
-    // battlefield" is NOT targeting. Hand is a hidden zone with no legal
-    // stack-time targets, so under the default `Stack` timing the slot resolves
-    // empty and the producer completes having moved nothing — silently, with no
-    // prompt at all. Resolution timing plus an unlimited-from-zero spec is the
-    // shape the engine uses for a DECLINABLE zone selection; it is pinned by the
-    // `up_to` unit test in `effects/change_zone.rs`, which asserts the resulting
-    // `EffectZoneChoice` carries count = eligible, min_count = 0, up_to = true.
-    .target_choice_timing(TargetChoiceTiming::Resolution)
-    .multi_target(MultiTargetSpec::unlimited(0));
-    producer.forward_result = true;
-
-    let ability = AbilityDefinition::new(
-        AbilityKind::Activated,
-        Effect::PutCounter {
-            counter_type: CounterType::Plus1Plus1,
-            count: QuantityExpr::Fixed { value: 1 },
-            target: TargetFilter::Typed(
-                TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
-            ),
-        },
-    )
-    .cost(AbilityCost::Mana {
-        cost: ManaCost::Cost {
-            shards: vec![ManaCostShard::Red],
-            generic: 0,
-        },
-    })
-    .sub_ability(producer);
-    {
-        let obj = runner
-            .state_mut()
-            .objects
-            .get_mut(&source)
-            .expect("the scenario source object exists");
-        // Layers reset `abilities` from `base_abilities` on every pass; set both.
-        obj.abilities = Arc::new(vec![ability.clone()]);
-        obj.base_abilities = Arc::new(vec![ability]);
-    }
 
     runner
         .act(GameAction::ActivateAbility {
@@ -308,6 +333,288 @@ fn a_declined_up_to_zone_choice_publishes_a_completed_empty_forwarded_result() {
          nothing, so the delayed \"that creature\" rider has no referent. Left at \
          `None` it inherits the chain's declared target and sacrifices the decoy, \
          which this spell never put onto the battlefield"
+    );
+}
+
+/// CR 608.2: the activated ability is on the stack — it reaches its sub-ability
+/// producer only once both players pass. Stops at the first non-priority prompt,
+/// or at an empty stack so a producer that never prompted is reported by the
+/// caller's reach-guard rather than silently passing turns.
+fn pass_priority_to_prompt(runner: &mut GameRunner) {
+    for _ in 0..8 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority toward resolution must be accepted");
+            }
+            _ => break,
+        }
+    }
+}
+
+/// CR 303.4f + CR 608.2c: the SIBLING of the declined-selection case. An Aura put
+/// onto the battlefield by a NON-SPELL effect with two or more legal hosts pauses
+/// mid-entry on the CR 303.4f host choice — the same out-of-band delivery shape as
+/// the as-enters copy choice. That member DID move, so the `forward_result`
+/// producer must still forward it: the completed-empty publish must never swallow
+/// a real entry.
+///
+/// Revert-proof: publish `&[]` for every paused member and this test fails — the
+/// delayed rider falls back to the chain's declared target and sacrifices the decoy
+/// this spell never put onto the battlefield (MEASURED).
+///
+/// It does NOT discriminate the choice of classifier: gating the forward on the
+/// inferring `terminal_completion_after_resume()` leaves this test green and breaks
+/// only the copy-choice sibling (also MEASURED). The two re-pause routes fail under
+/// different reverts, which is why both are kept.
+#[test]
+fn an_aura_host_pause_still_forwards_the_member_it_moved() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let source = scenario.add_creature(P0, "Forwarding Source", 2, 2).id();
+    let decoy = scenario.add_creature(P0, "Decoy Bear", 2, 2).id();
+    // CR 303.4f: two or more legal hosts is what makes the entry PAUSE. With
+    // exactly one the resolver auto-attaches and never installs the prompt —
+    // `old_growth_troll_return_as_aura` pins that branch.
+    let host = scenario.add_creature(P0, "Host Bear", 1, 1).id();
+    let aura = scenario
+        .add_spell_to_hand(P0, "Clinging Vines", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(
+            TypeFilter::Creature,
+        ))))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Red, source, false, Vec::new())],
+    );
+
+    let mut runner = scenario.build();
+    install_ability(
+        &mut runner,
+        source,
+        forwarding_producer_ability(TypeFilter::Enchantment),
+    );
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .expect("the constructed activation must be accepted");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(decoy)],
+        })
+        .expect("declaring the decoy as the chain's target must succeed");
+    pass_priority_to_prompt(&mut runner);
+
+    match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice { cards, .. } => assert!(
+            cards.contains(&aura),
+            "reach-guard: the Aura must be offered by the zone choice; got {cards:?}"
+        ),
+        other => panic!("reach-guard: expected the up-to zone choice; got {other:?}"),
+    }
+    runner
+        .act(GameAction::SelectCards { cards: vec![aura] })
+        .expect("choosing the Aura must be accepted");
+
+    // The entry pauses MID-DELIVERY on the CR 303.4f host choice. This is the
+    // reach-guard that makes the test discriminating: without this pause the
+    // member would be delivered through the ordinary synchronous path and would
+    // never reach the paused-member forward seam under test.
+    let hosts = match &runner.state().waiting_for {
+        WaitingFor::ReturnAsAuraTarget { legal_targets, .. } => legal_targets.clone(),
+        other => panic!("reach-guard: expected the CR 303.4f host choice; got {other:?}"),
+    };
+    assert!(
+        hosts.len() >= 2,
+        "reach-guard: the host pause requires two or more legal hosts; got {hosts:?}"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(host)),
+        })
+        .expect("answering the CR 303.4f host choice must be accepted");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&aura].zone,
+        Zone::Battlefield,
+        "reach-guard: the Aura really entered the battlefield"
+    );
+
+    pass_priority_into_end_step_of(&mut runner, P0);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&aura].zone,
+        Zone::Graveyard,
+        "CR 608.2c: the host pause delivered the Aura out-of-band, but it MOVED, so \
+         the producer must forward it and the delayed rider names the Aura"
+    );
+    assert_eq!(
+        runner.state().objects[&decoy].zone,
+        Zone::Battlefield,
+        "the chain's DECLARED target must not be inherited when a real member moved"
+    );
+}
+
+/// CR 614.6 + CR 616.1 + CR 608.2c: a REDIRECTED re-paused delivery must not fall
+/// back to inherited targets. A "would enter the battlefield, exile it instead"
+/// replacement rewrites the destination, so nothing was put onto the battlefield by
+/// this effect and the delayed "that creature" rider has no referent — it must not
+/// name the chain's DECLARED target instead.
+///
+/// Scope, stated precisely because it is narrower than it looks: this test
+/// discriminates against the `None` fallback only. Both correct policies — publish
+/// `Some([])` (what this seam does: the redirect's delivery events show no arrival
+/// at the requested destination) and forwarding the redirected object — block the
+/// tier-2 fallback identically, and `ParentTarget` resolves at trigger-resolution
+/// time, so neither board state nor the installed `DelayedTrigger` can tell them
+/// apart. MEASURED: this test stays green when the seam publishes `&[]` for every
+/// paused member.
+///
+/// Reaching the paused-member seam takes BOTH replacements. A lone redirect takes
+/// the `candidates.len() == 1` path and applies synchronously, never pausing; the
+/// enters-tapped sibling is what makes `candidates.len() > 1`. The redirect is then
+/// what makes the CR 616.1 ordering choice MATERIAL rather than degenerate —
+/// `candidate_materiality` returns `Unconditional` for a stored `ChangeZone` whose
+/// destination differs from the proposed one (`proposed_to != Some(destination)`),
+/// and a degenerate ordering would auto-resolve with no prompt at all.
+///
+/// Revert-proof: publish `&[]` for a redirected member and the delayed rider falls
+/// back to the chain's declared target, sacrificing the decoy.
+#[test]
+fn a_redirected_delivery_still_forwards_the_member_it_moved() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let source = scenario.add_creature(P0, "Forwarding Source", 2, 2).id();
+    let decoy = scenario.add_creature(P0, "Decoy Bear", 2, 2).id();
+
+    // CR 614.6: "If this creature would enter the battlefield, exile it instead."
+    let mut redirect = ReplacementDefinition::new(ReplacementEvent::ChangeZone);
+    redirect.valid_card = Some(TargetFilter::SelfRef);
+    redirect.execute = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    )));
+    // CR 614.1c: the second applicable replacement. Without it the pipeline takes
+    // the single-candidate path, applies the redirect synchronously, and never
+    // pauses — the seam under test would not be reached at all.
+    let mut enters_tapped = ReplacementDefinition::new(ReplacementEvent::ChangeZone);
+    enters_tapped.valid_card = Some(TargetFilter::SelfRef);
+    enters_tapped.execute = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+    )));
+
+    let redirected = scenario
+        .add_creature_to_hand(P0, "Redirected Bear", 2, 2)
+        .with_replacement_definition(redirect)
+        .with_replacement_definition(enters_tapped)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Red, source, false, Vec::new())],
+    );
+
+    let mut runner = scenario.build();
+    install_ability(
+        &mut runner,
+        source,
+        forwarding_producer_ability(TypeFilter::Creature),
+    );
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .expect("the constructed activation must be accepted");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(decoy)],
+        })
+        .expect("declaring the decoy as the chain's target must succeed");
+    pass_priority_to_prompt(&mut runner);
+
+    match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice { cards, .. } => assert!(
+            cards.contains(&redirected),
+            "reach-guard: the redirected creature must be offered; got {cards:?}"
+        ),
+        other => panic!("reach-guard: expected the up-to zone choice; got {other:?}"),
+    }
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![redirected],
+        })
+        .expect("choosing the creature must be accepted");
+
+    // CR 616.1: the ordering prompt. This reach-guard is what proves the entry
+    // PAUSED mid-delivery; without it the test would pass through the synchronous
+    // path and assert nothing about the seam.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach-guard: expected the CR 616.1 ordering choice; got {:?}",
+        runner.state().waiting_for
+    );
+    for _ in 0..4 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .expect("ordering the applicable replacements must be accepted");
+        } else {
+            break;
+        }
+    }
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&redirected].zone,
+        Zone::Exile,
+        "reach-guard: the redirect really rewrote the destination"
+    );
+
+    pass_priority_into_end_step_of(&mut runner, P0);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&decoy].zone,
+        Zone::Battlefield,
+        "CR 614.6 + CR 608.2c: a redirected member still MOVED, so the producer \
+         forwards it and the chain's declared target is never inherited"
     );
 }
 

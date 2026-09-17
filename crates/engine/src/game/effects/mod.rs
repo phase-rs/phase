@@ -1619,23 +1619,43 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 // `Moved`: the object did change zones, just not to the requested
                 // destination, so it stays forwarded.
                 //
-                // The gate reads the EXPLICIT `terminal_completion` sidecar, never
-                // `terminal_completion_after_resume()`. MEASURED on the
-                // copy-choice route: that paused record carries no sidecar AND an
-                // empty `delivery_events`, so the accessor's fallback classifies a
-                // member that really did enter the battlefield as `Remained`
-                // (`completion_from_delivery_events` returns `Remained` for an
-                // empty slice). Gating on that inference silently un-fixes #6902 —
-                // the creature stops being sacrificed. Absence of a recorded
-                // classification is not evidence of no move, so `None` forwards,
-                // exactly as this seam did before.
+                // The gate withholds ONLY on positive contrary evidence.
+                //
+                // With evidence, the test is arrival at the REQUESTED destination,
+                // mirroring the `moved_to_destination` count just below: a delivery
+                // that was prevented, that remained, or that a CR 614.6 replacement
+                // redirected elsewhere did not put this object where the producer
+                // said it would go, so "that creature" has no referent and the
+                // producer publishes the completed-empty result instead.
+                //
+                // Without evidence, it forwards. MEASURED on the copy-choice route:
+                // that paused record carries no sidecar AND an empty
+                // `delivery_events`, so every classifier that INFERS from it —
+                // `terminal_completion_after_resume()` included, which returns
+                // `Remained` for an empty slice — reports "did not move" for a
+                // member that really did enter the battlefield. Gating on such an
+                // inference silently un-fixes #6902: the creature stops being
+                // sacrificed. Absence of evidence is not evidence of no move.
                 let moved_member = [paused_current.member.object_id];
-                let moved: &[_] = match paused_current.terminal_completion {
-                    Some(crate::types::game_state::ZoneMoveCompletion::Prevented)
-                    | Some(crate::types::game_state::ZoneMoveCompletion::Remained) => &[],
-                    Some(crate::types::game_state::ZoneMoveCompletion::Moved) | None => {
-                        &moved_member
-                    }
+                let arrived_at_destination = paused_current.delivery_events.iter().any(|event| {
+                    matches!(
+                        event,
+                        GameEvent::ZoneChanged {
+                            object_id,
+                            from: Some(from),
+                            to,
+                            ..
+                        } if *object_id == paused_current.member.object_id
+                            && *from != destination
+                            && *to == destination
+                    )
+                });
+                let has_delivery_evidence = !paused_current.delivery_events.is_empty()
+                    || paused_current.terminal_completion.is_some();
+                let moved: &[_] = if arrived_at_destination || !has_delivery_evidence {
+                    &moved_member
+                } else {
+                    &[]
                 };
                 let delivered =
                     crate::types::ability::ForwardedResultContext::from_object_ids(state, moved);
