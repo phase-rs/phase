@@ -67,7 +67,9 @@ fn life_of(runner: &GameRunner, player: PlayerId) -> i32 {
 }
 
 /// Leg A: target the opponent's creature — damage is marked on it and the
-/// OPPONENT creates the Squirrel (CR 109.4: the creature's controller).
+/// OPPONENT creates the Squirrel (CR 110.2: the targeted permanent's
+/// controller; CR 608.2c + CR 115.1: the ability's written text and target
+/// legality resolve the recipient anaphor to that player).
 #[test]
 fn acorn_catapult_targeting_opponent_creature_token_goes_to_its_controller() {
     let mut scenario = GameScenario::new();
