@@ -9011,6 +9011,75 @@ fn effect_chain_rhystic_lightning_unless_dual_payer_is_parent_target_controller(
     );
 }
 
+/// CR 115.1 + CR 608.2c + CR 111.2 (issue #7191): Acorn Catapult's full
+/// Oracle text — "{1}, {T}: This artifact deals 1 damage to any target. That
+/// permanent's controller or that player creates a 1/1 green Squirrel
+/// creature token." The disjunctive recipient subject must bind to
+/// `ParentTargetController` (the permanent's controller for an object target,
+/// the target itself for a player target) and lift into the chained Token's
+/// `owner` — not fail closed to `unbound_subject`, which silently dropped the
+/// token half while the damage half resolved.
+#[test]
+fn acorn_catapult_disjunctive_recipient_token_owner_is_parent_target_controller() {
+    let parsed = parse_oracle_text(
+        "{1}, {T}: This artifact deals 1 damage to any target. That permanent's controller or that player creates a 1/1 green Squirrel creature token.",
+        "Acorn Catapult",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "Acorn Catapult must parse cleanly: {:?}",
+        parsed.parse_warnings
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Acorn Catapult must produce one activated ability");
+    assert!(
+        !ability_chain_has_unimplemented(ability),
+        "Acorn Catapult must not retain an Unimplemented node: {:#?}",
+        parsed.abilities
+    );
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ),
+        "primary should be DealDamage 1, got {:?}",
+        ability.effect
+    );
+    let sub = ability
+        .sub_ability
+        .as_ref()
+        .expect("Acorn Catapult must chain the token creation as a sub-ability");
+    match &*sub.effect {
+        Effect::Token {
+            name,
+            power,
+            toughness,
+            colors,
+            owner,
+            ..
+        } => {
+            assert_eq!(name, "Squirrel");
+            assert_eq!(power, &PtValue::Fixed(1));
+            assert_eq!(toughness, &PtValue::Fixed(1));
+            assert_eq!(colors, &vec![crate::types::mana::ManaColor::Green]);
+            assert_eq!(
+                owner,
+                &TargetFilter::ParentTargetController,
+                "the token's creator is the damage recipient's controller-or-self, not the Catapult's controller"
+            );
+        }
+        other => panic!("expected chained Token effect, got {other:?}"),
+    }
+}
+
 #[test]
 fn effect_exile_each_opponents_graveyard_has_origin() {
     let e = parse_effect("Exile each opponent's graveyard");

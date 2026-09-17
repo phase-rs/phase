@@ -3246,6 +3246,33 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
+    // CR 115.1 + CR 608.2c: "[that|the] <noun>'s controller or that player" —
+    // the disjunctive restatement of a damage recipient (Acorn Catapult: "That
+    // permanent's controller or that player creates a 1/1 green Squirrel
+    // creature token"). Both arms name one player — the parent target's
+    // controller for a permanent target (CR 109.4: only objects on the stack
+    // or battlefield have a controller), the target itself for a player
+    // target — which is exactly what `TargetFilter::ParentTargetController`
+    // resolves to (`parent_target_controller` matches both `TargetRef` kinds).
+    // Mirrors the unless-payer arm in `parse_resolution_unless_payer`
+    // (oracle_effect/mod.rs), which collapses the same phrase for Rhystic
+    // Lightning's "unless … pays" clause.
+    if all_consuming((
+        alt((tag::<_, _, OracleError<'_>>("that "), tag("the "))),
+        take_until("'s controller or that player"),
+        tag("'s controller or that player"),
+    ))
+    .parse(lower.as_str())
+    .is_ok()
+    {
+        return Some(SubjectApplication {
+            affected: TargetFilter::ParentTargetController,
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+        });
+    }
     // CR 608.2c: Definite/anaphoric "[the|that] <noun>'s controller" /
     // "[the|that] <noun>'s owner" — the parent target's controller/owner.
     // Mirrors the generic "the <noun>'s controller" path in `parse_target`
