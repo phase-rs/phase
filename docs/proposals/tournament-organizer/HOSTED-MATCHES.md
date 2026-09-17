@@ -484,14 +484,58 @@ The design requires an explicit **grace-expiry hook** for hosted games:
   `check_expired()`.
 - Choose **trusted terminal semantics** explicitly: a single seat's expiry ⇒ the
   other seat wins (Bo1) / the match forfeits to the other seat (Bo3, via §6.1's
-  primitive); **simultaneous expiry** of all live seats ⇒ an explicit represented
-  outcome (double-loss / no-result-drop per policy), never an implicit `None`.
+  primitive). **Simultaneous expiry** is its own problem — see §6.3 (R9); it is not
+  a free-form "double-loss per policy," because that is not representable.
 - Route that terminal through the **same generation-fenced, receipt-backed
   `report_tournament_game_over`** path (§4.2–§4.4) **before** the session is
   removed — so the pairing is reported, not silently retired.
 
-This is R8 (§7). It composes with R6 (which supplies the per-class trusted-terminal
-the hook selects) and R7 (the receipt the hook writes through).
+**Atomicity vs. reconnect (raised in review — R8's real hazard).** The hook is not
+safe as a check-then-act: today the expiry worker takes the state lock only in
+bursts — `check_expired` under lock, then **releases** it to `prepare_full_terminal`
+(async, no lock, `main.rs:2346-2381`), then re-acquires only to `remove_game`
+(`main.rs:2383-2395`). In that gap a reconnect wins: `handle_reconnect` sees the
+already-removed disconnect record as `NotFound` and **re-seats the player anyway**
+(`session.rs:2558-2571` — `ReconnectResult::NotFound ⇒ connected[player] = true`),
+accepted on the socket path (`main.rs:7804-7849`). A stale expiry worker then
+reports and removes an **actively reconnected** session. So R8 requires an **atomic
+session/epoch claim** that expiry takes *before* preparing the terminal and that
+**reconnect admission also checks** — once expiry has claimed the epoch, a
+concurrent reconnect is rejected (or forces revalidation), and the claim is
+re-verified immediately before report+removal. This extends §4.3's per-pairing
+critical section to span reconnect admission ↔ terminal report ↔ removal, and the
+implementation must carry a **race test** proving no expiry/reconnect interleaving
+can report or delete a reconnected session.
+
+This is R8 (§7). It composes with R6 (per-class trusted-terminal the hook selects),
+R7 (the receipt it writes through), and R9 (§6.3, the simultaneous-expiry outcome).
+
+### 6.3. Simultaneous full expiry needs a bracket-safe representable outcome (raised in review)
+
+When **every** live seat's grace timer lapses together (both players abandoned),
+there is no obviously-correct winner — and, crucially, no *representable* one in
+every bracket. `PodOutcome` is only `Decisive { winner, game_wins }` or `Draw`
+(`tournament.rs:771-782`). A `Draw` is **rejected in single-elimination** (nobody
+advances, `tournament.rs:2486-2499`), and dropping every seated player deliberately
+**leaves the pairing pending** (`tournament.rs:2515-2517`). So the earlier
+"double-loss / no-result-drop per policy" phrasing could **silently strand** a
+single-elim or pod pairing. R9 pins this down per bracket:
+
+- **Swiss (and any format where a draw scores/advances):** simultaneous full expiry
+  ⇒ `PodOutcome::Draw` — representable, legal, with its receipt (§4.4) and
+  `TournamentUpdate` outbound (R1). Both no-shows score 0-0, exactly as a played
+  draw would.
+- **Single-elimination and pods (where `Draw`/drop-all is not bracket-safe):**
+  hosted mode does **not** invent an auto-winner. The pairing enters an explicit
+  **organizer-resolution** state (surfaced in the view, *not* left silently
+  pending), and resolution falls to the organizer via the retained manual path
+  (R1's manual mode) — a deterministic auto-rule (e.g. higher seed) is rejected
+  because it credits an abandoning player. Whether hosted v1 instead simply
+  **excludes** the un-resolvable combination is the §9.7 scope question.
+
+Either way the transition is representable, serialized through the same atomic claim
+(R8) and receipt/outbound (R7/R1), and covered by tests — never an implicit `None`
+or a stranded pairing.
 
 ---
 
@@ -529,12 +573,19 @@ checklist the implementation PR must satisfy:
   with report publication transactionally coupled to the receipt (or an equivalent
   transactional outbox/reconciler). Without it, R2/R3 recovery is impossible on the
   native server, where the `Broker` is rebuilt fresh (§4.4).
-- **R8 — Reconnect-grace-expiry hook** — the grace-timer expiry path must use
-  `check_expired_with_players()` (not the identity-collapsing `check_expired()`),
-  choose explicit trusted terminal semantics for single vs. simultaneous expiry, and
-  route through the generation-fenced, receipt-backed report handoff **before**
-  session removal — instead of today's `terminal_artifact(…, None, …)` + remove,
-  which retires a hosted pairing with no winner and leaves it pending (§6.2).
+- **R8 — Reconnect-grace-expiry hook, atomic vs. reconnect** — the grace-timer
+  expiry path must use `check_expired_with_players()` (not the identity-collapsing
+  `check_expired()`), take an **atomic session/epoch claim** that reconnect admission
+  also checks (so a reconnect can't re-seat a session expiry is terminalizing across
+  the lock-release gap, `main.rs:2346-2395` vs `session.rs:2558-2571`), re-verify the
+  claim immediately before report+removal, and route through the receipt-backed
+  handoff **before** session removal — with a race test. Replaces today's
+  `terminal_artifact(…, None, …)` + remove (§6.2).
+- **R9 — Bracket-safe simultaneous-expiry outcome** — when all live seats expire
+  together, use a *representable* transition: `PodOutcome::Draw` where a draw
+  scores/advances (Swiss); for single-elim/pods (where `Draw`/drop-all is not
+  bracket-safe) an explicit organizer-resolution state, never an implicit `None` or a
+  silently stranded pairing (§6.3; scope choice §9.7).
 
 Genuinely open **sub-decisions** (do not block recording the design, resolved in
 the implementation PR):
@@ -552,7 +603,7 @@ the implementation PR):
 
 ---
 
-## 8. Failure matrix (how each ending is reported, under R1–R8)
+## 8. Failure matrix (how each ending is reported, under R1–R9)
 
 | Ending | Detector | Reports via | Fenced by |
 |---|---|---|---|
@@ -560,7 +611,8 @@ the implementation PR):
 | Concede / concede-match | existing concede sites | same idempotent path (R2) | generation (R3) |
 | Disconnect — 2-seat Bo3 | `apply_trusted_match_forfeit` → `Completed` | same idempotent path (R2) | generation (R3) |
 | Disconnect — Bo1 / pod | generic trusted-terminal (§6.1, **new**) or scoped out (§9.6) | same idempotent path (R2) | generation (R3) |
-| Reconnect-grace expiry | grace-expiry hook `check_expired_with_players()` (§6.2, R8) | same idempotent path (R2) | generation (R3) |
+| Reconnect-grace expiry (single) | grace-expiry hook, atomic claim vs. reconnect (§6.2, R8) | same idempotent path (R2) | epoch claim (R8) + generation (R3) |
+| Simultaneous full expiry | Swiss ⇒ `Draw`; SE/pod ⇒ organizer-resolution (§6.3, R9) | receipt + outbound (R1/R7) | epoch claim (R8) |
 | Restart recovery | `finish_restored_full_startup` (`main.rs:249`) after tournament rehydration (R7) | durable receipt → same path (R2) | generation, durably (R3+R7) |
 | No-show / never-connects | start-timeout (new, §9.2) | forfeit / `drop_player` | n/a (no game) |
 | Bye / pre-resolved | `generate_pairings` | never hosted | n/a |
@@ -589,3 +641,7 @@ the implementation PR):
    `apply_trusted_match_forfeit` does not apply. Add a **generic trusted-terminal**
    primitive in `match_flow` (recommended — keeps single-elim/pod hosting), or
    **restrict hosted v1 to 2-seat Bo3** and defer the rest?
+7. **Simultaneous-expiry scope (§6.3, R9).** For single-elim/pods where a double
+   no-show has no bracket-safe representable outcome, should hosted v1 route it to
+   explicit **organizer resolution** (recommended), or simply **exclude** those
+   bracket/expiry combinations from hosting for v1?
