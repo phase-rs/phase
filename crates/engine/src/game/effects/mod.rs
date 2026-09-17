@@ -6449,8 +6449,14 @@ fn node_or_branch_references_tracked_set(
     // CR 608.2c + CR 601.2c: a node that declares its own object targets is the
     // nearest antecedent of its continuation's "that creature" — even when the
     // declaration was empty — so a grant below it never reaches an ancestor's
-    // population (Trygon Prime's declined sub target grants nothing).
-    let child_anaphor = if ability.multi_target.is_some() || ability.optional_targeting {
+    // population (Trygon Prime's declined sub target grants nothing). An optional
+    // single target ("up to one target creature") declares one only when it is
+    // chosen on the stack. A resolution-time "up to one" choice declares no
+    // target, so its grant still reads the tracked set.
+    let declares_optional_single_target = ability.optional_targeting
+        && ability.target_choice_timing == TargetChoiceTiming::Stack
+        && crate::game::triggers::extract_target_filter_from_effect(&ability.effect).is_some();
+    let child_anaphor = if ability.multi_target.is_some() || declares_optional_single_target {
         ParentAnaphor::NamesDeclaredTargets
     } else {
         ParentAnaphor::NamesPublisher
@@ -20517,6 +20523,14 @@ mod tests {
             !chain_references_tracked_set(&pump),
             "an optional single declared target is the grant's antecedent, so the \
              grant must not consume an ancestor's tracked set"
+        );
+        // A resolution-time "up to one" choice declares no target, so the grant
+        // still names the chain's tracked set.
+        pump.target_choice_timing = TargetChoiceTiming::Resolution;
+        assert!(
+            chain_references_tracked_set(&pump),
+            "a resolution-time optional choice declares no target, so the grant \
+             must still consume the tracked set"
         );
     }
 
