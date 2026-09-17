@@ -21321,6 +21321,7 @@ mod tests {
             recipient: None,
             scoped_player: None,
             damage_source: None,
+            spell: None,
             event_amount: None,
             spell: None,
         }
