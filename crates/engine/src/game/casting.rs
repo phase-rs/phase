@@ -10564,7 +10564,7 @@ impl ResolutionCastProjection {
     /// Build candidate-specific immutable inputs from this same flushed
     /// baseline.  The callback receives no mutable access, so a request for one
     /// candidate cannot contaminate another candidate or either face probe.
-    pub(in crate::game) fn from_baseline<T>(&self, build: impl FnOnce(&GameState) -> T) -> T {
+    pub(in crate::game) fn with_baseline<T>(&self, build: impl FnOnce(&GameState) -> T) -> T {
         build(&self.baseline)
     }
 }

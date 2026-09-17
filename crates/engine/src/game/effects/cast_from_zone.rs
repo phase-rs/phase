@@ -243,7 +243,7 @@ fn compute_hand_pick_eligible(
                 if private_immediate_cast {
                     return projection.as_ref().is_some_and(|projection| {
                         projection
-                            .from_baseline(|baseline| {
+                            .with_baseline(|baseline| {
                                 private_resolution_cast_request(baseline, ability, *id)
                             })
                             .is_some_and(|request| {
