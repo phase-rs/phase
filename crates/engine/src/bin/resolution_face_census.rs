@@ -2492,6 +2492,7 @@ fn main() {
 mod tests {
     use super::*;
     use engine::types::ability::{ResolutionCastCleanup, ResolutionCastFacePolicy};
+    use engine::types::identifiers::ResolutionCastOfferId;
 
     fn fixture_export() -> String {
         self_test_fixture_export()
@@ -2662,6 +2663,7 @@ mod tests {
             additional_cost: None,
             cleanup: ResolutionCastCleanup {
                 source_id: ObjectId(900),
+                offer_id: Some(ResolutionCastOfferId(1)),
                 face_policy: ResolutionCastFacePolicy::new(
                     TargetFilter::Any,
                     ObjectId(900),
