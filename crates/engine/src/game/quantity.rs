@@ -21323,7 +21323,6 @@ mod tests {
             damage_source: None,
             spell: None,
             event_amount: None,
-            spell: None,
         }
     }
 
