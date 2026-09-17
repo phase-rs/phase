@@ -12451,6 +12451,13 @@ fn prowler_shared_card_type_reduction(
 
 #[test]
 fn cemetery_prowler_reduces_by_shared_card_types() {
+    // An empty linked-exile population shares no card types, even when the
+    // spell itself has a card type.
+    assert_eq!(
+        prowler_shared_card_type_reduction(&[], &[CoreType::Creature]),
+        3
+    );
+
     // Two exiled creature cards → one shared type → {1} (the Gatherer ruling's
     // "creature spells cost {1} less, not {2} less").
     assert_eq!(

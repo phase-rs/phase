@@ -139,3 +139,5 @@ triage/dashboard.md
 # Changelog backfill drafts — review staging only, never committed. The
 # canonical changelog lives at client/public/changelog.json.
 scripts/changelog/backfill-drafts.json
+
+graphify-out/
