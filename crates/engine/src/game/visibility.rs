@@ -7815,9 +7815,9 @@ mod tests {
     /// above it) ⇒ FAILS. Both leave every other row in this module green.
     ///
     /// This row mints through `d5h_offer_decisions` and reads through
-    /// `d5h_projected_declaration`, so it adds NO new `WaitingFor::LoopShortcut {` literal —
-    /// `tests/integration/loop_shortcut_offer_writer_census.rs` pins this file's production
-    /// multiset at 2 and would red on a third.
+    /// `d5h_projected_declaration`, so it adds NO new `WaitingFor::LoopShortcut {` literal.
+    /// `tests/integration/loop_shortcut_offer_writer_census.rs` is the authority for this
+    /// file's production multiset; a new production literal requires its own adjudication.
     #[test]
     fn r1k_a_public_subject_ahead_of_a_hidden_one_in_a_ranking_still_drops_the_declaration() {
         use crate::analysis::decision_template::{
