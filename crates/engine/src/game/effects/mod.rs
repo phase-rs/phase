@@ -1592,7 +1592,40 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             // CR 608.2c: classify this delivery ONCE. The completion recorded on
             // the logical group and the forwarded result published just below it
             // must agree on the same verdict for the same member.
-            let completion = paused_current.terminal_completion_after_resume();
+            // CR 608.2c: derive ONE authoritative completion here and hand it to
+            // BOTH consumers — the logical group's record immediately below, and
+            // the forwarded result further down. Deriving them independently let
+            // the group record `Remained` while the forward treated the same
+            // delivery as moved; for a battlefield-sourced member (a `BounceAll`
+            // producer, which sets the same marker) that member IS a prospective
+            // member, so settlement would then read a survivor for an object the
+            // chain had already forwarded as moved.
+            let arrived_at_destination = paused_current.delivery_events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(from),
+                        to,
+                        ..
+                    } if *object_id == paused_current.member.object_id
+                        && *from != destination
+                        && *to == destination
+                )
+            });
+            let has_delivery_evidence = !paused_current.delivery_events.is_empty()
+                || paused_current.terminal_completion.is_some();
+            let completion = if arrived_at_destination || !has_delivery_evidence {
+                // MEASURED on the copy-choice route: the paused record carries no
+                // sidecar AND no delivery events, so every classifier that INFERS
+                // from it — `terminal_completion_after_resume()` included, which
+                // returns `Remained` for an empty slice — reports "did not move"
+                // for a member that really did enter the battlefield. Absence of
+                // evidence is not evidence of no move.
+                crate::types::game_state::ZoneMoveCompletion::Moved
+            } else {
+                paused_current.terminal_completion_after_resume()
+            };
             logical_zone_change_group
                 .record_delivery_completion(paused_current.member.object_id, completion)
                 .expect("resumed ChangeZone member records its exact terminal outcome");
@@ -1637,26 +1670,16 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 // member that really did enter the battlefield. Gating on such an
                 // inference silently un-fixes #6902: the creature stops being
                 // sacrificed. Absence of evidence is not evidence of no move.
+                // The SAME authoritative completion decided above. A member that
+                // arrived at the requested destination is forwarded; one that was
+                // prevented, remained, or was redirected elsewhere by a CR 614.6
+                // replacement did not go where the producer said, so "that
+                // creature" has no referent and the producer contributes nothing.
                 let moved_member = [paused_current.member.object_id];
-                let arrived_at_destination = paused_current.delivery_events.iter().any(|event| {
-                    matches!(
-                        event,
-                        GameEvent::ZoneChanged {
-                            object_id,
-                            from: Some(from),
-                            to,
-                            ..
-                        } if *object_id == paused_current.member.object_id
-                            && *from != destination
-                            && *to == destination
-                    )
-                });
-                let has_delivery_evidence = !paused_current.delivery_events.is_empty()
-                    || paused_current.terminal_completion.is_some();
-                let moved: &[_] = if arrived_at_destination || !has_delivery_evidence {
-                    &moved_member
-                } else {
-                    &[]
+                let moved: &[_] = match completion {
+                    crate::types::game_state::ZoneMoveCompletion::Moved => &moved_member,
+                    crate::types::game_state::ZoneMoveCompletion::Prevented
+                    | crate::types::game_state::ZoneMoveCompletion::Remained => &[],
                 };
                 // CR 608.2c: ACCUMULATE, don't publish. The awaiting marker is
                 // consumed by the first publish, and a multi-card selection can
