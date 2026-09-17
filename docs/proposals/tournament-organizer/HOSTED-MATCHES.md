@@ -242,6 +242,27 @@ report?"), and the caller-identity check lives one layer up in the broker
   hosting authority, so `report_gate` stays `Open` and the seated-player
   self-report path is unchanged.
 
+**Publication contract (raised in review).** "Sole writer = the server path" must
+mean a **broker-level system-report action**, not a raw `report_result` core
+mutation. `report_result` (`tournament.rs:2434-2502`) only mutates core state; the
+`TournamentUpdate` outbound that refreshes every subscriber's pairing/standings is
+minted **exclusively** by `Broker::settle_gated` from a `GatedEffect`
+(`broker.rs:178, 333-356` — on success it emits
+`[ack?, ToSubscribers(TournamentUpdate{code, view})]`; the client report handler
+goes through this at `broker.rs:1447-1504`). A hosted handoff that called
+`report_result` directly would advance core state but leave subscribers stale and
+bypass the action/receipt semantics that make retries observable. So the design
+requires:
+
+- A broker-level, **non-wire-constructible** system-report action (the `System`
+  authority of R1) that produces the **same** `GatedEffect` → `settle_gated` →
+  `TournamentUpdate` outbounds as a client report, differing only in that it is
+  admitted by the `Hosted` gate and cannot originate from an RPC frame.
+- `report_tournament_game_over` invokes that action and **applies its outbounds**
+  (via the existing `main.rs:4766-4823` apply path) as part of the receipt-backed
+  publish sequence (§4.4) — publication and receipt-marking in the same
+  transaction, so a retry re-emits the same update idempotently.
+
 The design therefore does **not** ship a `player_token` to the client for the
 purpose of reporting a hosted result; any token the client holds is for joining
 the hosted table, never for asserting its outcome.
@@ -412,7 +433,9 @@ floors in `protocol.rs` + `ws-adapter.ts`):
   start-timeout resolves to a forfeit (or `drop_player`,
   `tournament.rs:2532`). This timeout policy is **new** and is a §7 sub-decision
   (does a no-show auto-forfeit, or wait for organizer action?).
-- **Mid-game disconnect** — match-type-dependent; see §6.1. Not one primitive.
+- **Mid-game disconnect** — two sub-paths: explicit concede/host-kick
+  (match-type-dependent, §6.1) and **reconnect-grace-timer expiry** (§6.2), the
+  latter currently bypassing the report handoff entirely.
 - **Lost report** — server-authoritative, so the server reports directly; there
   is no lost self-report frame to recover (unlike A).
 
@@ -442,6 +465,34 @@ Recommendation: **(ii)** — restricting to Bo3 would gut single-elim/pod hostin
 but this is the maintainer's call (§9.6). Either way, the §8 matrix's disconnect
 row is honestly scoped to the primitive that actually exists.
 
+### 6.2. Reconnect-grace expiry must route through the report handoff (raised in review)
+
+A distinct disconnect sub-path — the **reconnect grace timer expiring** — currently
+bypasses everything above, and is the one that actually fires on a player who drops
+and never returns. Today `main.rs:2343-2405` calls
+`ReconnectManager::check_expired()` (`reconnect.rs:87-100`), which **collapses
+per-seat identity to a deduplicated game code**, then builds
+`terminal_artifact(session, None, …)` — **`winner: None`** — and removes the
+session. It never selects a trusted forfeit winner and never invokes
+`report_tournament_game_over`. Left as-is, a hosted pairing whose grace timer
+lapses is retired with no winner and **stays pending forever**.
+
+The design requires an explicit **grace-expiry hook** for hosted games:
+
+- Use `check_expired_with_players()` (`reconnect.rs:104-117`), which **retains the
+  expired `(game_code, PlayerId)`** per seat, instead of the identity-collapsing
+  `check_expired()`.
+- Choose **trusted terminal semantics** explicitly: a single seat's expiry ⇒ the
+  other seat wins (Bo1) / the match forfeits to the other seat (Bo3, via §6.1's
+  primitive); **simultaneous expiry** of all live seats ⇒ an explicit represented
+  outcome (double-loss / no-result-drop per policy), never an implicit `None`.
+- Route that terminal through the **same generation-fenced, receipt-backed
+  `report_tournament_game_over`** path (§4.2–§4.4) **before** the session is
+  removed — so the pairing is reported, not silently retired.
+
+This is R8 (§7). It composes with R6 (which supplies the per-class trusted-terminal
+the hook selects) and R7 (the receipt the hook writes through).
+
 ---
 
 ## 7. Requirements vs. sub-decisions
@@ -450,10 +501,14 @@ The trust/recovery boundaries below are **requirements of the design** (raised i
 review), not deferrable — they are specified above and repeated here as a
 checklist the implementation PR must satisfy:
 
-- **R1 — Server-only result authority** for hosted pairings: `ReportGate::Hosted`
-  (WHO-independent) + an explicit `ReportAuthority::{SeatedPlayer,System}` param on
-  `report_result` — `Hosted` admits `System` (server code path only, not
-  wire-constructible), denies `SeatedPlayer` (client) (§4.1).
+- **R1 — Server-only result authority + broker publication** for hosted pairings:
+  `ReportGate::Hosted` (WHO-independent) + an explicit
+  `ReportAuthority::{SeatedPlayer,System}` param on `report_result` — `Hosted`
+  admits `System` (server code path only, not wire-constructible), denies
+  `SeatedPlayer` (client). The `System` write is a **broker-level action** emitting
+  the same `GatedEffect` → `settle_gated` → `TournamentUpdate` outbounds as a client
+  report (not a raw core mutation), applied as part of the receipt-backed publish
+  (§4.1).
 - **R2 — Durable, idempotent terminal handoff** through one report path across
   normal / concede / disconnect / restart-recovery, reporting before the hosted
   game is removed; typed persisted payload carries pairing id + full `PodOutcome`
@@ -474,6 +529,12 @@ checklist the implementation PR must satisfy:
   with report publication transactionally coupled to the receipt (or an equivalent
   transactional outbox/reconciler). Without it, R2/R3 recovery is impossible on the
   native server, where the `Broker` is rebuilt fresh (§4.4).
+- **R8 — Reconnect-grace-expiry hook** — the grace-timer expiry path must use
+  `check_expired_with_players()` (not the identity-collapsing `check_expired()`),
+  choose explicit trusted terminal semantics for single vs. simultaneous expiry, and
+  route through the generation-fenced, receipt-backed report handoff **before**
+  session removal — instead of today's `terminal_artifact(…, None, …)` + remove,
+  which retires a hosted pairing with no winner and leaves it pending (§6.2).
 
 Genuinely open **sub-decisions** (do not block recording the design, resolved in
 the implementation PR):
@@ -491,7 +552,7 @@ the implementation PR):
 
 ---
 
-## 8. Failure matrix (how each ending is reported, under R1–R7)
+## 8. Failure matrix (how each ending is reported, under R1–R8)
 
 | Ending | Detector | Reports via | Fenced by |
 |---|---|---|---|
@@ -499,6 +560,7 @@ the implementation PR):
 | Concede / concede-match | existing concede sites | same idempotent path (R2) | generation (R3) |
 | Disconnect — 2-seat Bo3 | `apply_trusted_match_forfeit` → `Completed` | same idempotent path (R2) | generation (R3) |
 | Disconnect — Bo1 / pod | generic trusted-terminal (§6.1, **new**) or scoped out (§9.6) | same idempotent path (R2) | generation (R3) |
+| Reconnect-grace expiry | grace-expiry hook `check_expired_with_players()` (§6.2, R8) | same idempotent path (R2) | generation (R3) |
 | Restart recovery | `finish_restored_full_startup` (`main.rs:249`) after tournament rehydration (R7) | durable receipt → same path (R2) | generation, durably (R3+R7) |
 | No-show / never-connects | start-timeout (new, §9.2) | forfeit / `drop_player` | n/a (no game) |
 | Bye / pre-resolved | `generate_pairings` | never hosted | n/a |
