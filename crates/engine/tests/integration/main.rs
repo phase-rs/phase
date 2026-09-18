@@ -1119,6 +1119,7 @@ mod primo_unbounded_fractal_counters;
 mod printed_ability_order;
 mod printed_damage_prevention_survives_turn;
 mod proliferate_zero_counter;
+mod promise_of_loyalty;
 mod pulse_of_the_forge;
 mod punishing_punch_twice_subject_power;
 mod purged_source_attachment_count_lki;

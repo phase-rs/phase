@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, map, opt, peek, rest, value, verify};
+use nom::combinator::{all_consuming, eof, map, opt, peek, rest, value, verify};
 use nom::multi::separated_list1;
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
@@ -38,9 +38,10 @@ use super::super::oracle_nom::target::{
 use super::super::oracle_quantity;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
-    parse_cant_be_activated_exemption_in_text, parse_chosen_qualifier_subject,
-    parse_continuous_modifications, parse_continuous_subject_filter, parse_static_line,
-    parse_static_line_multi, peel_compound_all_quantified_conjuncts,
+    parse_cant_attack_defended_scope_nom, parse_cant_be_activated_exemption_in_text,
+    parse_chosen_qualifier_subject, parse_continuous_modifications,
+    parse_continuous_subject_filter, parse_static_line, parse_static_line_multi,
+    peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase_folding,
@@ -6074,6 +6075,182 @@ fn build_restriction_clause(
             optional: false,
             unless_pay: None,
         });
+    }
+
+    // CR 508.1c + CR 109.5 + CR 608.2c: "<subject> can't attack you[ or
+    // planeswalkers you control]" — a recipient-local, CONTROLLER-RELATIVE
+    // attack prohibition. `parse_restriction_modes` declines it, because its
+    // `all_consuming` mode list has no production for the defended-scope tail,
+    // so without this branch the whole clause becomes `Effect::Unimplemented`.
+    //
+    // The general rule this encodes, not the card: a recipient-local
+    // prohibition whose defended scope is controller-relative must be emitted
+    // as a nested `GrantStaticAbility { affected: SelfRef }`, because that is
+    // the only shape with a per-recipient slot for CR 109.5's "you". The
+    // resolution-time stamp in `game/effects/effect.rs` latches "you" to the
+    // installing player, and its six conjuncts (`source_controller.is_none()`,
+    // `affected == Some(SelfRef)`, `condition.is_none()`,
+    // `modifications.is_empty()`, `attack_defended` satisfying
+    // `defended_scope_uses_source_controller_anchor`, and `mode` in
+    // {`CantAttack`, `CantAttackOrBlock`}) are satisfied only by this shape.
+    // `ContinuousModification::AddStaticMode` manufactures a `SelfRef` static
+    // against the recipient with no slot to carry a per-recipient "you".
+    //
+    // The mandatory `eof` is load-bearing twice: refusing a `None` defended
+    // scope leaves the bare "can't attack" to `parse_restriction_modes`, and
+    // refusing any trailing text declines the "… this turn" / "… this combat" /
+    // "… unless their controller pays" riders this grant shape cannot express.
+    if let Ok((_, Some(defended))) = terminated(
+        preceded(
+            tag::<_, _, OracleError<'_>>("can't attack"),
+            parse_cant_attack_defended_scope_nom,
+        ),
+        eof,
+    )
+    .parse(lower.as_str())
+    {
+        let affected = static_affected_for_application(&application);
+        // Exhaustive on the subject filter's kind, with NO wildcard, so a new
+        // `TargetFilter` variant forces an explicit fixed-vs-live adjudication
+        // here rather than silently joining whichever side it was listed under.
+        let subject_set_is_fixed = match &affected {
+            // CR 608.2c: an anaphorically- or specifically-fixed subject names
+            // a set the preceding instruction determined; CR 611.2c's FIRST
+            // sentence then applies, because an ability grant IS a
+            // characteristic modification (CR 613.1f, layer 6). Freezing the
+            // set is correct here, and is what delivers Promise of Loyalty's
+            // "a vow counter moved to another creature does not bind it".
+            //
+            // `ParentTarget` is listed first because it is what this seam
+            // receives: `static_affected_for_application` returns
+            // `TargetFilter::ParentTarget` only when
+            // `application.target.is_some() || application.inherits_parent`,
+            // and for an "Each of those <type>" subject both are false, so it
+            // returns `application.affected` — which the subject parser has
+            // already set to `ParentTarget`. The `TrackedSet` form appears only
+            // when a prior clause satisfied
+            // `oracle_effect::publishes_tracked_set_from_resolution` and the
+            // chain assembler rewrote the anaphor. Both install identically at
+            // runtime: `register_transient_effect`'s
+            // `Some(ParentTarget) if ability.targets.is_empty()` arm reads
+            // `state.chain_tracked_set_id` directly, and the `TrackedSet` form
+            // reaches the same members through `resolve_tracked_set_sentinel`.
+            TargetFilter::ParentTarget
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::SelfRef
+            | TargetFilter::SpecificObject { .. } => true,
+
+            // DEFERRED — broadcast subject, whose affected set must stay LIVE.
+            // CR 611.2c's SECOND sentence: an effect that grants no ability
+            // "modifies the rules of the game, so it can affect objects that
+            // weren't affected when that continuous effect began", which is
+            // exactly what Chronomantic Escape's printed ruling says. The grant
+            // shape above would FREEZE the set and ship a rules-incorrect fix.
+            // The engine's mechanism for this axis exists — the
+            // `MustAttackAwayFromSource` branch of `register_transient_effect`
+            // keeps the filter intact on ONE transient effect — but extending
+            // it to `CantAttack` is `game/effects/effect.rs` work for a
+            // different issue. Cards: Chronomantic Escape, Web of Inertia; both
+            // keep their `Effect::Unimplemented` and stay honestly uncovered.
+            TargetFilter::Typed(_) => false,
+
+            // DEFERRED — player-scoped subject. "…they can't attack you this
+            // combat" restricts a PLAYER (CR 508.1c), not objects, and an
+            // object-local `StaticMode::CantAttack` cannot express it. Card:
+            // Champions of Minas Tirith. Every remaining variant is either a
+            // player reference, an event/replacement reference with no fixed
+            // object set at parse time, or a composite whose members this
+            // adjudication has not been made for.
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::GrantingObject
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Not { .. }
+            | TargetFilter::Or { .. }
+            | TargetFilter::And { .. }
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::EventTarget
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::HasChosenName
+            | TargetFilter::ChosenDamageSource { .. }
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers => false,
+        };
+        if subject_set_is_fixed {
+            // CR 613.1f: the grant is an ability-adding effect, applied in
+            // layer 6. CR 611.2a/611.2b: the outer definition carries the
+            // peeled duration, so a "for as long as it has a vow counter on it"
+            // phrase keeps being re-evaluated per counter edit.
+            let granted = StaticDefinition::new(StaticMode::CantAttack)
+                .affected(TargetFilter::SelfRef)
+                .attack_defended(Some(defended));
+            let installer = StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(granted),
+                }])
+                .description(predicate.to_string());
+            return Some(ParsedEffectClause {
+                unlowered_guard: None,
+                effect: Effect::GenericEffect {
+                    static_abilities: vec![installer],
+                    duration: duration.clone(),
+                    // Passed through, not re-decided: both sibling emissions in
+                    // this function do the same. For an "Each of those <type>"
+                    // subject it is measured `None`; for an inherited or
+                    // targeted subject — which reaches the `ParentTarget` arm
+                    // above through `static_affected_for_application` — it is
+                    // the declaration `transient_bound_filters` binds against.
+                    target: application.target,
+                    end_cost: None,
+                },
+                duration,
+                sub_ability: None,
+                distribute: None,
+                multi_target: None,
+                condition: None,
+                optional: false,
+                unless_pay: None,
+            });
+        }
     }
 
     // CR 508.1d / CR 509.1a: Restriction predicates for attack/block/target.

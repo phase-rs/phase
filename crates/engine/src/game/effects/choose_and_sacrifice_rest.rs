@@ -613,6 +613,23 @@ fn sacrifice_unchosen(
     } else {
         scoped_players.to_vec()
     };
+    // Publish the KEEPER population so a later clause in the same resolution
+    // chain can name it ("Each of those creatures …", "put a counter on each of
+    // them"). This is the single funnel: every `sacrifice_unchosen` call site in
+    // this file reaches it, including the exact-count terminal resumed from
+    // `WaitingFor::KeepExactPermanentsChoice` and the category terminal, so the
+    // synchronous and resumed paths publish the same thing. `advance_to_next_player`
+    // and `step_exact_count` accumulate `all_kept` across seats and call this
+    // funnel once, when no player remains, so `kept` is the UNION across seats
+    // rather than the last seat's choice.
+    //
+    // `publish_fresh_tracked_set`, not `publish_tracked_set`: it rebinds
+    // `state.chain_tracked_set_id`, which is what both
+    // `register_transient_effect`'s `ParentTarget` arm and
+    // `counters::resolve_add_all`'s `TrackedSetId(0)` sentinel read.
+    // `PendingPlayerScopeSacrificeCompletion.publish_fresh_tracked_set` stays
+    // false: that field publishes the SACRIFICED set, the opposite population.
+    super::publish_fresh_tracked_set(state, kept.to_vec());
     let selections = unchosen_sacrifice_selections_for_scope(
         state,
         kept,

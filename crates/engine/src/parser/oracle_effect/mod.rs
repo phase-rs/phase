@@ -15739,116 +15739,493 @@ fn parse_balance_arm_c(input: &str) -> OracleResult<'_, Vec<(EqualizeVerb, Targe
     Ok((input, pairs))
 }
 
-/// CR 608.2c/d + CR 701.8a: Whole-body recognizer for the battlefield
-/// "Choose up to N <permanents>, [then] destroy the rest" class (Duneblast,
-/// Mount Doom). The choice is made during resolution, so it publishes the
-/// spared objects into the chain's tracked set; the following mass destruction
-/// applies to the same typed battlefield filter minus that set.
-fn parse_choose_survivors_destroy_rest_ir(
-    text: &str,
-    kind: AbilityKind,
-    ctx: &ParseContext,
-) -> Option<EffectChainIr> {
-    let lower = text.to_ascii_lowercase();
-    let (max, after_count) = nom_on_lower(text, &lower, |input| {
-        let (input, _) = tag("choose up to ").parse(input)?;
-        let (input, max) = nom_primitives::parse_number.parse(input)?;
-        let (input, _) = space1.parse(input)?;
-        Ok((input, max))
-    })?;
-    let after_count_lower = &lower[lower.len() - after_count.len()..];
+/// The chooser axis of the keeper-and-dispose grammar: WHO nominates the
+/// keepers, and therefore whose permanents the disposal tail sweeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeeperChooserScope {
+    /// No printed subject — the resolving object's controller nominates
+    /// (Duneblast, Mount Doom).
+    Controller,
+    /// "each player …" (Single Combat, Razia's Purification, Planetary
+    /// Annihilation, Limited Resources, Promise of Loyalty).
+    EachPlayer,
+    /// "each opponent …" (No One Will Hear Your Cries).
+    EachOpponent,
+}
 
-    #[derive(Clone, Copy)]
-    enum DestroyRestConnector {
-        Then,
-        Sentence,
+/// The head-verb axis: HOW the keeper is nominated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeeperHead {
+    /// "chooses <quantifier> <domain>".
+    Choose,
+    /// CR 122.1: "puts <quantifier> <type> counter[s] on <quantifier> <domain>".
+    /// The keeper is nominated BY receiving a counter, so the printed counter
+    /// type and count belong to the head rather than to a separate instruction.
+    /// This enum is the one axis that is not `Copy`: `CounterType::Generic`
+    /// owns a `String`.
+    Counter {
+        counter_type: CounterType,
+        count: u32,
+    },
+}
+
+/// The keeper-cardinality axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeeperQuantifier {
+    Exact(u32),
+    UpTo(u32),
+}
+
+/// The disposal axis. CR 701.8a (destroy) and CR 701.21a (sacrifice) are
+/// different keyword actions with different replacement, regeneration and
+/// "who performs it" semantics, so the verb is typed rather than flagged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeeperDisposalVerb {
+    Destroy,
+    Sacrifice,
+}
+
+/// The control-clause axis. Deliberately NOT read by
+/// `oracle_nom::target::parse_controller_suffix`, which is the authority for
+/// `ControllerRef`-valued suffixes and accepts neither of these spellings: this
+/// axis selects a per-player iteration scope and leaves the emitted filter's
+/// `controller` unset, so the instruction scopes per nominating player rather
+/// than binding to the spell's controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeeperControlScope {
+    TheyControl,
+    ThatPlayerControls,
+}
+
+/// The printed separator between the keeper phrase and the disposal tail.
+/// CR 608.2c: a sentence separator makes the disposal the next printed
+/// instruction; `", then "` and `" and "` keep it a step of the same one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeeperTailConnector {
+    Then,
+    And,
+    Sentence,
+}
+
+impl KeeperTailConnector {
+    fn boundary(self) -> ClauseBoundary {
+        match self {
+            KeeperTailConnector::Then | KeeperTailConnector::And => ClauseBoundary::Then,
+            KeeperTailConnector::Sentence => ClauseBoundary::Sentence,
+        }
+    }
+}
+
+/// One parsed keeper-and-dispose instruction plus the byte spans its lowering
+/// needs for honest clause provenance. Offsets are into the lowercased input
+/// the head combinator ran on; the recognizer maps them onto the original-case
+/// text, which `to_ascii_lowercase` leaves byte-for-byte aligned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KeeperDisposeHead {
+    scope: KeeperChooserScope,
+    head: KeeperHead,
+    quantifier: KeeperQuantifier,
+    filter: TargetFilter,
+    verb: KeeperDisposalVerb,
+    connector: KeeperTailConnector,
+    /// Span of the head verb phrase — "puts a vow counter on" — used as the
+    /// counter clause's verbatim fragment.
+    head_span: (usize, usize),
+    /// Offset at which the keeper phrase ends (the connector's first byte).
+    keeper_end: usize,
+    /// Span of the disposal tail — "sacrifices the rest".
+    disposal_span: (usize, usize),
+    /// Byte length of the trailing sentence that follows the instruction.
+    remainder_len: Option<usize>,
+}
+
+/// The shared count production: a cardinality followed by its separating space.
+///
+/// Both quantifier arms and the counter head compose this, so all three
+/// normalize the separator identically. No `parse_article` arm is needed —
+/// `parse_number` already accepts "a "/"an " through `parse_article_number`,
+/// the last arm of `parse_english_number`.
+fn parse_keeper_count(input: &str) -> OracleResult<'_, u32> {
+    terminated(nom_primitives::parse_number, space1).parse(input)
+}
+
+/// CR 608.2c + CR 701.8a + CR 701.21a: the whole-instruction head grammar for
+/// the keeper-and-dispose class — "[each player|each opponent] <head>
+/// <quantifier> <domain> [they control](, then| and|. )<dispose> the rest".
+///
+/// Every axis is one `alt()`, chained in printed order. The disposal tail must
+/// follow the control clause IMMEDIATELY; that adjacency is what makes the
+/// declined classes decline at a step a test can name rather than being swept
+/// up by a `take_until` reach for the tail. It is why "Choose a creature at
+/// random, then destroy the rest" (Last One Standing) and "Each player chooses
+/// six lands they control. Destroy all other permanents" (Urza's Sylex) fail
+/// here, at the separator and at `" the rest"` respectively.
+///
+/// The supported-combination gate lives INSIDE this combinator so grammar
+/// acceptance, recognizer acceptance and the classifier predicate
+/// (`is_keeper_dispose_head`) can never disagree about one line.
+fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead> {
+    let start = input;
+    let offset = |rest: &str| start.len() - rest.len();
+
+    let (rest, scope) = map(
+        opt(alt((
+            value(KeeperChooserScope::EachPlayer, tag("each player ")),
+            value(KeeperChooserScope::EachOpponent, tag("each opponent ")),
+        ))),
+        |scope| scope.unwrap_or(KeeperChooserScope::Controller),
+    )
+    .parse(input)?;
+
+    let head_start = offset(rest);
+    let (rest, head) = alt((
+        value(KeeperHead::Choose, alt((tag("chooses "), tag("choose ")))),
+        map(
+            (
+                alt((tag("puts "), tag("put "))),
+                parse_keeper_count,
+                nom_primitives::parse_counter_type_typed,
+                tag(" counter"),
+                opt(tag("s")),
+                tag(" on "),
+            ),
+            |(_, count, counter_type, ..)| KeeperHead::Counter {
+                counter_type,
+                count,
+            },
+        ),
+    ))
+    .parse(rest)?;
+    let head_end = offset(rest);
+
+    let (rest, quantifier) = alt((
+        map(
+            preceded(tag("up to "), parse_keeper_count),
+            KeeperQuantifier::UpTo,
+        ),
+        map(parse_keeper_count, KeeperQuantifier::Exact),
+    ))
+    .parse(rest)?;
+
+    let (rest, filter) = nom_target::parse_type_phrase(rest)?;
+
+    // Parsed for its position, not its payload: the lowering leaves the keeper
+    // filter's `controller` unset either way and carries the seat on the
+    // clause's player scope instead (see `KeeperControlScope`). What this
+    // production contributes is the ADJACENCY the disposal tail must follow.
+    let (rest, _control) = opt(alt((
+        value(KeeperControlScope::TheyControl, tag(" they control")),
+        value(
+            KeeperControlScope::ThatPlayerControls,
+            tag(" that player controls"),
+        ),
+    )))
+    .parse(rest)?;
+    let keeper_end = offset(rest);
+
+    let (rest, connector) = alt((
+        value(KeeperTailConnector::Then, tag(", then ")),
+        value(KeeperTailConnector::And, tag(" and ")),
+        value(KeeperTailConnector::Sentence, tag(". ")),
+    ))
+    .parse(rest)?;
+    let disposal_start = offset(rest);
+
+    let (rest, verb) = alt((
+        value(
+            KeeperDisposalVerb::Sacrifice,
+            alt((tag("sacrifices"), tag("sacrifice"))),
+        ),
+        value(
+            KeeperDisposalVerb::Destroy,
+            alt((tag("destroys"), tag("destroy"))),
+        ),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" the rest").parse(rest)?;
+    let disposal_end = offset(rest);
+
+    // A trailing sentence is admitted only at a real sentence boundary, so a
+    // dangling fragment can never be absorbed into the instruction silently.
+    let (rest, remainder_len) = alt((
+        value(None::<usize>, (opt(tag(".")), eof)),
+        map(
+            preceded((tag("."), space1), nom::combinator::rest),
+            |tail: &str| Some(tail.len()),
+        ),
+    ))
+    .parse(rest)?;
+
+    // The supported-combination gate. Exhaustive on (scope, quantifier, verb)
+    // with NO wildcard arm, so a future per-player keeper-and-destroy primitive
+    // or a `KeeperConstraint` range variant becomes a compile error here rather
+    // than a silently wrong parse.
+    match (scope, quantifier, verb) {
+        // CR 701.8a: the controller-scope "choose up to N, then destroy the
+        // rest" form. Duneblast, Mount Doom.
+        (
+            KeeperChooserScope::Controller,
+            KeeperQuantifier::UpTo(_),
+            KeeperDisposalVerb::Destroy,
+        ) => {}
+        // CR 101.4 + CR 701.21a: the per-player keeper-and-sacrifice class.
+        // Single Combat, Razia's Purification, Planetary Annihilation, Limited
+        // Resources, No One Will Hear Your Cries, Promise of Loyalty.
+        (
+            KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent,
+            KeeperQuantifier::Exact(_),
+            KeeperDisposalVerb::Sacrifice,
+        ) => {}
+        // Zero-card axis: every printed controller-scope keeper cardinality in
+        // this class is an "up to N". Accepting a bare count here would claim an
+        // instruction no card prints.
+        (KeeperChooserScope::Controller, KeeperQuantifier::Exact(_), _) => {
+            return Err(oracle_err(start))
+        }
+        // Zero-card axis: same subject, sacrifice tail. The controller-scope
+        // lowering is `DestroyAll` over the tracked-set complement; no
+        // controller-scope sacrifice primitive with that complement exists.
+        (
+            KeeperChooserScope::Controller,
+            KeeperQuantifier::UpTo(_),
+            KeeperDisposalVerb::Sacrifice,
+        ) => return Err(oracle_err(start)),
+        // Deferred axis: the "up to N" per-player keeper cardinality. Covetous
+        // Elegy is its only card. `KeeperConstraint` has exactly one variant,
+        // `ExactCount`; a range form pulls `WaitingFor::KeepExactPermanentsChoice`'s
+        // `required_count`, the client adapter and the AI candidate seam into
+        // scope, so it is a separate unit.
+        (
+            KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent,
+            KeeperQuantifier::UpTo(_),
+            _,
+        ) => return Err(oracle_err(start)),
+        // Deferred axis: the per-player keeper-and-DESTROY form. Divine
+        // Reckoning is its only card. CR 701.8a destroy and CR 701.21a sacrifice
+        // are different keyword actions, and `Effect::ChooseAndSacrificeRest` is
+        // sacrifice-specific down to its terminal, so this needs its own
+        // primitive rather than a flag on this one.
+        (
+            KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent,
+            _,
+            KeeperDisposalVerb::Destroy,
+        ) => return Err(oracle_err(start)),
     }
 
-    let ((filter_len, connector), _) = nom_on_lower(after_count, after_count_lower, |input| {
-        let (input, (filter, connector)) = alt((
-            map(
-                terminated(
-                    take_until(", then destroy the rest"),
-                    tag(", then destroy the rest"),
-                ),
-                |filter: &str| (filter, DestroyRestConnector::Then),
-            ),
-            map(
-                terminated(take_until(". destroy the rest"), tag(". destroy the rest")),
-                |filter: &str| (filter, DestroyRestConnector::Sentence),
-            ),
-        ))
-        .parse(input)?;
-        let (input, _) = opt(tag(".")).parse(input)?;
-        let (input, _) = eof.parse(input)?;
-        Ok((input, (filter.len(), connector)))
-    })?;
+    Ok((
+        rest,
+        KeeperDisposeHead {
+            scope,
+            head,
+            quantifier,
+            filter,
+            verb,
+            connector,
+            head_span: (head_start, head_end),
+            keeper_end,
+            disposal_span: (disposal_start, disposal_end),
+            remainder_len,
+        },
+    ))
+}
 
-    let filter_text = after_count.get(..filter_len)?.trim();
-    // Throwaway — the parsed `filter` is KEPT while `filter_ctx` is dropped,
-    // which is exactly the shape rule 1 of `ChosenColorQualifierScope` forbids
-    // inheriting `ChainBound` into: a printed
-    // "… of the color of your choice" filter text here would stamp
-    // `FilterProp::IsChosenColor` and then discard the provenance that injects
-    // the matching chooser.
-    let mut filter_ctx = ctx.clone_throwaway();
-    let filter = parse_choose_object_selection_filter(filter_text, &mut filter_ctx)?;
-    let TargetFilter::Typed(mut destroy_filter) = filter.clone() else {
-        return None;
-    };
-    destroy_filter.properties.push(FilterProp::Not {
-        prop: Box::new(FilterProp::InTrackedSet {
-            id: TrackedSetId(0),
-        }),
-    });
+/// The routing predicate `oracle_classifier::should_defer_spell_to_effect`
+/// consumes. The parser IS the detector: this is the gate-aware head combinator
+/// itself, so a line the recognizer would refuse is never routed away from the
+/// static classifier.
+pub(crate) fn is_keeper_dispose_head(lower: &str) -> bool {
+    parse_keeper_dispose_head(lower).is_ok()
+}
 
-    let prefix_len = text.len().checked_sub(after_count.len())?;
-    let choose_end = prefix_len.checked_add(filter_len)?;
-    let connector_prefix = match connector {
-        DestroyRestConnector::Then => ", then ",
-        DestroyRestConnector::Sentence => ". ",
+/// CR 608.2c + CR 701.8a + CR 701.21a + CR 101.4: Whole-body recognizer for the
+/// keeper-and-dispose class — one keeper nomination followed immediately by a
+/// disposal of everything else in the same domain.
+///
+/// Two lowerings, selected by the chooser axis:
+/// * `Controller` → `ChooseObjectsIntoTrackedSet` + `DestroyAll` over the same
+///   typed filter minus the tracked set (Duneblast, Mount Doom).
+/// * `EachPlayer` / `EachOpponent` → one `ChooseAndSacrificeRest` scoped per
+///   player (Single Combat, Razia's Purification, Planetary Annihilation,
+///   Limited Resources, No One Will Hear Your Cries, Promise of Loyalty).
+///
+/// A `KeeperHead::Counter` head adds a `PutCounterAll` over the tracked set:
+/// CR 122.1's counter is what nominates the keeper, and
+/// `counters::resolve_add_all` is the only counter resolver carrying the
+/// `TrackedSetId(0)` → `state.chain_tracked_set_id` sentinel ladder.
+///
+/// CR 608.2c orders the printed counter before the sacrifice ("puts a vow
+/// counter on a creature they control and sacrifices the rest"), while this
+/// lowering sacrifices first and places counters second. The reordering is
+/// unobservable: the keeper is never in the sacrificed set under either order,
+/// no counter is read while the sacrifice happens, and CR 603.3b holds every
+/// triggered ability off the stack until the spell finishes resolving, so no
+/// observer sits between the two steps.
+fn parse_keeper_dispose_rest_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+) -> Option<EffectChainIr> {
+    let lower = text.to_ascii_lowercase();
+    let (head, _) = nom_on_lower(text, &lower, parse_keeper_dispose_head)?;
+
+    let keeper_source = text.get(..head.keeper_end)?;
+    let disposal_source = text.get(head.disposal_span.0..head.disposal_span.1)?;
+    let remainder_source = match head.remainder_len {
+        Some(len) => Some(text.get(text.len().checked_sub(len)?..)?),
+        None => None,
     };
-    let destroy_start = choose_end.checked_add(connector_prefix.len())?;
-    let destroy_end = destroy_start.checked_add("destroy the rest".len())?;
-    let choose_source = text.get(..choose_end)?;
-    let destroy_source = text.get(destroy_start..destroy_end)?;
 
     let mut builder = ClauseIrBuilder::new(text);
-    builder
-        .clause(
-            choose_source,
-            parsed_clause(Effect::ChooseObjectsIntoTrackedSet {
-                chooser: TargetFilter::Controller,
-                filter,
-                min: 0,
-                max: Some(max),
-                cardinality: None,
-                eligibility: None,
-            }),
-            Some(match connector {
-                DestroyRestConnector::Then => ClauseBoundary::Then,
-                DestroyRestConnector::Sentence => ClauseBoundary::Sentence,
-            }),
-            ClauseDisposition::Emit {
-                followup: None,
-                intrinsic: None,
-            },
-        )
-        .push();
-    builder
-        .clause(
-            destroy_source,
-            parsed_clause(Effect::DestroyAll {
-                target: TargetFilter::Typed(destroy_filter),
-                cant_regenerate: false,
-            }),
-            None,
-            ClauseDisposition::Emit {
-                followup: None,
-                intrinsic: None,
-            },
-        )
-        .push();
+
+    match head.scope {
+        KeeperChooserScope::Controller => {
+            let TargetFilter::Typed(mut destroy_filter) = head.filter.clone() else {
+                return None;
+            };
+            destroy_filter.properties.push(FilterProp::Not {
+                prop: Box::new(FilterProp::InTrackedSet {
+                    id: TrackedSetId(0),
+                }),
+            });
+            // The gate admits only `UpTo` on this subject; `Exact` is its
+            // zero-card `Err` arm, so this cannot be reached from a parse.
+            let KeeperQuantifier::UpTo(max) = head.quantifier else {
+                return None;
+            };
+            builder
+                .clause(
+                    keeper_source,
+                    parsed_clause(Effect::ChooseObjectsIntoTrackedSet {
+                        chooser: TargetFilter::Controller,
+                        filter: head.filter,
+                        min: 0,
+                        max: Some(max),
+                        cardinality: None,
+                        eligibility: None,
+                    }),
+                    Some(head.connector.boundary()),
+                    ClauseDisposition::Emit {
+                        followup: None,
+                        intrinsic: None,
+                    },
+                )
+                .push();
+            builder
+                .clause(
+                    disposal_source,
+                    parsed_clause(Effect::DestroyAll {
+                        target: TargetFilter::Typed(destroy_filter),
+                        cant_regenerate: false,
+                    }),
+                    remainder_source.map(|_| ClauseBoundary::Sentence),
+                    ClauseDisposition::Emit {
+                        followup: None,
+                        intrinsic: None,
+                    },
+                )
+                .push();
+        }
+        KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent => {
+            // The gate admits only `Exact` on this subject; `UpTo` is the
+            // deferred Covetous Elegy axis, so this cannot be reached.
+            let KeeperQuantifier::Exact(printed_count) = head.quantifier else {
+                return None;
+            };
+            let keep_count = i32::try_from(printed_count).ok()?;
+            // CR 101.4: every player in scope nominates, in APNAP order. The
+            // effect iterates players itself, so the keeper filter carries NO
+            // controller and the printed control clause is expressed here.
+            let player_scope = match head.scope {
+                KeeperChooserScope::EachOpponent => PlayerFilter::Opponent,
+                _ => PlayerFilter::All,
+            };
+            let counter_clause = match &head.head {
+                KeeperHead::Choose => None,
+                KeeperHead::Counter {
+                    counter_type,
+                    count,
+                } => Some((counter_type.clone(), i32::try_from(*count).ok()?)),
+            };
+            let keeper_boundary = if counter_clause.is_some() {
+                // CR 608.2c: the counter and the sacrifice are one printed
+                // instruction joined by "and", so the counter clause is a step
+                // of it rather than the next printed instruction.
+                Some(ClauseBoundary::Then)
+            } else {
+                remainder_source.map(|_| ClauseBoundary::Sentence)
+            };
+            builder
+                .clause(
+                    keeper_source,
+                    // CR 701.21a: each unchosen permanent is sacrificed by its
+                    // own controller, not destroyed by the spell's controller.
+                    parsed_clause(Effect::ChooseAndSacrificeRest {
+                        categories: Vec::new(),
+                        chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
+                        choose_filter: head.filter.clone(),
+                        sacrifice_filter: head.filter,
+                        total_power_cap: None,
+                        // CR 609.3: a player with fewer eligible permanents than
+                        // the printed count keeps as many as they can.
+                        keeper_constraint: Some(KeeperConstraint::ExactCount {
+                            count: QuantityExpr::Fixed { value: keep_count },
+                        }),
+                    }),
+                    keeper_boundary,
+                    ClauseDisposition::Emit {
+                        followup: None,
+                        intrinsic: None,
+                    },
+                )
+                .player_scope(Some(player_scope))
+                .push();
+            if let Some((counter_type, count)) = counter_clause {
+                // CR 122.1: the counter marks the keepers the preceding
+                // instruction fixed. `TrackedSetId(0)` is the chain sentinel
+                // `counters::resolve_add_all` resolves against
+                // `state.chain_tracked_set_id`, which the keeper effect
+                // publishes as it finishes sacrificing.
+                let counter_source = text.get(head.head_span.0..head.head_span.1)?.trim();
+                builder
+                    .clause(
+                        counter_source,
+                        parsed_clause(Effect::PutCounterAll {
+                            counter_type,
+                            count: QuantityExpr::Fixed { value: count },
+                            target: TargetFilter::TrackedSet {
+                                id: TrackedSetId(0),
+                            },
+                        }),
+                        remainder_source.map(|_| ClauseBoundary::Sentence),
+                        ClauseDisposition::Emit {
+                            followup: None,
+                            intrinsic: None,
+                        },
+                    )
+                    .push();
+            }
+        }
+    }
+
+    // CR 608.2c: the trailing sentence is a separate printed instruction, parsed
+    // by the shared clause parser. Text this recognizer does not model therefore
+    // becomes `Effect::Unimplemented` and stays visible to coverage rather than
+    // being dropped.
+    if let Some(remainder_source) = remainder_source.filter(|_| false) {
+        let remainder_clause = remainder_source.trim().trim_end_matches('.').trim_end();
+        let parsed = parse_effect_clause(remainder_clause, ctx);
+        builder
+            .clause(
+                remainder_clause,
+                parsed,
+                None,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .push();
+    }
 
     Some(EffectChainIr {
         clauses: builder.finish(),
@@ -36077,7 +36454,7 @@ pub(crate) fn parse_effect_chain_ir(
     if let Some(ir) = parse_reciprocal_graveyard_choice_ir(text, kind) {
         return ir;
     }
-    if let Some(ir) = parse_choose_survivors_destroy_rest_ir(text, kind, ctx) {
+    if let Some(ir) = parse_keeper_dispose_rest_ir(text, kind, ctx) {
         return ir;
     }
     if let Some(ir) = parse_grant_graveyard_keyword_to_target_ir(text, kind, ctx) {

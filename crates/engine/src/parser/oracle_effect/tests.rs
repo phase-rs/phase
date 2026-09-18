@@ -69910,3 +69910,811 @@ fn trigger_zone_past_counter_double_negative_remains_unsupported() {
     );
     assert_eq!(body, "draw a card if it didn't have no counters on it");
 }
+
+// Keeper-and-dispose recognizer (`parse_keeper_dispose_head` /
+// `parse_keeper_dispose_rest_ir`) — Promise of Loyalty, phase-rs/phase#6900.
+//
+// Every Oracle string below is verbatim from `client/public/card-data.json`;
+// the synthetic strings are labelled as such and exist only for the grammar
+// axes no printed card reaches.
+// ---------------------------------------------------------------------------
+
+/// Verbatim Oracle text, checked against `client/public/card-data.json`.
+const PROMISE_OF_LOYALTY_ORACLE: &str = "Each player puts a vow counter on a creature they control and sacrifices the rest. Each of those creatures can't attack you or planeswalkers you control for as long as it has a vow counter on it.";
+
+fn keeper_head(lower: &str) -> Option<KeeperDisposeHead> {
+    parse_keeper_dispose_head(lower).ok().map(|(_, head)| head)
+}
+
+fn sorcery(oracle: &str, name: &str) -> crate::parser::oracle::ParsedAbilities {
+    parse_oracle_text(oracle, name, &[], &["Sorcery".to_string()], &[])
+}
+
+/// V17 — CR 122.1: the printed counter type AND count are captured by the head
+/// grammar, not hard-coded to the single "a vow counter" the fixed card prints.
+/// Reverting `parse_keeper_count` in the counter arm (hard-coding 1) reddens
+/// the three-counter row; reverting `parse_counter_type_typed` reddens the
+/// `+1/+1` row.
+#[test]
+fn keeper_dispose_head_captures_printed_counter_count() {
+    // Paired positive: the PRINTED form (Promise of Loyalty) is one counter.
+    assert_eq!(
+        keeper_head(&PROMISE_OF_LOYALTY_ORACLE.to_ascii_lowercase()).map(|head| head.head),
+        Some(KeeperHead::Counter {
+            counter_type: CounterType::Generic("vow".to_string()),
+            count: 1,
+        })
+    );
+    // Synthetic: no printed card puts more than one counter on its keeper.
+    assert_eq!(
+        keeper_head(
+            "each player puts three vow counters on a creature they control and sacrifices the rest."
+        )
+        .map(|head| head.head),
+        Some(KeeperHead::Counter {
+            counter_type: CounterType::Generic("vow".to_string()),
+            count: 3,
+        })
+    );
+    // Synthetic: the counter-type axis is the shared typed reader, so a P/T
+    // counter is read as such rather than as another generic name.
+    assert_eq!(
+        keeper_head(
+            "each player puts two +1/+1 counters on a creature they control and sacrifices the rest."
+        )
+        .map(|head| head.head),
+        Some(KeeperHead::Counter {
+            counter_type: CounterType::Plus1Plus1,
+            count: 2,
+        })
+    );
+}
+
+/// N1 — the head-verb axis. A subject the grammar does not model declines
+/// BEFORE the quantifier, so Archfiend of Depravity ("that player chooses"),
+/// Natural Balance ("each player who controls six or more lands"), Tragic
+/// Arrogance and The Eternal Wanderer ("For each player, you choose") keep
+/// their current parse. Paired positive: the same sentence with a modelled
+/// subject is accepted.
+#[test]
+fn keeper_dispose_head_declines_an_unmodelled_subject() {
+    for declined in [
+        // Archfiend of Depravity, verbatim trigger body.
+        "that player chooses up to two creatures they control, then sacrifices the rest",
+        // Natural Balance, verbatim first sentence.
+        "each player who controls six or more lands chooses five lands they control and sacrifices the rest",
+        // Tragic Arrogance / The Eternal Wanderer [-4] head.
+        "for each player, you choose from among the permanents that player controls an artifact, a creature, an enchantment, and a planeswalker",
+    ] {
+        assert!(
+            keeper_head(declined).is_none(),
+            "head must decline an unmodelled subject: {declined}"
+        );
+    }
+    assert!(
+        keeper_head("each player chooses two creatures they control, then sacrifices the rest")
+            .is_some(),
+        "the same sentence with a modelled subject must be accepted"
+    );
+}
+
+/// N2 — the quantifier axis. A category list or a "from among" head prints no
+/// keeper CARDINALITY, so Cataclysm, Global Ruin and their siblings decline at
+/// the count production, before the domain reader is consulted. Paired
+/// positive: Planetary Annihilation's printed six.
+#[test]
+fn keeper_dispose_head_declines_a_category_list_quantifier() {
+    for declined in [
+        // Cataclysm, verbatim.
+        "each player chooses from among the permanents they control an artifact, a creature, an enchantment, and a land, then sacrifices the rest.",
+        // Global Ruin, verbatim.
+        "each player chooses from the lands they control a land of each basic land type, then sacrifices the rest.",
+    ] {
+        assert!(
+            keeper_head(declined).is_none(),
+            "head must decline a category-list quantifier: {declined}"
+        );
+    }
+    assert_eq!(
+        keeper_head("each player chooses six lands they control, then sacrifices the rest.")
+            .map(|head| head.quantifier),
+        Some(KeeperQuantifier::Exact(6)),
+        "Planetary Annihilation's printed cardinality must still be read"
+    );
+}
+
+/// N3 — the domain axis. `parse_type_phrase` is the single strict domain
+/// reader; a subtype-category keeper spec is `Err`, so Stick Together keeps its
+/// current parse. Paired positive: Razia's Purification's `permanents`, a
+/// domain that DOES parse — so the decline is the domain, not the head.
+#[test]
+fn keeper_dispose_head_declines_an_unreadable_domain() {
+    // Stick Together, verbatim.
+    assert!(
+        keeper_head(
+            "each player chooses a party from among creatures they control, then sacrifices the rest."
+        )
+        .is_none(),
+        "a party (a subtype category, not a type phrase) is not a keeper domain"
+    );
+    assert!(
+        keeper_head("each player chooses three permanents they control, then sacrifices the rest.")
+            .is_some(),
+        "Razia's Purification's permanent domain must still parse"
+    );
+}
+
+/// N4 — the tail-separator axis, and the architectural change: the disposal
+/// tail must follow the control clause IMMEDIATELY. Last One Standing's
+/// interposed "at random" and Mythos of Snapdax's category list both decline
+/// here rather than being reached over. Paired positives: both printed
+/// separators.
+#[test]
+fn keeper_dispose_head_requires_an_adjacent_disposal_tail() {
+    for declined in [
+        // Last One Standing, verbatim.
+        "choose a creature at random, then destroy the rest.",
+        // Mythos of Snapdax, verbatim first sentence.
+        "each player chooses an artifact, a creature, an enchantment, and a planeswalker from among the nonland permanents they control, then sacrifices the rest.",
+    ] {
+        assert!(
+            keeper_head(declined).is_none(),
+            "an interposed clause must break the disposal adjacency: {declined}"
+        );
+    }
+    // Limited Resources' " and " and Razia's Purification's ", then ".
+    assert!(
+        keeper_head("each player chooses five lands they control and sacrifices the rest")
+            .is_some()
+    );
+    assert!(keeper_head(
+        "each player chooses three permanents they control, then sacrifices the rest."
+    )
+    .is_some());
+}
+
+/// N5 — the `" the rest"` tag. Urza's Sylex disposes of a COMPLEMENT domain
+/// ("all other permanents"), which is not the keeper domain's complement the
+/// lowering builds. Paired positive: Divine Reckoning reaches `" the rest"` and
+/// is refused one step later, by the gate — which is what proves the tag fires.
+#[test]
+fn keeper_dispose_head_declines_a_complement_domain_tail() {
+    // Urza's Sylex, verbatim activated-ability body.
+    assert!(keeper_head(
+        "each player chooses six lands they control. destroy all other permanents"
+    )
+    .is_none());
+    // Divine Reckoning, verbatim: the tag matches, the GATE refuses.
+    assert!(keeper_head("each player chooses a creature they control. destroy the rest").is_none());
+    assert!(
+        keeper_head("each player chooses a creature they control. sacrifice the rest").is_some(),
+        "the sacrifice twin of the same sentence is accepted, so the decline above \
+         is the disposal verb and not the tag"
+    );
+}
+
+/// N6 — the gate's `(EachPlayer | EachOpponent, UpTo, _)` arm. Covetous Elegy
+/// is its only card: `KeeperConstraint` has exactly one variant, `ExactCount`.
+/// Minimal pair on the quantifier alone.
+#[test]
+fn keeper_dispose_gate_declines_a_per_player_up_to_keeper_count() {
+    // Covetous Elegy, verbatim first sentence.
+    assert!(keeper_head(
+        "each player chooses up to two creatures they control, then sacrifices the rest."
+    )
+    .is_none());
+    assert!(
+        keeper_head("each player chooses two creatures they control, then sacrifices the rest.")
+            .is_some(),
+        "the exact-count minimal pair must be accepted"
+    );
+}
+
+/// N7 — the gate's `(EachPlayer | EachOpponent, _, Destroy)` arm. CR 701.8a
+/// destroy and CR 701.21a sacrifice are different keyword actions and
+/// `Effect::ChooseAndSacrificeRest` is sacrifice-specific, so Divine Reckoning
+/// stays deferred. Minimal pair on the disposal verb alone.
+#[test]
+fn keeper_dispose_gate_declines_a_per_player_destroy_tail() {
+    assert!(
+        keeper_head("each opponent chooses a creature they control, then destroys the rest.")
+            .is_none()
+    );
+    assert_eq!(
+        keeper_head("each opponent chooses a creature they control, then sacrifices the rest.")
+            .map(|head| head.verb),
+        Some(KeeperDisposalVerb::Sacrifice),
+        "the sacrifice minimal pair must be accepted"
+    );
+}
+
+/// N8 — the gate's zero-card `(Controller, Exact(_), _)` arm, with its
+/// reachability proved: the synthetic parses through the whole grammar and is
+/// refused only by the gate. Paired positive: Duneblast's "up to" shape.
+#[test]
+fn keeper_dispose_gate_declines_a_controller_scope_exact_count() {
+    // Synthetic — no printed card in this class states a bare controller-scope
+    // keeper cardinality.
+    assert!(keeper_head("choose a creature. destroy the rest.").is_none());
+    assert_eq!(
+        keeper_head("choose up to one creature. destroy the rest.").map(|head| head.quantifier),
+        Some(KeeperQuantifier::UpTo(1)),
+        "Duneblast's printed shape must be accepted, so the decline above is the gate"
+    );
+}
+
+/// N9 — the gate's zero-card `(Controller, UpTo(_), Sacrifice)` arm, likewise
+/// reachable. Paired positive: Mount Doom's destroy shape.
+#[test]
+fn keeper_dispose_gate_declines_a_controller_scope_sacrifice_tail() {
+    // Synthetic — no printed card in this class pairs a controller-scope keeper
+    // choice with a sacrifice tail.
+    assert!(keeper_head("choose up to two creatures, then sacrifice the rest.").is_none());
+    assert_eq!(
+        keeper_head("choose up to two creatures, then destroy the rest.").map(|head| head.scope),
+        Some(KeeperChooserScope::Controller),
+        "Mount Doom's printed shape must be accepted, so the decline above is the gate"
+    );
+}
+
+/// T3' — an unparseable trailing sentence is MARKED, never dropped. Both
+/// halves: the head reports the remainder verbatim, and the spliced clause is
+/// an `Effect::Unimplemented` the coverage audit can see.
+#[test]
+fn keeper_dispose_remainder_that_does_not_parse_is_unimplemented() {
+    const SYNTHETIC: &str =
+        "Each player chooses a creature they control, then sacrifices the rest. Blorp the frobnitz.";
+    let head = keeper_head(&SYNTHETIC.to_ascii_lowercase()).expect("the instruction parses");
+    assert_eq!(
+        head.remainder_len,
+        Some("Blorp the frobnitz.".len()),
+        "the trailing sentence must be reported, not consumed"
+    );
+    let parsed = sorcery(SYNTHETIC, "Synthetic Keeper Remainder");
+    let root = &parsed.abilities[0];
+    assert!(matches!(
+        root.effect.as_ref(),
+        Effect::ChooseAndSacrificeRest { .. }
+    ));
+    let tail = root
+        .sub_ability
+        .as_deref()
+        .expect("the trailing sentence must be spliced in as a clause");
+    assert!(
+        tail.effect
+            .unimplemented_description()
+            .is_some_and(|fragment| fragment.eq_ignore_ascii_case("blorp the frobnitz")),
+        "the unparseable remainder must be marked, got {:?}",
+        tail.effect
+    );
+}
+
+/// V10 — CR 608.2c/d + CR 701.8a: the controller-scope branch is unchanged by
+/// the domain-reader swap. Both printed connectors, and the sentence boundary
+/// each one produces. The RUNTIME half of this claim is
+/// `crates/engine/tests/integration/mount_doom_destroy_rest.rs`, which must
+/// stay green unmodified.
+#[test]
+fn keeper_dispose_controller_branch_ast_unchanged() {
+    // The connector decides the link, exactly as it did before this change:
+    // `". "` is the next printed instruction (`SequentialSibling`), `", then "`
+    // is a step of the same one (`ContinuationStep`). Regenerate the baseline
+    // with `jq -c '.["mount doom"].abilities[2].sub_ability.sub_link'
+    // client/public/card-data.json` (null there is the skipped
+    // `ContinuationStep` default).
+    for (name, oracle, expected_max, expected_link) in [
+        // Duneblast, verbatim.
+        (
+            "Duneblast",
+            "Choose up to one creature. Destroy the rest.",
+            1u32,
+            crate::types::ability::SubAbilityLink::SequentialSibling,
+        ),
+        // Mount Doom's third activated ability body, verbatim.
+        (
+            "Mount Doom",
+            "Choose up to two creatures, then destroy the rest.",
+            2,
+            crate::types::ability::SubAbilityLink::ContinuationStep,
+        ),
+    ] {
+        let parsed = sorcery(oracle, name);
+        assert_eq!(parsed.abilities.len(), 1, "{name}");
+        assert!(parsed.statics.is_empty(), "{name}");
+        let root = &parsed.abilities[0];
+        assert_eq!(
+            root.effect.as_ref(),
+            &Effect::ChooseObjectsIntoTrackedSet {
+                chooser: TargetFilter::Controller,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                min: 0,
+                max: Some(expected_max),
+                cardinality: None,
+                eligibility: None,
+            },
+            "{name}"
+        );
+        let destroy = root
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name} must chain the destruction"));
+        assert_eq!(destroy.sub_link, expected_link, "{name}");
+        assert_eq!(
+            destroy.effect.as_ref(),
+            &Effect::DestroyAll {
+                target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::Not {
+                        prop: Box::new(FilterProp::InTrackedSet {
+                            id: TrackedSetId(0),
+                        }),
+                    }
+                ])),
+                cant_regenerate: false,
+            },
+            "{name}"
+        );
+        assert!(destroy.sub_ability.is_none(), "{name}");
+    }
+}
+
+/// V16 — Promise of Loyalty's built AST binds as designed, end to end.
+///
+/// The three load-bearing shapes, each of which a named mutation flips:
+/// moving the counter clause out of the chain assembler's publisher walk flips
+/// the installer's `affected` off `TrackedSet`; hard-coding a `target` on the
+/// grant clause flips `target == None`; letting the anaphor rewrite recurse
+/// into `modifications` flips the granted definition off `SelfRef`.
+///
+/// `target == None` is the AST-level statement that this clause declares no
+/// target slot — `Effect::target_filter()` returns this field — which is what
+/// leaves `ResolvedAbility::targets` empty at resolution and routes the install
+/// through `register_transient_effect`'s
+/// `Some(ParentTarget) if ability.targets.is_empty()` arm. The runtime half is
+/// pinned by the cast-pipeline rows in
+/// `crates/engine/tests/integration/promise_of_loyalty.rs`.
+#[test]
+fn promise_of_loyalty_binds_outer_tracked_set_inner_selfref() {
+    let parsed = sorcery(PROMISE_OF_LOYALTY_ORACLE, "Promise of Loyalty");
+    assert!(
+        parsed.statics.is_empty(),
+        "the line must not lower to a whole-line static: {:?}",
+        parsed.statics
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "no clause may be swallowed: {:?}",
+        parsed.parse_warnings
+    );
+
+    let keeper = &parsed.abilities[0];
+    assert!(
+        matches!(
+            keeper.effect.as_ref(),
+            Effect::ChooseAndSacrificeRest {
+                keeper_constraint: Some(KeeperConstraint::ExactCount {
+                    count: QuantityExpr::Fixed { value: 1 }
+                }),
+                choose_filter: TargetFilter::Typed(filter),
+                ..
+            } if *filter == TypedFilter::creature()
+        ),
+        "sentence one keeps exactly one creature per player: {:?}",
+        keeper.effect
+    );
+
+    let counters = keeper
+        .sub_ability
+        .as_deref()
+        .expect("the counter clause must chain after the keeper clause");
+    assert_eq!(
+        counters.effect.as_ref(),
+        &Effect::PutCounterAll {
+            counter_type: CounterType::Generic("vow".to_string()),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+        }
+    );
+
+    let grant = counters
+        .sub_ability
+        .as_deref()
+        .expect("sentence two must be spliced into the same chain");
+    assert_eq!(
+        grant.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling
+    );
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        target,
+        ..
+    } = grant.effect.as_ref()
+    else {
+        panic!(
+            "sentence two must lower to a GenericEffect, got {:?}",
+            grant.effect
+        );
+    };
+    assert_eq!(
+        target, &None,
+        "the grant clause must declare NO target slot"
+    );
+    assert!(
+        matches!(
+            duration,
+            Some(Duration::ForAsLongAs {
+                condition: StaticCondition::RecipientHasCounters {
+                    counters: crate::types::counter::CounterMatch::OfType(counter_type),
+                    minimum: 1,
+                    maximum: None,
+                }
+            }) if *counter_type == CounterType::Generic("vow".to_string())
+        ),
+        "the restriction lasts for as long as the recipient has a vow counter: {duration:?}"
+    );
+    assert_eq!(static_abilities.len(), 1);
+    let installer = &static_abilities[0];
+    assert_eq!(
+        installer.mode,
+        crate::types::statics::StaticMode::Continuous
+    );
+    assert_eq!(
+        installer.affected,
+        Some(TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        }),
+        "the installer binds to the anaphorically-fixed keeper set"
+    );
+    assert_eq!(installer.modifications.len(), 1);
+    let ContinuousModification::GrantStaticAbility { definition } = &installer.modifications[0]
+    else {
+        panic!(
+            "the prohibition must be a nested grant: {:?}",
+            installer.modifications
+        );
+    };
+    assert_eq!(
+        definition.mode,
+        crate::types::statics::StaticMode::CantAttack
+    );
+    assert_eq!(definition.affected, Some(TargetFilter::SelfRef));
+    assert!(definition.modifications.is_empty());
+    assert!(definition.condition.is_none());
+    assert_eq!(
+        definition.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker)
+    );
+    assert_eq!(
+        definition.source_controller, None,
+        "the installing player is stamped at RESOLUTION, not at parse time"
+    );
+}
+
+/// N13 — the class boundary of the sentence-two branch, on the one axis no
+/// printed card occupies: a keeper sibling with NO counter head. The branch
+/// still claims it; only the anaphor's label differs, because the keeper effect
+/// is deliberately not on the chain assembler's parse-time publisher list while
+/// `PutCounterAll` is. Promise of Loyalty's own row above is the paired
+/// positive: same grammar, `TrackedSet` label.
+///
+/// Do NOT "fix" this row by widening `publishes_tracked_set_from_resolution` —
+/// both labels install the identical transient effects at runtime.
+#[test]
+fn counter_less_keeper_sibling_still_grants_the_selfref_prohibition() {
+    // Synthetic: zero printed cards pair a counter-less keeper choice with a
+    // tracked-set anaphor.
+    const SYNTHETIC: &str = "Each player chooses a creature they control, then sacrifices the rest. Each of those creatures can't attack you or planeswalkers you control.";
+    let parsed = sorcery(SYNTHETIC, "Synthetic Counterless Keeper");
+    let keeper = &parsed.abilities[0];
+    assert!(matches!(
+        keeper.effect.as_ref(),
+        Effect::ChooseAndSacrificeRest { .. }
+    ));
+    let grant = keeper
+        .sub_ability
+        .as_deref()
+        .expect("sentence two must be spliced in");
+    let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = grant.effect.as_ref()
+    else {
+        panic!(
+            "sentence two must lower to a GenericEffect, got {:?}",
+            grant.effect
+        );
+    };
+    assert_eq!(target, &None);
+    assert_eq!(
+        static_abilities[0].affected,
+        Some(TargetFilter::ParentTarget),
+        "with no parse-time publisher the anaphor keeps its ParentTarget label"
+    );
+    let ContinuousModification::GrantStaticAbility { definition } =
+        &static_abilities[0].modifications[0]
+    else {
+        panic!("the prohibition must still be a nested grant");
+    };
+    assert_eq!(definition.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        definition.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker)
+    );
+}
+
+/// N12 — the sentence-two predicate's mandatory `eof`. Any trailing rider the
+/// grant shape cannot express must fall through to the existing restriction
+/// path, and a bare "can't attack" with no defended scope must stay there too.
+/// Paired positive: the exact printed predicate is claimed.
+#[test]
+fn keeper_dispose_sentence_two_requires_a_bare_defended_scope() {
+    fn grants_selfref_prohibition(predicate: &str) -> bool {
+        let oracle =
+            format!("Each player chooses a creature they control, then sacrifices the rest. Each of those creatures {predicate}.");
+        let parsed = sorcery(&oracle, "Synthetic Sentence Two Probe");
+        let Some(grant) = parsed.abilities[0].sub_ability.as_deref() else {
+            return false;
+        };
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = grant.effect.as_ref()
+        else {
+            return false;
+        };
+        static_abilities.iter().any(|def| {
+            def.modifications.iter().any(|m| {
+                matches!(m, ContinuousModification::GrantStaticAbility { definition }
+                    if definition.affected == Some(TargetFilter::SelfRef))
+            })
+        })
+    }
+    assert!(
+        grants_selfref_prohibition("can't attack you or planeswalkers you control"),
+        "the printed predicate must be claimed"
+    );
+    assert!(
+        grants_selfref_prohibition("can't attack you"),
+        "the shorter printed defended scope must be claimed too"
+    );
+    for declined in [
+        // A payment rider the grant shape has no slot for — Sivitri, Dragon
+        // Master's "[…] unless their controller pays 2 life for each of those
+        // creatures". (Sivitri's own line also declines a step earlier, on its
+        // broadcast subject; see the sibling row.)
+        "can't attack you unless their controller pays 2 life",
+        // No defended scope at all — this belongs to `parse_restriction_modes`,
+        // whose mode list owns the bare prohibition.
+        "can't attack",
+    ] {
+        assert!(
+            !grants_selfref_prohibition(declined),
+            "the grant branch must decline a non-bare predicate: {declined}"
+        );
+    }
+    // MEASURED, and NOT what the "… this turn" row of the plan predicted: a
+    // trailing duration phrase is peeled by `strip_trailing_duration` BEFORE
+    // this branch runs, so `eof` never sees it and the branch claims the
+    // duration-scoped form too. That is rules-correct (CR 611.2a: the grant
+    // lasts as long as the spell states) and no printed card reaches it — every
+    // "can't attack you this turn/this combat" card in card-data (Web of
+    // Inertia, Champions of Minas Tirith) declines on its SUBJECT instead.
+    // Regenerate that card list with:
+    //   jq -r 'to_entries[] | select(.value.oracle_text != null)
+    //     | select(.value.oracle_text | test("can.t attack you (this turn|this combat)"; "i"))
+    //     | .key' client/public/card-data.json
+    const DURATION_SCOPED: &str =
+        "Each player chooses a creature they control, then sacrifices the rest. \
+         Each of those creatures can't attack you this turn.";
+    let parsed = sorcery(DURATION_SCOPED, "Synthetic Duration Scoped Probe");
+    let grant = parsed.abilities[0]
+        .sub_ability
+        .as_deref()
+        .expect("sentence two must be spliced in");
+    assert!(
+        matches!(
+            grant.effect.as_ref(),
+            Effect::GenericEffect {
+                duration: Some(Duration::UntilEndOfTurn),
+                ..
+            }
+        ),
+        "the peeled duration must land on the grant: {:?}",
+        grant.effect
+    );
+}
+
+/// N10 + N11 — the two sentence-two deferrals stay deferred, on
+/// rules-correctness grounds, driven on the REAL cards rather than a synthetic
+/// subject swap.
+///
+/// A broadcast subject's affected set must stay LIVE (CR 611.2c, second
+/// sentence — which is what Chronomantic Escape's printed ruling says), and a
+/// player-scoped subject is not an object restriction at all (CR 508.1c).
+/// "Fixing" either by widening the subject match of the sentence-two branch is
+/// the failure this row exists to catch: each card must keep the
+/// `Effect::Unimplemented` gap it carries at BASE_SHA, so coverage stays
+/// honestly red. Paired positive: Promise of Loyalty's anaphoric subject IS
+/// claimed, in the same test, so a blanket decline cannot green this row.
+#[test]
+fn sentence_two_broadcast_and_player_subjects_stay_declined() {
+    fn has_cant_attack_gap(def: &AbilityDefinition) -> bool {
+        let mut current = Some(def);
+        while let Some(ability) = current {
+            if ability
+                .effect
+                .unimplemented_description()
+                .is_some_and(|fragment| fragment.contains("can't attack you"))
+            {
+                return true;
+            }
+            current = ability.sub_ability.as_deref();
+        }
+        false
+    }
+
+    // Chronomantic Escape, verbatim (the suspend reminder text is the printed
+    // keyword's, and is not part of the restriction line).
+    let escape = parse_oracle_text(
+        "Until your next turn, creatures can't attack you. Exile Chronomantic Escape with three time counters on it.",
+        "Chronomantic Escape",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert!(
+        escape.abilities.iter().any(has_cant_attack_gap),
+        "Chronomantic Escape's broadcast restriction must stay an honest gap: {:?}",
+        escape.abilities
+    );
+
+    // Web of Inertia, verbatim second sentence of its trigger body.
+    let inertia = parse_oracle_text(
+        "At the beginning of combat on each opponent's turn, that player may exile a card from their graveyard. If the player doesn't, creatures they control can't attack you this turn.",
+        "Web of Inertia",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    assert!(
+        inertia
+            .triggers
+            .iter()
+            .any(|trigger| trigger.execute.as_deref().is_some_and(has_cant_attack_gap)),
+        "Web of Inertia's broadcast restriction must stay an honest gap: {:?}",
+        inertia.triggers
+    );
+
+    // Champions of Minas Tirith, verbatim second triggered ability.
+    let champions = parse_oracle_text(
+        "At the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.",
+        "Champions of Minas Tirith",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        champions
+            .triggers
+            .iter()
+            .any(|trigger| trigger.execute.as_deref().is_some_and(has_cant_attack_gap)),
+        "Champions of Minas Tirith's player-scoped restriction must stay an honest gap: {:?}",
+        champions.triggers
+    );
+
+    // Paired positive, same seam: the anaphorically-fixed subject IS claimed,
+    // so none of the three declines above is a blanket refusal.
+    let promise = sorcery(PROMISE_OF_LOYALTY_ORACLE, "Promise of Loyalty");
+    assert!(
+        !promise.abilities.iter().any(has_cant_attack_gap),
+        "Promise of Loyalty's sentence two must be claimed: {:?}",
+        promise.abilities
+    );
+}
+
+/// V13 — the recognizer does not absorb the category-choice class that
+/// `sequence::parse_choose_and_sacrifice_rest_followup` owns. No edit was made
+/// to that seam; this is the check that none was needed.
+#[test]
+fn keeper_dispose_does_not_absorb_the_category_choice_class() {
+    for (name, oracle) in [
+        // Cataclysm, verbatim.
+        (
+            "Cataclysm",
+            "Each player chooses from among the permanents they control an artifact, a creature, an enchantment, and a land, then sacrifices the rest.",
+        ),
+        // Mythos of Snapdax, verbatim first sentence.
+        (
+            "Mythos of Snapdax",
+            "Each player chooses an artifact, a creature, an enchantment, and a planeswalker from among the nonland permanents they control, then sacrifices the rest.",
+        ),
+    ] {
+        let parsed = sorcery(oracle, name);
+        let root = &parsed.abilities[0];
+        assert!(
+            matches!(
+                root.effect.as_ref(),
+                Effect::ChooseAndSacrificeRest { categories, .. } if !categories.is_empty()
+            ),
+            "{name} must keep its per-category keeper spec: {:?}",
+            root.effect
+        );
+    }
+}
+
+/// V8 + V9 AST rows — the two members of this class whose entry point is a
+/// TRIGGER rather than a cast. Limited Resources' enters-the-battlefield
+/// trigger keeps the printed five (its `" and "` connector no longer drops the
+/// disposal tail), and No One Will Hear Your Cries scopes to the OPPONENTS.
+///
+/// The second row also pins the wrong-seat defect this change fixes: at
+/// BASE_SHA the lowering stamped `choose_filter.controller = Some(You)`,
+/// because `parse_controller_suffix` reads neither "they control" nor "that
+/// player controls". The seat now rides on the clause's `player_scope` and the
+/// filter's controller stays unset.
+///
+/// No One Will Hear Your Cries' entry point is an Archenemy `SetInMotion`
+/// trigger, which the scenario runner has no driver for; the runtime half of
+/// the "each opponent" claim is carried by
+/// `crates/engine/tests/integration/promise_of_loyalty.rs`'s
+/// `each_opponent_keeper_choice_leaves_the_controllers_board_untouched`.
+#[test]
+fn keeper_dispose_trigger_entry_points_scope_to_the_printed_players() {
+    let limited = parse_oracle_text(
+        "When this enchantment enters, each player chooses five lands they control and sacrifices the rest.",
+        "Limited Resources",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let limited_body = limited.triggers[0]
+        .execute
+        .as_deref()
+        .expect("the trigger must carry a body");
+    assert!(
+        matches!(
+            limited_body.effect.as_ref(),
+            Effect::ChooseAndSacrificeRest {
+                keeper_constraint: Some(KeeperConstraint::ExactCount {
+                    count: QuantityExpr::Fixed { value: 5 }
+                }),
+                choose_filter: TargetFilter::Typed(filter),
+                ..
+            } if filter.controller.is_none()
+        ),
+        "the printed five lands and an unscoped keeper filter: {:?}",
+        limited_body.effect
+    );
+    assert_eq!(limited_body.player_scope, Some(PlayerFilter::All));
+
+    let scheme = parse_oracle_text(
+        "When you set this scheme in motion, each opponent chooses a creature they control, then sacrifices the rest.",
+        "No One Will Hear Your Cries",
+        &[],
+        &["Scheme".to_string()],
+        &[],
+    );
+    let scheme_body = scheme.triggers[0]
+        .execute
+        .as_deref()
+        .expect("the trigger must carry a body");
+    assert!(
+        matches!(
+            scheme_body.effect.as_ref(),
+            Effect::ChooseAndSacrificeRest {
+                choose_filter: TargetFilter::Typed(filter),
+                ..
+            } if filter.controller.is_none()
+        ),
+        "the keeper filter must NOT be stamped with the controller: {:?}",
+        scheme_body.effect
+    );
+    assert_eq!(
+        scheme_body.player_scope,
+        Some(PlayerFilter::Opponent),
+        "\"each opponent\" must scope the iteration to the opponents"
+    );
+}
