@@ -26,8 +26,7 @@ TRIPLE_SOURCES = [
 
 
 def listed():
-    # read_text raises on a missing file by design: an unreadable list must not
-    # read as an empty set, which is a subset of any matrix.
+    # read_text raises by design: an empty list fails a populated matrix anyway, but blames it.
     rows = [line.split("#")[0].split() for line in PLATFORMS.read_text().splitlines()]
     rows = [row for row in rows if row]
     if malformed := [row for row in rows if len(row) != 3]:

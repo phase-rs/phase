@@ -2,9 +2,7 @@
 """Legs for check_desktop_platform_matrix.py: agreement, a grown matrix, a
 dropped platform, a missing list, a free matrix axis, a grown preview matrix, a
 platform nothing releases, a malformed row. The direction that matters is
-refusal: an unreadable list file reads as an empty set, and the empty set is a
-subset of any matrix, so a checker that understood nothing could report a clean
-pass.
+refusal: an unreadable list must raise, not read as an empty list.
 """
 
 import os
