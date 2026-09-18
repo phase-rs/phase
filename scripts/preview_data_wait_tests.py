@@ -248,6 +248,18 @@ class PublishWiringTests(unittest.TestCase):
         self.assertEqual(len(signs), 1, "publish must sign manifest data URLs in exactly one step")
         return steps, waits[0], signs[0]
 
+    def test_publish_checks_out_the_commit_it_publishes(self) -> None:
+        # The scripts and the platform contract this job reads have to come from
+        # the commit whose binaries it signs, not from whichever ref is running
+        # the workflow. `commit` is a required input, so there is no fallback.
+        checkouts = [
+            step.get("with") or {}
+            for step in self.preview["jobs"]["publish"]["steps"]
+            if "actions/checkout@" in str(step.get("uses", ""))
+        ]
+        self.assertEqual(len(checkouts), 1, "publish must check out exactly once")
+        self.assertEqual(checkouts[0].get("ref"), "${{ inputs.commit }}")
+
     def test_the_wait_step_carries_nothing_but_its_run(self) -> None:
         steps, wait_index, _ = self.wait_and_sign()
         wait = steps[wait_index]

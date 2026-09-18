@@ -272,6 +272,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: steps.publication-gate.outputs.already_published != 'true'
         with:
+          # This job publishes `commit`, so it reads the scripts and the
+          # platform contract from it rather than from the workflow ref.
+          ref: ${{ inputs.commit }}
           persist-credentials: false
 
       - name: Wait for the data files the manifest names

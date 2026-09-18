@@ -1243,7 +1243,7 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Verify every built slim server is in the asset list
+      - name: Verify the release assets are the ones desktops download
         env:
           RELEASE_FILES: ${{ steps.release-assets.outputs.files }}
         run: |
@@ -1261,6 +1261,21 @@ jobs:
                 { echo "::error::built $asset is missing from the release asset list"; status=1; }
             done
           done
+          # Both sides above are publisher-side spellings: rename a pair in the
+          # build and in the list, they still agree, and the desktop's download
+          # 404s. native_engine.rs asks for phase-server-slim-<triple>, and for
+          # that name plus .minisig, with .exe on windows; the contract's os and
+          # triple columns are where CI already holds that naming.
+          canonical=$(awk '{sub(/#.*/, ""); if (NF) print "phase-server-slim-" $3 ($1 == "windows" ? ".exe" : "")}' packaging/desktop-platforms.txt)
+          [ -n "$canonical" ] || { echo "::error::packaging/desktop-platforms.txt named no desktop platform"; exit 1; }
+          printf 'desktop download names: %s\n' "${canonical//$'\n'/ }"
+          published=$(printf '%s\n' "$RELEASE_FILES" | sed 's|.*/||')
+          while read -r binary; do
+            for asset in "$binary" "$binary.minisig"; do
+              printf '%s\n' "$published" | grep -qxF "$asset" ||
+                { echo "::error::no release asset is published as $asset, which the desktop shell downloads by that exact name"; status=1; }
+            done
+          done <<<"$canonical"
           exit $status
 
       - name: Create release
