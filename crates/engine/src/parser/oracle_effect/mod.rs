@@ -10020,7 +10020,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // CR 120.1 + CR 608.2c: "each <object-class filter> [you control] deals N damage
     // to <recipient>" — every matching object is its own damage source. Intercept
     // BEFORE the generic subject-stripping sites (mod.rs `9705`/`9735`,
-    // `subject.rs:178` via `try_parse_subject_predicate_ast`) flatten the source
+    // `subject.rs::try_parse_subject_predicate_ast`) flatten the source
     // class into a single ability-sourced `DealDamage`. Returns the supported
     // `EachSourceDealsDamage` clause, or a fail-closed `Unimplemented` for the
     // deferred attachment-host recipient (Aura Barbs clause 2).
@@ -16211,7 +16211,7 @@ fn parse_keeper_dispose_rest_ir(
     // by the shared clause parser. Text this recognizer does not model therefore
     // becomes `Effect::Unimplemented` and stays visible to coverage rather than
     // being dropped.
-    if let Some(remainder_source) = remainder_source.filter(|_| false) {
+    if let Some(remainder_source) = remainder_source {
         let remainder_clause = remainder_source.trim().trim_end_matches('.').trim_end();
         let parsed = parse_effect_clause(remainder_clause, ctx);
         builder

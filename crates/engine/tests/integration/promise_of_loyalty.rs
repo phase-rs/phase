@@ -17,6 +17,9 @@
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
+use engine::types::ability::{
+    GameRestriction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
@@ -549,8 +552,18 @@ fn razias_purification_sacrifices_the_unchosen_not_the_keeper() {
 
 /// V7's sibling on the Or-domain: Single Combat's keeper may be a creature OR a
 /// planeswalker, and its trailing casting restriction must survive the splice
-/// (T1). The restriction is asserted through the real cast pipeline: a creature
-/// spell cast afterwards is refused.
+/// (T1). The spell is driven through the real cast-and-resolve pipeline, and the
+/// restriction it installs is read back off `state.restrictions`.
+///
+/// Asserted on the installed restriction rather than on a refused cast.
+/// `casting.rs::is_blocked_by_cant_cast_spells_for` returns `false` for a
+/// `RestrictionExpiry::UntilEndOfNextTurnOf` expiry, and the assertion below
+/// shows that is the expiry this clause lowers to, so no cast attempted in the
+/// creating turn can observe this ban. A cast-refusal assertion in this window
+/// cannot discriminate: with the recognizer's remainder splice disabled the
+/// parse carries no `AddRestriction` and `state.restrictions` is `[]`, yet a
+/// cast-refusal assertion here still passed — so that refusal did not come from
+/// the prohibition.
 #[test]
 fn single_combat_keeps_one_and_still_prohibits_creature_casts() {
     let mut scenario = GameScenario::new();
@@ -559,9 +572,6 @@ fn single_combat_keeps_one_and_still_prohibits_creature_casts() {
     let keeper = scenario.add_creature(P0, "Chosen Champion", 2, 2).id();
     let doomed = scenario.add_creature(P0, "Doomed Champion", 2, 2).id();
     let rival_keeper = scenario.add_creature(P1, "Rival Champion", 2, 2).id();
-    let follow_up = scenario
-        .add_creature_to_hand(P1, "Follow-up Bear", 2, 2)
-        .id();
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Single Combat", false, SINGLE_COMBAT)
         .id();
@@ -583,18 +593,52 @@ fn single_combat_keeps_one_and_still_prohibits_creature_casts() {
     assert_eq!(runner.state().objects[&keeper].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&doomed].zone, Zone::Graveyard);
 
-    // T1: the trailing sentence survived the remainder splice and is enforced.
-    let card_id = runner.state().objects[&follow_up].card_id;
+    // T1: the trailing sentence survived the remainder splice and reached the
+    // resolver. With the splice disabled `state.restrictions` is empty here.
+    let installed: Vec<&GameRestriction> = runner
+        .state()
+        .restrictions
+        .iter()
+        .filter(|restriction| {
+            matches!(
+                restriction,
+                GameRestriction::ProhibitActivity {
+                    activity: ProhibitedActivity::CastSpells { .. },
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        installed.len(),
+        1,
+        "exactly one cast prohibition — the splice must install the clause once, \
+         not zero times and not twice: {:?}",
+        runner.state().restrictions
+    );
+    let GameRestriction::ProhibitActivity {
+        affected_players,
+        expiry,
+        activity: ProhibitedActivity::CastSpells { spell_filter },
+        ..
+    } = installed[0]
+    else {
+        unreachable!("filtered above")
+    };
+    // The printed subject is "Players" — every seat, including the caster's own,
+    // rather than the caster's opponents.
+    assert_eq!(*affected_players, RestrictionPlayerScope::AllPlayers);
+    // "until the end of your next turn" is anchored on the spell's controller.
     assert!(
-        runner
-            .act(GameAction::CastSpell {
-                object_id: follow_up,
-                card_id,
-                targets: vec![],
-                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
-            })
-            .is_err(),
-        "Single Combat's trailing prohibition must still forbid creature casts"
+        matches!(expiry, RestrictionExpiry::UntilEndOfNextTurnOf { player } if *player == P0),
+        "the expiry must be anchored on the caster: {expiry:?}"
+    );
+    // The printed ban names two card types, not every spell. A `None` filter
+    // here is read as a total ban: `is_blocked_by_cant_cast_spells_for` matches
+    // its `None` arm unconditionally.
+    assert!(
+        spell_filter.is_some(),
+        "the prohibition must carry the creature-or-planeswalker spell filter"
     );
 }
 

@@ -60600,8 +60600,9 @@ exiled this way on the bottom of your library in a random order.";
 /// Text is two real printed sentences composed: Codie, Vociferous Codex's activated
 /// ability (the adopted `CODIE_CONTINUATION_TEXT`) with Kathril, Aspect Warper's
 /// "Repeat this process for ..." sentence spliced in after the installer. That sentence
-/// routes to the text-local producer at `mod.rs:30356`, which pushes
-/// `ClauseDisposition::ReplicatePerKeyword` and `continue`s (`:30367`/`:30368`).
+/// routes to the text-local producer `try_parse_repeat_process_for_keywords`
+/// inside `mod.rs::parse_effect_chain_ir`, which pushes
+/// `ClauseDisposition::ReplicatePerKeyword` and `continue`s.
 ///
 /// PARSE-TIME ONLY. The composition is not a playable card — `ReplicatePerKeyword` is
 /// relational at lowering and Codie's installer is not a keyword-counter antecedent.
@@ -60650,7 +60651,8 @@ deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigi
             .count(),
         1,
         "T-B1 precondition: the spliced sentence must be the chain's only non-emitted \
-         clause (producer mod.rs:30356 → ReplicatePerKeyword): {intervened:#?}"
+         clause (producer try_parse_repeat_process_for_keywords → \
+         ReplicatePerKeyword): {intervened:#?}"
     );
 
     let intervened_promoted = intervened
