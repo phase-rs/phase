@@ -540,12 +540,17 @@ single-elim or pod pairing. R9 pins this down per bracket:
     **organizer-authorized** resolution action, with its view, `TournamentUpdate`
     outbound, receipt (§4.4), and recovery/reconnect/race tests. A real new surface
     (new authority + action + state), not a reuse.
-  - **(b) Firm v1 exclusion** — hosted v1 supports only brackets whose *every*
-    terminal is representable. Simultaneous expiry is representable only as a Swiss
-    `Draw`, so (b) means **hosted v1 = Swiss head-to-head only**, excluding
-    single-elim and pods from hosting. This also subsumes §9.6 (the Bo1/pod
-    trusted-terminal gap, R6) — same brackets — so one exclusion closes R6, R9, and
-    this blocker together.
+  - **(b) Firm v1 exclusion** — hosted v1 supports only the configuration whose
+    *every* terminal is representable **and** covered by an existing trusted
+    primitive. That is **Swiss + head-to-head + Bo3**, not merely "Swiss H2H":
+    an organizer may select `MatchType::Bo1` for any H2H event
+    (`tournament.rs:902-909` — "An organizer may override head-to-head to
+    `MatchType::Bo1`"; admitted at `:2118-2134`), and a **Bo1** H2H disconnect hits
+    the same wall — `apply_trusted_match_forfeit` rejects every non-Bo3 session
+    (`match_flow.rs:278-285`). So the admission gate must require `bracket == Swiss
+    && arity == HEAD_TO_HEAD && match_type == Bo3`, excluding single-elim, pods, **and
+    Bo1 H2H**. Only then does (b) actually close R6 (Bo3-only ⇒ the existing forfeit
+    primitive applies) and R9 (simultaneous expiry ⇒ a legal Swiss `Draw`).
 
   This is the §9.7 decision; recommendation **(b)** for v1 (smallest honest scope),
   (a) as a later expansion. Until decided, the doc does **not** claim a resolution
@@ -605,8 +610,10 @@ checklist the implementation PR must satisfy:
   (no organizer report authority; `report_result` is seated-player-only), so v1 must
   **(a)** build an organizer-authored resolution subsystem (persisted state +
   authorized action + view/outbound/receipt/recovery/reconnect tests) or **(b)** firm
-  the exclusion (hosted v1 = Swiss head-to-head only, closing R6+R9 together). Never
-  an implicit `None` or a stranded pairing (§6.3; decision §9.7).
+  the exclusion (hosted v1 = **Swiss + H2H + Bo3** only — Bo1 H2H is organizer-
+  selectable and equally unsupported, so the gate must check `match_type == Bo3`, not
+  just bracket+arity — closing R6+R9 together). Never an implicit `None` or a stranded
+  pairing (§6.3; decision §9.7).
 
 Genuinely open **sub-decisions** (do not block recording the design, resolved in
 the implementation PR):
@@ -665,5 +672,6 @@ the implementation PR):
 7. **Simultaneous-expiry scope (§6.3, R9).** A double no-show in single-elim/pods
    has no legal resolution path today (no organizer report authority). Should hosted
    v1 **(a)** build an organizer-authored resolution subsystem, or **(b)** firm the
-   exclusion — **hosted v1 = Swiss head-to-head only** (recommended; also closes the
-   §9.6 R6 gap, since it excludes the same brackets)? Note (b) makes §9.6 moot.
+   exclusion — **hosted v1 = Swiss + H2H + Bo3** (recommended; must gate on
+   `match_type == Bo3`, since Bo1 H2H is organizer-selectable and equally unsupported,
+   §6.3)? Note (b), scoped to Bo3, also closes §9.6 (R6).
