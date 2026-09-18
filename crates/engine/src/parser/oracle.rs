@@ -1834,6 +1834,9 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         QuantityRef::PropertyAggregate(aggregate) => {
             characteristic_source_uses_filter_prop(aggregate.source(), pred)
         }
+        QuantityRef::PlayerCount { filter } | QuantityRef::EventContextPlayerCount { filter } => {
+            player_filter_uses_filter_prop(filter, pred)
+        }
         QuantityRef::HandSize { .. }
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::GraveyardSize { .. }
@@ -1855,8 +1858,6 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::ObjectNameWordCount { .. }
         | QuantityRef::ObjectTypelineComponentCount { .. }
         | QuantityRef::ManaSymbolsInManaCost { .. }
-        | QuantityRef::PlayerCount { .. }
-        | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
@@ -1932,6 +1933,52 @@ fn characteristic_source_uses_filter_prop(
     // A truncated walk claims the prop: this feeds parse-time capability
     // reporting, where over-reporting a dependency is the harmless direction.
     found || !complete
+}
+
+/// CR 109.4 + CR 608.2c: Player-level quantity filters can cross back into
+/// object filters and quantity expressions. Preserve chosen-property
+/// dependencies through both arms of a nested player predicate.
+fn player_filter_uses_filter_prop(
+    filter: &PlayerFilter,
+    pred: &impl Fn(&FilterProp) -> bool,
+) -> bool {
+    match filter {
+        PlayerFilter::OpponentDealtDamage { source, .. } => source
+            .as_deref()
+            .is_some_and(|source| target_filter_uses_filter_prop(source, pred)),
+        PlayerFilter::ControlsCount { filter, count, .. } => {
+            target_filter_uses_filter_prop(filter, pred)
+                || quantity_expr_uses_filter_prop(count, pred)
+        }
+        PlayerFilter::PlayerAttribute { attr, value, .. } => {
+            quantity_ref_uses_filter_prop(attr, pred) || quantity_expr_uses_filter_prop(value, pred)
+        }
+        PlayerFilter::TrackedSetPossessor { filter, .. } => {
+            target_filter_uses_filter_prop(filter, pred)
+        }
+        PlayerFilter::AllExcept { exclude } => player_filter_uses_filter_prop(exclude, pred),
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner => false,
+    }
 }
 
 fn target_filter_uses_filter_prop(

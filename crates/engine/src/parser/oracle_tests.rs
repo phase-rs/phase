@@ -27248,6 +27248,44 @@ fn bbfu10_ledger_variant_reaches_filter_prop_scan() {
     );
 }
 
+/// CR 109.4 + CR 608.2c: a persisted as-enters counter whose count is a
+/// `PlayerCount` must retain a chosen-property dependency nested in
+/// `PlayerFilter::ControlsCount`. The negative twin proves the relation is not
+/// reported for an otherwise identical prop-free player filter.
+#[test]
+fn chosen_etb_counter_player_count_reaches_nested_filter_prop_scan() {
+    use crate::types::ability::{
+        Comparator, FilterProp, PlayerFilter, PlayerRelation, QuantityExpr, QuantityRef,
+        TargetFilter, TypeFilter, TypedFilter,
+    };
+
+    let player_count = |properties| QuantityExpr::Ref {
+        qty: QuantityRef::PlayerCount {
+            filter: PlayerFilter::ControlsCount {
+                relation: PlayerRelation::All,
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties,
+                }),
+                comparator: Comparator::GE,
+                count: Box::new(QuantityExpr::Fixed { value: 1 }),
+            },
+        },
+    };
+
+    assert!(
+        super::quantity_expr_uses_chosen_filter(&player_count(vec![
+            FilterProp::IsChosenCreatureType,
+        ])),
+        "a persisted ETB counter count must see chosen properties nested in ControlsCount"
+    );
+    assert!(
+        !super::quantity_expr_uses_chosen_filter(&player_count(Vec::new())),
+        "a prop-free nested player filter must remain an independent negative case"
+    );
+}
+
 /// CR 205.2a + CR 205.2b + CR 608.2c (issue #518): every shipped card printing a
 /// card-type DISJUNCTION in an "If it's a[n] X or Y card" reveal gate must carry
 /// BOTH printed legs.
