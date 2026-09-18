@@ -838,6 +838,7 @@ mod issue_6908_kozilek_discard_mana_value;
 mod issue_6913_eagle_vision_freerunning;
 mod issue_6916_xantcha_entry_controller;
 mod issue_691_sheoldred_saga_lore;
+mod issue_6924_moldervine_cost_sacrifice_trigger;
 mod issue_6943_faerie_slumber_party;
 mod issue_6979_land_mana_amplification;
 mod issue_6981_mana_spend_provenance;
