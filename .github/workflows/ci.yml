@@ -116,9 +116,11 @@ jobs:
         run: python3 scripts/release_dispatch_guard_tests.py
 
       - name: Preview data wait tests
-        # preview-server.yml signs the preview manifest only after this script
-        # sees its data URLs served; the tests drive the script against a local
-        # HTTP server and check the publish job waits on every manifest data URL.
+        # The manifest is signed only after this script sees its data URLs
+        # served, so the tests drive it against a local HTTP server. They also
+        # run the publish step's own shell over a stubbed checkout, holding
+        # packaging/desktop-platforms.txt to the binaries that step uploads: a
+        # listed triple it does not publish leaves that desktop with no preview.
         run: python3 scripts/preview_data_wait_tests.py
 
       - name: Action pin checker unit tests
