@@ -274,6 +274,10 @@ jobs:
         with:
           # This job publishes `commit`, so it reads the scripts and the
           # platform contract from it rather than from the workflow ref.
+          # Known split: the YAML around them still comes from the workflow ref,
+          # so a deploy one commit behind pairs an older contract with a newer
+          # binaries list. The sign step's diff refuses that pair, publishing
+          # nothing rather than a partial set, and the next deploy heals it.
           ref: ${{ inputs.commit }}
           persist-credentials: false
 
