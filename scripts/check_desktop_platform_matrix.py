@@ -4,8 +4,8 @@
 A platform shell-release.yml's build-shell matrix builds with no row there ships
 a desktop whose ServerPlatform resolves no target triple, so it can never fetch
 an engine; a triple preview-server.yml builds with no row there provisions a
-preview no desktop asks for. native_engine.rs's own test holds that enum to the
-same file; these are the matrix halves, which no Rust test can see.
+preview no desktop asks for; a listed triple release.yml's build-server never
+builds is a download URL that 404s. native_engine.rs's test cannot see any half.
 """
 
 import os
@@ -18,6 +18,11 @@ ROOT = Path(os.environ.get("DESKTOP_PLATFORM_ROOT") or Path(__file__).resolve().
 PLATFORMS = ROOT / "packaging" / "desktop-platforms.txt"
 MATRIX = ROOT / ".github" / "workflows" / "shell-release.yml"
 PREVIEW = ROOT / ".github" / "workflows" / "preview-server.yml"
+RELEASE = ROOT / ".github" / "workflows" / "release.yml"
+TRIPLE_SOURCES = [
+    (PREVIEW, "build", "no desktop would ever ask for that preview", ""),
+    (RELEASE, "build-server", "no desktop downloads it", "; the desktop's download URL 404s"),
+]
 
 
 def listed():
@@ -44,10 +49,6 @@ def built():
     return {(entry["os"], entry["arch"]) for entry in include(MATRIX, "build-shell")}
 
 
-def previewed():
-    return {entry["triple"] for entry in include(PREVIEW, "build")}
-
-
 def main():
     rows = listed()
     want, have = {row[:2] for row in rows}, built()
@@ -59,16 +60,19 @@ def main():
     for pair in sorted(want - have):
         print(f"::error::desktop-platforms.txt lists {pair}, which build-shell does not build",
               file=sys.stderr)
-    triples, preview = {row[2] for row in rows}, previewed()
+    triples, agree = {row[2] for row in rows}, want == have
     print(f"desktop-platforms.txt triples: {sorted(triples)}")
-    print(f"preview-server build matrix:   {sorted(preview)}")
-    for triple in sorted(preview - triples):
-        print(f"::error::preview-server builds {triple}, which desktop-platforms.txt does not "
-              "list; no desktop would ever ask for that preview", file=sys.stderr)
-    for triple in sorted(triples - preview):
-        print(f"::error::desktop-platforms.txt lists {triple}, which preview-server does not build",
-              file=sys.stderr)
-    return 0 if (want, triples) == (have, preview) else 1
+    for path, job, unlisted, missing in TRIPLE_SOURCES:
+        builds = {entry["triple"] for entry in include(path, job)}
+        print(f"{path.stem} {job} matrix:".ljust(30), sorted(builds))
+        agree &= builds == triples
+        for triple in sorted(builds - triples):
+            print(f"::error::{path.stem} {job} has a row for {triple}, which "
+                  f"desktop-platforms.txt does not list; {unlisted}", file=sys.stderr)
+        for triple in sorted(triples - builds):
+            print(f"::error::desktop-platforms.txt lists {triple}, which {path.stem} {job} "
+                  f"does not build{missing}", file=sys.stderr)
+    return 0 if agree else 1
 
 
 if __name__ == "__main__":

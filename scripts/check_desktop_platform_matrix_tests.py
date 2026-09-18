@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Legs for check_desktop_platform_matrix.py: agreement, a grown matrix, a
 dropped platform, a missing list, a free matrix axis, a grown preview matrix, a
-malformed row. The direction that matters is refusal: an unreadable list file
-reads as an empty set, and the empty set is a subset of any matrix, so a checker
-that understood nothing could report a clean pass.
+platform nothing releases, a malformed row. The direction that matters is
+refusal: an unreadable list file reads as an empty set, and the empty set is a
+subset of any matrix, so a checker that understood nothing could report a clean
+pass.
 """
 
 import os
@@ -31,14 +32,24 @@ jobs:
           - {triple: x86_64-unknown-linux-musl}
           - {triple: aarch64-apple-darwin}
 """
+RELEASE = """\
+jobs:
+  build-server:
+    strategy:
+      matrix:
+        include:
+          - {triple: x86_64-unknown-linux-musl}
+          - {triple: aarch64-apple-darwin}
+"""
 LISTING = "# fields: os arch triple\nlinux x86_64  x86_64-unknown-linux-musl\nmacos aarch64 aarch64-apple-darwin\n"
 
 
-def run(matrix, listing, preview=PREVIEW):
+def run(matrix, listing, preview=PREVIEW, release=RELEASE):
     root = Path(tempfile.mkdtemp())
     (root / ".github" / "workflows").mkdir(parents=True)
     (root / ".github" / "workflows" / "shell-release.yml").write_text(matrix)
     (root / ".github" / "workflows" / "preview-server.yml").write_text(preview)
+    (root / ".github" / "workflows" / "release.yml").write_text(release)
     if listing is not None:
         (root / "packaging").mkdir()
         (root / "packaging" / "desktop-platforms.txt").write_text(listing)
@@ -74,9 +85,20 @@ previewed = run(MATRIX, LISTING, PREVIEW + "          - {triple: riscv64-unknown
 assert previewed.returncode != 0, previewed.stdout
 assert "riscv64-unknown-linux-musl" in previewed.stderr, previewed.stderr
 
+# The reviewer's reproduction: a platform every other matrix gained, which the
+# release never builds, so its desktop resolves a download URL that 404s.
+unreleased = run(
+    MATRIX + "          - {os: linux, arch: riscv64, runner: ubuntu-latest}\n",
+    LISTING + "linux riscv64 riscv64-unknown-linux-musl\n",
+    PREVIEW + "          - {triple: riscv64-unknown-linux-musl}\n",
+)
+assert unreleased.returncode != 0, unreleased.stdout
+assert "release build-server does not build" in unreleased.stderr, unreleased.stderr
+assert "riscv64-unknown-linux-musl" in unreleased.stderr, unreleased.stderr
+
 malformed = run(MATRIX, "linux x86_64\n")
 assert malformed.returncode != 0, malformed.stdout
 assert "['linux', 'x86_64']" in malformed.stderr, malformed.stderr
 
 print("ok: agreement, grown matrix, dropped platform, missing list, free axis, "
-      "grown preview matrix, malformed row")
+      "grown preview matrix, unreleased platform, malformed row")
