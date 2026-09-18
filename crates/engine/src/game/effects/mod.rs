@@ -6648,7 +6648,8 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
             // the producer skip publication and the chained count resolve to 0.
             QuantityRef::DistinctCardTypes { source }
             | QuantityRef::SharedCardTypes { source }
-            | QuantityRef::DistinctSubtypes { source, .. } => {
+            | QuantityRef::DistinctSubtypes { source, .. }
+            | QuantityRef::DistinctColorsAmong { source } => {
                 card_type_set_source_references_tracked_set(source)
             }
             QuantityRef::PropertyAggregate(aggregate) => {
@@ -20734,6 +20735,55 @@ mod tests {
         assert!(
             !quantity_expr_references_tracked_set(&qty_no_tracked),
             "a union with no tracked-set member must NOT reference the tracked set"
+        );
+    }
+
+    /// CR 608.2c: `DistinctColorsAmong` uses the same characteristic-source
+    /// population axis as the other distinct-characteristic quantities. Its
+    /// direct and `AnyOf`-nested tracked-set sources must therefore publish the
+    /// chain set before the quantity is resolved.
+    #[test]
+    fn distinct_colors_among_tracked_set_sources_references_tracked_set() {
+        let direct = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: crate::types::ability::CardTypeSetSource::TrackedSet {
+                    set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                },
+            },
+        };
+        assert!(
+            quantity_expr_references_tracked_set(&direct),
+            "DistinctColorsAmong over a direct TrackedSet must publish the chain set"
+        );
+
+        let nested = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: crate::types::ability::CardTypeSetSource::AnyOf {
+                    sources: crate::types::ability::UnionSources::new(vec![
+                        crate::types::ability::CardTypeSetSource::ExiledBySource,
+                        crate::types::ability::CardTypeSetSource::TrackedSet {
+                            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                            caused_by: None,
+                        },
+                    ])
+                    .expect("two-member union is valid"),
+                },
+            },
+        };
+        assert!(
+            quantity_expr_references_tracked_set(&nested),
+            "DistinctColorsAmong over an AnyOf TrackedSet must publish the chain set"
+        );
+
+        let unrelated = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: crate::types::ability::CardTypeSetSource::ExiledBySource,
+            },
+        };
+        assert!(
+            !quantity_expr_references_tracked_set(&unrelated),
+            "DistinctColorsAmong over ExiledBySource must not publish a tracked set"
         );
     }
 
