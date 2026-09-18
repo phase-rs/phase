@@ -208,8 +208,9 @@ const BATTLE_CRY_TRIGGER_PREFIX: &str = "CR 702.91a: Battle cry";
 /// prompt so that `token_trigger_first` decides which of Hero's two triggers
 /// resolves first. Returns the Soldier tokens Hero created.
 ///
-/// CR 603.3b: the submitted order is bottom-first, so the LAST index is placed
-/// on top of the stack and therefore resolves FIRST (CR 405.3 LIFO).
+/// CR 603.3b: the controller chooses the relative order of their triggers.
+/// The engine accepts a bottom-first order: the last index goes on top
+/// (CR 405.2), and the topmost object resolves first (CR 608.1).
 fn declare_and_order(token_trigger_first: bool) -> (GameRunner, ObjectId, ObjectId, Vec<ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
