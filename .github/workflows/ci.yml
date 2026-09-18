@@ -168,7 +168,7 @@ jobs:
         # packaging/desktop-platforms.txt is the published desktop platform set.
         # A platform shell-release.yml's build-shell matrix builds with no row
         # there ships a desktop whose ServerPlatform resolves no triple, so it can
-        # never fetch an engine; preview-server.yml's and release.yml's
+        # never fetch an engine; preview-server.yml's build and release.yml's
         # build-server triples are held to the same file by equality, so a triple
         # published for no listed desktop is an error, not a harmless extra. The
         # enum half is native_engine.rs's own test, which runs at tag time in
