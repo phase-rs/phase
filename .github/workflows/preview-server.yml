@@ -462,12 +462,15 @@ jobs:
           fetched=$(mktemp)
           verify_published() {
             local url=$1 expected=$2 actual
-            # Retry discipline as release.yml's post-upload check(): a fresh
-            # per-fingerprint key has no cached predecessor to serve stale, and
-            # binaries upload with no content encoding, so the bytes that arrive
-            # are the bytes to hash.
+            # Retry discipline as release.yml's post-upload check(), bounded so
+            # a hung CDN fails this step rather than the job timeout: --max-time
+            # caps each attempt, --retry-max-time the retry loop, so one object
+            # costs at most 180s. A fresh per-fingerprint key has no cached
+            # predecessor to serve stale, and binaries upload with no content
+            # encoding, so the bytes that arrive are the bytes to hash.
             if ! curl -sS --fail -o "$fetched" \
-              --connect-timeout 5 --max-time 120 --retry 3 --retry-all-errors "$url"; then
+              --connect-timeout 5 --max-time 120 --retry 3 --retry-all-errors \
+              --retry-max-time 60 "$url"; then
               echo "::error::Published preview object could not be read back: $url"
               exit 1
             fi
