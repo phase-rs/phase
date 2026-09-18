@@ -1243,6 +1243,25 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Verify every built slim server is in the asset list
+        env:
+          RELEASE_FILES: ${{ steps.release-assets.outputs.files }}
+        run: |
+          set -euo pipefail
+          # fail_on_unmatched_files only ever sees the list above, so it cannot
+          # know a platform is missing from it: add a build target, forget this
+          # file, and every desktop on it 404s with all gates green. Immutable
+          # releases take no late upload, so this has to fail before the create.
+          status=0
+          for binary in artifacts/phase-server-slim-*/*; do
+            case "$binary" in *.minisig) continue ;; esac
+            for asset in "$binary" "$binary.minisig"; do
+              printf '%s\n' "$RELEASE_FILES" | grep -qxF "$asset" ||
+                { echo "::error::built $asset is missing from the release asset list"; status=1; }
+            done
+          done
+          exit $status
+
       - name: Create release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:

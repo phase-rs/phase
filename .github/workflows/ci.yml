@@ -170,8 +170,10 @@ jobs:
         # packaging/desktop-platforms.txt is the published desktop platform set.
         # A platform shell-release.yml's build-shell matrix builds with no row
         # there ships a desktop whose ServerPlatform resolves no triple, so it can
-        # never fetch an engine. native_engine.rs's own test holds that enum to
-        # the same file; this is the matrix half, which no Rust test can see.
+        # never fetch an engine; preview-server.yml's triples are held to the same
+        # file. The enum half is native_engine.rs's own test, which runs at tag
+        # time in shell-release.yml's shell-preflight — tauri-check is disabled
+        # here, so no PR-time job compiles it.
         run: python3 scripts/check_desktop_platform_matrix.py
 
       - name: Resolution-frame boundary guard

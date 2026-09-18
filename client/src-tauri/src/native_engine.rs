@@ -3463,7 +3463,7 @@ mod tests {
 
     #[test]
     fn server_target_triple_maps_every_published_desktop_platform() {
-        let mut listed = 0;
+        let mut listed = HashSet::new();
         for line in include_str!("../../../packaging/desktop-platforms.txt").lines() {
             let content = line.split_once('#').map_or(line, |(before, _)| before);
             let fields: Vec<&str> = content.split_whitespace().collect();
@@ -3474,9 +3474,14 @@ mod tests {
                 panic!("expected `os arch triple`, got {line:?}")
             };
             assert_eq!(server_target_triple(os, arch), Some(triple), "{os}-{arch}");
-            listed += 1;
+            listed.insert((os, arch));
         }
-        assert_eq!(listed, ServerPlatform::ALL.len());
+        // The set, not its size: a duplicated row would otherwise stand in for
+        // a variant no row covers.
+        assert_eq!(
+            listed,
+            HashSet::from(ServerPlatform::ALL.map(ServerPlatform::os_arch))
+        );
         for (os, arch) in [
             ("macos", "x86_64"),
             ("windows", "aarch64"),

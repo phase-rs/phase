@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Legs for check_desktop_platform_matrix.py: agreement, a grown matrix, a
-dropped platform, a missing list. The direction that matters is refusal: an
-unreadable list file reads as an empty set, and the empty set is a subset of any
-matrix, so a checker that understood nothing could report a clean pass.
+dropped platform, a missing list, a free matrix axis, a grown preview matrix, a
+malformed row. The direction that matters is refusal: an unreadable list file
+reads as an empty set, and the empty set is a subset of any matrix, so a checker
+that understood nothing could report a clean pass.
 """
 
 import os
@@ -21,13 +22,23 @@ jobs:
           - {os: linux, arch: x86_64, runner: ubuntu-latest}
           - {os: macos, arch: aarch64, runner: macos-latest}
 """
+PREVIEW = """\
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - {triple: x86_64-unknown-linux-musl}
+          - {triple: aarch64-apple-darwin}
+"""
 LISTING = "# fields: os arch triple\nlinux x86_64  x86_64-unknown-linux-musl\nmacos aarch64 aarch64-apple-darwin\n"
 
 
-def run(matrix, listing):
+def run(matrix, listing, preview=PREVIEW):
     root = Path(tempfile.mkdtemp())
     (root / ".github" / "workflows").mkdir(parents=True)
     (root / ".github" / "workflows" / "shell-release.yml").write_text(matrix)
+    (root / ".github" / "workflows" / "preview-server.yml").write_text(preview)
     if listing is not None:
         (root / "packaging").mkdir()
         (root / "packaging" / "desktop-platforms.txt").write_text(listing)
@@ -55,4 +66,17 @@ assert absent.returncode != 0, absent.stdout
 assert "desktop-platforms.txt" in absent.stderr, absent.stderr
 assert "('linux', 'x86_64')" not in absent.stdout, absent.stdout
 
-print("ok: agreement, grown matrix, dropped platform, missing list")
+free = run(MATRIX + "        arch: [riscv64]\n", LISTING)
+assert free.returncode != 0, free.stdout
+assert "free axes ['arch']" in free.stderr, free.stderr
+
+previewed = run(MATRIX, LISTING, PREVIEW + "          - {triple: riscv64-unknown-linux-musl}\n")
+assert previewed.returncode != 0, previewed.stdout
+assert "riscv64-unknown-linux-musl" in previewed.stderr, previewed.stderr
+
+malformed = run(MATRIX, "linux x86_64\n")
+assert malformed.returncode != 0, malformed.stdout
+assert "['linux', 'x86_64']" in malformed.stderr, malformed.stderr
+
+print("ok: agreement, grown matrix, dropped platform, missing list, free axis, "
+      "grown preview matrix, malformed row")
