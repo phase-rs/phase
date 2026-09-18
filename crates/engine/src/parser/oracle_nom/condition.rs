@@ -2722,9 +2722,10 @@ pub(crate) fn parse_source_power_toughness_condition(
     ))
 }
 
-/// CR 208.1 + CR 603.4 + CR 603.10a: Intervening-if comparing the *triggering*
-/// object's last-known stat against the ability source's stat — "it had power
-/// greater than ~'s power" (Drizzt Do'Urden's dies trigger). The subject "it" is
+/// CR 208.1 + CR 603.4 + CR 603.10a: Condition comparing the *triggering*
+/// object's stat against the ability source's stat — "it had power greater
+/// than ~'s power" (Drizzt Do'Urden's dies trigger, last-known) or "its power is
+/// less than ~'s power" (Shelinda, Yevon Acolyte, current). The subject "it" is
 /// the object referenced by the trigger event (the creature that died); "had"
 /// is past tense because CR 603.10a's look-back reads the dying creature's
 /// last-known power from the graveyard at resolution. "~'s power" is the ability
@@ -2738,10 +2739,28 @@ pub(crate) fn parse_source_power_toughness_condition(
 /// bridges it onto the trigger's `condition`, and so the trigger-level
 /// difference binding in `lower_trigger_ir` (oracle_trigger.rs) can read the two
 /// operands for a paired "put ... counters equal to the difference" count.
-fn parse_event_object_pt_vs_source_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
-    // Subject: "it had " — the triggering-event object, past tense (LKI look-back).
-    let (rest, _) = tag("it had ").parse(input)?;
-    let (rest, lhs) = parse_pt_ref_scoped(rest, ObjectScope::EventSource)?;
+pub(crate) fn parse_event_object_pt_vs_source_comparison(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    // Subject: the triggering-event object's stat, on one of two tense axes:
+    // - "it had <stat>" — past tense, the LKI look-back of a dies trigger
+    //   (Drizzt Do'Urden, CR 603.10a).
+    // - "its <stat> is" — present tense, the object still on the battlefield
+    //   (Shelinda, Yevon Acolyte: "put a +1/+1 counter on that creature if its
+    //   power is less than ~'s power"). Because the RHS below is the ability
+    //   source ("~'s"), "its" cannot denote the source itself — comparing the
+    //   source's stat with itself is vacuous — so it binds the event object.
+    let (rest, lhs) = alt((
+        preceded(tag("it had "), |i| {
+            parse_pt_ref_scoped(i, ObjectScope::EventSource)
+        }),
+        delimited(
+            tag("its "),
+            |i| parse_pt_ref_scoped(i, ObjectScope::EventSource),
+            tag(" is"),
+        ),
+    ))
+    .parse(input)?;
     // Comparator between the two stats. Longer phrases precede their prefixes so
     // "greater than or equal to" wins over "greater than".
     let (rest, comparator) = alt((
@@ -20251,6 +20270,58 @@ mod tests {
     /// spelled-out subject gets no gate. CR 702.191a's own rules text words the
     /// subject exactly that way — what separates the two is that no oracle face
     /// gives that keyword any subject but its reminder's.
+    /// CR 208.1: "its power is less than ~'s power" (Shelinda, Yevon Acolyte) —
+    /// the present-tense sibling of Drizzt's "it had power greater than ~'s
+    /// power". Both operands are dynamic P/T refs: the event object's stat on the
+    /// left, the ability source's on the right.
+    #[test]
+    fn test_parse_condition_event_object_present_power_vs_source_power() {
+        use crate::types::ability::ObjectScope;
+        for (text, comparator) in [
+            ("if its power is less than ~'s power", Comparator::LT),
+            ("if its power is greater than ~'s power", Comparator::GT),
+            (
+                "if its toughness is greater than or equal to ~'s toughness",
+                Comparator::GE,
+            ),
+            ("if it had power greater than ~'s power", Comparator::GT),
+        ] {
+            let (rest, c) = parse_condition(text).unwrap_or_else(|e| panic!("{text}: {e:?}"));
+            assert_eq!(rest, "", "{text}");
+            let StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref { qty: lhs },
+                comparator: got,
+                rhs: QuantityExpr::Ref { qty: rhs },
+            } = c
+            else {
+                panic!("{text}: expected ref-vs-ref QuantityComparison, got {c:?}");
+            };
+            assert_eq!(got, comparator, "{text}");
+            assert!(
+                matches!(
+                    lhs,
+                    QuantityRef::Power {
+                        scope: ObjectScope::EventSource
+                    } | QuantityRef::Toughness {
+                        scope: ObjectScope::EventSource
+                    }
+                ),
+                "{text}: lhs must be the event object's stat, got {lhs:?}"
+            );
+            assert!(
+                matches!(
+                    rhs,
+                    QuantityRef::Power {
+                        scope: ObjectScope::Source
+                    } | QuantityRef::Toughness {
+                        scope: ObjectScope::Source
+                    }
+                ),
+                "{text}: rhs must be the source's stat, got {rhs:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_parse_condition_mana_spent_vs_normalized_self_pt_has_creature_gate() {
         let (rest, c) =
