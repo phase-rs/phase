@@ -28325,6 +28325,271 @@ fn top_of_library_cast_permission_future_sight_compound() {
     assert!(matches!(def.affected, Some(TargetFilter::Any)));
 }
 
+/// CR 601.3 + CR 601.1a: The direct-object surface form — "you may [play|cast]
+/// the top card of your library" (The Lunar Whale) — is the same
+/// `TopOfLibraryCastPermission` class as the perimeter forms, with no
+/// eligibility filter (`affected: Any`) because the verb's object names the
+/// singular top card itself. Also proves the line reaches the static parser
+/// through the ungated leftover-static fallback (no classifier widening).
+#[test]
+fn top_of_library_object_form_unconditional() {
+    let text = "You may play the top card of your library.";
+    let lower = text.to_lowercase();
+    let def =
+        try_parse_top_of_library_cast_permission(text, &lower).expect("object form must parse");
+    match def.mode {
+        StaticMode::TopOfLibraryCastPermission {
+            play_mode,
+            frequency,
+            ref alt_cost,
+        } => {
+            assert_eq!(play_mode, CardPlayMode::Play);
+            assert_eq!(frequency, CastFrequency::Unlimited);
+            assert!(alt_cost.is_none());
+        }
+        other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
+    }
+    assert!(matches!(def.affected, Some(TargetFilter::Any)));
+    assert!(def.condition.is_none(), "no printed gate → no condition");
+
+    // Reachability through the full static dispatcher, not just the arm.
+    let dispatched = parse_static_line("You may play the top card of your library.")
+        .expect("direct-orientation object form must reach the static parser");
+    assert!(
+        matches!(
+            dispatched.mode,
+            StaticMode::TopOfLibraryCastPermission { .. }
+        ),
+        "expected TopOfLibraryCastPermission from parse_static_line, got {dispatched:?}"
+    );
+}
+
+/// CR 601.3: the "cast" verb selects `CardPlayMode::Cast` — the verb, not a
+/// filter, is the play-mode axis of the object form.
+#[test]
+fn top_of_library_object_form_cast_verb() {
+    let text = "You may cast the top card of your library.";
+    let lower = text.to_lowercase();
+    let def = try_parse_top_of_library_cast_permission(text, &lower)
+        .expect("object form cast verb must parse");
+    match def.mode {
+        StaticMode::TopOfLibraryCastPermission { play_mode, .. } => {
+            assert_eq!(play_mode, CardPlayMode::Cast);
+        }
+        other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
+    }
+}
+
+/// CR 611.3a: a fully-typed trailing gate attaches to the object form through
+/// the class's condition authority (`parse_top_of_library_permission_condition`
+/// → `nom_condition::parse_inner_condition`). "~ is untapped" lowers to
+/// `Not(SourceIsTapped)` (`parse_tapped_untapped`).
+#[test]
+fn top_of_library_object_form_typed_gate() {
+    let text = "You may play the top card of your library as long as ~ is untapped.";
+    let lower = text.to_lowercase();
+    let def = try_parse_top_of_library_cast_permission(text, &lower)
+        .expect("object form with a typed gate must parse");
+    assert!(matches!(
+        def.mode,
+        StaticMode::TopOfLibraryCastPermission { .. }
+    ));
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceIsTapped),
+        }),
+        "the typed gate must be attached, not dropped"
+    );
+}
+
+/// CR 611.3a: an " as long as " gate whose condition does not type declines the
+/// direct-object form entirely — claiming the line would emit an UNCONDITIONAL
+/// permission with the printed gate dropped (the inverted-"as long as" rewrite
+/// re-attaches the split condition only when it types).
+///
+/// The untypeable fixtures use a condition no parser arm claims, so the
+/// property stays tested independently of which condition arms exist (a real
+/// gate that later gains an arm must NOT be used here — the assertion would
+/// flip for the wrong reason). The Lunar Whale's own gate ("~ attacked this
+/// turn") will be exercised by the composition check once the in-flight
+/// condition arm (PR #8887) lands, not by this test.
+///
+/// Reach guard: the same test first proves the identical inverted sentence with
+/// a typed gate produces the permission, so the negative cannot pass vacuously
+/// on an unreachable arm.
+#[test]
+fn top_of_library_object_form_fails_closed_on_untyped_gate() {
+    let reach =
+        parse_static_line("As long as ~ is untapped, you may play the top card of your library.")
+            .expect("reach guard: the inverted sentence with a typed gate must parse");
+    assert!(
+        matches!(&reach.mode, StaticMode::TopOfLibraryCastPermission { .. }),
+        "reach guard: expected the permission with a typed gate, got {reach:?}"
+    );
+    assert_eq!(
+        reach.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceIsTapped),
+        }),
+        "reach guard: the typed gate must survive the inverted rewrite"
+    );
+
+    for text in [
+        "As long as ~ is fluorescent, you may play the top card of your library.",
+        "As long as this creature is fluorescent, you may play the top card of your library.",
+        "You may play the top card of your library as long as ~ is fluorescent.",
+    ] {
+        let parsed = parse_static_line(text);
+        assert!(
+            !matches!(
+                parsed.as_ref().map(|def| &def.mode),
+                Some(StaticMode::TopOfLibraryCastPermission { .. })
+            ),
+            "an untypeable gate must never yield an unconditional permission for {text:?}, \
+             got {parsed:?}"
+        );
+    }
+
+    // A rider stacked with an untypeable gate — in either order — must decline
+    // too: the rider helper scans for its anchor anywhere, so the gate-marker
+    // decline is what keeps a dropped gate from being laundered through it.
+    for text in [
+        "You may play the top card of your library. If you cast a spell this way, \
+         pay life equal to its mana value rather than paying its mana cost \
+         as long as ~ is fluorescent.",
+        "You may play the top card of your library as long as ~ is fluorescent. \
+         If you cast a spell this way, pay life equal to its mana value rather than \
+         paying its mana cost.",
+    ] {
+        assert!(
+            try_parse_top_of_library_cast_permission(text, &text.to_lowercase()).is_none(),
+            "gate+rider stacking must decline for {text:?}"
+        );
+    }
+}
+
+/// CR 401.5 + CR 601.3: the object-form arm must not shadow its neighbours —
+/// the "look at" line, the "play with … revealed" line, the perimeter filtered
+/// forms, and the "their library" object (Xanathar) all keep their own
+/// lowering.
+#[test]
+fn top_of_library_object_form_does_not_shadow_neighbours() {
+    let look = parse_static_line("You may look at the top card of your library any time.")
+        .expect("look-at line must still parse");
+    assert!(
+        matches!(look.mode, StaticMode::MayLookAtTopOfLibrary),
+        "expected MayLookAtTopOfLibrary, got {look:?}"
+    );
+
+    let revealed = parse_static_line("You may play with the top card of your library revealed.")
+        .expect("play-with-top-revealed line must still parse");
+    assert!(
+        matches!(revealed.mode, StaticMode::RevealTopOfLibrary { .. }),
+        "expected RevealTopOfLibrary, got {revealed:?}"
+    );
+
+    // Perimeter filtered forms keep their eligibility filter.
+    let lands = "You may play lands from the top of your library.";
+    let def = try_parse_top_of_library_cast_permission(lands, &lands.to_lowercase())
+        .expect("perimeter form must still parse");
+    assert!(
+        matches!(&def.affected, Some(TargetFilter::Typed(tf)) if tf.type_filters.contains(&TypeFilter::Land)),
+        "perimeter land filter must survive, got {:?}",
+        def.affected
+    );
+
+    // "their library" (Xanathar) is an EFFECT, not this permission.
+    let their = "You may play the top card of their library.";
+    assert!(
+        try_parse_top_of_library_cast_permission(their, &their.to_lowercase()).is_none(),
+        "the 'their library' object must not match the 'your library' anchor"
+    );
+}
+
+/// CR 118.9: the class's alt-cost rider attaches to the object form too. The
+/// rider must open the tail (after an optional sentence period) — pinning the
+/// anchor is what stops a dropped gate from being laundered through it.
+#[test]
+fn top_of_library_object_form_alt_cost_rider() {
+    let text = "You may play the top card of your library. If you cast a spell this way, \
+                pay life equal to its mana value rather than paying its mana cost.";
+    let lower = text.to_lowercase();
+    let def = try_parse_top_of_library_cast_permission(text, &lower)
+        .expect("object form with an alt-cost rider must parse");
+    match &def.mode {
+        StaticMode::TopOfLibraryCastPermission {
+            play_mode,
+            alt_cost,
+            ..
+        } => {
+            assert_eq!(*play_mode, CardPlayMode::Play);
+            assert!(alt_cost.is_some(), "the rider must be stamped, not dropped");
+        }
+        other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
+    }
+    assert!(def.condition.is_none());
+}
+
+/// CR 611.3a + CR 118.9: a typed gate followed by a supported alt-cost rider
+/// preserves BOTH components — the gate attaches as the condition and the
+/// rider stamps `alt_cost`, the same independent field assignment the
+/// perimeter siblings perform.
+#[test]
+fn top_of_library_object_form_gate_with_alt_cost_rider() {
+    let text = "You may play the top card of your library as long as ~ is untapped. \
+                If you cast a spell this way, pay life equal to its mana value rather \
+                than paying its mana cost.";
+    let lower = text.to_lowercase();
+    let def = try_parse_top_of_library_cast_permission(text, &lower)
+        .expect("gate + rider object form must parse");
+    match &def.mode {
+        StaticMode::TopOfLibraryCastPermission {
+            play_mode,
+            alt_cost,
+            ..
+        } => {
+            assert_eq!(*play_mode, CardPlayMode::Play);
+            assert!(alt_cost.is_some(), "the rider must be stamped, not dropped");
+        }
+        other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
+    }
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceIsTapped),
+        }),
+        "the typed gate must be preserved alongside the rider"
+    );
+}
+
+/// CR 118.9: the rider must be the tail's LAST sentence — the class's cost
+/// recognizer consumes nothing, so any further sentence would be silently
+/// dropped. Also rejects a rider whose opening does not lead the tail, and any
+/// unmodeled remainder after a typed gate.
+#[test]
+fn top_of_library_object_form_rejects_unmodeled_rider_trailer() {
+    for text in [
+        // A second sentence after the rider would be dropped by the scan-based
+        // cost recognizer.
+        "You may play the top card of your library. If you cast a spell this way, \
+         pay life equal to its mana value rather than paying its mana cost. Draw a card.",
+        // A typed gate followed by something other than a supported rider
+        // declines rather than dropping the remainder.
+        "You may play the top card of your library as long as ~ is untapped. \
+         Anything else at all.",
+        // The rider's opening must lead the tail (text before it would be
+        // skipped over by the recognizer).
+        "You may play the top card of your library. Meanwhile if you cast a spell this way, \
+         pay life equal to its mana value rather than paying its mana cost.",
+    ] {
+        assert!(
+            try_parse_top_of_library_cast_permission(text, &text.to_lowercase()).is_none(),
+            "unmodeled rider trailing must decline for {text:?}"
+        );
+    }
+}
+
 /// CR 700.6 + CR 401.5: Crystal Skull — "You may play historic lands and cast
 /// historic spells from the top of your library." lowers to a disjunctive
 /// `TopOfLibraryCastPermission` whose `affected` is an `Or` of historic Land

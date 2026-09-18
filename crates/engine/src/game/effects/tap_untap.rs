@@ -237,21 +237,13 @@ pub(crate) fn process_one_untap(
                         object_id,
                         &CounterType::Stun,
                     ) {
-                        let obj = state
-                            .objects
-                            .get_mut(&object_id)
-                            .ok_or(EffectError::ObjectNotFound(object_id))?;
-                        if let Some(count) = obj.counters.get_mut(&CounterType::Stun) {
-                            *count -= 1;
-                            if *count == 0 {
-                                obj.counters.remove(&CounterType::Stun);
-                            }
-                        }
-                        events.push(GameEvent::CounterRemoved {
+                        super::counters::apply_counter_removal(
+                            state,
                             object_id,
-                            counter_type: CounterType::Stun,
-                            count: 1,
-                        });
+                            CounterType::Stun,
+                            1,
+                            events,
+                        );
                     }
                 } else {
                     if crate::game::object_state::resolve_and_apply_object_edit(
@@ -456,6 +448,26 @@ mod tests {
             vec![TargetRef::Object(target)],
             ObjectId(100),
             PlayerId(0),
+        )
+    }
+
+    fn install_stun_duration(state: &mut GameState, object_id: ObjectId) -> u64 {
+        use crate::types::ability::{ContinuousModification, Duration, StaticCondition};
+        use crate::types::counter::CounterMatch;
+        let controller = state.objects[&object_id].controller;
+        state.add_transient_continuous_effect(
+            object_id,
+            controller,
+            Duration::ForAsLongAs {
+                condition: StaticCondition::RecipientHasCounters {
+                    counters: CounterMatch::OfType(CounterType::Stun),
+                    minimum: 1,
+                    maximum: None,
+                },
+            },
+            TargetFilter::SpecificObject { id: object_id },
+            vec![ContinuousModification::AddPower { value: 1 }],
+            None,
         )
     }
 
@@ -740,9 +752,29 @@ mod tests {
         let object = state.objects.get_mut(&faerie).unwrap();
         object.tapped = true;
         object.counters.insert(CounterType::Stun, 2);
+        let duration_id = install_stun_duration(&mut state, faerie);
         let mut events = Vec::new();
 
         resolve_set_tap_state(&mut state, &make_untap_ability(faerie), &mut events).unwrap();
+
+        let commands = state.resolved_rules_journal.entries().iter().filter(|entry| matches!(
+            &entry.command,
+            Some(crate::types::resolved_commands::ResolvedRulesCommand::ObjectCounter(command))
+                if command.object.object_id == faerie
+                    && command.counter_type == CounterType::Stun
+                    && matches!(command.edit, crate::types::resolved_commands::ResolvedObjectCounterEdit::Remove { count: 1 })
+        )).count();
+        assert_eq!(
+            commands, 1,
+            "effect untap records exactly one accepted stun removal"
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.id == duration_id),
+            "one remaining stun counter keeps the duration true"
+        );
 
         assert!(state.objects[&faerie].tapped);
         assert_eq!(
@@ -753,6 +785,126 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, GameEvent::PermanentUntapped { object_id } if *object_id == faerie)));
+    }
+
+    #[test]
+    fn effect_untap_blocked_stun_removal_has_no_counter_command() {
+        use crate::types::ability::{ControllerRef, StaticDefinition};
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fear of Sleep Paralysis".into(),
+            Zone::Battlefield,
+        );
+        let def = StaticDefinition::new(StaticMode::CountersCantBeRemoved {
+            counter_type: CounterType::Stun,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::Opponent),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+        let faerie = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Stunned Creature".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&faerie)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&faerie).unwrap().tapped = true;
+        state
+            .objects
+            .get_mut(&faerie)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+        let duration_id = install_stun_duration(&mut state, faerie);
+        assert!(
+            crate::game::effects::counters::counter_removal_blocked(
+                &state,
+                faerie,
+                &CounterType::Stun,
+            ),
+            "fixture must activate the counter-removal prohibition"
+        );
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(faerie), &mut events).unwrap();
+        assert_eq!(
+            state.objects[&faerie].counters.get(&CounterType::Stun),
+            Some(&1)
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.id == duration_id),
+            "a prohibited removal cannot expire the duration"
+        );
+        assert!(state.objects[&faerie].tapped);
+        assert!(!events.iter().any(|event| matches!(event, GameEvent::CounterRemoved { object_id, .. } if *object_id == faerie)));
+        assert_eq!(state.resolved_rules_journal.entries().iter().filter(|entry| matches!(&entry.command,
+            Some(crate::types::resolved_commands::ResolvedRulesCommand::ObjectCounter(command))
+                if command.object.object_id == faerie
+        )).count(), 0, "blocked effect untap records no counter command");
+    }
+
+    #[test]
+    fn effect_untap_final_stun_retires_started_duration() {
+        let mut state = GameState::new_two_player(42);
+        let faerie = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Stunned Creature".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&faerie).unwrap().tapped = true;
+        state
+            .objects
+            .get_mut(&faerie)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+        let duration_id = install_stun_duration(&mut state, faerie);
+        let mut events = Vec::new();
+        resolve_set_tap_state(&mut state, &make_untap_ability(faerie), &mut events).unwrap();
+        assert_eq!(
+            state.objects[&faerie].counters.get(&CounterType::Stun),
+            None
+        );
+        assert_eq!(state.resolved_rules_journal.entries().iter().filter(|entry| matches!(&entry.command,
+            Some(crate::types::resolved_commands::ResolvedRulesCommand::ObjectCounter(command))
+                if command.object.object_id == faerie
+                    && command.counter_type == CounterType::Stun
+                    && matches!(command.edit, crate::types::resolved_commands::ResolvedObjectCounterEdit::Remove { count: 1 })
+        )).count(), 1);
+        assert!(state
+            .transient_continuous_effects
+            .iter()
+            .all(|effect| effect.id != duration_id));
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1 } if *object_id == faerie)).count(), 1);
     }
 
     #[test]

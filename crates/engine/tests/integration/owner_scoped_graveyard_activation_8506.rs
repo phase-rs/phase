@@ -296,6 +296,7 @@ fn controller_defaults_to_owner_after_a_foreign_cast_resolves() {
                 enters_with_counter: None,
                 enters_with_modifications: vec![],
                 mana_spend_permission: None,
+                cast_cost_modifier: None,
             });
     }
 

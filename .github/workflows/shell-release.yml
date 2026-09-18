@@ -29,7 +29,7 @@ jobs:
       release_sha: ${{ steps.resolve.outputs.release_sha }}
       shell_version: ${{ steps.resolve.outputs.shell_version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -71,7 +71,7 @@ jobs:
       RELEASE_SHA: ${{ needs.resolve-shell-ref.outputs.release_sha }}
       SHELL_VERSION: ${{ needs.resolve-shell-ref.outputs.shell_version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.RELEASE_SHA }}
 
@@ -127,7 +127,7 @@ jobs:
             jq empty "$f"
           done
 
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache-shared-key: rust-shell-preflight
 
@@ -187,19 +187,19 @@ jobs:
             runner: windows-latest
             artifact: shell-tauri-windows
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.RELEASE_SHA }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache-shared-key: rust-shell-${{ matrix.os }}-${{ matrix.arch }}
 
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 9
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
@@ -311,7 +311,7 @@ jobs:
           done
 
       - name: Build shell
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           # beforeBuildCommand runs only pnpm build:bootstrap. SHELL_REMOTE_ORIGIN
           # is intentionally unset so release shells use https://phase-rs.dev.
@@ -356,7 +356,7 @@ jobs:
           ls -la staging/
 
       - name: Upload shell artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.artifact }}
           path: staging/*
@@ -400,7 +400,7 @@ jobs:
           fi
           echo 'available=true' >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: steps.android-signing.outputs.available == 'true'
         with:
           ref: ${{ env.RELEASE_SHA }}
@@ -409,23 +409,23 @@ jobs:
         if: steps.android-signing.outputs.available == 'true'
         uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         if: steps.android-signing.outputs.available == 'true'
         with:
           version: 9.15.9
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         if: steps.android-signing.outputs.available == 'true'
         with:
           node-version: 22
 
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         if: steps.android-signing.outputs.available == 'true'
         with:
           distribution: temurin
           java-version: 17
 
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
         if: steps.android-signing.outputs.available == 'true'
         with:
           # Same withdrawal as in ci.yml: the action's default `tools platform-tools`
@@ -433,7 +433,7 @@ jobs:
           # installs what this job needs.
           packages: platform-tools
 
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         if: steps.android-signing.outputs.available == 'true'
         with:
           target: aarch64-linux-android,armv7-linux-androideabi
@@ -573,7 +573,7 @@ jobs:
       - name: Upload signed Android artifacts
         id: upload-android-artifacts
         if: steps.android-signing.outputs.available == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: shell-tauri-android
           path: staging/*.apk
@@ -608,25 +608,25 @@ jobs:
       WRANGLER_VERSION: "4.113.0"
     steps:
       - name: Download Linux shell artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: shell-tauri-linux
           path: artifacts/shell-tauri-linux
 
       - name: Download Linux aarch64 shell artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: shell-tauri-linux-aarch64
           path: artifacts/shell-tauri-linux-aarch64
 
       - name: Download macOS shell artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: shell-tauri-macos
           path: artifacts/shell-tauri-macos
 
       - name: Download Windows shell artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: shell-tauri-windows
           path: artifacts/shell-tauri-windows
@@ -692,7 +692,7 @@ jobs:
 
       - name: Download signed Android APKs
         if: needs.build-android.outputs.apk_available == 'true'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: shell-tauri-android
           path: artifacts/shell-tauri-android
@@ -721,7 +721,7 @@ jobs:
           fi
 
       - name: Create shell release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ env.SHELL_TAG }}
           name: phase.rs Desktop v${{ env.SHELL_VERSION }}
@@ -756,7 +756,7 @@ jobs:
             artifacts/shell-tauri-android/Phase-Android-ARM64.apk
             artifacts/shell-tauri-android/Phase-Android-ARMv7.apk
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 

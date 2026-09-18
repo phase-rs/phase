@@ -1252,6 +1252,9 @@ fn casting_restriction_applies(
         // Not a timing gate: "can't spend mana" restricts how the cost is paid,
         // never when. Always satisfied here; enforced in the mana-payment path.
         CastingRestriction::CantSpendMana => true,
+        // CR 601.2b / CR 601.2h: "Spend only ... on X" restricts how the cost is paid,
+        // never when. Always satisfied here; enforced in the mana-payment path.
+        CastingRestriction::SpendOnlyOnX { .. } => true,
     }
 }
 
@@ -2417,8 +2420,11 @@ pub(crate) fn is_source_blocked(
     })
 }
 
-/// CR 508.1d + CR 508.1h: Whether a declared `AttackTarget` falls within a
-/// combat restriction's defended scope relative to the static's controller.
+/// CR 109.5 + CR 508.1c: Whether a declared `AttackTarget` falls within a
+/// combat restriction's defended scope. `source_controller` is the
+/// authoritative controller-relative anchor (the carrier's controller or a
+/// snapshotted installing player), while `source_owner` anchors owner-relative
+/// scopes.
 pub(crate) fn attack_target_matches_defended_scope(
     state: &crate::types::game_state::GameState,
     attack_target: Option<&crate::game::combat::AttackTarget>,

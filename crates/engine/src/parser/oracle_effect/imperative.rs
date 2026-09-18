@@ -69,7 +69,7 @@ use super::super::oracle_target::{
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, merge_or_filters, parse_count_expr,
     parse_mana_symbols, parse_ordinal, parse_rounding_suffix_only, rewrite_quantity_expr_rounding,
-    split_around, starts_with_possessive, TextPair,
+    split_around, starts_with_possessive, CountWord, TextPair,
 };
 
 fn parse_extra_turn(input: &str) -> OracleResult<'_, QuantityExpr> {
@@ -1718,7 +1718,15 @@ pub(super) fn parse_all_sacrifice<'a>(
     Some((count, target, rem))
 }
 
-fn add_another_to_sacrifice_filter(filter: &mut TargetFilter) {
+/// Re-apply `FilterProp::Another` to every typed leg of a parsed filter.
+///
+/// The count-word grammar consumes "another " as a bare count of 1, discarding
+/// the source exclusion it encodes, so each grammar that consumes the word
+/// re-applies it here. Typed legs get the property (idempotently); `Or`/`And`
+/// composites are walked so a disjunctive class ("creature or planeswalker")
+/// excludes the source on every leg its type could match. Other shapes are left
+/// untouched — the callers' filters are typal by construction.
+pub(super) fn add_another_to_filter_recursive(filter: &mut TargetFilter) {
     match filter {
         TargetFilter::Typed(typed) if !typed.properties.contains(&FilterProp::Another) => {
             typed.properties.push(FilterProp::Another);
@@ -1726,7 +1734,7 @@ fn add_another_to_sacrifice_filter(filter: &mut TargetFilter) {
         TargetFilter::Typed(_) => {}
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             for leg in filters {
-                add_another_to_sacrifice_filter(leg);
+                add_another_to_filter_recursive(leg);
             }
         }
         _ => {}
@@ -1886,7 +1894,7 @@ pub(super) fn parse_targeted_action_ast(
             count_word,
             super::super::oracle_util::CountWord::SourceExclusion
         ) {
-            add_another_to_sacrifice_filter(&mut target);
+            add_another_to_filter_recursive(&mut target);
         }
         return Some(TargetedImperativeAst::Sacrifice {
             target,
@@ -2835,6 +2843,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
                 mana_spend_permission: None,
+                cast_cost_modifier: None,
             },
             target,
             grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
@@ -4345,6 +4354,164 @@ fn try_parse_choose_and_verb_it_edict(rest_lower: &str) -> Option<ChooseImperati
     })
 }
 
+/// CR 115.1 + CR 110.1: Is this filter a battlefield-object CLASS filter —
+/// the domain `Effect::ChooseObjectsIntoTrackedSet` scans?
+///
+/// Conservative by design (Gate A's recognition and Gate B's provenance re-run
+/// must be precise, never merely plausible): the filter must be typal (`Typed`
+/// with a non-empty type list, or a conjunction/disjunction of such), carry no
+/// explicit non-battlefield zone constraint (`extract_zones()` ⊆ Battlefield),
+/// name no `Card` type (CR 110.1: a card denotes a zone object, never a
+/// battlefield permanent — the same guard `parse_choose_object_selection_filter`
+/// applies for the same runtime reason), and its controller must be an absolute
+/// you/opponent scope (a relative/context controller belongs to a different
+/// grammar). Everything else declines.
+pub(super) fn is_battlefield_object_class_filter(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            !tf.type_filters.is_empty()
+                && !tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Card))
+                && tf.controller.as_ref().is_none_or(|controller| {
+                    matches!(controller, ControllerRef::You | ControllerRef::Opponent)
+                })
+                && filter
+                    .extract_zones()
+                    .iter()
+                    .all(|zone| *zone == Zone::Battlefield)
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().all(is_battlefield_object_class_filter)
+        }
+        _ => false,
+    }
+}
+
+/// CR 115.1d + CR 608.2d: The single recognition authority for the standalone
+/// battlefield-object choice core — the quantifier axis, the object filter, and
+/// the class predicate. Shared verbatim by Gate A
+/// ([`try_parse_choose_battlefield_object`], chain context present) and by
+/// Gate B's head-shape provenance ([`is_standalone_object_choice_clause`],
+/// chain context absent), so the two can never disagree about which heads the
+/// durability reconcile considers.
+///
+/// `rest` is the original-case text after the "choose " strip; `rest_lower` is
+/// its lowercase twin.
+fn parse_battlefield_object_choice_core(
+    rest: &str,
+    rest_lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<(TargetFilter, u32, Option<u32>)> {
+    let (min, max, after_lower, count_word) =
+        if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("any number of ").parse(rest_lower) {
+            (0u32, None, after, CountWord::Plain)
+        } else if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(rest_lower) {
+            let (after_count, count) = parse_multi_target_count_expr(after).ok()?;
+            // Mirror `multi_target_spec_min_max`: a literal max is concrete; a
+            // dynamic max ("up to X") collapses to the unbounded reading rather
+            // than guessing a number.
+            let max = match count {
+                QuantityExpr::Fixed { value } => u32::try_from(value).ok(),
+                _ => None,
+            };
+            (0u32, max, after_count, CountWord::Plain)
+        } else if let Ok((after, count_word)) = alt((
+            value(CountWord::Plain, tag::<_, _, OracleError<'_>>("a ")),
+            value(CountWord::Plain, tag("an ")),
+            value(CountWord::SourceExclusion, tag("another ")),
+        ))
+        .parse(rest_lower)
+        {
+            (1u32, Some(1u32), after, count_word)
+        } else {
+            return None;
+        };
+    // Map the lowercase remainder back to the original chunk text.
+    let after = &rest[rest.len() - after_lower.len()..];
+    let (mut filter, remainder) = parse_target_with_ctx(after.trim_end(), ctx);
+    // Optional clause terminator ("." or ",") after a whole-phrase filter parse.
+    let remainder = opt(alt((tag::<_, _, OracleError<'_>>("."), tag(","))))
+        .parse(remainder.trim_end())
+        .ok()?
+        .0;
+    if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    if !is_battlefield_object_class_filter(&filter) {
+        return None;
+    }
+    // CR 115.10: the class is affected, not targeted ("choose another creature
+    // you control"). "another " scopes the class to objects other than the
+    // source, but the quantifier consumed the word as a bare count of 1 — so
+    // re-apply the source exclusion to the parsed filter. This is the same
+    // shared recursive helper the sacrifice grammar uses on its own typed
+    // `CountWord::SourceExclusion` signal, so a composite class
+    // ("creature or planeswalker") excludes the source on every typed leg.
+    // Plain articles stay untouched.
+    //
+    // No CR annotation for the re-application itself: this is parser-grammar
+    // scoping of the word "another"; the exclusion is CR-annotated at the
+    // filter layer (`game/filter.rs` `FilterProp::Another`).
+    if matches!(count_word, CountWord::SourceExclusion) {
+        add_another_to_filter_recursive(&mut filter);
+    }
+    Some((filter, min, max))
+}
+
+/// CR 607.2d + CR 608.2c: Gate A — is this "choose …" chunk a standalone,
+/// non-target battlefield-object choice whose chain carries a
+/// "the chosen ‹object›" reader?
+///
+/// Four ordered conjuncts, each load-bearing:
+/// 1. `ctx.effect_chain_full_lower` must be present: only
+///    `parse_effect_chain`-driven call sites carry chain context, and a bare
+///    `parse_effect` (no chain) must keep today's `TargetOnly` fallback —
+///    fail-closed on `None`.
+/// 2. The choose chunk's own text must lead the chain (the chain-head gate):
+///    Gate B's durability reconcile is root-only, so a choose clause nested
+///    mid-chain (Canoptek Wraith, Ticking Mime Bomb) is not this class's head
+///    and must keep its existing parse.
+/// 3. The chain text must mention a chosen-object reader — the reader is the
+///    reason the choice must be remembered.
+/// 4. The shared core must recognize the quantifier + class filter.
+fn try_parse_choose_battlefield_object(
+    rest: &str,
+    rest_lower: &str,
+    chunk_lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ChooseImperativeAst> {
+    let chain_lower = ctx.effect_chain_full_lower.as_deref()?;
+    tag::<_, _, OracleError<'_>>(chunk_lower.trim())
+        .parse(chain_lower)
+        .ok()?;
+    if !nom_target::chain_text_mentions_chosen_object(chain_lower) {
+        return None;
+    }
+    let (filter, min, max) = parse_battlefield_object_choice_core(rest, rest_lower, ctx)?;
+    Some(ChooseImperativeAst::BattlefieldObject { filter, min, max })
+}
+
+/// CR 607.2d + CR 608.2c: Gate B's head-shape provenance — does this head
+/// clause fragment have the standalone battlefield-object choice shape?
+///
+/// Re-runs the SAME core Gate A used, on the fragment alone with a throwaway
+/// context, so it can only answer "does this text have the shape?", never "was
+/// Gate A the producer?". The reader-text conjunct that completes Gate B's
+/// consideration set is applied by `reconcile_object_choice_durability`.
+pub(super) fn is_standalone_object_choice_clause(fragment: &str) -> bool {
+    let lower = fragment.to_ascii_lowercase();
+    let Some((_, rest)) = nom_on_lower(fragment, &lower, |input| {
+        value((), tag("choose ")).parse(input)
+    }) else {
+        return false;
+    };
+    let rest_lower = &lower[lower.len() - rest.len()..];
+    let mut throwaway = ParseContext::default();
+    parse_battlefield_object_choice_core(rest, rest_lower, &mut throwaway).is_some()
+}
+
 pub(super) fn parse_choose_ast(
     text: &str,
     lower: &str,
@@ -4437,6 +4604,15 @@ pub(super) fn parse_choose_ast(
         // and drop the exile. Operates on `rest_lower` (the "choose " strip has
         // de-inflected the leading actor verb; the inner "exiles" keeps its -s).
         if let Some(ast) = try_parse_choose_and_verb_it_edict(rest_lower) {
+            return Some(ast);
+        }
+
+        // CR 607.2d + CR 608.2c: a standalone, non-target battlefield-object
+        // choice whose chain carries a "the chosen ‹object›" reader (Zenos yae
+        // Galvus). Gate A: chain present (fail-closed) + chain-head + reader +
+        // the shared core. Must precede `is_choose_as_targeting`, which would
+        // otherwise take the clause as the degraded targeting fallback.
+        if let Some(ast) = try_parse_choose_battlefield_object(rest, rest_lower, lower, ctx) {
             return Some(ast);
         }
 
@@ -5969,6 +6145,21 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             domain,
             chooser,
         },
+        // CR 607.2d + CR 608.2d: a standalone, non-target battlefield-object
+        // choice by the ability's controller. Lowering onto the tracked-set
+        // choice is what makes the pick durable for the chain's
+        // "the chosen ‹object›" reader (the linked-ability relation is
+        // reconciled at assembly by `reconcile_object_choice_durability`).
+        ChooseImperativeAst::BattlefieldObject { filter, min, max } => {
+            Effect::ChooseObjectsIntoTrackedSet {
+                chooser: TargetFilter::Controller,
+                filter,
+                min,
+                max,
+                cardinality: None,
+                eligibility: None,
+            }
+        }
     }
 }
 

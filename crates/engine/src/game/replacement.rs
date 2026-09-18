@@ -499,33 +499,20 @@ fn umbra_armor_attachments(
 /// CR 122.1c: Remove one shield counter from the permanent, emitting
 /// `CounterRemoved`. Returns `true` if a shield counter was present and removed
 /// (so the caller should treat the destruction/damage as replaced/prevented),
-/// `false` otherwise. Mirrors the CR 122.1d stun-counter removal model in
-/// `turns.rs`: decrement, drop the map entry at zero, and emit one
-/// `CounterRemoved { count: 1 }` event so counter-removal triggers observe it.
+/// `false` otherwise. The accepted edit journals one counter command and emits
+/// one `CounterRemoved { count: 1 }` event for counter-removal triggers.
 pub(crate) fn consume_shield_counter(
     state: &mut GameState,
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    let Some(obj) = state.objects.get_mut(&object_id) else {
-        return false;
-    };
-    let Some(entry) = obj.counters.get_mut(&CounterType::Shield) else {
-        return false;
-    };
-    if *entry == 0 {
-        return false;
-    }
-    *entry -= 1;
-    if *entry == 0 {
-        obj.counters.remove(&CounterType::Shield);
-    }
-    events.push(GameEvent::CounterRemoved {
+    crate::game::effects::counters::apply_counter_removal(
+        state,
         object_id,
-        counter_type: CounterType::Shield,
-        count: 1,
-    });
-    true
+        CounterType::Shield,
+        1,
+        events,
+    ) == 1
 }
 
 fn apply_compleated_replacement(
@@ -5444,7 +5431,7 @@ fn bind_search_found_definition(
                         card_filter: None,
                         single_use_group: None,
                         single_use: false,
-                        cast_cost_raise: None,
+                        cast_cost_modifier: None,
                         alt_ability_cost: None,
                         land_enter_tapped,
                         invalidation: None,
@@ -11196,6 +11183,156 @@ mod tests {
         ReplacementDefinition::new(event)
     }
 
+    fn shield_removal_commands(state: &GameState, object_id: ObjectId) -> usize {
+        state.resolved_rules_journal.entries().iter().filter(|entry| matches!(
+            &entry.command,
+            Some(crate::types::resolved_commands::ResolvedRulesCommand::ObjectCounter(command))
+                if command.object.object_id == object_id
+                    && command.counter_type == CounterType::Shield
+                    && matches!(command.edit, crate::types::resolved_commands::ResolvedObjectCounterEdit::Remove { count: 1 })
+        )).count()
+    }
+
+    #[test]
+    fn shield_damage_and_destroy_each_journal_one_accepted_removal() {
+        for destroy in [false, true] {
+            let mut state = GameState::new_two_player(42);
+            let object_id = ObjectId(30);
+            let mut target = GameObject::new(
+                object_id,
+                CardId(3),
+                PlayerId(1),
+                "Shielded Bear".into(),
+                Zone::Battlefield,
+            );
+            target.counters.insert(CounterType::Shield, 1);
+            state.objects.insert(object_id, target);
+            state.battlefield.push_back(object_id);
+            let proposed = if destroy {
+                ProposedEvent::Destroy {
+                    object_id,
+                    source: Some(ObjectId(50)),
+                    cant_regenerate: false,
+                    applied: HashSet::new(),
+                }
+            } else {
+                ProposedEvent::Damage {
+                    source_id: ObjectId(50),
+                    target: TargetRef::Object(object_id),
+                    amount: 2,
+                    is_combat: false,
+                    applied: HashSet::new(),
+                }
+            };
+            let mut events = Vec::new();
+            let result = replace_event(&mut state, proposed, &mut events);
+            assert!(
+                matches!(result, ReplacementResult::Prevented),
+                "shield must replace the {:?} event",
+                if destroy { "destroy" } else { "damage" }
+            );
+            assert_eq!(
+                state.objects[&object_id].counters.get(&CounterType::Shield),
+                None
+            );
+            assert_eq!(
+                shield_removal_commands(&state, object_id),
+                1,
+                "accepted shield consumption must record one command"
+            );
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id: id, counter_type: CounterType::Shield, count: 1 } if *id == object_id)).count(), 1, "one accepted edit emits one removal event");
+            if !destroy {
+                let removed_at = events.iter().position(|event| matches!(event, GameEvent::CounterRemoved { object_id: id, counter_type: CounterType::Shield, .. } if *id == object_id)).unwrap();
+                let prevented_at = events
+                    .iter()
+                    .position(|event| matches!(event, GameEvent::DamagePrevented { .. }))
+                    .unwrap();
+                assert!(
+                    removed_at < prevented_at,
+                    "damage prevention follows the accepted shield removal event"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn batched_combat_shield_consumption_journals_once() {
+        use crate::game::combat::{DamageAssignment, DamageTarget};
+        use crate::game::combat_damage::{apply_combat_damage, CombatDamageBatch};
+        use crate::game::zones::create_object;
+        use crate::types::game_state::CombatDamageSubStep;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        let shielded = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Shielded Bear".into(),
+            Zone::Battlefield,
+        );
+        let attacker_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker A".into(),
+            Zone::Battlefield,
+        );
+        let attacker_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Attacker B".into(),
+            Zone::Battlefield,
+        );
+        for (id, power, toughness) in [(shielded, 2, 2), (attacker_a, 3, 3), (attacker_b, 3, 3)] {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.power = Some(power);
+            object.toughness = Some(toughness);
+            object.entered_battlefield_turn = Some(1);
+        }
+        state
+            .objects
+            .get_mut(&shielded)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 1);
+        let assignments = vec![
+            (
+                attacker_a,
+                DamageAssignment {
+                    target: DamageTarget::Object(shielded),
+                    amount: 3,
+                },
+            ),
+            (
+                attacker_b,
+                DamageAssignment {
+                    target: DamageTarget::Object(shielded),
+                    amount: 3,
+                },
+            ),
+        ];
+        let CombatDamageBatch::Complete(events) =
+            apply_combat_damage(&mut state, &assignments, CombatDamageSubStep::Regular)
+        else {
+            panic!("the simultaneous damage batch must complete");
+        };
+        assert_eq!(state.objects[&shielded].damage_marked, 0);
+        assert_eq!(
+            state.objects[&shielded].counters.get(&CounterType::Shield),
+            None
+        );
+        assert_eq!(
+            shield_removal_commands(&state, shielded),
+            1,
+            "the post-batch shield consumption records one accepted removal"
+        );
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Shield, count: 1 } if *object_id == shielded)).count(), 1);
+    }
+
     /// V14 — `ability_tree_copies_tokens` walks the substitution's OWN tree and
     /// stops at a granted trigger.
     ///
@@ -13580,6 +13717,11 @@ mod tests {
                 .counters
                 .get(&CounterType::Shield),
             None
+        );
+        assert_eq!(
+            shield_removal_commands(&state, ObjectId(30)),
+            1,
+            "unpreventable damage still journals its accepted shield removal"
         );
         assert!(
             !events

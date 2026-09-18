@@ -1,14 +1,15 @@
 //! Fuse integration coverage against real split-card fixture data.
 //!
-//! `Breaking // Entering` is useful here because it proves CR 702.102d order:
-//! the left half mills first, then the right half can reanimate a creature card
-//! that only became a legal graveyard target because the left half resolved.
+//! `Breaking // Entering` is useful here because it exercises the real three
+//! choices: Breaking, Entering, and the fused spell. Entering's target is
+//! selected while casting, so it must already be in a graveyard; Breaking then
+//! mills its independent library markers as the fused spell resolves.
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CastingVariant, StackEntryKind, WaitingFor};
+use engine::types::game_state::{CastingVariant, CastingVariantFace, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -23,19 +24,38 @@ fn pool_units(mana: &[ManaType]) -> Vec<ManaUnit> {
         .collect()
 }
 
+fn assert_breaking_entering_identity(
+    state: &engine::types::game_state::GameState,
+    breaking: ObjectId,
+) {
+    let card = &state.objects[&breaking];
+    assert_eq!(card.name, "Breaking");
+    assert_eq!(
+        card.back_face.as_ref().map(|face| face.name.as_str()),
+        Some("Entering"),
+        "the real database fixture must retain Entering as Breaking's split half"
+    );
+}
+
 #[test]
-fn fused_breaking_entering_combines_cost_characteristics_and_resolves_left_then_right() {
-    let Some(db) = load_db() else {
-        return;
-    };
+fn hand_fuse_fused_left_combines_cost_characteristics_and_resolves_both_halves() {
+    let db = load_db().expect("fuse runtime coverage requires the real card database");
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let breaking = scenario.add_real_card(P0, "Breaking", Zone::Hand, db);
-    let milled_creature = scenario.add_real_card(P1, "Grizzly Bears", Zone::Library, db);
-    for _ in 0..7 {
-        scenario.add_real_card(P1, "Lightning Bolt", Zone::Library, db);
-    }
+    let reanimation_target = scenario.add_real_card(P1, "Grizzly Bears", Zone::Graveyard, db);
+    let library_markers = [
+        "Lightning Bolt",
+        "Opt",
+        "Divination",
+        "Doom Blade",
+        "Shock",
+        "Unsummon",
+        "Negate",
+        "Cancel",
+    ]
+    .map(|name| scenario.add_real_card(P1, name, Zone::Library, db));
     scenario.with_mana_pool(
         P0,
         pool_units(&[
@@ -51,18 +71,20 @@ fn fused_breaking_entering_combines_cost_characteristics_and_resolves_left_then_
     );
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    assert_breaking_entering_identity(runner.state(), breaking);
 
     let commit = runner
         .cast(breaking)
         .casting_variant(CastingVariant::Fuse)
         .target_player(P1)
-        .target_object(milled_creature)
+        .target_object(reanimation_target)
         .commit();
 
     let selected = commit
         .selected_casting_variant()
         .expect("fuse should be selected through CastingVariantChoice");
     assert_eq!(selected.variant, CastingVariant::Fuse);
+    assert_eq!(selected.face, CastingVariantFace::Left);
     assert_eq!(
         selected.mana_cost.mana_value(),
         8,
@@ -105,17 +127,81 @@ fn fused_breaking_entering_combines_cost_characteristics_and_resolves_left_then_
         "CR 702.102b + CR 709.4d: fused characteristics must be visible on stack"
     );
     assert_eq!(
-        state.objects[&milled_creature].zone,
-        Zone::Library,
-        "the right-half target is only legal after Breaking mills it"
+        state.objects[&reanimation_target].zone,
+        Zone::Graveyard,
+        "Entering's target must be legal when the fused spell is cast"
     );
-
     let outcome = commit.resolve();
 
-    // CR 608.2c + CR 702.102d: Breaking mills first; Entering then reanimates
-    // the creature that the left half put into the graveyard.
-    outcome.assert_zone(&[milled_creature], Zone::Battlefield);
-    assert_eq!(outcome.state().objects[&milled_creature].controller, P0);
+    // CR 608.2c + CR 702.102d: Breaking mills its eight markers, then Entering
+    // returns the creature card that was legally targeted during casting.
+    outcome.assert_zone(&library_markers, Zone::Graveyard);
+    outcome.assert_zone(&[reanimation_target], Zone::Battlefield);
+    assert_eq!(outcome.state().objects[&reanimation_target].controller, P0);
+    outcome.assert_zone(&[breaking], Zone::Graveyard);
+}
+
+#[test]
+fn hand_fuse_normal_left_casts_only_breaking() {
+    let db = load_db().expect("fuse runtime coverage requires the real card database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let breaking = scenario.add_real_card(P0, "Breaking", Zone::Hand, db);
+    let library_markers = [
+        "Lightning Bolt",
+        "Opt",
+        "Divination",
+        "Doom Blade",
+        "Shock",
+        "Unsummon",
+        "Negate",
+        "Cancel",
+    ]
+    .map(|name| scenario.add_real_card(P1, name, Zone::Library, db));
+    scenario.with_mana_pool(P0, pool_units(&[ManaType::Blue, ManaType::Black]));
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    assert_breaking_entering_identity(runner.state(), breaking);
+
+    let outcome = runner
+        .cast(breaking)
+        .casting_variant_face(CastingVariant::Normal, CastingVariantFace::Left)
+        .target_player(P1)
+        .resolve();
+    outcome.assert_zone(&[breaking], Zone::Graveyard);
+    outcome.assert_zone(&library_markers, Zone::Graveyard);
+    assert_eq!(outcome.state().players[1].graveyard.len(), 8);
+}
+
+#[test]
+fn hand_fuse_normal_right_casts_only_entering_with_preexisting_graveyard_creature() {
+    let db = load_db().expect("fuse runtime coverage requires the real card database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let breaking = scenario.add_real_card(P0, "Breaking", Zone::Hand, db);
+    let creature = scenario.add_real_card(P1, "Grizzly Bears", Zone::Graveyard, db);
+    scenario.with_mana_pool(
+        P0,
+        pool_units(&[
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]),
+    );
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    assert_breaking_entering_identity(runner.state(), breaking);
+
+    let outcome = runner
+        .cast(breaking)
+        .casting_variant_face(CastingVariant::Normal, CastingVariantFace::Right)
+        .target_object(creature)
+        .resolve();
+    outcome.assert_zone(&[creature], Zone::Battlefield);
+    assert_eq!(outcome.state().objects[&creature].controller, P0);
     outcome.assert_zone(&[breaking], Zone::Graveyard);
 }
 
@@ -123,9 +209,7 @@ fn fused_breaking_entering_combines_cost_characteristics_and_resolves_left_then_
 /// the `CastingVariant::Fuse` prompt — not the Life // Death ModalFaceChoice path.
 #[test]
 fn fuse_split_card_uses_casting_variant_choice_not_modal_face_choice() {
-    let Some(db) = load_db() else {
-        return;
-    };
+    let db = load_db().expect("fuse runtime coverage requires the real card database");
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);

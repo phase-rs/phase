@@ -47,8 +47,8 @@ use super::oracle_nom::primitives::{
 
 use super::oracle_attraction::parse_attraction_visit_triggers;
 use super::oracle_casting::{
-    parse_additional_cost_line, parse_casting_restriction_line, parse_spell_casting_option_line,
-    split_additional_cost_trailing_spell_reduction,
+    extract_spend_only_on_x_prefix, parse_additional_cost_line, parse_casting_restriction_line,
+    parse_spell_casting_option_line, split_additional_cost_trailing_spell_reduction,
 };
 use super::oracle_class::parse_class_oracle_text;
 use super::oracle_classifier::{
@@ -2894,6 +2894,11 @@ fn prepare_spell_resolution_line(raw_line: &str) -> Option<SpellResolutionLine> 
     let line_with_reminder_stripped = strip_reminder_text(raw_line);
     let min_x_value = x_annotation_min_value(&line_with_reminder_stripped);
     let line = strip_x_cant_be_zero_suffix(&line_with_reminder_stripped);
+    let line = if let Some((remaining, _)) = extract_spend_only_on_x_prefix(&line) {
+        remaining.to_string()
+    } else {
+        line
+    };
     if line.is_empty() {
         return None;
     }
@@ -5162,11 +5167,17 @@ fn parse_normalized_oracle_ir(
         let min_x_value = x_annotation_min_value(&line);
         // Strip "X can't be 0." casting constraint suffix — annotation only, not an ability.
         let line = strip_x_cant_be_zero_suffix(&line);
+        let line = if let Some((remaining, restriction)) = extract_spend_only_on_x_prefix(&line) {
+            emitter.casting_restriction_at(item_line, restriction);
+            remaining.to_string()
+        } else {
+            line
+        };
         if line.is_empty() {
             if min_x_value > 0 {
                 emitter.raise_last_spell_min_x(min_x_value);
             }
-            // Priority 14: entirely parenthesized reminder text
+            // Priority 14: entirely parenthesized reminder text or standalone restriction line
             i += 1;
             continue;
         }
@@ -7092,8 +7103,17 @@ fn parse_normalized_oracle_ir(
                     let next_line = strip_reminder_text(lines[next_i].trim());
                     let next_min_x_value = x_annotation_min_value(&next_line);
                     let next_stripped = strip_x_cant_be_zero_suffix(&next_line);
-                    if next_min_x_value > 0 && next_stripped.is_empty() {
-                        spell_min_x_value = spell_min_x_value.max(next_min_x_value);
+                    let next_stripped = if let Some((remaining, _)) =
+                        extract_spend_only_on_x_prefix(&next_stripped)
+                    {
+                        remaining
+                    } else {
+                        &next_stripped
+                    };
+                    if next_stripped.is_empty() {
+                        if next_min_x_value > 0 {
+                            spell_min_x_value = spell_min_x_value.max(next_min_x_value);
+                        }
                         next_i += 1;
                     }
                     break;

@@ -115,6 +115,7 @@ function PodSetup() {
   const setHostDisplayName = useDraftPodStore((s) => s.setHostDisplayName);
   const guestDisplayName = useDraftPodStore((s) => s.guestDisplayName);
   const setGuestDisplayName = useDraftPodStore((s) => s.setGuestDisplayName);
+  const adoptSavedDisplayName = useDraftPodStore((s) => s.adoptSavedDisplayName);
   const joinCode = useDraftPodStore((s) => s.joinCode);
   const setJoinCode = useDraftPodStore((s) => s.setJoinCode);
   const createPod = useDraftPodStore((s) => s.createPod);
@@ -142,6 +143,16 @@ function PodSetup() {
       : null,
   );
   const refreshProcedure = useDraftPodStore((s) => s.refreshProcedure);
+
+  // Seed both name inputs below from the saved multiplayer identity, so
+  // hosting or joining a pod is not one more place to retype a name the player
+  // already saved. On mount rather than per render: `adoptSavedDisplayName`
+  // fills only an empty field, so re-seeding on every render would re-fill the
+  // input mid-edit (measured: clearing it and typing "Bea" under a dependency-
+  // less effect lands "AliceBea") instead of leaving it editable.
+  useEffect(() => {
+    adoptSavedDisplayName();
+  }, [adoptSavedDisplayName]);
 
   // The kind radios record intent (`setConfig`) but publish nothing, so the
   // ENGINE's per-kind axes — booster count and allowed seat set — are re-read here

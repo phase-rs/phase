@@ -239,8 +239,10 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         parse_top_of_library_condition,
         parse_source_state_conditions,
         parse_player_state_conditions,
-        // CR 402.1 + CR 602.5: existential "a player has <hand-size predicate>".
-        parse_a_player_has_hand_predicate,
+        // CR 402.1 + CR 602.5 + CR 603.4 + CR 102.1: existential "a player has
+        // <hand-size predicate>" OR "a player has more <property> than each
+        // other player" (the unique-leader tail).
+        parse_a_player_has_property_condition,
         parse_you_have_conditions,
         parse_parent_target_controller_more_life_than_you,
         parse_that_player_has_conditions,
@@ -2726,7 +2728,8 @@ pub(crate) fn parse_source_power_toughness_condition(
 /// the object referenced by the trigger event (the creature that died); "had"
 /// is past tense because CR 603.10a's look-back reads the dying creature's
 /// last-known power from the graveyard at resolution. "~'s power" is the ability
-/// source's current power.
+/// source's current power. The present-tense possessive sibling ("its power is
+/// less than ~'s power") is [`parse_its_pt_vs_source_comparison`].
 ///
 /// Distinct from [`parse_source_power_toughness_condition`] ("its power is N",
 /// which compares the *source's* stat against a fixed threshold): here BOTH
@@ -2740,6 +2743,34 @@ fn parse_event_object_pt_vs_source_comparison(input: &str) -> OracleResult<'_, S
     // Subject: "it had " — the triggering-event object, past tense (LKI look-back).
     let (rest, _) = tag("it had ").parse(input)?;
     let (rest, lhs) = parse_pt_ref_scoped(rest, ObjectScope::EventSource)?;
+    parse_pt_vs_source_comparison_tail(rest, lhs)
+}
+
+/// CR 208.1: Present-tense possessive form "its <stat> is <comparator> ~'s
+/// <stat>" (Shelinda, Yevon Acolyte: "…on that creature if its power is less
+/// than ~'s power").
+///
+/// Deliberately NOT registered in [`parse_inner_condition`]: "its" is an
+/// anaphor with no fixed referent. In Shelinda it is the trigger's entering
+/// creature, but in Sage-Eye Avengers ("return target creature to its owner's
+/// hand if its power is less than this creature's power") it is the spell's
+/// target. Only a caller that knows the antecedent may bind it, which is why
+/// the subject scope is a parameter rather than a guess.
+pub(crate) fn parse_its_pt_vs_source_comparison(
+    input: &str,
+    subject: ObjectScope,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, lhs) =
+        delimited(tag("its "), |i| parse_pt_ref_scoped(i, subject), tag(" is")).parse(input)?;
+    parse_pt_vs_source_comparison_tail(rest, lhs)
+}
+
+/// CR 208.1: The shared "<comparator> ~'s <stat>" tail of an object-vs-source
+/// P/T comparison, applied to an already-parsed left-hand stat.
+fn parse_pt_vs_source_comparison_tail(
+    rest: &str,
+    lhs: QuantityRef,
+) -> OracleResult<'_, StaticCondition> {
     // Comparator between the two stats. Longer phrases precede their prefixes so
     // "greater than or equal to" wins over "greater than".
     let (rest, comparator) = alt((
@@ -3035,20 +3066,44 @@ fn parse_hand_size_predicate(rest: &str, player: PlayerScope) -> Option<(&str, S
     None
 }
 
-/// CR 402.1 + CR 602.5: "a player has <hand-size predicate>" — an existential
-/// over ALL players (`PlayerRelation::All`) whose per-player hand size satisfies
-/// the predicate. Powers "Activate only if a player has one or fewer cards in
+/// CR 603.4 + CR 102.1: "a player has <property-predicate>" — an existential
+/// over ALL players. Two tails, longest-phrase-first:
+///   1. the unique-leader tail ("more <property> than each other player"),
+///      and
+///   2. the incumbent hand-size threshold lift (Temple of the Dead /
+///      Aclazotz), byte-for-byte unchanged behind an `OracleResult`
+///      wrapper.
+fn parse_a_player_has_property_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    preceded(
+        tag("a player has "),
+        alt((
+            parse_unique_property_lead_tail,
+            parse_hand_size_threshold_existential,
+        )),
+    )
+    .parse(input)
+}
+
+/// Thin `OracleResult` adapter so the incumbent `Option`-returning predicate
+/// helper can be an `alt` arm. Behavior-identical to the pre-split body,
+/// including its `PlayerScope::Controller` inert scope (see the module note
+/// on the codebase's Controller/ScopedPlayer split — deliberately NOT
+/// changed here, to avoid churning a shipped AST shape for zero runtime
+/// gain).
+///
+/// CR 402.1 + CR 602.5: "<hand-size predicate>" — an existential over ALL
+/// players (`PlayerRelation::All`) whose per-player hand size satisfies the
+/// predicate. Powers "Activate only if a player has one or fewer cards in
 /// hand" (Temple of the Dead / Aclazotz). The predicate's comparator and
 /// threshold are delegated to the shared `parse_hand_size_predicate`; its
-/// per-player `QuantityComparison` (lhs `HandSize`, rhs the threshold) is lifted
-/// into a `PlayerAttribute` counted existentially (`PlayerCount(..) >= 1`), so
-/// ANY player — including an opponent — satisfying the predicate gates the
-/// ability. The embedded `PlayerScope::Controller` on `HandSize` carries no
-/// game-state meaning under `PlayerAttribute`: the runtime reads the scalar off
-/// each candidate player (see `resolve_player_count`).
-fn parse_a_player_has_hand_predicate(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("a player has ").parse(input)?;
-    let Some((rest, predicate)) = parse_hand_size_predicate(rest, PlayerScope::Controller) else {
+/// per-player `QuantityComparison` (lhs `HandSize`, rhs the threshold) is
+/// lifted into a `PlayerAttribute` counted existentially (`PlayerCount(..)
+/// >= 1`), so ANY player — including an opponent — satisfying the predicate
+/// gates the ability. The embedded `PlayerScope::Controller` on `HandSize`
+/// carries no game-state meaning under `PlayerAttribute`: the runtime reads
+/// the scalar off each candidate player (see `resolve_player_count`).
+fn parse_hand_size_threshold_existential(input: &str) -> OracleResult<'_, StaticCondition> {
+    let Some((rest, predicate)) = parse_hand_size_predicate(input, PlayerScope::Controller) else {
         return Err(oracle_err(input));
     };
     let StaticCondition::QuantityComparison {
@@ -3072,6 +3127,47 @@ fn parse_a_player_has_hand_predicate(input: &str) -> OracleResult<'_, StaticCond
             },
             1,
         ),
+    ))
+}
+
+/// CR 603.4 (the intervening-if consumer), CR 102.1 (the player population),
+/// CR 119.3 / CR 402.3 (the readable per-player scalars): "more `<property>`
+/// than each other player" with an EXISTENTIAL subject.
+///
+/// ∃p ∀q≠p : s(p) > s(q)  ⟺  exactly ONE player attains max(s).
+/// The uniqueness count is what carries strictness, which is why this needs
+/// no `exclude` anchor: with an existential subject there is no anchor to
+/// exclude.
+///
+/// The comparator/aggregate coupling (a "greater than" reading pairs with
+/// `Max`) is owned by `parse_superlative_comparator_phrase` in this module,
+/// which documents it as grammatical coupling rather than a CR rule.
+/// Literal reuse is impossible — that combinator parses the phrases
+/// "greater than " / "less than ", and "more … than" is not one of them —
+/// so the coupling is CITED here, not re-derived.
+///
+/// The existing generic lift (`PlayerAttribute` with a threshold in
+/// `value`) must NOT be reused for an ANCHORED form: `value` is resolved
+/// ONCE per evaluation, candidate-independently
+/// (`resolve_quantity(state, value, controller, source_id)` sits outside
+/// `resolve_player_count`'s candidate loop), so an `exclude: Some(anchor)`
+/// nested there would compare every candidate against one fixed excluded
+/// population.
+fn parse_unique_property_lead_tail(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, property) =
+        preceded(tag("more "), nom_quantity::parse_player_property_keyword).parse(input)?;
+    let (rest, _) = tag(" than each other player").parse(rest)?;
+    let filter = nom_quantity::player_property_leader_filter(property, PlayerRelation::All)
+        .ok_or_else(|| oracle_err(input))?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount { filter },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        },
     ))
 }
 
@@ -10901,6 +10997,143 @@ mod tests {
     };
     use crate::types::card_type::Supertype;
     use crate::types::mana::{ManaColor, ManaCost};
+
+    /// CR 603.4 + CR 102.1: "a player has more `<property>` than each other
+    /// player" via the public `parse_inner_condition` seam — the exact shape,
+    /// with `rest == ""`. Covers both properties (life, hand size).
+    #[test]
+    fn parse_a_player_has_more_property_than_each_other_player_exact_shape() {
+        for (text, expected_qty) in [
+            (
+                "a player has more life than each other player",
+                QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            ),
+            (
+                "a player has more cards in hand than each other player",
+                QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            ),
+        ] {
+            let (rest, cond) =
+                parse_inner_condition(text).unwrap_or_else(|_| panic!("{text:?} must parse"));
+            assert_eq!(rest, "", "must fully consume {text:?}, left {rest:?}");
+            let StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref { qty },
+                comparator,
+                rhs,
+            } = cond
+            else {
+                panic!("expected QuantityComparison, got {cond:?}");
+            };
+            let QuantityRef::PlayerCount {
+                filter:
+                    PlayerFilter::PlayerAttribute {
+                        relation,
+                        attr,
+                        comparator: inner_comparator,
+                        value,
+                    },
+            } = qty
+            else {
+                panic!("expected PlayerCount(PlayerAttribute(..)), got {qty:?}");
+            };
+            assert_eq!(relation, PlayerRelation::All);
+            // B3/N1: `attr`'s embedded scope MUST be `ScopedPlayer`, not
+            // `Controller` — a copy-paste regression here would be silent
+            // (the scope is inert at runtime) without this assertion.
+            assert_eq!(*attr, expected_qty);
+            assert_eq!(inner_comparator, Comparator::GE);
+            assert_eq!(
+                *value,
+                QuantityExpr::Ref {
+                    qty: match &expected_qty {
+                        QuantityRef::LifeTotal { .. } => QuantityRef::LifeTotal {
+                            player: PlayerScope::AllPlayers {
+                                aggregate: AggregateFunction::Max,
+                                exclude: None,
+                            },
+                        },
+                        QuantityRef::HandSize { .. } => QuantityRef::HandSize {
+                            player: PlayerScope::AllPlayers {
+                                aggregate: AggregateFunction::Max,
+                                exclude: None,
+                            },
+                        },
+                        other => panic!("unexpected axis {other:?}"),
+                    }
+                }
+            );
+            // The naive-GE guard (U1-R7's parser-side mirror): the OUTER
+            // comparison is the uniqueness count, and it MUST be EQ 1, not
+            // GE 1. A `GE 1` slip is true whenever ANYONE is at the max —
+            // i.e. always — and would not be revert-discriminating.
+            assert_eq!(comparator, Comparator::EQ);
+            assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
+        }
+    }
+
+    /// Negative with a PAIRED positive reach-guard in the SAME test
+    /// (`/card-test` foot-gun 6): the subfamily-B object-count noun
+    /// "controls more lands" must NOT parse via this production, and the
+    /// positive sibling in the same test proves the dispatcher is actually
+    /// live (so the negative cannot pass through a dead dispatcher).
+    #[test]
+    fn parse_a_player_controls_more_lands_declines_with_positive_reach_guard() {
+        assert!(
+            parse_inner_condition("a player has more life than each other player").is_ok(),
+            "positive reach-guard: the dispatcher must be live"
+        );
+        assert!(
+            parse_inner_condition("a player controls more lands than each other player").is_err(),
+            "the object-count noun 'lands' must decline — subfamily B stays honestly red"
+        );
+        // The assertion above declines at the "a player has " prefix (its verb
+        // is "controls"), so on its own it never reaches the property
+        // selector. This one shares the prefix and therefore exercises the
+        // unsupported-PROPERTY rejection itself.
+        assert!(
+            parse_inner_condition("a player has more lands than each other player").is_err(),
+            "'lands' must decline at the property selector, not only at the verb"
+        );
+    }
+
+    /// Regression: "a player has one or fewer cards in hand" (Temple of the
+    /// Dead / Aclazotz) still produces its UNCHANGED `PlayerCount{..} GE 1`
+    /// shape after U1.3's rename and `alt` split — including its incumbent
+    /// `PlayerScope::Controller` inert scope, which this plan deliberately
+    /// does NOT change (N1).
+    #[test]
+    fn parse_a_player_has_one_or_fewer_cards_in_hand_unchanged_by_u1_3() {
+        let (rest, cond) = parse_inner_condition("a player has one or fewer cards in hand")
+            .expect("Temple of the Dead / Aclazotz's condition must still parse");
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref { qty },
+            comparator,
+            rhs,
+        } = cond
+        else {
+            panic!("expected QuantityComparison, got {cond:?}");
+        };
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    }),
+                    comparator: Comparator::LE,
+                    value: Box::new(QuantityExpr::Fixed { value: 1 }),
+                },
+            }
+        );
+        assert_eq!(comparator, Comparator::GE);
+        assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
+    }
 
     /// CR 603.4 + CR 608.2c: Avatar Aang's intervening-if "you've done all four
     /// this turn" parses to a distinct-bend-count comparison (`>= 4`).
@@ -20037,6 +20270,89 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 208.1: the present-tense possessive comparison "its <stat> is <cmp>
+    /// ~'s <stat>" (Shelinda, Yevon Acolyte). The subject scope is the
+    /// caller's to bind, so the left operand carries exactly the scope passed in.
+    #[test]
+    fn test_parse_its_pt_vs_source_comparison_binds_the_supplied_subject() {
+        use crate::types::ability::ObjectScope;
+        for (text, comparator, lhs_expected) in [
+            (
+                "its power is less than ~'s power",
+                Comparator::LT,
+                QuantityRef::Power {
+                    scope: ObjectScope::EventSource,
+                },
+            ),
+            (
+                "its power is greater than ~'s power",
+                Comparator::GT,
+                QuantityRef::Power {
+                    scope: ObjectScope::EventSource,
+                },
+            ),
+            (
+                "its toughness is greater than or equal to ~'s toughness",
+                Comparator::GE,
+                QuantityRef::Toughness {
+                    scope: ObjectScope::EventSource,
+                },
+            ),
+        ] {
+            let (rest, c) = parse_its_pt_vs_source_comparison(text, ObjectScope::EventSource)
+                .unwrap_or_else(|e| panic!("{text}: {e:?}"));
+            assert_eq!(rest, "", "{text}");
+            let StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref { qty: lhs },
+                comparator: got,
+                rhs: QuantityExpr::Ref { qty: rhs },
+            } = c
+            else {
+                panic!("{text}: expected ref-vs-ref QuantityComparison, got {c:?}");
+            };
+            assert_eq!(got, comparator, "{text}");
+            assert_eq!(lhs, lhs_expected, "{text}");
+            assert!(
+                matches!(
+                    rhs,
+                    QuantityRef::Power {
+                        scope: ObjectScope::Source
+                    } | QuantityRef::Toughness {
+                        scope: ObjectScope::Source
+                    }
+                ),
+                "{text}: rhs must be the source's stat, got {rhs:?}"
+            );
+        }
+    }
+
+    /// CR 208.1: the shared condition grammar must NOT bind a bare possessive
+    /// "its" to the trigger event object — in Sage-Eye Avengers the "its" is the
+    /// spell's target, so a shared-grammar reading would compare the attacking
+    /// source with itself and make the ability impossible to use.
+    #[test]
+    fn test_parse_condition_does_not_bind_bare_its_to_event_object() {
+        use crate::types::ability::ObjectScope;
+        let binds_event_object = matches!(
+            parse_condition("if its power is less than ~'s power"),
+            Ok((
+                _,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::EventSource
+                        }
+                    },
+                    ..
+                }
+            ))
+        );
+        assert!(
+            !binds_event_object,
+            "a bare possessive has no fixed referent in the shared grammar"
+        );
     }
 
     /// CR 702.191a: the reminder-text subject identifies the Increment keyword,

@@ -72,6 +72,7 @@ fn cast_window(source: ObjectId) -> ResolvedAbility {
             },
             mana_spend_permission: None,
             additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![],
         source,

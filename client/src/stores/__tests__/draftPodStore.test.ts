@@ -22,6 +22,10 @@ const mocks = vi.hoisted(() => ({
   // reason.
   multiplayerConfig: {
     hostingServer: "wss://phase.example/ws" as string | null,
+    // `adoptSavedDisplayName` reads the saved identity off this store, so the
+    // mock carries the field under its real name. Empty is the real store's
+    // own initial value, which keeps it out of the way of every other suite.
+    displayName: "",
     userLobbySources: [],
     sourceStatus: new Map(),
   },
@@ -105,6 +109,7 @@ describe("draftPodStore", () => {
     mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
     mocks.multiplayerState.joinDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
     mocks.multiplayerConfig.hostingServer = "wss://phase.example/ws";
+    mocks.multiplayerConfig.displayName = "";
     mocks.inspectActiveDraftPod.mockReturnValue({
       type: "absent",
     });
@@ -1735,6 +1740,128 @@ describe("draftPodStore", () => {
         configError: "offline.startUnavailable",
       });
       expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Saved-identity seeding ───────────────────────────────────────────────
+  //
+  // Every assertion here is REVERT-FAILING as a group: BASE has no
+  // `adoptSavedDisplayName`, so the call is a TypeError rather than a wrong
+  // value. The per-test notes below say what each one discriminates BEYOND
+  // that — i.e. what a present-but-wrong implementation would fail on.
+  describe("adoptSavedDisplayName", () => {
+    it("seeds both pod name fields from the saved identity", () => {
+      mocks.multiplayerConfig.displayName = "Alice";
+
+      useDraftPodStore.getState().adoptSavedDisplayName();
+
+      expect(useDraftPodStore.getState()).toMatchObject({
+        hostDisplayName: "Alice",
+        guestDisplayName: "Alice",
+      });
+    });
+
+    it.each([
+      ["host", "hostDisplayName", () => useDraftPodStore.getState().setHostDisplayName("Bea")],
+      ["guest", "guestDisplayName", () => useDraftPodStore.getState().setGuestDisplayName("Bea")],
+    ])("leaves a name the %s already typed alone", (_seat, field, type) => {
+      mocks.multiplayerConfig.displayName = "Alice";
+      type();
+
+      useDraftPodStore.getState().adoptSavedDisplayName();
+
+      // Discriminates an unconditional `set`: that would overwrite "Bea" here.
+      expect(useDraftPodStore.getState()[field as "hostDisplayName" | "guestDisplayName"]).toBe("Bea");
+    });
+
+    it("leaves an already-populated host field alone", () => {
+      // `setState` is the shortcut, so this measures the guard on a non-empty
+      // `hostDisplayName` — NOT a production ordering. The ordering the page
+      // really produces is the test below.
+      useDraftPodStore.setState({ hostDisplayName: "Restored Host" });
+      mocks.multiplayerConfig.displayName = "Alice";
+
+      useDraftPodStore.getState().adoptSavedDisplayName();
+
+      expect(useDraftPodStore.getState().hostDisplayName).toBe("Restored Host");
+      // The guest field was empty, so the same call still seeds it — this is
+      // one action over two independent fields, not an all-or-nothing gate.
+      expect(useDraftPodStore.getState().guestDisplayName).toBe("Alice");
+    });
+
+    it.each([
+      ["never set", ""],
+      ["whitespace only", "   "],
+    ])("leaves both fields empty when the saved identity is %s", (_label, saved) => {
+      mocks.multiplayerConfig.displayName = saved;
+
+      useDraftPodStore.getState().adoptSavedDisplayName();
+
+      // Discriminates a seed that skips the emptiness check: "   " would land
+      // in both fields and read as filled while `createPod`/`joinPod` still
+      // reject it, since both trim before validating.
+      expect(useDraftPodStore.getState()).toMatchObject({
+        hostDisplayName: "",
+        guestDisplayName: "",
+      });
+    });
+
+    it("skips a persisted identity that is not a string", () => {
+      // `multiplayerStore`'s persist `merge` normalizes `lastHostConfig`,
+      // `userLobbySources`, `disabledDirectorySources`, `hostingServer` and
+      // `connectionMode` under the comment "Persisted state is external
+      // input", but spreads `displayName` through unvalidated — so a corrupt
+      // or hand-edited localStorage blob really can hydrate a non-string here.
+      // The cast is how this suite reaches that state; the store's own type
+      // says it cannot happen.
+      (mocks.multiplayerConfig as { displayName: unknown }).displayName = 42;
+
+      // Seeding is cosmetic, so it must not be able to take the page down.
+      // `PodSetup` calls this from a mount effect, and `App.tsx` wraps every
+      // route in `ErrorBoundary` — so an unguarded throw here replaces the
+      // Draft Pod screen with that boundary's fallback. Measured with the guard
+      // removed and `displayName` set to 42: rendering the page bare throws a
+      // TypeError out of the `.trim()`.
+      expect(() => useDraftPodStore.getState().adoptSavedDisplayName()).not.toThrow();
+      expect(useDraftPodStore.getState()).toMatchObject({
+        hostDisplayName: "",
+        guestDisplayName: "",
+      });
+    });
+
+    it("yields to a host session restored after it", async () => {
+      // The ordering the page actually produces: `PodSetup`'s mount effect
+      // seeds first, and `resumeHostedPod` — whose `set` sits behind an
+      // `await` — lands after it. The restored name wins because that path
+      // assigns `hostDisplayName` unconditionally, NOT because of the
+      // empty-field guard, which by then has nothing left to protect.
+      mocks.multiplayerConfig.displayName = "Alice";
+      mocks.inspectActiveDraftPod.mockReturnValue({
+        type: "present",
+        meta: activeMeta,
+        capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt },
+      });
+      mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
+
+      useDraftPodStore.getState().adoptSavedDisplayName();
+      // Reach guard: the seed really did land, so the assertion after the
+      // resume is measuring an overwrite rather than a seed that never ran.
+      expect(useDraftPodStore.getState().hostDisplayName).toBe("Alice");
+
+      await expect(useDraftPodStore.getState().resumeHostedPod()).resolves.toBe("resumed");
+
+      expect(useDraftPodStore.getState().hostDisplayName).toBe(persistedSession.hostDisplayName);
+    });
+
+    it("reads the identity at call time, not at store creation", () => {
+      // The name is editable — `PlayerIdentityBanner`, and Preferences →
+      // Multiplayer — long after this module is evaluated. Discriminates a
+      // seed captured into `initialState`.
+      mocks.multiplayerConfig.displayName = "Renamed After Load";
+
+      useDraftPodStore.getState().adoptSavedDisplayName();
+
+      expect(useDraftPodStore.getState().hostDisplayName).toBe("Renamed After Load");
     });
   });
 });

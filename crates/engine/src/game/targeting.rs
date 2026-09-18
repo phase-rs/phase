@@ -24,6 +24,17 @@ pub fn find_legal_targets(
     find_legal_targets_with_context(state, filter, source_controller, source_id, &target_ctx)
 }
 
+pub fn has_legal_target(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    let target_ctx =
+        super::filter::FilterContext::from_source_with_controller(source_id, source_controller);
+    has_legal_target_with_context(state, filter, source_controller, source_id, &target_ctx)
+}
+
 pub(crate) fn find_legal_targets_for_ability(
     state: &GameState,
     filter: &TargetFilter,
@@ -260,7 +271,7 @@ fn find_legal_targets_with_context(
         TargetFilter::Typed(tf)
             if tf.type_filters.is_empty()
                 && tf.controller.is_none()
-                && tf.properties.iter().any(|p| matches!(p, FilterProp::Another))
+                && tf.properties.as_slice() == [FilterProp::Another]
     );
 
     // Check if filter could match players
@@ -4478,7 +4489,7 @@ mod tests {
     }
 
     #[test]
-    fn find_legal_targets_any_returns_creatures_and_players() {
+    fn find_legal_targets_any_returns_all_objects_and_players() {
         let (state, c0, c1, land) = setup_with_typed_creatures();
         let targets = find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(c0)));
@@ -4486,6 +4497,258 @@ mod tests {
         assert!(targets.contains(&TargetRef::Object(land)));
         assert!(targets.contains(&TargetRef::Player(PlayerId(0))));
         assert!(targets.contains(&TargetRef::Player(PlayerId(1))));
+        assert_eq!(targets.len(), 5); // 2 creatures + 1 land + 2 players
+    }
+
+    #[test]
+    fn find_legal_targets_any_and_another_returns_all_battlefield_objects_and_players() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let planeswalker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Jace".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&planeswalker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Planeswalker);
+
+        let battle = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Invasion of Gobakhan".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&battle)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Battle);
+
+        let land = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Island".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let artifact = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(1),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let enchantment = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(1),
+            "Blood Moon".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&enchantment)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+
+        let source = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Test TargetFilter::Any: includes all battlefield objects + all players
+        let any_targets = find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), source);
+        assert!(any_targets.contains(&TargetRef::Player(PlayerId(0))));
+        assert!(any_targets.contains(&TargetRef::Player(PlayerId(1))));
+        assert!(any_targets.contains(&TargetRef::Object(creature)));
+        assert!(any_targets.contains(&TargetRef::Object(planeswalker)));
+        assert!(any_targets.contains(&TargetRef::Object(battle)));
+        assert!(any_targets.contains(&TargetRef::Object(land)));
+        assert!(any_targets.contains(&TargetRef::Object(artifact)));
+        assert!(any_targets.contains(&TargetRef::Object(enchantment)));
+        assert!(any_targets.contains(&TargetRef::Object(source)));
+        assert_eq!(any_targets.len(), 9); // 2 players + 7 battlefield permanents
+
+        // Test "any other target" (TypedFilter with FilterProp::Another and empty type_filters):
+        // includes all battlefield objects except source + all players
+        let other_filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another]));
+        let other_targets = find_legal_targets(&state, &other_filter, PlayerId(0), source);
+        assert!(other_targets.contains(&TargetRef::Player(PlayerId(0))));
+        assert!(other_targets.contains(&TargetRef::Player(PlayerId(1))));
+        assert!(other_targets.contains(&TargetRef::Object(creature)));
+        assert!(other_targets.contains(&TargetRef::Object(planeswalker)));
+        assert!(other_targets.contains(&TargetRef::Object(battle)));
+        assert!(other_targets.contains(&TargetRef::Object(land)));
+        assert!(other_targets.contains(&TargetRef::Object(artifact)));
+        assert!(other_targets.contains(&TargetRef::Object(enchantment)));
+        assert!(!other_targets.contains(&TargetRef::Object(source)));
+        assert_eq!(other_targets.len(), 8);
+    }
+
+    #[test]
+    fn find_legal_targets_another_token_does_not_gain_player_and_includes_noncreature_token() {
+        let mut state = GameState::new_two_player(42);
+        let source_token = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source_token).unwrap().is_token = true;
+        state
+            .objects
+            .get_mut(&source_token)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let treasure_token = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Treasure Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&treasure_token).unwrap().is_token = true;
+        state
+            .objects
+            .get_mut(&treasure_token)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let nontoken_artifact = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&nontoken_artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        // Filter: "another target token" -> TypedFilter with properties [Another, Token]
+        let another_token_filter = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::Another, FilterProp::Token]),
+        );
+
+        let targets = find_legal_targets(&state, &another_token_filter, PlayerId(0), source_token);
+
+        // Players must NOT be legal targets for "another target token"
+        assert!(!targets.contains(&TargetRef::Player(PlayerId(0))));
+        assert!(!targets.contains(&TargetRef::Player(PlayerId(1))));
+
+        // Noncreature token (Treasure) must be a legal target
+        assert!(targets.contains(&TargetRef::Object(treasure_token)));
+
+        // The source token itself must be excluded by Another
+        assert!(!targets.contains(&TargetRef::Object(source_token)));
+
+        // Nontoken must be excluded by Token
+        assert!(!targets.contains(&TargetRef::Object(nontoken_artifact)));
+
+        assert_eq!(targets, vec![TargetRef::Object(treasure_token)]);
+
+        // Test has_legal_target
+        assert!(has_legal_target(
+            &state,
+            &another_token_filter,
+            PlayerId(0),
+            source_token
+        ));
+    }
+
+    #[test]
+    fn has_legal_target_cr_115_4_restrictions() {
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Island".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Consume Spirit".to_string(),
+            Zone::Battlefield,
+        );
+
+        // When players are legal targets, Any / Another has legal target
+        assert!(has_legal_target(
+            &state,
+            &TargetFilter::Any,
+            PlayerId(0),
+            source
+        ));
+
+        let other_filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another]));
+        assert!(has_legal_target(&state, &other_filter, PlayerId(0), source));
     }
 
     #[test]

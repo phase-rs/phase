@@ -5,7 +5,7 @@ import pathlib
 root = pathlib.Path(__file__).resolve().parents[1] / "crates" / "engine"
 marker = "CastingPermission::PlayFromExile {"
 insert_lines = (
-    "cast_cost_raise: None,\n"
+    "cast_cost_modifier: None,\n"
     "land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,\n"
 )
 
@@ -34,7 +34,7 @@ for path in sorted(root.rglob("*.rs")):
             j += 1
         block = text[idx:j]
         inner = block[len(marker) : -1]
-        if "cast_cost_raise" not in block and ".." not in inner:
+        if "cast_cost_modifier" not in block and ".." not in inner:
             indent = "            "
             for line in block.splitlines():
                 m = re.match(r"^(\s*)single_use:", line)

@@ -4223,29 +4223,63 @@ mod tests {
     #[test]
     fn sba_phased_out_fortification_with_illegal_host_is_skipped() {
         // CR 702.26b: a phased-out Fortification is treated as though it
-        // doesn't exist, so the SBA must not touch it even though its host
-        // has left the battlefield — direct analog of the phased-out
-        // Equipment guard implied by `battlefield_phased_in_ids` filtering.
+        // doesn't exist, so the SBA must not touch it even though its host is
+        // an illegal one — direct analog of the phased-out Equipment guard
+        // implied by `battlefield_phased_in_ids` filtering.
+        //
+        // The illegal host here is a creature that is NOT a land: CR 301.6
+        // requires a Fortification's host to be a land, so this fails
+        // `is_valid_attachment_target` while both permanents stay put. Host
+        // EXIT is deliberately not the vehicle — `zones::move_to_zone` now
+        // severs the attachment graph itself per CR 702.26i, so a departing
+        // host would clear the pointer before this SBA ever ran and the
+        // assertion would no longer be about the SBA at all.
         let mut state = setup();
-        let land = create_land(&mut state, CardId(1), PlayerId(0), "Forest");
+        let host = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
         let fort = create_fortification(&mut state, CardId(2), PlayerId(0), "Darksteel Garrison");
         {
             let obj = state.objects.get_mut(&fort).unwrap();
-            obj.attached_to = Some(land.into());
+            obj.attached_to = Some(host.into());
             obj.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
                 cause: crate::game::game_object::PhaseOutCause::Directly,
             };
         }
-        state.objects.get_mut(&land).unwrap().attachments.push(fort);
-        zones::move_to_zone(&mut state, land, Zone::Graveyard, &mut Vec::new());
+        state.objects.get_mut(&host).unwrap().attachments.push(fort);
 
         let mut events = Vec::new();
         check_state_based_actions(&mut state, &mut events);
 
         assert_eq!(
             state.objects.get(&fort).unwrap().attached_to,
-            Some(land.into()),
+            Some(host.into()),
             "a phased-out Fortification is skipped by the SBA re-check"
+        );
+    }
+
+    #[test]
+    fn sba_phased_in_fortification_with_illegal_host_is_unattached() {
+        // Reach guard for the test above: the ONLY thing keeping that
+        // Fortification attached is its phased-out status. With the identical
+        // illegal host and the attachment phased in, CR 704.5n unattaches it —
+        // proving the SBA genuinely reaches this shape and the phased-out
+        // assertion is not passing for some unrelated reason.
+        let mut state = setup();
+        let host = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let fort = create_fortification(&mut state, CardId(2), PlayerId(0), "Darksteel Garrison");
+        state.objects.get_mut(&fort).unwrap().attached_to = Some(host.into());
+        state.objects.get_mut(&host).unwrap().attachments.push(fort);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects.get(&fort).unwrap().attached_to,
+            None,
+            "CR 704.5n: a phased-in Fortification on a non-land host unattaches"
+        );
+        assert!(
+            state.battlefield.contains(&fort),
+            "CR 704.5n: it remains on the battlefield"
         );
     }
 

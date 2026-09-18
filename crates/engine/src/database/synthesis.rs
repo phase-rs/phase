@@ -6714,6 +6714,7 @@ fn build_suspend_last_counter_cast_trigger() -> TriggerDefinition {
             driver: CastFromZoneDriver::DuringResolution,
             mana_spend_permission: None,
             additional_cost: None,
+            cast_cost_modifier: None,
         },
     )
     .optional();
@@ -9978,6 +9979,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
         )
         .optional();

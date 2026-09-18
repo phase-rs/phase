@@ -424,6 +424,7 @@ mod tests {
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
                 mana_spend_permission: None,
+                cast_cost_modifier: None,
             },
         );
         let play_grant = exiled(
@@ -441,7 +442,7 @@ mod tests {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: EtbTapState::Unspecified,
             },
@@ -456,6 +457,7 @@ mod tests {
                 granted_to: Some(PlayerId(0)),
                 duration: Some(Duration::UntilSourceExilesAnotherCard),
                 source_id: Some(source),
+                cast_cost_modifier: None,
             },
         );
         let foreign = exiled(
@@ -473,6 +475,7 @@ mod tests {
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
                 mana_spend_permission: None,
+                cast_cost_modifier: None,
             },
         );
 
@@ -616,7 +619,7 @@ mod tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: None,
             land_enter_tapped: EtbTapState::Unspecified,
             invalidation: None,
@@ -786,6 +789,7 @@ mod tests {
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             ObjectId(1),

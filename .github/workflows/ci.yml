@@ -158,11 +158,22 @@ jobs:
         # while only the .deb side was current.
         run: python3 scripts/check_media_plugin_packaging.py
 
+      - name: Desktop platform mapping checker unit tests
+        # Exercises the checker against throwaway trees only; it does not read
+        # this repository's own files. The direction that matters is refusal: an
+        # unreadable matrix reads as an empty published set, and the empty set is
+        # a subset of any mapping, so a checker that understood nothing would
+        # report a clean pass.
+        run: python3 scripts/check_shell_platform_mapping_tests.py
+
       - name: Desktop platform mapping coverage
-        # Every platform shell-release.yml's build-shell matrix publishes must
-        # have a native_engine.rs SERVER_TARGET_TRIPLES entry, or that desktop
-        # ships unable to fetch an engine. The Rust-side test pins the pairs it
-        # expects and cannot see the matrix grow past them; this reads both files.
+        # Two directions across three files. Every platform shell-release.yml's
+        # build-shell matrix publishes must be a native_engine.rs ServerPlatform
+        # variant, or that desktop ships unable to fetch an engine; and every
+        # triple that enum resolves must reach release.yml signed, with both the
+        # binary and its signature attached, or the desktop's download 404s on
+        # whichever half is missing. The Rust-side test pins the pairs it expects
+        # and cannot see either set grow past them.
         run: python3 scripts/check_shell_platform_mapping.py
 
       - name: Resolution-frame boundary guard
@@ -832,22 +843,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 9.15.9
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
           cache-dependency-path: client/pnpm-lock.yaml
 
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: temurin
           java-version: 17
@@ -863,7 +874,7 @@ jobs:
           # the fix rather than a version bump — v4.0.1 ships the same default.
           packages: platform-tools
 
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           target: aarch64-linux-android
           cache-shared-key: rust-tauri-android-arm64
@@ -930,7 +941,7 @@ jobs:
           cp "$APK" Phase-Android-ARM64-debug.apk
 
       - name: Upload inspected Android debug APK
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: phase-android-arm64-debug
           path: Phase-Android-ARM64-debug.apk

@@ -25,7 +25,35 @@ pub(super) fn cancel_pending_cast(
             "Cannot cancel an activation after a cost is paid".to_string(),
         ));
     }
+    // CR 601.2: if a player cannot comply with a casting step, that illegal
+    // cast returns to the moment before the spell was proposed. This rules
+    // note covers only that incomplete-casting rollback fact.
+    //
+    // Capture and consume the exact resolution-owned grant before generic
+    // rollback removes the placeholder stack entry.  A normal pending cast
+    // has no such cleanup and retains the historical Priority result; a
+    // resolution cast must instead dispose of its offered card/misses and
+    // resume the parked parent exactly once.
+    let resolution_cleanup = match pending_cast.casting_permission_index {
+        Some(index) => casting::take_resolution_cast_cleanup(
+            state,
+            player,
+            pending_cast.object_id,
+            pending_cast.card_id,
+            index,
+        )?,
+        None => None,
+    };
     casting::handle_cancel_cast(state, pending_cast, events);
+    if let Some(cleanup) = resolution_cleanup {
+        return super::engine_resolution_choices::abort_resolution_cast(
+            state,
+            player,
+            pending_cast.object_id,
+            cleanup,
+            events,
+        );
+    }
     Ok(WaitingFor::Priority { player })
 }
 
@@ -393,11 +421,15 @@ pub(super) fn handle_collect_evidence_cancel(
     player: PlayerId,
     resume: &CollectEvidenceResume,
     events: &mut Vec<GameEvent>,
-) -> WaitingFor {
+) -> Result<WaitingFor, EngineError> {
     if let CollectEvidenceResume::Casting { pending_cast, .. } = resume {
-        casting::handle_cancel_cast(state, pending_cast, events);
+        let pending_cast = state
+            .pending_cast
+            .take()
+            .unwrap_or_else(|| pending_cast.clone());
+        return cancel_pending_cast(state, player, &pending_cast, events);
     }
-    WaitingFor::Priority { player }
+    Ok(WaitingFor::Priority { player })
 }
 
 pub(super) fn handle_harmonize_tap_choice(

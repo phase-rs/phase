@@ -23,6 +23,7 @@ use crate::parser::oracle_ir::effect_chain::{
 };
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::target::chain_text_mentions_chosen_object;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     CastFromZoneDriver, CastingPermission, ChoiceType, Comparator, ControllerRef, DamageChannel,
@@ -37,12 +38,14 @@ use super::lower::{
     append_remember_card_to_standalone_exiled_choice, apply_where_x_ability_expression,
     apply_where_x_to_latest_def, attach_alt_ability_cost_to_previous_play_from_exile,
     attach_any_color_mana_rider_to_previous_play_from_exile,
-    attach_cast_cost_raise_to_previous_play_from_exile,
+    attach_cast_cost_modifier_to_previous_play_from_exile,
+    attach_cast_cost_modifier_to_prior_cast_from_zone,
     attach_graveyard_redirect_rider_to_prior_cast_from_zone,
     attach_graveyard_redirect_rider_to_prior_free_cast_from_zones,
-    attach_land_enters_tapped_to_previous_play_from_exile, cast_cost_raise_rider,
-    clone_would_transplant_gated_referent, consolidate_die_and_coin_defs,
-    definition_targets_self_source, effect_publishes_revealed_subject,
+    attach_land_enters_tapped_to_previous_play_from_exile, cast_cost_modifier_rider,
+    chain_references_chosen_card, clone_would_transplant_gated_referent,
+    consolidate_die_and_coin_defs, definition_targets_self_source,
+    effect_publishes_revealed_subject, ensure_remember_card_after_object_choice,
     extract_bounded_target_multi_target, extract_exact_target_multi_target,
     extract_optional_target_multi_target, extract_verb_up_to_multi_target,
     fold_copy_spell_gains_haste_and_quoted_grant,
@@ -2390,18 +2393,40 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             }
         }
 
-        // CR 601.2f + CR 614.1c: Lightstall Inquisitor's "Each spell cast this
-        // way costs {1} more to cast." / "Each land played this way enters
-        // tapped." rider sentences scope to the preceding `PlayFromExile`
-        // grant. Fold each into the grant (`cast_cost_raise` /
-        // `land_enter_tapped`) instead of emitting a standalone cost-modify
-        // static or board-wide ETB-tapped replacement — "this way" binds them
-        // to the exile-play permission, not to all spells/lands.
-        if let Some(cost) = cast_cost_raise_rider(clause_ir) {
-            if attach_cast_cost_raise_to_previous_play_from_exile(&mut defs, cost) {
+        // CR 601.2f + CR 608.2c + CR 614.1c: "Each spell cast this way costs {1}
+        // more to cast." (Lightstall Inquisitor), "Spells you cast this way cost
+        // {2} less to cast." (Urianger Augurelt), and "Each land played this way
+        // enters tapped." are rider sentences scoped by "this way" to the
+        // immediately-preceding grant. Fold each into that grant
+        // (`cast_cost_modifier` / `land_enter_tapped`) instead of emitting a
+        // standalone cost-modify static or board-wide ETB-tapped replacement.
+        //
+        // The cost rider has two hosts. A prior `Effect::CastFromZone` is tried
+        // first: it is the instruction that states the rider, and its resolver
+        // decides which of the permissions it builds may carry it (CR 305.1 —
+        // never the land-play companion). A prior `PlayFromExile` grant is the
+        // fallback for the class whose permission is built by the parser.
+        //
+        // When NEITHER host can carry it — no grant precedes the rider, or the
+        // one that does is on a `CastFromZone` driver with no cost-modifier slot
+        // — the rider must not lower as a clause of its own. Its own grammar
+        // ("[each/a] spell cast this way costs …") reads to the generic head
+        // dispatch as a cast instruction, so the fall-through produced a bare
+        // `Effect::CastFromZone` over every card, and at the line-classification
+        // layer a board-wide `StaticMode::ModifyCost` that prices EVERY spell
+        // its controller casts — both counted as supported by `cargo coverage`.
+        // Refuse instead: one honest gap, priced at nothing, counted as red.
+        let mut unabsorbed_rider_gap = None;
+        if let Some(modifier) = cast_cost_modifier_rider(clause_ir) {
+            if attach_cast_cost_modifier_to_prior_cast_from_zone(&mut defs, modifier.clone()) {
                 prev_boundary = clause_ir.boundary;
                 continue;
             }
+            if attach_cast_cost_modifier_to_previous_play_from_exile(&mut defs, modifier.clone()) {
+                prev_boundary = clause_ir.boundary;
+                continue;
+            }
+            unabsorbed_rider_gap = Some(cast_cost_modifier_without_host_gap(&modifier));
         }
         if is_land_enters_tapped_rider(clause_ir)
             && attach_land_enters_tapped_to_previous_play_from_exile(&mut defs)
@@ -2419,8 +2444,12 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         }
 
         // ── Build AbilityDefinition from ClauseIr ──
-        let is_target_only = matches!(clause_ir.parsed.effect, Effect::TargetOnly { .. });
-        let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+        // The refused rider above substitutes its gap for this clause's lowered
+        // effect, so it travels the ordinary def-construction path (boundary
+        // link, condition, provenance) rather than a bespoke emit.
+        let clause_effect = unabsorbed_rider_gap.unwrap_or_else(|| clause_ir.parsed.effect.clone());
+        let is_target_only = matches!(clause_effect, Effect::TargetOnly { .. });
+        let mut def = AbilityDefinition::new(kind, clause_effect);
         // CR 702.26a: Preserve clause provenance on parent-target tap riders so
         // host-bound phase-in rewrites can match the exact printed phrase without
         // falling back to whole-trigger text.
@@ -3681,6 +3710,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // CR 601.2c + CR 608.2c: suppress a reflexive-target rider when the optional
     // "up to one" antecedent target is declined (no object target chosen).
     gate_reflexive_rider_on_declined_optional_target(&mut result);
+    // CR 607.2d + CR 608.2c: a standalone battlefield-object choice whose chain
+    // reads the pick persists it (`RememberCard`) — or, when the reader text
+    // belongs to a non-object axis (Gideon's Sacrifice), is restored to its
+    // pre-phase-2 `TargetOnly` shape. See `reconcile_object_choice_durability`.
+    reconcile_object_choice_durability(&mut result, ir);
     // CR 608.2c + CR 613.1f: persist a standalone "choose a [type] card exiled
     // with ~" pick as the host's last chosen card (Koh, the Face Stealer).
     append_remember_card_to_standalone_exiled_choice(&mut result);
@@ -3814,6 +3848,71 @@ fn same_revealed_card_type_condition(
     positive_types == negated_types
         && positive_filter == negated_filter
         && positive_subtype == negated_subtype
+}
+
+/// CR 607.2d + CR 608.2c: The durability transaction for a standalone,
+/// non-target battlefield-object choice head.
+///
+/// Gate A (in `imperative.rs`) only fires when the choose chunk leads the chain,
+/// so a Gate-A-produced head is always `result.effect` — but assembly must be
+/// able to recognize that provenance from the IR alone (the frozen scope rule
+/// forbids adding a marker field to `ParsedEffectClause`). It reconstructs the
+/// Gate-A consideration set from two facts:
+///
+/// * the HEAD-shape fact — the head clause fragment passes the same shared core
+///   Gate A used (`is_standalone_object_choice_clause`, chain context absent);
+/// * the READER-TEXT fact — some clause fragment mentions a "the chosen
+///   ‹battlefield object›" reader (`chain_text_mentions_chosen_object`).
+///
+/// The reader-text conjunct is MANDATORY, not belt-and-braces: the base corpus
+/// has nine root `ChooseObjectsIntoTrackedSet` cards, and without it the
+/// choose-up-to family (Duneblast, Mount Doom, The Day of the Doctor — all
+/// `supported: true`) would be downgraded by the restore arm below even though
+/// their chains contain no ChosenCard reader. Measured: with the conjunct the
+/// only candidates are Zenos yae Galvus and Gideon's Sacrifice.
+///
+/// The SEMANTIC authority is the explicit tree walk
+/// (`chain_references_chosen_card`), never the text scan: a present reader
+/// splices the `RememberCard` writer; a text-only reader (Gideon's
+/// "the chosen permanent" belongs to a damage-redirect axis, not the
+/// remembered-object reader) restores the pre-phase-2 `TargetOnly` shape so the
+/// card's parse is byte-identical to base.
+fn reconcile_object_choice_durability(result: &mut AbilityDefinition, ir: &EffectChainIr) {
+    if !matches!(&*result.effect, Effect::ChooseObjectsIntoTrackedSet { .. }) {
+        return;
+    }
+    let Some(head_fragment) = ir
+        .clauses
+        .first()
+        .and_then(|clause| clause.source.fragment())
+    else {
+        return;
+    };
+    if !super::imperative::is_standalone_object_choice_clause(head_fragment) {
+        return;
+    }
+    let chain_has_reader_text = ir
+        .clauses
+        .iter()
+        .filter_map(|clause| clause.source.fragment())
+        .any(|fragment| chain_text_mentions_chosen_object(&fragment.to_lowercase()));
+    if !chain_has_reader_text {
+        return;
+    }
+    if chain_references_chosen_card(result) {
+        // CR 607.2d + CR 608.2c: the chain reads the pick — make it durable.
+        ensure_remember_card_after_object_choice(result);
+    } else {
+        // CR 115.1 + CR 608.2d: reader TEXT but no remembered-object reader in
+        // the tree (Gideon's Sacrifice: "the chosen permanent" is a redirect
+        // axis). Restore the pre-phase-2 standalone non-targeting shape.
+        let Effect::ChooseObjectsIntoTrackedSet { filter, .. } = &*result.effect else {
+            return;
+        };
+        *result.effect = Effect::TargetOnly {
+            target: filter.clone(),
+        };
+    }
 }
 
 /// R2 — CR 608.2c + CR 401.4: linked-exile-cast bottom cleanup.

@@ -409,7 +409,7 @@ fn priority_land_play_omits_an_exile_land_blocked_by_a_play_restriction() {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
@@ -1704,7 +1704,10 @@ fn worldsouls_rage_offered_x_is_payable_with_an_unchosen_citadel_copy() {
         WaitingFor::ChooseXValue { max, .. } => max,
         other => panic!("expected X choice before target selection, got {other:?}"),
     };
-    assert_eq!(max, 6, "the unchosen Citadel copy produces no mana, so eight basics must cap {{X}}{{R}}{{G}} at X=6");
+    assert_eq!(
+        max, 6,
+        "the unchosen Citadel copy produces no mana, so eight basics must cap {{X}}{{R}}{{G}} at X=6"
+    );
 
     let after_x = apply_as_current(&mut state, GameAction::ChooseX { value: max })
         .expect("the offered maximum X must remain castable");
@@ -1915,7 +1918,7 @@ fn spell_auto_tap_honors_exile_any_color_permission() {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
@@ -1978,7 +1981,7 @@ fn add_play_from_exile_test_spell(
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
@@ -2270,7 +2273,7 @@ fn cast_permanent_from_granted_permission_enters_under_caster_control() {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
@@ -2323,7 +2326,7 @@ fn play_land_from_granted_permission_enters_under_player_control() {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
@@ -2631,6 +2634,139 @@ fn normal_option_offered(set: &CastingVariantChoiceSet) -> bool {
     set.options
         .iter()
         .any(|o| o.variant == CastingVariant::Normal)
+}
+
+/// An ordinary cast skips the variant menu, but its direct preparation still
+/// accepts only the object's already-active `Current` face.
+#[test]
+fn ordinary_cast_preparation_accepts_only_current_face() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::types::game_state::CastingVariantFace;
+
+    let db = crate::test_support::shared_card_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    add_mana(&mut scenario.state, P0, ManaType::Red, 1);
+
+    let current = prepare_casting_variant_on_face(
+        &scenario.state,
+        P0,
+        bolt,
+        CastingVariant::Normal,
+        CastingVariantFace::Current,
+        CastingMode::Actual,
+    )
+    .expect("ordinary casts must accept their explicit Current face");
+    assert_eq!(current.prepared.casting_variant, CastingVariant::Normal);
+    assert!(can_cast_object_now(&scenario.state, P0, bolt));
+    for face in [CastingVariantFace::Left, CastingVariantFace::Right] {
+        assert!(
+            prepare_casting_variant_on_face(
+                &scenario.state,
+                P0,
+                bolt,
+                CastingVariant::Normal,
+                face,
+                CastingMode::Actual,
+            )
+            .is_err(),
+            "ordinary casts must reject the split-only {face:?} selector"
+        );
+    }
+}
+
+/// Fuse exposes two `Normal` choices. Selection is therefore the entire
+/// `(index, variant, face, cost)` tuple: a stale right-half option carrying the
+/// left-half cost must be refused rather than silently choosing either Normal.
+#[test]
+fn fuse_variant_selection_requires_the_fresh_full_tuple_and_exact_right_index() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::types::game_state::CastingVariantFace;
+
+    let db = crate::test_support::shared_card_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let breaking = scenario.add_real_card(P0, "Breaking", Zone::Hand, db);
+    fill_mana_for_fused_cast(&mut scenario, P0);
+    let card_id = scenario.state.objects[&breaking].card_id;
+    let options = casting_variant_choice_set(&scenario.state, P0, breaking, None).options;
+
+    assert_eq!(
+        options
+            .iter()
+            .map(|option| (option.variant, option.face, option.mana_cost.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                CastingVariant::Normal,
+                CastingVariantFace::Left,
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue, ManaCostShard::Black],
+                    generic: 0,
+                },
+            ),
+            (
+                CastingVariant::Normal,
+                CastingVariantFace::Right,
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::Black, ManaCostShard::Red],
+                    generic: 4,
+                },
+            ),
+            (
+                CastingVariant::Fuse,
+                CastingVariantFace::Left,
+                ManaCost::Cost {
+                    shards: vec![
+                        ManaCostShard::Blue,
+                        ManaCostShard::Black,
+                        ManaCostShard::Black,
+                        ManaCostShard::Red,
+                    ],
+                    generic: 4,
+                },
+            ),
+        ],
+        "the two Normal entries are disambiguated by their faces and costs"
+    );
+
+    let right_index = options
+        .iter()
+        .position(|option| {
+            option.variant == CastingVariant::Normal && option.face == CastingVariantFace::Right
+        })
+        .expect("the right normal half has one exact option index");
+    let mut stale_options = options.clone();
+    stale_options[right_index].mana_cost = stale_options[0].mana_cost.clone();
+    let mut stale_state = scenario.state.clone();
+    let stale = handle_casting_variant_choice(
+        &mut stale_state,
+        P0,
+        breaking,
+        card_id,
+        &stale_options,
+        right_index,
+        &mut Vec::new(),
+    )
+    .expect_err("a stale option must not be matched by variant alone");
+    assert!(matches!(stale, EngineError::ActionNotAllowed(_)));
+
+    let mut selected_state = scenario.state.clone();
+    handle_casting_variant_choice(
+        &mut selected_state,
+        P0,
+        breaking,
+        card_id,
+        &options,
+        right_index,
+        &mut Vec::new(),
+    )
+    .expect("the exact right-half tuple should enter the normal cast pipeline");
+    assert_eq!(selected_state.objects[&breaking].name, "Entering");
+    assert!(selected_state.objects[&breaking].cast_face_committed);
 }
 
 /// Test 1 (prohibition / per-turn-limit path). A `PerTurnCastLimit { max: 0,
@@ -2972,21 +3108,15 @@ fn non_fuse_alt_cost_candidate_enumeration_uses_front_half() {
     );
 }
 
-/// Regression: a fusable split card in hand under an ACTIVE Unlimited free-cast
-/// permission (Omniscience) must offer EXACTLY ONE `Normal` option. The Fuse
-/// block pushes `Normal` (front-half printed) and the Omniscience block also
-/// pushes `Normal`; those two pushes are NON-adjacent (Fuse + HandPermission sit
-/// between them), and `casting_variant_choice_set` dedups with consecutive-only
-/// `Vec::dedup` (no preceding sort), so before the guard both identical `Normal`
-/// options survived — a malformed "two Cast Normally buttons" menu. The
-/// `!has_fuse_candidate` guard on the Omniscience-block push suppresses the
-/// duplicate. This asserts `count() == 1` (not `>= 1`), so it fails on the
-/// unfixed code (count 2) and passes after the guard; the `HandPermission` and
-/// `Fuse` presence checks prove the guard didn't drop the free or fused options.
+/// Regression: a fusable split card in hand under Omniscience keeps every
+/// independently legal spell face. In particular, the free permission cannot
+/// disappear when Fuse expands the normal rows, and selecting either free half
+/// must commit precisely that half.
 #[test]
-fn fuse_split_under_unlimited_free_cast_offers_single_normal_option() {
+fn fuse_split_under_omniscience_keeps_normal_fuse_and_free_half_rows() {
     use crate::game::scenario::{GameScenario, P0};
     use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::types::game_state::CastingVariantFace;
 
     let db = crate::test_support::shared_card_db();
 
@@ -3009,32 +3139,74 @@ fn fuse_split_under_unlimited_free_cast_offers_single_normal_option() {
             .expect("Omniscience static should parse"),
     );
 
-    let set = casting_variant_choice_set(&sc.state, P0, breaking, None);
-    let variants: Vec<CastingVariant> = set.options.iter().map(|o| o.variant).collect();
-
-    let normal_count = set
-        .options
+    let options = casting_variant_choice_set(&sc.state, P0, breaking, None).options;
+    let rows: Vec<_> = options
         .iter()
-        .filter(|o| o.variant == CastingVariant::Normal)
-        .count();
-    assert_eq!(
-        normal_count, 1,
-        "a fusable split card under an Unlimited free-cast permission must offer EXACTLY ONE \
-         Normal option; the non-adjacent Fuse-block + Omniscience-block Normal pushes survive \
-         consecutive-only dedup without the guard. Offered: {variants:?}"
+        .map(|option| (option.variant, option.face, option.mana_cost.clone()))
+        .collect();
+
+    assert!(
+        rows.iter().any(|(variant, face, _)| {
+            *variant == CastingVariant::Normal && *face == CastingVariantFace::Left
+        }) && rows.iter().any(|(variant, face, _)| {
+            *variant == CastingVariant::Normal && *face == CastingVariantFace::Right
+        }) && rows.iter().any(|(variant, face, _)| {
+            *variant == CastingVariant::Fuse && *face == CastingVariantFace::Left
+        }),
+        "the ordinary left/right and fused rows must remain available: {rows:?}"
+    );
+    let free_left = options
+        .iter()
+        .position(|option| {
+            matches!(option.variant, CastingVariant::HandPermission { .. })
+                && option.face == CastingVariantFace::Left
+                && option.mana_cost == ManaCost::NoCost
+        })
+        .expect("Omniscience must offer a free left-half cast");
+    let free_right = options
+        .iter()
+        .position(|option| {
+            matches!(option.variant, CastingVariant::HandPermission { .. })
+                && option.face == CastingVariantFace::Right
+                && option.mana_cost == ManaCost::NoCost
+        })
+        .expect("Omniscience may cast the independently castable right half for free");
+
+    let card_id = sc.state.objects[&breaking].card_id;
+    let mut left_state = sc.state.clone();
+    let left_waiting = handle_casting_variant_choice(
+        &mut left_state,
+        P0,
+        breaking,
+        card_id,
+        &options,
+        free_left,
+        &mut Vec::new(),
+    )
+    .expect("the offered free left-half choice must commit");
+    assert_eq!(left_state.objects[&breaking].name, "Breaking");
+    assert!(
+        left_state.objects[&breaking].cast_face_committed,
+        "the elected left split face must be committed before cast preparation"
     );
     assert!(
-        set.options
-            .iter()
-            .any(|o| matches!(o.variant, CastingVariant::HandPermission { .. })),
-        "the free HandPermission option must still be offered. Offered: {variants:?}"
+        !matches!(left_waiting, WaitingFor::ManaPayment { .. }),
+        "a HandPermission cast pays no mana"
     );
-    assert!(
-        set.options
-            .iter()
-            .any(|o| o.variant == CastingVariant::Fuse),
-        "the Fuse option must still be offered — the guard must not drop it. Offered: {variants:?}"
-    );
+
+    let mut right_state = sc.state.clone();
+    handle_casting_variant_choice(
+        &mut right_state,
+        P0,
+        breaking,
+        card_id,
+        &options,
+        free_right,
+        &mut Vec::new(),
+    )
+    .expect("the offered free right-half choice must commit exactly once");
+    assert_eq!(right_state.objects[&breaking].name, "Entering");
+    assert!(right_state.objects[&breaking].cast_face_committed);
 }
 
 #[test]
@@ -3096,6 +3268,7 @@ fn foretell_cast_does_not_inherit_sibling_alt_cost_or_spend_rider() {
                 mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
+                cast_cost_modifier: None,
             });
     }
 
@@ -3769,6 +3942,7 @@ fn exile_with_alt_cost_zero_uses_no_cost_path() {
             mana_spend_permission: None,
             enters_with_counter: None,
             enters_with_modifications: Vec::new(),
+            cast_cost_modifier: None,
         });
     let prepared = prepare_spell_cast(&state, PlayerId(0), exiled).unwrap();
     assert!(matches!(prepared.mana_cost, ManaCost::NoCost));
@@ -10698,6 +10872,7 @@ fn jhoira_granted_suspend_last_counter_cast_tags_suspend_variant() {
             mana_spend_permission: None,
             additional_cost: None,
             driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(suspended)],
         suspended,
@@ -10827,6 +11002,7 @@ fn jhoira_granted_suspend_creature_cast_gains_haste() {
             mana_spend_permission: None,
             additional_cost: None,
             driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(suspended)],
         suspended,
@@ -11689,7 +11865,10 @@ fn undaunted_no_op_without_keyword() {
     );
 }
 
-fn play_from_exile_raise(granted_to: PlayerId, raise: Option<ManaCost>) -> CastingPermission {
+fn play_from_exile_raise(
+    granted_to: PlayerId,
+    modifier: Option<CastCostModifier>,
+) -> CastingPermission {
     CastingPermission::PlayFromExile {
         provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
         mode: crate::types::ability::CardPlayMode::Play,
@@ -11703,19 +11882,19 @@ fn play_from_exile_raise(granted_to: PlayerId, raise: Option<ManaCost>) -> Casti
         card_filter: None,
         single_use_group: None,
         single_use: false,
-        cast_cost_raise: raise,
+        cast_cost_modifier: modifier,
         alt_ability_cost: None,
         land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
     }
 }
 
 /// CR 601.2f: A spell cast via a `PlayFromExile` grant carrying
-/// `cast_cost_raise: Some({1})` (Lightstall Inquisitor: "Each spell cast this
+/// `cast_cost_modifier: Some({1})` (Lightstall Inquisitor: "Each spell cast this
 /// way costs {1} more to cast.") has its total cost raised by {1}: {6}{B}
 /// becomes {7}{B}. Reverting the `apply_non_floor_cost_modifiers` raise leaves
 /// generic at 6 and flips this assertion.
 #[test]
-fn play_from_exile_cast_cost_raise_increases_generic() {
+fn play_from_exile_cast_cost_modifier_increases_generic() {
     let mut state = setup_game_at_main_phase();
     let obj_id =
         create_black_sorcery_with_keywords(&mut state, 16012, "Exile-Play Spell", 6, Vec::new());
@@ -11723,10 +11902,10 @@ fn play_from_exile_cast_cost_raise_increases_generic() {
     obj.zone = Zone::Exile;
     obj.casting_permissions.push(play_from_exile_raise(
         PlayerId(0),
-        Some(ManaCost::Cost {
+        Some(CastCostModifier::raise(ManaCost::Cost {
             shards: vec![],
             generic: 1,
-        }),
+        })),
     ));
 
     let mut mana_cost = state.objects.get(&obj_id).unwrap().mana_cost.clone();
@@ -11744,7 +11923,7 @@ fn play_from_exile_cast_cost_raise_increases_generic() {
             shards: vec![ManaCostShard::Black],
             generic: 7,
         },
-        "the exile-play cast_cost_raise of {{1}} must raise {{6}}{{B}} to {{7}}{{B}}",
+        "the exile-play cast_cost_modifier of {{1}} must raise {{6}}{{B}} to {{7}}{{B}}",
     );
 }
 
@@ -11762,10 +11941,10 @@ fn gobakhan_play_from_exile_cost_raise_adds_two_generic() {
     obj.zone = Zone::Exile;
     obj.casting_permissions.push(play_from_exile_raise(
         PlayerId(0),
-        Some(ManaCost::Cost {
+        Some(CastCostModifier::raise(ManaCost::Cost {
             shards: vec![],
             generic: 2,
-        }),
+        })),
     ));
 
     let mut mana_cost = state.objects.get(&obj_id).unwrap().mana_cost.clone();
@@ -11789,7 +11968,7 @@ fn gobakhan_play_from_exile_cost_raise_adds_two_generic() {
 /// CR 601.2f + CR 611.2a: The raise is scoped to the grantee — a permission
 /// granted to a different player must not tax P0's cast.
 #[test]
-fn play_from_exile_cast_cost_raise_only_applies_to_grantee() {
+fn play_from_exile_cast_cost_modifier_only_applies_to_grantee() {
     let mut state = setup_game_at_main_phase();
     let obj_id =
         create_black_sorcery_with_keywords(&mut state, 16013, "Other-Grantee Spell", 6, Vec::new());
@@ -11797,10 +11976,10 @@ fn play_from_exile_cast_cost_raise_only_applies_to_grantee() {
     obj.zone = Zone::Exile;
     obj.casting_permissions.push(play_from_exile_raise(
         PlayerId(1),
-        Some(ManaCost::Cost {
+        Some(CastCostModifier::raise(ManaCost::Cost {
             shards: vec![],
             generic: 1,
-        }),
+        })),
     ));
 
     let mut mana_cost = state.objects.get(&obj_id).unwrap().mana_cost.clone();
@@ -11834,7 +12013,10 @@ fn elected_plain_play_from_exile_does_not_inherit_later_cost_raise() {
     obj.zone = Zone::Exile;
     obj.casting_permissions = vec![
         play_from_exile_raise(PlayerId(0), None),
-        play_from_exile_raise(PlayerId(0), Some(ManaCost::generic(3))),
+        play_from_exile_raise(
+            PlayerId(0),
+            Some(CastCostModifier::raise(ManaCost::generic(3))),
+        ),
     ];
 
     let prepared = prepare_spell_cast(&state, PlayerId(0), obj_id)
@@ -13848,6 +14030,7 @@ fn x_cost_alt_cost_max_and_charge_derive_from_alt_base() {
         PlayerId(0),
         spell,
         CastingVariant::Overload,
+        crate::types::game_state::CastingVariantFace::Current,
         CastPaymentMode::Auto,
         &mut events,
     )
@@ -19071,7 +19254,7 @@ fn cast_with_keyword_convoke_honors_from_exile_filter() {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
@@ -19175,7 +19358,7 @@ fn convoke_from_exile_stacks_with_red_spell_cost_reduction_on_hybrid_cost() {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
@@ -19350,7 +19533,7 @@ fn play_from_exile_grant_binds_to_grantee_and_carries_any_mana_permission() {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
@@ -19410,6 +19593,7 @@ fn cast_from_zone_exile_rider_exiles_graveyard_cast_on_resolution() {
             mana_spend_permission: None,
             additional_cost: None,
             driver: CastFromZoneDriver::LingeringPermission,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(instant)],
         ObjectId(9001),
@@ -19553,6 +19737,7 @@ fn cast_from_exile_library_bottom_rider_bottoms_resolved_spell() {
             mana_spend_permission: None,
             additional_cost: None,
             driver: CastFromZoneDriver::LingeringPermission,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(spell)],
         kylox,
@@ -19666,6 +19851,7 @@ fn graveyard_timed_alt_cost_grant_is_castable_in_place() {
             mana_spend_permission: None,
             additional_cost: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(bauble)],
         ObjectId(9001),
@@ -19724,7 +19910,7 @@ fn graveyard_timed_alt_cost_grant_omits_an_artifact_land_but_keeps_its_land_play
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
@@ -19759,6 +19945,7 @@ fn graveyard_timed_alt_cost_grant_omits_an_artifact_land_but_keeps_its_land_play
                 mana_spend_permission: None,
                 additional_cost: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(target)],
             source,
@@ -19863,6 +20050,7 @@ fn graveyard_in_place_alt_cost_grant_is_consumed_after_one_cast() {
                 mana_spend_permission: None,
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
+                cast_cost_modifier: None,
             });
     }
 
@@ -19970,6 +20158,7 @@ fn graveyard_cast_this_way_enters_with_finality_counter() {
             mana_spend_permission: None,
             additional_cost: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(creature)],
         ObjectId(9100),
@@ -20072,6 +20261,7 @@ fn graveyard_cast_without_rider_has_no_finality_counter() {
             mana_spend_permission: None,
             additional_cost: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(creature)],
         ObjectId(9101),
@@ -20175,6 +20365,7 @@ fn graveyard_cast_this_way_enters_with_type_grant_rider() {
             mana_spend_permission: None,
             additional_cost: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(creature)],
         ObjectId(9110),
@@ -20293,6 +20484,7 @@ fn graveyard_cast_without_type_rider_is_not_a_vampire() {
             mana_spend_permission: None,
             additional_cost: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(creature)],
         ObjectId(9111),
@@ -20381,6 +20573,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
                     mana_spend_permission: None,
                     enters_with_counter: rider_on_consumed.clone(),
                     enters_with_modifications: Vec::new(),
+                    cast_cost_modifier: None,
                 });
             // P2: foreign-granted (to the opponent) so it never supports
             // PlayerId(0)'s cast — it is the non-consumed sibling carrying the
@@ -20399,6 +20592,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
                     mana_spend_permission: None,
                     enters_with_counter: Some(CounterType::Finality),
                     enters_with_modifications: Vec::new(),
+                    cast_cost_modifier: None,
                 });
         }
 
@@ -20477,11 +20671,19 @@ fn exact_permission_does_not_inherit_sibling_etb_counter() {
                     resolution_cleanup: (index == 1).then(|| {
                         crate::types::ability::ResolutionCastCleanup {
                             source_id: creature,
+                            offer_id: None,
+                            face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                                TargetFilter::Any,
+                                creature,
+                                PlayerId(0),
+                                None,
+                            ),
                             exiled_misses: Vec::new(),
                             reject_action:
                                 crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                             success_action:
                                 crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                            delayed_trigger_receipts: Vec::new(),
                         }
                     }),
                     duration: Some(Duration::UntilEndOfTurn),
@@ -20489,6 +20691,7 @@ fn exact_permission_does_not_inherit_sibling_etb_counter() {
                     enters_with_counter,
                     enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
+                    cast_cost_modifier: None,
                 });
         }
     }
@@ -20563,11 +20766,19 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
                     resolution_cleanup: (index == 1).then(|| {
                         crate::types::ability::ResolutionCastCleanup {
                             source_id: creature,
+                            offer_id: None,
+                            face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                                TargetFilter::Any,
+                                creature,
+                                PlayerId(0),
+                                None,
+                            ),
                             exiled_misses: Vec::new(),
                             reject_action:
                                 crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                             success_action:
                                 crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                            delayed_trigger_receipts: Vec::new(),
                         }
                     }),
                     duration: Some(Duration::UntilEndOfTurn),
@@ -20575,6 +20786,7 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
                     enters_with_counter: None,
                     enters_with_modifications,
                     mana_spend_permission: None,
+                    cast_cost_modifier: None,
                 });
         }
     }
@@ -20639,6 +20851,7 @@ fn hand_alt_cost_permission_overrides_printed_mana_cost() {
                 mana_spend_permission: None,
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
+                cast_cost_modifier: None,
             });
     }
 
@@ -20690,6 +20903,7 @@ fn beseech_style_permission() -> CastingPermission {
         mana_spend_permission: None,
         enters_with_counter: None,
         enters_with_modifications: Vec::new(),
+        cast_cost_modifier: None,
     }
 }
 
@@ -20732,6 +20946,7 @@ fn failing_mana_value_permission_does_not_override_unconstrained_permission() {
                 mana_spend_permission: None,
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
+                cast_cost_modifier: None,
             });
     }
 
@@ -20801,7 +21016,7 @@ fn once_per_turn_collection_counter_play_permission_requires_live_source_static(
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
@@ -20877,7 +21092,7 @@ fn collection_counter_play_permission_is_once_per_turn() {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
@@ -27803,6 +28018,7 @@ fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
             mana_spend_permission: None,
             enters_with_counter: None,
             enters_with_modifications: Vec::new(),
+            cast_cost_modifier: None,
         },
         CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
@@ -27817,7 +28033,7 @@ fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         },
@@ -29445,6 +29661,7 @@ fn cast_only_from_zones_blocks_affected_opponent_from_exile() {
             mana_spend_permission: None,
             enters_with_counter: None,
             enters_with_modifications: Vec::new(),
+            cast_cost_modifier: None,
         });
 
     assert!(is_blocked_by_cast_only_from_zones(
@@ -32631,6 +32848,7 @@ fn cast_with_keyword_convoke_uses_caster_not_stored_controller() {
                 mana_spend_permission: None,
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
+                cast_cost_modifier: None,
             });
     }
 
@@ -45403,6 +45621,7 @@ fn normal_cost_grant(player: PlayerId, cost: ManaCost) -> crate::types::ability:
         enters_with_counter: None,
         enters_with_modifications: vec![],
         mana_spend_permission: None,
+        cast_cost_modifier: None,
     }
 }
 
@@ -45727,6 +45946,7 @@ fn free_cast_grant(player: PlayerId) -> crate::types::ability::CastingPermission
         enters_with_counter: None,
         enters_with_modifications: vec![],
         mana_spend_permission: None,
+        cast_cost_modifier: None,
     }
 }
 
@@ -45747,7 +45967,7 @@ fn play_from_exile_grant(
         card_filter: None,
         single_use_group: None,
         single_use: false,
-        cast_cost_raise: None,
+        cast_cost_modifier: None,
         alt_ability_cost: None,
         land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         provenance: if companion {
@@ -46013,15 +46233,24 @@ fn resolution_offer_grant(
         granted_to: Some(player),
         resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
             source_id,
+            offer_id: None,
+            face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                TargetFilter::Any,
+                source_id,
+                player,
+                None,
+            ),
             exiled_misses: vec![],
             reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
             success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+            delayed_trigger_receipts: Vec::new(),
         }),
         duration: None,
         graveyard_replacement: None,
         enters_with_counter: None,
         enters_with_modifications: vec![],
         mana_spend_permission: None,
+        cast_cost_modifier: None,
     }
 }
 
@@ -46654,7 +46883,7 @@ fn add_impulse_exiled_card(
             })),
             single_use_group: Some(single_use_group),
             single_use: true,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
@@ -46815,14 +47044,14 @@ fn play_from_exile_single_use_consumes_with_rider_fields() {
     for object_id in [first, second] {
         let obj = state.objects.get_mut(&object_id).unwrap();
         let CastingPermission::PlayFromExile {
-            cast_cost_raise,
+            cast_cost_modifier,
             land_enter_tapped,
             ..
         } = obj.casting_permissions.first_mut().unwrap()
         else {
             panic!("test helper creates PlayFromExile grants");
         };
-        *cast_cost_raise = Some(ManaCost::generic(1));
+        *cast_cost_modifier = Some(CastCostModifier::raise(ManaCost::generic(1)));
         *land_enter_tapped = crate::types::zones::EtbTapState::Tapped;
     }
 
@@ -46937,7 +47166,7 @@ fn grant_object_exile_land_play_permission(
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
@@ -47191,7 +47420,7 @@ fn impulse_play_from_exile_land_uses_play_path_not_cast_path() {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
@@ -47909,6 +48138,7 @@ fn exile_static_any_color_is_bound_to_elected_source() {
             source: plain_source,
             frequency: CastFrequency::Unlimited,
         },
+        crate::types::game_state::CastingVariantFace::Current,
         CastPaymentMode::Auto,
         &mut denied_events,
     );
@@ -47925,6 +48155,7 @@ fn exile_static_any_color_is_bound_to_elected_source() {
             source: any_color_source,
             frequency: CastFrequency::Unlimited,
         },
+        crate::types::game_state::CastingVariantFace::Current,
         CastPaymentMode::Auto,
         &mut allowed_events,
     )
@@ -52455,6 +52686,7 @@ fn quistis_class_grant_forwards_any_type_mana_and_pays_off_color_full_cost() {
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
             additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(spell)],
         ObjectId(9200),
@@ -52774,6 +53006,7 @@ fn resolve_graveyard_paid_grant_with_permission(
             driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
             mana_spend_permission: Some(mana_spend_permission),
             additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(spell)],
         ObjectId(9200),
@@ -52799,6 +53032,7 @@ fn resolve_graveyard_paid_grant_with_exile_rider(state: &mut GameState, spell: O
             driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
             mana_spend_permission: Some(ManaSpendPermission::AnyColor),
             additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(spell)],
         ObjectId(9200),
@@ -52825,6 +53059,112 @@ fn resolve_graveyard_paid_grant_with_exile_rider(state: &mut GameState, spell: O
         PlayerId(0),
     )));
     crate::game::effects::cast_from_zone::resolve(state, &grant, &mut Vec::new()).unwrap();
+}
+
+/// Install the exact CR 603.7 tail that a paid resolution offer transports.
+/// The effect is observably small (`gain 1 life`), so the accepted-cast test
+/// below proves the receipt is retained through payment and then really fires.
+fn install_paid_offer_spell_cast_receipt(
+    state: &mut GameState,
+    spell: ObjectId,
+    source: ObjectId,
+    offer_id: crate::types::identifiers::ResolutionCastOfferId,
+) -> crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+    use crate::types::ability::{
+        DelayedTriggerCondition, DelayedTriggerLifetime, TriggerDefinition,
+    };
+    use crate::types::game_state::DelayedTrigger;
+    use crate::types::triggers::TriggerMode;
+
+    let mut definition = TriggerDefinition::new(TriggerMode::SpellCast);
+    definition.valid_card = Some(TargetFilter::SpecificObject { id: spell });
+    let mut ability = ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        PlayerId(0),
+    );
+    ability.set_trigger_source_recursive(crate::game::triggers::trigger_source_context_for_latch(
+        state,
+        state
+            .objects
+            .get(&source)
+            .expect("the production-style delayed tail must retain a source context"),
+    ));
+    let delayed = DelayedTrigger::new(
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger: Box::new(definition),
+            or_trigger: None,
+            lifetime: DelayedTriggerLifetime::ThisTurn,
+        },
+        Box::new(ability),
+        PlayerId(0),
+        source,
+        true,
+    );
+    assert!(state.active_paid_resolution_offer_tail.is_none());
+    state.active_paid_resolution_offer_tail = Some(offer_id);
+    crate::game::triggers::install_delayed_trigger(state, delayed, &mut Vec::new());
+    state.active_paid_resolution_offer_tail = None;
+    let origin = state
+        .delayed_triggers
+        .last()
+        .unwrap()
+        .provenance
+        .origin()
+        .expect("production delayed-trigger installation must mint an exact receipt");
+    crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+        offer_id: origin
+            .offer_id
+            .expect("paid tail marker stamps its exact owner"),
+        token: origin.token,
+        instance: origin.instance,
+        source_id: origin.source_id,
+    }
+}
+
+fn receipt_is_installed(
+    state: &GameState,
+    receipt: &crate::types::ability::ResolutionCastDelayedTriggerReceipt,
+) -> bool {
+    state.delayed_triggers.iter().any(|trigger| {
+        trigger.provenance.origin().is_some_and(|origin| {
+            origin.token == receipt.token
+                && origin.instance == receipt.instance
+                && origin.source_id == receipt.source_id
+                && origin.offer_id == Some(receipt.offer_id)
+        })
+    })
+}
+
+fn attach_paid_offer_receipt(
+    state: &mut GameState,
+    receipt: crate::types::ability::ResolutionCastDelayedTriggerReceipt,
+) {
+    let WaitingFor::CastOffer {
+        kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
+        ..
+    } = &mut state.waiting_for
+    else {
+        panic!("fixture must be parked on a paid graveyard cast offer");
+    };
+    assert_eq!(cleanup.offer_id, Some(receipt.offer_id));
+    cleanup.delayed_trigger_receipts = vec![receipt];
+}
+
+fn paid_offer_id(state: &GameState) -> crate::types::identifiers::ResolutionCastOfferId {
+    match &state.waiting_for {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
+            ..
+        } => cleanup
+            .offer_id
+            .expect("paid offer must have a producer identity"),
+        _ => panic!("fixture must be parked on a paid graveyard cast offer"),
+    }
 }
 
 /// Count the synthetic self-scoped spell→graveyard redirect replacements
@@ -52924,10 +53264,12 @@ fn graveyard_paid_cast_router_opens_offer_not_lingering_permission() {
 
 /// CR 603.7 + CR 608.2g (issue #8775 review): declining a paid offer withdraws
 /// exactly the delayed triggers the granting resolution installed behind THAT
-/// offer — matched by installation instance, not by source and card. Two
+/// offer — matched by its full token/instance/source receipt, not by source and card. Two
 /// "when you cast that spell" triggers of the same source on the same card
 /// (a second offer for the same card, another effect): the offer records the
-/// second; declining leaves the first standing.
+/// second; declining leaves the first standing.  The real `GameAction` is the
+/// reach guard: direct helper-only removal would not exercise the serialized
+/// offer handoff.
 ///
 /// Revert-failing: matching by source + card shape withdraws both (`left: 0`).
 #[test]
@@ -52965,17 +53307,37 @@ fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
         )
     };
     let mut events = Vec::new();
+    let first_offer_id = crate::types::identifiers::ResolutionCastOfferId(1);
+    state.active_paid_resolution_offer_tail = Some(first_offer_id);
     crate::game::triggers::install_delayed_trigger(&mut state, cast_of_spell(), &mut events);
+    state.active_paid_resolution_offer_tail = None;
+    let second_offer_id = crate::types::identifiers::ResolutionCastOfferId(2);
+    state.active_paid_resolution_offer_tail = Some(second_offer_id);
     crate::game::triggers::install_delayed_trigger(&mut state, cast_of_spell(), &mut events);
-    let instance_of = |state: &GameState, index: usize| {
-        state.delayed_triggers[index]
+    state.active_paid_resolution_offer_tail = None;
+    let receipt_of = |state: &GameState, index: usize| {
+        let origin = state.delayed_triggers[index]
             .provenance
             .origin()
-            .expect("a live install mints a receipt root")
-            .instance
+            .expect("a live install mints a receipt root");
+        crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+            offer_id: origin
+                .offer_id
+                .expect("paid tail marker stamps its exact owner"),
+            token: origin.token,
+            instance: origin.instance,
+            source_id: origin.source_id,
+        }
     };
-    let (first, second) = (instance_of(&state, 0), instance_of(&state, 1));
-    assert_ne!(first, second, "reach guard: two distinct installations");
+    let (first, second) = (receipt_of(&state, 0), receipt_of(&state, 1));
+    assert_ne!(
+        first.instance, second.instance,
+        "reach guard: two distinct installations"
+    );
+    assert_ne!(
+        first.offer_id, second.offer_id,
+        "reach guard: colliding visible offers retain distinct producer identities"
+    );
 
     state.waiting_for = WaitingFor::CastOffer {
         player: PlayerId(0),
@@ -52984,9 +53346,21 @@ fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
             mana_spend_permission: None,
             graveyard_replacement: None,
             cast_transformed: false,
-            constraint: None,
             additional_cost: None,
-            installed_triggers: vec![second],
+            cleanup: crate::types::ability::ResolutionCastCleanup {
+                source_id: source,
+                offer_id: Some(second_offer_id),
+                face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                    TargetFilter::Any,
+                    source,
+                    PlayerId(0),
+                    None,
+                ),
+                exiled_misses: Vec::new(),
+                reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                delayed_trigger_receipts: vec![second],
+            },
         },
     };
     apply_as_current(
@@ -53003,9 +53377,184 @@ fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
         "only the trigger recorded on the declined offer is withdrawn"
     );
     assert_eq!(
-        instance_of(&state, 0),
-        first,
+        receipt_of(&state, 0).instance,
+        first.instance,
         "the other trigger of the same source on the same card stays"
+    );
+}
+
+/// An accepted paid offer can still be cancelled from its manual payment
+/// window.  The receipt must survive the neutral post-constraint permission
+/// slot so this real `CancelCast` action withdraws its trigger rather than
+/// leaving it armed for a later unrelated cast.
+#[test]
+fn cancelling_an_accepted_paid_offer_withdraws_its_tail_receipt() {
+    use crate::types::ability::{
+        DelayedTriggerCondition, DelayedTriggerLifetime, TriggerDefinition,
+    };
+    use crate::types::game_state::{CastOfferKind, DelayedTrigger};
+    use crate::types::triggers::TriggerMode;
+
+    let mut state = setup_game_at_main_phase();
+    let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+    let source = ObjectId(9200);
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    let mut definition = TriggerDefinition::new(TriggerMode::SpellCast);
+    definition.valid_card = Some(TargetFilter::SpecificObject { id: spell });
+    let delayed = DelayedTrigger::new(
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger: Box::new(definition),
+            or_trigger: None,
+            lifetime: DelayedTriggerLifetime::ThisTurn,
+        },
+        Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )),
+        PlayerId(0),
+        source,
+        true,
+    );
+    let offer_id = crate::types::identifiers::ResolutionCastOfferId(1);
+    state.active_paid_resolution_offer_tail = Some(offer_id);
+    crate::game::triggers::install_delayed_trigger(&mut state, delayed, &mut Vec::new());
+    state.active_paid_resolution_offer_tail = None;
+    let origin = state.delayed_triggers[0]
+        .provenance
+        .origin()
+        .expect("reach guard: production installation mints a provenance receipt");
+    state.waiting_for = WaitingFor::CastOffer {
+        player: PlayerId(0),
+        kind: CastOfferKind::GraveyardPaidCast {
+            hit_card: spell,
+            mana_spend_permission: None,
+            graveyard_replacement: None,
+            cast_transformed: false,
+            additional_cost: None,
+            cleanup: crate::types::ability::ResolutionCastCleanup {
+                source_id: source,
+                offer_id: Some(offer_id),
+                face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                    TargetFilter::Any,
+                    source,
+                    PlayerId(0),
+                    None,
+                ),
+                exiled_misses: Vec::new(),
+                reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                delayed_trigger_receipts: vec![
+                    crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+                        offer_id: origin
+                            .offer_id
+                            .expect("paid tail marker stamps its exact owner"),
+                        token: origin.token,
+                        instance: origin.instance,
+                        source_id: origin.source_id,
+                    },
+                ],
+            },
+        },
+    };
+
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("reach guard: accepting the offer opens its manual payment window");
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+    apply_as_current(&mut state, GameAction::CancelCast)
+        .expect("cancelling the accepted paid offer must settle its resolution cleanup");
+
+    assert!(
+        state.delayed_triggers.is_empty(),
+        "the accepted offer's delayed tail must be withdrawn on CancelCast"
+    );
+    assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+}
+
+/// A paid offer can reach its final admission gate only after the player
+/// accepts it.  That real `GameAction` rejection must settle the frozen
+/// resolution tail, rather than leaving its next-spell receipt armed.
+#[test]
+fn graveyard_paid_final_rejection_withdraws_delayed_tail_receipt() {
+    let mut state = setup_game_at_main_phase();
+    let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+    resolve_graveyard_paid_grant(&mut state, spell);
+    let offer_id = paid_offer_id(&state);
+    let receipt = install_paid_offer_spell_cast_receipt(&mut state, spell, spell, offer_id);
+    attach_paid_offer_receipt(&mut state, receipt.clone());
+
+    // The router already opened its offer.  Making its target a land causes
+    // the later cast-path admission check to reject it after `Cast`.
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("a final paid-offer rejection must settle instead of becoming an action error");
+
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(!receipt_is_installed(&state, &receipt));
+    assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+    assert!(state.objects[&spell].casting_permissions.is_empty());
+    assert!(state.stack.iter().all(|entry| entry.source_id != spell));
+}
+
+/// An accepted paid offer carries its tail receipt through manual payment.
+/// On the real spell-cast event it must be consumed and produce its effect.
+#[test]
+fn accepted_paid_offer_retains_then_fires_delayed_tail_receipt() {
+    let mut state = setup_game_at_main_phase();
+    let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+    let life_before = state.players[0].life;
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    resolve_graveyard_paid_grant(&mut state, spell);
+    let offer_id = paid_offer_id(&state);
+    let receipt = install_paid_offer_spell_cast_receipt(&mut state, spell, spell, offer_id);
+    attach_paid_offer_receipt(&mut state, receipt.clone());
+
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("accepting the paid offer must open its normal payment window");
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+    assert!(
+        receipt_is_installed(&state, &receipt),
+        "acceptance must retain the tail receipt until the spell is actually cast"
+    );
+
+    apply_as_current(&mut state, GameAction::PassPriority)
+        .expect("paying the spell's mana cost must finish the cast");
+    assert!(state.stack.iter().any(|entry| entry.source_id == spell));
+    assert!(
+        !receipt_is_installed(&state, &receipt),
+        "the one-shot receipt must be consumed by that spell-cast event"
+    );
+
+    stack::resolve_top(&mut state, &mut Vec::new());
+    assert_eq!(
+        state.players[0].life,
+        life_before + 1,
+        "the consumed receipt must have put its gain-life trigger on the stack"
     );
 }
 
@@ -53055,6 +53604,7 @@ fn paid_cast_with_explicit_duration_remains_a_lingering_permission() {
             driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
             mana_spend_permission: None,
             additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(spell)],
         ObjectId(9200),
@@ -53270,9 +53820,17 @@ fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling(
             granted_to: Some(PlayerId(0)),
             resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
                 source_id: spell,
+                offer_id: None,
+                face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                    TargetFilter::Any,
+                    spell,
+                    PlayerId(0),
+                    None,
+                ),
                 exiled_misses: vec![hostile_miss],
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                delayed_trigger_receipts: Vec::new(),
             }),
             duration: None,
             graveyard_replacement: Some(
@@ -53281,6 +53839,7 @@ fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling(
             enters_with_counter: None,
             enters_with_modifications: Vec::new(),
             mana_spend_permission: None,
+            cast_cost_modifier: None,
         });
     add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
     resolve_graveyard_paid_grant_with_exile_rider(&mut state, spell);
@@ -53384,18 +53943,27 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
             },
         ));
     }
+    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        TargetFilter::Any,
+        spell,
+        PlayerId(0),
+        None,
+    );
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: spell,
+        offer_id: None,
+        face_policy: face_policy.clone(),
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+        delayed_trigger_receipts: Vec::new(),
     };
-    let wf = initiate_cast_during_resolution(
+    let initiation = initiate_cast_during_resolution(
         &mut state,
         PlayerId(0),
         spell,
         ResolutionCastRequest {
-            constraint: None,
+            face_policy,
             cast_transformed: false,
             cleanup,
             graveyard_replacement: None,
@@ -53404,14 +53972,786 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
         &mut Vec::new(),
     )
     .expect("free during-resolution cast must begin");
+    let ResolutionCastInitiation::WaitingFor(wf) = initiation else {
+        panic!("a legal free cast must not take the resolution rejection path");
+    };
     assert!(
-        !matches!(wf, WaitingFor::ManaPayment { .. }),
+        !matches!(wf.as_ref(), WaitingFor::ManaPayment { .. }),
         "a Free during-resolution cast must NOT open a payment step, got {wf:?}"
     );
     assert!(
         state.stack.iter().any(|e| e.source_id == spell),
         "a Free cast must reach the stack with no mana paid"
     );
+}
+
+fn resolution_test_two_spell_faces(
+    state: &mut GameState,
+    front: CoreType,
+    back: CoreType,
+) -> ObjectId {
+    let spell = create_object(
+        state,
+        CardId(83_020),
+        PlayerId(0),
+        "Resolution Front".to_string(),
+        Zone::Exile,
+    );
+    let object = state.objects.get_mut(&spell).unwrap();
+    object.card_types.core_types.push(front);
+    object.mana_cost = ManaCost::zero();
+    object.back_face = Some(crate::game::game_object::BackFaceData {
+        is_swap_snapshot: false,
+        trigger_printed_origins: Vec::new(),
+        name: "Resolution Back".to_string(),
+        power: None,
+        toughness: None,
+        loyalty: None,
+        printed_loyalty: None,
+        defense: None,
+        card_types: {
+            let mut card_types = crate::types::card_type::CardType::default();
+            card_types.core_types.push(back);
+            card_types
+        },
+        mana_cost: ManaCost::zero(),
+        keywords: Vec::new(),
+        abilities: Vec::new(),
+        trigger_definitions: Default::default(),
+        replacement_definitions: Default::default(),
+        static_definitions: Default::default(),
+        color: Vec::new(),
+        printed_ref: None,
+        modal: None,
+        additional_cost: None,
+        strive_cost: None,
+        casting_restrictions: Vec::new(),
+        casting_options: Vec::new(),
+        layout_kind: Some(LayoutKind::Modal),
+        parse_warnings: vec![],
+    });
+    spell
+}
+
+/// Jennifer Walters // The Sensational She-Hulk is represented as a spell/spell
+/// Modal DFC. Her transform text does not turn that card layout into the
+/// transform-only class, so an effect that casts either spell face still has to
+/// ask the controller which spell to cast.
+fn jennifer_walters_spell_faces(state: &mut GameState) -> ObjectId {
+    let spell = resolution_test_two_spell_faces(state, CoreType::Sorcery, CoreType::Instant);
+    let object = state
+        .objects
+        .get_mut(&spell)
+        .expect("Jennifer fixture exists");
+    object.name = "Jennifer Walters".to_string();
+    object.base_name = object.name.clone();
+    object
+        .back_face
+        .as_mut()
+        .expect("Jennifer fixture has a spell back face")
+        .name = "The Sensational She-Hulk".to_string();
+    spell
+}
+
+fn resolution_test_request(filter: TargetFilter) -> ResolutionCastRequest {
+    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        filter,
+        ObjectId(83_021),
+        PlayerId(0),
+        None,
+    );
+    ResolutionCastRequest {
+        cleanup: crate::types::ability::ResolutionCastCleanup {
+            source_id: ObjectId(83_021),
+            offer_id: None,
+            face_policy: face_policy.clone(),
+            exiled_misses: Vec::new(),
+            reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+            success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+            delayed_trigger_receipts: Vec::new(),
+        },
+        face_policy,
+        cast_transformed: false,
+        graveyard_replacement: None,
+        cost: crate::types::ability::ResolutionCastCost::Free,
+    }
+}
+
+/// A private-library look/cast policy is frozen before it reaches the candidate
+/// chooser.  Kiora's "less than X" constraint therefore applies to each
+/// projected face: the front may be offered, while a back face equal to X may
+/// not leak into the private choice.  This remains an offer-admission check;
+/// target, timing, and payment preparation still wait for the elected face.
+#[test]
+fn resolution_spell_face_admission_applies_frozen_constraint_per_private_library_face() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    {
+        let object = state.objects.get_mut(&spell).expect("fixture spell exists");
+        object.zone = Zone::Library;
+        object.mana_cost = ManaCost::generic(2);
+        object
+            .back_face
+            .as_mut()
+            .expect("fixture has a back spell face")
+            .mana_cost = ManaCost::generic(3);
+    }
+    state.players[0].library.push_front(spell);
+
+    let policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        TargetFilter::Any,
+        ObjectId(83_021),
+        PlayerId(0),
+        Some(CastPermissionConstraint::ManaValue {
+            comparator: Comparator::LT,
+            // This is Kiora, Sovereign of the Deep's already-frozen X = 3.
+            value: QuantityExpr::Fixed { value: 3 },
+        }),
+    );
+
+    assert_eq!(
+        resolution_spell_face_admission(&state, spell, &policy),
+        ResolutionSpellFaceLegality {
+            front: true,
+            back: false,
+        },
+        "the back face has MV equal to Kiora's frozen X and must not be offered"
+    );
+}
+
+fn mark_resolution_test_back_face_as_aftermath(state: &mut GameState, spell: ObjectId) {
+    let back_face = state.objects[&spell]
+        .back_face
+        .as_mut()
+        .expect("the resolution fixture has a spell back face");
+    back_face.layout_kind = Some(LayoutKind::Split);
+    back_face.keywords.push(Keyword::Aftermath);
+}
+
+/// A frozen resolution policy is applied to each face, rather than to the
+/// card's unchosen front.  Here the policy accepts only the instant back face,
+/// so no choice is issued and that face is announced automatically.
+#[test]
+fn resolution_cast_auto_selects_its_only_legal_spell_face() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    let request =
+        resolution_test_request(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)));
+
+    assert_eq!(
+        resolution_spell_face_legality(&state, PlayerId(0), spell, &request),
+        ResolutionSpellFaceLegality {
+            front: false,
+            back: true,
+        }
+    );
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("the legal back face must be cast during resolution");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("the legal back face must not be rejected");
+    };
+
+    assert!(matches!(waiting_for.as_ref(), WaitingFor::Priority { .. }));
+    assert!(state.stack.iter().any(|entry| entry.source_id == spell));
+    assert_eq!(state.objects[&spell].name, "Resolution Back");
+    assert!(state.objects[&spell].modal_back_face);
+}
+
+/// A paid resolution offer evaluates both independently castable faces. Once a
+/// player elects the back face, it must charge that face's printed cost and
+/// retain the grant's additional cost across the modal prompt.
+#[test]
+fn resolution_full_cost_face_choice_preserves_elected_face_and_additional_cost() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::generic(1);
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .back_face
+        .as_mut()
+        .unwrap()
+        .mana_cost = ManaCost::generic(2);
+    let mut request = resolution_test_request(TargetFilter::Any);
+    request.cost = crate::types::ability::ResolutionCastCost::FullCost {
+        mana_spend_permission: None,
+        additional_cost: Some(ManaCost::generic(2)),
+    };
+
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("both paid spell faces must open a choice");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("two legal paid faces must not reject");
+    };
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ModalFaceChoice { .. }
+    ));
+    state.waiting_for = *waiting_for;
+    let actions = crate::ai_support::legal_actions(&state);
+    assert!(actions.contains(&GameAction::ChooseModalFace { back_face: false }));
+    assert!(actions.contains(&GameAction::ChooseModalFace { back_face: true }));
+
+    apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: true })
+        .expect("the elected paid back face must prepare");
+
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+    assert_eq!(state.objects[&spell].name, "Resolution Back");
+    assert_eq!(
+        state
+            .pending_cast
+            .as_ref()
+            .expect("the paid cast must retain its transaction")
+            .cost
+            .mana_value(),
+        4,
+        "a paid resolution cast must charge the elected back face plus its carried addition"
+    );
+}
+
+/// A frozen policy that accepts only the back face must still auto-elect and
+/// charge that face for a paid resolution cast.
+#[test]
+fn resolution_full_cost_auto_selects_only_legal_back_face() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::generic(1);
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .back_face
+        .as_mut()
+        .unwrap()
+        .mana_cost = ManaCost::generic(2);
+    let mut request =
+        resolution_test_request(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)));
+    request.cost = crate::types::ability::ResolutionCastCost::FullCost {
+        mana_spend_permission: None,
+        additional_cost: None,
+    };
+
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("the only legal paid back face must prepare");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("the only legal paid back face must not reject");
+    };
+
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ManaPayment { .. }
+    ));
+    assert_eq!(state.objects[&spell].name, "Resolution Back");
+    assert_eq!(
+        state
+            .pending_cast
+            .as_ref()
+            .expect("the paid cast must retain its transaction")
+            .cost
+            .mana_value(),
+        2,
+        "a paid resolution cast must charge its only legal back face's printed cost"
+    );
+}
+
+/// A paid resolution cast from a graveyard is still a normal-cost cast.  Its
+/// temporary permission must not let the card's native Flashback alternative
+/// replace the printed cost while preparing the selected face.
+#[test]
+fn resolution_full_cost_graveyard_cast_uses_printed_cost_not_flashback() {
+    let mut state = setup_game_at_main_phase();
+    let spell = add_flashback_instant_to_graveyard(
+        &mut state,
+        PlayerId(0),
+        ManaCost::generic(5),
+        ManaCost::generic(2),
+    );
+    let mut request = resolution_test_request(TargetFilter::Any);
+    request.cost = crate::types::ability::ResolutionCastCost::FullCost {
+        mana_spend_permission: None,
+        additional_cost: None,
+    };
+
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("the paid graveyard cast must prepare");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("the paid graveyard cast must not reject");
+    };
+
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ManaPayment { .. }
+    ));
+    let pending_cast = state
+        .pending_cast
+        .as_ref()
+        .expect("the paid cast must retain its transaction");
+    assert_eq!(pending_cast.casting_variant, CastingVariant::Normal);
+    assert_eq!(
+        pending_cast.cost.mana_value(),
+        2,
+        "a paid resolution cast must charge its printed cost, not Flashback"
+    );
+}
+
+/// CR 712.14a: a transformed-resolution permission keeps a transforming DFC's
+/// front face on the stack and lets the established post-entry transform make
+/// it enter on its back face.  Pre-swapping here would double-transform it.
+#[test]
+fn resolution_cast_transformed_keeps_front_on_stack_and_enters_back() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_object(
+        &mut state,
+        CardId(83_020),
+        PlayerId(0),
+        "Resolution Transform Front".to_string(),
+        Zone::Exile,
+    );
+    {
+        let object = state.objects.get_mut(&spell).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.power = Some(2);
+        object.toughness = Some(2);
+        object.mana_cost = ManaCost::zero();
+        let mut back_types = crate::types::card_type::CardType::default();
+        back_types.core_types.push(CoreType::Creature);
+        object.back_face = Some(crate::game::game_object::BackFaceData {
+            name: "Resolution Transform Back".to_string(),
+            power: Some(5),
+            toughness: Some(5),
+            card_types: back_types,
+            layout_kind: Some(LayoutKind::Transform),
+            ..Default::default()
+        });
+    }
+    let mut request = resolution_test_request(TargetFilter::Any);
+    request.cast_transformed = true;
+
+    assert_eq!(
+        resolution_spell_face_legality(&state, PlayerId(0), spell, &request),
+        ResolutionSpellFaceLegality {
+            front: true,
+            back: false,
+        },
+        "a true transform-only DFC never opens the spell-face election"
+    );
+
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("the transformed resolution cast must be prepared");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("a legal transformed face must not reject");
+    };
+
+    assert!(matches!(waiting_for.as_ref(), WaitingFor::Priority { .. }));
+    assert!(state.stack.iter().any(|entry| entry.source_id == spell));
+    assert_eq!(state.objects[&spell].name, "Resolution Transform Front");
+    assert!(!state.objects[&spell].transformed);
+
+    crate::game::stack::resolve_top(&mut state, &mut Vec::new());
+
+    assert_eq!(state.objects[&spell].zone, Zone::Battlefield);
+    assert!(state.objects[&spell].transformed);
+    assert_eq!(state.objects[&spell].name, "Resolution Transform Back");
+    assert_eq!(state.objects[&spell].power, Some(5));
+}
+
+/// When both spell faces pass the same serialized policy, the legacy
+/// `ModalFaceChoice` remains wire-compatible but its actions are still derived
+/// from the resolution permission, and the selected face consumes that exact
+/// tail permission.
+#[test]
+fn resolution_cast_two_legal_faces_issues_and_completes_exact_face_choice() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    let initiation = initiate_cast_during_resolution(
+        &mut state,
+        PlayerId(0),
+        spell,
+        resolution_test_request(TargetFilter::Any),
+        &mut Vec::new(),
+    )
+    .expect("both spell faces must open a choice");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("two legal faces must open a choice rather than reject");
+    };
+
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ModalFaceChoice { .. }
+    ));
+    state.waiting_for = *waiting_for;
+    let actions = crate::ai_support::legal_actions(&state);
+    assert!(actions.contains(&GameAction::ChooseModalFace { back_face: false }));
+    assert!(actions.contains(&GameAction::ChooseModalFace { back_face: true }));
+
+    // The action surface and the authoritative handler both re-check the
+    // exact tail permission.  This models a forged/stale front-face action
+    // after the carried policy becomes back-face-only.
+    let object = state.objects.get_mut(&spell).unwrap();
+    let Some(CastingPermission::ExileWithAltCost {
+        resolution_cleanup: Some(cleanup),
+        ..
+    }) = object.casting_permissions.last_mut()
+    else {
+        panic!("the resolution offer must retain its cleanup permission");
+    };
+    cleanup.face_policy.filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant));
+
+    let restricted_actions = crate::ai_support::legal_actions(&state);
+    assert!(!restricted_actions.contains(&GameAction::ChooseModalFace { back_face: false }));
+    assert!(restricted_actions.contains(&GameAction::ChooseModalFace { back_face: true }));
+    assert!(
+        apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: false },).is_err()
+    );
+    assert_eq!(state.objects[&spell].name, "Resolution Front");
+
+    apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: true })
+        .expect("the elected back face must consume the appended resolution permission");
+    assert!(state.stack.iter().any(|entry| entry.source_id == spell));
+    assert_eq!(state.objects[&spell].name, "Resolution Back");
+}
+
+#[test]
+fn jennifer_walters_modal_resolution_choice_elects_only_the_selected_spell_face() {
+    for (back_face, expected_name) in [
+        (false, "Jennifer Walters"),
+        (true, "The Sensational She-Hulk"),
+    ] {
+        let mut state = setup_game_at_main_phase();
+        let spell = jennifer_walters_spell_faces(&mut state);
+        let request = resolution_test_request(TargetFilter::Any);
+        assert_eq!(
+            resolution_spell_face_legality(&state, PlayerId(0), spell, &request),
+            ResolutionSpellFaceLegality {
+                front: true,
+                back: true,
+            },
+            "Jennifer's Modal layout exposes both independently legal spell faces"
+        );
+
+        let initiation = initiate_cast_during_resolution(
+            &mut state,
+            PlayerId(0),
+            spell,
+            request,
+            &mut Vec::new(),
+        )
+        .expect("Jennifer's resolution cast must begin");
+        let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+            panic!("two legal Jennifer faces must prompt for a face");
+        };
+        assert!(matches!(
+            waiting_for.as_ref(),
+            WaitingFor::ModalFaceChoice { .. }
+        ));
+        state.waiting_for = *waiting_for;
+
+        apply_as_current(&mut state, GameAction::ChooseModalFace { back_face })
+            .expect("the elected Jennifer face must be cast");
+        assert_eq!(state.objects[&spell].name, expected_name);
+        assert_eq!(state.objects[&spell].modal_back_face, back_face);
+        assert_eq!(
+            state
+                .stack
+                .iter()
+                .filter(|entry| entry.source_id == spell)
+                .count(),
+            1,
+            "only the elected face is announced"
+        );
+    }
+}
+
+/// A forged/stale modal action must not consume the resolution-owned delayed
+/// tail.  The actual `GameAction` handler restores every provisional mutation
+/// when the frozen permission no longer admits its elected face.
+#[test]
+fn resolution_modal_forged_late_rejection_preserves_delayed_tail_receipt_and_state() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    let offer_id = crate::types::identifiers::ResolutionCastOfferId(1);
+    let receipt = install_paid_offer_spell_cast_receipt(&mut state, spell, spell, offer_id);
+    let mut request = resolution_test_request(TargetFilter::Any);
+    request.cleanup.offer_id = Some(offer_id);
+    request.cleanup.delayed_trigger_receipts = vec![receipt.clone()];
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("two legal spell faces must open the real modal action");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("two legal spell faces must not reject before face choice");
+    };
+    state.waiting_for = *waiting_for;
+
+    // The UI action was valid at issuance, but this forged/stale front-face
+    // action arrives after the exact carried permission becomes back-only.
+    let Some(CastingPermission::ExileWithAltCost {
+        resolution_cleanup: Some(cleanup),
+        ..
+    }) = state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .casting_permissions
+        .last_mut()
+    else {
+        panic!("the modal prompt must retain its exact resolution permission");
+    };
+    cleanup.face_policy.filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant));
+    let state_before = state.clone();
+
+    assert!(
+        apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: false }).is_err(),
+        "the forged front-face action must be rejected by the live handler"
+    );
+    assert_eq!(
+        state, state_before,
+        "a late modal rejection must not mutate the receipt, prompt, or cast state"
+    );
+    assert!(
+        receipt_is_installed(&state, &receipt),
+        "the untouched receipt remains armed because no cast was accepted"
+    );
+}
+
+/// A resolution-owned face prompt is intentionally pre-announcement (there is
+/// no `PendingCast` or placeholder stack entry), yet it is a cancellable
+/// transaction: the exact temporary permission is removed and the parent path
+/// receives the same cleanup as a declined cast.
+#[test]
+fn resolution_modal_face_choice_issues_cancel_and_removes_its_exact_permission() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    let initiation = initiate_cast_during_resolution(
+        &mut state,
+        PlayerId(0),
+        spell,
+        resolution_test_request(TargetFilter::Any),
+        &mut Vec::new(),
+    )
+    .expect("two legal faces must open a resolution-owned prompt");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("two legal faces must not reject");
+    };
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ModalFaceChoice { .. }
+    ));
+    assert!(state.pending_cast.is_none());
+    assert!(state.stack.iter().all(|entry| entry.source_id != spell));
+    state.waiting_for = *waiting_for;
+
+    let actions = crate::ai_support::legal_actions(&state);
+    assert!(actions.contains(&GameAction::CancelCast));
+    apply_as_current(&mut state, GameAction::CancelCast)
+        .expect("the issued resolution cancel must settle the transaction");
+
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.objects[&spell].casting_permissions.is_empty());
+    assert_eq!(state.objects[&spell].name, "Resolution Front");
+    assert!(!state.objects[&spell].cast_face_committed);
+}
+
+/// A legacy modal-face prompt retains its ordinary cast/land behavior.  Only
+/// the indexed resolution transaction authorizes cancellation.
+#[test]
+fn ordinary_modal_face_choice_neither_issues_nor_accepts_cancel() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    state.waiting_for = WaitingFor::ModalFaceChoice {
+        player: PlayerId(0),
+        object_id: spell,
+        card_id: state.objects[&spell].card_id,
+        payment_mode: CastPaymentMode::Auto,
+        resolution_additional_cost: None,
+    };
+    let state_before = state.clone();
+
+    assert!(!crate::ai_support::legal_actions(&state).contains(&GameAction::CancelCast));
+    assert!(apply_as_current(&mut state, GameAction::CancelCast).is_err());
+    assert_eq!(state, state_before);
+}
+
+/// The same transaction authority remains live after a paid face election:
+/// a later cast-step cancellation must not strand the resolution permission,
+/// placeholder stack entry, or parent continuation.
+#[test]
+fn resolution_cast_cancel_after_paid_face_preparation_routes_through_cleanup() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::generic(1);
+    let mut request = resolution_test_request(TargetFilter::Any);
+    request.cost = crate::types::ability::ResolutionCastCost::FullCost {
+        mana_spend_permission: None,
+        additional_cost: None,
+    };
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("the full-cost resolution offer must open its paid face choice");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("the legal full-cost faces must not reject");
+    };
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ModalFaceChoice { .. }
+    ));
+    state.waiting_for = *waiting_for;
+    apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: false })
+        .expect("the elected paid front face must prepare");
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+    assert!(state.pending_cast.is_some());
+    assert!(state.stack.iter().any(|entry| entry.source_id == spell));
+
+    apply_as_current(&mut state, GameAction::CancelCast)
+        .expect("a later cast-step cancel must use the resolution cleanup authority");
+
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_cast.is_none());
+    assert!(state.stack.iter().all(|entry| entry.source_id != spell));
+    assert!(state.objects[&spell].casting_permissions.is_empty());
+    assert_eq!(state.objects[&spell].zone, Zone::Exile);
+    assert_eq!(state.objects[&spell].name, "Resolution Front");
+    assert!(!state.objects[&spell].cast_face_committed);
+}
+
+/// A resolution-owned cast can pause in an interactive collect-evidence cost.
+/// That cancellation path must use the same exact permission cleanup as every
+/// other post-announcement cast step.
+#[test]
+fn resolution_cast_cancel_from_collect_evidence_routes_through_cleanup() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::generic(1);
+    let mut request = resolution_test_request(TargetFilter::Any);
+    request.cost = crate::types::ability::ResolutionCastCost::FullCost {
+        mana_spend_permission: None,
+        additional_cost: None,
+    };
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("the full-cost resolution offer must open its paid face choice");
+    let ResolutionCastInitiation::WaitingFor(waiting_for) = initiation else {
+        panic!("the legal full-cost faces must not reject");
+    };
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ModalFaceChoice { .. }
+    ));
+    state.waiting_for = *waiting_for;
+    apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: false })
+        .expect("the elected paid front face must prepare");
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+    let pending_cast = state
+        .pending_cast
+        .clone()
+        .expect("the announced resolution cast must retain its transaction");
+    state.waiting_for = WaitingFor::CollectEvidenceChoice {
+        player: PlayerId(0),
+        minimum_mana_value: 0,
+        cards: Vec::new(),
+        resume: Box::new(crate::types::game_state::CollectEvidenceResume::Casting {
+            pending_cast,
+            source: Default::default(),
+        }),
+    };
+
+    apply_as_current(&mut state, GameAction::CancelCast)
+        .expect("collect-evidence cancellation must settle the resolution transaction");
+
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_cast.is_none());
+    assert!(state.stack.iter().all(|entry| entry.source_id != spell));
+    assert!(state.objects[&spell].casting_permissions.is_empty());
+    assert_eq!(state.objects[&spell].zone, Zone::Exile);
+    assert_eq!(state.objects[&spell].name, "Resolution Front");
+    assert!(!state.objects[&spell].cast_face_committed);
+}
+
+/// A resolution offer with no policy-legal spell face does not leave an
+/// announcement or temporary permission behind.
+#[test]
+fn resolution_cast_routes_zero_legal_spell_faces_through_abort_cleanup() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    let initiation = initiate_cast_during_resolution(
+        &mut state,
+        PlayerId(0),
+        spell,
+        resolution_test_request(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
+        &mut Vec::new(),
+    )
+    .expect("zero legal faces are a resolution abort, not an invalid action");
+    let ResolutionCastInitiation::Rejected(cleanup) = initiation else {
+        panic!("a creature-only policy must reject both spell faces");
+    };
+    let waiting_for = crate::game::engine_resolution_choices::abort_resolution_cast(
+        &mut state,
+        PlayerId(0),
+        spell,
+        *cleanup,
+        &mut Vec::new(),
+    )
+    .expect("the resolution abort must settle");
+
+    assert!(matches!(waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(state.objects[&spell].zone, Zone::Exile);
+    assert!(state.objects[&spell].casting_permissions.is_empty());
+    assert!(state.stack.iter().all(|entry| entry.source_id != spell));
+}
+
+/// The prospective-face projector is not a second, partial castability model:
+/// zone admission and live prohibitions must be observed before the engine
+/// issues a face action or auto-elects a side.
+#[test]
+fn resolution_face_projection_rejects_a_zone_prohibited_cast_before_announcement() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+    add_cant_cast_from_hand_only_permanent(&mut state, PlayerId(1), ProhibitionScope::AllPlayers);
+    let request = resolution_test_request(TargetFilter::Any);
+
+    assert_eq!(
+        resolution_spell_face_legality(&state, PlayerId(0), spell, &request),
+        ResolutionSpellFaceLegality {
+            front: false,
+            back: false,
+        }
+    );
+    let initiation =
+        initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut Vec::new())
+            .expect("a blocked resolution cast must resolve as an abort, not an action error");
+    assert!(matches!(initiation, ResolutionCastInitiation::Rejected(_)));
+    assert!(state.objects[&spell].casting_permissions.is_empty());
+    assert!(state.stack.iter().all(|entry| entry.source_id != spell));
+}
+
+/// CR 702.127a: a broad resolution-cast grant still cannot offer the
+/// aftermath half outside the graveyard.  Its unrelated front half remains an
+/// independently evaluated spell face, while the graveyard row proves the
+/// aftermath half is not blanket-excluded.
+#[test]
+fn resolution_face_projection_limits_aftermath_half_to_graveyard() {
+    for zone in [Zone::Hand, Zone::Exile, Zone::Graveyard, Zone::Library] {
+        let mut state = setup_game_at_main_phase();
+        let spell =
+            resolution_test_two_spell_faces(&mut state, CoreType::Sorcery, CoreType::Instant);
+        state.objects.get_mut(&spell).unwrap().zone = zone;
+        mark_resolution_test_back_face_as_aftermath(&mut state, spell);
+        let request = resolution_test_request(TargetFilter::Any);
+
+        assert_eq!(
+            resolution_spell_face_legality(&state, PlayerId(0), spell, &request),
+            ResolutionSpellFaceLegality {
+                front: true,
+                back: zone == Zone::Graveyard,
+            },
+            "the aftermath half must be legal only from the graveyard, not {zone:?}"
+        );
+    }
 }
 
 // --- Conduit of Worlds line-2 end-to-end (Steps 5/6/7) --------------------
@@ -53670,20 +55010,30 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
                 mana_spend_permission: None,
+                cast_cost_modifier: None,
             });
     }
+    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        TargetFilter::Any,
+        spell,
+        PlayerId(0),
+        None,
+    );
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: spell,
+        offer_id: None,
+        face_policy: face_policy.clone(),
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+        delayed_trigger_receipts: Vec::new(),
     };
     initiate_cast_during_resolution(
         &mut state,
         PlayerId(0),
         spell,
         ResolutionCastRequest {
-            constraint: None,
+            face_policy,
             cast_transformed: false,
             cleanup,
             graveyard_replacement: None,
@@ -53732,23 +55082,32 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
+    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        TargetFilter::Any,
+        spell,
+        PlayerId(0),
+        None,
+    );
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: spell,
+        offer_id: None,
+        face_policy: face_policy.clone(),
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+        delayed_trigger_receipts: Vec::new(),
     };
     initiate_cast_during_resolution(
         &mut state,
         PlayerId(0),
         spell,
         ResolutionCastRequest {
-            constraint: None,
+            face_policy,
             cast_transformed: false,
             cleanup,
             graveyard_replacement: None,
@@ -53803,16 +55162,25 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
                 granted_to: Some(PlayerId(0)),
                 resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
                     source_id: spell,
+                    offer_id: None,
+                    face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                        TargetFilter::Any,
+                        spell,
+                        PlayerId(0),
+                        None,
+                    ),
                     exiled_misses: Vec::new(),
                     reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                    delayed_trigger_receipts: Vec::new(),
                 }),
                 duration: None,
                 graveyard_replacement: None,
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
                 mana_spend_permission: None,
+                cast_cost_modifier: None,
             });
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
@@ -53828,6 +55196,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
                 mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                cast_cost_modifier: None,
             });
     }
     add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
@@ -53879,6 +55248,7 @@ fn without_paying_graveyard_free_cast_bypasses_paid_offer() {
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
             additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(spell)],
         ObjectId(9201),

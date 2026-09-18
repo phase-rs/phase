@@ -2017,17 +2017,30 @@ pub(crate) fn parse_exile_spell_cast_this_way_rider(input: &str) -> OracleResult
 }
 
 pub(crate) fn parse_top_of_library_permission_condition(trailing: &str) -> Option<StaticCondition> {
+    let (rest, condition) = parse_top_of_library_permission_condition_and_rest(trailing)?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+    Some(condition)
+}
+
+/// CR 611.3a: The gate-prefixed condition WITH the text that follows it — the
+/// sequencing form of [`parse_top_of_library_permission_condition`], for
+/// permission shapes whose trailing may carry a second clause after the gate
+/// (e.g. a CR 118.9 alt-cost rider). Single authority for the " as long as "
+/// marker and the condition grammar; the full-consumption form above delegates
+/// here, so the two cannot drift.
+pub(crate) fn parse_top_of_library_permission_condition_and_rest(
+    trailing: &str,
+) -> Option<(&str, StaticCondition)> {
     let (rest, condition) = preceded(
         tag::<_, _, OracleError<'_>>(" as long as "),
         nom_condition::parse_inner_condition,
     )
     .parse(trailing)
     .ok()?;
-    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
-    if !rest.is_empty() {
-        return None;
-    }
-    Some(condition)
+    Some((rest, condition))
 }
 
 /// CR 118.9 + CR 119.4: Helper to parse the optional alt-cost rider that may

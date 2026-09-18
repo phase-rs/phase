@@ -9699,6 +9699,7 @@ mod tests {
                 token: DelayedTriggerToken(1),
                 instance: DelayedTriggerInstanceId(1),
                 source_id: ObjectId(500),
+                offer_id: None,
             }),
         );
         let mut b = a.clone();
@@ -9711,6 +9712,7 @@ mod tests {
                 token: DelayedTriggerToken(2),
                 instance: DelayedTriggerInstanceId(2),
                 source_id: ObjectId(500),
+                offer_id: None,
             }),
         );
         assert!(

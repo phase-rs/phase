@@ -3692,7 +3692,7 @@ const LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION: u64 = 2;
 /// that can produce it is an explicit remover.
 ///
 /// The remover is `client_state_wire_value` (`crate::game::derived_views`),
-/// which strips exactly these three plus six `skip_serializing_if` siblings.
+/// which strips exactly these four plus six `skip_serializing_if` siblings.
 /// The six siblings are deliberately NOT listed here: their absence is
 /// value-dependent, so it proves nothing.
 ///
@@ -3721,6 +3721,7 @@ const LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION: u64 = 2;
 const CLIENT_WIRE_UNCONDITIONAL_FIELDS: &[&str] = &[
     "next_delayed_trigger_token",
     "next_delayed_trigger_instance",
+    "next_resolution_cast_offer_id",
     "resolved_rules_journal",
 ];
 
@@ -3733,9 +3734,10 @@ const CLIENT_WIRE_UNCONDITIONAL_FIELDS: &[&str] = &[
 /// Conjunctive on purpose. Each field individually went in at a different time
 /// — `resolved_rules_journal` in #6331 (2026-07-22), the two allocators in
 /// #6842 (2026-08-01), while `resolution_stack` itself landed in #6269
-/// (2026-07-21) — so a genuine save from a build in the 2026-07-21..22 window
-/// carries `resolution_stack` and lacks all three legitimately. Requiring all
-/// three keeps that window as small as the field history allows. It changes no
+/// (2026-07-21). `next_resolution_cast_offer_id` is newer still, but a genuine
+/// save from the 2026-07-21..22 window carries `resolution_stack` and lacks all
+/// four legitimately. Requiring all four keeps that window as small as the
+/// field history allows. It changes no
 /// outcome regardless: every `resolution_stack`-bearing unversioned payload was
 /// refused outright before the wire inference existed, so a window save fails
 /// either way. Only the wording it receives changes, and the refusal raised by
@@ -3744,8 +3746,8 @@ const CLIENT_WIRE_UNCONDITIONAL_FIELDS: &[&str] = &[
 ///
 /// The conjunction AND each entry of the `const` above are pinned by
 /// `redaction_fingerprint_is_conjunctive_over_every_unconditional_field`
-/// (`types/game_state.rs` `mod tests`), which decodes three payloads each
-/// carrying exactly one of the three keys. A `.any(…)` here, or a dropped
+/// (`types/game_state.rs` `mod tests`), which decodes four payloads each
+/// carrying exactly one of the four keys. A `.any(…)` here, or a dropped
 /// `const` entry, reddens it.
 fn is_redacted_client_wire_projection(object: &Map<String, Value>) -> bool {
     CLIENT_WIRE_UNCONDITIONAL_FIELDS
@@ -3890,7 +3892,7 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
         return Err(
             // Written to be TRUE of both populations that reach here, not just
             // the client-wire one. A genuine save from the 2026-07-21..22 build
-            // window lacks all three fingerprint fields legitimately, and is
+            // window lacks all four fingerprint fields legitimately, and is
             // refused by this same statement; telling that player their file is
             // a debug export would be a false statement of fact about their
             // file. So the first clause states only what is observable of the
@@ -4207,6 +4209,7 @@ impl ResolutionStateWire {
                     }
                 }
                 normalize_legacy_completed_resolution_carrier(&mut legacy);
+                crate::types::game_state::normalize_resolution_cast_offer_allocator(&mut legacy)?;
                 let frames = canonicalize_legacy_resolution_state(&legacy)?;
                 frames
                     .validate(&legacy.waiting_for)
@@ -4260,6 +4263,10 @@ impl ResolutionStateWire {
                     .validate(&state.waiting_for)
                     .map_err(|error| error.to_string())?;
                 let projected = project_frames_into_legacy_state(&state, &frames)?;
+                let mut projected = projected;
+                crate::types::game_state::normalize_resolution_cast_offer_allocator(
+                    &mut projected,
+                )?;
                 let canonical = canonicalize_legacy_resolution_state(&projected)?;
                 if canonical != frames {
                     return Err(

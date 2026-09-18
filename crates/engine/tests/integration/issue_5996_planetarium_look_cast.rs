@@ -488,6 +488,7 @@ fn missing_look_referent_does_not_play_inherited_unrelated_object() {
             driver: CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
             additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![],
         source,

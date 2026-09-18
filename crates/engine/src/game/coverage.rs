@@ -14,7 +14,7 @@ use crate::parser::oracle::{
     is_draft_matters_sentence, parse_strive_cost_line,
 };
 use crate::parser::oracle_casting::parse_casting_restriction_line;
-use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_ir::diagnostic::{ClauseGap, OracleDiagnostic};
 use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
@@ -657,7 +657,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::CostPaidObject => "cost-paid object".into(),
         // CR 701.47c: matches `ObjectScope::AmassedArmy`'s description string.
         TargetFilter::AmassedArmy => "amassed Army".into(),
-        TargetFilter::ChosenCard => "last chosen card".into(),
+        TargetFilter::ChosenCard => "the chosen object".into(),
         TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
         TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
@@ -5916,10 +5916,18 @@ pub fn parse_warning_pattern(
         OracleDiagnostic::SwallowedClause {
             detector,
             description,
+            gap,
             ..
         } => {
-            let excerpt = oracle_text
-                .and_then(|text| swallowed_clause_excerpt(detector, text))
+            // Prefer the engine's own typed verdict. The phrase the axis authority rejected
+            // is parens-stripped, it is bounded by the grammar's own clause bounds, and it is
+            // not subject to `description`'s 140-byte truncation. The excerpt and the
+            // whole-description fallbacks are unchanged, and a `gap: None` warning takes
+            // exactly the path it takes today.
+            let excerpt = gap
+                .as_ref()
+                .map(ClauseGap::phrase)
+                .or_else(|| oracle_text.and_then(|text| swallowed_clause_excerpt(detector, text)))
                 .unwrap_or(description.as_str());
             (
                 warning.category_name().to_string(),
@@ -11063,7 +11071,14 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 // Hogaak, Arisen Necropolis (issue #1095): "You can't spend mana
                 // to cast this spell" is parsed to CastingRestriction::CantSpendMana.
                 || lower.starts_with("you can't spend mana to cast ")
-                || lower.starts_with("you can\u{2019}t spend mana to cast "));
+                || lower.starts_with("you can\u{2019}t spend mana to cast ")
+                // CR 601.2b / CR 601.2h: "Spend only [colors] mana on X" is parsed to
+                // CastingRestriction::SpendOnlyOnX { colors }.
+                || (face
+                    .casting_restrictions
+                    .iter()
+                    .any(|r| matches!(r, crate::types::ability::CastingRestriction::SpendOnlyOnX { .. }))
+                    && crate::parser::oracle_casting::extract_spend_only_on_x_prefix(line).is_some()));
         // Casting option lines ("You may pay X rather than pay...", "If you control a
         // commander, you may cast this spell without paying its mana cost", etc.)
         let covered_by_casting_option = !face.casting_options.is_empty()
@@ -14344,6 +14359,7 @@ mod tests {
         let warnings = vec![OracleDiagnostic::swallowed_clause(
             "APNAP",
             "Repeat the following process for each opponent in turn order.",
+            None,
         )];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
         assert_eq!(gaps[0].handler, "Swallow:APNAP");
@@ -14355,6 +14371,7 @@ mod tests {
             crate::parser::oracle_ir::diagnostic::OracleDiagnostic::swallowed_clause(
                 "Condition_If",
                 "If foo, draw a card.",
+                None,
             ),
         ];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
@@ -14571,6 +14588,75 @@ mod tests {
         assert!(missing.is_empty());
     }
 
+    /// The warning pattern prefers the engine's typed phrase, and falls back
+    /// to the sentence excerpt when there is none.
+    ///
+    /// The two halves are given the SAME `oracle_text` and the SAME detector, so `gap` is
+    /// the only variable, and each half is pinned to its own literal. Those two literals
+    /// differ, which is what stops either half from passing on a constant. The `None` half's
+    /// expected string is the excerpt path's output, i.e. exactly what this warning produced
+    /// before this field existed.
+    #[test]
+    fn swallowed_clause_pattern_prefers_the_gap_phrase_and_falls_back_without_one() {
+        const ORACLE: &str = "Whenever Aggressive Detective attacks, if all your commanders \
+have been revealed, Aggressive Detective deals 2 damage to each opponent.";
+        const DESCRIPTION: &str =
+            "Whenever Aggressive Detective attacks, if all your commanders have been revealed";
+
+        let with_gap = OracleDiagnostic::SwallowedClause {
+            detector: "Condition_If".to_string(),
+            description: DESCRIPTION.to_string(),
+            line_index: 0,
+            unit_span: None,
+            items: Vec::new(),
+            gap: Some(ClauseGap::Condition {
+                guard: "all your commanders have been revealed".to_string(),
+            }),
+        };
+        let without_gap = OracleDiagnostic::swallowed_clause("Condition_If", DESCRIPTION, None);
+
+        let preferred = parse_warning_pattern(&with_gap, Some(ORACLE));
+        let fallback = parse_warning_pattern(&without_gap, Some(ORACLE));
+
+        // The phrase the axis authority rejected, normalized, wins the chain head.
+        assert_eq!(
+            preferred,
+            (
+                "swallowed-clause".to_string(),
+                "Condition_If: all your commanders have been revealed".to_string()
+            )
+        );
+
+        // With no gap the excerpt path is untouched: the marker's whole sentence.
+        assert_eq!(
+            fallback,
+            (
+                "swallowed-clause".to_string(),
+                "Condition_If: if all your commanders have been revealed, aggressive detective \
+                 deals N damage to each opponent"
+                    .to_string()
+            )
+        );
+    }
+
+    /// A non-phrase detector's pattern is byte-identical to the value the phase-base
+    /// export records for it. The expected string is taken from that export's warning
+    /// patterns, an artifact, not from this code.
+    #[test]
+    fn non_phrase_detector_pattern_is_unchanged() {
+        const ORACLE: &str =
+            "Needle Drop deals 1 damage to any target that was dealt damage this turn.\nDraw a card.";
+        let warning = OracleDiagnostic::swallowed_clause("Duration_ThisTurn", ORACLE, None);
+
+        assert_eq!(
+            parse_warning_pattern(&warning, Some(ORACLE)),
+            (
+                "swallowed-clause".to_string(),
+                "Duration_ThisTurn: this turn".to_string()
+            )
+        );
+    }
+
     /// A fired `SwallowedClause` diagnostic must demote the card from
     /// "supported" via a `Swallow:{detector}` gap label (issue #2230 / #2243).
     /// The label format is a contract: parser tests in `oracle.rs` grep for
@@ -14580,6 +14666,7 @@ mod tests {
         let warnings = vec![OracleDiagnostic::swallowed_clause(
             "Condition_If",
             "if you control a creature, …",
+            None,
         )];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
         assert_eq!(gaps[0].handler, "Swallow:Condition_If");
@@ -14593,8 +14680,13 @@ mod tests {
             OracleDiagnostic::swallowed_clause(
                 "DynamicQty",
                 "equal to the number of charge counters",
+                None,
             ),
-            OracleDiagnostic::swallowed_clause("DynamicQty", "equal to that card's mana value"),
+            OracleDiagnostic::swallowed_clause(
+                "DynamicQty",
+                "equal to that card's mana value",
+                None,
+            ),
         ];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
         assert_eq!(gaps.len(), 1);
@@ -14610,6 +14702,7 @@ mod tests {
         let warnings = vec![OracleDiagnostic::swallowed_clause(
             "Optional_YouMay",
             "you may reveal that card and put it into your hand",
+            None,
         )];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
         assert_eq!(gaps[0].handler, "Swallow:Optional_YouMay");
@@ -15085,6 +15178,112 @@ mod tests {
         );
     }
 
+    /// CR 601.2b / CR 601.2h: "Spend only [colors] mana on X" is consumed into
+    /// `casting_restrictions`, so its line must not be classified as a silent drop.
+    #[test]
+    fn spend_only_on_x_casting_restriction_line_is_not_a_silent_drop() {
+        use crate::types::ability::CastingRestriction;
+        use crate::types::mana::ManaColor;
+
+        for (name, types, oracle, expected_restrictions, expected_unsupported_substring) in [
+            (
+                "Consume Spirit",
+                vec!["Sorcery".to_string()],
+                "Spend only black mana on X.\nConsume Spirit deals X damage to any target and you gain X life.",
+                vec![CastingRestriction::SpendOnlyOnX {
+                    colors: vec![ManaColor::Black],
+                }],
+                None,
+            ),
+            (
+                "Drain Life",
+                vec!["Sorcery".to_string()],
+                "Spend only black mana on X.\nDrain Life deals X damage to any target. You gain life equal to the damage dealt, but not more life than the player's life total before the damage was dealt, the planeswalker's loyalty before the damage was dealt, or the creature's toughness.",
+                vec![CastingRestriction::SpendOnlyOnX {
+                    colors: vec![ManaColor::Black],
+                }],
+                None,
+            ),
+            (
+                "Soul Burn",
+                vec!["Sorcery".to_string()],
+                "Spend only black and/or red mana on X.\nSoul Burn deals X damage to any target. You gain life equal to the damage dealt, but not more than the amount of {B} spent on X, the player\u{2019}s life total before the damage was dealt, the planeswalker\u{2019}s loyalty before the damage was dealt, or the creature\u{2019}s toughness.",
+                vec![CastingRestriction::SpendOnlyOnX {
+                    colors: vec![ManaColor::Black, ManaColor::Red],
+                }],
+                None,
+            ),
+            (
+                "Emblazoned Golem",
+                vec!["Artifact".to_string(), "Creature".to_string()],
+                "Kicker {X}\nSpend only colored mana on X. No more than one mana of each color may be spent this way.\nIf this creature was kicked, it enters with X +1/+1 counters on it.",
+                vec![CastingRestriction::SpendOnlyOnX {
+                    colors: vec![
+                        ManaColor::White,
+                        ManaColor::Blue,
+                        ManaColor::Black,
+                        ManaColor::Red,
+                        ManaColor::Green,
+                    ],
+                }],
+                Some("No more than one mana of each color"),
+            ),
+        ] {
+            let parsed = crate::parser::parse_oracle_text(oracle, name, &[], &types, &[]);
+            assert_eq!(
+                parsed.casting_restrictions, expected_restrictions,
+                "{name}: parsed casting restrictions must match exact typed AST"
+            );
+
+            let mut face = make_face();
+            face.name = name.to_string();
+            face.oracle_text = Some(oracle.to_string());
+            face.keywords = parsed.extracted_keywords;
+            face.abilities = parsed.abilities;
+            face.triggers = parsed.triggers;
+            face.static_abilities = parsed.statics;
+            face.replacements = parsed.replacements;
+            face.modal = parsed.modal;
+            face.additional_cost = parsed.additional_cost;
+            face.strive_cost = parsed.strive_cost;
+            face.casting_restrictions = parsed.casting_restrictions;
+            face.casting_options = parsed.casting_options;
+            face.solve_condition = parsed.solve_condition;
+            face.parse_warnings = parsed.parse_warnings;
+
+            let parse_details = build_parse_details_for_face(&face);
+            let mut missing = Vec::new();
+            check_silent_drops(
+                &Some(oracle.to_string()),
+                name,
+                &parse_details,
+                &mut missing,
+            );
+            assert!(
+                !missing.iter().any(|gap| gap.starts_with("SilentDrop:")),
+                "{name}: spend-only-on-X casting restriction line must not be classified as a silent drop, got {missing:?}"
+            );
+
+            if let Some(substring) = expected_unsupported_substring {
+                let has_unsupported_ability = face.abilities.iter().any(|a| {
+                    matches!(&*a.effect, crate::types::ability::Effect::Unimplemented { name, description }
+                        if name.contains(substring) || description.as_deref().is_some_and(|d| d.contains(substring)))
+                });
+                let has_unsupported_item = parse_details.iter().any(|item| {
+                    !item.supported
+                        && (item.source_text.as_deref().is_some_and(|t| t.contains(substring))
+                            || item.details.iter().any(|(_, v)| v.contains(substring)))
+                });
+                assert!(
+                    has_unsupported_ability || has_unsupported_item,
+                    "{name}: expected explicit unsupported remainder mentioning {substring:?}, got abilities={:?}, parse_details={:?}",
+                    face.abilities,
+                    parse_details
+                );
+            }
+        }
+    }
+
     /// The exclusion above must not become a blanket amnesty for anything that
     /// merely looks like a cost preamble. `parse_casting_restriction_line`
     /// returns `None` for an unrecognized cost, so Pie-Eating Contest's "gobble
@@ -15118,6 +15317,102 @@ mod tests {
             &mut missing,
         );
         assert_eq!(missing, vec!["SilentDrop:1_of_2"]);
+    }
+
+    /// Unrecognized spend-only lines (like "Spend only mana produced by basic lands to cast this spell")
+    /// must not be swallowed by a generic "spend only " prefix check when SpendOnlyOnX does not match.
+    ///
+    /// Tests both the `check_silent_drops` pipeline guard and the discriminating `audit_card_lines`
+    /// coverage authority at `crates/engine/src/game/coverage.rs:11058-11073` for supported and
+    /// unrecognized spend-only lines.
+    #[test]
+    fn unrecognized_spend_only_line_is_still_a_silent_drop() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, CastingRestriction, Effect, QuantityExpr, TargetFilter,
+        };
+        use crate::types::mana::ManaColor;
+
+        const UNRECOGNIZED_ORACLE: &str =
+            "Spend only mana produced by basic lands to cast this spell.\nDraw two cards.";
+
+        let mut unrecognized_face = make_face();
+        // Give face SpendOnlyOnX to prove that having a SpendOnlyOnX restriction does NOT
+        // grant blanket immunity to an unrecognized "Spend only" line.
+        unrecognized_face
+            .casting_restrictions
+            .push(CastingRestriction::SpendOnlyOnX {
+                colors: vec![ManaColor::Black],
+            });
+        unrecognized_face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .description("Draw two cards.".to_string()),
+        );
+
+        // 1. Retain the existing check_silent_drops unrecognized-line guard
+        let parse_details = build_parse_details_for_face(&unrecognized_face);
+        let mut missing = Vec::new();
+        check_silent_drops(
+            &Some(UNRECOGNIZED_ORACLE.to_string()),
+            "Basic Spell",
+            &parse_details,
+            &mut missing,
+        );
+        assert_eq!(missing, vec!["SilentDrop:1_of_2"]);
+
+        // 2. Discriminating audit_card_lines assertion for the unrecognized line:
+        // Because extract_spend_only_on_x_prefix returns None for this unrecognized line,
+        // audit_card_lines must NOT treat it as covered_by_casting, and must emit SilentDrop.
+        // If audit_card_lines reverted to `lower.starts_with("spend only ")`, this assertion would fail.
+        let unrecognized_findings = audit_card_lines(UNRECOGNIZED_ORACLE, &unrecognized_face);
+        assert!(
+            unrecognized_findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line == "Spend only mana produced by basic lands to cast this spell."
+            )),
+            "Unrecognized spend-only line must be emitted as SilentDrop by audit_card_lines: {unrecognized_findings:?}"
+        );
+
+        // 3. Discriminating audit_card_lines assertion for a supported SpendOnlyOnX line:
+        // A valid "Spend only [colors] mana on X" line with SpendOnlyOnX present on face
+        // must be recognized as covered_by_casting and not emitted as SilentDrop.
+        const SUPPORTED_ORACLE: &str = "Spend only black mana on X.\nDraw two cards.";
+        let mut supported_face = make_face();
+        supported_face
+            .casting_restrictions
+            .push(CastingRestriction::SpendOnlyOnX {
+                colors: vec![ManaColor::Black],
+            });
+        supported_face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .description("Draw two cards.".to_string()),
+        );
+
+        let supported_findings = audit_card_lines(SUPPORTED_ORACLE, &supported_face);
+        assert!(
+            !supported_findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line == "Spend only black mana on X."
+            )),
+            "Supported SpendOnlyOnX line must not be emitted as SilentDrop by audit_card_lines: {supported_findings:?}"
+        );
+        assert!(
+            supported_findings.is_empty(),
+            "Supported SpendOnlyOnX card should have no semantic findings: {supported_findings:?}"
+        );
     }
 
     #[test]
@@ -15254,6 +15549,7 @@ mod tests {
         let warnings = vec![OracleDiagnostic::swallowed_clause(
             "Condition_If",
             "If a condition is met, do something.",
+            None,
         )];
 
         let gaps = merge_coverage_gaps(&analysis, tree, &warnings);

@@ -36,6 +36,7 @@ use super::oracle_nom::filter::{
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
 };
+use super::oracle_nom::target::parse_chosen_object_reference;
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
 use super::oracle_static::{parse_commander_subject_filter_prefix, typed_filter_for_subtype};
 use super::oracle_target::{
@@ -1011,13 +1012,24 @@ fn parse_attack_verb(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+fn parse_one_of_your_opponents(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            opt(tag::<_, _, OracleError<'_>>("another ")),
+            tag("one of your opponents"),
+        ),
+    )
+    .parse(input)
+}
+
 fn parse_referenced_player_phrase(input: &str) -> OracleResult<'_, ()> {
     alt((
         value(
             (),
             tag::<_, _, OracleError<'_>>("one or more of your opponents"),
         ),
-        value((), tag("one of your opponents")),
+        parse_one_of_your_opponents,
         value((), tag("another player")),
         value((), tag("an opponent")),
         value((), tag("a player")),
@@ -11708,6 +11720,18 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         }
     }
 
+    // CR 607.2d + CR 603.6c + CR 603.10a: "the chosen <object noun>" names the
+    // object a LINKED choice recorded (CR 607.2d: "the chosen [value]" refers
+    // only to the choice made by the linked ability). The engine carries that
+    // object on the source as `ChosenAttribute::Card`, read by
+    // `TargetFilter::ChosenCard`; a leaves-the-battlefield trigger on it looks
+    // back in time (CR 603.10a). Object-axis only: the player/color/label
+    // choice axes have their own readers and are refused by the atom's noun
+    // set + boundary peek.
+    if let Ok((rest, filter)) = parse_chosen_object_reference(text) {
+        return (filter, rest.trim_start());
+    }
+
     // Parser heuristic (no CR citation — this is Oracle-text interpretation, not a
     // rule implementation): anaphoric subjects that only bind inside a DELAYED
     // triggered ability created by a parent ability. These pronouns have no
@@ -13155,7 +13179,10 @@ fn try_parse_event(
                     )),
                 ),
                 value(AttackTargetFilter::Planeswalker, tag(" a planeswalker")),
-                value(AttackTargetFilter::Player, tag(" one of your opponents")),
+                value(
+                    AttackTargetFilter::Player,
+                    preceded(tag(" "), parse_one_of_your_opponents),
+                ),
                 value(AttackTargetFilter::Player, tag(" a player")),
                 value(AttackTargetFilter::Player, tag(" you")),
                 // CR 303.4e: "attacks enchanted player" — a Curse Aura trigger
@@ -13180,9 +13207,12 @@ fn try_parse_event(
         // eight or more lands" (Owlbear Cub) from the trigger event clause.
         let attack_target_parsed = parse_attack_target.parse(after).ok();
         let attack_target_filter = attack_target_parsed.as_ref().map(|(_, f)| f.clone());
-        let attacks_one_of_your_opponents = tag::<_, _, OracleError<'_>>(" one of your opponents")
-            .parse(after)
-            .is_ok();
+        let attacks_one_of_your_opponents = preceded(
+            tag::<_, _, OracleError<'_>>(" "),
+            parse_one_of_your_opponents,
+        )
+        .parse(after)
+        .is_ok();
         let mut def = make_base();
         // CR 508.3d: "Whenever [a player] attacks" triggers fire once per attack declaration,
         // not once per attacker. This applies to "opponent attacks you" patterns (e.g., Lulu,

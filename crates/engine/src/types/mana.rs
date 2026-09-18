@@ -296,6 +296,11 @@ pub struct SpellMeta {
     /// (`game::casting::pay_mana_cost_from_pool_with_choices`) withholds all real
     /// (non-convoke) pool units for the duration of the payment when this is set.
     pub cant_spend_mana: bool,
+    /// CR 601.2b / CR 601.2h: "Spend only [colors] mana on X."
+    /// When present, `spend_only_on_x_generic_count` of the generic mana pips must be paid
+    /// using only the specified `spend_only_on_x_colors`.
+    pub spend_only_on_x_colors: Option<Vec<ManaColor>>,
+    pub spend_only_on_x_generic_count: u32,
 }
 
 /// CR 106.6: Context for a mana-payment decision. Distinguishes "paying for a
@@ -2965,6 +2970,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let instant_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -2977,6 +2984,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let legendary_spell = SpellMeta {
             types: vec!["Legendary".to_string(), "Creature".to_string()],
@@ -2989,6 +2998,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(restriction.allows_spell(&creature_spell));
         assert!(!restriction.allows_spell(&instant_spell));
@@ -3017,6 +3028,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let omen_spell = SpellMeta {
             types: vec!["Enchantment".to_string(), "Omen".to_string()],
@@ -3029,6 +3042,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let goblin_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3041,6 +3056,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         // Matches one branch each.
         assert!(restriction.allows_spell(&dragon_spell));
@@ -3091,6 +3108,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let turtle_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3103,6 +3122,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3115,6 +3136,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(restriction.allows_spell(&ninja_creature));
         assert!(!restriction.allows_spell(&turtle_creature));
@@ -3135,6 +3158,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let source_types = vec!["Artifact".to_string()];
         let source_subtypes = Vec::new();
@@ -3163,6 +3188,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3175,6 +3202,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let elf_instant = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -3187,6 +3216,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(restriction.allows_spell(&elf_creature));
         assert!(!restriction.allows_spell(&goblin_creature));
@@ -3224,6 +3255,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let spent = pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&spell))
@@ -3253,6 +3286,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&elf_spell))
@@ -3316,6 +3351,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&goblin_spell))
@@ -3343,6 +3380,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let tribal_elemental_instant = SpellMeta {
             types: vec!["Tribal".to_string(), "Instant".to_string()],
@@ -3355,6 +3394,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3367,6 +3408,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let plain_instant = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -3379,6 +3422,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(restriction.allows_spell(&elemental_creature));
         assert!(restriction.allows_spell(&tribal_elemental_instant));
@@ -3405,6 +3450,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let colored_eldrazi = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3417,6 +3464,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let colorless_construct = SpellMeta {
             types: vec!["Artifact".to_string(), "Colorless".to_string()],
@@ -3429,6 +3478,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(restriction.allows_spell(&colorless_eldrazi));
         assert!(!restriction.allows_spell(&colored_eldrazi));
@@ -3485,6 +3536,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let colored_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3497,6 +3550,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         // Spell half: still gated to the named type.
         assert!(restriction.allows_spell(&colorless_spell));
@@ -3538,6 +3593,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let artifact_creature_spell = SpellMeta {
             types: vec!["Artifact".to_string(), "Creature".to_string()],
@@ -3550,6 +3607,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let instant_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -3562,6 +3621,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let creature_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3574,6 +3635,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         // Permitted: any artifact spell (incl. artifact creatures).
         assert!(restriction.allows(&PaymentContext::Spell(&artifact_spell)));
@@ -3614,6 +3677,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let creature_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3626,6 +3691,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let artifact_types = vec!["Artifact".to_string()];
         let creature_types = vec!["Creature".to_string()];
@@ -3660,12 +3727,16 @@ mod tests {
             types: vec!["Creature".to_string()],
             is_face_down: true,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         let face_up_spell = SpellMeta {
             types: vec!["Creature".to_string()],
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         // LEGAL: spending the mana on a face-down cast.
@@ -3699,6 +3770,8 @@ mod tests {
             types: vec!["Creature".to_string()],
             is_face_down: true,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(!restriction.allows(&PaymentContext::Spell(&spell)));
@@ -3830,6 +3903,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let sorcery = SpellMeta {
             types: vec!["Sorcery".to_string()],
@@ -3842,6 +3917,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3854,6 +3931,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         // Manamorphose is an instant — the {R}{R} restricted mana must pay for it.
         assert!(restriction.allows_spell(&instant));
@@ -3898,6 +3977,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let normal_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -3910,6 +3991,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(restriction.allows_spell(&flashback_spell));
         assert!(!restriction.allows_spell(&normal_spell));
@@ -3930,6 +4013,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         let mv_four = SpellMeta {
@@ -3939,6 +4024,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         let no_mv = SpellMeta::default();
@@ -3963,6 +4050,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         let mv_four = SpellMeta {
@@ -3972,6 +4061,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(restriction.allows_spell(&mv_two));
@@ -3997,6 +4088,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -4011,6 +4104,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -4047,6 +4142,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         let two_colors = SpellMeta {
@@ -4055,6 +4152,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(restriction.allows_spell(&three_colors));
@@ -4080,6 +4179,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         let one_color = SpellMeta {
@@ -4088,6 +4189,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(restriction.allows_spell(&colorless));
@@ -4112,6 +4215,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         let one_color = SpellMeta {
@@ -4120,6 +4225,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(two_or_more.allows_spell(&three_colors));
@@ -4146,6 +4253,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -4159,6 +4268,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -4461,6 +4572,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(restriction.allows_spell(&equipment_spell));
         // Non-Equipment artifact spell: REJECTED.
@@ -4475,6 +4588,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(!restriction.allows_spell(&artifact_spell));
     }

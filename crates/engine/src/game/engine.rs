@@ -10991,7 +10991,55 @@ fn apply_non_priority_pass_action(
                 player,
                 object_id,
                 card_id,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            let permission_index = casting::current_resolution_cast_permission_index(
+                state,
+                *player,
+                *object_id,
+                *card_id,
+            )
+            .ok_or_else(|| {
+                EngineError::ActionNotAllowed(
+                    "Only a resolution-owned modal face election may be cancelled".to_string(),
+                )
+            })?;
+            let cleanup = casting::take_resolution_cast_cleanup(
+                state,
+                *player,
+                *object_id,
+                *card_id,
+                permission_index,
+            )
+            ?
+            .ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "Resolution face choice permission provenance is stale or mismatched"
+                        .to_string(),
+                )
+            })?;
+            crate::game::engine_resolution_choices::abort_resolution_cast(
+                state,
+                *player,
+                *object_id,
+                cleanup,
+                &mut events,
+            )?
+        }
+        (
+            WaitingFor::ModalFaceChoice {
+                player,
+                object_id,
+                card_id,
                 payment_mode,
+                resolution_additional_cost,
             },
             GameAction::ChooseModalFace { back_face },
         ) => {
@@ -11000,6 +11048,49 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
+            let resolution_permission = casting::current_resolution_cast_permission_index(
+                state,
+                *player,
+                *object_id,
+                *card_id,
+            );
+            // Validate the exact indexed paid-cleanup root before changing the
+            // visible face or its election flags. A forged receipt must leave
+            // the prompt, object, permissions, triggers, journal, and events
+            // byte-for-byte untouched.
+            if let Some(permission_index) = resolution_permission {
+                let cleanup = state
+                    .objects
+                    .get(object_id)
+                    .and_then(|object| object.casting_permissions.get(permission_index.0))
+                    .and_then(|permission| match permission {
+                        crate::types::ability::CastingPermission::ExileWithAltCost {
+                            granted_to: Some(grantee),
+                            resolution_cleanup: Some(cleanup),
+                            ..
+                        } if *grantee == *player => Some(cleanup.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        EngineError::InvalidAction(
+                            "Resolution face choice permission provenance is stale or mismatched"
+                                .to_string(),
+                        )
+                    })?;
+                crate::game::engine_resolution_choices::validate_resolution_cast_cleanup_authority(
+                    *player, &cleanup,
+                )?;
+                crate::game::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
+                    state, &cleanup,
+                )?;
+            }
+            // A resolution-owned election has not announced anything yet.  If
+            // the selected face later fails its exact permission policy, put
+            // the object (including the appended temporary permission) back
+            // exactly as the public prompt exposed it.
+            let resolution_object_before = resolution_permission
+                .as_ref()
+                .and_then(|_| state.objects.get(object_id).cloned());
             if let Some(obj) = state.objects.get_mut(object_id) {
                 if back_face {
                     // Swap to back face — the shared swap preserves the stored
@@ -11018,6 +11109,29 @@ fn apply_non_priority_pass_action(
                 // blind. Cleared on any zone change off the stack and on
                 // cancel.
                 obj.cast_face_committed = true;
+            }
+            if let Some(permission_index) = resolution_permission {
+                let result = casting::continue_resolution_modal_face_choice(
+                    state,
+                    *player,
+                    *object_id,
+                    casting::ResolutionModalFaceChoice {
+                        permission_index,
+                        payment_mode: *payment_mode,
+                        additional_cost: resolution_additional_cost.clone(),
+                    },
+                    &mut events,
+                );
+                if result.is_err() {
+                    if let Some(object) = resolution_object_before {
+                        state.objects.insert(*object_id, object);
+                    }
+                }
+                return result.map(|waiting_for| ActionResult {
+                    events: std::mem::take(&mut events),
+                    waiting_for,
+                    log_entries: Vec::new(),
+                });
             }
             // CR 712.12 / CR 712.11b: Route the re-entry by the now-active face's
             // type. A land face is put onto the battlefield via the play-land
@@ -12093,7 +12207,7 @@ fn apply_non_priority_pass_action(
             &mut events,
         )?,
         (WaitingFor::CollectEvidenceChoice { player, resume, .. }, GameAction::CancelCast) => {
-            engine_casting::handle_collect_evidence_cancel(state, *player, resume, &mut events)
+            engine_casting::handle_collect_evidence_cancel(state, *player, resume, &mut events)?
         }
         // CR 702.180b: Player chose which creature to tap for harmonize cost reduction.
         // CR 601.2b: Creature is tapped as part of paying the total cost.
@@ -12482,9 +12596,9 @@ fn apply_non_priority_pass_action(
             let player = *player;
             let convoke_mode = *convoke_mode;
             if let Some(pending) = state.pending_cast.as_ref() {
-                // CR 602.2b + CR 601.2b/h: An activation's announced X must
-                // make its full cost payable before the announcement commits,
-                // whether or not the ability has deferred targets.
+                // CR 602.2b + CR 601.2b/f/h: Concretize {X} into generic mana in the cost structure.
+                // Payment restrictions ("Spend only [colors] mana on X") are carried as payment-allocation
+                // metadata in SpellMeta and enforced during mana payment.
                 let mut trial = pending.as_ref().clone();
                 trial.ability.set_chosen_x_recursive(value);
                 trial.cost.concretize_x(value);
@@ -12532,9 +12646,15 @@ fn apply_non_priority_pass_action(
                     }
                 }
             }
-            let pending = state.pending_cast.as_mut().ok_or_else(|| {
-                EngineError::InvalidAction("No pending cast awaiting X".to_string())
-            })?;
+            let pending = state
+                .pending_cast
+                .as_mut()
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("No pending cast awaiting X".to_string())
+                })?;
+            // CR 601.2b + CR 601.2f + CR 601.2h: Concretize {X} into generic mana in the cost structure.
+            // Payment restrictions ("Spend only [colors] mana on X") are carried as payment-allocation
+            // metadata in SpellMeta and enforced during mana payment.
             pending.ability.set_chosen_x_recursive(value);
             pending.cost.concretize_x(value);
             let object_id = pending.object_id;
@@ -16381,6 +16501,7 @@ fn handle_play_land(
                 object_id,
                 card_id,
                 payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                resolution_additional_cost: None,
             });
         }
 

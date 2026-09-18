@@ -22,6 +22,7 @@
 //!      representation.
 
 use super::oracle::{is_draft_matters_sentence, ParsedAbilities};
+use super::oracle_effect::gap_diagnosis::{swallowed_clause_gap, GuardWord, SwallowedAxis};
 use super::oracle_effect::player_lookback_relative_clause_owns_suffix;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use super::oracle_ir::doc::OracleItemIr;
@@ -421,6 +422,7 @@ fn detect_replacement(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::Replacement.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -560,6 +562,7 @@ fn detect_replacement_instead(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ReplacementInstead.detector_label(),
         truncate(original, 140),
+        swallowed_clause_gap(SwallowedAxis::Replacement, cleaned),
     ));
 }
 
@@ -584,6 +587,7 @@ fn detect_activate_only_during(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ActivateOnlyDuring.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -612,6 +616,7 @@ fn detect_activate_limit(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ActivateLimit.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -678,6 +683,7 @@ fn detect_duration_until_eot(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::DurationUntilEndOfTurn.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -756,6 +762,7 @@ fn detect_optional_you_may(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::OptionalYouMay.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -2759,6 +2766,7 @@ fn detect_dynamic_qty(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::DynamicQty.detector_label(),
         truncate(original, 140),
+        swallowed_clause_gap(SwallowedAxis::Quantity, cleaned),
     ));
 }
 
@@ -2823,6 +2831,7 @@ fn detect_modal_dynamic_max_dropped(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ModalDynamicMaxDropped.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -3942,6 +3951,11 @@ fn detect_condition_if(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ConditionIf.detector_label(),
         truncate(original, 140),
+        // Report AFTER this detector's exemptions are applied: `stripped` is `cleaned` with the
+        // CR-implicit "if" sentences, the represented replacement-antecedent sentences and the
+        // represented tiered counter pairs removed. Reporting from `cleaned` here would name a
+        // guard this detector has already decided is represented.
+        swallowed_clause_gap(SwallowedAxis::Guard(GuardWord::If), &stripped),
     ));
 }
 
@@ -4190,6 +4204,7 @@ fn detect_condition_unless(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ConditionUnless.detector_label(),
         truncate(original, 140),
+        swallowed_clause_gap(SwallowedAxis::Guard(GuardWord::Unless), cleaned),
     ));
 }
 
@@ -4259,6 +4274,7 @@ fn detect_condition_as_long_as(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::ConditionAsLongAs.detector_label(),
         truncate(original, 140),
+        swallowed_clause_gap(SwallowedAxis::Guard(GuardWord::AsLongAs), cleaned),
     ));
 }
 
@@ -4768,6 +4784,7 @@ fn detect_duration_this_turn(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::DurationThisTurn.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -4825,6 +4842,7 @@ fn detect_duration_next_turn(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::DurationNextTurn.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -4871,6 +4889,7 @@ fn detect_optional_may_have(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::OptionalMayHave.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -4899,6 +4918,7 @@ fn detect_apnap(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::Apnap.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -5199,6 +5219,7 @@ fn detect_damage_subject_conjunction(
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::DamageSubjectConjunction.detector_label(),
         truncate(original, 140),
+        None,
     ));
 }
 
@@ -5362,6 +5383,10 @@ mod tests {
         effect_has_internal_optionality, trigger_tree_has_optional, twice_is_activation_limit,
     };
     use crate::parser::oracle::parse_oracle_text;
+    use crate::parser::oracle_effect::gap_diagnosis::{
+        swallowed_clause_gap, GuardWord, SwallowedAxis,
+    };
+    use crate::parser::oracle_ir::diagnostic::ClauseGap; // `pub enum` in oracle_ir::diagnostic
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ContinuousModification, DamageModification, Effect,
@@ -5374,6 +5399,7 @@ mod tests {
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+    use std::collections::BTreeSet; // the non-phrase set-equality guard
 
     fn parse(text: &str, types: &[&str]) -> crate::parser::oracle::ParsedAbilities {
         parse_named(text, "Test Card", types)
@@ -5391,6 +5417,392 @@ mod tests {
             &types.iter().map(|ty| (*ty).to_string()).collect::<Vec<_>>(),
             &[],
         )
+    }
+
+    // ── Swallow phrases: each detector carries the phrase its own axis rejected ──
+    //
+    // Venue B: `parse_named` with VERBATIM Oracle text and the card's real name, so
+    // `normalize_card_name_refs` behaves exactly as it does in production. Every test
+    // opens with a REACH GUARD asserting its detector actually fired — without one, an
+    // upstream `Effect::Unimplemented` (which makes `check_swallowed_clauses` skip the
+    // whole unit at its `any_ability_has_unimplemented` guard) would satisfy a
+    // `.all(...)` assertion vacuously.
+
+    /// Every `SwallowedClause` on `parsed` whose detector is `detector`.
+    fn swallows_for<'a>(
+        parsed: &'a crate::parser::oracle::ParsedAbilities,
+        detector: &str,
+    ) -> Vec<&'a OracleDiagnostic> {
+        parsed
+            .parse_warnings
+            .iter()
+            .filter(|w| {
+                matches!(w, OracleDiagnostic::SwallowedClause { detector: d, .. } if d == detector)
+            })
+            .collect()
+    }
+
+    /// The one warning `detector` raised, failing with the whole warning list if the
+    /// count is anything but one.
+    fn only_swallow<'a>(
+        parsed: &'a crate::parser::oracle::ParsedAbilities,
+        detector: &str,
+    ) -> &'a OracleDiagnostic {
+        let found = swallows_for(parsed, detector);
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one {detector} warning; got {:?}",
+            parsed.parse_warnings
+        );
+        found[0]
+    }
+
+    /// `Condition_If` reports the first `if`-guard its ladder rejects, in both
+    /// the leading-trigger position and the trailing position.
+    #[test]
+    fn condition_if_swallow_carries_the_rejected_guard() {
+        // Aggressive Detective (UNK) — the guard sits between a trigger condition and the
+        // effect.
+        let parsed = parse_named(
+            "Whenever Aggressive Detective attacks, if all your commanders have been \
+             revealed, Aggressive Detective deals 2 damage to each opponent.",
+            "Aggressive Detective",
+            &["Creature"],
+        );
+        assert_eq!(
+            only_swallow(&parsed, "Condition_If").gap(),
+            Some(&ClauseGap::Condition {
+                guard: "all your commanders have been revealed".to_string()
+            }),
+            "full warning: {:?}",
+            only_swallow(&parsed, "Condition_If")
+        );
+
+        // Barrin's Unmaking (INV) — the sibling case: a TRAILING guard, which a
+        // leading-only extractor built on `split_leading_conditional` would miss entirely.
+        let parsed = parse_named(
+            "Return target permanent to its owner's hand if that permanent shares a color \
+             with the most common color among all permanents or a color tied for most common.",
+            "Barrin's Unmaking",
+            &["Instant"],
+        );
+        assert_eq!(
+            only_swallow(&parsed, "Condition_If").gap(),
+            Some(&ClauseGap::Condition {
+                guard: "that permanent shares a color with the most common color among all \
+                        permanents or a color tied for most common"
+                    .to_string()
+            }),
+            "full warning: {:?}",
+            only_swallow(&parsed, "Condition_If")
+        );
+    }
+
+    /// CONSTRUCTED, and deliberately so: no corpus card exercises this path, because the
+    /// exemption works. Both sentences below ARE corpus-attested — the outer text is
+    /// Land Aid '04 verbatim (UNH; it fires `Condition_If` at base), and "If you search
+    /// your library this way, shuffle." is printed on many corpus cards, NONE of which
+    /// produces a `Condition_If` warning. Only the COMPOSITION is synthetic.
+    ///
+    /// The two corpus facts above are stated as predicates rather than counts, because a
+    /// count here would rot silently against every corpus refresh while this comment sat
+    /// unchanged. Regenerate both with `scripts/swallow_phrase_freq.py` over a current
+    /// export, or directly: cards whose lowercased `oracle_text` contains "if you search
+    /// your library this way" (or the "searched" variant), intersected with cards
+    /// producing a `Condition_If` `SwallowedClause` — the intersection is what must stay
+    /// empty.
+    const EXEMPTED_FIRST_IF: &str = "Search your library for a basic land card, put that card \
+onto the battlefield tapped, then shuffle. If you search your library this way, shuffle. \
+If you sang a song the whole time you were searching and shuffling, you may untap that land.";
+
+    /// A text whose FIRST `if` is exempted reports the guard that survives.
+    ///
+    /// What this discriminates: `strip_cr_implicit_if_phrases` drops the inserted
+    /// sentence, so the surviving guard is the sang-a-song one. Passing `cleaned` instead
+    /// of `stripped` at the `Condition_If` push site yields
+    /// `Some(Condition { guard: "you search your library this way" })` — a DIFFERENT,
+    /// non-None value, measured. The test is therefore red under the single most likely
+    /// wiring mistake, and it cannot be satisfied vacuously by an upstream short-circuit,
+    /// which would give `None` rather than the other guard.
+    #[test]
+    fn condition_if_swallow_reports_the_guard_that_survives_the_exemptions() {
+        let parsed = parse_named(EXEMPTED_FIRST_IF, "Land Aid '04", &["Sorcery"]);
+        let warning = only_swallow(&parsed, "Condition_If");
+
+        assert_eq!(
+            warning.gap(),
+            Some(&ClauseGap::Condition {
+                guard: "you sang a song the whole time you were searching and shuffling"
+                    .to_string()
+            }),
+            "full warning: {warning:?}"
+        );
+    }
+
+    /// The exemption's effect on the reported guard, without the parse chain.
+    ///
+    /// Venue B′: it lives here rather than beside the other extractor tests because
+    /// `strip_cr_implicit_if_phrases` is private to this module's parent, and
+    /// `gap_diagnosis` is a sibling that cannot see it. Independent of the detector-level
+    /// test above, which goes
+    /// through the whole `parse_oracle_text` chain and could in principle stop firing
+    /// `Condition_If` on this constructed text.
+    #[test]
+    fn strip_then_extract_reports_the_surviving_guard() {
+        // `swallowed_clause_gap`'s documented precondition is lowercased input — in
+        // production the detector passes `cleaned`/`stripped`, both `to_ascii_lowercase`
+        // outputs. This reproduces that rather than relying on the extractor to
+        // re-lowercase; it must not, and "no defensive re-lowercasing" is the recorded
+        // idiom.
+        let lower = EXEMPTED_FIRST_IF.to_ascii_lowercase();
+
+        // `super::`-qualified, NOT imported: this module has no `use super::*` — it opens
+        // a selective `use super::{ … }` list — and the qualified call is the idiom it
+        // already uses to reach the parent-private `detect_dynamic_qty`. No production
+        // visibility change and no import line.
+        let stripped = super::strip_cr_implicit_if_phrases(&lower);
+        let after = swallowed_clause_gap(SwallowedAxis::Guard(GuardWord::If), &stripped);
+        let before = swallowed_clause_gap(SwallowedAxis::Guard(GuardWord::If), &lower);
+
+        // REACH GUARD on the PRE-strip side only. The row's discriminator is that the two
+        // sides DIFFER, and `after` is pinned to a literal below — so a `None` there is
+        // already red. `before` is pinned by nothing, so without this a stripper that
+        // deleted the whole text would satisfy "they differ" for the wrong reason.
+        assert!(
+            before.is_some(),
+            "pre-strip extraction returned None; got {before:?}"
+        );
+        assert_ne!(before, after, "the exemption changed nothing: {before:?}");
+
+        assert_eq!(
+            after,
+            Some(ClauseGap::Condition {
+                guard: "you sang a song the whole time you were searching and shuffling"
+                    .to_string()
+            }),
+            "post-strip guard: {after:?}"
+        );
+    }
+
+    /// `Condition_Unless` reports the rejected `unless` guard, and a
+    /// co-resident warning on a DIFFERENT axis keeps its own verdict.
+    #[test]
+    fn condition_unless_swallow_carries_the_rejected_guard() {
+        // Essence Vortex (ICE) fires two detectors on one audit unit, i.e. two
+        // authorities asked about one text. This is the multi-authority hostile fixture:
+        // a shared phrase buffer, or extraction hoisted above the per-detector call,
+        // gives both records the same verdict and turns the second half red.
+        let parsed = parse_named(
+            "Destroy target creature unless its controller pays life equal to its \
+             toughness. A creature destroyed this way can't be regenerated.",
+            "Essence Vortex",
+            &["Instant"],
+        );
+
+        assert_eq!(
+            only_swallow(&parsed, "Condition_Unless").gap(),
+            Some(&ClauseGap::Condition {
+                guard: "its controller pays life equal to its toughness".to_string()
+            }),
+            "full warning: {:?}",
+            only_swallow(&parsed, "Condition_Unless")
+        );
+
+        // The same parse's `DynamicQty` record is SEPARATE and carries its own
+        // axis's answer. Measured `None` here: the quantity authorities accept this
+        // card's operand, so the axis names no phrase. What matters is that it is never
+        // the `Condition` verdict its co-resident holds.
+        let dynamic = only_swallow(&parsed, "DynamicQty");
+        assert_eq!(
+            dynamic.gap(),
+            None,
+            "the DynamicQty record must carry its own axis's answer, not the \
+             Condition_Unless verdict its co-resident holds: {dynamic:?}"
+        );
+    }
+
+    /// `Condition_AsLongAs` reports the rejected "as long as" guard.
+    #[test]
+    fn condition_as_long_as_swallow_carries_the_rejected_guard() {
+        // Torrent of Lava (MIR). The guard is bounded at the clause break, so it must not
+        // run on into the quoted granted ability that follows it.
+        let parsed = parse_named(
+            "Torrent of Lava deals X damage to each creature without flying.\nAs long as \
+             Torrent of Lava is on the stack, each creature has \"{T}: Prevent the next 1 \
+             damage that would be dealt to this creature by Torrent of Lava this turn.\"",
+            "Torrent of Lava",
+            &["Sorcery"],
+        );
+        let warning = only_swallow(&parsed, "Condition_AsLongAs");
+
+        // Removing the `trailing_guard` arm this phase adds turns this `None`: measured,
+        // the scanner has no "as long as" arm at base at all.
+        assert_eq!(
+            warning.gap(),
+            Some(&ClauseGap::Condition {
+                guard: "torrent of lava is on the stack".to_string()
+            }),
+            "full warning: {warning:?}"
+        );
+    }
+
+    /// `DynamicQty` reports the rejected operand.
+    #[test]
+    fn dynamic_qty_swallow_carries_the_rejected_operand() {
+        // Captain Vargus Wrath (CMR). The operand is spanned by the marker's own
+        // `OperandSpan` and bounded by its own `end_bounds`; a hand-rolled split would
+        // produce a different string.
+        let parsed = parse_named(
+            "Whenever Captain Vargus Wrath attacks, Pirates you control get +1/+1 until \
+             end of turn for each time you've cast a commander from the command zone this \
+             game.",
+            "Captain Vargus Wrath",
+            &["Creature"],
+        );
+        let warning = only_swallow(&parsed, "DynamicQty");
+
+        assert_eq!(
+            warning.gap(),
+            Some(&ClauseGap::Quantity {
+                operand: "time you've cast a commander from the command zone this game".to_string()
+            }),
+            "full warning: {warning:?}"
+        );
+    }
+
+    /// `Replacement_Instead` reports the ANTECEDENT, connector-stripped and
+    /// line-scoped.
+    #[test]
+    fn replacement_instead_swallow_carries_the_event_antecedent() {
+        // Lava Burst (ME2). Dropping `condition_names_an_event` would put a `Some` on the
+        // majority of `Replacement_Instead` warnings that carry no "would" at all.
+        let parsed = parse_named(
+            "Lava Burst deals X damage to any target. If Lava Burst would deal damage to a \
+             creature, that damage can't be prevented or dealt instead to another permanent \
+             or player.",
+            "Lava Burst",
+            &["Sorcery"],
+        );
+        assert_eq!(
+            only_swallow(&parsed, "Replacement_Instead").gap(),
+            Some(&ClauseGap::Replacement {
+                antecedent: "lava burst would deal damage to a creature".to_string()
+            }),
+            "full warning: {:?}",
+            only_swallow(&parsed, "Replacement_Instead")
+        );
+
+        // Flitwing, Lyev Detective (MBC) — the line-scoping case. Its audit unit spans a
+        // bare keyword line and the clause line. Dropping the per-LINE scoping makes the
+        // antecedent carry "flying\n"; dropping `parse_leading_conditional_prefix` makes
+        // it keep "if ".
+        let parsed = parse_named(
+            "Flying\nIf you would create one or more tokens, you may create that many Clue \
+             tokens instead. (They're artifacts with \"{2}, Sacrifice this token: Draw a \
+             card.\")",
+            "Flitwing, Lyev Detective",
+            &["Creature"],
+        );
+        let warning = only_swallow(&parsed, "Replacement_Instead");
+        assert_eq!(
+            warning.gap(),
+            Some(&ClauseGap::Replacement {
+                antecedent: "you would create one or more tokens".to_string()
+            }),
+            "full warning: {warning:?}"
+        );
+    }
+
+    /// The nine detector labels that pass `None` and are measured present in the phase-base
+    /// corpus. `ActivateLimit` and `ModalDynamicMaxDropped` are deliberately absent: both
+    /// have ZERO corpus warnings at base, so no fixture can reach them. They are bought by
+    /// the compiler instead — the constructor's new parameter makes omission a compile error.
+    ///
+    /// "Non-phrase" here means "no gap axis wired at the push site", NOT "no phrase is
+    /// nameable". `Replacement` is in this set and its axis names phrases perfectly well —
+    /// `Replacement_Instead` runs that same `SwallowedAxis::Replacement` and mints
+    /// antecedents from it. See `SwallowedClause::gap`, case 1.
+    const EXPECTED_NON_PHRASE: &[&str] = &[
+        "APNAP",
+        "ActivateOnlyDuring",
+        "DamageSubjectConjunction",
+        "Duration_NextTurn",
+        "Duration_ThisTurn",
+        "Duration_UntilEndOfTurn",
+        "Optional_MayHave",
+        "Optional_YouMay",
+        "Replacement",
+    ];
+
+    const PHRASE_BEARING: &[&str] = &[
+        "Condition_AsLongAs",
+        "Condition_If",
+        "Condition_Unless",
+        "DynamicQty",
+        "Replacement_Instead",
+    ];
+
+    /// A detector with no gap axis wired at its push site passes `None`.
+    ///
+    /// The reach guard is a SET EQUALITY, not a count and not `!is_empty()`. An
+    /// `assert!(!observed.is_empty())` here would be satisfied by eight of the nine
+    /// ceasing to fire, which is the "guarded assertion satisfied by the guarded paths
+    /// ceasing to fire" shape this suite has shipped before. This is red the moment any
+    /// one of them stops.
+    #[test]
+    fn non_phrase_detectors_carry_no_gap() {
+        // One verbatim-Oracle corpus card per corpus-present non-phrase detector. Several
+        // also fire a phrase-bearing detector; those records are filtered out below, so a
+        // card carrying both is fine.
+        let fixtures: &[(&str, &str, &[&str])] = &[
+            ("Protection Racket", "At the beginning of your upkeep, repeat the following process for each opponent in turn order. Reveal the top card of your library. That player may pay life equal to that card's mana value. If they do, exile that card. Otherwise, put it into your hand.", &["Enchantment"]),
+            ("Dementia Sliver", "All Slivers have \"{T}: Choose a card name. Target opponent reveals a card at random from their hand. If that card has the chosen name, that player discards it. Activate only during your turn.\"", &["Creature"]),
+            ("Disorder", "Disorder deals 2 damage to each white creature and each player who controls a white creature.", &["Sorcery"]),
+            ("Perch Protection", "Gift an extra turn (You may promise an opponent a gift as you cast this spell. If you do, they take an extra turn after this one.)\nCreate four 2/2 blue Bird creature tokens with flying. If the gift was promised, all permanents you control phase out, and until your next turn, your life total can't change and you gain protection from everything.\nExile Perch Protection.", &["Instant"]),
+            ("Jandor's Ring", "{2}, {T}, Discard the last card you drew this turn: Draw a card.", &["Artifact"]),
+            ("Dragon Egg", "Defender\nWhen this creature dies, create a 2/2 red Dragon creature token with flying and \"{R}: This token gets +1/+0 until end of turn.\"", &["Creature"]),
+            ("Siege Behemoth", "Hexproof\nAs long as this creature is attacking, for each creature you control, you may have that creature assign its combat damage as though it weren't blocked.", &["Creature"]),
+            ("Ballot Broker", "While voting, you may vote an additional time. (The votes can be for different choices or for the same choice.)", &["Creature"]),
+            ("Mikey & Don, Party Planners", "Ward {2}\nYou may look at the top card of your library any time.\nYou may play lands and cast Mutant, Ninja, or Turtle spells from the top of your library. If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it.", &["Creature"]),
+        ];
+
+        let mut observed: BTreeSet<String> = BTreeSet::new();
+        let mut gapful: Vec<String> = Vec::new();
+
+        for (name, text, types) in fixtures {
+            let parsed = parse_named(text, name, types);
+            for warning in &parsed.parse_warnings {
+                let OracleDiagnostic::SwallowedClause { detector, .. } = warning else {
+                    continue;
+                };
+                if PHRASE_BEARING.contains(&detector.as_str()) {
+                    continue;
+                }
+                observed.insert(detector.clone());
+                if warning.gap().is_some() {
+                    gapful.push(format!("{name}/{detector}: {warning:?}"));
+                }
+            }
+        }
+
+        // REACH GUARD — set equality.
+        assert_eq!(
+            observed,
+            EXPECTED_NON_PHRASE
+                .iter()
+                .map(|d| (*d).to_string())
+                .collect::<BTreeSet<_>>(),
+            "observed non-phrase detector set differs from the corpus-measured nine; \
+             observed = {observed:?}"
+        );
+
+        // A blanket `swallowed_clause_gap(...)` applied at all sixteen push sites turns
+        // this red.
+        assert!(
+            gapful.is_empty(),
+            "a detector with no gap axis wired reported a phrase: {gapful:?}"
+        );
     }
 
     /// Evidence carrying NO `StaticMode::ModifyActivationLimit` — for exercising the
@@ -11280,7 +11692,7 @@ mod detect_condition_if_replacement_exemption_tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: Some(AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 0 },
             }),
@@ -11358,7 +11770,7 @@ mod detect_condition_if_replacement_exemption_tests {
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: None,
+            cast_cost_modifier: None,
             alt_ability_cost: Some(AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 0 },
             }),

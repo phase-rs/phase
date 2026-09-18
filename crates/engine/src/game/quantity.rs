@@ -4953,8 +4953,15 @@ fn resolve_ref(
                 crate::types::zones::Zone::Battlefield,
             );
             aggregate_over_players(
+                // CR 104.5 + CR 800.4 + CR 800.4a: a departed player controls no
+                // battlefield objects, so leaving them in the population feeds a
+                // guaranteed 0 into the fold. `Min` then reports that 0 as the
+                // board minimum (Balance's Arm A below reads exactly this
+                // shape), which is the same failure `LifeTotal{Min}` had before
+                // `resolve_per_team_life` gained its own filter.
                 state.players.iter().filter(|p| {
                     crate::game::players::matches_relation(state, p.id, controller, *relation)
+                        && !p.is_eliminated
                 }),
                 *aggregate,
                 |p| {
@@ -6492,8 +6499,23 @@ fn scoped_players<'a>(
         CountScope::SourceChosenPlayer => {
             source_chosen_player_for_context(state, &ctx).is_some_and(|player| p.id == player)
         }
-        CountScope::All => true,
-        CountScope::Opponents => p.id != controller,
+        // CR 104.5 + CR 800.4 + CR 800.4a: a player who has left the game is
+        // not part of the live population these two scopes range over, and
+        // CR 800.4a takes their owned objects out of the game with them. So
+        // neither their player counters (CR 122.1) nor their zone and
+        // spell-cast counts may contribute to an "each player" / "each
+        // opponent" total. Same population as the `PlayerScope` aggregate
+        // authority in `resolve_per_player_scalar`, which filters
+        // `!p.is_eliminated` on its `Opponent` and `AllPlayers` arms; these
+        // two scopes are the `CountScope` mirror of those and must agree.
+        //
+        // The single-player scopes above deliberately keep no such filter: they
+        // name ONE specific player rather than ranging over a population, and
+        // silently resolving `Controller` (the "you" axis) or a persisted
+        // `SourceChosenPlayer` to the empty set would read 0 instead of that
+        // player's actual value.
+        CountScope::All => !p.is_eliminated,
+        CountScope::Opponents => p.id != controller && !p.is_eliminated,
     })
 }
 
@@ -6513,9 +6535,33 @@ fn count_scope_owner_matches(
         CountScope::SourceChosenPlayer => {
             source_chosen_player_for_context(state, &ctx).is_some_and(|player| owner == player)
         }
-        CountScope::All => true,
-        CountScope::Opponents => owner != controller,
+        // CR 800.4a: "all objects owned by that player leave the game" — so a
+        // departed player's cards are not part of the exile population these
+        // two scopes range over, even though this engine models leaving the
+        // game by moving those cards INTO `state.exile` (see
+        // `elimination::eliminate_player`, whose own test asserts the departed
+        // player's graveyard and library cards land there). Keying on the
+        // OWNER is what makes this precise: a card owned by a surviving player
+        // but exiled by the departed one stays counted, because CR 800.4a only
+        // removes objects the departed player OWNED.
+        //
+        // Single-player scopes above keep no filter, for the same reason as in
+        // `scoped_players`: they name one player rather than a population.
+        CountScope::All => !player_has_left(state, owner),
+        CountScope::Opponents => owner != controller && !player_has_left(state, owner),
     }
+}
+
+/// CR 104.5 + CR 800.4: whether `player` has left the game.
+///
+/// An unknown id reads as "still in the game" so a lookup miss can never
+/// silently delete a live player from a population count.
+fn player_has_left(state: &GameState, player: PlayerId) -> bool {
+    state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .is_some_and(|p| p.is_eliminated)
 }
 
 fn count_scope_actor_matches(
@@ -8179,10 +8225,12 @@ fn resolve_single_player_scope(
 
 /// CR 102 + CR 119 + CR 402: Resolve a per-player scalar through a `PlayerScope`.
 ///
-/// Single authority for all `LifeTotal { player }` / `HandSize { player }`-style
-/// player-scoped quantity references. `extract` returns the scalar for a single
-/// player (e.g., `p.life`, `p.hand.len()`); the scope decides which players
-/// contribute and how to combine them.
+/// Single authority for the `HandSize { player }`-style player-scoped quantity
+/// references — NOT for `LifeTotal { player }`, whose arm never reaches here:
+/// it routes through `players::team_life_total` / `resolve_per_team_life` for
+/// CR 810.9a team folding. `extract` returns the scalar for a single player
+/// (e.g., `p.hand.len()`); the scope decides which players contribute and how
+/// to combine them.
 ///
 /// - `Controller`: returns the controller's value, or 0 if not found.
 /// - `Target`: returns the first player target's value (CR 115.1), or 0.
@@ -8250,19 +8298,33 @@ where
         PlayerScope::SourceChosenPlayer => source_chosen_player_for_context(state, &ctx)
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
             .map_or(0, &mut extract),
+        // CR 104.3 + CR 104.5 + CR 800.4: a player who has left the game is
+        // excluded from the aggregate population, same as
+        // `resolve_player_count`'s candidate loop — an eliminated player's
+        // scalar must not inflate a `Max`/`Min`/`Sum` read over the
+        // remaining, still-in-the-game players (Sokenzan Renegade: an
+        // eliminated player's larger hand must not out-rank the live
+        // leader).
         PlayerScope::Opponent { aggregate } => aggregate_over_players(
-            state.players.iter().filter(|p| p.id != controller),
+            state
+                .players
+                .iter()
+                .filter(|p| p.id != controller && !p.is_eliminated),
             *aggregate,
             &mut extract,
         ),
-        // CR 102.1: aggregate over all players, optionally excluding the
-        // `exclude` anchor ("each OTHER player").
+        // CR 102.1 + CR 104.3 + CR 104.5 + CR 800.4: aggregate over all
+        // players still in the game, optionally excluding the `exclude`
+        // anchor ("each OTHER player").
         PlayerScope::AllPlayers { aggregate, exclude } => {
             let excluded_id = exclude.as_deref().and_then(|ex| {
                 resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
             });
             aggregate_over_players(
-                state.players.iter().filter(|p| Some(p.id) != excluded_id),
+                state
+                    .players
+                    .iter()
+                    .filter(|p| Some(p.id) != excluded_id && !p.is_eliminated),
                 *aggregate,
                 &mut extract,
             )
@@ -8303,10 +8365,14 @@ where
     F: FnMut(&crate::types::player::Player) -> Option<i32>,
 {
     match scope {
-        // CR 102.2 / CR 102.1: the aggregate populations, narrowed to the
-        // players that actually have the scalar.
+        // CR 102.2 / CR 102.1 / CR 104.3 + CR 104.5 + CR 800.4: the
+        // aggregate populations, narrowed to players still in the game that
+        // actually have the scalar.
         PlayerScope::Opponent { aggregate } => aggregate_over_present_players(
-            state.players.iter().filter(|p| p.id != controller),
+            state
+                .players
+                .iter()
+                .filter(|p| p.id != controller && !p.is_eliminated),
             *aggregate,
             &mut extract,
         ),
@@ -8315,7 +8381,10 @@ where
                 resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
             });
             aggregate_over_present_players(
-                state.players.iter().filter(|p| Some(p.id) != excluded_id),
+                state
+                    .players
+                    .iter()
+                    .filter(|p| Some(p.id) != excluded_id && !p.is_eliminated),
                 *aggregate,
                 &mut extract,
             )
@@ -8405,18 +8474,23 @@ fn resolve_per_team_life(
     ability: Option<&ResolvedAbility>,
 ) -> i32 {
     match scope {
-        // CR 102.2: aggregate over all opponents' teams.
+        // CR 102.2 + CR 104.3 + CR 104.5 + CR 800.4: aggregate over all
+        // opponents' teams still in the game. An eliminated player's
+        // `team_life_total` reads 0 (`shared_resource_members` returns empty
+        // for a departed player off-2HG), so leaving them in this fold lets
+        // 0 win a `Min` read below every live player's actual life.
         PlayerScope::Opponent { aggregate } => crate::game::players::aggregate_over_teams(
             state,
             state
                 .players
                 .iter()
-                .filter(|p| p.id != controller)
+                .filter(|p| p.id != controller && !p.is_eliminated)
                 .map(|p| p.id),
             *aggregate,
         ),
-        // CR 102.1: aggregate over all players' teams, optionally excluding
-        // the `exclude` anchor ("each OTHER player").
+        // CR 102.1 + CR 104.3 + CR 104.5 + CR 800.4: aggregate over all
+        // players' teams still in the game, optionally excluding the
+        // `exclude` anchor ("each OTHER player").
         PlayerScope::AllPlayers { aggregate, exclude } => {
             let excluded_id = exclude.as_deref().and_then(|ex| {
                 resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
@@ -8426,7 +8500,7 @@ fn resolve_per_team_life(
                 state
                     .players
                     .iter()
-                    .filter(|p| Some(p.id) != excluded_id)
+                    .filter(|p| Some(p.id) != excluded_id && !p.is_eliminated)
                     .map(|p| p.id),
                 *aggregate,
             )
@@ -11425,6 +11499,255 @@ mod tests {
             resolve_quantity(&state, &max_expr, PlayerId(0), ObjectId(0)),
             7
         );
+    }
+
+    /// G5 — REGRESSION: pins the `!p.is_eliminated` filter on
+    /// `resolve_per_team_life`'s `AllPlayers`/`Opponent` arms, mirroring the
+    /// guard on their `resolve_per_player_scalar` siblings (pinned by
+    /// `f7_hostile_eliminated_player_hand_axis_leader_still_wins`,
+    /// `crates/engine/tests/integration/superlative_player_subject_control.rs`).
+    /// WITHOUT that filter this read returns 0 rather than the lowest live
+    /// life total, and this test fails.
+    /// Because `topology::shared_resource_members` returns EMPTY for a departed
+    /// (non-2HG) player, `team_life_total` for an eliminated player reads 0 —
+    /// which becomes the new Min whenever it undercuts every live player's
+    /// actual life. `Max` is unaffected (0 never wins a Max fold unless every
+    /// life total is non-positive), which is why the `Max`-shaped sibling
+    /// fixture `hostile_eliminated_player_life_axis_excluded_from_population`
+    /// (`unique_player_property_leader_condition.rs`) was green even before
+    /// this filter existed — only the `Min` reads were wrong.
+    ///
+    /// 3 players, lives 20/15/12 (P0 controller); P2 (the true minimum, 12) is
+    /// ELIMINATED. Expected (CR 104.3 + CR 104.5 + CR 800.4: an eliminated
+    /// player has left the game and must not contribute to a live population):
+    /// `Min` over the live players {P0:20, P1:15} = 15. MEASURED at HEAD
+    /// (pre-fix): reads 0, because eliminated P2's `team_life_total` (0, not
+    /// 12) still enters the fold and wins the Min.
+    #[test]
+    fn life_total_min_excludes_eliminated_player_from_population() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 0);
+        state.players[0].life = 20;
+        state.players[1].life = 15;
+        state.players[2].life = 12;
+        state.players[2].is_eliminated = true;
+
+        let all_players_min = QuantityExpr::Ref {
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Min,
+                    exclude: None,
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &all_players_min, PlayerId(0), ObjectId(0)),
+            15,
+            "an eliminated player's team_life_total (0) must not win the live-population Min"
+        );
+
+        let opponent_min = QuantityExpr::Ref {
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &opponent_min, PlayerId(0), ObjectId(0)),
+            15,
+            "the same exclusion must hold for the Opponent-scoped population"
+        );
+    }
+
+    /// G5 SIBLING — REGRESSION: pins the `!p.is_eliminated` filters on
+    /// `resolve_per_player_scalar_opt`'s `Opponent` / `AllPlayers` arms, the
+    /// partially-defined-scalar twin of the guards on `resolve_per_player_scalar`.
+    /// Those two arms had NO test of their own; this row is that test.
+    ///
+    /// `PlayerChosenNumber` is the shape that discriminates them. Unlike
+    /// `LifeTotal`, an eliminated player's `chosen_number()` still reads back the
+    /// number they actually chose, so a departed player enters the fold with a
+    /// REAL value rather than a 0 — which is exactly what `Min` picks up when
+    /// their number undercuts every live player's.
+    ///
+    /// 3 players, chosen numbers 5 / 7 / 2 (P0 controller); P2 (the true
+    /// minimum, 2) is ELIMINATED. Expected (CR 104.3 + CR 104.5 + CR 800.4: a
+    /// player who has left the game is not in the population): `AllPlayers{Min}`
+    /// over the live {P0:5, P1:7} = 5, and `Opponent{Min}` over the live
+    /// opponents {P1:7} = 7. Each arm was discriminated on its own, measured:
+    /// reverting the `AllPlayers` filter fails the first assertion (reads 2,
+    /// expected 5); reverting the `Opponent` filter alone fails the second
+    /// (reads 2, expected 7).
+    #[test]
+    fn player_chosen_number_min_excludes_eliminated_player_from_population() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 0);
+        state.players[0].chosen_attributes = vec![ChosenAttribute::Number(5)];
+        state.players[1].chosen_attributes = vec![ChosenAttribute::Number(7)];
+        state.players[2].chosen_attributes = vec![ChosenAttribute::Number(2)];
+        state.players[2].is_eliminated = true;
+
+        let all_players_min = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerChosenNumber {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Min,
+                    exclude: None,
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &all_players_min, PlayerId(0), ObjectId(0)),
+            5,
+            "an eliminated player's chosen number (2) must not win the live-population Min"
+        );
+
+        let opponent_min = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerChosenNumber {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &opponent_min, PlayerId(0), ObjectId(0)),
+            7,
+            "the same exclusion must hold for the Opponent-scoped population"
+        );
+    }
+
+    /// CR 104.5 + CR 800.4 + CR 122.1: `CountScope::All` ranges over the LIVE
+    /// player population, so a departed player's poison counters must not
+    /// inflate an "each player" total.
+    ///
+    /// Drives the real departure path (`eliminate_player`), not a hand-set
+    /// flag. The mid-test assertion is the non-vacuity guard: elimination does
+    /// NOT clear `poison_counters`, so the departed 40 is still sitting on the
+    /// struct when the quantity resolves. Without that check the test would
+    /// pass for the wrong reason if elimination ever started zeroing counters.
+    ///
+    /// REVERT-FAIL: drop `!p.is_eliminated` from `scoped_players`'s `All` arm
+    /// and this reads 43 instead of 3.
+    #[test]
+    fn player_counter_all_scope_excludes_departed_player() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 0);
+        state.players[0].poison_counters = 1;
+        state.players[1].poison_counters = 2;
+        state.players[2].poison_counters = 40;
+
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert!(
+            state.players[2].is_eliminated,
+            "precondition: P2 must have actually left the game"
+        );
+        assert_eq!(
+            state.players[2].poison_counters, 40,
+            "non-vacuity: the departed player's counters must SURVIVE elimination, so that \
+             excluding them is the filter's doing and not a side effect of the sweep"
+        );
+
+        let all_poison = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: crate::types::player::PlayerCounterKind::Poison,
+                scope: CountScope::All,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &all_poison, PlayerId(0), ObjectId(0)),
+            3,
+            "an 'each player' poison total must sum the live survivors (1 + 2) and leave the \
+             departed player's 40 out"
+        );
+    }
+
+    /// CR 102.1 + CR 104.5 + CR 800.4: the same live-population rule for
+    /// `CountScope::Opponents`, which must drop BOTH the controller and the
+    /// departed opponent while keeping the surviving one.
+    ///
+    /// REVERT-FAIL: drop `!p.is_eliminated` from the `Opponents` arm and this
+    /// reads 42 instead of 2.
+    #[test]
+    fn player_counter_opponents_scope_excludes_departed_player() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 0);
+        state.players[0].poison_counters = 1;
+        state.players[1].poison_counters = 2;
+        state.players[2].poison_counters = 40;
+
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert_eq!(
+            state.players[2].poison_counters, 40,
+            "non-vacuity: see the All-scope sibling"
+        );
+
+        let opponent_poison = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: crate::types::player::PlayerCounterKind::Poison,
+                scope: CountScope::Opponents,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &opponent_poison, PlayerId(0), ObjectId(0)),
+            2,
+            "an 'each opponent' poison total must read only the SURVIVING opponent (2): the \
+             controller's 1 is not an opponent and the departed 40 is not in the game"
+        );
+    }
+
+    /// CR 800.4a: the owner-axis counterpart for the EXILE zone, which reaches
+    /// `count_scope_owner_matches` rather than `scoped_players` (exile is a
+    /// global zone, so membership is predicated per object on `obj.owner`).
+    ///
+    /// This engine models "leaves the game" by moving the departed player's
+    /// cards into `state.exile` — measured here by the mid-test assertions:
+    /// after a real `eliminate_player`, the card IS in exile and IS still
+    /// owned by P2. So without the owner-axis filter an "each opponent" exile
+    /// count reports a card that CR 800.4a says left the game.
+    ///
+    /// REVERT-FAIL: drop `!player_has_left(..)` from either arm of
+    /// `count_scope_owner_matches` and both counts read 1 instead of 0.
+    #[test]
+    fn exile_zone_count_excludes_cards_owned_by_a_departed_player() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 0);
+        let card = create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(2),
+            "Departed Bear".to_string(),
+            crate::types::zones::Zone::Graveyard,
+        );
+
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert!(
+            state.exile.contains(&card),
+            "non-vacuity: this engine routes a departed player's cards INTO exile, so the \
+             card must be sitting there for the filter to have anything to exclude"
+        );
+        assert_eq!(
+            state.objects.get(&card).map(|o| o.owner),
+            Some(PlayerId(2)),
+            "non-vacuity: ownership must survive the sweep, so exclusion is the filter's \
+             doing and not a re-owning side effect"
+        );
+
+        for scope in [CountScope::Opponents, CountScope::All] {
+            let expr = QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Exile,
+                    card_types: Vec::new(),
+                    filter: None,
+                    scope: scope.clone(),
+                },
+            };
+            assert_eq!(
+                resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+                0,
+                "{scope:?}: a card owned by a player who left the game must not be counted \
+                 as an exiled card (CR 800.4a)"
+            );
+        }
     }
 
     /// CR 810.9a + CR 810.4: `LifeAboveStarting` reads the controller's TEAM
@@ -19930,6 +20253,54 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 1);
+    }
+
+    /// CR 104.5 + CR 800.4a: a departed player controls no battlefield
+    /// objects, so leaving them in the population feeds a guaranteed 0 into
+    /// the fold and `Min` reports the board minimum as 0. Balance's Arm A
+    /// reads this exact shape, so the practical effect would be every
+    /// surviving player sacrificing down to a departed player's zero.
+    ///
+    /// Drives the real `eliminate_player` path. The mid-test assertion is the
+    /// non-vacuity guard: P1 is a LIVE player holding 1 land, so the expected
+    /// 1 can only come from the live population — if the filter also dropped
+    /// survivors this would read P0's 3, and unfiltered it reads 0.
+    ///
+    /// REVERT-FAIL: drop `!p.is_eliminated` here and this reads 0 instead of 1.
+    #[test]
+    fn controlled_by_each_player_min_excludes_a_departed_player() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 0);
+        add_lands(&mut state, PlayerId(0), 3);
+        add_lands(&mut state, PlayerId(1), 1);
+        // P2 gets lands too, so the sweep has something to take away and the
+        // fixture is not just "a player who never had any".
+        add_lands(&mut state, PlayerId(2), 2);
+
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert!(
+            state.players[2].is_eliminated,
+            "precondition: P2 must have actually left the game"
+        );
+        assert!(
+            !state.players[1].is_eliminated,
+            "non-vacuity: P1 must still be live, so the expected Min comes from the \
+             surviving population rather than from dropping everyone"
+        );
+
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ControlledByEachPlayer {
+                filter: lands_filter(),
+                aggregate: AggregateFunction::Min,
+                relation: PlayerRelation::All,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)),
+            1,
+            "Min must be the fewest among players STILL IN THE GAME (P1's 1), not the 0 a \
+             departed player contributes"
+        );
     }
 
     #[test]

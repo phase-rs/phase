@@ -25363,6 +25363,109 @@ fn drizzt_dies_trigger_puts_difference_counters_gated_by_power_comparison() {
     );
 }
 
+/// CR 208.1 + CR 608.2c: Shelinda, Yevon Acolyte — "put a +1/+1 counter on that
+/// creature if its power is less than ~'s power. Otherwise, put a +1/+1 counter
+/// on ~." The trailing "if" compares the entering creature's (EventSource)
+/// current power against the source's power. It must gate the first counter
+/// placement so the "Otherwise" clause binds as that clause's `else_ability`
+/// instead of degrading to an `Unimplemented("otherwise")` placeholder.
+#[test]
+fn shelinda_trailing_power_comparison_binds_otherwise_as_else_branch() {
+    use crate::types::counter::CounterType;
+
+    let r = parse(
+        "Lifelink\n\
+         Whenever another creature you control enters, put a +1/+1 counter on that creature if its power is less than Shelinda's power. Otherwise, put a +1/+1 counter on Shelinda.",
+        "Shelinda, Yevon Acolyte",
+        &[],
+        &["Creature"],
+        &["Human", "Cleric"],
+    );
+
+    let trigger = r
+        .triggers
+        .iter()
+        .find(|t| {
+            t.execute
+                .as_ref()
+                .is_some_and(|e| matches!(&*e.effect, Effect::PutCounter { .. }))
+        })
+        .unwrap_or_else(|| panic!("no ETB PutCounter trigger parsed: {r:#?}"));
+    let execute = trigger.execute.as_ref().expect("trigger has a body");
+    assert!(
+        !has_unimplemented(execute),
+        "trigger body must not contain an Unimplemented placeholder: {execute:#?}"
+    );
+
+    // If-branch: +1/+1 counter on the entering creature, gated by the comparison.
+    match &*execute.effect {
+        Effect::PutCounter {
+            counter_type,
+            target,
+            ..
+        } => {
+            assert_eq!(*counter_type, CounterType::Plus1Plus1);
+            assert_eq!(*target, TargetFilter::TriggeringSource);
+        }
+        other => panic!("if-branch must be PutCounter, got {other:?}"),
+    }
+    assert!(
+        execute.condition.is_some(),
+        "the trailing power comparison must gate the if-branch: {execute:#?}"
+    );
+
+    // Else-branch: +1/+1 counter on Shelinda herself.
+    let else_def = execute
+        .else_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("Otherwise must bind as else_ability: {execute:#?}"));
+    match &*else_def.effect {
+        Effect::PutCounter {
+            counter_type,
+            target,
+            ..
+        } => {
+            assert_eq!(*counter_type, CounterType::Plus1Plus1);
+            assert_eq!(*target, TargetFilter::SelfRef);
+        }
+        other => panic!("else-branch must be PutCounter on ~, got {other:?}"),
+    }
+}
+
+/// CR 208.1: Sage-Eye Avengers — "return target creature to its owner's hand
+/// if its power is less than this creature's power." Here the possessive "its"
+/// is the chosen TARGET, not the trigger event object. For an attack trigger the
+/// event object is Sage-Eye itself, so binding "its" to `EventSource` would
+/// compare Sage-Eye's power with its own — always false — and silently make the
+/// ability unusable. Neither the trigger nor its body may carry that binding.
+#[test]
+fn sage_eye_avengers_target_possessive_is_not_bound_to_the_event_object() {
+    let r = parse(
+        "Prowess\n\
+         Whenever this creature attacks, you may return target creature to its owner's hand if its power is less than this creature's power.",
+        "Sage-Eye Avengers",
+        &[],
+        &["Creature"],
+        &["Djinn", "Monk"],
+    );
+
+    let attack = r
+        .triggers
+        .iter()
+        .find(|t| {
+            t.execute
+                .as_ref()
+                .is_some_and(|e| matches!(&*e.effect, Effect::Bounce { .. }))
+        })
+        .unwrap_or_else(|| panic!("no attack Bounce trigger parsed: {r:#?}"));
+
+    let rendered = format!("{:?} {:?}", attack.condition, attack.execute);
+    assert!(
+        !rendered.contains("EventSource"),
+        "the target's possessive must not be bound to the attacking source: {rendered}"
+    );
+}
+
 /// CR 122.1 coverage-honesty: a "put ... counters equal to the difference" whose
 /// enclosing trigger has NO "if it had <stat> greater than ~'s <stat>"
 /// comparison has nothing to bind the anaphor to. It must surface as a loud
@@ -29457,6 +29560,7 @@ fn render_net_reaches_every_nested_description_carrier() {
                 enters_with_counter: None,
                 enters_with_modifications: vec![granted("grant_casting_permission")],
                 mana_spend_permission: None,
+                cast_cost_modifier: None,
             },
             target: TargetFilter::Any,
             grantee: PermissionGrantee::AbilityController,
@@ -29700,6 +29804,7 @@ fn guard_walk_reaches_every_continuous_modification_carrier() {
                     enters_with_counter: None,
                     enters_with_modifications: vec![marked()],
                     mana_spend_permission: None,
+                    cast_cost_modifier: None,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::AbilityController,
@@ -29952,7 +30057,7 @@ fn granted_cost_axis_is_not_walked_and_no_parse_shape_reaches_it() {
 
 /// CR 603.2 + CR 608.2c: Cyclops Gladiator (verbatim MTGJSON Oracle text) —
 /// the "if you do" continuation's damage-back amount must keep reading the
-/// TARGET creature's power (`ObjectScope::EventSource`, the "that creature"
+/// TARGET creature's power (`ObjectScope::Anaphoric`, the "that creature"
 /// established by the first sentence), never the attacking Cyclops's own
 /// power.
 ///
@@ -29970,7 +30075,7 @@ fn granted_cost_axis_is_not_walked_and_no_parse_shape_reaches_it() {
 /// predecessor (Galion's shape), not `Effect::DealDamage`, so it returns
 /// `None` here and control reached the (then-unconstrained) rebind, clearing
 /// `ctx.subject` to `None` and silently flipping the damage-back amount's
-/// possessive "its power" from the target's power (`EventSource`) to the
+/// possessive "its power" from the target's power to the
 /// Cyclops's own power (`Source`) — a real rules regression, not just a
 /// cosmetic parse-tree diff. The fix scopes the rebind to the bare
 /// possessive-pronoun base-P/T-set clause shape only
@@ -30042,7 +30147,7 @@ fn cyclops_gladiator_if_you_do_damage_back_reads_targets_power_not_sources() {
         *back_amount,
         QuantityExpr::Ref {
             qty: QuantityRef::Power {
-                scope: ObjectScope::EventSource,
+                scope: ObjectScope::Anaphoric,
             },
         },
         "the damage-back amount must read the TARGET creature's ('that \
@@ -30527,5 +30632,49 @@ fn unless_pay_survives_the_choose_one_of_branch_lift() {
     assert!(
         resolved.unless_pay.is_some(),
         "the branch definition's modifier must reach the ResolvedAbility the runtime reads"
+    );
+}
+
+// ─── Zenos yae Galvus phase-2 trigger test (2-C4) ─────────────────────────────
+
+/// CR 607.2d + CR 603.6c + CR 603.10a: POST-CHANGE control (`2-C4`). The Step 0
+/// baseline (`zenos_leaves_trigger_baseline_before_phase2`, captured failing
+/// before this update) pinned the measured base `TriggerMode::Unknown` /
+/// `valid_card: None`; after the U3 arm the subject is the remembered-object
+/// reader and the event lowers to a leaves-the-battlefield trigger, with the
+/// source required on the battlefield (`trigger_zones == [Battlefield]`) and the
+/// body still transforming the source.
+#[test]
+fn zenos_leaves_trigger_targets_the_chosen_creature() {
+    let def = crate::parser::oracle_trigger::parse_trigger_line(
+        "When the chosen creature leaves the battlefield, transform ~.",
+        "Zenos yae Galvus",
+    );
+    assert_eq!(
+        def.mode,
+        TriggerMode::LeavesBattlefield,
+        "the chosen-object subject must route to the LTB event"
+    );
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::ChosenCard),
+        "the subject must be the CR 607.2d remembered-object reader"
+    );
+    assert_eq!(
+        def.trigger_zones,
+        vec![crate::types::zones::Zone::Battlefield],
+        "the chosen-object LTB subject must stay battlefield-active"
+    );
+    let execute = def.execute.as_deref().expect("transform execute ability");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::Transform {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "the trigger body must keep transforming the source, got {:?}",
+        execute.effect
     );
 }

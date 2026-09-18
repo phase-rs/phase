@@ -122,6 +122,31 @@ pub fn resolve(
                     // continuous effect for the rest of the turn (CR 611.2c).
                     ContinuousModification::GrantStaticAbility { definition } => {
                         snapshot_granted_cost_modifier(state, ability, definition);
+                        // CR 109.5 + CR 508.1c + CR 611.2c: A resolving
+                        // one-shot effect that grants a bare recipient-local
+                        // attack prohibition fixes the installing player as
+                        // the meaning of controller-relative defended scopes.
+                        // A quoted static ability can also arrive as
+                        // GrantStaticAbility, but its own nontrivial scope or
+                        // condition keeps "you" relative to the recipient's
+                        // controller (CR 109.5). Owner-relative and dynamic
+                        // monarch scopes also remain unstamped.
+                        if definition.source_controller.is_none()
+                            && definition.affected == Some(TargetFilter::SelfRef)
+                            && definition.condition.is_none()
+                            && definition.modifications.is_empty()
+                            && definition
+                                .attack_defended
+                                .as_ref()
+                                .is_some_and(defended_scope_uses_source_controller_anchor)
+                            && matches!(
+                                definition.mode,
+                                crate::types::statics::StaticMode::CantAttack
+                                    | crate::types::statics::StaticMode::CantAttackOrBlock
+                            )
+                        {
+                            definition.source_controller = Some(ability.controller);
+                        }
                     }
                     _ => {}
                 }
@@ -1309,6 +1334,23 @@ fn snapshot_granted_cost_modifier(
     *amount = amount.scaled(multiplier);
 }
 
+fn defended_scope_uses_source_controller_anchor(
+    filter: &crate::types::triggers::AttackTargetFilter,
+) -> bool {
+    use crate::types::triggers::AttackTargetFilter;
+
+    match filter {
+        AttackTargetFilter::Player
+        | AttackTargetFilter::Planeswalker
+        | AttackTargetFilter::PlayerOrPlaneswalker
+        | AttackTargetFilter::Battle
+        | AttackTargetFilter::PlayerOrPermanents => true,
+        AttackTargetFilter::Owner
+        | AttackTargetFilter::OwnerOrPlaneswalker
+        | AttackTargetFilter::Monarch => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1368,6 +1410,288 @@ mod tests {
             vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Flying,
             }]
+        );
+    }
+
+    /// CR 109.5 + CR 611.2c: a one-shot effect that grants a defended attack
+    /// restriction keeps the installing player as the meaning of "you" even if
+    /// the affected creature later changes controllers.
+    #[test]
+    fn generic_effect_snapshots_installer_for_granted_defended_restriction() {
+        use crate::game::combat::{declare_attackers, AttackTarget};
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::layers::evaluate_layers;
+        use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
+        use crate::types::ability::TargetRef;
+        use crate::types::format::FormatConfig;
+        use crate::types::statics::StaticMode;
+        use crate::types::triggers::AttackTargetFilter;
+
+        let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Restriction Source".to_string(),
+            Zone::Command,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Restricted Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let creature = state.objects.get_mut(&recipient).unwrap();
+            creature.card_types.core_types.push(CoreType::Creature);
+            creature.base_card_types = creature.card_types.clone();
+            creature.power = Some(2);
+            creature.toughness = Some(2);
+            creature.base_power = Some(2);
+            creature.base_toughness = Some(2);
+            creature.summoning_sick = false;
+        }
+
+        let installer_walker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Installer Walker".to_string(),
+            Zone::Battlefield,
+        );
+        let other_walker = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(3),
+            "Other Walker".to_string(),
+            Zone::Battlefield,
+        );
+        for walker in [installer_walker, other_walker] {
+            state
+                .objects
+                .get_mut(&walker)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Planeswalker);
+        }
+
+        let outer = StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTarget)
+            .modifications(
+                [
+                    (
+                        StaticMode::CantAttack,
+                        AttackTargetFilter::PlayerOrPlaneswalker,
+                    ),
+                    (
+                        StaticMode::CantAttackOrBlock,
+                        AttackTargetFilter::PlayerOrPlaneswalker,
+                    ),
+                    (StaticMode::CantAttack, AttackTargetFilter::Owner),
+                    (StaticMode::CantAttack, AttackTargetFilter::Monarch),
+                ]
+                .into_iter()
+                .map(
+                    |(mode, defended)| ContinuousModification::GrantStaticAbility {
+                        definition: Box::new(
+                            StaticDefinition::new(mode)
+                                .affected(TargetFilter::SelfRef)
+                                .attack_defended(Some(defended)),
+                        ),
+                    },
+                )
+                .collect(),
+            );
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![outer],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: Some(TargetFilter::ParentTarget),
+                end_cost: None,
+            },
+            vec![TargetRef::Object(recipient)],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let installed_anchors: Vec<_> = state.transient_continuous_effects[0]
+            .modifications
+            .iter()
+            .map(|modification| match modification {
+                ContinuousModification::GrantStaticAbility { definition } => (
+                    definition.attack_defended.clone(),
+                    definition.source_controller,
+                ),
+                other => panic!("expected granted static definitions, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            installed_anchors,
+            vec![
+                (
+                    Some(AttackTargetFilter::PlayerOrPlaneswalker),
+                    Some(PlayerId(0))
+                ),
+                (
+                    Some(AttackTargetFilter::PlayerOrPlaneswalker),
+                    Some(PlayerId(0))
+                ),
+                (Some(AttackTargetFilter::Owner), None),
+                (Some(AttackTargetFilter::Monarch), None),
+            ]
+        );
+
+        {
+            let creature = state.objects.get_mut(&recipient).unwrap();
+            creature.controller = PlayerId(2);
+            creature.base_controller = Some(PlayerId(2));
+        }
+        evaluate_layers(&mut state);
+
+        let applies_to = |mode, attack_target| {
+            check_static_ability(
+                &state,
+                mode,
+                &StaticCheckContext {
+                    target_id: Some(recipient),
+                    attack_target: Some(attack_target),
+                    ..Default::default()
+                },
+            )
+        };
+        for mode in [StaticMode::CantAttack, StaticMode::CantAttackOrBlock] {
+            assert!(applies_to(mode.clone(), AttackTarget::Player(PlayerId(0))));
+            assert!(applies_to(
+                mode.clone(),
+                AttackTarget::Planeswalker(installer_walker)
+            ));
+            assert!(!applies_to(mode.clone(), AttackTarget::Player(PlayerId(3))));
+            assert!(!applies_to(mode, AttackTarget::Planeswalker(other_walker)));
+        }
+
+        // Declare from P2 after the control change. P3 is a legal opposing
+        // defender, unlike P2 itself; the four-player fixture separates the
+        // installer, owner, current controller, and alternate defender.
+        let attack_is_legal = |target| {
+            let mut candidate = state.clone();
+            candidate.active_player = PlayerId(2);
+            declare_attackers(&mut candidate, &[(recipient, target)], &mut Vec::new())
+        };
+        assert!(attack_is_legal(AttackTarget::Player(PlayerId(0))).is_err());
+        assert!(attack_is_legal(AttackTarget::Planeswalker(installer_walker)).is_err());
+        assert!(
+            attack_is_legal(AttackTarget::Player(PlayerId(3))).is_ok(),
+            "alternate defender must be attackable: {:?}",
+            attack_is_legal(AttackTarget::Player(PlayerId(3)))
+        );
+        assert!(attack_is_legal(AttackTarget::Planeswalker(other_walker)).is_ok());
+    }
+
+    /// CR 109.5: a quoted static granted as ability text uses the recipient's
+    /// controller for "you", not the player who installed the quotation.
+    #[test]
+    fn quoted_defended_static_does_not_snapshot_installer() {
+        use crate::game::combat::{declare_attackers, AttackTarget};
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::layers::evaluate_layers;
+        use crate::parser::oracle_static::classify_quoted_inner;
+        use crate::types::ability::TargetRef;
+        use crate::types::format::FormatConfig;
+        use crate::types::triggers::AttackTargetFilter;
+
+        let mut state = GameState::new(FormatConfig::standard(), 4, 43);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Quotation Source".to_string(),
+            Zone::Command,
+        );
+        let host = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Quotation Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(3),
+            "Flying Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let creature = state.objects.get_mut(&attacker).unwrap();
+            creature.card_types.core_types.push(CoreType::Creature);
+            creature.base_card_types = creature.card_types.clone();
+            creature.power = Some(2);
+            creature.toughness = Some(2);
+            creature.base_power = Some(2);
+            creature.base_toughness = Some(2);
+            creature.base_keywords.push(Keyword::Flying);
+            creature.keywords.push(Keyword::Flying);
+            creature.summoning_sick = false;
+        }
+
+        let quoted = classify_quoted_inner("Creatures with flying can't attack you.");
+        assert!(matches!(
+            quoted.as_slice(),
+            [ContinuousModification::GrantStaticAbility { definition }]
+                if definition.affected != Some(TargetFilter::SelfRef)
+                    && definition.attack_defended == Some(AttackTargetFilter::Player)
+        ));
+        let outer = StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTarget)
+            .modifications(quoted);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![outer],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: Some(TargetFilter::ParentTarget),
+                end_cost: None,
+            },
+            vec![TargetRef::Object(host)],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+        let [ContinuousModification::GrantStaticAbility { definition }] = state
+            .transient_continuous_effects[0]
+            .modifications
+            .as_slice()
+        else {
+            panic!("quoted static must remain a full granted definition")
+        };
+        assert_eq!(definition.source_controller, None);
+
+        {
+            let recipient = state.objects.get_mut(&host).unwrap();
+            recipient.controller = PlayerId(2);
+            recipient.base_controller = Some(PlayerId(2));
+        }
+        evaluate_layers(&mut state);
+        let attack_is_legal = |defender| {
+            let mut candidate = state.clone();
+            candidate.active_player = PlayerId(3);
+            declare_attackers(
+                &mut candidate,
+                &[(attacker, AttackTarget::Player(defender))],
+                &mut Vec::new(),
+            )
+            .is_ok()
+        };
+        assert!(attack_is_legal(PlayerId(0)), "installer is not protected");
+        assert!(
+            !attack_is_legal(PlayerId(2)),
+            "recipient's controller is protected"
         );
     }
 

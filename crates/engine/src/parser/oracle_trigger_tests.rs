@@ -2163,6 +2163,77 @@ fn trigger_attacking_highest_life_player_condition_maps_to_dethrone_shape() {
     );
 }
 
+// U1 + U2 (parser-gap-triage): Ghazbán Ogre's verbatim upkeep trigger must
+// map to a typed `TriggerCondition::QuantityComparison` (not `None` — a
+// dropped LEADING intervening-if emits no warning at all, PLAN-v3 §0.2) and
+// its execute body must be an INTACT `GiveControl`, not corrupted by the
+// intervening-if extraction. Modelled on
+// `trigger_attacking_highest_life_player_condition_maps_to_dethrone_shape`.
+#[test]
+fn trigger_ghazban_ogre_maps_to_unique_leader_condition_and_give_control() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, if a player has more life than each \
+             other player, the player with the most life gains control of this \
+             creature.",
+        "Ghazbán Ogre",
+    );
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PlayerAttribute {
+                        relation: crate::types::ability::PlayerRelation::All,
+                        attr: Box::new(QuantityRef::LifeTotal {
+                            player: PlayerScope::ScopedPlayer,
+                        }),
+                        comparator: Comparator::GE,
+                        value: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::LifeTotal {
+                                player: PlayerScope::AllPlayers {
+                                    aggregate: AggregateFunction::Max,
+                                    exclude: None,
+                                },
+                            },
+                        }),
+                    },
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }),
+        "condition must be the unique-leader comparison; a None here means U1 did not bind — this is the whole B1-v2 hazard"
+    );
+    let Some(execute) = &def.execute else {
+        panic!("expected a GiveControl execute ability, got None");
+    };
+    assert_eq!(
+        *execute.effect,
+        Effect::GiveControl {
+            target: TargetFilter::SelfRef,
+            recipient: TargetFilter::PlayerMatching {
+                player: Box::new(PlayerFilter::PlayerAttribute {
+                    relation: crate::types::ability::PlayerRelation::All,
+                    attr: Box::new(QuantityRef::LifeTotal {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: PlayerScope::AllPlayers {
+                                aggregate: AggregateFunction::Max,
+                                exclude: None,
+                            },
+                        },
+                    }),
+                }),
+            },
+        },
+        "the effect body must not be corrupted by the intervening-if extraction, and the \
+         recipient must be the leader filter, not an anaphor"
+    );
+}
+
 // Sibling: Animate Dead's own genuine (non-conjunctive) "if it's on the
 // battlefield" condition, immediately followed by a comma, must still match
 // the simple-table entry — the boundary check must not be so strict that it
@@ -21768,6 +21839,28 @@ fn trigger_one_of_your_opponents_is_attacked() {
         "singular 'one of your opponents is attacked' must not be batched"
     );
     assert!(def.execute.is_some());
+}
+
+#[test]
+fn karazikar_attack_trigger_scopes_both_opponents() {
+    let def = parse_trigger_line(
+        "Whenever an opponent attacks another one of your opponents, you and the attacking player each draw a card and lose 1 life.",
+        "Karazikar, the Eye Tyrant",
+    );
+    let opponent = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+
+    // CR 508.3e: both players named by the attack trigger are opponents of
+    // Karazikar's controller, and the attacked object must be a player.
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_source, Some(opponent.clone()));
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    assert_eq!(def.valid_target, Some(opponent));
+    assert!(matches!(
+        def.execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::Unimplemented { .. })
+    ));
 }
 
 #[test]

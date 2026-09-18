@@ -378,7 +378,7 @@ fn overlapping_exile_grant_pays_the_selected_permissions_cost_not_a_sibling_gran
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: EtbTapState::Unspecified,
             },

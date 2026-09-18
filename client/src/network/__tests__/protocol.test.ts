@@ -71,8 +71,8 @@ const PREVIEW_ANSWER = {
 } as never;
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v54", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(54);
+  it("pins the P2P wire protocol to v57", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(57);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {
@@ -308,6 +308,83 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     };
     const bytes = await encodeWireMessage(msg);
     await expect(decodeWireMessage(bytes)).resolves.toEqual(msg);
+  });
+
+  it("round-trips nonempty resolution-cast receipts and legacy empty cleanup", async () => {
+    const nonempty: P2PMessage = {
+      type: "state_update",
+      state: buildGameState({
+        waiting_for: {
+          type: "CastOffer",
+          data: {
+            player: 0,
+            kind: {
+              type: "GraveyardPaidCast",
+              hit_card: 17,
+              cast_transformed: false,
+              graveyard_replacement: {
+                type: "Library",
+                position: { type: "BeneathTop", depth: { type: "Fixed", value: 2 } },
+              },
+              cleanup: {
+                source_id: 11,
+                face_policy: {
+                  filter: { type: "Any" },
+                  source_id: 11,
+                  controller: 0,
+                  constraint: null,
+                },
+                exiled_misses: [],
+                reject_action: { type: "RemainExiled" },
+                success_action: { type: "BottomMisses" },
+                delayed_trigger_receipts: [{ token: 31, instance: 32, source_id: 11 }],
+              },
+            },
+          },
+        },
+      }),
+      events: [],
+      legalActions: [],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
+    };
+    const legacyEmpty: P2PMessage = {
+      ...nonempty,
+      state: buildGameState({
+        waiting_for: {
+          type: "CastOffer",
+          data: {
+            player: 0,
+            kind: {
+              type: "GraveyardPaidCast",
+              hit_card: 17,
+              cast_transformed: false,
+              graveyard_replacement: {
+                type: "Library",
+                position: { type: "RandomWithinTop", n: { type: "Fixed", value: 3 } },
+              },
+              cleanup: {
+                source_id: 11,
+                face_policy: {
+                  filter: { type: "Any" },
+                  source_id: 11,
+                  controller: 0,
+                  constraint: null,
+                },
+                exiled_misses: [],
+                reject_action: { type: "RemainExiled" },
+                success_action: { type: "BottomMisses" },
+              },
+            },
+          },
+        },
+      }),
+    };
+
+    for (const message of [nonempty, legacyEmpty]) {
+      const bytes = await encodeWireMessage(message);
+      await expect(decodeWireMessage(bytes)).resolves.toEqual(message);
+    }
   });
 
   // (b) Tiny messages take FORMAT_RAW.

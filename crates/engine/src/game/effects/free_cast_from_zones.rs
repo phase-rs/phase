@@ -1,10 +1,66 @@
-use crate::game::filter::{matches_target_filter_in_owner_zone, FilterContext};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CastOfferKind, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
+
+/// Complete, already-frozen input for opening a resolution-scoped free-cast
+/// window.  Keeping the policy and its window budget in one value prevents a
+/// caller from accidentally replacing policy provenance while forwarding the
+/// other pause-state fields.
+pub(crate) struct FreeCastWindowRequest {
+    pub(crate) count: Option<u8>,
+    pub(crate) max_total_mv: Option<u32>,
+    pub(crate) zones: Vec<Zone>,
+    pub(crate) graveyard_replacement:
+        Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+    pub(crate) face_policy: crate::types::ability::ResolutionCastFacePolicy,
+}
+
+/// Build the exact request for one free cast from a current window.
+///
+/// CR 608.2g + CR 118.9b: an effect may let a player cast a spell during its
+/// resolution without paying its mana cost as an alternative cost.
+///
+/// The cleanup retains the window's re-offer authority, while the request
+/// itself deliberately carries no graveyard rider: `FreeCastOfferRemaining`
+/// installs that one rider after the cast finalizes.
+pub(in crate::game) fn free_cast_window_resolution_request(
+    controller: PlayerId,
+    remaining_casts: Option<u8>,
+    remaining_mv_budget: Option<u32>,
+    face_policy: crate::types::ability::ResolutionCastFacePolicy,
+    zones: Vec<Zone>,
+    graveyard_replacement: Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+    member_pool: Vec<ObjectId>,
+) -> crate::game::casting::ResolutionCastRequest {
+    let cleanup = crate::types::ability::ResolutionCastCleanup {
+        source_id: face_policy.source_id,
+        offer_id: None,
+        face_policy: face_policy.clone(),
+        exiled_misses: Vec::new(),
+        reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+        success_action:
+            crate::types::ability::ResolutionCastSuccessAction::FreeCastOfferRemaining {
+                controller,
+                remaining_casts,
+                remaining_mv_budget,
+                face_policy: Box::new(face_policy.clone()),
+                zones,
+                graveyard_replacement,
+                member_pool,
+            },
+        delayed_trigger_receipts: Vec::new(),
+    };
+    crate::game::casting::ResolutionCastRequest {
+        face_policy,
+        cast_transformed: false,
+        cleanup,
+        graveyard_replacement: None,
+        cost: crate::types::ability::ResolutionCastCost::Free,
+    }
+}
 
 /// CR 608.2g + CR 601.2 + CR 118.9: Open an interactive free-cast window.
 ///
@@ -47,6 +103,44 @@ pub fn resolve(
         ),
         _ => return Err(EffectError::MissingParam("FreeCastFromZones".to_string())),
     };
+    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        crate::game::effects::cast_from_zone::freeze_resolution_cast_filter(
+            state, ability, filter, None,
+        ),
+        ability.source_id,
+        ability.controller,
+        None,
+    );
+    resolve_with_face_policy(
+        state,
+        ability,
+        FreeCastWindowRequest {
+            count,
+            max_total_mv,
+            zones,
+            graveyard_replacement,
+            face_policy,
+        },
+        events,
+    )
+}
+
+/// Open a free-cast window using a policy fixed by the caller while its
+/// resolution context is still live.  `CastFromZone` uses this for a frozen
+/// constraint; ordinary `FreeCastFromZones` calls [`resolve`] above.
+pub(crate) fn resolve_with_face_policy(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    request: FreeCastWindowRequest,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let FreeCastWindowRequest {
+        count,
+        max_total_mv,
+        zones,
+        graveyard_replacement,
+        face_policy,
+    } = request;
 
     // CR 603.3a: Resolve the acting player from the ability's controller (the
     // resolving spell's controller). Invoke Calamity grants the window to its
@@ -74,15 +168,31 @@ pub fn resolve(
         })
         .collect();
 
-    let candidates = eligible_candidates(
-        state,
+    // A member pool has already consumed any player-target leg from its parent
+    // resolution.  Freeze that residual form into the one policy carried by
+    // this window so initial enumeration and every re-offer evaluate exactly
+    // the same authority.
+    let face_policy = if member_pool.is_empty() {
+        face_policy
+    } else {
+        crate::types::ability::ResolutionCastFacePolicy::new(
+            member_pool_filter(&face_policy.filter),
+            face_policy.source_id,
+            face_policy.controller,
+            face_policy.constraint,
+        )
+    };
+
+    let cast_request = free_cast_window_resolution_request(
         controller,
-        ability.source_id,
-        &filter,
-        &zones,
+        count,
         max_total_mv,
-        &member_pool,
+        face_policy.clone(),
+        zones.clone(),
+        graveyard_replacement.clone(),
+        member_pool.clone(),
     );
+    let candidates = eligible_candidates(state, &zones, max_total_mv, &member_pool, &cast_request);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::FreeCastFromZones,
@@ -109,10 +219,9 @@ pub fn resolve(
             candidates,
             remaining_casts: count,
             remaining_mv_budget: max_total_mv,
-            filter,
+            face_policy,
             zones,
             graveyard_replacement,
-            source: ability.source_id,
             member_pool,
         },
     };
@@ -125,11 +234,6 @@ pub fn resolve(
 /// Shared by the resolver and the handler's re-offer loop so the candidate set
 /// stays consistent across both entry points.
 ///
-/// `source` is the resolving ability's source object: `TargetFilter`s such as
-/// `ExiledBySource` (Plargg and Nassari's "the other cards exiled this way")
-/// resolve their exile links against it, so the real id must be threaded
-/// rather than a sentinel.
-///
 /// `member_pool`, when non-empty, is THIS resolution's concrete approved pool:
 /// candidates are enumerated from those exact ids, rather than from a zone scan.
 /// It originally served "exiled this way" batches, and also carries paired
@@ -138,21 +242,26 @@ pub fn resolve(
 /// `TargetPlayer`/`Owned(TargetPlayer)` are not evaluated again; zone, type,
 /// cast legality, and every unrelated filter property remain authoritative.
 /// Empty retains Invoke Calamity's existing controller-zone enumeration.
-pub(crate) fn eligible_candidates(
+/// `request` is the exact free resolution-cast transaction that will be used
+/// for a chosen candidate. Its policy, cleanup, payment shape, and rider must
+/// all survive the clone projection unchanged.
+pub(in crate::game) fn eligible_candidates(
     state: &GameState,
-    controller: PlayerId,
-    source: ObjectId,
-    filter: &TargetFilter,
     zones: &[Zone],
     max_total_mv: Option<u32>,
     member_pool: &[ObjectId],
+    request: &crate::game::casting::ResolutionCastRequest,
 ) -> Vec<ObjectId> {
+    let face_policy = &request.face_policy;
+    let controller = face_policy.controller;
     let Some(player) = state.players.iter().find(|p| p.id == controller) else {
         return Vec::new();
     };
+    // One immutable, layer-flushed baseline serves this entire enumeration.
+    // Each card/face probe below derives its own projection, so neither a
+    // rejected candidate nor a swapped face can contaminate a later candidate.
+    let projection = crate::game::casting::ResolutionCastProjection::new(state);
 
-    let ctx = FilterContext::from_source_with_controller(source, controller);
-    let member_pool_filter = member_pool_filter(filter);
     let mut candidates = Vec::new();
     let candidate_ids: Vec<ObjectId> = if member_pool.is_empty() {
         let mut ids = Vec::new();
@@ -186,30 +295,15 @@ pub(crate) fn eligible_candidates(
         {
             continue;
         }
-        // CR 305.1: a land card can never be cast — this window is a cast
-        // grant, so lands are excluded from the offer outright (mirrors
-        // `cast_from_zone`'s cast-mode land guard).
-        if state.objects.get(&id).is_some_and(|obj| {
-            obj.card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Land)
-        }) {
-            continue;
-        }
-        let candidate_filter = if member_pool.is_empty() {
-            filter
-        } else {
-            &member_pool_filter
-        };
-        if !matches_target_filter_in_owner_zone(state, id, candidate_filter, &ctx) {
-            continue;
-        }
-        // CR 601.2c + CR 608.2g: A spell cast during resolution still
-        // needs every required target to be legal before it can be offered.
-        let Some(obj) = state.objects.get(&id) else {
-            continue;
-        };
-        if !crate::game::casting::spell_has_legal_targets(state, obj, controller) {
+        // CR 601.2b-c + CR 608.2g: discover candidates by projecting each
+        // spell face through the exact request that will be announced. A
+        // policy-only front check would admit a spell with no legal targets or
+        // erase a legal back-only spell before it could be elected.
+        if projection
+            .spell_face_legality(face_policy.controller, id, request)
+            .count()
+            == 0
+        {
             continue;
         }
         // CR 202.3 + CR 107.3b + CR 601.2b: Respect the running MV budget.
@@ -217,13 +311,11 @@ pub(crate) fn eligible_candidates(
         // be announced as 0, so the card's printed mana_value() is the same
         // value used when the choice is submitted.
         if let Some(budget) = max_total_mv {
-            let mv = state
-                .objects
-                .get(&id)
-                // CR 202.3d + CR 709.4b: candidate cards are in a non-stack
-                // zone, so a split card's MV budget is its combined halves.
-                .map(|obj| obj.effective_mana_value())
-                .unwrap_or(0);
+            // CR 202.3d + CR 709.4b: candidate cards are in a non-stack zone,
+            // so a split card's budget is its combined halves. Read that MV
+            // from the immutable flushed baseline, never from an earlier
+            // candidate or the caller's unflushed state.
+            let mv = projection.candidate_mana_value(id).unwrap_or(0);
             if mv > budget {
                 continue;
             }
@@ -264,7 +356,71 @@ fn member_pool_filter(filter: &TargetFilter) -> TargetFilter {
         TargetFilter::Not { filter } => TargetFilter::Not {
             filter: Box::new(member_pool_filter(filter)),
         },
-        other => other.clone(),
+        TargetFilter::TrackedSetFiltered {
+            id,
+            filter,
+            caused_by,
+        } => TargetFilter::TrackedSetFiltered {
+            id: *id,
+            filter: Box::new(member_pool_filter(filter)),
+            caused_by: *caused_by,
+        },
+        TargetFilter::ChosenDamageSource { filter } => TargetFilter::ChosenDamageSource {
+            filter: filter
+                .as_ref()
+                .map(|filter| Box::new(member_pool_filter(filter))),
+        },
+        unchanged @ (TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers) => unchanged.clone(),
     }
 }
 
@@ -272,7 +428,11 @@ fn member_pool_filter(filter: &TargetFilter) -> TargetFilter {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{SpellStackToGraveyardReplacement, TypeFilter, TypedFilter};
+    use crate::types::ability::{
+        ControllerRef, FilterProp, SpellStackToGraveyardReplacement, ThisWayCause, TypeFilter,
+        TypedFilter,
+    };
+    use crate::types::card::LayoutKind;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -284,6 +444,46 @@ mod tests {
                 TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
             ],
         }
+    }
+
+    fn test_face_policy(
+        filter: TargetFilter,
+        source_id: ObjectId,
+        controller: PlayerId,
+    ) -> crate::types::ability::ResolutionCastFacePolicy {
+        crate::types::ability::ResolutionCastFacePolicy::new(filter, source_id, controller, None)
+    }
+
+    fn test_eligible_candidates(
+        state: &GameState,
+        zones: &[Zone],
+        max_total_mv: Option<u32>,
+        member_pool: &[ObjectId],
+        face_policy: crate::types::ability::ResolutionCastFacePolicy,
+    ) -> Vec<ObjectId> {
+        // A pooled production window normalizes away its already-consumed
+        // paired-player binding before it persists the request. Keep these
+        // direct enumerator tests on that same serialized request shape.
+        let face_policy = if member_pool.is_empty() {
+            face_policy
+        } else {
+            crate::types::ability::ResolutionCastFacePolicy::new(
+                member_pool_filter(&face_policy.filter),
+                face_policy.source_id,
+                face_policy.controller,
+                face_policy.constraint,
+            )
+        };
+        let request = free_cast_window_resolution_request(
+            face_policy.controller,
+            None,
+            max_total_mv,
+            face_policy,
+            zones.to_vec(),
+            None,
+            member_pool.to_vec(),
+        );
+        eligible_candidates(state, zones, max_total_mv, member_pool, &request)
     }
 
     fn add_card(
@@ -301,6 +501,216 @@ mod tests {
         obj.card_types.core_types.push(core);
         obj.mana_cost = ManaCost::generic(mv);
         id
+    }
+
+    fn add_modal_spell_card(state: &mut GameState, front: CoreType, back: CoreType) -> ObjectId {
+        let id = add_card(state, PlayerId(0), Zone::Graveyard, front, 1);
+        let mut back_types = crate::types::card_type::CardType::default();
+        back_types.core_types.push(back);
+        state.objects.get_mut(&id).unwrap().back_face =
+            Some(crate::game::game_object::BackFaceData {
+                name: format!("Back face {id:?}"),
+                card_types: back_types,
+                mana_cost: ManaCost::generic(1),
+                layout_kind: Some(LayoutKind::Modal),
+                ..Default::default()
+            });
+        id
+    }
+
+    fn add_targeted_aura_card(state: &mut GameState, zone: Zone) -> ObjectId {
+        let id = add_card(state, PlayerId(0), zone, CoreType::Enchantment, 1);
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.subtypes.push("Aura".to_string());
+        object
+            .keywords
+            .push(crate::types::keywords::Keyword::Enchant(
+                TargetFilter::Typed(TypedFilter::creature()),
+            ));
+        object.base_card_types = object.card_types.clone();
+        object.base_keywords = object.keywords.clone();
+        object.base_mana_cost = object.mana_cost.clone();
+        id
+    }
+
+    fn add_targeted_modal_aura_card(state: &mut GameState, zone: Zone) -> ObjectId {
+        let id = add_targeted_aura_card(state, zone);
+        let mut back_types = crate::types::card_type::CardType::default();
+        back_types.core_types.push(CoreType::Enchantment);
+        back_types.subtypes.push("Aura".to_string());
+        state.objects.get_mut(&id).unwrap().back_face =
+            Some(crate::game::game_object::BackFaceData {
+                name: format!("Targeted Aura Back {id:?}"),
+                card_types: back_types,
+                mana_cost: ManaCost::generic(1),
+                keywords: vec![crate::types::keywords::Keyword::Enchant(
+                    TargetFilter::Typed(TypedFilter::creature()),
+                )],
+                layout_kind: Some(LayoutKind::Modal),
+                ..Default::default()
+            });
+        id
+    }
+
+    fn add_target_creature(state: &mut GameState) -> ObjectId {
+        let id = add_card(state, PlayerId(1), Zone::Battlefield, CoreType::Creature, 1);
+        let object = state.objects.get_mut(&id).unwrap();
+        object.base_card_types = object.card_types.clone();
+        id
+    }
+
+    #[test]
+    fn candidate_projections_isolate_rejected_and_face_swapped_siblings() {
+        let mut state = GameState::new_two_player(1);
+        let rejected = add_card(
+            &mut state,
+            PlayerId(0),
+            Zone::Graveyard,
+            CoreType::Creature,
+            1,
+        );
+        let back_only = add_modal_spell_card(&mut state, CoreType::Sorcery, CoreType::Instant);
+        let later = add_card(
+            &mut state,
+            PlayerId(0),
+            Zone::Graveyard,
+            CoreType::Instant,
+            1,
+        );
+
+        let candidates = test_eligible_candidates(
+            &state,
+            &[Zone::Graveyard],
+            None,
+            &[],
+            test_face_policy(
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                ObjectId(900),
+                PlayerId(0),
+            ),
+        );
+
+        assert_eq!(candidates, vec![back_only, later]);
+        assert_eq!(
+            state.objects[&back_only].name, "Spell",
+            "the back-face probe must not swap the authoritative candidate"
+        );
+        assert!(
+            !state.objects[&back_only].modal_back_face,
+            "the next candidate must not inherit the prior face projection"
+        );
+        assert_eq!(state.objects[&rejected].name, "Spell");
+        assert_eq!(state.objects[&later].name, "Spell");
+    }
+
+    /// The shared free-cast traversal flushes one baseline for the whole pool;
+    /// target-bearing one- and two-face candidates still receive distinct
+    /// candidate and elected-face projections. The target helper fallback must
+    /// not clone and flush once again for each face.
+    #[test]
+    fn targeted_candidate_projection_uses_one_baseline_without_target_fallback() {
+        for (face_count, make_card) in [
+            (
+                1_u32,
+                add_targeted_aura_card as fn(&mut GameState, Zone) -> ObjectId,
+            ),
+            (2_u32, add_targeted_modal_aura_card),
+        ] {
+            for candidate_count in [1_u32, 3] {
+                let mut state = GameState::new_two_player(1);
+                let _target = add_target_creature(&mut state);
+                let expected: Vec<_> = (0..candidate_count)
+                    .map(|_| make_card(&mut state, Zone::Graveyard))
+                    .collect();
+                let original_state = serde_json::to_value(&state).unwrap();
+
+                crate::game::casting::reset_resolution_cast_projection_measurements();
+                let candidates = test_eligible_candidates(
+                    &state,
+                    &[Zone::Graveyard],
+                    None,
+                    &[],
+                    test_face_policy(
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
+                        ObjectId(900),
+                        PlayerId(0),
+                    ),
+                );
+                let measurements = crate::game::casting::resolution_cast_projection_measurements();
+
+                assert_eq!(candidates, expected, "all targeted faces stay eligible");
+                assert_eq!(measurements.baseline_clones, 1);
+                assert_eq!(measurements.baseline_flushes, 1);
+                assert_eq!(measurements.candidate_clones, candidate_count);
+                assert_eq!(measurements.face_clones, candidate_count * face_count);
+                assert_eq!(
+                    measurements.projected_target_checks,
+                    candidate_count * face_count
+                );
+                assert_eq!(measurements.target_helper_fallback_clone_flushes, 0);
+                assert_eq!(
+                    serde_json::to_value(&state).unwrap(),
+                    original_state,
+                    "projection must be read-only"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn member_pool_filter_recurses_through_its_two_direct_nested_carriers() {
+        let consumed_binding = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Instant)
+                .controller(ControllerRef::TargetPlayer)
+                .properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::TargetPlayer,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ]),
+        );
+        let retained = TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant).properties(vec![
+            FilterProp::InZone {
+                zone: Zone::Graveyard,
+            },
+        ]));
+        let filtered = TargetFilter::And {
+            filters: vec![
+                TargetFilter::TrackedSetFiltered {
+                    id: crate::types::identifiers::TrackedSetId(44),
+                    filter: Box::new(consumed_binding.clone()),
+                    caused_by: Some(ThisWayCause::Exiled),
+                },
+                TargetFilter::ChosenDamageSource {
+                    filter: Some(Box::new(TargetFilter::Not {
+                        filter: Box::new(consumed_binding),
+                    })),
+                },
+                TargetFilter::ChosenDamageSource { filter: None },
+            ],
+        };
+
+        assert_eq!(
+            member_pool_filter(&filtered),
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::TrackedSetFiltered {
+                        id: crate::types::identifiers::TrackedSetId(44),
+                        filter: Box::new(retained.clone()),
+                        caused_by: Some(ThisWayCause::Exiled),
+                    },
+                    TargetFilter::ChosenDamageSource {
+                        filter: Some(Box::new(TargetFilter::Not {
+                            filter: Box::new(retained),
+                        })),
+                    },
+                    TargetFilter::ChosenDamageSource { filter: None },
+                ],
+            },
+            "only the already-consumed TargetPlayer binding is removed inside the direct carriers"
+        );
     }
 
     /// CR 601.2a: Candidates are gathered from BOTH the graveyard and the hand,
@@ -325,14 +735,12 @@ mod tests {
             1,
         );
 
-        let candidates = eligible_candidates(
+        let candidates = test_eligible_candidates(
             &state,
-            PlayerId(0),
-            ObjectId(0),
-            &instant_sorcery_filter(),
             &[Zone::Graveyard, Zone::Hand],
             None,
             &[],
+            test_face_policy(instant_sorcery_filter(), ObjectId(0), PlayerId(0)),
         );
         assert!(candidates.contains(&gy_instant));
         assert!(candidates.contains(&hand_sorcery));
@@ -357,14 +765,12 @@ mod tests {
         );
         let _expensive = add_card(&mut state, PlayerId(0), Zone::Hand, CoreType::Sorcery, 7);
 
-        let candidates = eligible_candidates(
+        let candidates = test_eligible_candidates(
             &state,
-            PlayerId(0),
-            ObjectId(0),
-            &instant_sorcery_filter(),
             &[Zone::Graveyard, Zone::Hand],
             Some(6),
             &[],
+            test_face_policy(instant_sorcery_filter(), ObjectId(0), PlayerId(0)),
         );
         assert_eq!(candidates, vec![cheap]);
     }
@@ -389,23 +795,22 @@ mod tests {
             1,
         );
 
-        let candidates = eligible_candidates(
+        let candidates = test_eligible_candidates(
             &state,
-            PlayerId(0),
-            ObjectId(0),
-            &instant_sorcery_filter(),
             &[Zone::Graveyard, Zone::Hand],
             None,
             &[],
+            test_face_policy(instant_sorcery_filter(), ObjectId(0), PlayerId(0)),
         );
         assert_eq!(candidates, vec![mine]);
     }
 
     /// CR 608.2g + CR 115.1a: A nonempty member pool is the enumeration
     /// authority. It preserves exactly the paired opponent-graveyard targets,
-    /// skips their consumed TargetPlayer/Owned binding, and never substitutes
-    /// another matching card from either graveyard on the initial offer or a
-    /// re-offer after one pool member becomes illegal.
+    /// skips their consumed TargetPlayer/Owned binding even below the linked
+    /// `TrackedSetFiltered` carrier, and never substitutes another matching
+    /// card from either graveyard on the initial offer or a re-offer after one
+    /// pool member becomes illegal.
     #[test]
     fn member_pool_keeps_exact_opponent_graveyard_targets_without_substitutes() {
         use crate::types::ability::{ControllerRef, FilterProp};
@@ -440,32 +845,35 @@ mod tests {
             CoreType::Sorcery,
             1,
         );
-        let filter = TargetFilter::Typed(
-            TypedFilter::new(TypeFilter::AnyOf(vec![
-                TypeFilter::Instant,
-                TypeFilter::Sorcery,
-            ]))
-            .controller(ControllerRef::TargetPlayer)
-            .properties(vec![
-                FilterProp::Owned {
-                    controller: ControllerRef::TargetPlayer,
-                },
-                FilterProp::InZone {
-                    zone: Zone::Graveyard,
-                },
-            ]),
+        let tracked_set = crate::types::identifiers::TrackedSetId(71);
+        state.tracked_object_sets.insert(
+            tracked_set,
+            vec![selected_p1, selected_p2, _p1_extra, _p2_extra],
         );
+        let filter = TargetFilter::TrackedSetFiltered {
+            id: tracked_set,
+            filter: Box::new(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::AnyOf(vec![
+                    TypeFilter::Instant,
+                    TypeFilter::Sorcery,
+                ]))
+                .controller(ControllerRef::TargetPlayer)
+                .properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::TargetPlayer,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ]),
+            )),
+            caused_by: None,
+        };
 
         let pool = [selected_p1, selected_p2];
-        let candidates = eligible_candidates(
-            &state,
-            PlayerId(0),
-            ObjectId(900),
-            &filter,
-            &[Zone::Graveyard],
-            None,
-            &pool,
-        );
+        let face_policy = test_face_policy(filter.clone(), ObjectId(900), PlayerId(0));
+        let candidates =
+            test_eligible_candidates(&state, &[Zone::Graveyard], None, &pool, face_policy.clone());
         assert_eq!(
             candidates,
             vec![selected_p1, selected_p2],
@@ -473,15 +881,8 @@ mod tests {
         );
 
         state.objects.get_mut(&selected_p1).unwrap().zone = Zone::Exile;
-        let reoffered = eligible_candidates(
-            &state,
-            PlayerId(0),
-            ObjectId(900),
-            &filter,
-            &[Zone::Graveyard],
-            None,
-            &pool,
-        );
+        let reoffered =
+            test_eligible_candidates(&state, &[Zone::Graveyard], None, &pool, face_policy);
         assert!(
             reoffered == vec![selected_p2],
             "an illegal selected target must disappear rather than be replaced by a graveyard extra"
@@ -508,14 +909,12 @@ mod tests {
             1,
         );
         assert_eq!(
-            eligible_candidates(
+            test_eligible_candidates(
                 &state,
-                PlayerId(0),
-                ObjectId(900),
-                &instant_sorcery_filter(),
                 &[Zone::Graveyard],
                 None,
                 &[],
+                test_face_policy(instant_sorcery_filter(), ObjectId(900), PlayerId(0)),
             ),
             vec![mine],
             "empty pool preserves Invoke Calamity's controller-graveyard scan"

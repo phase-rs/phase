@@ -1081,11 +1081,23 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
             ])),
             tag("all artifact cards in your graveyard"),
         ),
-        // CR 613.1f + CR 611.2c: "the last chosen card" (Koh, the Face Stealer) —
-        // the single card most recently recorded on the host via
-        // `Effect::RememberCard` (`ChosenAttribute::Card`). Resolved live each
-        // layer pass by `TargetFilter::ChosenCard`.
-        value(TargetFilter::ChosenCard, tag("the last chosen card")),
+        // CR 607.2a + CR 607.2d: "the last chosen card" (Koh, the Face Stealer) —
+        // the card most recently recorded on the host via `Effect::RememberCard`
+        // (`ChosenAttribute::Card`, CR 608.2c) AND still in the exile zone. The
+        // CR 607.2a exile pinning of the linked reference is composed here so
+        // the shared `ChosenCard` reader stays zone-agnostic (CR 607.2d).
+        value(
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ChosenCard,
+                    TargetFilter::Typed(
+                        TypedFilter::default()
+                            .properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+                    ),
+                ],
+            },
+            tag("the last chosen card"),
+        ),
     ))
     .parse(input)
 }

@@ -1995,19 +1995,13 @@ pub fn execute_untap_with_choices(
                             object_id,
                             &CounterType::Stun,
                         ) {
-                            if let Some(obj) = state.objects.get_mut(&object_id) {
-                                if let Some(entry) = obj.counters.get_mut(&CounterType::Stun) {
-                                    *entry -= 1;
-                                    if *entry == 0 {
-                                        obj.counters.remove(&CounterType::Stun);
-                                    }
-                                }
-                            }
-                            events.push(GameEvent::CounterRemoved {
+                            super::effects::counters::apply_counter_removal(
+                                state,
                                 object_id,
-                                counter_type: CounterType::Stun,
-                                count: 1,
-                            });
+                                CounterType::Stun,
+                                1,
+                                events,
+                            );
                         }
                     } else if crate::game::object_state::resolve_and_apply_object_edit(
                         state,
@@ -2325,19 +2319,13 @@ fn execute_seedborn_statics(state: &mut GameState, events: &mut Vec<GameEvent>, 
                                 object_id,
                                 &CounterType::Stun,
                             ) {
-                                if let Some(obj) = state.objects.get_mut(&object_id) {
-                                    if let Some(entry) = obj.counters.get_mut(&CounterType::Stun) {
-                                        *entry -= 1;
-                                        if *entry == 0 {
-                                            obj.counters.remove(&CounterType::Stun);
-                                        }
-                                    }
-                                }
-                                events.push(GameEvent::CounterRemoved {
+                                super::effects::counters::apply_counter_removal(
+                                    state,
                                     object_id,
-                                    counter_type: CounterType::Stun,
-                                    count: 1,
-                                });
+                                    CounterType::Stun,
+                                    1,
+                                    events,
+                                );
                             }
                         } else if crate::game::object_state::resolve_and_apply_object_edit(
                             state,
@@ -3667,6 +3655,38 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.turn_number = 1;
         state
+    }
+
+    fn stun_removal_commands(state: &GameState, object_id: ObjectId) -> usize {
+        state.resolved_rules_journal.entries().iter().filter(|entry| matches!(
+            &entry.command,
+            Some(crate::types::resolved_commands::ResolvedRulesCommand::ObjectCounter(command))
+                if command.object.object_id == object_id
+                    && command.counter_type == CounterType::Stun
+                    && matches!(command.edit, crate::types::resolved_commands::ResolvedObjectCounterEdit::Remove { count: 1 })
+        )).count()
+    }
+
+    fn install_stun_duration(state: &mut GameState, object_id: ObjectId) -> u64 {
+        use crate::types::ability::{
+            ContinuousModification, Duration, StaticCondition, TargetFilter,
+        };
+        use crate::types::counter::CounterMatch;
+        let controller = state.objects[&object_id].controller;
+        state.add_transient_continuous_effect(
+            object_id,
+            controller,
+            Duration::ForAsLongAs {
+                condition: StaticCondition::RecipientHasCounters {
+                    counters: CounterMatch::OfType(CounterType::Stun),
+                    minimum: 1,
+                    maximum: None,
+                },
+            },
+            TargetFilter::SpecificObject { id: object_id },
+            vec![ContinuousModification::AddPower { value: 1 }],
+            None,
+        )
     }
 
     #[test]
@@ -8665,8 +8685,23 @@ mod tests {
         obj.tapped = true;
         obj.counters.insert(CounterType::Stun, 2);
 
+        let duration_id = install_stun_duration(&mut state, obj_id);
+
         let mut events = Vec::new();
         execute_untap(&mut state, &mut events);
+
+        assert_eq!(
+            stun_removal_commands(&state, obj_id),
+            1,
+            "the main untap route records its accepted stun removal"
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.id == duration_id),
+            "one remaining stun counter keeps the started duration true"
+        );
 
         let obj = &state.objects[&obj_id];
         assert!(
@@ -10420,8 +10455,22 @@ mod tests {
             obj.counters.insert(CounterType::Stun, 1);
         }
 
+        let duration_id = install_stun_duration(&mut state, stunned);
         let mut events = Vec::new();
         execute_untap(&mut state, &mut events);
+
+        assert_eq!(
+            stun_removal_commands(&state, stunned),
+            0,
+            "a blocked main-untap removal records no command"
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.id == duration_id),
+            "blocked main untap cannot retire the duration"
+        );
 
         // The creature must stay tapped — the stun counter blocks the untap.
         assert!(
@@ -10467,8 +10516,22 @@ mod tests {
             obj.counters.insert(CounterType::Stun, 1);
         }
 
+        let duration_id = install_stun_duration(&mut state, stunned);
         let mut events = Vec::new();
         execute_untap(&mut state, &mut events);
+
+        assert_eq!(
+            stun_removal_commands(&state, stunned),
+            1,
+            "the unblocked main untap records one command"
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .all(|effect| effect.id != duration_id),
+            "accepted main untap retires the last-stun duration"
+        );
 
         // The creature stays tapped (stun counter was removed instead of untapping).
         assert!(
@@ -10565,8 +10628,22 @@ mod tests {
             .static_definitions
             .push(def);
 
+        let duration_id = install_stun_duration(&mut state, stunned);
         let mut events = Vec::new();
         execute_untap(&mut state, &mut events);
+
+        assert_eq!(
+            stun_removal_commands(&state, stunned),
+            0,
+            "a blocked Seedborn removal records no command"
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.id == duration_id),
+            "blocked Seedborn untap cannot retire the duration"
+        );
 
         // The stun counter must remain — the Seedborn pass is blocked.
         assert_eq!(
@@ -10623,8 +10700,22 @@ mod tests {
             .counters
             .insert(CounterType::Stun, 1);
 
+        let duration_id = install_stun_duration(&mut state, stunned);
         let mut events = Vec::new();
         execute_untap(&mut state, &mut events);
+
+        assert_eq!(
+            stun_removal_commands(&state, stunned),
+            1,
+            "the Seedborn route records one accepted removal"
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .all(|effect| effect.id != duration_id),
+            "accepted Seedborn untap retires the last-stun duration"
+        );
 
         // Without prohibition, the stun counter is removed per CR 122.1d.
         assert!(

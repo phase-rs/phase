@@ -25,7 +25,7 @@ use crate::types::game_state::{
     AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState, LKISnapshot,
     SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
 };
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
@@ -4553,29 +4553,40 @@ fn filter_inner_for_object(
             .is_some_and(|snapshot| {
                 snapshot.live_object_id(state) == Some(object_id)
             }),
-        // CR 613.1f + CR 611.2c + CR 400.7: the FILTER source's last-remembered
-        // card (`ChosenAttribute::Card`, written by `Effect::RememberCard`). Read
-        // live each layer pass against `source_id` (the permanent that HAS the
-        // granting static — Koh), not the resolving `ability`, so the static grant
-        // resolves it. The `obj.zone == Zone::Exile` guard is the invalidation:
-        // a chosen card that leaves exile becomes a new object (CR 400.7) with a
-        // fresh id, so the stored id stops matching an exiled object and the grant
-        // drops. Re-choosing replaces the stored `Card` (RememberCard is
-        // replace-on-rechoose), so this always reflects the single latest choice.
-        TargetFilter::ChosenCard => {
-            obj.zone == Zone::Exile
-                && source_context_from_filter(
-                    state,
-                    source_id,
-                    source_controller,
-                    ability,
-                    trigger_source,
-                    recipient_id,
-                )
-                .chosen_attributes
-                .iter()
-                .any(|attr| matches!(attr, ChosenAttribute::Card(id) if *id == object_id))
-        }
+        // CR 607.2d + CR 608.2c + CR 613.1f + CR 400.7: the FILTER source's
+        // last-remembered object (`ChosenAttribute::Card`, written by
+        // `Effect::RememberCard`). Read live each layer pass against `source_id`
+        // (the permanent that HAS the granting static — Koh), not the resolving
+        // `ability`, so the static grant resolves it. The stored value is an
+        // exact-incarnation pin (CR 400.7): the candidate occurrence must match
+        // the remembered storage id AND the incarnation captured at choice
+        // time, so an object that changed zones and returned at the same
+        // storage id is a new object and does not re-match. A legacy bare-id
+        // pin deserializes to `LEGACY_INCARNATION` and matches nothing
+        // (fail-closed). This is the zone-agnostic reader (CR 607.2d); a reader
+        // whose linked ability requires a zone composes `FilterProp::InZone` at
+        // its emission site (Koh's CR 607.2a exile pin), which also keeps the
+        // same pinned occurrence reachable from the leaves-the-battlefield
+        // look-back path (CR 603.10a). Re-choosing replaces the stored `Card`
+        // (RememberCard is replace-on-rechoose), so this always reflects the
+        // single latest choice.
+        TargetFilter::ChosenCard => source_context_from_filter(
+            state,
+            source_id,
+            source_controller,
+            ability,
+            trigger_source,
+            recipient_id,
+        )
+        .chosen_attributes
+        .iter()
+        .any(|attr| {
+            matches!(attr, ChosenAttribute::Card(pin)
+                if state
+                    .objects
+                    .get(&object_id)
+                    .is_some_and(|object| ObjectIncarnationRef::from_object(object) == *pin))
+        }),
         // CR 603.7: Match objects in a tracked set from the originating effect.
         // CR 608.2c: `TrackedSetId(0)` is the parser's "most recent set" sentinel.
         // Resolve it via `targeting::resolve_tracked_set_id` — the single
@@ -5079,6 +5090,38 @@ fn zone_change_filter_inner(
             });
             chosen_name.is_some_and(|name| record.name.eq_ignore_ascii_case(name))
         }
+        // CR 607.2d + CR 603.10a + CR 400.7: the remembered object on the
+        // leaves-the-battlefield look-back path. The candidate occurrence is the
+        // record's OWN pre-change authority —
+        // `record.trigger_source_context().identity.reference`, captured by
+        // `snapshot_for_zone_change` at the instant before the move — not the
+        // raw `record.object_id`: a record whose occurrence is a later
+        // incarnation (the same storage id left and returned) must not satisfy a
+        // stale pin. Real records always carry that context; a legacy record
+        // without one fails closed and matches nothing. The source's
+        // `ChosenAttribute::Card` pin is compared against that exact occurrence.
+        // A reader needing a zone composes `FilterProp::InZone` at its emission
+        // site (Koh's CR 607.2a exile pin) — on this zone-change look-back path
+        // `InZone` means "departed FROM that zone" (`record.from_zone`), whereas
+        // on the live path it means "currently in that zone".
+        TargetFilter::ChosenCard => {
+            let occurrence = record
+                .trigger_source_context()
+                .map(|context| context.identity.reference);
+            occurrence.is_some_and(|occurrence| {
+                source_context_from_filter(
+                    state,
+                    source_id,
+                    source_controller,
+                    ability,
+                    trigger_source,
+                    None,
+                )
+                .chosen_attributes
+                .iter()
+                .any(|attr| matches!(attr, ChosenAttribute::Card(pin) if *pin == occurrence))
+            })
+        }
         TargetFilter::ChosenDamageSource { .. } => false,
         TargetFilter::Named { name } => record.name == *name,
 
@@ -5106,7 +5149,6 @@ fn zone_change_filter_inner(
         | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::AmassedArmy
-        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -6332,6 +6374,32 @@ fn source_context_from_filter<'a>(
             // still live; all other source facts continue to come from `read`.
             lki.chosen_attributes
                 .clone_from(&source.lki.chosen_attributes);
+            // CR 607.2d + CR 608.2c + CR 400.7: the remembered-object reader's
+            // writer (`Effect::RememberCard`) persists `ChosenAttribute::Card`
+            // on the LIVE source object only — unlike source-bound named
+            // choices, it has no resolution-context writer — so the latched
+            // snapshot above can be stale within the very resolution that just
+            // wrote it (e.g. a dependent instruction excluding `Not{ChosenCard}`
+            // would still see the pre-resolution choice). While the source is
+            // still the exact observed incarnation in its expected zone, the
+            // live object is authoritative for that one attribute: drop any
+            // `Card` copied from the context and layer the live entry over the
+            // snapshot. The overlay keys on `source_read`'s exact
+            // incarnation/zone gate, so a departed source keeps the latched
+            // snapshot on the CR 603.10a look-back path; the layered `Card`
+            // value itself is an incarnation pin (CR 400.7), so a returned
+            // object at the same storage id cannot re-match it.
+            if let crate::types::game_state::TriggerSourceRead::ExactLive(object) = read {
+                lki.chosen_attributes
+                    .retain(|attribute| !matches!(attribute, ChosenAttribute::Card(_)));
+                if let Some(card) = object
+                    .chosen_attributes
+                    .iter()
+                    .find(|attribute| matches!(attribute, ChosenAttribute::Card(_)))
+                {
+                    lki.chosen_attributes.push(card.clone());
+                }
+            }
             (
                 lki,
                 read.attached_to(),
@@ -9509,6 +9577,323 @@ mod tests {
             ),
             "a legacy attachment snapshot without an incarnation proof must not rebind by ObjectId"
         );
+    }
+
+    /// CR 607.2d + CR 400.7: `ChosenCard` is the zone-agnostic remembered-object
+    /// reader on the LIVE object path. A remembered object matches wherever it
+    /// currently is (the widened behavior — the old `obj.zone == Zone::Exile`
+    /// guard hardcoded Koh's zone into the shared reader), a different object
+    /// does not, and a source with no recorded choice matches nothing.
+    #[test]
+    fn chosen_card_reader_matches_remembered_object_in_any_zone() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Remembers");
+        let remembered = add_creature(&mut state, PlayerId(0), "Remembered");
+        let other = add_creature(&mut state, PlayerId(0), "Other");
+
+        // Fail-closed until `Effect::RememberCard` writes a choice.
+        assert!(
+            !matches_target_filter(&state, remembered, &TargetFilter::ChosenCard, source),
+            "a source with no recorded choice must match nothing"
+        );
+
+        state.objects.get_mut(&source).unwrap().chosen_attributes = vec![ChosenAttribute::Card(
+            ObjectIncarnationRef::from_object(&state.objects[&remembered]),
+        )];
+
+        assert!(
+            matches_target_filter(&state, remembered, &TargetFilter::ChosenCard, source),
+            "the remembered object must match on the live path wherever it is — \
+             the reader is zone-agnostic (CR 607.2d)"
+        );
+        assert!(
+            !matches_target_filter(&state, other, &TargetFilter::ChosenCard, source),
+            "an object other than the remembered one must not match"
+        );
+    }
+
+    /// CR 607.2a + CR 607.2d + CR 400.7: zone discipline is composed at the
+    /// emission site, not inside the shared reader. The Koh pin
+    /// `And[ChosenCard, Typed[InZone{Exile}]]` matches only while the remembered
+    /// object is in exile; after it leaves, the pin drops while the bare reader
+    /// still identifies the pinned occurrence (this unit mutates `zone`
+    /// directly, so the incarnation boundary is not crossed here — the
+    /// returned-object case is covered by the incarnation discriminating tests).
+    #[test]
+    fn pinned_chosen_card_reader_drops_when_remembered_object_leaves_exile() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Koh");
+        let remembered = add_creature(&mut state, PlayerId(0), "Remembered");
+
+        state.objects.get_mut(&source).unwrap().chosen_attributes = vec![ChosenAttribute::Card(
+            ObjectIncarnationRef::from_object(&state.objects[&remembered]),
+        )];
+
+        let pinned = TargetFilter::And {
+            filters: vec![
+                TargetFilter::ChosenCard,
+                TargetFilter::Typed(
+                    TypedFilter::default()
+                        .properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+                ),
+            ],
+        };
+
+        // Battlefield: the bare reader matches, the exile pin rejects.
+        assert!(matches_target_filter(
+            &state,
+            remembered,
+            &TargetFilter::ChosenCard,
+            source
+        ));
+        assert!(
+            !matches_target_filter(&state, remembered, &pinned, source),
+            "the exile pin must reject the remembered object outside exile"
+        );
+
+        // In exile: the pin matches.
+        state.objects.get_mut(&remembered).unwrap().zone = Zone::Exile;
+        assert!(
+            matches_target_filter(&state, remembered, &pinned, source),
+            "while the remembered object is in exile, the composed pin matches"
+        );
+
+        // Leaves exile: the pin drops; the bare reader still identifies the id.
+        state.objects.get_mut(&remembered).unwrap().zone = Zone::Graveyard;
+        assert!(
+            !matches_target_filter(&state, remembered, &pinned, source),
+            "once the object leaves exile, the composed pin drops the grant"
+        );
+        assert!(
+            matches_target_filter(&state, remembered, &TargetFilter::ChosenCard, source),
+            "the bare reader is zone-agnostic and still identifies the pinned \
+             occurrence (only the zone field was mutated here, so the pin's \
+             incarnation is untouched)"
+        );
+    }
+
+    /// CR 603.10a + CR 607.2d + CR 400.7: on the leaves-the-battlefield look-back
+    /// path the reader compares the record's own pre-change occurrence
+    /// (`TriggerSourceContext.identity.reference`, captured by
+    /// `snapshot_for_zone_change`) against the source's
+    /// `ChosenAttribute::Card` pin. The remembered object's own departure record
+    /// matches; another object's record does not.
+    #[test]
+    fn chosen_card_reader_matches_remembered_object_on_zone_change_record() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Koh");
+        let remembered = add_creature(&mut state, PlayerId(0), "Remembered");
+        let other = add_creature(&mut state, PlayerId(0), "Other");
+        state.objects.get_mut(&source).unwrap().chosen_attributes = vec![ChosenAttribute::Card(
+            ObjectIncarnationRef::from_object(&state.objects[&remembered]),
+        )];
+
+        let context = FilterContext::from_source(&state, source);
+        // Real records: each snapshot carries the object's pre-change occurrence
+        // (`test_minimal` leaves `trigger_source_context: None`, which the LKI
+        // arm now treats as fail-closed).
+        let remembered_record = state
+            .objects
+            .get(&remembered)
+            .unwrap()
+            .snapshot_for_zone_change(remembered, Some(Zone::Battlefield), Zone::Graveyard);
+        let other_record = state.objects.get(&other).unwrap().snapshot_for_zone_change(
+            other,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+
+        assert!(
+            matches_target_filter_on_zone_change_record(
+                &state,
+                &remembered_record,
+                &TargetFilter::ChosenCard,
+                &context,
+            ),
+            "the remembered object's departure record must match the LKI arm (CR 603.10a)"
+        );
+        assert!(
+            !matches_target_filter_on_zone_change_record(
+                &state,
+                &other_record,
+                &TargetFilter::ChosenCard,
+                &context,
+            ),
+            "another object's departure record must not match the remembered id"
+        );
+    }
+
+    /// CR 607.2d + CR 608.2c + CR 400.7: `Effect::RememberCard` persists on the
+    /// LIVE source object, not on the resolution chain's latched
+    /// `TriggerSourceContext`, so within one resolution the context's snapshot
+    /// is stale. An exact-live source must layer the live `Card` over it (only
+    /// for that attribute — resolution-local named choices still come from the
+    /// context); a departed source keeps the CR 603.10a latched snapshot.
+    #[test]
+    fn chosen_card_reader_layers_live_card_over_stale_latched_context() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Remembers");
+        let remembered = add_creature(&mut state, PlayerId(0), "Remembered");
+        let stale = add_creature(&mut state, PlayerId(0), "Stale");
+
+        // The chain-latched context, captured before `RememberCard` wrote.
+        let mut context = state
+            .objects
+            .get(&source)
+            .unwrap()
+            .snapshot_for_zone_change(source, Some(Zone::Battlefield), Zone::Battlefield)
+            .trigger_source_context()
+            .unwrap()
+            .clone();
+        context.lki.chosen_attributes = vec![ChosenAttribute::Card(
+            ObjectIncarnationRef::from_object(&state.objects[&stale]),
+        )];
+
+        // The live source carries the just-remembered card.
+        state.objects.get_mut(&source).unwrap().chosen_attributes = vec![ChosenAttribute::Card(
+            ObjectIncarnationRef::from_object(&state.objects[&remembered]),
+        )];
+
+        let live_context = FilterContext::from_trigger_source(&context);
+        assert!(
+            super::matches_target_filter(
+                &state,
+                remembered,
+                &TargetFilter::ChosenCard,
+                &live_context,
+            ),
+            "an exact-live source must layer the live `Card` over the stale \
+             latched snapshot (CR 607.2d + CR 608.2c)"
+        );
+        assert!(
+            !super::matches_target_filter(&state, stale, &TargetFilter::ChosenCard, &live_context,),
+            "the stale latched `Card` must be dropped, not unioned with the live one"
+        );
+
+        // Depart the battlefield: `source_read` becomes the CR 603.10a latched
+        // path and the live overlay must NOT apply — the context governs.
+        state.objects.get_mut(&source).unwrap().zone = Zone::Graveyard;
+        let latched_context = FilterContext::from_trigger_source(&context);
+        assert!(
+            super::matches_target_filter(
+                &state,
+                stale,
+                &TargetFilter::ChosenCard,
+                &latched_context,
+            ),
+            "a departed source keeps its latched snapshot (CR 603.10a)"
+        );
+        assert!(
+            !super::matches_target_filter(
+                &state,
+                remembered,
+                &TargetFilter::ChosenCard,
+                &latched_context,
+            ),
+            "a live write must not leak into the latched look-back path"
+        );
+    }
+
+    /// CR 400.7: the stored pin names one incarnation. After the object changes
+    /// zones (incarnation bumped) the same storage id is a new object and must
+    /// not satisfy the live arm.
+    #[test]
+    fn chosen_card_reader_rejects_remembered_object_after_incarnation_bump() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Remembers");
+        let remembered = add_creature(&mut state, PlayerId(0), "Remembered");
+        state.objects.get_mut(&source).unwrap().chosen_attributes = vec![ChosenAttribute::Card(
+            ObjectIncarnationRef::from_object(&state.objects[&remembered]),
+        )];
+        assert!(
+            matches_target_filter(&state, remembered, &TargetFilter::ChosenCard, source),
+            "the pin must match the occurrence it was captured from"
+        );
+
+        // CR 400.7: the object leaves and returns at the same storage id — a new
+        // object with a bumped incarnation.
+        state
+            .objects
+            .get_mut(&remembered)
+            .unwrap()
+            .bump_incarnation();
+        assert!(
+            !matches_target_filter(&state, remembered, &TargetFilter::ChosenCard, source),
+            "a stale incarnation pin must not re-identify the returned object"
+        );
+    }
+
+    /// CR 603.10a + CR 400.7: the LKI arm matches the pin against the record's
+    /// own pre-change occurrence, so a departure record captured from a LATER
+    /// incarnation of the same storage id must not satisfy the stale pin.
+    #[test]
+    fn chosen_card_reader_rejects_zone_change_record_from_other_incarnation() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Remembers");
+        let remembered = add_creature(&mut state, PlayerId(0), "Remembered");
+        state.objects.get_mut(&source).unwrap().chosen_attributes = vec![ChosenAttribute::Card(
+            ObjectIncarnationRef::from_object(&state.objects[&remembered]),
+        )];
+        let context = FilterContext::from_source(&state, source);
+
+        // The object left and returned (new incarnation), then departs again:
+        // the record's occurrence is the new incarnation, not the pinned one.
+        state
+            .objects
+            .get_mut(&remembered)
+            .unwrap()
+            .bump_incarnation();
+        let record = state
+            .objects
+            .get(&remembered)
+            .unwrap()
+            .snapshot_for_zone_change(remembered, Some(Zone::Battlefield), Zone::Graveyard);
+        assert!(
+            !matches_target_filter_on_zone_change_record(
+                &state,
+                &record,
+                &TargetFilter::ChosenCard,
+                &context,
+            ),
+            "a record captured from a later incarnation must not satisfy the \
+             stale pin (CR 400.7)"
+        );
+    }
+
+    /// CR 400.7: the pre-migration wire form stored a bare `ObjectId`. It must
+    /// deserialize fail-closed to `LEGACY_INCARNATION`, a value no real
+    /// incarnation can equal, so a loaded legacy choice matches nothing.
+    #[test]
+    fn legacy_chosen_card_payload_deserializes_and_matches_nothing() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Remembers");
+        let remembered = add_creature(&mut state, PlayerId(0), "Remembered");
+
+        let legacy: ChosenAttribute =
+            serde_json::from_str(&format!(r#"{{"type":"Card","value":{}}}"#, remembered.0))
+                .expect("the legacy bare-number payload must still load");
+        assert_eq!(
+            legacy,
+            ChosenAttribute::Card(ObjectIncarnationRef::of(
+                remembered,
+                crate::types::identifiers::LEGACY_INCARNATION,
+            )),
+            "a legacy bare-id payload must bind to the fail-closed sentinel"
+        );
+
+        state.objects.get_mut(&source).unwrap().chosen_attributes = vec![legacy];
+        assert!(
+            !matches_target_filter(&state, remembered, &TargetFilter::ChosenCard, source),
+            "the legacy sentinel must not match the live object's real incarnation"
+        );
+
+        // New writes emit the full `{ object_id, incarnation }` pair under the
+        // internally-tagged `value` slot.
+        let fresh = ChosenAttribute::Card(ObjectIncarnationRef::of(remembered, 3));
+        let wire = serde_json::to_value(&fresh).unwrap();
+        assert_eq!(wire["type"], "Card");
+        assert_eq!(wire["value"]["object_id"].as_u64(), Some(remembered.0));
+        assert_eq!(wire["value"]["incarnation"].as_u64(), Some(3));
     }
 
     #[test]
