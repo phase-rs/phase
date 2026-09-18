@@ -27,6 +27,7 @@
 //! drive the real declare-attackers → trigger → resolution pipeline.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -34,9 +35,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 use super::rules::AttackTarget;
-
-// Verbatim Oracle text (Scryfall, 2026-09-16).
-const HERO_OF_BLADEHOLD: &str = "Battle cry (Whenever this creature attacks, each other attacking creature gets +1/+0 until end of turn.)\nWhenever this creature attacks, create two 1/1 white Soldier creature tokens that are tapped and attacking.";
+use super::support::shared_card_db;
 
 /// Derived power of an object (counters and layers applied), read off live state.
 fn power_of(runner: &GameRunner, id: ObjectId) -> i32 {
@@ -73,10 +72,8 @@ fn is_attacking(runner: &GameRunner, id: ObjectId) -> bool {
 /// Reach-guard: Hero must carry the battle cry KEYWORD and both `Attacks`
 /// triggers before any P/T assertion below means anything.
 ///
-/// Without explicit keyword hints the scenario builder extracts no keyword from
-/// a parenthetical "Battle cry (...)" line, `synthesize_all` then installs no
-/// battle-cry trigger, and every "was it pumped?" assertion fails for a reason
-/// that has nothing to do with the engine.
+/// The committed export fixture supplies the keyword and token trigger; database
+/// synthesis must install the battle-cry trigger without injected keyword hints.
 fn assert_battle_cry_installed(runner: &GameRunner, hero: ObjectId) {
     let obj = &runner.state().objects[&hero];
     assert!(
@@ -102,11 +99,8 @@ fn battle_cry_pumps_the_other_declared_attacker() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    let hero = {
-        let mut b = scenario.add_creature(P0, "Hero of Bladehold", 3, 4);
-        b.from_oracle_text_with_keywords(&["Battle cry"], HERO_OF_BLADEHOLD);
-        b.id()
-    };
+    let db = shared_card_db().expect("the curated fixture must contain Hero of Bladehold");
+    let hero = scenario.add_real_card(P0, "Hero of Bladehold", Zone::Battlefield, db);
     let ally = scenario.add_creature(P0, "Vanilla Ally", 2, 2).id();
     let home = scenario.add_creature(P0, "Stayed Home", 2, 2).id();
 
@@ -174,11 +168,8 @@ fn hero_attacking_alone_still_creates_its_tokens_and_never_pumps_itself() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    let hero = {
-        let mut b = scenario.add_creature(P0, "Hero of Bladehold", 3, 4);
-        b.from_oracle_text_with_keywords(&["Battle cry"], HERO_OF_BLADEHOLD);
-        b.id()
-    };
+    let db = shared_card_db().expect("the curated fixture must contain Hero of Bladehold");
+    let hero = scenario.add_real_card(P0, "Hero of Bladehold", Zone::Battlefield, db);
 
     let mut runner = scenario.build();
     assert_battle_cry_installed(&runner, hero);
@@ -223,11 +214,8 @@ fn declare_and_order(token_trigger_first: bool) -> (GameRunner, ObjectId, Object
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    let hero = {
-        let mut b = scenario.add_creature(P0, "Hero of Bladehold", 3, 4);
-        b.from_oracle_text_with_keywords(&["Battle cry"], HERO_OF_BLADEHOLD);
-        b.id()
-    };
+    let db = shared_card_db().expect("the curated fixture must contain Hero of Bladehold");
+    let hero = scenario.add_real_card(P0, "Hero of Bladehold", Zone::Battlefield, db);
     let ally = scenario.add_creature(P0, "Vanilla Ally", 2, 2).id();
 
     let mut runner = scenario.build();
