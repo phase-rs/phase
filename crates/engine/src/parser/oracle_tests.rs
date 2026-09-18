@@ -25084,6 +25084,40 @@ fn banner_of_kinship_composes_choose_and_chosen_dependent_counters() {
         } if name == "fellowship"
     ));
 }
+
+/// Production-parser regression for Cemetery Prowler #6898. The isolated
+/// static-line parser is insufficient: the generated card-data path must carry
+/// the shared-card-type quantity into the exported static definition too.
+#[test]
+fn cemetery_prowler_production_parse_exports_shared_card_types() {
+    let parsed = parse(
+        "Vigilance\nWhenever this creature enters or attacks, exile a card from a graveyard.\nSpells you cast cost {1} less to cast for each card type they share with cards exiled with this creature.",
+        "Cemetery Prowler",
+        &[Keyword::Vigilance],
+        &["Creature"],
+        &["Wolf"],
+    );
+    let static_def = parsed
+        .statics
+        .iter()
+        .find(|def| matches!(def.mode, StaticMode::ModifyCost { .. }))
+        .expect("Cemetery Prowler must export a cost modifier");
+    let StaticMode::ModifyCost {
+        dynamic_count: Some(QuantityRef::SharedCardTypes { source }),
+        ..
+    } = &static_def.mode
+    else {
+        panic!(
+            "production parser must export SharedCardTypes, got {:?}",
+            static_def.mode
+        );
+    };
+    assert!(matches!(
+        source,
+        crate::types::ability::CardTypeSetSource::ExiledBySource
+    ));
+}
+
 #[test]
 fn oubliette_host_bound_parse_structure() {
     let text = "When this enchantment enters, target creature phases out until this enchantment leaves the battlefield. Tap that creature as it phases in this way.";
