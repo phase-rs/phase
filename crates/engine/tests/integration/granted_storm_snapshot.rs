@@ -77,7 +77,8 @@ fn first_spell_storm_grant_is_snapshotted_before_cast_recording() {
             } => None,
             StackEntryKind::Spell { .. }
             | StackEntryKind::ActivatedAbility { .. }
-            | StackEntryKind::KeywordAction { .. } => None,
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => None,
         })
         .collect();
     assert_eq!(

@@ -12373,6 +12373,8 @@ pub struct PreparedPersistedGameState {
 pub enum PersistedRestoreError {
     #[error("persisted state uses an unsupported format configuration: {0}")]
     UnsupportedFormat(String),
+    #[error("persisted state contains an unsupported stack object: {0}")]
+    UnsupportedStackObject(&'static str),
     #[error("persisted restore finalization policy mismatch: {0}")]
     FinalizationPolicyMismatch(&'static str),
     #[error("persisted state runtime rehydration failed: {0}")]
@@ -12571,6 +12573,25 @@ impl PersistedGameState {
             .format_config
             .reject_unimplemented_range_of_influence()
             .map_err(PersistedRestoreError::UnsupportedFormat)?;
+        if state
+            .stack
+            .iter()
+            .any(|entry| matches!(entry.kind, StackEntryKind::CombatDamage { .. }))
+        {
+            return Err(PersistedRestoreError::UnsupportedStackObject(
+                "combat damage on the stack is not resolvable in this build",
+            ));
+        }
+        // Decoding a type and admitting it as a PLAYABLE persisted game are
+        // separate contracts. `StackEntryKind::CombatDamage` is serde-decodable
+        // so later phases can round-trip it, but no phase before the pushing
+        // one can resolve its assignments — so a restored state carrying one
+        // has pending damage this build cannot deal. Admitting it would either
+        // crash resolution or silently drop that damage; both are worse than
+        // refusing the load. Rejected here, at the single chokepoint every
+        // production restore funnels through (WASM `prepare_restored_game_state`,
+        // `server-core`'s `from_persisted`, and offline tooling), rather than at
+        // each caller.
         let recovered_terminal_rest =
             crate::game::engine::recover_terminal_resolution_rest_on_restore(&mut state)?;
         Ok(PreparedPersistedGameState {
@@ -16139,6 +16160,12 @@ pub enum StackResolutionEntryProvenance {
     KeywordAction {
         action: KeywordAction,
     },
+    /// Pre-M10 combat damage on the stack. Carries the same payload the entry
+    /// does, so the fence stays a complete entry-local snapshot.
+    CombatDamage {
+        sub_step: CombatDamageSubStep,
+        assignments: Vec<AssignedCombatDamage>,
+    },
 }
 
 /// Captured fields for a triggered stack entry. Heap indirection keeps the
@@ -16204,6 +16231,13 @@ impl StackResolutionEntryFence {
                     action: action.clone(),
                 }
             }
+            StackEntryKind::CombatDamage {
+                sub_step,
+                assignments,
+            } => StackResolutionEntryProvenance::CombatDamage {
+                sub_step: *sub_step,
+                assignments: assignments.clone(),
+            },
         };
         let (target_incarnations, selected_target_incarnations) = entry
             .ability()
@@ -16430,28 +16464,30 @@ pub struct ResolutionSourceRelatch {
 
 impl StackEntry {
     /// Access the resolved ability for this stack entry (immutable).
-    /// Returns `None` for permanent spells with no spell-level effect, and for
+    /// Returns `None` for permanent spells with no spell-level effect, for
     /// `KeywordAction` entries which carry a typed payload instead of a
-    /// `ResolvedAbility`.
+    /// `ResolvedAbility`, and for `CombatDamage`, which is not an ability at
+    /// all (CR 113.3b) and carries frozen assignments instead.
     pub fn ability(&self) -> Option<&ResolvedAbility> {
         match &self.kind {
             StackEntryKind::Spell { ability, .. } => ability.as_deref(),
             StackEntryKind::ActivatedAbility { ability, .. } => Some(ability),
             StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
-            StackEntryKind::KeywordAction { .. } => None,
+            StackEntryKind::KeywordAction { .. } | StackEntryKind::CombatDamage { .. } => None,
         }
     }
 
     /// Access the resolved ability for this stack entry (mutable).
-    /// Returns `None` for permanent spells with no spell-level effect, and for
+    /// Returns `None` for permanent spells with no spell-level effect, for
     /// `KeywordAction` entries which carry a typed payload instead of a
-    /// `ResolvedAbility`.
+    /// `ResolvedAbility`, and for `CombatDamage`, which is not an ability at
+    /// all (CR 113.3b) and carries frozen assignments instead.
     pub fn ability_mut(&mut self) -> Option<&mut ResolvedAbility> {
         match &mut self.kind {
             StackEntryKind::Spell { ability, .. } => ability.as_deref_mut(),
             StackEntryKind::ActivatedAbility { ability, .. } => Some(ability),
             StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
-            StackEntryKind::KeywordAction { .. } => None,
+            StackEntryKind::KeywordAction { .. } | StackEntryKind::CombatDamage { .. } => None,
         }
     }
 }
@@ -17076,6 +17112,68 @@ pub enum StackEntryKind {
     /// additionally carries its own typed object ids (equipment_id, vehicle_id,
     /// mount_id, spacecraft_id) needed at resolution.
     KeywordAction { action: KeywordAction },
+    /// Pre-M10 combat damage on the stack: one object per combat damage step,
+    /// holding every assignment made in that step.
+    ///
+    /// Neither a spell (CR 112.1: a spell is a card on the stack) nor an
+    /// ability (CR 113.3b), which is why [`StackEntryKind::class`] answers with
+    /// its own [`StackObjectClass`] variant rather than joining either. The
+    /// 1999–2009 rules called this an object that "can't be countered" and put
+    /// all of a step's assignments on the stack as a single one; those rule
+    /// numbers are deliberately not cited as `CR` annotations, because the
+    /// current CR reuses them for Battles.
+    ///
+    /// Assignments are frozen at push time and carry
+    /// [`ObjectIncarnationRef`](crate::types::identifiers::ObjectIncarnationRef)
+    /// rather than a bare `ObjectId`: dealing-time identity turns on whether the
+    /// source or recipient is still the same object (CR 400.7).
+    ///
+    /// RUNTIME: type-only in this phase — nothing constructs this variant in
+    /// production. It is pushed and resolved in the combat-damage-timing phase
+    /// that follows; see `docs/proposals/custom-format-engine/`.
+    CombatDamage {
+        sub_step: CombatDamageSubStep,
+        assignments: Vec<AssignedCombatDamage>,
+    },
+}
+
+/// One combat-damage assignment, frozen when the damage went on the stack.
+///
+/// Distinct from [`DamageAssignment`](crate::game::combat::DamageAssignment),
+/// which is the live modern-rules shape keyed by a bare `ObjectId`: under the
+/// pre-M10 procedure the source and recipient may change or leave between
+/// assignment and dealing, so identity is pinned to the CR 400.7 incarnation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssignedCombatDamage {
+    pub source: crate::types::identifiers::ObjectIncarnationRef,
+    pub target: AssignedDamageRecipient,
+    pub amount: u32,
+}
+
+/// Recipient of a frozen combat-damage assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum AssignedDamageRecipient {
+    Object(crate::types::identifiers::ObjectIncarnationRef),
+    Player(PlayerId),
+}
+
+/// What kind of object a stack entry is, for every rules purpose that asks.
+///
+/// CR 112.1 makes a spell a card on the stack and CR 113.3b makes an activated
+/// ability an ability; the two are disjoint, and combat damage on the stack is
+/// neither. This projection is the single authority for that question — it
+/// replaced an `Option<StackAbilityKind>` whose `None` meant "spell", a shape
+/// that structurally could not express a third kind.
+///
+/// Engine-internal: never serialized, never part of the wire format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackObjectClass {
+    Spell,
+    Ability(StackAbilityKind),
+    /// Neither a spell nor an ability, so no "target spell" or "target
+    /// ability" effect can ever name it.
+    CombatDamage,
 }
 
 impl StackEntryKind {
@@ -17098,15 +17196,23 @@ impl StackEntryKind {
     /// stack for every rules purpose — including being a legal target of
     /// "target activated ability" effects (Squelch, Interdict, Reroute).
     ///
+    /// `CombatDamage` is neither: CR 112.1 makes a spell a card on the stack and
+    /// CR 113.3b makes an activated ability an ability, and pre-M10 combat
+    /// damage on the stack is not a card and not an ability. It therefore
+    /// matches no "target spell" or "target ability" filter at all.
+    ///
     /// Exhaustive on purpose: a future `StackEntryKind` variant must make this
     /// classification decision explicitly instead of silently defaulting.
-    pub fn stack_ability_kind(&self) -> Option<StackAbilityKind> {
+    pub fn class(&self) -> StackObjectClass {
         match self {
-            StackEntryKind::Spell { .. } => None,
+            StackEntryKind::Spell { .. } => StackObjectClass::Spell,
             StackEntryKind::ActivatedAbility { .. } | StackEntryKind::KeywordAction { .. } => {
-                Some(StackAbilityKind::Activated)
+                StackObjectClass::Ability(StackAbilityKind::Activated)
             }
-            StackEntryKind::TriggeredAbility { .. } => Some(StackAbilityKind::Triggered),
+            StackEntryKind::TriggeredAbility { .. } => {
+                StackObjectClass::Ability(StackAbilityKind::Triggered)
+            }
+            StackEntryKind::CombatDamage { .. } => StackObjectClass::CombatDamage,
         }
     }
 
@@ -17118,9 +17224,11 @@ impl StackEntryKind {
     /// Mana abilities never reach the stack (CR 605.3b), so every ability entry
     /// reaching this predicate is targetable in principle.
     pub fn matches_stack_ability_kind(&self, kind: Option<&StackAbilityKind>) -> bool {
-        match self.stack_ability_kind() {
-            None => false,
-            Some(entry_kind) => kind.is_none_or(|wanted| *wanted == entry_kind),
+        match self.class() {
+            StackObjectClass::Spell | StackObjectClass::CombatDamage => false,
+            StackObjectClass::Ability(entry_kind) => {
+                kind.is_none_or(|wanted| *wanted == entry_kind)
+            }
         }
     }
 }
@@ -25446,9 +25554,13 @@ impl GameState {
                         }
                     }
             }),
+            // CR 117.3d: a yield is a pre-commitment to pass priority for a
+            // specific triggered ability. Combat damage on the stack is not an
+            // ability and is never yielded.
             StackEntryKind::Spell { .. }
             | StackEntryKind::ActivatedAbility { .. }
-            | StackEntryKind::KeywordAction { .. } => false,
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => false,
         }
     }
 

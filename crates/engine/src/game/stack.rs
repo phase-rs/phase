@@ -1424,6 +1424,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         StackEntryKind::KeywordAction { .. } => unreachable!(
             "KeywordAction stack entries are resolved via the early-return branch above"
         ),
+        // Nothing constructs a `CombatDamage` entry in production yet: it has no
+        // push authority until combat-damage-on-the-stack timing lands, and at
+        // that point it gains its own early-return resolver ahead of this match,
+        // exactly as `KeywordAction` has. Until then no state can reach here.
+        // Unreachable on two independent grounds, and the second is what an
+        // earlier revision of this arm was missing: no phase before the pushing
+        // one constructs this kind, AND `PersistedGameState::prepare_for_restore`
+        // refuses to admit a decoded state that carries one. Without that second
+        // guard a deserialized entry could reach here, which is why "nothing
+        // constructs one" was not sufficient on its own.
+        StackEntryKind::CombatDamage { .. } => unreachable!(
+            "CombatDamage stack entries are refused at persisted admission and never pushed in this phase"
+        ),
     };
 
     // CR 608.2c + CR 400.7a + CR 613.1b: "The controller of the spell or ability follows
@@ -5029,7 +5042,13 @@ pub fn stack_display_groups(state: &GameState) -> Vec<StackDisplayGroup> {
         // keyword activations (a vanishingly rare scenario), we opt them
         // out of coalescing: always push a fresh group and clear
         // `last_key` so a following non-keyword entry also starts fresh.
-        if matches!(entry.kind, StackEntryKind::KeywordAction { .. }) {
+        // Combat-damage entries opt out for the same reason keyword actions do,
+        // plus one of their own: each combat damage step puts its own distinct
+        // object on the stack, so two of them are never "the same thing twice".
+        if matches!(
+            entry.kind,
+            StackEntryKind::KeywordAction { .. } | StackEntryKind::CombatDamage { .. }
+        ) {
             out.push(StackDisplayGroup {
                 representative: entry.id,
                 count: 1,
@@ -5085,6 +5104,7 @@ fn group_key(state: &GameState, entry: &StackEntry) -> StackGroupKey {
             ("triggered", description.as_deref())
         }
         StackEntryKind::KeywordAction { .. } => ("keyword", None),
+        StackEntryKind::CombatDamage { .. } => ("combat-damage", None),
     };
     let effective_ability = effective_stack_ability(state, entry);
     let targets = effective_ability
@@ -5100,7 +5120,8 @@ fn group_key(state: &GameState, entry: &StackEntry) -> StackGroupKey {
         StackEntryKind::TriggeredAbility { provenance, .. } => provenance.clone(),
         StackEntryKind::Spell { .. }
         | StackEntryKind::ActivatedAbility { .. }
-        | StackEntryKind::KeywordAction { .. } => None,
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => None,
     };
     StackGroupKey {
         source_name,

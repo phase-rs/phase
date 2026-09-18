@@ -200,6 +200,7 @@ fn print_stack_summary(state: &GameState) {
             StackEntryKind::ActivatedAbility { .. } => "ActivatedAbility",
             StackEntryKind::TriggeredAbility { .. } => "TriggeredAbility",
             StackEntryKind::KeywordAction { .. } => "KeywordAction",
+            StackEntryKind::CombatDamage { .. } => "CombatDamage",
         };
         *kinds.entry(kind).or_default() += 1;
     }

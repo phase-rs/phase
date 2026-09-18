@@ -2400,6 +2400,14 @@ fn stack_entry_matches_filter_with_context(
             filter_targets_stack_abilities(filter)
                 && stack_ability_matches_filter(entry, filter, source_controller)
         }
+        // CR 112.1 + CR 113.3b: combat damage on the stack is neither a spell
+        // nor an ability, so no filter can name it — not as a target and not as
+        // a member of a non-targeting sweep. This arm is what forecloses the
+        // CR 608.2b mass-counter path (`effects::counter::resolve_all` reaches
+        // it through `stack_entry_matches_filter`), which has no other guard:
+        // that sweep's object lookup answers `false` for an entry with no
+        // `GameObject` rather than skipping it.
+        StackEntryKind::CombatDamage { .. } => false,
     }
 }
 

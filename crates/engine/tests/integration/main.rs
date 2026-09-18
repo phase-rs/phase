@@ -137,6 +137,7 @@ mod codie_turn14_effect_zone_wedge;
 mod colorless_spell_cost_reduction;
 mod combat_celebrant_exert;
 mod combat_damage_order_triggers_no_hang;
+mod combat_damage_stack_object;
 mod combat_lifelink_replacement_ordering;
 mod combat_target_support;
 mod combo_infinite_pile;
