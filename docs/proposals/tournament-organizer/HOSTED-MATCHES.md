@@ -103,9 +103,11 @@ entry" — in the native `phase-server`, verified. B is a near-exact mirror.
 straight into the pure `tournament.rs` core ("Tournament variants are
 lobby-scoped, so they delegate straight to…",
 `crates/server-core/src/client_message_wire_guard.rs:211`); `phase-server` holds
-the `LobbyManager` that owns the tournament. So B needs **no new crate boundary
-and no change to the tournament core's purity** — it adds a server-side hosting
-layer *beside* the draft one.
+the `LobbyManager` that owns the tournament. So B needs **no new crate boundary and
+no change to the core's *purity*** (it stays GameState-free) — it adds a server-side
+hosting layer *beside* the draft one, plus additive state/API on the core itself
+(enumerated in §3/§4: `ReportGate::Hosted` + `ReportAuthority`, generation, durable
+persistence). "Extended, still pure" — not "unchanged."
 
 ---
 
@@ -131,11 +133,17 @@ part of the proposal, not an afterthought — see §4.1.
 
 **What B costs (corrected against the codebase):**
 
-- **No new crate boundary; the tournament core stays GameState-free.** The pure
-  `tournament.rs` remains the sole authority for pairings/standings and never
-  touches `GameState`; the new hosting layer lives in `server-core`/`phase-server`
-  exactly like `draft_session.rs`. The *module* invariant (`tournament.rs:1-36`)
-  is preserved.
+- **No new crate boundary; the tournament core stays pure/GameState-free — but it
+  is *extended*, not unchanged.** `tournament.rs` remains the sole authority for
+  pairings/standings and never touches `GameState` (the *purity* invariant,
+  `tournament.rs:1-36`, holds); the hosting/orchestration lives in
+  `server-core`/`phase-server` like `draft_session.rs`. But the R1–R9 requirements
+  add **additive core state/API** to `tournament.rs` itself: a `ReportGate::Hosted`
+  arm + a `ReportAuthority` parameter on `report_result` (R1, §4.1), durable
+  per-pairing **hosting authority** + a monotonic **generation** with atomic
+  validate→publish (R3, §4.3), and durable **persistence/rehydration** of tournament
+  state + receipts (R7, §4.4). Enumerated where each is required; none introduces
+  `GameState`.
 - **The retired invariant is the product-level "v1 stays lobby-only (no
   auto-launched `GameSession` per pairing)"** (`CONTEXT.md:392`, open question #3).
   Hosted tournaments require the native `phase-server` to spawn and observe games;
@@ -162,7 +170,7 @@ asserted as decided (§9.5).
 ## 4. Architecture (B)
 
 ```text
- lobby-broker (pure, WASM-safe, GameState-free)          UNCHANGED core
+ lobby-broker (pure, WASM-safe, GameState-free)   EXTENDED (additive), still pure
    tournament.rs: pairings, standings, report_gate,
                   report_result, validate_match_result
         ▲ report_result(pairing_id, PodOutcome)                 (verified)
@@ -178,9 +186,14 @@ asserted as decided (§9.5).
         └─────────────────────────── report_result(verified PodOutcome) ─┘
 ```
 
-- **Tournament core (`tournament.rs`)** — unchanged. Auto-report enters through
-  the same `report_result`/`report_gate`/`validate_match_result` path a manual
-  report uses; byes/forfeits still refuse a report and so never get a hosted game.
+- **Tournament core (`tournament.rs`)** — **pure/GameState-free but extended**
+  (not unchanged). Auto-report still enters through the
+  `report_result`/`report_gate`/`validate_match_result` path a manual report uses,
+  and byes/forfeits still refuse a report — but the core gains additive state/API:
+  `ReportGate::Hosted` + a `ReportAuthority` param on `report_result` (R1),
+  per-pairing hosting authority + generation with atomic validate→publish (R3), and
+  persistence/rehydration of tournament state + receipts (R7). All additive, none
+  touching `GameState`.
 - **Hosting layer (`server-core`, driven by `phase-server`)** — new, mirrors
   `draft_session.rs`. Per-tournament `active_matches: HashMap<PairingId,
   game_code>`; on round start, for each non-bye pairing, spawn a `GameSession`
