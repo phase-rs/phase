@@ -347,6 +347,42 @@ fn flatten_cost_components(cost: &AbilityCost, components: &mut Vec<AbilityCost>
     }
 }
 
+/// CR 601.2h + CR 602.2b: A cost component that moves objects from a library to
+/// a PUBLIC zone belongs to the second payment tier — "first, they pay all costs
+/// that don't involve random elements or moving objects from the library to a
+/// public zone, in any order. Then they pay all remaining costs in any order."
+/// CR 602.2b binds 601.2b-i to activated abilities.
+///
+/// CR 400.2 fixes what "public" means: graveyard, battlefield, stack, exile,
+/// ante and command are public; LIBRARY AND HAND ARE HIDDEN. So a hypothetical
+/// library->hand cost is NOT deferred — only moves out of a library into a
+/// public zone are.
+///
+/// Single authority, shared by the payment partition in `pay_ability_cost_inner`
+/// and the interactive activation-cost scheduler
+/// (`casting_costs::surface_next_unpaid_interactive_activation_cost`) so the
+/// tier plan that schedules a prompt and the tier plan that pays cannot drift.
+///
+/// Classifies ONE component. Callers tier a composite by flattening it to leaves
+/// (`flatten_cost_components`) and applying this to each: tiering a whole child
+/// `Composite` on behalf of one nested library leg would wrongly defer that
+/// child's first-tier siblings too. `OneOf` and `PerCounter` never reach this
+/// classification — both are rejected earlier in `pay_ability_cost_inner`
+/// ("OneOf cost is only valid as an unless-cost", "PerCounter cost must be
+/// expanded against game state before reaching pay_ability_cost").
+pub(crate) fn is_library_to_public_zone_cost(cost: &AbilityCost) -> bool {
+    matches!(
+        cost,
+        AbilityCost::Exile {
+            zone: Some(Zone::Library),
+            ..
+        } | AbilityCost::ExileWithAggregate {
+            zone: Zone::Library,
+            ..
+        }
+    )
+}
+
 /// CR 118.12 + CR 605.3b + CR 616.1: A nested composite carries the unpaid
 /// suffix of each enclosing composite into a paused mana-payment root. The
 /// root begins with `active_cost`; anything after that prefix belongs to an
@@ -928,41 +964,34 @@ fn pay_ability_cost_inner(
             }
         },
         AbilityCost::Composite { costs } => {
-            // CR 601.2h + CR 602.2b: "First, they pay all costs that don't involve
-            // random elements or moving objects from the library to a public zone,
-            // in any order. Then they pay all remaining costs in any order." CR
-            // 602.2b binds 601.2b-i to activated abilities, so a composite
-            // activation cost must pay its library-to-public-zone components LAST.
+            // CR 601.2h + CR 602.2b: a composite activation cost pays its
+            // library-to-public-zone components LAST. `is_library_to_public_zone_cost`
+            // is the single authority for that classification and carries the rule
+            // text; this arm owns only the ORDER it imposes.
             //
-            // CR 400.2 fixes what "public" means: graveyard, battlefield, stack,
-            // exile, ante and command are public; LIBRARY AND HAND ARE HIDDEN. So a
-            // hypothetical library->hand cost is NOT deferred — only moves out of a
-            // library into a public zone are.
-            fn is_library_to_public_zone_cost(cost: &AbilityCost) -> bool {
-                matches!(
-                    cost,
-                    AbilityCost::Exile {
-                        zone: Some(Zone::Library),
-                        ..
-                    } | AbilityCost::ExileWithAggregate {
-                        zone: Zone::Library,
-                        ..
-                    }
-                )
-            }
-
+            // Tier each LEAF, not each top-level child. A child `Composite` that
+            // merely *contains* a library-to-public leg must not be deferred whole:
+            // that would drag its own first-tier siblings into tier 2, which CR
+            // 601.2h does not say. Flattening first also means the classification
+            // needs no recursion of its own — every component it sees is a leaf.
+            //
             // A STABLE partition: relative order within each tier is preserved, so a
             // mana-leading composite stays mana-leading and
             // `resume_cost_with_concrete_mana`'s "a mana payment root must begin with
             // mana" invariant still holds. Payment order is reordered here rather
             // than at parse time because a CONSTRUCTED `Composite` never passes
             // through the parser, and the suffixes below are derived from this same
-            // vector so iteration order and the unpaid-suffix slices cannot drift —
-            // `enclosing_composite_suffix` asserts exactly that agreement.
-            let ordered: Vec<AbilityCost> = costs
+            // vector. `enclosing_composite_suffix` is unaffected by the reordering:
+            // it only requires a resume cost to begin with its ACTIVE cost's own
+            // leaves, and `composite_cost_suffix` always emits `leading` first.
+            let mut leaves = Vec::new();
+            for sub_cost in costs {
+                flatten_cost_components(sub_cost, &mut leaves);
+            }
+            let ordered: Vec<AbilityCost> = leaves
                 .iter()
                 .filter(|sub| !is_library_to_public_zone_cost(sub))
-                .chain(costs.iter().filter(|sub| is_library_to_public_zone_cost(sub)))
+                .chain(leaves.iter().filter(|sub| is_library_to_public_zone_cost(sub)))
                 .cloned()
                 .collect();
             let enclosing_suffix = enclosing_composite_suffix(cost, resume_cost);
