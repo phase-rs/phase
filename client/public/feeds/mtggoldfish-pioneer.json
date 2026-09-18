@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-09-17T00:00:00Z",
+  "updated": "2026-09-18T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -748,48 +748,20 @@
       "name": "Azorius Control",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
-        "W"
+        "W",
+        "U"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 2,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Emeritus of Ideation"
-        },
-        {
-          "count": 4,
-          "name": "Consult the Star Charts"
-        },
-        {
-          "count": 1,
-          "name": "Fountainport"
-        },
-        {
-          "count": 2,
-          "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 1,
-          "name": "Field of Ruin"
-        },
-        {
-          "count": 4,
-          "name": "No More Lies"
-        },
-        {
-          "count": 4,
+          "count": 3,
           "name": "Get Lost"
         },
         {
-          "count": 3,
-          "name": "Restless Anchorage"
+          "count": 1,
+          "name": "Castle Ardenvale"
         },
         {
           "count": 2,
@@ -797,23 +769,51 @@
         },
         {
           "count": 4,
-          "name": "Temporary Lockdown"
+          "name": "Consult the Star Charts"
         },
         {
-          "count": 1,
-          "name": "Otawara, Soaring City"
+          "count": 3,
+          "name": "Deserted Beach"
+        },
+        {
+          "count": 4,
+          "name": "Dovin's Veto"
         },
         {
           "count": 1,
           "name": "Eiganjo, Seat of the Empire"
         },
         {
-          "count": 4,
-          "name": "March of Otherworldly Light"
+          "count": 2,
+          "name": "Emeritus of Ideation"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
         },
         {
           "count": 1,
-          "name": "Island"
+          "name": "Fountainport"
+        },
+        {
+          "count": 1,
+          "name": "Get Lost"
+        },
+        {
+          "count": 2,
+          "name": "Glacial Fortress"
+        },
+        {
+          "count": 2,
+          "name": "Hall of Storm Giants"
+        },
+        {
+          "count": 4,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 4,
+          "name": "Hengegate Pathway"
         },
         {
           "count": 2,
@@ -821,6 +821,46 @@
         },
         {
           "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "March of Otherworldly Light"
+        },
+        {
+          "count": 1,
+          "name": "Farewell"
+        },
+        {
+          "count": 1,
+          "name": "Narset, Parter of Veils"
+        },
+        {
+          "count": 4,
+          "name": "No More Lies"
+        },
+        {
+          "count": 3,
+          "name": "Omen of the Sea"
+        },
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 2,
+          "name": "Petrified Hamlet"
+        },
+        {
+          "count": 2,
+          "name": "Island"
+        },
+        {
+          "count": 3,
+          "name": "Restless Anchorage"
+        },
+        {
+          "count": 2,
           "name": "Field of Ruin"
         },
         {
@@ -829,55 +869,7 @@
         },
         {
           "count": 4,
-          "name": "Dovin's Veto"
-        },
-        {
-          "count": 1,
-          "name": "Castle Ardenvale"
-        },
-        {
-          "count": 4,
-          "name": "Hengegate Pathway"
-        },
-        {
-          "count": 2,
-          "name": "Hall of Storm Giants"
-        },
-        {
-          "count": 3,
-          "name": "Deserted Beach"
-        },
-        {
-          "count": 3,
-          "name": "The Wandering Emperor"
-        },
-        {
-          "count": 2,
-          "name": "Plains"
-        },
-        {
-          "count": 2,
-          "name": "Glacial Fortress"
-        },
-        {
-          "count": 2,
-          "name": "Supreme Verdict"
-        },
-        {
-          "count": 2,
-          "name": "Petrified Hamlet"
-        },
-        {
-          "count": 1,
-          "name": "Narset, Parter of Veils"
-        },
-        {
-          "count": 4,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 3,
-          "name": "Omen of the Sea"
+          "name": "Temporary Lockdown"
         },
         {
           "count": 1,
@@ -885,21 +877,53 @@
         },
         {
           "count": 3,
-          "name": "Meticulous Archive"
+          "name": "The Wandering Emperor"
+        },
+        {
+          "count": 1,
+          "name": "Ultima"
         },
         {
           "count": 2,
-          "name": "Ultima"
+          "name": "Supreme Verdict"
+        },
+        {
+          "count": 2,
+          "name": "Beza, the Bounding Spring"
+        },
+        {
+          "count": 3,
+          "name": "Meticulous Archive"
         }
       ],
       "sideboard": [
+        {
+          "count": 1,
+          "name": "Erode"
+        },
+        {
+          "count": 1,
+          "name": "Farewell"
+        },
+        {
+          "count": 2,
+          "name": "High Noon"
+        },
+        {
+          "count": 3,
+          "name": "Kutzil's Flanker"
+        },
+        {
+          "count": 2,
+          "name": "Narset's Reversal"
+        },
         {
           "count": 2,
           "name": "Rest in Peace"
         },
         {
-          "count": 2,
-          "name": "Narset's Reversal"
+          "count": 1,
+          "name": "Three Steps Ahead"
         },
         {
           "count": 1,
@@ -907,27 +931,7 @@
         },
         {
           "count": 2,
-          "name": "High Noon"
-        },
-        {
-          "count": 2,
           "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 1,
-          "name": "Farewell"
-        },
-        {
-          "count": 1,
-          "name": "Erode"
-        },
-        {
-          "count": 1,
-          "name": "Three Steps Ahead"
-        },
-        {
-          "count": 3,
-          "name": "Kutzil's Flanker"
         }
       ]
     },
