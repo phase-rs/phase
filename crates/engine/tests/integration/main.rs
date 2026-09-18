@@ -1574,6 +1574,7 @@ mod scry_substituted_draw_per_card_replacement;
 mod secret_of_bloodbending_control_window;
 mod security_bypass_attacking_alone;
 mod she_hulk_wallbreaker_becomes_blocked_4599;
+mod shelinda_yevon_acolyte_otherwise;
 mod shelob_repro_token;
 mod sheoldred_edict_multi_opponent_sac;
 mod sheriff_base_plus_additional_counters_runtime;
