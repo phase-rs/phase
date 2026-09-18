@@ -31,7 +31,7 @@ use crate::types::counter::{positive_counter_entries, CounterType};
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
-    CastingVariant, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
+    CastingVariant, CombatDamageSubStep, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
     SyntheticTriggerProvenance, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
@@ -2196,7 +2196,8 @@ fn storm_count(state: &GameState) -> u32 {
             StackEntryKind::Spell { .. }
             | StackEntryKind::ActivatedAbility { .. }
             | StackEntryKind::TriggeredAbility { .. }
-            | StackEntryKind::KeywordAction { .. } => None,
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => None,
         })
         .unwrap_or_else(|| spells_cast_this_turn(state))
 }
@@ -2831,6 +2832,7 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
             description.clone().or_else(|| ability.description.clone()),
         ),
         StackEntryKind::KeywordAction { action } => (keyword_action_label(action), None),
+        StackEntryKind::CombatDamage { sub_step, .. } => (combat_damage_label(*sub_step), None),
     };
 
     StackEntryDisplay {
@@ -2850,7 +2852,8 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
             StackEntryKind::TriggeredAbility { provenance, .. } => provenance.clone(),
             StackEntryKind::Spell { .. }
             | StackEntryKind::ActivatedAbility { .. }
-            | StackEntryKind::KeywordAction { .. } => None,
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => None,
         },
         // CR 109.4 + CR 601.2a: the live controller, EXCEPT during the
         // announcement window. Between `announce_spell_on_stack` and cast
@@ -2909,6 +2912,16 @@ fn keyword_action_label(action: &KeywordAction) -> String {
         KeywordAction::Crew { .. } => "Crew".to_string(),
         KeywordAction::Saddle { .. } => "Saddle".to_string(),
         KeywordAction::Station { .. } => "Station".to_string(),
+    }
+}
+
+/// CR 510.4: the two combat damage steps are distinct steps, so the label names
+/// which one this object belongs to. Engine-owned, like every other stack label
+/// — the client renders `kind_label` and derives nothing.
+fn combat_damage_label(sub_step: CombatDamageSubStep) -> String {
+    match sub_step {
+        CombatDamageSubStep::FirstStrike => "Combat damage — first strike".to_string(),
+        CombatDamageSubStep::Regular => "Combat damage".to_string(),
     }
 }
 

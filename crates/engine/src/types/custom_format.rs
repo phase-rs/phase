@@ -79,11 +79,14 @@ pub enum ManaBurnPolicy {
 
 /// CR 510 (Combat Damage Step): the modern rules deal all combat damage —
 /// first strike and regular — in one unified damage step per combat-damage
-/// sub-step, not using the stack (CR 510.2). `OnStack` reproduces the older
-/// pre-6th-edition procedure, where assigned combat damage was itself placed
-/// on the stack as a stack object rather than a triggered ability, giving
-/// players a priority window between assignment and dealing before it
-/// resolved. Variant names match `docs/proposals/custom-format-engine/
+/// sub-step, not using the stack (CR 510.2). `OnStack` reproduces the pre-M10
+/// procedure — introduced by the Classic Sixth Edition rules in 1999 and
+/// removed by Magic 2010 in July 2009 — where assigned combat damage was
+/// itself placed on the stack as a stack object rather than a triggered
+/// ability, giving players a priority window between assignment and dealing
+/// before it resolved. (An earlier revision of this comment called that
+/// "pre-6th-edition", which is backwards: Sixth Edition is what introduced it.)
+/// Variant names match `docs/proposals/custom-format-engine/
 /// PLAN.md`'s canonical schema exactly. Schema only in this phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum CombatDamageTiming {
