@@ -12,8 +12,9 @@ The shell under test is `scripts/wait-for-preview-data.sh` itself, driven
 against a local HTTP server that answers HEAD the way the data endpoint does.
 The wiring tests decode the workflows with `yaml.safe_load`, the way GitHub
 reads them, and assert over the decoded structure -- not over workflow text.
-The publish step's own `run` is one such decoded value, and the last two tests
-run it, so the platform check inside it is measured rather than read.
+The publish step's own `run` is one such decoded value, which `publish` below
+runs against a stubbed checkout, so the platform check inside it is measured
+rather than read.
 """
 
 from __future__ import annotations
@@ -369,6 +370,16 @@ class PublishWiringTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("riscv64gc-unknown-linux-musl", result.stdout)
         self.assertIn("::error::packaging/desktop-platforms.txt", result.stdout)
+        self.assertEqual(uploads, [], "a mismatch must publish nothing at all")
+
+    def test_a_published_triple_with_no_contract_row_stops_before_publication(self) -> None:
+        # The other direction the same error promises: a binary this job uploads
+        # that the contract does not list is a preview no desktop ever asks for.
+        dropped = "aarch64-apple-darwin"
+        rows = CONTRACT.read_text(encoding="utf-8").splitlines(True)
+        result, uploads = self.publish("".join(r for r in rows if dropped not in r))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"> {dropped}", result.stdout)
         self.assertEqual(uploads, [], "a mismatch must publish nothing at all")
 
     def test_the_deploy_caller_needs_the_job_that_uploads_the_data(self) -> None:
