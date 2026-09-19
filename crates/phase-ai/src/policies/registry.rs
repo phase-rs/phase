@@ -116,7 +116,6 @@ pub enum PolicyId {
     PlusOneCountersMulligan,
     SpellslingerCasting,
     SpellslingerKeepablesMulligan,
-    CombatTaxPayment,
     ReactiveSelfProtection,
     /// CR 601.2f + CR 702.34a: a cast whose mandatory sacrifice cost — an
     /// additional cost, or a flashback alternative cost — could only be paid by
@@ -409,7 +408,6 @@ impl Default for PolicyRegistry {
             Box::new(AnthemPriorityPolicy),
             Box::new(PlusOneCountersPolicy),
             Box::new(SpellslingerCastingPolicy),
-            Box::new(super::combat_tax::CombatTaxPaymentPolicy),
             Box::new(ReactiveSelfProtectionPolicy),
             Box::new(SacrificeCostManaGatePolicy),
             Box::new(SacrificeLandProtectionPolicy),

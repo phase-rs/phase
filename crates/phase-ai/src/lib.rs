@@ -6,6 +6,7 @@ pub mod card_hints;
 pub(crate) mod card_value;
 pub mod cast_facts;
 pub mod combat_ai;
+mod combat_tax;
 pub mod combo;
 pub mod config;
 pub mod context;
