@@ -417,11 +417,13 @@ type CommanderDraftCompatibilityState =
 function useCommanderDraftCompatibility({
   enforceCompatibility,
   selectedFormat,
+  draftSetCodes,
   main,
   commanders,
 }: {
   enforceCompatibility: boolean;
   selectedFormat: "CommanderDraft" | null;
+  draftSetCodes: readonly string[];
   main: DeckEntry[];
   commanders: string[];
 }) {
@@ -432,6 +434,7 @@ function useCommanderDraftCompatibility({
   }), [main, commanders]);
   const key = useMemo(() => JSON.stringify({
     selectedFormat,
+    draftSetCodes,
     main,
     sideboard: [],
     commander: commanders,
@@ -439,14 +442,14 @@ function useCommanderDraftCompatibility({
     schemeDeck: [],
     signatureSpell: [],
     companion: null,
-  }), [selectedFormat, main, commanders]);
+  }), [selectedFormat, draftSetCodes, main, commanders]);
   const [state, setState] = useState<CommanderDraftCompatibilityState | null>(null);
   const generationRef = useRef(0);
 
   useEffect(() => {
     const generation = ++generationRef.current;
     setState({ key, status: "pending" });
-    evaluateDeckCompatibility(request, { selectedFormat })
+    evaluateDeckCompatibility(request, { selectedFormat, draftSetCodes })
       .then((result) => {
         if (generation === generationRef.current) {
           setState({ key, status: "resolved", result });
@@ -455,6 +458,17 @@ function useCommanderDraftCompatibility({
       .catch(() => {
         if (generation === generationRef.current) setState({ key, status: "error" });
       });
+    // `draftSetCodes` and `selectedFormat` are deliberately absent from this
+    // dependency array: both ride in the `key` memo above, whose value is a
+    // JSON.stringify string, and React compares dependencies with Object.is,
+    // which is by value for strings — so a re-render handing this hook a
+    // different array of equal content does not re-fire the evaluator while
+    // one of different content does. The exhaustive-deps warning naming those
+    // two is expected; do NOT silence it by adding them. `cd client && npx
+    // eslint src/components/draft/LimitedDeckBuilder.tsx` prints that warning,
+    // and `cd client && npx vitest run --coverage.enabled=false
+    // src/components/draft/__tests__/LimitedDeckBuilder.test.tsx` covers both
+    // re-render directions.
   }, [key, request]);
 
   const currentState = state?.key === key ? state : null;
@@ -726,6 +740,7 @@ function ControlledDeckBuilder({
   const compatibility = useCommanderDraftCompatibility({
     enforceCompatibility: commanderDraftCompatibilityActive,
     selectedFormat: deckFormat,
+    draftSetCodes,
     main: commanderDeckEntries,
     commanders,
   });
@@ -1119,6 +1134,7 @@ function WorkspaceDeckBuilder({
   const compatibility = useCommanderDraftCompatibility({
     enforceCompatibility: commanderDraftCompatibilityActive,
     selectedFormat: deckFormat,
+    draftSetCodes,
     main: commanderDeckEntries,
     commanders,
   });
