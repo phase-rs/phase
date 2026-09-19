@@ -1670,6 +1670,7 @@ pub(crate) fn evaluate_condition(
                     scoped_player: None,
                     damage_source: None,
                     event_amount: None,
+                    spell: None,
                 },
             ) as usize
                 >= *minimum

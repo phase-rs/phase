@@ -2211,6 +2211,7 @@ fn quantity_ref_contains_filter_prop(
             card_type_set_source_contains_filter_prop(aggregate.source(), predicate)
         }
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             card_type_set_source_contains_filter_prop(source, predicate)
@@ -2681,6 +2682,7 @@ fn rewrite_quantity_ref_filter_props(
             .expect("rewriting a property aggregate filter preserves aggregate validity");
         }
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             rewrite_card_type_set_source_filter_props(source, rewrite, complete)

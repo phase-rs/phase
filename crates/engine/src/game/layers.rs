@@ -2034,6 +2034,7 @@ fn evaluate_condition_inner(
                         scoped_player: None,
                         damage_source: None,
                         event_amount: None,
+                        spell: None,
                     },
                 )
             };
@@ -3603,6 +3604,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         // three characteristics share the population axis, so they share this
         // classification.
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             characteristic_source_reads_zone(source, zone)
@@ -3929,6 +3931,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         // population carries (`Objects { filter }` and the journal's optional
         // narrowing filter); the fixed-vocabulary set-sources carry none.
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             characteristic_source_reads_life_total(source)

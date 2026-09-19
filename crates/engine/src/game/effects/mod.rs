@@ -4015,6 +4015,7 @@ fn quantity_ref_counts_population_matching(
             filter_pred(source) || filter_pred(target)
         }
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             card_type_set_source_counts_population_matching(source, filter_pred)
@@ -6617,27 +6618,42 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
     false
 }
 
+/// CR 608.2c: Does a [`CardTypeSetSource`] population read the chain's tracked
+/// object set, at any depth of its `AnyOf` union?
+///
+/// The single authority for the tracked-set dependency on the population axis.
+/// A direct-only `TrackedSet { .. }` match misses a tracked set nested inside an
+/// `AnyOf` ("among cards exiled with ~ and creatures you control"), so the
+/// producer never publishes and the chained count resolves to 0. Uses the same
+/// bounded walker as every other union consumer; an incomplete walk is
+/// conservatively reported as a dependency so a truncated source still forces
+/// publication rather than silently under-counting.
+fn card_type_set_source_references_tracked_set(source: &CardTypeSetSource) -> bool {
+    let mut found = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            found |= matches!(leaf, CardTypeSetSource::TrackedSet { .. });
+        });
+    found || !complete
+}
+
 fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
     match qty {
         QuantityExpr::Fixed { .. } => false,
         QuantityExpr::Ref { qty } => match qty {
-            QuantityRef::TrackedSetSize
-            | QuantityRef::FilteredTrackedSetSize { .. }
-            | QuantityRef::DistinctCardTypes {
-                source: CardTypeSetSource::TrackedSet { .. },
+            QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. } => true,
+            // CR 608.2c: the three characteristic-set quantities share the
+            // population axis, so a tracked set nested inside an `AnyOf` union
+            // must be detected too — a direct-only `TrackedSet` match would let
+            // the producer skip publication and the chained count resolve to 0.
+            QuantityRef::DistinctCardTypes { source }
+            | QuantityRef::SharedCardTypes { source }
+            | QuantityRef::DistinctSubtypes { source, .. }
+            | QuantityRef::DistinctColorsAmong { source } => {
+                card_type_set_source_references_tracked_set(source)
             }
-            | QuantityRef::DistinctSubtypes {
-                source: CardTypeSetSource::TrackedSet { .. },
-                ..
-            } => true,
             QuantityRef::PropertyAggregate(aggregate) => {
-                let mut found = false;
-                let complete = aggregate
-                    .source()
-                    .try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
-                        found |= matches!(leaf, CardTypeSetSource::TrackedSet { .. })
-                    });
-                found || !complete
+                card_type_set_source_references_tracked_set(aggregate.source())
             }
             // CR 608.2c: a player-count whose filter is keyed on the chain's
             // tracked object set is a CONSUMER of that set — the preceding
@@ -20674,6 +20690,102 @@ mod tests {
         assert!(
             ability_or_branch_references_tracked_set(&ability),
             "token P/T TrackedSetAggregate must publish the chain tracked set"
+        );
+    }
+
+    /// CR 608.2c: a tracked set nested inside an `AnyOf` population must mark
+    /// the quantity as a tracked-set consumer. A direct-only `TrackedSet { .. }`
+    /// match misses the union member, so the producer never publishes and the
+    /// chained count resolves to 0. `SharedCardTypes` shares the population axis
+    /// with `DistinctCardTypes`/`DistinctSubtypes`, so all three route through
+    /// the same bounded walk.
+    #[test]
+    fn shared_card_types_over_any_of_tracked_set_references_tracked_set() {
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::SharedCardTypes {
+                source: crate::types::ability::CardTypeSetSource::AnyOf {
+                    sources: crate::types::ability::UnionSources::new(vec![
+                        crate::types::ability::CardTypeSetSource::TrackedSet {
+                            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                            caused_by: None,
+                        },
+                        crate::types::ability::CardTypeSetSource::ExiledBySource,
+                    ])
+                    .expect("two-member union is valid"),
+                },
+            },
+        };
+        assert!(
+            quantity_expr_references_tracked_set(&qty),
+            "a SharedCardTypes population with a TrackedSet union member must reference the tracked set"
+        );
+
+        // Paired negative: a union with no tracked-set member reads no tracked set.
+        let qty_no_tracked = QuantityExpr::Ref {
+            qty: QuantityRef::SharedCardTypes {
+                source: crate::types::ability::CardTypeSetSource::AnyOf {
+                    sources: crate::types::ability::UnionSources::new(vec![
+                        crate::types::ability::CardTypeSetSource::ExiledBySource,
+                        crate::types::ability::CardTypeSetSource::Objects {
+                            filter: TargetFilter::Any,
+                        },
+                    ])
+                    .expect("two-member union is valid"),
+                },
+            },
+        };
+        assert!(
+            !quantity_expr_references_tracked_set(&qty_no_tracked),
+            "a union with no tracked-set member must NOT reference the tracked set"
+        );
+    }
+
+    /// CR 608.2c: `DistinctColorsAmong` uses the same characteristic-source
+    /// population axis as the other distinct-characteristic quantities. Its
+    /// direct and `AnyOf`-nested tracked-set sources must therefore publish the
+    /// chain set before the quantity is resolved.
+    #[test]
+    fn distinct_colors_among_tracked_set_sources_references_tracked_set() {
+        let direct = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: crate::types::ability::CardTypeSetSource::TrackedSet {
+                    set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                },
+            },
+        };
+        assert!(
+            quantity_expr_references_tracked_set(&direct),
+            "DistinctColorsAmong over a direct TrackedSet must publish the chain set"
+        );
+
+        let nested = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: crate::types::ability::CardTypeSetSource::AnyOf {
+                    sources: crate::types::ability::UnionSources::new(vec![
+                        crate::types::ability::CardTypeSetSource::ExiledBySource,
+                        crate::types::ability::CardTypeSetSource::TrackedSet {
+                            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                            caused_by: None,
+                        },
+                    ])
+                    .expect("two-member union is valid"),
+                },
+            },
+        };
+        assert!(
+            quantity_expr_references_tracked_set(&nested),
+            "DistinctColorsAmong over an AnyOf TrackedSet must publish the chain set"
+        );
+
+        let unrelated = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: crate::types::ability::CardTypeSetSource::ExiledBySource,
+            },
+        };
+        assert!(
+            !quantity_expr_references_tracked_set(&unrelated),
+            "DistinctColorsAmong over ExiledBySource must not publish a tracked set"
         );
     }
 

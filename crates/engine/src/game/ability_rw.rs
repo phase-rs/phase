@@ -2200,6 +2200,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::DistinctCardTypes { .. }
+        | QuantityRef::SharedCardTypes { .. }
         | QuantityRef::DistinctSubtypes { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::PartySize { .. }
@@ -6381,6 +6382,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // claiming a board read and OMIT the `JournalCast` player read, which is
         // fail-open for the CR 603.3b same-event ordering gate.
         QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => characteristic_source_read_bounded(source),
         // CR 603.10a (PR-6.75 c5): promoted out of the fail-closed group below to

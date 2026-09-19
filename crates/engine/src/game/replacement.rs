@@ -6131,6 +6131,7 @@ fn replacement_condition_quantity_ctx(
         scoped_player,
         damage_source: None,
         event_amount,
+        spell: None,
     }
 }
 
@@ -8564,6 +8565,7 @@ fn extract_etb_counters_from_effect(
                 scoped_player: None,
                 damage_source: None,
                 event_amount: None,
+                spell: None,
             };
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,
@@ -8598,6 +8600,7 @@ fn extract_etb_counters_from_effect(
                     scoped_player: None,
                     damage_source: None,
                     event_amount: None,
+                    spell: None,
                 };
                 let n =
                     crate::game::quantity::resolve_quantity_with_ctx(state, count, controller, ctx)

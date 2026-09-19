@@ -2323,6 +2323,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         // pattern can only over-report, never under-report. The population axis is
         // not decomposed here because no caller needs a narrower answer.
         QuantityRef::DistinctCardTypes { .. } => Axes::CONSERVATIVE,
+        QuantityRef::SharedCardTypes { .. } => Axes::CONSERVATIVE,
         QuantityRef::DistinctSubtypes { .. } => Axes::CONSERVATIVE,
         QuantityRef::CardsExiledBySource => Axes::NONE,
         QuantityRef::ExiledCardPower { index: _ } => Axes::NONE,

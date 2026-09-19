@@ -116,6 +116,7 @@ mod cast_this_way_gate_8721;
 mod cavern_hoard_dragon_cost_reduction;
 mod cda_counted_quantities_pt;
 mod celestial_kirin_cast_spell_mana_value;
+mod cemetery_prowler_shared_card_types;
 mod chain_of_smog_copy;
 mod chain_root_target_suspension;
 mod chains_of_mephistopheles_discard_draw_or_mill;
