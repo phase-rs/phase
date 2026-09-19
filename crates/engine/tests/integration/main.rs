@@ -333,6 +333,7 @@ mod flashback_nonmana_payability;
 mod flickerwisp_delayed_return;
 mod floodpits_drowner;
 mod flowstone_surge_mixed_anthem;
+mod force_of_rage_delayed_sacrifice;
 mod forced_retarget_multi_role_mana_6056;
 mod foretell_pipeline;
 mod fra_bloodline_recollector;

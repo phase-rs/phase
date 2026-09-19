@@ -10088,6 +10088,50 @@ fn trigger_dalkovan_encampment_delayed_you_attack() {
     );
 }
 
+// CR 701.21a + CR 603.7c + CR 608.2c: Force of Rage — "Create two 3/1 red
+// Elemental creature tokens with trample and haste. Sacrifice those tokens at the
+// beginning of your next upkeep." The delayed cleanup must count the WHOLE tracked
+// set. With the old `Fixed(1)` count the upkeep asked to sacrifice one token and
+// the other stayed forever (field report 2026-09-15, reproduced on the engine).
+#[test]
+fn force_of_rage_delayed_sacrifice_counts_every_token() {
+    use crate::parser::oracle::parse_oracle_text;
+
+    let parsed = parse_oracle_text(
+        "If it's not your turn, you may exile a red card from your hand rather than pay \
+             this spell's mana cost.\nCreate two 3/1 red Elemental creature tokens with \
+             trample and haste. Sacrifice those tokens at the beginning of your next upkeep.",
+        "Force of Rage",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let spell = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::Token { .. }))
+        .expect("token creation spell ability");
+    let delayed = spell
+        .sub_ability
+        .as_deref()
+        .expect("token creation must chain to the delayed sacrifice");
+    let Effect::CreateDelayedTrigger { effect: inner, .. } = delayed.effect.as_ref() else {
+        panic!("expected CreateDelayedTrigger, got {:?}", delayed.effect);
+    };
+    let Effect::Sacrifice { target, count, .. } = inner.effect.as_ref() else {
+        panic!("expected delayed Sacrifice, got {:?}", inner.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter }
+            } if filter == target
+        ),
+        "\"Sacrifice those tokens\" must count the whole set, got target {target:?} count {count:?}"
+    );
+}
+
 #[test]
 fn trigger_becomes_tapped() {
     let def = parse_trigger_line(

@@ -143,6 +143,32 @@ fn trigger_event_scoped_player(state: &GameState, ability: &ResolvedAbility) -> 
 }
 
 /// CR 701.21a: To sacrifice a permanent, its controller moves it to its owner's graveyard.
+/// CR 608.2c: a filter that names a referent set or pronoun rather than a
+/// population ("those tokens", "the rest", "them", the just-created tokens).
+fn is_referent_filter(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::LastCreated
+            | TargetFilter::ParentTarget
+            | TargetFilter::TriggeringSource
+    )
+}
+
+/// CR 701.21a: the count is "all of them" — an `ObjectCount` over the
+/// sacrifice's own filter. Parser post-passes may rebind a pronoun target
+/// (`ParentTarget` → `LastCreated`) without touching the count, so two
+/// referent filters are treated as the same referent.
+fn counts_whole_pool(count: &QuantityExpr, filter: &TargetFilter) -> bool {
+    match count {
+        QuantityExpr::Ref {
+            qty: crate::types::ability::QuantityRef::ObjectCount { filter: counted },
+        } => counted == filter || (is_referent_filter(counted) && is_referent_filter(filter)),
+        _ => false,
+    }
+}
+
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -461,6 +487,17 @@ pub fn resolve(
             })
             .collect();
 
+        // CR 701.21a + CR 608.2c: "sacrifice those tokens" / "sacrifices the rest" /
+        // "sacrifice all <filter>" count the sacrifice's OWN referent — every
+        // member of the pool built above (through the tracked-set sentinel
+        // binder), not a live-board census of the raw anaphor, which can miss
+        // the set entirely.
+        let count = if counts_whole_pool(count_expr, raw_filter) {
+            eligible.len()
+        } else {
+            count
+        };
+
         if count == 0 {
             // CR 107.3a: A dynamic count that resolves to zero is a legal
             // no-op (e.g. "sacrifice half the permanents they control" when
@@ -691,6 +728,126 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    fn two_battlefield_tokens(state: &mut GameState) -> (ObjectId, ObjectId) {
+        let mut make = |card: u64, name: &str| {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.is_token = true;
+            id
+        };
+        let a = make(1, "Elemental");
+        let b = make(2, "Elemental");
+        (a, b)
+    }
+
+    /// CR 701.21a + CR 608.2c: "Sacrifice those tokens" names EVERY created token
+    /// (Force of Rage creates two). The whole-set count must sacrifice both without
+    /// a choose-one prompt; before the fix the parser's `Fixed(1)` default left the
+    /// second token on the battlefield.
+    #[test]
+    fn sacrifice_whole_referent_set_sacrifices_every_member() {
+        let mut state = GameState::new_two_player(42);
+        let (a, b) = two_battlefield_tokens(&mut state);
+        state.last_created_token_ids = vec![a, b];
+        let ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::LastCreated,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::LastCreated,
+                    },
+                },
+                min_count: 0,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "whole-set sacrifice must not prompt for a choice, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            !state.battlefield.contains(&a),
+            "first token must be sacrificed"
+        );
+        assert!(
+            !state.battlefield.contains(&b),
+            "second token must be sacrificed"
+        );
+    }
+
+    /// CR 701.21a: a count bound to a referent that a parser post-pass rebound
+    /// (`ParentTarget` → `LastCreated`, "Sacrifice them at the beginning of the next
+    /// end step") still means the whole set.
+    #[test]
+    fn sacrifice_whole_set_count_survives_rebound_referent() {
+        let mut state = GameState::new_two_player(42);
+        let (a, b) = two_battlefield_tokens(&mut state);
+        state.last_created_token_ids = vec![a, b];
+        let ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::LastCreated,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::ParentTarget,
+                    },
+                },
+                min_count: 0,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(!state.battlefield.contains(&a) && !state.battlefield.contains(&b));
+    }
+
+    /// CR 701.21a: a PRINTED count ("sacrifices one of them") keeps its choose-one
+    /// prompt — the whole-set rule applies only to the `ObjectCount` shape.
+    #[test]
+    fn sacrifice_explicit_one_of_referent_set_still_prompts_for_one() {
+        let mut state = GameState::new_two_player(42);
+        let (a, b) = two_battlefield_tokens(&mut state);
+        state.last_created_token_ids = vec![a, b];
+        let ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::LastCreated,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { count, cards, .. } => {
+                assert_eq!(*count, 1);
+                assert_eq!(cards.len(), 2);
+            }
+            other => panic!("expected a choose-one EffectZoneChoice, got {other:?}"),
+        }
     }
 
     /// CR 208.4b + CR 613.4b: Discriminating runtime test that base power/

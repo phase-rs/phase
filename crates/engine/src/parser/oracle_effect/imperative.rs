@@ -1804,12 +1804,16 @@ pub(super) fn parse_targeted_action_ast(
         // bare count of 1. `parse_count_expr` discards the word's identity, so
         // without this the parsed target never regains `FilterProp::Another`
         // and the source could sacrifice itself (Morkrut Necropod, #4513).
-        let (mut count, after_count, count_word) =
-            super::super::oracle_util::parse_count_expr_with_exclusion(rest).unwrap_or((
-                crate::types::ability::QuantityExpr::Fixed { value: 1 },
-                rest,
-                super::super::oracle_util::CountWord::Plain,
-            ));
+        let parsed_count = super::super::oracle_util::parse_count_expr_with_exclusion(rest);
+        // CR 701.21a: remember whether the text PRINTED a count word. "Sacrifice one
+        // of them" keeps its 1; a bare set anaphor ("sacrifice those tokens") has no
+        // count word and names the whole set (see below).
+        let explicit_count = parsed_count.is_some();
+        let (mut count, after_count, count_word) = parsed_count.unwrap_or((
+            crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            rest,
+            super::super::oracle_util::CountWord::Plain,
+        ));
         let (target_text, _) = super::strip_optional_target_prefix(after_count.trim_start());
         // Strip the "of their choice" / "of your choice" confirmation suffix —
         // CR 701.21a makes the controller the sacrificing player, so the phrase is a no-op
@@ -1895,6 +1899,27 @@ pub(super) fn parse_targeted_action_ast(
             super::super::oracle_util::CountWord::SourceExclusion
         ) {
             add_another_to_filter_recursive(&mut target);
+        }
+        // CR 701.21a + CR 608.2c: with no count word, a set anaphor names EVERY
+        // member of the set — "Sacrifice those tokens at the beginning of your next
+        // upkeep" (Force of Rage), "Sacrifice them at the beginning of the next end
+        // step" (Dalkovan Encampment), "then sacrifices the rest" (Archfiend of
+        // Depravity). The `Fixed(1)` default made each of these a choose-ONE prompt
+        // and left the other members on the battlefield. Same `ObjectCount` shape
+        // `parse_all_sacrifice` emits; the resolver counts the bound pool.
+        if !explicit_count
+            && (matches!(
+                target,
+                TargetFilter::TrackedSet { .. }
+                    | TargetFilter::TrackedSetFiltered { .. }
+                    | TargetFilter::LastCreated
+            ) || super::is_bare_plural_object_pronoun(target_text.trim()))
+        {
+            count = QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: target.clone(),
+                },
+            };
         }
         return Some(TargetedImperativeAst::Sacrifice {
             target,
@@ -17621,6 +17646,64 @@ mod tests {
             }
             other => panic!("expected Effect::Sacrifice, got {other:?}"),
         }
+    }
+
+    /// CR 701.21a + CR 608.2c: a bare set anaphor with no count word names the
+    /// whole set; a printed count or a singular pronoun keeps `Fixed(1)`.
+    #[test]
+    fn parse_sacrifice_set_anaphor_counts_whole_set() {
+        let parse = |text: &str| {
+            let lower = text.to_lowercase();
+            let mut ctx = ParseContext {
+                actor: Some(ControllerRef::You),
+                ..Default::default()
+            };
+            let result =
+                parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+            let Effect::Sacrifice { target, count, .. } = lower_targeted_action_ast(result) else {
+                panic!("expected Effect::Sacrifice for {text:?}");
+            };
+            (target, count)
+        };
+
+        // Force of Rage / Mardu Siegebreaker: "those tokens" → the tracked set, all of it.
+        let (target, count) = parse("sacrifice those tokens");
+        assert!(
+            matches!(target, TargetFilter::TrackedSet { .. }),
+            "got {target:?}"
+        );
+        match count {
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } => assert_eq!(filter, target),
+            other => panic!("\"those tokens\" must count the whole set, got {other:?}"),
+        }
+
+        // Dalkovan Encampment: plural "them" (later rebound to the created tokens).
+        let (_, count) = parse("sacrifice them");
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "\"them\" must count the whole set, got {count:?}"
+        );
+
+        // A printed count keeps its number; a singular pronoun is unchanged.
+        let (_, count) = parse("sacrifice one of them");
+        assert_eq!(
+            count,
+            QuantityExpr::Fixed { value: 1 },
+            "\"one of them\" stays 1"
+        );
+        let (_, count) = parse("sacrifice it");
+        assert_eq!(
+            count,
+            QuantityExpr::Fixed { value: 1 },
+            "singular \"it\" stays 1"
+        );
     }
 
     /// Issue #967: "sacrifice any number of creatures, each with power 1 or
