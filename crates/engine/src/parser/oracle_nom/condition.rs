@@ -4271,7 +4271,7 @@ fn parse_ge_threshold(input: &str) -> OracleResult<'_, u32> {
 /// `parse_there_are_conditions` ("there are fewer than six creature cards in
 /// your graveyard"), and `parse_strict_n_counters` ("has fewer than three
 /// +1/+1 counters on it" / "has more than two +1/+1 counters on it").
-fn parse_strict_comparator_prefix(input: &str) -> OracleResult<'_, Comparator> {
+pub(crate) fn parse_strict_comparator_prefix(input: &str) -> OracleResult<'_, Comparator> {
     alt((
         value(Comparator::LT, tag("fewer than ")),
         value(Comparator::GT, tag("more than ")),

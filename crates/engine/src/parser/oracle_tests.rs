@@ -30678,3 +30678,234 @@ fn zenos_leaves_trigger_targets_the_chosen_creature() {
         execute.effect
     );
 }
+
+/// CR 603.4 + CR 608.2c + CR 122.2: Bogardan Phoenix — "When this creature
+/// dies, exile it if it had a death counter on it. Otherwise, return it to the
+/// battlefield under your control and put a death counter on it."
+///
+/// The trailing `if` follows an INSTRUCTION, so CR 603.4 ("only applies to an
+/// `if` that immediately follows a trigger condition") does not reach it: it is
+/// CR 608.2c resolution text whose `Otherwise` is the paired else branch.
+/// Hoisting it onto the trigger envelope makes it the CR 603.4
+/// candidate-survival test, which is a live gameplay bug — a Phoenix that dies
+/// WITHOUT a death counter would not trigger at all.
+#[test]
+fn bogardan_phoenix_trailing_had_counter_otherwise_is_not_intervening_if() {
+    let r = parse(
+        "Flying\n\
+         When this creature dies, exile it if it had a death counter on it. Otherwise, return it to the battlefield under your control and put a death counter on it.",
+        "Bogardan Phoenix",
+        &[Keyword::Flying],
+        &["Creature"],
+        &["Phoenix"],
+    );
+
+    let dies = r
+        .triggers
+        .iter()
+        .find(|t| t.destination == Some(Zone::Graveyard))
+        .unwrap_or_else(|| panic!("no dies trigger parsed: {r:#?}"));
+    assert_eq!(
+        dies.condition, None,
+        "the trailing counter gate must NOT become the CR 603.4 intervening-if \
+         (that would stop the trigger firing with no counter): {dies:#?}"
+    );
+}
+
+/// CR 122.2 + CR 400.7 + CR 603.10 + CR 608.2h: the same clause instead binds at
+/// the effect level, where the `Otherwise` branch can attach to it as
+/// `else_ability`. CR 603.10 is the trigger's look-back that establishes the
+/// zone-change event; CR 608.2h is why the gate is answerable at RESOLUTION
+/// time, when the dying object is no longer in the zone it was expected to be
+/// in, so the effect reads its last known information.
+#[test]
+fn bogardan_phoenix_trailing_counter_condition_binds_otherwise_as_else_branch() {
+    use crate::types::counter::{CounterMatch, CounterType};
+
+    let r = parse(
+        "Flying\n\
+         When this creature dies, exile it if it had a death counter on it. Otherwise, return it to the battlefield under your control and put a death counter on it.",
+        "Bogardan Phoenix",
+        &[Keyword::Flying],
+        &["Creature"],
+        &["Phoenix"],
+    );
+
+    let dies = r
+        .triggers
+        .iter()
+        .find(|t| t.destination == Some(Zone::Graveyard))
+        .unwrap_or_else(|| panic!("no dies trigger parsed: {r:#?}"));
+    let execute = dies.execute.as_deref().expect("dies trigger has a body");
+    assert!(
+        !has_unimplemented(execute),
+        "the Otherwise must bind, not degrade to the honest fallback marker: {execute:#?}"
+    );
+
+    // If-branch: exile the dying Phoenix, gated on the LKI counter read.
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::TriggeringSource,
+                ..
+            }
+        ),
+        "if-branch must exile the event object, got {:?}",
+        execute.effect
+    );
+    assert_eq!(
+        execute.condition,
+        Some(AbilityCondition::ZoneChangeObjectMatchesFilter {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Graveyard,
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Generic("death".to_string())),
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }
+            ])),
+        }),
+        "the gate must read the zone-change event object's counters: {execute:#?}"
+    );
+
+    // Else-branch: return under your control, then add a death counter.
+    let else_def = execute
+        .else_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("Otherwise must bind as else_ability: {execute:#?}"));
+    assert!(
+        matches!(
+            else_def.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "else-branch must return it to the battlefield, got {:?}",
+        else_def.effect
+    );
+    let counter = else_def
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("else-branch must chain the counter: {else_def:#?}"));
+    assert!(
+        matches!(
+            counter.effect.as_ref(),
+            Effect::PutCounter { counter_type, .. }
+                if *counter_type == CounterType::Generic("death".to_string())
+        ),
+        "else-branch must put a death counter, got {:?}",
+        counter.effect
+    );
+}
+
+/// CR 118.12 + CR 608.2c: Rent Is Due — "At the beginning of your end step, you
+/// may tap two untapped creatures and/or Treasures you control. If you do, draw
+/// a card. Otherwise, sacrifice this enchantment."
+///
+/// CR 118.12 prints this template verbatim. The `If you do` outcome gate is
+/// split off the chain text by the reflexive-payment recognizer and stamped on
+/// the chain ROOT, so the chunk loop sees no in-chain antecedent; the `Otherwise`
+/// must still bind to that root rather than degrade to the fallback marker.
+#[test]
+fn rent_is_due_if_you_do_binds_otherwise() {
+    let r = parse(
+        "At the beginning of your end step, you may tap two untapped creatures and/or Treasures you control. If you do, draw a card. Otherwise, sacrifice this enchantment.",
+        "Rent Is Due",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+
+    let end_step = r
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(crate::types::phase::Phase::End))
+        .unwrap_or_else(|| panic!("no end-step trigger parsed: {r:#?}"));
+    let execute = end_step.execute.as_deref().expect("trigger has a body");
+    assert!(
+        !has_unimplemented(execute),
+        "the Otherwise must bind to the outcome gate: {execute:#?}"
+    );
+
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::PayCost { .. }),
+        "the optional tap is the parent instruction, got {:?}",
+        execute.effect
+    );
+    assert!(
+        execute.optional,
+        "the tap must stay declinable: {execute:#?}"
+    );
+
+    let draw = execute
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("the reflexive body must hang off the payment: {execute:#?}"));
+    assert!(
+        matches!(draw.effect.as_ref(), Effect::Draw { .. }),
+        "the paid branch draws, got {:?}",
+        draw.effect
+    );
+    assert_eq!(
+        draw.condition,
+        Some(AbilityCondition::EffectOutcome {
+            signal: crate::types::ability::EffectOutcomeSignal::OptionalEffectPerformed,
+        }),
+        "the paid branch keeps its CR 118.12 outcome gate: {draw:#?}"
+    );
+
+    let else_def = draw
+        .else_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("Otherwise must bind as the outcome gate's else: {draw:#?}"));
+    assert!(
+        matches!(
+            else_def.effect.as_ref(),
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "the declined branch sacrifices the enchantment, got {:?}",
+        else_def.effect
+    );
+}
+
+/// CR 608.2c coverage honesty control, and the blast-radius guard for the
+/// CR 603.4 hoist suppression: Rose Room Treasurer — "Alliance — Whenever
+/// another creature you control enters, create a Treasure token if this is the
+/// first or second time this ability has resolved this turn. Otherwise, you may
+/// pay {X}. When you do, this creature deals X damage to any target."
+///
+/// Same SURFACE as Bogardan Phoenix (trailing `if` + `Otherwise`), so the hoist
+/// suppression applies to it too — but its antecedent condition ("the first or
+/// second time this ability has resolved this turn") is a genuine Mode-A parser
+/// gap, and its else branch contains a CR 603.12 reflexive trigger. Nothing here
+/// is supported, so the card must keep an honest `Effect::Unimplemented` marker
+/// rather than silently reporting as covered.
+#[test]
+fn rose_room_treasurer_otherwise_remains_fallback() {
+    let r = parse(
+        "Alliance — Whenever another creature you control enters, create a Treasure token if this is the first or second time this ability has resolved this turn. Otherwise, you may pay {X}. When you do, this creature deals X damage to any target.",
+        "Rose Room Treasurer",
+        &[],
+        &["Creature"],
+        &["Ogre", "Warrior"],
+    );
+
+    let alliance = r
+        .triggers
+        .iter()
+        .find(|t| t.execute.is_some())
+        .unwrap_or_else(|| panic!("no Alliance trigger parsed: {r:#?}"));
+    let execute = alliance.execute.as_deref().expect("trigger has a body");
+    assert!(
+        has_unimplemented(execute),
+        "an unparsed antecedent must keep the honest gap marker rather than \
+         binding an Otherwise it cannot evaluate: {execute:#?}"
+    );
+}
