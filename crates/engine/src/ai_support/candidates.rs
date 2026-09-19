@@ -1380,6 +1380,40 @@ pub fn candidate_actions_broad_with_probe(
                 bounded_select_card_candidates(*player, selectable_cards, [max_keep])
             }
         }
+        // CR 401.2 + CR 401.4 + CR 608.2c: the submission is a full
+        // arrangement of the fixed remainder pile — leading `top_count`
+        // entries to the library top, the rest to the bottom.
+        //
+        // The strategically meaningful axis is WHICH cards take the top, so
+        // the partition is still enumerated with the same bounded combination
+        // helper the sibling `DigChoice` arm uses (identical pool/candidate
+        // caps). Each combination is then completed into the one canonical
+        // full permutation it implies: the chosen top cards in their
+        // combination order, followed by the unchosen cards in pile order.
+        // Order WITHIN a pile is deliberately not enumerated — it would be
+        // factorial for no tactical gain, and `phase-ai`'s `search.rs` heuristic
+        // orders both piles by intrinsic value when it actually picks. This
+        // mirrors `RippleBottomOrder` above, which likewise enumerates one
+        // arrangement rather than every permutation.
+        WaitingFor::DigRestSplitChoice {
+            player,
+            cards,
+            top_count,
+            ..
+        } => bounded_select_card_candidates(*player, cards, [(*top_count).min(cards.len())])
+            .into_iter()
+            .map(|mut candidate| {
+                if let GameAction::SelectCards { cards: chosen } = &mut candidate.action {
+                    let bottom: Vec<_> = cards
+                        .iter()
+                        .filter(|id| !chosen.contains(id))
+                        .copied()
+                        .collect();
+                    chosen.extend(bottom);
+                }
+                candidate
+            })
+            .collect(),
         WaitingFor::SurveilChoice { player, cards } => select_cards_variants(*player, cards, None),
         WaitingFor::RevealChoice {
             player,

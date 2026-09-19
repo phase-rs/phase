@@ -1116,6 +1116,7 @@ const PARTITION_FIXTURES: Record<
   CoinFlipKeepChoice: NO_TARGET_REF_LEGAL_SET,
   DieKeepChoice: NO_TARGET_REF_LEGAL_SET,
   DigChoice: NO_TARGET_REF_LEGAL_SET,
+  DigRestSplitChoice: NO_TARGET_REF_LEGAL_SET,
   SurveilChoice: NO_TARGET_REF_LEGAL_SET,
   RevealChoice: NO_TARGET_REF_LEGAL_SET,
   SearchChoice: NO_TARGET_REF_LEGAL_SET,

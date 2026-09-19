@@ -20,6 +20,7 @@ type ArrangePlanarDeckTopChoice = Extract<
 type CoinFlipKeepChoice = Extract<WaitingFor, { type: "CoinFlipKeepChoice" }>;
 type DieKeepChoice = Extract<WaitingFor, { type: "DieKeepChoice" }>;
 type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
+type DigRestSplitChoice = Extract<WaitingFor, { type: "DigRestSplitChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
 type RippleBottomOrder = Extract<WaitingFor, { type: "RippleBottomOrder" }>;
@@ -544,6 +545,111 @@ export function DigModal({ data }: { data: DigChoice["data"] }) {
           );
         })}
       </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+/**
+ * CR 401.2 + CR 401.4 + CR 608.2d + CR 701.20e: the second stage of a Telling
+ * Time-class dig. The remainder pile is fixed and every card in it is going
+ * back into the SAME library; what the player decides is the whole
+ * arrangement. The submitted payload is a full permutation of `data.cards`:
+ * its leading `top_count` entries go on top (topmost first) and the rest go to
+ * the bottom, each pile in the submitted order.
+ *
+ * Drag-to-order rather than tap-to-select, mirroring `RippleBottomOrderModal`
+ * above, because one gesture has to express both decisions CR asks for here:
+ * which cards take which position (CR 608.2d) and how the 2+ cards landing in
+ * a single position are arranged (CR 401.4). A degenerate `top_count` of 0 or
+ * `cards.length` is a normal, expected prompt — the partition is forced but
+ * the order still isn't.
+ *
+ * No game logic here: `cards` and `top_count` are exactly what the engine
+ * resolved and parked, the split point is rendered from the engine-supplied
+ * `top_count`, and nothing about the outcome is computed client-side.
+ *
+ * Selection state is seeded from `data.cards` at mount. `CardChoiceModal`
+ * passes a prompt-identity `key` derived from the pile so React REMOUNTS this
+ * component between two consecutive split prompts; without it a second prompt
+ * would re-render with new props while holding the first prompt's stale ids,
+ * leaving Confirm enabled with a payload the engine then rejects.
+ */
+export function DigRestSplitModal({ data }: { data: DigRestSplitChoice["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const scrollRef = useHorizontalScroll<HTMLDivElement>({ drag: false });
+  const [order, setOrder] = useState<ObjectId[]>(data.cards);
+
+  const handleConfirm = useCallback(() => {
+    dispatch({ type: "SelectCards", data: { cards: order } });
+  }, [dispatch, order]);
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title={t("cardChoice.dig.titleSplit")}
+      subtitle={t("cardChoice.dig.subtitleSplit", {
+        count: data.top_count,
+        remaining: data.cards.length - data.top_count,
+      })}
+      maxWidthClassName="max-w-[38rem] sm:max-w-[48rem] lg:max-w-[58rem]"
+      footer={<ConfirmButton onClick={handleConfirm} />}
+    >
+      <div ref={scrollRef} className="flex min-h-0 flex-1 overflow-x-auto">
+        <Reorder.Group
+          as="div"
+          axis="x"
+          values={order}
+          onReorder={setOrder}
+          layoutScroll
+          className="mx-auto flex w-max items-center gap-2 px-1 py-2 lg:gap-3"
+        >
+          {order.map((id, index) => {
+            const obj = objects[id];
+            if (!obj) return null;
+            const goesOnTop = index < data.top_count;
+            return (
+              <Reorder.Item
+                key={id}
+                as="div"
+                value={id}
+                className="relative flex shrink-0 cursor-grab flex-col items-center gap-2 active:cursor-grabbing"
+                whileDrag={{ scale: 1.05, zIndex: 20 }}
+              >
+                <div
+                  className={`relative rounded-lg ring-2 transition ${
+                    goesOnTop ? "ring-emerald-400/80" : "ring-slate-400/60"
+                  }`}
+                  {...hoverProps(id)}
+                >
+                  <CardImage
+                    {...objectImageProps(obj)}
+                    size="normal"
+                    className={CHOICE_CARD_IMAGE_CLASS}
+                  />
+                  <div className="absolute inset-x-0 bottom-1 flex justify-center">
+                    <span
+                      className={`rounded-full px-3 py-1 text-xs font-bold text-white ${
+                        goesOnTop ? "bg-emerald-500/90" : "bg-slate-600/90"
+                      }`}
+                    >
+                      {goesOnTop
+                        ? t("cardChoice.dig.badgeTop", { order: index + 1 })
+                        : t("cardChoice.dig.badgeBottom")}
+                    </span>
+                  </div>
+                </div>
+              </Reorder.Item>
+            );
+          })}
+        </Reorder.Group>
+      </div>
+      <p className="mt-1 shrink-0 text-center text-xs text-slate-400">
+        {t("cardChoice.dig.hintSplit")}
+      </p>
     </ChoiceOverlay>
   );
 }

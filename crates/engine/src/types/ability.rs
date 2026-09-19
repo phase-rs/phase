@@ -15861,6 +15861,25 @@ pub enum Effect {
         /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
         #[serde(default)]
         rest_destination: Option<Zone>,
+        /// CR 401.2 + CR 701.20e + CR 608.2c: Telling Time-class split of the
+        /// unkept remainder between the two rules-legal positions of ONE
+        /// library ("...one on top of your library, and one on the bottom of
+        /// your library"). CR 401.2 keeps a library a single face-down pile
+        /// whose order may only change as an effect allows, so top and bottom
+        /// are the only positions such an instruction can name; the partition
+        /// between them is the looking player's choice (CR 701.20e — the pile
+        /// is known only to them).
+        ///
+        /// `Some(n)` = exactly `n` of the remainder go on top and the rest go
+        /// to the bottom, via a `WaitingFor::DigRestSplitChoice` pause.
+        /// `None` = unchanged behavior: the whole remainder goes uniformly to
+        /// `rest_destination` (defaulting to Graveyard). Note CR 701.20d: the
+        /// remainder cards are reordered within the library by this split, so
+        /// they stop being revealed and become new objects — the shared
+        /// `reorder_within_library` primitive that performs the move already
+        /// advances the library knowledge epoch for exactly that reason.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_split_top_count: Option<QuantityExpr>,
         /// CR 400.5 + CR 608.2c: Ordering instruction for an unchosen
         /// library rest pile. `Random` is only set by exact Oracle text.
         #[serde(default, skip_serializing_if = "DigRestOrder::is_preserve")]

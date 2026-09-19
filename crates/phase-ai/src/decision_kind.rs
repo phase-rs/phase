@@ -121,6 +121,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // selection; route to the ability catch-all bucket.
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::DigChoice { .. }
+        // CR 401.2: the remainder split is a forced mid-resolution selection,
+        // same bucket as the keep selection it follows.
+        | WaitingFor::DigRestSplitChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::DrawnThisTurnTopdeckChoice { .. }

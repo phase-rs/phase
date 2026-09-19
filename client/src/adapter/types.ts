@@ -2293,6 +2293,7 @@ export type WaitingFor =
       };
     }
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
+  | { type: "DigRestSplitChoice"; data: { player: PlayerId; library_owner: PlayerId; cards: ObjectId[]; top_count: number; source_id?: ObjectId | null } }
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean } }
   | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean; up_to?: boolean; allows_partial_find?: boolean; constraint?: SearchSelectionConstraint; ordering_hint?: SearchOrderingHint; split?: SearchDestinationSplit | null } }

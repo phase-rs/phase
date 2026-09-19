@@ -62,6 +62,7 @@ import {
   CoinFlipKeepModal,
   DieKeepModal,
   DigModal,
+  DigRestSplitModal,
   RevealModal,
   RippleBottomOrderModal,
   ScryModal,
@@ -186,6 +187,18 @@ export function CardChoiceModal() {
     case "DigChoice":
       if (!canActForWaitingState) return null;
       return <DigModal data={waitingFor.data} />;
+    case "DigRestSplitChoice":
+      if (!canActForWaitingState) return null;
+      // Prompt-identity key, same as `RippleBottomOrder` above: the modal
+      // seeds its drag order from `data.cards` at mount, so two consecutive
+      // split prompts must REMOUNT it rather than re-render it with the first
+      // prompt's stale ids still selected.
+      return (
+        <DigRestSplitModal
+          key={waitingFor.data.cards.join("-")}
+          data={waitingFor.data}
+        />
+      );
     case "SurveilChoice":
       if (!canActForWaitingState) return null;
       return <SurveilModal data={waitingFor.data} />;

@@ -909,6 +909,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
             | WaitingFor::DigChoice { .. }
+            | WaitingFor::DigRestSplitChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
@@ -1050,6 +1051,162 @@ pub(crate) fn route_rest_partition_then(
     crate::game::zone_pipeline::move_objects_simultaneously_then(
         state, requests, completion, events,
     )
+}
+
+/// CR 401.2 + CR 401.4 + CR 701.20d: Route a Telling Time-class remainder
+/// split — `top_ids` to the top of the library, `bottom_ids` to its bottom — as
+/// ONE simultaneous batch, so the deferred dig tail behind `completion` runs
+/// exactly once no matter how the two piles settle.
+///
+/// This is `route_rest_partition_then` with the `LibraryPosition` lifted from a
+/// constant to a per-card value; it deliberately reuses the identical
+/// `ZoneMoveRequest::effect(..).at_library_position(..)` primitive rather than
+/// introducing a second way to reach the library. Every card here is already IN
+/// the library — a dig looks at cards without moving them (CR 701.20b/e) — so
+/// each request takes `move_to_library_at_index`'s `from == Zone::Library`
+/// early return into `reorder_within_library`, which advances the library
+/// knowledge epoch (CR 701.20d: reordered revealed cards stop being revealed and
+/// become new objects) and re-marks top-of-library statics on its own. No
+/// manual epoch bookkeeping belongs here.
+///
+/// `top_ids` is submitted back-to-front so the caller's first-listed card ends
+/// up topmost, matching CR 401.4's "the owner may arrange them in any order".
+pub(crate) fn route_rest_split_then(
+    state: &mut GameState,
+    top_ids: &[ObjectId],
+    bottom_ids: &[ObjectId],
+    source_id: Option<ObjectId>,
+    completion: Option<crate::types::game_state::BatchCompletion>,
+    events: &mut Vec<GameEvent>,
+) -> crate::game::zone_pipeline::BatchMoveResult {
+    let requests = top_ids
+        .iter()
+        .rev()
+        .map(|&id| (id, LibraryPosition::Top))
+        .chain(bottom_ids.iter().map(|&id| (id, LibraryPosition::Bottom)))
+        .map(|(obj_id, position)| {
+            crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                obj_id,
+                Zone::Library,
+                source_id.unwrap_or(obj_id),
+            )
+            .at_library_position(position)
+        })
+        .collect();
+    crate::game::zone_pipeline::move_objects_simultaneously_then(
+        state, requests, completion, events,
+    )
+}
+
+/// CR 401.2 + CR 701.20e + CR 608.2c: Hand a Telling Time-class remainder pile
+/// to the player who looked at it, to split between the top and the bottom of
+/// the library it came from. `top_count` is already resolved (CR 608.2c fixes
+/// it as the effect is applied) and is clamped to the pile size here, since a
+/// short library can leave fewer remainder cards than the text names.
+///
+/// The library owner is derived from the pile rather than passed in: the cards
+/// never left the library they were looked at in (CR 701.20b/e), so their
+/// owner IS that library's owner, and deriving it here keeps the one source of
+/// that fact next to the move that depends on it.
+///
+/// CR 401.4 governs the prompt condition, and it is about ARRANGEMENT, not
+/// partition: "if an effect puts two or more cards in a specific position in a
+/// library at the same time, the owner of those cards may arrange them in any
+/// order." A unique partition is therefore NOT a unique arrangement. A
+/// degenerate split (`top_count == 0`, or `top_count == pile.len()`) sends the
+/// whole pile to ONE position, and the moment that pile holds two or more
+/// cards CR 401.4 hands its order to the owner — exactly the choice
+/// `ripple::open_bottom_order_or_place` raises for its own all-to-the-bottom
+/// pile at `cards.len() >= 2`.
+///
+/// So the single gate is `pile.len() >= 2`, which subsumes both decisions:
+///
+/// * `pile.len() < 2` — one position, one card (or none). Neither a partition
+///   nor an order exists; route immediately with no prompt.
+/// * `pile.len() >= 2` — at least one real decision exists. Either the
+///   partition is genuine (`0 < top_count < pile.len()`), or it is degenerate
+///   and the single destination position now holds 2+ cards whose order is the
+///   owner's under CR 401.4. Both are answered by the same submission.
+///
+/// The response is a full permutation of `pile` (see
+/// [`validate_dig_rest_split_selection`]), the same contract
+/// `WaitingFor::RippleBottomOrder` already uses for its own "in any order"
+/// pile — one prompt carries both the partition and both piles' orders, rather
+/// than chaining a second and third prompt for the same instruction.
+fn split_rest_pile_or_park(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    pile: &[ObjectId],
+    top_count: usize,
+    source_id: Option<ObjectId>,
+    completion: crate::types::game_state::BatchCompletion,
+    events: &mut Vec<GameEvent>,
+) -> crate::game::zone_pipeline::BatchMoveResult {
+    let top_count = top_count.min(pile.len());
+    if pile.len() < 2 {
+        // CR 401.4 does not apply below two cards, and a 0-or-1-card pile has
+        // exactly one legal arrangement. `split_at` is total here because
+        // `top_count` was just clamped to `pile.len()`.
+        let (top, bottom) = pile.split_at(top_count);
+        return route_rest_split_then(state, top, bottom, source_id, Some(completion), events);
+    }
+    let library_owner = pile
+        .first()
+        .and_then(|id| state.objects.get(id))
+        .map_or(player, |obj| obj.owner);
+    state.waiting_for = WaitingFor::DigRestSplitChoice {
+        player,
+        library_owner,
+        cards: pile.to_vec(),
+        top_count,
+        source_id,
+        completion: Some(Box::new(completion)),
+    };
+    crate::game::zone_pipeline::BatchMoveResult::Done
+}
+
+/// CR 401.2 + CR 401.4 + CR 608.2c: Validate a `DigRestSplitChoice` response.
+///
+/// The pile is fixed and every card in it is going back into the SAME library,
+/// so the player submits one thing: the full arrangement. The response is a
+/// permutation of `pile` whose first `top_count` entries go on top (topmost
+/// first) and whose remaining entries go to the bottom. That single payload
+/// answers both questions CR asks here — which cards take which position
+/// (CR 608.2d, the effect's own choice) and in what order each position's
+/// cards are arranged (CR 401.4) — and is the same full-permutation contract
+/// `WaitingFor::RippleBottomOrder` uses for its own "in any order" pile.
+///
+/// Requiring the whole pile is also what makes the check total: equal length
+/// plus no duplicates plus full membership IS a permutation, so no card can be
+/// silently stranded or placed twice. Mirrors `validate_dig_selection`'s
+/// duplicate / membership checks — this state is one of the freeform
+/// selections the multiplayer server forwards unvalidated, so `apply` is the
+/// sole legality boundary.
+fn validate_dig_rest_split_selection(
+    arrangement: &[ObjectId],
+    pile: &[ObjectId],
+) -> Result<(), EngineError> {
+    if arrangement.len() != pile.len() {
+        return Err(EngineError::InvalidAction(format!(
+            "rest-split arrangement must list exactly all {} card(s) of the rest pile, got {}",
+            pile.len(),
+            arrangement.len()
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for id in arrangement {
+        if !seen.insert(*id) {
+            return Err(EngineError::InvalidAction(
+                "rest-split selection contains a duplicate card".to_string(),
+            ));
+        }
+        if !pile.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "rest-split selection contains a card that is not in the rest pile".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_exact_keep_on_top_selection(
@@ -2171,6 +2328,7 @@ pub(super) fn handle_resolution_choice(
                             rest_cards: graveyard_cards,
                             rest_destination: Zone::Graveyard,
                             rest_order: DigRestOrder::Preserve,
+                            rest_split_top_count: None,
                             clear_markers: cards.clone(),
                             publish_tracked_set: None,
                             publish_tracked_set_cause: None,
@@ -2455,6 +2613,7 @@ pub(super) fn handle_resolution_choice(
                                     rest_cards: misses,
                                     rest_destination,
                                     rest_order: DigRestOrder::Preserve,
+                                    rest_split_top_count: None,
                                     clear_markers,
                                     publish_tracked_set: None,
                                     publish_tracked_set_cause: None,
@@ -2525,6 +2684,7 @@ pub(super) fn handle_resolution_choice(
                     rest_cards: Vec::new(),
                     rest_destination,
                     rest_order: DigRestOrder::Preserve,
+                    rest_split_top_count: None,
                     clear_markers,
                     publish_tracked_set: None,
                     publish_tracked_set_cause: None,
@@ -3879,6 +4039,58 @@ pub(super) fn handle_resolution_choice(
                 ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
             }
         }
+        // CR 401.2 + CR 401.4 + CR 608.2d + CR 701.20e: The looking player
+        // arranges a Telling Time-class remainder across the top and the
+        // bottom of one library. `arrangement` is a full permutation of the
+        // pile: its first `top_count` entries go on top (topmost first, per
+        // CR 608.2d's effect-level choice) and the remainder goes to the
+        // bottom, each pile in exactly the submitted order (CR 401.4).
+        (
+            WaitingFor::DigRestSplitChoice {
+                player: _,
+                library_owner: _,
+                cards,
+                top_count,
+                source_id: split_source_id,
+                completion,
+            },
+            GameAction::SelectCards { cards: arrangement },
+        ) => {
+            validate_dig_rest_split_selection(&arrangement, &cards)?;
+            // VALIDATE BEFORE MUTATING. `completion` carries the dig's entire
+            // deferred tail — `BatchCompletion::RevealRestPile`'s reveal-marker
+            // cleanup, tracked-set publication, continuation wiring and
+            // priority drain. Running the move without it would place the
+            // cards correctly and then silently drop that whole tail, leaving
+            // stale reveal markers and an unpublished tracked set behind a
+            // dig that looked like it completed.
+            //
+            // `None` is reachable and is never legitimate: `game/visibility.rs`
+            // STRIPS `completion` to `None` in every per-player client
+            // projection, so a `None` here is a redacted client view being
+            // echoed back (or a hand-built/corrupt state), not a real pending
+            // dig. Reject it before a single card moves rather than finishing
+            // the split against bookkeeping that is not there.
+            let Some(completion) = completion else {
+                return Err(EngineError::InvalidAction(
+                    "rest-split state has no pending dig completion to finish; \
+                     refusing to move cards against missing bookkeeping"
+                        .to_string(),
+                ));
+            };
+            // Total: `top_count` was clamped to `cards.len()` at park time and
+            // `arrangement` was just proven to be a permutation of `cards`.
+            let (top_cards, bottom_cards) = arrangement.split_at(top_count.min(arrangement.len()));
+            route_rest_split_then(
+                state,
+                top_cards,
+                bottom_cards,
+                split_source_id,
+                Some(*completion),
+                events,
+            );
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
         (
             WaitingFor::DigChoice {
                 player,
@@ -3889,6 +4101,7 @@ pub(super) fn handle_resolution_choice(
                 selectable_cards,
                 kept_destination,
                 rest_destination,
+                rest_split_top_count,
                 rest_order,
                 enter_tapped,
                 enters_attacking,
@@ -3951,6 +4164,14 @@ pub(super) fn handle_resolution_choice(
                         // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
                         player_state.library.insert(index, card_id);
                     }
+                    // CR 401.2: `rest_split_top_count` is deliberately not
+                    // consulted on this branch. It only exists for a remainder
+                    // whose position within the library is still open, and
+                    // this branch is the reorder form (`kept_destination ==
+                    // Some(Library)`) whose text has ALREADY named both
+                    // positions — the kept cards go on top and the remainder
+                    // to the bottom in the same instruction, leaving nothing
+                    // to split. The parser never emits both together.
                     match rest_destination {
                         Some(Zone::Library) => {
                             if rest_order == DigRestOrder::Random {
@@ -4015,6 +4236,7 @@ pub(super) fn handle_resolution_choice(
                                     rest_cards: Vec::new(),
                                     rest_destination: zone,
                                     rest_order: DigRestOrder::Preserve,
+                                    rest_split_top_count: None,
                                     clear_markers: Vec::new(),
                                     publish_tracked_set: None,
                                     publish_tracked_set_cause: None,
@@ -4096,6 +4318,14 @@ pub(super) fn handle_resolution_choice(
                         },
                         rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
                         rest_order,
+                        // CR 401.2 + CR 701.20e: carry the Telling Time-class
+                        // remainder split onto the kept delivery. The split
+                        // prompt can only be raised once the kept cards have
+                        // finished leaving (the remainder is not fixed until
+                        // then), and this completion is the only carrier that
+                        // survives an arbitrary number of replacement re-parks
+                        // in between.
+                        rest_split_top_count,
                         clear_markers: Vec::new(),
                         publish_tracked_set: Some(publish_set),
                         publish_tracked_set_cause: publish_cause,
@@ -4167,6 +4397,7 @@ pub(super) fn handle_resolution_choice(
                     rest_cards: Vec::new(),
                     rest_destination,
                     rest_order,
+                    rest_split_top_count: None,
                     clear_markers: Vec::new(),
                     publish_tracked_set: Some(publish_set),
                     publish_tracked_set_cause: publish_cause,
@@ -4180,6 +4411,31 @@ pub(super) fn handle_resolution_choice(
                         rest_destination,
                     ),
                 };
+                // CR 401.2 + CR 701.20e: the same Telling Time-class split the
+                // kept-delivery completion applies, for the reveal-only dig
+                // form whose kept cards never move (`kept_destination: None`)
+                // and so has no kept batch to ride. Same gate, same helper,
+                // same tail.
+                if let Some(top_count) =
+                    rest_split_top_count.filter(|_| rest_destination == Zone::Library)
+                {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        match split_rest_pile_or_park(
+                            state,
+                            player,
+                            &ordered_unkept,
+                            top_count,
+                            dig_source_id,
+                            completion,
+                            events,
+                        ) {
+                            crate::game::zone_pipeline::BatchMoveResult::Done
+                            | crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                                state.waiting_for.clone()
+                            }
+                        },
+                    ));
+                }
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     match route_rest_partition_then(
                         state,
@@ -8090,6 +8346,7 @@ fn route_kept_card_or_defer(
                     rest_cards: misses.to_vec(),
                     rest_destination,
                     rest_order: DigRestOrder::Preserve,
+                    rest_split_top_count: None,
                     clear_markers,
                     publish_tracked_set: None,
                     publish_tracked_set_cause: None,
@@ -8993,6 +9250,7 @@ pub(crate) fn run_batch_completion(
             rest_cards,
             rest_destination,
             rest_order,
+            rest_split_top_count,
             clear_markers,
             publish_tracked_set,
             publish_tracked_set_cause,
@@ -9020,6 +9278,7 @@ pub(crate) fn run_batch_completion(
                     rest_cards: Vec::new(),
                     rest_destination,
                     rest_order,
+                    rest_split_top_count: None,
                     clear_markers,
                     publish_tracked_set,
                     publish_tracked_set_cause,
@@ -9033,6 +9292,37 @@ pub(crate) fn run_batch_completion(
                         rest_destination,
                     ),
                 };
+                // CR 401.2 + CR 701.20e + CR 608.2c: Telling Time-class
+                // remainder. The pile is fixed now that the kept cards have
+                // finished leaving, so its owner partitions it between the top
+                // and the bottom of their library instead of it going
+                // uniformly to `rest_destination`. The Rest-stage completion
+                // built just above IS the dig tail and is handed straight on,
+                // so the split path and the uniform path converge on exactly
+                // the same reveal-marker cleanup, tracked-set publish,
+                // continuation wiring, and priority drain.
+                //
+                // Gated on a Library destination because the split names
+                // positions WITHIN one library (CR 401.2's single face-down
+                // pile has no third position to name); the parser only ever
+                // pairs `rest_split_top_count` with `rest_destination:
+                // Some(Zone::Library)`, and this gate keeps a hand-built or
+                // deserialized state that violates that pairing on the
+                // unchanged uniform route rather than silently relocating the
+                // pile into a library it was not sent to.
+                if let Some(top_count) =
+                    rest_split_top_count.filter(|_| rest_destination == Zone::Library)
+                {
+                    return split_rest_pile_or_park(
+                        state,
+                        player,
+                        &ordered_rest_cards,
+                        top_count,
+                        source_id,
+                        completion,
+                        events,
+                    );
+                }
                 return route_rest_partition_then(
                     state,
                     &ordered_rest_cards,
@@ -9059,6 +9349,7 @@ pub(crate) fn run_batch_completion(
                     rest_cards: Vec::new(),
                     rest_destination,
                     rest_order,
+                    rest_split_top_count: None,
                     clear_markers,
                     publish_tracked_set,
                     publish_tracked_set_cause,
@@ -9093,6 +9384,7 @@ pub(crate) fn run_batch_completion(
                     rest_cards: Vec::new(),
                     rest_destination,
                     rest_order: DigRestOrder::Preserve,
+                    rest_split_top_count: None,
                     clear_markers,
                     publish_tracked_set: None,
                     publish_tracked_set_cause: None,
@@ -11337,6 +11629,7 @@ mod tests {
                 selectable_cards: vec![black, white],
                 kept_destination: Some(Zone::Library),
                 rest_destination: Some(Zone::Library),
+                rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,
@@ -11420,6 +11713,7 @@ mod tests {
                 selectable_cards: vec![keep, rest[0], rest[1], rest[2]],
                 kept_destination: Some(Zone::Library),
                 rest_destination: Some(Zone::Library),
+                rest_split_top_count: None,
                 rest_order: DigRestOrder::Random,
                 source_id: None,
                 enter_tapped: false,
@@ -11460,6 +11754,7 @@ mod tests {
                 selectable_cards: vec![keep, rest[0], rest[1], rest[2]],
                 kept_destination: Some(Zone::Library),
                 rest_destination: Some(Zone::Library),
+                rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,

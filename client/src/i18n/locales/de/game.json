@@ -1422,7 +1422,13 @@
       "subtitleUpTo_other": "Wähle bis zu {{count}} Karten, um sie {{destination}} zu legen",
       "destinationTop": "oben auf deine Bibliothek",
       "destinationBattlefield": "auf das Schlachtfeld",
-      "destinationHand": "auf deine Hand"
+      "destinationHand": "auf deine Hand",
+      "titleSplit": "Die übrigen Karten aufteilen",
+      "subtitleSplit_one": "Ordne die Karten an: {{count}} kommt oben auf deine Bibliothek, die übrigen {{remaining}} kommen nach unten",
+      "subtitleSplit_other": "Ordne die Karten an: {{count}} kommen oben auf deine Bibliothek, die übrigen {{remaining}} kommen nach unten",
+      "badgeTop": "Oben {{order}}",
+      "badgeBottom": "Unten",
+      "hintSplit": "Zum Umsortieren ziehen · grüne Karten kommen nach oben (ganz links zuoberst), graue nach unten"
     },
     "surveil": {
       "title": "Überwachen",

@@ -3594,6 +3594,14 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             //      events exist — it would snapshot a permanent +0/+0.
             | WaitingFor::DieKeepChoice { .. }
             | WaitingFor::DigChoice { .. }
+            // CR 608.2d + CR 608.2c: a Telling Time-class remainder split is a
+            // choice the effect offers, which "the player announces while
+            // applying the effect" (CR 608.2d) — a second, later pause in the
+            // SAME dig instruction, whose instructions are followed in the
+            // order written (CR 608.2c). Anything chained after the dig must
+            // wait for it, or the sub-ability would run while the remainder is
+            // still sitting undistributed.
+            | WaitingFor::DigRestSplitChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
@@ -36696,6 +36704,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
@@ -37457,6 +37466,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,

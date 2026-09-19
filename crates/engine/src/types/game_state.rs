@@ -6135,6 +6135,14 @@ pub enum BatchCompletion {
         /// Reveal-until uses the serde-default Preserve value.
         #[serde(default)]
         rest_order: DigRestOrder,
+        /// CR 401.2 + CR 701.20e: Telling Time-class remainder split, carried
+        /// from `DigChoice` through the kept delivery so the routing decision
+        /// survives an arbitrary number of replacement re-parks. Consumed
+        /// exactly once, by the `DigDeliveryStage::Kept` arm, which swaps the
+        /// uniform rest-pile route for a `DigRestSplitChoice` pause. `None` on
+        /// every reveal-until and every non-splitting dig.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_split_top_count: Option<usize>,
         /// CR 701.20b: reveal markers to clear once the cards have moved (the
         /// kept card plus the misses).
         clear_markers: Vec<ObjectId>,
@@ -13153,6 +13161,20 @@ pub enum WaitingFor {
         /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
         #[serde(default)]
         rest_destination: Option<Zone>,
+        /// CR 401.2 + CR 701.20e + CR 608.2c: Telling Time-class remainder
+        /// split. `Some(n)` routes the unkept pile into a follow-up
+        /// `DigRestSplitChoice` that puts exactly `n` of it on top of the
+        /// library and the remainder on the bottom, instead of moving the
+        /// whole pile uniformly to `rest_destination`.
+        ///
+        /// Already resolved from `Effect::Dig.rest_split_top_count`
+        /// (a `QuantityExpr`) at dig-resolution time, mirroring how this state
+        /// carries a resolved `keep_count: usize` for the effect's
+        /// `keep_count_expr: Option<QuantityExpr>`. CR 608.2c fixes the value
+        /// as the effect is applied, and the later completion site has no
+        /// `ResolvedAbility` to resolve an expression against.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_split_top_count: Option<usize>,
         /// CR 400.5 + CR 608.2c: Ordering instruction for a library rest pile.
         #[serde(default)]
         rest_order: DigRestOrder,
@@ -13167,6 +13189,71 @@ pub enum WaitingFor {
         /// attacking rather than being declared as attackers.
         #[serde(default)]
         enters_attacking: bool,
+    },
+    /// CR 401.2 + CR 701.20e + CR 608.2c: After a `DigChoice`'s keep-selection
+    /// has been routed to its destination, a Telling Time-class dig partitions
+    /// the FIXED remainder pile between the top and the bottom of the SAME
+    /// library ("...one on top of your library, and one on the bottom of your
+    /// library"). CR 401.2 makes top and bottom the only two positions such an
+    /// instruction can name, so this variant's single axis of choice is
+    /// `LibraryPosition` within one already-fixed `Zone::Library` destination.
+    ///
+    /// Distinct from its two neighbours: `DigChoice` chooses a SUBSET to send
+    /// to one destination zone, and `SearchPartitionChoice` splits a set
+    /// between two different `Zone`s. Neither can express "same zone, two
+    /// positions", which is why this is a sibling rather than a parameter of
+    /// either.
+    DigRestSplitChoice {
+        /// The player who looked at the cards and therefore makes the split
+        /// (CR 701.20e — the remainder is known only to them).
+        player: PlayerId,
+        /// Owner of the library the pile is placed back into.
+        library_owner: PlayerId,
+        /// The fixed rest pile. Every id here ends up in `Zone::Library`; what
+        /// is undecided is each card's `LibraryPosition` (Top or Bottom) AND
+        /// the order of the cards within each position (CR 401.4).
+        ///
+        /// The response is `GameAction::SelectCards` carrying a full
+        /// PERMUTATION of this list — the same contract `RippleBottomOrder`
+        /// uses for its own "in any order" pile — not a subset. The first
+        /// `top_count` entries go on top, topmost first; the rest go to the
+        /// bottom in the submitted order. One payload therefore answers both
+        /// the CR 608.2d partition choice and the CR 401.4 arrangement of each
+        /// resulting pile.
+        cards: Vec<ObjectId>,
+        /// How many of the submitted arrangement's leading entries go on top;
+        /// the remainder go to the bottom. Exact, not "up to" — Telling Time's
+        /// split is forced. Already resolved against game state and clamped to
+        /// `0..=cards.len()` at park time, so a client never has to interpret a
+        /// `QuantityExpr`.
+        ///
+        /// May legally be `0` or `cards.len()`: a DEGENERATE partition still
+        /// parks this prompt whenever `cards.len() >= 2`, because CR 401.4
+        /// gives the owner the order of the 2+ cards landing in that single
+        /// position even though which-goes-where was never in question. Only a
+        /// pile of fewer than two cards skips the prompt entirely.
+        top_count: usize,
+        source_id: Option<ObjectId>,
+        /// The deferred dig tail (reveal-marker cleanup, tracked-set publish,
+        /// continuation wiring, priority drain) carried verbatim across this
+        /// player pause and handed straight back to the zone pipeline as the
+        /// split batch's completion.
+        ///
+        /// Carried whole rather than re-derived from scalars because it is the
+        /// same typed `BatchCompletion` carrier the dig already threads through
+        /// `RevealRestPile` for exactly this purpose — rebuilding its fourteen
+        /// fields at the resume site would fork that tail into a second copy
+        /// that could drift. Engine-internal bookkeeping, not player
+        /// information: `game/visibility.rs` strips it from every client view.
+        ///
+        /// `Option` ONLY because that stripping needs a way to say "redacted";
+        /// a genuine pending split always carries one. The resolver therefore
+        /// treats `None` as an invalid state and rejects the submission BEFORE
+        /// moving any card, rather than completing the move and dropping the
+        /// dig's reveal-marker cleanup and tracked-set publication on the
+        /// floor.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion: Option<Box<BatchCompletion>>,
     },
     SurveilChoice {
         player: PlayerId,
@@ -15330,6 +15417,7 @@ impl WaitingFor {
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
             WaitingFor::DieKeepChoice { .. } => "DieKeepChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
+            WaitingFor::DigRestSplitChoice { .. } => "DigRestSplitChoice",
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
             WaitingFor::RevealChoice { .. } => "RevealChoice",
             WaitingFor::SearchChoice { .. } => "SearchChoice",
@@ -15490,6 +15578,7 @@ impl WaitingFor {
             | WaitingFor::CoinFlipKeepChoice { player, .. }
             | WaitingFor::DieKeepChoice { player, .. }
             | WaitingFor::DigChoice { player, .. }
+            | WaitingFor::DigRestSplitChoice { player, .. }
             | WaitingFor::SurveilChoice { player, .. }
             | WaitingFor::RevealChoice { player, .. }
             | WaitingFor::SearchChoice { player, .. }
@@ -15936,6 +16025,12 @@ impl WaitingFor {
                 | WaitingFor::ArrangePlanarDeckTopChoice { .. }
                 | WaitingFor::SurveilChoice { .. }
                 | WaitingFor::DigChoice { .. }
+                // CR 401.2 + CR 401.4: the split response names which cards go
+                // on top, and when two or more do, their owner may arrange
+                // them in any order — a free permutation the combination
+                // enumerator does not list, so `apply()` is the real validator
+                // (it enforces the exact count, uniqueness, and membership).
+                | WaitingFor::DigRestSplitChoice { .. }
                 // CR 702.60a: the Ripple bottom-order response is a free
                 // permutation of the offered pile — the candidate enumerator
                 // only lists {identity}, so `apply()` is the real validator.
@@ -36199,10 +36294,19 @@ mod tests {
             selectable_cards: vec![ObjectId(1)],
             kept_destination: None,
             rest_destination: None,
+            rest_split_top_count: None,
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
             enters_attacking: false,
+        }));
+        variants.push(Box::new(WaitingFor::DigRestSplitChoice {
+            player: PlayerId(0),
+            library_owner: PlayerId(0),
+            cards: vec![ObjectId(1), ObjectId(2)],
+            top_count: 1,
+            source_id: None,
+            completion: None,
         }));
         variants.push(Box::new(WaitingFor::SurveilChoice {
             player: PlayerId(0),
@@ -36427,7 +36531,7 @@ mod tests {
             mana_reduction: ManaCost::zero(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 39);
+        assert_eq!(variants.len(), 40);
     }
 
     #[test]

@@ -455,6 +455,23 @@ pub(crate) enum ContinuationAst {
         /// "put two of them into your hand and the rest on the bottom of your library".
         /// When None, a subsequent PutRest continuation handles rest_destination.
         rest_destination: Option<Zone>,
+        /// CR 401.2 + CR 701.20e + CR 608.2c: Set when the same clause names
+        /// BOTH library positions for the remainder instead of one destination
+        /// for all of it — "put one of those cards into your hand, one on top
+        /// of your library, and one on the bottom of your library" (Telling
+        /// Time). Carries how many of the remainder go on TOP; CR 401.2 leaves
+        /// the bottom as the only other position a library instruction can
+        /// name, so the bottom count is implied rather than stored twice.
+        /// Always accompanied by `rest_destination: Some(Zone::Library)`.
+        /// `None` for every uniform-remainder form, including the plain
+        /// "... and the rest on the bottom of your library".
+        ///
+        /// Boxed only to keep `clippy::large_enum_variant` satisfied:
+        /// `DigFromAmong` is already this enum's largest variant, and an
+        /// inline `QuantityExpr` here pushes it past the lint's ratio against
+        /// the second-largest variant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_split_top_count: Option<Box<QuantityExpr>>,
         /// CR 400.5 + CR 608.2c: Only exact "in a random order" text sets
         /// `Random`; every other accepted form preserves existing behavior.
         #[serde(default)]

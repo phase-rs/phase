@@ -1422,7 +1422,13 @@
       "subtitleUpTo_other": "Selecciona hasta {{count}} cartas para poner {{destination}}",
       "destinationTop": "en la parte superior de tu biblioteca",
       "destinationBattlefield": "en el campo de batalla",
-      "destinationHand": "en tu mano"
+      "destinationHand": "en tu mano",
+      "titleSplit": "Reparte las cartas restantes",
+      "subtitleSplit_one": "Ordena las cartas: {{count}} va a la parte superior de tu biblioteca; las otras {{remaining}} van al fondo",
+      "subtitleSplit_other": "Ordena las cartas: {{count}} van a la parte superior de tu biblioteca; las otras {{remaining}} van al fondo",
+      "badgeTop": "Arriba {{order}}",
+      "badgeBottom": "Fondo",
+      "hintSplit": "Arrastra para reordenar · las verdes van arriba (la primera es la superior), las grises al fondo"
     },
     "surveil": {
       "title": "Vigilar",

@@ -1477,6 +1477,9 @@ pub fn fallback_action(
         // Take the engine's own issued answer instead of restating the rule.
         WaitingFor::ScryChoice { .. }
         | WaitingFor::DigChoice { .. }
+        // CR 401.2: exactly `top_count` cards, never an empty pick — take the
+        // engine's own issued answer rather than a blanket empty selection.
+        | WaitingFor::DigRestSplitChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::SearchChoice { .. }
@@ -3778,6 +3781,27 @@ pub(crate) fn deterministic_choice(
             scored.iter().take(*keep_count).map(|(id, _)| *id).collect()
         };
         return Some(GameAction::SelectCards { cards: kept });
+    }
+
+    // CR 401.2 + CR 401.4: the submission is a full ARRANGEMENT of the
+    // remainder — the leading `top_count` entries take the library top and the
+    // rest take the bottom. Sorting the whole pile by intrinsic value descending
+    // and submitting it verbatim gets both decisions right at once with the
+    // same ordering the sibling dig and surveil arms use:
+    //   * partition — the most valuable `top_count` cards land on top, where
+    //     they are drawn soonest;
+    //   * CR 401.4 order — within the top pile the best card is drawn first,
+    //     and within the bottom pile the better cards sit nearer the rest of
+    //     the library (`route_rest_split_then` appends bottom entries in the
+    //     submitted order, so the last entry ends up bottom-most).
+    if let WaitingFor::DigRestSplitChoice { cards, .. } = &state.waiting_for {
+        let mut scored: Vec<_> = cards
+            .iter()
+            .map(|&id| (id, intrinsic_value(state, id)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let arrangement: Vec<_> = scored.into_iter().map(|(id, _)| id).collect();
+        return Some(GameAction::SelectCards { cards: arrangement });
     }
 
     if let WaitingFor::SurveilChoice { cards, .. } = &state.waiting_for {
@@ -13822,6 +13846,7 @@ mod tests {
             selectable_cards: pool,
             kept_destination: None,
             rest_destination: None,
+            rest_split_top_count: None,
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
@@ -13948,6 +13973,7 @@ mod tests {
                 selectable_cards: vec![pool[0]],
                 kept_destination: None,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,
