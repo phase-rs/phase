@@ -21,6 +21,9 @@ import init, {
   get_ai_action_proposal_from_scores_with_diagnostics,
   get_ai_scored_candidates,
   submit_ai_action_proposal,
+  buildLlmDecisionRequest,
+  getAiActionProposalFromLlmResponse,
+  llmProviderCatalog,
   get_legal_actions_js,
   get_legal_actions_for_viewer_js,
   get_viewer_snapshot_js,
@@ -104,6 +107,24 @@ type EngineRequest =
   | { type: "getAiActionProposalFromScores"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
   | { type: "getAiActionProposalFromScoresWithDiagnostics"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
   | { type: "submitAiActionProposal"; id: number; proposal: AiActionProposal }
+  | {
+      type: "buildLlmDecisionRequest";
+      id: number;
+      difficulty: string;
+      playerId: number;
+      endpointJson: string;
+      historyJson: string;
+    }
+  | {
+      type: "getAiActionProposalFromLlmResponse";
+      id: number;
+      playerId: number;
+      fingerprint: string;
+      provider: string;
+      status: number;
+      responseBody: string;
+    }
+  | { type: "llmProviderCatalog"; id: number }
   | { type: "restoreState"; id: number; stateJson: string }
   | { type: "resumeRestoredGameState"; id: number }
   | { type: "resumeMultiplayerHostState"; id: number; stateJson: string }
@@ -550,6 +571,38 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "getAiActionProposalFromScoresWithDiagnostics": {
         result(msg.id, get_ai_action_proposal_from_scores_with_diagnostics(msg.scoresJson, msg.difficulty, msg.playerId, BigInt(msg.seed)) ?? null);
+        break;
+      }
+
+      case "buildLlmDecisionRequest": {
+        result(
+          msg.id,
+          buildLlmDecisionRequest(
+            msg.difficulty,
+            msg.playerId,
+            msg.endpointJson,
+            msg.historyJson,
+          ) ?? null,
+        );
+        break;
+      }
+
+      case "getAiActionProposalFromLlmResponse": {
+        result(
+          msg.id,
+          getAiActionProposalFromLlmResponse(
+            msg.playerId,
+            msg.fingerprint,
+            msg.provider,
+            msg.status,
+            msg.responseBody,
+          ) ?? null,
+        );
+        break;
+      }
+
+      case "llmProviderCatalog": {
+        result(msg.id, llmProviderCatalog());
         break;
       }
 
