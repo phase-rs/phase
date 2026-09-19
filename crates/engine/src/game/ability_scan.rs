@@ -1690,12 +1690,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             count,
             enters_under,
             kept_destination_if,
-            matched_disposition: _,
-            kept_destination: _,
-            rest_destination: _,
-            enter_tapped: _,
-            enters_attacking: _,
-            kept_optional_to: _,
+            ..
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(player, target_ctx, mode));

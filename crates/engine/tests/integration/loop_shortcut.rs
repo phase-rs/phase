@@ -5115,8 +5115,8 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // ── the classifier's own reach-guard: the enum was actually found ──
     let total = enum_variants(&enum_src, "WaitingFor").len();
     assert_eq!(
-        total, 136,
-        "`WaitingFor` has 136 variants at this tip, read off the `syn` parse. This number is \
+        total, 137,
+        "`WaitingFor` has 137 variants at this tip, read off the `syn` parse. This number is \
          pinned so a variant REMOVED is as visible as one added; if you added a variant and it \
          carries no `DecisionTemplate`, update this number. A wildly different count means the \
          reader lost its anchor, and every assertion below would then be measuring an empty enum"
@@ -5155,6 +5155,11 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // also deliberately absent from the `filter_state_for_viewer` redaction loop. That omission is
     // engine convention carrying no CR annotation — no Comprehensive Rule states that die results
     // are public information — and mirrors `CoinFlipKeepChoice`, which is likewise unredacted.
+    // 136 ⇒ 137 is ADJUDICATED: CR 701.20a + CR 608.2d RevealUntil bottom order added
+    // `RevealUntilBottomOrder { player, source_id, cards, clear_markers, emit_reveal_until_resolved, reveal_until_hit_snapshot }`.
+    // Measured, not inferred: holds no `DecisionTemplate` (resolution-choice prompt handled in
+    // `engine_resolution_choices`), so the carrier assertion is unchanged. It is also explicitly
+    // included in `accepts_freeform_card_order` and carries public card identifiers.
 
     let carriers = carriers_in_source(&enum_src, "WaitingFor", &corpus, &marker, true);
     assert_eq!(

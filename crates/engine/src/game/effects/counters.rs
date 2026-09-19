@@ -2364,6 +2364,12 @@ fn resolve_defined_or_targets(
     }
 
     if let Some(filter) = target_spec {
+        if matches!(
+            filter,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        ) {
+            return crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter);
+        }
         let event_targets =
             crate::game::targeting::resolve_event_context_targets(state, filter, ability.source_id);
         if !event_targets.is_empty() {

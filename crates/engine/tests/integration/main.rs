@@ -284,6 +284,7 @@ mod engine_invariants;
 mod enlightened_tutor_regression;
 mod equipment_attach_event_context;
 mod equipment_etb_attach_parent_target;
+mod erratic_mutation;
 mod ertai_trickery_counter_kicked;
 mod escape_tunnel_landfall;
 mod esix_fractal_bloom;

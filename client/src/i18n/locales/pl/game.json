@@ -1789,6 +1789,14 @@
       "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
       "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
       "hint": "Drag to reorder · position 1 ends up on top of this pile"
+    },
+    "revealUntilBottom": {
+      "title": "Ułóż resztę na spodzie",
+      "subtitle_one": "Połóż {{count}} ujawnioną kartę na spodzie swojej biblioteki",
+      "subtitle_other": "Połóż {{count}} ujawnione karty na spodzie swojej biblioteki w dowolnej kolejności",
+      "hint": "Przeciągnij, aby zmienić kolejność · pozycja 1 trafi na wierzch tego stosu",
+      "moveLeft": "Przesuń w lewo",
+      "moveRight": "Przesuń w prawo"
     }
   },
   "specializeColor": {

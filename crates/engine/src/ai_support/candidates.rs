@@ -1285,10 +1285,11 @@ pub fn candidate_actions_broad_with_probe(
             }
         }
         WaitingFor::ScryChoice { player, cards } => select_cards_variants(*player, cards, None),
-        // CR 702.60a: the Ripple bottom-order response is a full permutation of
-        // the uncast revealed pile. `select_cards_variants` yields the identity
+        // CR 702.60a + CR 608.2d: the bottom-order response is a full permutation of
+        // the revealed pile. `select_cards_variants` yields the identity
         // ordering (+ a couple of variants); `apply()` validates any permutation.
-        WaitingFor::RippleBottomOrder { player, cards, .. } => {
+        WaitingFor::RippleBottomOrder { player, cards, .. }
+        | WaitingFor::RevealUntilBottomOrder { player, cards, .. } => {
             select_cards_variants(*player, cards, Some(cards.len()))
         }
         WaitingFor::ArrangePlanarDeckTopChoice {

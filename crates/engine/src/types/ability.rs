@@ -15032,6 +15032,7 @@ pub enum DigRestOrder {
     #[default]
     Preserve,
     Random,
+    PlayerChoice,
 }
 
 impl DigRestOrder {
@@ -18133,6 +18134,11 @@ pub enum Effect {
         kept_destination: Zone,
         /// Where non-matching revealed cards go (Library bottom or Graveyard).
         rest_destination: Zone,
+        /// CR 400.5 + CR 608.2c: The required placement order when revealed cards
+        /// go to a library. `Preserve` retains encounter order ("in any order" /
+        /// default); `Random` shuffles immediately before placement ("in a random order").
+        #[serde(default, skip_serializing_if = "DigRestOrder::is_preserve")]
+        rest_order: DigRestOrder,
         /// CR 110.5b: The matching card enters the battlefield tapped.
         #[serde(
             default,

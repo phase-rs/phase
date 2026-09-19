@@ -2022,6 +2022,7 @@ impl GameRunner {
             WaitingFor::ScryChoice { .. } => "ScryChoice",
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
             WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
+            WaitingFor::RevealUntilBottomOrder { .. } => "RevealUntilBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -3621,6 +3622,11 @@ fn drive_resolution(
             } => {
                 let keep: Vec<_> = cards.iter().take(*keep_on_top).copied().collect();
                 act_collect(runner, GameAction::SelectCards { cards: keep }, &mut events)?;
+            }
+            WaitingFor::RippleBottomOrder { cards, .. }
+            | WaitingFor::RevealUntilBottomOrder { cards, .. } => {
+                let cards = cards.clone();
+                act_collect(runner, GameAction::SelectCards { cards }, &mut events)?;
             }
             // CR 701.25a: default surveil policy keeps all looked-at cards on
             // top, mirroring the scry default.

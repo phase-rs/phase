@@ -2271,6 +2271,10 @@ pub(crate) fn parent_referent_context_from_events(
         return Some(snapshot);
     }
 
+    if let Some(snapshot) = reveal_until_object_context_from_events(events) {
+        return Some(snapshot);
+    }
+
     if let Some(snapshot) = revealed_object_context_from_events(state, events) {
         return Some(snapshot);
     }
@@ -2503,6 +2507,47 @@ fn stack_pushed_object_context_from_events(
     });
     let first = pushed.next()?;
     pushed.next().is_none().then_some(first)
+}
+
+/// CR 608.2c + CR 701.20a: A `RevealUntil` instruction that stopped on a single
+/// matching card introduces that card as the referent for downstream anaphoric
+/// pronouns ("that card's mana value", Erratic Mutation). Captured from
+/// `EffectResolved`'s subject snapshot.
+fn reveal_until_object_context_from_events(events: &[GameEvent]) -> Option<CostPaidObjectSnapshot> {
+    let mut hits = events.iter().filter_map(|event| match event {
+        GameEvent::EffectResolved {
+            kind: EffectKind::RevealUntil,
+            subject: Some(subject),
+            ..
+        } => Some(CostPaidObjectSnapshot {
+            object_id: subject.identity.object_id,
+            lki: LKISnapshot {
+                name: subject.name.clone(),
+                token_image_ref: None,
+                power: subject.power,
+                toughness: subject.toughness,
+                base_power: subject.base_power,
+                base_toughness: subject.base_toughness,
+                mana_value: subject.mana_value,
+                controller: subject.controller,
+                owner: subject.owner,
+                card_types: subject.core_types.clone(),
+                subtypes: subject.subtypes.clone(),
+                supertypes: subject.supertypes.clone(),
+                keywords: subject.keywords.clone(),
+                colors: subject.colors.clone(),
+                chosen_attributes: Vec::new(),
+                counters: subject.counters.clone(),
+                tapped: subject.tapped,
+                is_suspected: subject.is_suspected,
+                attachments: Vec::new(),
+            },
+            incarnation: subject.identity.incarnation,
+        }),
+        _ => None,
+    });
+    let first = hits.next()?;
+    hits.next().is_none().then_some(first)
 }
 
 /// CR 608.2c + CR 608.2h + CR 701.20b: A `reveal` instruction introduces an
@@ -3471,6 +3516,12 @@ pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
             .target_filter()
             .is_some_and(TargetFilter::references_exiled_by_source)
             && !effect_refs_parent_target(&sub.effect))
+        && !sub.effect.target_filter().is_some_and(|f| {
+            matches!(
+                f,
+                TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+            )
+        })
 }
 
 /// CR 115.10 + CR 608.2d: a nontargeted zone choice announced while the effect
@@ -3625,6 +3676,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
                 ..
             }
             | WaitingFor::RevealUntilKeptChoice { .. }
+            | WaitingFor::RevealUntilBottomOrder { .. }
             | WaitingFor::RepeatDecision { .. }
             | WaitingFor::CastOffer {
                 kind: CastOfferKind::Cascade { .. },
@@ -4476,8 +4528,11 @@ fn effect_writes_last_revealed_ids(effect: &Effect) -> bool {
 
 fn target_filter_for_last_revealed_sub(effect: &Effect) -> Option<&TargetFilter> {
     match effect {
-        Effect::CastFromZone { target, .. } => Some(target),
-        Effect::PutAtLibraryPosition { target, .. } => Some(target),
+        Effect::CastFromZone { target, .. }
+        | Effect::PutAtLibraryPosition { target, .. }
+        | Effect::ChangeZone { target, .. }
+        | Effect::Transform { target, .. }
+        | Effect::Reveal { target, .. } => Some(target),
         _ => None,
     }
 }
@@ -6806,19 +6861,23 @@ fn filter_prop_references_tracked_quantity(prop: &crate::types::ability::FilterP
 }
 
 fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::GrantCastingPermission {
-            target: TargetFilter::TrackedSet { .. },
-            ..
-        } | Effect::CastCopyOfCard {
-            target: TargetFilter::TrackedSet { .. },
-            ..
-        } | Effect::PutAtLibraryPosition {
-            target: TargetFilter::ExiledBySource,
-            ..
+    let matches_filter = |f: &TargetFilter| {
+        matches!(
+            f,
+            TargetFilter::TrackedSet { .. }
+                | TargetFilter::TrackedSetFiltered { .. }
+                | TargetFilter::ExiledBySource
+        )
+    };
+    if effect.target_filter().is_some_and(matches_filter) {
+        return true;
+    }
+    match effect {
+        Effect::GrantCastingPermission { target, .. } | Effect::CastCopyOfCard { target, .. } => {
+            matches_filter(target)
         }
-    )
+        _ => false,
+    }
 }
 
 /// CR 707.10: A `CopySpell { SelfRef }` sub-ability after a `forward_result`
@@ -16235,6 +16294,9 @@ fn resolve_chain_body(
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
             && effect_writes_last_revealed_ids(&ability.effect)
+            && (target_filter_for_last_revealed_sub(&sub.effect).is_some()
+                || effect_consumes_parent_object_referent(&sub.effect)
+                || has_member_driven_repeat(sub.as_ref()))
             // CR 701.21a: Sacrifice resolves its own battlefield-scoped eligible
             // pool — injecting library card IDs from a look-only Dig (e.g.
             // Birthing Ritual) would route through effect_object_targets and
@@ -26151,6 +26213,7 @@ mod tests {
             matched_disposition: crate::types::ability::RevealUntilDisposition::KeepEach,
             kept_destination: Zone::Exile,
             rest_destination: Zone::Library,
+            rest_order: crate::types::ability::DigRestOrder::Preserve,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
@@ -26229,6 +26292,7 @@ mod tests {
             matched_disposition: crate::types::ability::RevealUntilDisposition::KeepEach,
             kept_destination: Zone::Hand,
             rest_destination: Zone::Library,
+            rest_order: crate::types::ability::DigRestOrder::Preserve,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
