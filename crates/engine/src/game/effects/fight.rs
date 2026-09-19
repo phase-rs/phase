@@ -14,6 +14,9 @@ use crate::types::zones::Zone;
 /// - `SelfRef` → the ability's source object (default: "~ fights").
 /// - `AttachedTo` → the permanent this Aura/Equipment is attached to
 ///   ("enchanted creature fights" / "equipped creature fights").
+/// - `TriggeringSource` → the object named by the trigger event
+///   (CR 608.2k + CR 608.2c: "that creature" is the entering Wolf, not the
+///   ability source).
 fn resolve_fight_subject(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -27,16 +30,37 @@ fn resolve_fight_subject(
         // host (a creature). If the source is attached to a player (CR 303.4 +
         // CR 702.5d, Curse cycle), there's no creature subject — surface the
         // same MissingParam error as the unattached case.
-        state
+        return state
             .objects
             .get(&ability.source_id)
             .and_then(|obj| obj.attached_to)
             .and_then(|t| t.as_object())
             .ok_or_else(|| {
                 EffectError::MissingParam("Fight subject: source not attached to anything".into())
-            })
-    } else {
-        Ok(ability.source_id)
+            });
+    }
+    match subject {
+        TargetFilter::TriggeringSource => {
+            // CR 608.2k + CR 608.2c + CR 701.14a: the fighter is the event
+            // source (`extract_source_from_event`), not `ability.source_id`.
+            // Same pair `deal_damage.rs` uses for `DamageSource::TriggeringSource`.
+            // Do not call `resolve_event_context_target` — its ParentTarget +
+            // ZoneChanged arm binds the entering object for filters that are
+            // not the trigger source.
+            Ok(state
+                .current_trigger_event
+                .as_ref()
+                .and_then(crate::game::targeting::extract_source_from_event)
+                .unwrap_or(ability.source_id))
+        }
+        TargetFilter::SelfRef => Ok(ability.source_id),
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
+            // Dual-chosen fights return from `resolve_fight_fighters` before
+            // this function. A single-fighter ParentTarget subject is the
+            // ability source, never the live ZoneChanged object.
+            Ok(ability.source_id)
+        }
+        _ => Ok(ability.source_id),
     }
 }
 
@@ -120,6 +144,14 @@ pub(crate) fn resolve_fight_fighters(
             // not reinterpret a lone survivor as "~ fights target creature".
             return Ok(None);
         }
+    }
+    // CR 115.6 + CR 701.14a: a fight that requires targets may still allow
+    // zero chosen objects ("up to one target"). Analog: change_zone.rs empty
+    // targets + `targeting_is_optional()` → Ok no-op. Do not fall through to
+    // MissingParam — `execute_effect` swallows that error after other
+    // instructions (e.g. GainLife) have already run.
+    if object_targets.is_empty() && ability.targeting_is_optional() {
+        return Ok(None);
     }
     let source_id = resolve_fight_subject(state, ability)?;
     let target_id = object_targets
@@ -333,10 +365,11 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, Comparator, Effect, ManaContribution, ManaProduction, QuantityExpr,
-        QuantityRef, TargetFilter,
+        AbilityCondition, Comparator, Effect, ManaContribution, ManaProduction, MultiTargetSpec,
+        QuantityExpr, QuantityRef, TargetFilter,
     };
     use crate::types::card_type::CoreType;
+    use crate::types::game_state::ZoneChangeRecord;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::{ManaColor, ManaType};
     use crate::types::player::PlayerId;
@@ -1003,6 +1036,151 @@ mod tests {
             Some((a, b)),
             "2-slot root: divert recovers both declared fighters (slot0, slot1)"
         );
+    }
+
+    /// CR 608.2k + CR 701.14a: `Fight { subject: TriggeringSource }` binds the
+    /// event object, not `ability.source_id`. Revert of the TriggeringSource arm
+    /// → (tolsimir, opponent).
+    #[test]
+    fn triggering_source_fight_subject_uses_event_source() {
+        let mut state = GameState::new_two_player(42);
+        let tolsimir = make_creature(&mut state, PlayerId(0), "Tolsimir", 3, 3);
+        let wolf = make_creature(&mut state, PlayerId(0), "Wolf", 1, 1);
+        let opponent = make_creature(&mut state, PlayerId(1), "Beast", 4, 4);
+
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: wolf,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                wolf,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        });
+        assert!(
+            state.current_trigger_event.is_some(),
+            "reach-guard: event is live"
+        );
+        assert_eq!(
+            crate::game::targeting::extract_source_from_event(
+                state.current_trigger_event.as_ref().unwrap()
+            ),
+            Some(wolf)
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::Fight {
+                subject: TargetFilter::TriggeringSource,
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(opponent)],
+            tolsimir,
+            PlayerId(0),
+        );
+        let fighters = resolve_fight_fighters(&state, &ability).unwrap();
+        assert_eq!(
+            fighters,
+            Some((wolf, opponent)),
+            "TriggeringSource subject must fight as the entering Wolf, not Tolsimir"
+        );
+    }
+
+    /// Hostile sibling: `ParentTarget` must not steal the entering object from
+    /// a live `ZoneChanged { object_id != source_id }`. r1's
+    /// `resolve_event_context_target` catch-all would bind the Wolf.
+    #[test]
+    fn parent_target_fight_subject_does_not_steal_entering_object() {
+        let mut state = GameState::new_two_player(42);
+        let parent_fighter = make_creature(&mut state, PlayerId(0), "Parent Fighter", 3, 3);
+        let entering_wolf = make_creature(&mut state, PlayerId(0), "Entering Wolf", 1, 1);
+        let opponent = make_creature(&mut state, PlayerId(1), "Beast", 4, 4);
+
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: entering_wolf,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                entering_wolf,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        });
+        assert_ne!(entering_wolf, parent_fighter);
+
+        let ability = ResolvedAbility::new(
+            Effect::Fight {
+                subject: TargetFilter::ParentTarget,
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(opponent)],
+            parent_fighter,
+            PlayerId(0),
+        );
+        let fighters = resolve_fight_fighters(&state, &ability).unwrap();
+        assert_eq!(
+            fighters,
+            Some((parent_fighter, opponent)),
+            "ParentTarget subject must stay the parent-chosen fighter, not the ETB object"
+        );
+        assert_ne!(fighters, Some((entering_wolf, opponent)));
+    }
+
+    /// CR 115.6 + CR 701.14a: empty object targets + `targeting_is_optional()`
+    /// is `Ok(None)`, not `Err(MissingParam("Fight target"))`.
+    #[test]
+    fn optional_empty_fight_targets_are_ok_none() {
+        let mut state = GameState::new_two_player(42);
+        let source = make_creature(&mut state, PlayerId(0), "Fighter", 1, 1);
+
+        let mut via_multi = ResolvedAbility::new(
+            Effect::Fight {
+                subject: TargetFilter::SelfRef,
+                target: TargetFilter::Any,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        via_multi.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }));
+        assert!(via_multi.targeting_is_optional());
+        assert_eq!(
+            resolve_fight_fighters(&state, &via_multi).unwrap(),
+            None,
+            "multi_target up_to(1) with zero chosen objects must no-op"
+        );
+
+        let mut via_flag = ResolvedAbility::new(
+            Effect::Fight {
+                subject: TargetFilter::SelfRef,
+                target: TargetFilter::Any,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        via_flag.optional_targeting = true;
+        assert_eq!(
+            resolve_fight_fighters(&state, &via_flag).unwrap(),
+            None,
+            "optional_targeting with zero chosen objects must no-op"
+        );
+
+        let required = ResolvedAbility::new(
+            Effect::Fight {
+                subject: TargetFilter::SelfRef,
+                target: TargetFilter::Any,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        match resolve_fight_fighters(&state, &required) {
+            Err(EffectError::MissingParam(msg)) => {
+                assert_eq!(msg, "Fight target");
+            }
+            other => panic!("required empty fight must be MissingParam, got {other:?}"),
+        }
     }
 
     #[test]
