@@ -1422,7 +1422,16 @@
       "subtitleUpTo_other": "Selecione até {{count}} cartas para colocar {{destination}}",
       "destinationTop": "no topo de seu grimório",
       "destinationBattlefield": "no campo de batalha",
-      "destinationHand": "em sua mão"
+      "destinationHand": "em sua mão",
+      "titleSplit": "Dividir as Cartas Restantes",
+      "subtitleSplit_one": "Organize as cartas: {{count}} vai para o topo de seu grimório; as outras {{remaining}} vão para o fundo",
+      "subtitleSplit_other": "Organize as cartas: {{count}} vão para o topo de seu grimório; as outras {{remaining}} vão para o fundo",
+      "badgeTop": "Topo {{order}}",
+      "badgeBottom": "Fundo",
+      "hintSplit": "Arraste para reordenar · as verdes vão para o topo (a primeira no topo), as cinzas para o fundo",
+      "moveEarlier": "Mover {{card}} para antes",
+      "moveLater": "Mover {{card}} para depois",
+      "hintSplitOrderOnly": "Arraste ou use as setas para reordenar dentro de cada pilha · outro jogador escolheu quais cartas vão para o topo"
     },
     "surveil": {
       "title": "Vigiar",

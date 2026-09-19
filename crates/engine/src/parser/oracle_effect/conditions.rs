@@ -4817,6 +4817,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         player: prev_player,
         count: prev_count,
         rest_destination: prev_rest,
+        rest_split_top_count: prev_rest_split_top_count,
         rest_order: prev_rest_order,
         reveal: prev_reveal,
         ..
@@ -4895,6 +4896,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         filter: alt_filter,
         destination: alt_destination,
         rest_destination: alt_rest,
+        rest_split_top_count: alt_rest_split_top_count,
         rest_order: alt_rest_order,
         enter_tapped: alt_enter_tapped,
         enters_attacking: alt_enters_attacking,
@@ -4933,6 +4935,35 @@ pub(crate) fn try_parse_dig_instead_alternative(
         up_to: alt_up_to,
         filter: alt_filter,
         rest_destination: alt_rest.or(*prev_rest),
+        // CR 608.2c ("read the whole text and apply the rules of English"):
+        // the remainder instruction is inherited ONLY when the alternative is
+        // silent about the remainder. Precedence mirrors `alt_rest` /
+        // `alt_rest_order` directly above and below:
+        //
+        //   1. the alternative named its own split      -> use it;
+        //   2. the alternative named a UNIFORM remainder
+        //      destination ("...put the rest on the bottom
+        //      of your library") -> `None`. An explicit
+        //      one-position instruction is not merely a
+        //      different destination, it positively says
+        //      "all of it goes to one place", which
+        //      overrides the base branch's split instead
+        //      of being contaminated by it;
+        //   3. the alternative said nothing about the
+        //      remainder             -> inherit the base branch's split,
+        //                               exactly as `prev_rest` and
+        //                               `prev_reveal` are inherited.
+        //
+        // Before this precedence existed, case 2 kept the base's split and the
+        // alternative branch tried to partition a remainder its own text had
+        // already sent uniformly to one position.
+        rest_split_top_count: alt_rest_split_top_count.map(|boxed| *boxed).or_else(|| {
+            if alt_rest.is_some() {
+                None
+            } else {
+                prev_rest_split_top_count.clone()
+            }
+        }),
         rest_order: alt_rest.map_or(*prev_rest_order, |_| alt_rest_order),
         reveal: *prev_reveal,
         enter_tapped: alt_enter_tapped,

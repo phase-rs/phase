@@ -1422,7 +1422,16 @@
       "subtitleUpTo_other": "Seleziona fino a {{count}} carte da mettere {{destination}}",
       "destinationTop": "in cima al tuo grimorio",
       "destinationBattlefield": "sul campo di battaglia",
-      "destinationHand": "nella tua mano"
+      "destinationHand": "nella tua mano",
+      "titleSplit": "Dividi le carte rimanenti",
+      "subtitleSplit_one": "Disponi le carte: {{count}} va in cima al tuo grimorio, le altre {{remaining}} vanno in fondo",
+      "subtitleSplit_other": "Disponi le carte: {{count}} vanno in cima al tuo grimorio, le altre {{remaining}} vanno in fondo",
+      "badgeTop": "Cima {{order}}",
+      "badgeBottom": "Fondo",
+      "hintSplit": "Trascina per riordinare · le verdi vanno in cima (la prima è la più alta), le grigie in fondo",
+      "moveEarlier": "Sposta {{card}} prima",
+      "moveLater": "Sposta {{card}} dopo",
+      "hintSplitOrderOnly": "Trascina o usa le frecce per riordinare all’interno di ogni pila · un altro giocatore ha scelto quali carte vanno in cima"
     },
     "surveil": {
       "title": "Sorvegliare",

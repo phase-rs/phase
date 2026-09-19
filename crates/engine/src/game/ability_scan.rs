@@ -843,6 +843,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             enters_attacking: _,
             source: _,
             keep_count_expr,
+            rest_split_top_count,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(player, target_ctx, mode));
@@ -852,6 +853,11 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             // detector exactly like `count`. Classify it identically, not `_`.
             if let Some(kce) = keep_count_expr {
                 acc = acc.or(scan_quantity_expr(kce, mode));
+            }
+            // CR 401.2 + CR 701.20e: a dynamic remainder-split size is the same
+            // class of projected-resource read as the dynamic keep count.
+            if let Some(split) = rest_split_top_count {
+                acc = acc.or(scan_quantity_expr(split, mode));
             }
             acc = acc.or(scan_target_filter(filter, target_ctx, mode));
             acc

@@ -1241,6 +1241,7 @@ mod tchaka_venerable_king;
 mod teamwork_aggregate_legal_actions;
 mod teamwork_origin_composition;
 mod teferi_time_raveler_sorcery_speed_lock;
+mod telling_time_rest_split;
 mod tempt_with_discovery;
 mod termination_facilitator_bounty_damage_8379;
 mod terra_herald_optional_prompt;

@@ -757,9 +757,21 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // `WaitingFor::acting_authority` as `ActingAuthority::One(player)`. Not
     // actorless: the prompt cannot advance without that player's
     // `GameAction::SelectDieRolls`.
-    if declared.len() != 136 {
+    // 136 -> 137 is adjudicated: the CR 401.2 Telling Time-class remainder
+    // split ("...one on top of your library, and one on the bottom of your
+    // library") added `DigRestSplitChoice`. It names one acting `player` and is
+    // classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. WHICH player that is depends on the
+    // variant's `scope`: the partition belongs to the looking player
+    // (CR 608.2d + CR 701.20e — the remainder was shown only to them), while
+    // the arrangement of a 2+ card pile belongs to the LIBRARY'S OWNER
+    // (CR 401.4), who may be a different player for a dig of another player's
+    // library. Either way exactly one player acts, so the classification is
+    // unchanged. Not actorless: the prompt cannot advance without that
+    // player's `GameAction::SelectCards`.
+    if declared.len() != 137 {
         failures.push(format!(
-            "PIN declared.len()={} != 136.\n\
+            "PIN declared.len()={} != 137.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\

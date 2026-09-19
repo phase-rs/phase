@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { motion, Reorder } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
@@ -20,6 +20,7 @@ type ArrangePlanarDeckTopChoice = Extract<
 type CoinFlipKeepChoice = Extract<WaitingFor, { type: "CoinFlipKeepChoice" }>;
 type DieKeepChoice = Extract<WaitingFor, { type: "DieKeepChoice" }>;
 type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
+type DigRestSplitChoice = Extract<WaitingFor, { type: "DigRestSplitChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
 type RippleBottomOrder = Extract<WaitingFor, { type: "RippleBottomOrder" }>;
@@ -544,6 +545,185 @@ export function DigModal({ data }: { data: DigChoice["data"] }) {
           );
         })}
       </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+/**
+ * CR 401.2 + CR 401.4 + CR 608.2d + CR 701.20e: the second stage of a Telling
+ * Time-class dig. The remainder pile is fixed and every card in it is going
+ * back into the SAME library; what the player decides is the whole
+ * arrangement. The submitted payload is a full permutation of `data.cards`:
+ * its leading `top_count` entries go on top (topmost first) and the rest go to
+ * the bottom, each pile in the submitted order.
+ *
+ * Drag-to-order rather than tap-to-select, mirroring `RippleBottomOrderModal`
+ * above, because one gesture has to express both decisions CR asks for here:
+ * which cards take which position (CR 608.2d) and how the 2+ cards landing in
+ * a single position are arranged (CR 401.4). A degenerate `top_count` of 0 or
+ * `cards.length` is a normal, expected prompt — the partition is forced but
+ * the order still isn't.
+ *
+ * Drag is not the ONLY way to reorder: each card carries focusable
+ * move-earlier / move-later buttons (also driven by Left/Right arrow keys
+ * while a card's row has focus), so a keyboard-only player can reach every
+ * arrangement — including moving a card across the top/bottom boundary to pick
+ * a different partition — without a pointer.
+ *
+ * `data.scope` narrows what the controls may express: an `order_only` prompt
+ * belongs to the library's OWNER, whose CR 401.4 choice is the order WITHIN
+ * each already-settled pile, so moves that would cross the boundary are
+ * disabled rather than submitted and rejected. The engine is still the
+ * authority — this only keeps the UI from offering an illegal action.
+ *
+ * No game logic here: `cards`, `top_count`, `bottom_count` and `scope` are
+ * exactly what the engine resolved and parked, the split point is rendered
+ * from the engine-supplied `top_count`, and nothing about the outcome is
+ * computed client-side.
+ *
+ * Selection state is seeded from `data.cards` at mount. `CardChoiceModal`
+ * passes a prompt-identity `key` derived from the pile so React REMOUNTS this
+ * component between two consecutive split prompts; without it a second prompt
+ * would re-render with new props while holding the first prompt's stale ids,
+ * leaving Confirm enabled with a payload the engine then rejects.
+ */
+export function DigRestSplitModal({ data }: { data: DigRestSplitChoice["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const scrollRef = useHorizontalScroll<HTMLDivElement>({ drag: false });
+  const [order, setOrder] = useState<ObjectId[]>(data.cards);
+
+  const handleConfirm = useCallback(() => {
+    dispatch({ type: "SelectCards", data: { cards: order } });
+  }, [dispatch, order]);
+
+  // CR 401.4: an `order_only` prompt may reorder within a pile but must not
+  // move a card across the top/bottom boundary — that partition belongs to
+  // another player and is already spent.
+  const boundaryIsLocked = data.scope === "order_only";
+  const canMove = useCallback(
+    (from: number, to: number) => {
+      if (to < 0 || to >= order.length) return false;
+      if (!boundaryIsLocked) return true;
+      return from < data.top_count === to < data.top_count;
+    },
+    [boundaryIsLocked, data.top_count, order.length],
+  );
+  const move = useCallback(
+    (from: number, to: number) => {
+      if (!canMove(from, to)) return;
+      setOrder((current) => {
+        const next = [...current];
+        const [card] = next.splice(from, 1);
+        next.splice(to, 0, card);
+        return next;
+      });
+    },
+    [canMove],
+  );
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title={t("cardChoice.dig.titleSplit")}
+      subtitle={t("cardChoice.dig.subtitleSplit", {
+        count: data.top_count,
+        remaining: data.bottom_count,
+      })}
+      maxWidthClassName="max-w-[38rem] sm:max-w-[48rem] lg:max-w-[58rem]"
+      footer={<ConfirmButton onClick={handleConfirm} />}
+    >
+      <div ref={scrollRef} className="flex min-h-0 flex-1 overflow-x-auto">
+        <Reorder.Group
+          as="div"
+          axis="x"
+          values={order}
+          onReorder={setOrder}
+          layoutScroll
+          className="mx-auto flex w-max items-center gap-2 px-1 py-2 lg:gap-3"
+        >
+          {order.map((id, index) => {
+            const obj = objects[id];
+            if (!obj) return null;
+            const goesOnTop = index < data.top_count;
+            const cardName = obj.name;
+            return (
+              <Reorder.Item
+                key={id}
+                as="div"
+                value={id}
+                className="relative flex shrink-0 cursor-grab flex-col items-center gap-2 active:cursor-grabbing"
+                whileDrag={{ scale: 1.05, zIndex: 20 }}
+                // Keyboard parity with drag: arrow keys move the focused card
+                // one slot earlier/later, which is what changes BOTH the
+                // partition (when the move crosses the `top_count` boundary)
+                // and the within-pile order.
+                onKeyDown={(event: ReactKeyboardEvent) => {
+                  if (event.key === "ArrowLeft") {
+                    event.preventDefault();
+                    move(index, index - 1);
+                  } else if (event.key === "ArrowRight") {
+                    event.preventDefault();
+                    move(index, index + 1);
+                  }
+                }}
+              >
+                <div
+                  className={`relative rounded-lg ring-2 transition ${
+                    goesOnTop ? "ring-emerald-400/80" : "ring-slate-400/60"
+                  }`}
+                  {...hoverProps(id)}
+                >
+                  <CardImage
+                    {...objectImageProps(obj)}
+                    size="normal"
+                    className={CHOICE_CARD_IMAGE_CLASS}
+                  />
+                  <div className="absolute inset-x-0 bottom-1 flex justify-center">
+                    <span
+                      className={`rounded-full px-3 py-1 text-xs font-bold text-white ${
+                        goesOnTop ? "bg-emerald-500/90" : "bg-slate-600/90"
+                      }`}
+                    >
+                      {goesOnTop
+                        ? t("cardChoice.dig.badgeTop", { order: index + 1 })
+                        : t("cardChoice.dig.badgeBottom")}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    aria-label={t("cardChoice.dig.moveEarlier", { card: cardName })}
+                    disabled={!canMove(index, index - 1)}
+                    onClick={() => move(index, index - 1)}
+                    className="rounded bg-slate-700/80 px-2 py-1 text-xs font-bold text-white transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-30"
+                  >
+                    {"←"}
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={t("cardChoice.dig.moveLater", { card: cardName })}
+                    disabled={!canMove(index, index + 1)}
+                    onClick={() => move(index, index + 1)}
+                    className="rounded bg-slate-700/80 px-2 py-1 text-xs font-bold text-white transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-30"
+                  >
+                    {"→"}
+                  </button>
+                </div>
+              </Reorder.Item>
+            );
+          })}
+        </Reorder.Group>
+      </div>
+      <p className="mt-1 shrink-0 text-center text-xs text-slate-400">
+        {boundaryIsLocked
+          ? t("cardChoice.dig.hintSplitOrderOnly")
+          : t("cardChoice.dig.hintSplit")}
+      </p>
     </ChoiceOverlay>
   );
 }

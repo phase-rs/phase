@@ -111,6 +111,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::CoinFlipKeepChoice { .. }
         | WaitingFor::DieKeepChoice { .. }
         | WaitingFor::DigChoice { .. }
+        | WaitingFor::DigRestSplitChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::SearchChoice { .. }
@@ -648,17 +649,23 @@ pub(crate) fn identity_projection_for_viewer(
             (HashSet::new(), HashSet::new())
         };
 
-    let dig_visible: HashSet<ObjectId> = if let WaitingFor::DigChoice {
-        player, ref cards, ..
-    } = state.waiting_for
-    {
-        if can_view_private_for_player(player) {
-            cards.iter().copied().collect()
-        } else {
-            HashSet::new()
+    // CR 701.20e: the looked-at pile is shown only to the looking player, and
+    // that stays true for the follow-up split prompt — the remainder is still
+    // in the library and still known only to them (CR 701.20b).
+    let dig_visible: HashSet<ObjectId> = match state.waiting_for {
+        WaitingFor::DigChoice {
+            player, ref cards, ..
         }
-    } else {
-        HashSet::new()
+        | WaitingFor::DigRestSplitChoice {
+            player, ref cards, ..
+        } => {
+            if can_view_private_for_player(player) {
+                cards.iter().copied().collect()
+            } else {
+                HashSet::new()
+            }
+        }
+        _ => HashSet::new(),
     };
 
     // CR 701.22a: Scry instructs the player to look at the top N cards of
@@ -1563,6 +1570,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         ref selectable_cards,
         kept_destination,
         rest_destination,
+        rest_split_top_count,
         rest_order,
         source_id,
         enter_tapped,
@@ -1579,12 +1587,54 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 selectable_cards: selectable_cards.iter().map(|_| ObjectId(0)).collect(),
                 kept_destination,
                 rest_destination,
+                // The split SIZE is public (it is printed on the card); only
+                // the identities of the cards are private, and those are
+                // blanked above.
+                rest_split_top_count,
                 rest_order,
                 source_id,
                 enter_tapped,
                 enters_attacking,
             };
         }
+    }
+
+    // CR 701.20e + CR 701.20b: the remainder being split is still face down in
+    // the library and was shown only to the splitting player, so every other
+    // viewer sees a pile of the right SIZE with no identities. The carried
+    // `completion` is engine-internal bookkeeping (it holds the dig's deferred
+    // tail, including the same private object ids) and is stripped for EVERY
+    // viewer, the splitting player included — no client has any use for it.
+    if let WaitingFor::DigRestSplitChoice {
+        player,
+        library_owner,
+        ref cards,
+        top_count,
+        bottom_count: _,
+        scope,
+        source_id,
+        completion: _,
+    } = state.waiting_for
+    {
+        // `player` is the prompt's acting authority in every scope (the chooser
+        // for a partition prompt, the library's owner for a CR 401.4
+        // arrangement prompt), so it is also the one viewer who must be able to
+        // tell the pile's cards apart in order to answer. Re-derived through
+        // the constructor so `bottom_count` cannot drift from the redacted
+        // `cards` list.
+        filtered.waiting_for = WaitingFor::new_dig_rest_split(
+            player,
+            library_owner,
+            if can_view_private_for_player(player) {
+                cards.clone()
+            } else {
+                cards.iter().map(|_| ObjectId(0)).collect()
+            },
+            top_count,
+            scope,
+            source_id,
+            None,
+        );
     }
 
     if let WaitingFor::ScryChoice {

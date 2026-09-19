@@ -1422,7 +1422,16 @@
       "subtitleUpTo_other": "Sélectionnez jusqu'à {{count}} cartes à placer {{destination}}",
       "destinationTop": "au-dessus de votre bibliothèque",
       "destinationBattlefield": "sur le champ de bataille",
-      "destinationHand": "dans votre main"
+      "destinationHand": "dans votre main",
+      "titleSplit": "Répartir les cartes restantes",
+      "subtitleSplit_one": "Organisez les cartes : {{count}} ira sur le dessus de votre bibliothèque, les {{remaining}} autres iront dessous",
+      "subtitleSplit_other": "Organisez les cartes : {{count}} iront sur le dessus de votre bibliothèque, les {{remaining}} autres iront dessous",
+      "badgeTop": "Dessus {{order}}",
+      "badgeBottom": "Dessous",
+      "hintSplit": "Glissez pour réorganiser · les vertes vont dessus (la première tout en haut), les grises dessous",
+      "moveEarlier": "Déplacer {{card}} vers l’avant",
+      "moveLater": "Déplacer {{card}} vers l’arrière",
+      "hintSplitOrderOnly": "Glissez ou utilisez les flèches pour réorganiser dans chaque pile · un autre joueur a choisi les cartes qui vont dessus"
     },
     "surveil": {
       "title": "Surveillance",

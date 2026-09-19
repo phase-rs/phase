@@ -10107,6 +10107,12 @@ fn apply_action(
         WaitingFor::RevealChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::DigChoice { .. }
+            // CR 701.20a + CR 608.2c: a revealed card "remains revealed for as
+            // long as necessary to complete the parts of the effect that card
+            // is relevant to", and a reveal-dig's remainder split is a later
+            // pause in the SAME instruction — so its cards stay public across
+            // it exactly as they do across the keep selection above.
+            | WaitingFor::DigRestSplitChoice { .. }
             // CR 700.3 + CR 701.20a: Fact or Fiction reveals persist through
             // both the opponent's partition step and the controller's pile
             // choice — the cards remain public while both players interact.

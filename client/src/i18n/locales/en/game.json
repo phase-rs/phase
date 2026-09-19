@@ -1460,7 +1460,16 @@
       "subtitleUpTo_other": "Select up to {{count}} cards to put {{destination}}",
       "destinationTop": "on top of your library",
       "destinationBattlefield": "onto the battlefield",
-      "destinationHand": "into your hand"
+      "destinationHand": "into your hand",
+      "titleSplit": "Split the Remaining Cards",
+      "subtitleSplit_one": "Arrange {{count}} card for the top of your library; the other {{remaining}} go on the bottom",
+      "subtitleSplit_other": "Arrange these cards: {{count}} go on top of your library, the other {{remaining}} go on the bottom",
+      "badgeTop": "Top {{order}}",
+      "badgeBottom": "Bottom",
+      "hintSplit": "Drag to reorder · green cards go on top (leftmost is topmost), grey cards go on the bottom",
+      "moveEarlier": "Move {{card}} earlier",
+      "moveLater": "Move {{card}} later",
+      "hintSplitOrderOnly": "Drag or use the arrow buttons to reorder within each pile · another player chose which cards go on top"
     },
     "surveil": {
       "title": "Surveil",

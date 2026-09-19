@@ -25703,6 +25703,7 @@ fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_split_top_count: None,
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
@@ -27172,6 +27173,7 @@ fn dig_put_those_cards_on_top_in_any_order() {
             destination: Some(Zone::Library),
             keep_count: None,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             reveal: false,
             ..
         }
@@ -27202,6 +27204,7 @@ fn reveal_dig_put_those_cards_on_top_stays_dig() {
             destination: Some(Zone::Library),
             keep_count: None,
             rest_destination: Some(Zone::Library),
+            rest_split_top_count: None,
             reveal: true,
             ..
         }
