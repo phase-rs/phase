@@ -1969,6 +1969,7 @@ mod tests {
         controller: PlayerId,
     ) -> crate::types::game_state::PendingChangeZoneIteration {
         crate::types::game_state::PendingChangeZoneIteration {
+            forwarded_members: Vec::new(),
             logical_zone_change_group: group,
             paused_current,
             remaining,

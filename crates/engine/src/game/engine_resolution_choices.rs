@@ -5865,6 +5865,25 @@ pub(super) fn handle_resolution_choice(
                 if let Some(result) = result {
                     effects::stamp_active_player_action_completion(state, source_id, result);
                 }
+                // CR 608.2c + CR 400.7: a TERMINAL empty `up_to` selection is a
+                // COMPLETED producer that moved nothing, which the forwarded-result
+                // contract spells `Some([])` — NOT `None`. `None` means no producer
+                // ran at all, so a marked continuation left at `None` falls back to
+                // inherited targets and a following "that creature" rider names an
+                // object this selection never moved. Publish the completed-empty
+                // context and consume the marker here, because the resume below
+                // drains the continuation immediately (the non-empty path does the
+                // same thing further down, after its moves).
+                //
+                // Self-scoping: `mark_continuation_awaits_forwarded_result` sets the
+                // marker only for a `forward_result` producer paused on a
+                // `ChangeZone`/`BounceAll` zone choice, so every other effect kind
+                // finds no marker and this is a no-op.
+                let forwarded_empty =
+                    crate::types::ability::ForwardedResultContext::from_object_ids(state, &[]);
+                if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                    frame.publish_forwarded_producer_result(forwarded_empty);
+                }
                 set_priority(state, player);
                 resume_with_error_propagation(state, events)?;
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -6051,6 +6070,7 @@ pub(super) fn handle_resolution_choice(
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
                                 state.push_change_zone_iteration(
                                     crate::types::game_state::PendingChangeZoneIteration {
+                                        forwarded_members: Vec::new(),
                                         logical_zone_change_group,
                                         paused_current: anticipated_pause.map(|mut boundary| {
                                             boundary
@@ -6126,6 +6146,7 @@ pub(super) fn handle_resolution_choice(
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
                                 state.push_change_zone_iteration(
                                     crate::types::game_state::PendingChangeZoneIteration {
+                                        forwarded_members: Vec::new(),
                                         logical_zone_change_group,
                                         paused_current: Some(
                                             state
@@ -6534,6 +6555,7 @@ pub(super) fn handle_resolution_choice(
                                 .expect("paused cost-payment zone move retains its explicit delivery prefix");
                                 state.push_change_zone_iteration(
                                     crate::types::game_state::PendingChangeZoneIteration {
+                                        forwarded_members: Vec::new(),
                                         logical_zone_change_group,
                                         paused_current: anticipated_pause.map(|mut boundary| {
                                             boundary
@@ -6583,6 +6605,7 @@ pub(super) fn handle_resolution_choice(
                                 .expect("paused cost-payment zone move retains its explicit delivery prefix");
                                 state.push_change_zone_iteration(
                                     crate::types::game_state::PendingChangeZoneIteration {
+                                        forwarded_members: Vec::new(),
                                         logical_zone_change_group,
                                         paused_current: Some(
                                             state
@@ -6765,6 +6788,26 @@ pub(super) fn handle_resolution_choice(
                     _ => None,
                 })
                 .collect();
+
+            // CR 608.2c + CR 400.7: the synchronous chain forwards a
+            // `forward_result` producer's moved objects to the next instruction
+            // (`resolve_chain_body`). When that producer paused for this
+            // selection, its parked continuation was marked as awaiting the
+            // result; hand it exactly the objects this selection moved, so a
+            // later "that creature" (and the delayed trigger that snapshots it)
+            // names them rather than nothing (Sneak Attack, issue #6902). An
+            // unmarked continuation belongs to a non-forwarding producer and is
+            // left alone, so a declared target is never overridden.
+            let forwarded = crate::types::ability::ForwardedResultContext::from_object_ids(
+                state,
+                &state.last_zone_changed_ids,
+            );
+            // CR 608.2c: fill ONLY the frame that is awaiting this producer's
+            // result, and consume the marker so a later non-forwarding zone
+            // choice in the same resolution cannot overwrite it.
+            if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                frame.publish_forwarded_producer_result(forwarded);
+            }
 
             // Step B: resolve the reflexive `WhenYouDo` continuation (Grist's
             // `[-2]`). `waiting_for` is still `Priority` here, so
