@@ -312,6 +312,106 @@ fn promise_of_loyalty_keeper_cannot_attack_the_caster() {
         .expect("a creature with no vow counter attacks the same player freely");
 }
 
+/// V3's hostile fixture — CR 115.10a: "Just because an object or player is
+/// being affected by a spell or ability doesn't make that object or player a
+/// target of that spell or ability." Nothing in this card's text says "target",
+/// so a HEXPROOF creature is an ordinary member of its controller's keeper
+/// pool: it appears in the seat's eligible list, may be chosen, takes the vow
+/// counter, and carries the prohibition.
+///
+/// This is the property that rules `Effect::TargetOnly` out for this class. A
+/// targeted lowering could not reach a hexproof creature at all, so reverting
+/// the recognizer to one would leave this seat's hexproof creature un-marked —
+/// or refuse the choice outright.
+///
+/// Two paired positives keep the row non-vacuous: the caster's own seat is
+/// prompted and sacrifices its unchosen creature (so the instruction provably
+/// ran), and an unmarked bystander created AFTER resolution attacks the caster
+/// freely in the same window the hexproof keeper is refused.
+#[test]
+fn hexproof_creature_is_eligible_and_choosable_as_a_keeper() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let p0_keeper = scenario.add_creature(P0, "Caster Keeper", 2, 2).id();
+    let p0_doomed = scenario.add_creature(P0, "Caster Doomed", 2, 2).id();
+    // The opponent's pool is a hexproof creature and a plain one, so the seat
+    // has a real choice to make and can make the hexproof one.
+    let p1_hexproof = scenario
+        .add_creature(P1, "Warded Keeper", 2, 2)
+        .hexproof()
+        .id();
+    let p1_doomed = scenario.add_creature(P1, "Rival Doomed", 2, 2).id();
+    stock_libraries(&mut scenario, &[P0, P1]);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Promise of Loyalty", false, PROMISE_OF_LOYALTY)
+        .id();
+
+    let mut runner = scenario.build();
+    drop(runner.cast(spell).resolve());
+    runner
+        .act(GameAction::ChooseKeptPermanents {
+            kept: vec![p0_keeper],
+        })
+        .expect("the caster keeps one creature");
+
+    // CR 115.10a: hexproof does not remove the creature from the choice pool.
+    let WaitingFor::KeepExactPermanentsChoice {
+        player, eligible, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the opponent must be prompted for its own keeper: {:?}",
+            runner.state().waiting_for
+        )
+    };
+    assert_eq!(player, P1);
+    assert!(
+        eligible.contains(&p1_hexproof),
+        "a hexproof creature is chosen, not targeted, so it must be eligible: {eligible:?}"
+    );
+    runner
+        .act(GameAction::ChooseKeptPermanents {
+            kept: vec![p1_hexproof],
+        })
+        .expect("the opponent may keep its hexproof creature");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&p1_hexproof].zone,
+        Zone::Battlefield,
+        "the hexproof keeper survives"
+    );
+    for sacrificed in [p0_doomed, p1_doomed] {
+        assert_eq!(
+            runner.state().objects[&sacrificed].zone,
+            Zone::Graveyard,
+            "CR 701.21a: the unchosen creatures are still sacrificed on both seats"
+        );
+    }
+    // CR 122.1: the counter reaches the hexproof keeper — the marking step does
+    // not target either.
+    assert_eq!(
+        vow_counters(&runner, p1_hexproof),
+        1,
+        "the hexproof keeper must be marked like any other"
+    );
+
+    // CR 508.1c: and it carries the prohibition, with the paired positive in
+    // the same declare-attackers window.
+    let bystander = spawn_creature(runner.state_mut(), P1, "Unmarked Bystander");
+    advance_to_declare_attackers_for(&mut runner, P1);
+    assert!(
+        runner
+            .declare_attackers(&[(p1_hexproof, AttackTarget::Player(P0))])
+            .is_err(),
+        "the hexproof keeper is bound by the prohibition it received"
+    );
+    runner
+        .declare_attackers(&[(bystander, AttackTarget::Player(P0))])
+        .expect("a creature with no vow counter attacks the same player freely");
+}
+
 /// V4 — CR 611.2b: the duration is re-evaluated, so removing the last vow
 /// counter lifts the restriction; removing one of two does not.
 #[test]
@@ -548,6 +648,92 @@ fn razias_purification_sacrifices_the_unchosen_not_the_keeper() {
             "the UNCHOSEN permanents are the ones sacrificed"
         );
     }
+}
+
+/// V7's hostile fixture — CR 609.3: "If an effect attempts to do something
+/// impossible, it does only as much as possible." A seat that controls FEWER
+/// permanents than the printed count keeps every one of them and sacrifices
+/// nothing, and is never prompted — `step_exact_count`'s
+/// `eligible.len() <= count` auto-keep arm.
+///
+/// `promise_of_loyalty_auto_keeps_a_seat_that_cannot_choose` reaches the same
+/// arm only at the degenerate count of one, where "fewer than the count" and
+/// "nothing to choose between" are the same board. Razia's printed three
+/// separates them: this seat's two permanents are a genuine multi-permanent
+/// pool that still cannot satisfy the instruction.
+///
+/// Positive reach-guard in the same game: the caster's four-permanent seat IS
+/// prompted for the printed three and does lose its unchosen permanent, so the
+/// clamped seat's survival is not the spell failing to resolve.
+#[test]
+fn razias_purification_clamps_a_seat_with_fewer_permanents_than_the_count() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // The caster can satisfy the printed three and has one to spare.
+    let caster_pool: Vec<ObjectId> = (0..4)
+        .map(|i| scenario.add_creature(P0, &format!("Caster {i}"), 1, 1).id())
+        .collect();
+    // The opponent controls two permanents — more than one, fewer than three.
+    let clamped_pool: Vec<ObjectId> = (0..2)
+        .map(|i| {
+            scenario
+                .add_creature(P1, &format!("Clamped {i}"), 1, 1)
+                .id()
+        })
+        .collect();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Razia's Purification", false, RAZIAS_PURIFICATION)
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).resolve();
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::KeepExactPermanentsChoice {
+                player: P0,
+                required_count: 3,
+                ..
+            }
+        ),
+        "the seat that CAN satisfy the printed three must be prompted for three: {:?}",
+        outcome.final_waiting_for()
+    );
+    drop(outcome);
+    runner
+        .act(GameAction::ChooseKeptPermanents {
+            kept: caster_pool[..3].to_vec(),
+        })
+        .expect("the caster keeps exactly three permanents");
+
+    // CR 609.3: the short seat is never asked — there is no choice to make, and
+    // asking would demand a three-permanent answer it cannot give.
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::KeepExactPermanentsChoice { .. }
+        ),
+        "the seat with fewer permanents than the count must not be prompted: {:?}",
+        runner.state().waiting_for
+    );
+    runner.advance_until_stack_empty();
+
+    for kept in &clamped_pool {
+        assert_eq!(
+            runner.state().objects[kept].zone,
+            Zone::Battlefield,
+            "CR 609.3: both of the short seat's permanents are kept"
+        );
+    }
+    for kept in &caster_pool[..3] {
+        assert_eq!(runner.state().objects[kept].zone, Zone::Battlefield);
+    }
+    assert_eq!(
+        runner.state().objects[&caster_pool[3]].zone,
+        Zone::Graveyard,
+        "the instruction provably ran: the caster's unchosen permanent is sacrificed"
+    );
 }
 
 /// V7's sibling on the Or-domain: Single Combat's keeper may be a creature OR a

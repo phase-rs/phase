@@ -30981,16 +30981,24 @@ fn promise_of_loyalty_routes_to_the_effect_chain_not_a_whole_line_static() {
 /// `jq -c '.["covetous elegy"] | {ab:(.abilities|length),
 /// st:((.static_abilities//[])|length), e0:.abilities[0].effect.type}'
 /// client/public/card-data.json`.
+///
+/// Both Oracle strings are the FULL printed text, verbatim from
+/// `jq -r '.["divine reckoning"].oracle_text' client/public/card-data.json` —
+/// including Divine Reckoning's flashback line, which is why that row passes
+/// the MTGJSON keyword name the card-data pipeline passes at
+/// `database/synthesis.rs`'s `parse_oracle_text` call.
 #[test]
 fn gate_refused_keeper_cards_keep_their_base_routing() {
-    for (name, oracle) in [
+    for (name, oracle, keyword_names) in [
         (
             "Covetous Elegy",
             "Each player chooses up to two creatures they control, then sacrifices the rest. Then you create a tapped Treasure token for each creature your opponents control.",
+            &[][..],
         ),
         (
             "Divine Reckoning",
-            "Each player chooses a creature they control. Destroy the rest.",
+            "Each player chooses a creature they control. Destroy the rest.\nFlashback {5}{W}{W} (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+            &["Flashback".to_string()][..],
         ),
     ] {
         assert!(
@@ -30999,7 +31007,7 @@ fn gate_refused_keeper_cards_keep_their_base_routing() {
             ),
             "{name} must not be deferred by the keeper-dispose arm"
         );
-        let parsed = parse_oracle_text(oracle, name, &[], &["Sorcery".to_string()], &[]);
+        let parsed = parse_oracle_text(oracle, name, keyword_names, &["Sorcery".to_string()], &[]);
         assert!(parsed.statics.is_empty(), "{name}: {:?}", parsed.statics);
         assert_eq!(parsed.abilities.len(), 1, "{name}");
         assert!(

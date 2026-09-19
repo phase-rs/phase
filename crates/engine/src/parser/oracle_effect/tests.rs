@@ -70075,6 +70075,76 @@ fn keeper_dispose_head_requires_an_adjacent_disposal_tail() {
     .is_some());
 }
 
+/// N4' — the control-clause production, which is recognized for its POSITION
+/// and carries no payload. Three claims, each with its own mutation:
+///
+/// 1. Both admitted spellings and the clause's ABSENCE reach the same head —
+///    every field but the keeper span is identical. Deleting the production
+///    reddens the two spelling rows (the connector then faces
+///    `" they control, then "`); making it mandatory reddens the absence row.
+/// 2. The clause lives INSIDE the keeper span, so `keeper_end` moves with it.
+///    That is the only thing the lowering reads it for.
+/// 3. An unmodelled possessive between the domain and the connector declines,
+///    which is the adjacency N4 asserts for the interposed-clause case.
+#[test]
+fn keeper_dispose_head_recognizes_the_control_clause_positionally() {
+    // Razia's Purification's printed " they control".
+    const PRINTED: &str =
+        "each player chooses three permanents they control, then sacrifices the rest.";
+    // Synthetic: no printed card pairs " that player controls" with a
+    // `" the rest"` tail — `jq -r 'to_entries[] | select(.value.oracle_text
+    // != null) | select(.value.oracle_text | test("that player controls, then
+    // sacrific"; "i")) | .key' client/public/card-data.json` returns nothing,
+    // while the same query for "they control, then sacrifices the rest" returns
+    // ten cards. It is a real Oracle spelling of the same clause elsewhere
+    // (Ashling, the Extinguisher), admitted here for the class.
+    const ALTERNATE_SPELLING: &str =
+        "each player chooses three permanents that player controls, then sacrifices the rest.";
+    // Synthetic: no printed card in this class omits the clause. It is accepted
+    // because the seat is enforced at resolution, not by this phrase —
+    // `choose_and_sacrifice_rest.rs::compute_eligible_creatures` filters on
+    // `obj.controller == player`.
+    const NO_CLAUSE: &str = "each player chooses three permanents, then sacrifices the rest.";
+
+    let printed = keeper_head(PRINTED).expect("the printed control clause parses");
+    let alternate = keeper_head(ALTERNATE_SPELLING).expect("the alternate spelling parses");
+    let absent = keeper_head(NO_CLAUSE).expect("the control clause is optional");
+
+    for (label, other) in [("alternate spelling", &alternate), ("no clause", &absent)] {
+        assert_eq!(other.scope, printed.scope, "{label}");
+        assert_eq!(other.head, printed.head, "{label}");
+        assert_eq!(other.quantifier, printed.quantifier, "{label}");
+        assert_eq!(other.filter, printed.filter, "{label}");
+        assert_eq!(other.verb, printed.verb, "{label}");
+        assert_eq!(other.connector, printed.connector, "{label}");
+        assert_eq!(other.remainder_len, printed.remainder_len, "{label}");
+    }
+
+    // The clause is part of the keeper phrase, so the span the lowering hands
+    // to the clause builder covers it.
+    assert_eq!(
+        printed.keeper_end,
+        "each player chooses three permanents they control".len()
+    );
+    assert_eq!(
+        alternate.keeper_end,
+        "each player chooses three permanents that player controls".len()
+    );
+    assert_eq!(
+        absent.keeper_end,
+        "each player chooses three permanents".len()
+    );
+
+    // Synthetic: an unmodelled possessive is not skipped over to reach the
+    // tail. The paired positive is `printed` above — the same sentence with a
+    // modelled possessive.
+    assert!(
+        keeper_head("each player chooses three permanents they own, then sacrifices the rest.")
+            .is_none(),
+        "an unmodelled possessive must break the disposal adjacency"
+    );
+}
+
 /// N5 — the `" the rest"` tag. Urza's Sylex disposes of a COMPLEMENT domain
 /// ("all other permanents"), which is not the keeper domain's complement the
 /// lowering builds. Paired positive: Divine Reckoning reaches `" the rest"` and

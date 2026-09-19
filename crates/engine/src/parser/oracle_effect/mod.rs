@@ -15785,18 +15785,6 @@ enum KeeperDisposalVerb {
     Sacrifice,
 }
 
-/// The control-clause axis. Deliberately NOT read by
-/// `oracle_nom::target::parse_controller_suffix`, which is the authority for
-/// `ControllerRef`-valued suffixes and accepts neither of these spellings: this
-/// axis selects a per-player iteration scope and leaves the emitted filter's
-/// `controller` unset, so the instruction scopes per nominating player rather
-/// than binding to the spell's controller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeeperControlScope {
-    TheyControl,
-    ThatPlayerControls,
-}
-
 /// The printed separator between the keeper phrase and the disposal tail.
 /// CR 608.2c: a sentence separator makes the disposal the next printed
 /// instruction; `", then "` and `" and "` keep it a step of the same one.
@@ -15909,18 +15897,24 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
 
     let (rest, filter) = nom_target::parse_type_phrase(rest)?;
 
-    // Parsed for its position, not its payload: the lowering leaves the keeper
-    // filter's `controller` unset either way and carries the seat on the
-    // clause's player scope instead (see `KeeperControlScope`). What this
-    // production contributes is the ADJACENCY the disposal tail must follow.
-    let (rest, _control) = opt(alt((
-        value(KeeperControlScope::TheyControl, tag(" they control")),
-        value(
-            KeeperControlScope::ThatPlayerControls,
-            tag(" that player controls"),
-        ),
-    )))
-    .parse(rest)?;
+    // Recognized for its POSITION, not for a payload — which is why this
+    // production is a bare `alt` and carries no typed value. Nothing downstream
+    // could read one: both lowerings leave the emitted keeper filter's
+    // `controller` unset and carry the seat on the clause's player scope
+    // instead, and the per-seat eligibility is enforced at resolution by
+    // `choose_and_sacrifice_rest.rs::compute_eligible_creatures`, whose
+    // `obj.controller == player` test scopes each seat's choice to its own
+    // permanents whether or not the line prints this clause. The spellings are
+    // deliberately NOT routed through `nom_target::parse_controller_suffix` —
+    // that is the authority for `ControllerRef`-valued suffixes and accepts
+    // neither of them, and binding one here would bind the domain to the
+    // SPELL's controller rather than to each nominating seat.
+    //
+    // What this production does contribute is the ADJACENCY the disposal tail
+    // must follow: `keeper_dispose_head_recognizes_the_control_clause_positionally`
+    // pins that both spellings and their absence parse, and that an unmodelled
+    // possessive between the domain and the connector declines.
+    let (rest, _) = opt(alt((tag(" they control"), tag(" that player controls")))).parse(rest)?;
     let keeper_end = offset(rest);
 
     let (rest, connector) = alt((
@@ -16057,9 +16051,10 @@ pub(crate) fn is_keeper_dispose_head(lower: &str) -> bool {
 /// counter on a creature they control and sacrifices the rest"), while this
 /// lowering sacrifices first and places counters second. The reordering is
 /// unobservable: the keeper is never in the sacrificed set under either order,
-/// no counter is read while the sacrifice happens, and CR 603.3b holds every
-/// triggered ability off the stack until the spell finishes resolving, so no
-/// observer sits between the two steps.
+/// no counter is read while the sacrifice happens, and CR 603.3 puts a
+/// triggered ability on the stack only "the next time a player would receive
+/// priority" — which CR 117.3b places after this spell has finished resolving —
+/// so no observer sits between the two steps.
 fn parse_keeper_dispose_rest_ir(
     text: &str,
     kind: AbilityKind,
