@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-09-18T00:00:00Z",
+  "updated": "2026-09-19T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -848,44 +848,8 @@
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 2,
-          "name": "Inti, Seneschal of the Sun"
-        },
-        {
-          "count": 3,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 2,
-          "name": "Erode"
-        },
-        {
-          "count": 2,
-          "name": "Inspiring Vantage"
-        },
-        {
           "count": 4,
-          "name": "Iron-Shield Elf"
-        },
-        {
-          "count": 4,
-          "name": "Starting Town"
-        },
-        {
-          "count": 3,
-          "name": "Practiced Offense"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Moonshadow"
+          "name": "Bloodghast"
         },
         {
           "count": 4,
@@ -893,23 +857,63 @@
         },
         {
           "count": 4,
+          "name": "Iron-Shield Elf"
+        },
+        {
+          "count": 4,
           "name": "Marauding Mako"
         },
         {
           "count": 4,
-          "name": "Sacred Foundry"
+          "name": "Moonshadow"
+        },
+        {
+          "count": 2,
+          "name": "Erode"
+        },
+        {
+          "count": 4,
+          "name": "Practiced Offense"
         },
         {
           "count": 4,
           "name": "Cool but Rude"
         },
         {
-          "count": 2,
-          "name": "Requiting Hex"
+          "count": 4,
+          "name": "Blood Crypt"
         },
         {
           "count": 4,
-          "name": "Bloodghast"
+          "name": "Starting Town"
+        },
+        {
+          "count": 3,
+          "name": "Godless Shrine"
+        },
+        {
+          "count": 3,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 2,
+          "name": "Blazemire Verge"
+        },
+        {
+          "count": 2,
+          "name": "Concealed Courtyard"
+        },
+        {
+          "count": 2,
+          "name": "Inspiring Vantage"
+        },
+        {
+          "count": 2,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Casey Jones, Vigilante"
         },
         {
           "count": 1,
@@ -917,53 +921,57 @@
         },
         {
           "count": 2,
-          "name": "Tersa Lightshatter"
-        },
-        {
-          "count": 4,
-          "name": "Blood Crypt"
-        },
-        {
-          "count": 3,
-          "name": "Godless Shrine"
+          "name": "Burst Lightning"
         },
         {
           "count": 2,
-          "name": "Casey Jones, Vigilante"
+          "name": "Tersa Lightshatter"
+        },
+        {
+          "count": 1,
+          "name": "Inti, Seneschal of the Sun"
+        },
+        {
+          "count": 1,
+          "name": "Cecil, Dark Knight"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Requisition Raid"
-        },
-        {
-          "count": 1,
-          "name": "Deathmark"
-        },
-        {
-          "count": 3,
           "name": "Strategic Betrayal"
         },
         {
           "count": 1,
-          "name": "Slagstorm"
+          "name": "Pyrrhic Strike"
         },
         {
           "count": 2,
-          "name": "Duress"
+          "name": "Seam Rip"
+        },
+        {
+          "count": 2,
+          "name": "Requiting Hex"
+        },
+        {
+          "count": 2,
+          "name": "The Queen of Dale"
+        },
+        {
+          "count": 2,
+          "name": "Voice of Victory"
         },
         {
           "count": 1,
-          "name": "Shoot the Sheriff"
+          "name": "Bilbo's Gambit"
+        },
+        {
+          "count": 1,
+          "name": "Erode"
         },
         {
           "count": 2,
-          "name": "Monument to Endurance"
-        },
-        {
-          "count": 3,
-          "name": "Voice of Victory"
+          "name": "Lorehold Charm"
         }
       ]
     },
