@@ -102,6 +102,29 @@ pub enum ZoneChoiceCandidateSource {
     Direct,
     /// Read only this resolution chain's active tracked set.
     Tracked,
+    /// Read only the objects this SAME ability's cost moved, filtered to the
+    /// declared zone(s).
+    ///
+    /// CR 601.2h + CR 602.2b: an activated ability's cost is paid while the
+    /// ability is activated, before it resolves; the engine records every object
+    /// a non-mana cost consumed on the resolving ability
+    /// (`ResolvedAbility::cost_paid_objects`). CR 400.7j: because that cost
+    /// moved those objects to a PUBLIC zone (exile), this same ability's effects
+    /// can find them. CR 608.2d: the resolution-time choice then picks from
+    /// exactly that set — "An opponent chooses one of the exiled cards" (Coin of
+    /// Fate) names the cards the cost exiled, not every card in exile and not a
+    /// tracked set some earlier clause published.
+    ///
+    /// CR 400.7: the recorded referents are matched by INCARNATION, not by
+    /// storage id alone. A cost-exiled card that leaves exile and returns is a
+    /// new object with no relation to the one the cost moved, so it is no longer
+    /// one of "the exiled cards" even though the engine reuses its `ObjectId`.
+    ///
+    /// Unlike [`Self::Legacy`], this source has NO fallback: candidates come from
+    /// `cost_paid_objects` alone, live-filtered to the requested zone(s), so a
+    /// cost-paid object that has since left that zone is simply not offered and an
+    /// unrelated object that happens to sit in the zone can never be.
+    CostPaidObjects,
 }
 
 impl ZoneChoiceCandidateSource {
@@ -31084,7 +31107,7 @@ pub struct ResolvedAbility {
     /// with no memory of this activation's payment).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub noted_mana_payment: Option<NotedManaPayment>,
-    /// CR 601.2h + CR 602.2b (issue #4948): EVERY object paid as
+    /// CR 601.2h + CR 602.2b + CR 400.7 (issue #4948): EVERY object paid as
     /// part of this resolving ability's own cost — unlike `cost_paid_object`
     /// above, not just the first. This engine pays non-self
     /// Sacrifice/Discard/Exile costs BEFORE choosing this SAME ability's own
@@ -31092,13 +31115,30 @@ pub struct ResolvedAbility {
     /// see issue #1301's `exclude_cost_paid_object_that_left_battlefield`),
     /// so any object that already left its zone to pay that cost was never
     /// actually a legal target under the real target-before-cost order — no
-    /// matter how many objects the cost consumed. Read only by
-    /// `exclude_cost_paid_object_that_left_battlefield`
-    /// (`game/ability_utils.rs`) to strip those ids from this ability's own
-    /// candidate lists; never a resolution-time referent (use
-    /// `cost_paid_object` for that).
+    /// matter how many objects the cost consumed.
+    ///
+    /// Stored as full [`CostPaidObjectSnapshot`]s rather than bare
+    /// [`ObjectId`]s because this collection serves BOTH consumers of the
+    /// payment record and one of them is identity-sensitive:
+    ///
+    /// * `exclude_cost_paid_object_that_left_battlefield`
+    ///   (`game/ability_utils.rs`) reads STORAGE identity only — an object
+    ///   that left the battlefield to pay this cost was never a legal target
+    ///   regardless of which incarnation now sits at that id.
+    /// * `ZoneChoiceCandidateSource::CostPaidObjects`
+    ///   (`game/effects/choose_from_zone.rs`) reads the LIVE object, so it
+    ///   must gate on [`CostPaidObjectSnapshot::is_current`]: CR 400.7 makes a
+    ///   cost-exiled card that left exile and came back a NEW object this
+    ///   reference must no longer name, and the engine reuses `ObjectId`
+    ///   across zone changes so the id alone cannot tell the two apart.
+    ///
+    /// ONE correctly-typed field rather than a second parallel `Vec<ObjectId>`
+    /// — two collections recording the same fact would be two sources of truth
+    /// that drift. The incarnation pins are kept honest across the cost's OWN
+    /// moves by `repin_cost_paid_object_recursive` (CR 608.2k), so only a
+    /// LATER zone change reads as stale.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cost_paid_object_ids: Vec<ObjectId>,
+    pub cost_paid_objects: Vec<CostPaidObjectSnapshot>,
     /// Public characteristics of an object chosen or moved by an earlier
     /// effect in the same resolving ability. This is distinct from
     /// `cost_paid_object`: the object was not paid as a cost, but later
@@ -31280,7 +31320,7 @@ impl ResolvedAbility {
             chosen_x: None,
             cost_paid_object: None,
             noted_mana_payment: None,
-            cost_paid_object_ids: Vec::new(),
+            cost_paid_objects: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
             ability_index: None,
@@ -32087,8 +32127,10 @@ impl ResolvedAbility {
     }
 
     /// CR 400.7 + CR 608.2k: Re-pin this ability's (and every sub/else branch's)
-    /// cost-paid referent to its current incarnation, once the cost's own object
-    /// moves are complete. Mirrors `set_cost_paid_object_recursive`'s traversal.
+    /// cost-paid referents to their current incarnation, once the cost's own
+    /// object moves are complete. Covers BOTH the singular `cost_paid_object`
+    /// referent and every entry of the plural `cost_paid_objects` collection.
+    /// Mirrors `set_cost_paid_object_recursive`'s traversal.
     ///
     /// See `CostPaidObjectSnapshot::repin_to_current_incarnation`: the cost's own
     /// move must not make the reference stale, only a later one.
@@ -32097,6 +32139,9 @@ impl ResolvedAbility {
         state: &crate::types::game_state::GameState,
     ) {
         if let Some(snapshot) = self.cost_paid_object.as_mut() {
+            snapshot.repin_to_current_incarnation(state);
+        }
+        for snapshot in self.cost_paid_objects.iter_mut() {
             snapshot.repin_to_current_incarnation(state);
         }
         if let Some(sub) = self.sub_ability.as_mut() {
@@ -32145,23 +32190,29 @@ impl ResolvedAbility {
         }
     }
 
-    /// CR 601.2h + CR 602.2b (issue #4948): Record EVERY object
+    /// CR 601.2h + CR 602.2b + CR 400.7 (issue #4948): Record EVERY object
     /// paid as part of this ability's own cost (mirrors
     /// `set_cost_paid_object_recursive`'s recursion into `sub_ability` /
-    /// `else_ability`, but accumulates every id instead of overwriting a
-    /// single referent). Call this alongside — not instead of —
+    /// `else_ability`, but accumulates every referent instead of overwriting a
+    /// single one). Call this alongside — not instead of —
     /// `set_cost_paid_object_recursive` at every non-self
     /// Sacrifice/Discard/Exile cost-payment site; the singular field keeps
-    /// its own resolution-time referent semantics and this one only feeds
+    /// its own referent-wording semantics while this collection feeds both
     /// `exclude_cost_paid_object_that_left_battlefield`'s target-candidate
-    /// filter.
-    pub fn add_cost_paid_object_ids_recursive(&mut self, ids: &[ObjectId]) {
-        self.cost_paid_object_ids.extend_from_slice(ids);
+    /// filter and `ZoneChoiceCandidateSource::CostPaidObjects`'s candidate
+    /// pool.
+    ///
+    /// Snapshots must be captured BEFORE the cost moves the objects (CR
+    /// 608.2h: the `lki` records their pre-move characteristics); the
+    /// subsequent `repin_cost_paid_object_recursive` fixes the incarnation
+    /// epoch so the cost's own move does not read as stale (CR 608.2k).
+    pub fn add_cost_paid_objects_recursive(&mut self, snapshots: &[CostPaidObjectSnapshot]) {
+        self.cost_paid_objects.extend_from_slice(snapshots);
         if let Some(sub) = self.sub_ability.as_mut() {
-            sub.add_cost_paid_object_ids_recursive(ids);
+            sub.add_cost_paid_objects_recursive(snapshots);
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.add_cost_paid_object_ids_recursive(ids);
+            else_branch.add_cost_paid_objects_recursive(snapshots);
         }
     }
 

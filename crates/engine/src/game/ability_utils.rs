@@ -6154,7 +6154,7 @@ fn collect_sub_chain_slot_specs(
 /// for a different zone, so they are correctly left untouched by this gate.
 ///
 /// Issue #4948 — Samwise Gamgee: checks EVERY object the cost
-/// consumed (`ability.cost_paid_object_ids`), not just the single referent in
+/// consumed (`ability.cost_paid_objects`), not just the single referent in
 /// `ability.cost_paid_object`. A multi-object non-self cost (e.g. "Sacrifice
 /// three Foods") can move several objects into the same zone this ability's
 /// own target searches at once; excluding only the first left the rest
@@ -6163,13 +6163,21 @@ fn collect_sub_chain_slot_specs(
 /// fizzling it (CR 608.2b). `cost_paid_object`'s id is folded in too as a
 /// defense-in-depth fallback for any cost-payment site that stamps the
 /// singular referent without also calling
-/// `add_cost_paid_object_ids_recursive`.
+/// `add_cost_paid_objects_recursive`.
+///
+/// CR 400.7: this consumer deliberately compares STORAGE identity only and is
+/// NOT gated on `CostPaidObjectSnapshot::is_current`. The rule being enforced
+/// is "this object left the battlefield to pay this ability's own cost, so it
+/// was never a legal target under the real target-before-cost order" — that is
+/// true of the storage slot regardless of which incarnation now occupies it.
+/// Only consumers that act on the referent as a LIVE object (e.g.
+/// `ZoneChoiceCandidateSource::CostPaidObjects`) need the incarnation gate.
 fn exclude_cost_paid_object_that_left_battlefield(
     state: &GameState,
     ability: &ResolvedAbility,
     targets: Vec<TargetRef>,
 ) -> Vec<TargetRef> {
-    if ability.cost_paid_object_ids.is_empty() && ability.cost_paid_object.is_none() {
+    if ability.cost_paid_objects.is_empty() && ability.cost_paid_object.is_none() {
         return targets;
     }
     let left_battlefield = |id: ObjectId| match state.objects.get(&id) {
@@ -6180,7 +6188,10 @@ fn exclude_cost_paid_object_that_left_battlefield(
         .into_iter()
         .filter(|target| match target {
             TargetRef::Object(id) => {
-                let was_paid_as_cost = ability.cost_paid_object_ids.contains(id)
+                let was_paid_as_cost = ability
+                    .cost_paid_objects
+                    .iter()
+                    .any(|snapshot| snapshot.object_id == *id)
                     || ability
                         .cost_paid_object
                         .as_ref()

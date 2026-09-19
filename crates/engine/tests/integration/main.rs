@@ -134,6 +134,7 @@ mod cloud_key_chosen_type_cost;
 mod coalition_relic_integration;
 mod cobra_king_guarded_reflexive_modal;
 mod codie_turn14_effect_zone_wedge;
+mod coin_of_fate;
 mod colorless_spell_cost_reduction;
 mod combat_celebrant_exert;
 mod combat_damage_order_triggers_no_hang;

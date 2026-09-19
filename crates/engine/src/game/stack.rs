@@ -3742,7 +3742,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         chosen_x,
         cost_paid_object,
         noted_mana_payment,
-        cost_paid_object_ids,
+        cost_paid_objects,
         effect_context_object,
         amassed_army_object,
         ability_index,
@@ -3828,7 +3828,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         // abilities today (only cost-payment handlers populate it), kept
         // here so this exhaustive-field check stays correct if that ever
         // changes.
-        && cost_paid_object_ids.is_empty()
+        && cost_paid_objects.is_empty()
         && effect_context_object.is_none()
         && amassed_army_object.is_none()
         && ability_index.is_none()
@@ -3973,7 +3973,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         chosen_x,
         cost_paid_object,
         noted_mana_payment,
-        cost_paid_object_ids,
+        cost_paid_objects,
         effect_context_object,
         amassed_army_object,
         ability_index: _,
@@ -4039,7 +4039,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && chosen_x.is_none()
         && cost_paid_object.is_none()
         && noted_mana_payment.is_none()
-        && cost_paid_object_ids.is_empty()
+        && cost_paid_objects.is_empty()
         && effect_context_object.is_none()
         && amassed_army_object.is_none()
         && *target_selection_mode == TargetSelectionMode::Chosen
@@ -4184,7 +4184,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         chosen_x,
         cost_paid_object,
         noted_mana_payment,
-        cost_paid_object_ids,
+        cost_paid_objects,
         effect_context_object,
         amassed_army_object,
         ability_index: _,
@@ -4254,7 +4254,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && chosen_x.is_none()
         && cost_paid_object.is_none()
         && noted_mana_payment.is_none()
-        && cost_paid_object_ids.is_empty()
+        && cost_paid_objects.is_empty()
         && effect_context_object.is_none()
         && amassed_army_object.is_none()
         && *target_selection_mode == TargetSelectionMode::Chosen
@@ -4666,7 +4666,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         chosen_x: a_chosen_x,
         cost_paid_object: a_cost_paid_object,
         noted_mana_payment: a_noted_mana_payment,
-        cost_paid_object_ids: a_cost_paid_object_ids,
+        cost_paid_objects: a_cost_paid_objects,
         effect_context_object: a_effect_context_object,
         amassed_army_object: a_amassed_army_object,
         ability_index: _,
@@ -4740,7 +4740,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         chosen_x: b_chosen_x,
         cost_paid_object: b_cost_paid_object,
         noted_mana_payment: b_noted_mana_payment,
-        cost_paid_object_ids: b_cost_paid_object_ids,
+        cost_paid_objects: b_cost_paid_objects,
         effect_context_object: b_effect_context_object,
         amassed_army_object: b_amassed_army_object,
         ability_index: _,
@@ -4813,7 +4813,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_chosen_x == b_chosen_x
         && a_cost_paid_object == b_cost_paid_object
         && a_noted_mana_payment == b_noted_mana_payment
-        && a_cost_paid_object_ids == b_cost_paid_object_ids
+        && a_cost_paid_objects == b_cost_paid_objects
         && a_effect_context_object == b_effect_context_object
         && a_amassed_army_object == b_amassed_army_object
         && a_target_selection_mode == b_target_selection_mode

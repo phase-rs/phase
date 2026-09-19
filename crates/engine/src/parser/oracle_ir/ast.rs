@@ -1528,6 +1528,12 @@ pub(crate) enum ChooseImperativeAst {
         chooser: crate::types::ability::Chooser,
         /// CR 608.2d (override): `Random` for "choose one of them at random".
         selection: crate::types::ability::CardSelectionMode,
+        /// CR 608.2d: WHICH set the anaphor names. The bare "of them"/"of those"
+        /// anaphors keep the historic tracked-set fallback (`Legacy`); the
+        /// source-bound "of the exiled cards" form inside an ability whose own
+        /// cost exiled the cards names that cost-payment record instead
+        /// (`CostPaidObjects`, CR 400.7j).
+        candidate_source: crate::types::ability::ZoneChoiceCandidateSource,
     },
     /// "choose a [filter] card in/from [player's] [zone]" — direct selection
     /// from visible/resolution-scoped zone contents. Lowered to `Effect::ChooseFromZone`.

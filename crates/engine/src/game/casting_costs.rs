@@ -1913,7 +1913,18 @@ pub(crate) fn handle_discard_for_cost(
     // selection excludes all of them — a multi-card non-self discard cost
     // paid before targets are chosen can otherwise let a just-discarded card
     // leak into the ability's own "target card in your graveyard" pool.
-    pending.ability.add_cost_paid_object_ids_recursive(chosen);
+    // CR 400.7 + CR 608.2h: captured HERE, before the discard moves them, so
+    // each snapshot carries the card's pre-move characteristics and its
+    // binding-time incarnation; `repin_cost_paid_object_recursive` fixes the
+    // epoch once the cost's own moves are done.
+    let chosen_snapshots: Vec<CostPaidObjectSnapshot> = chosen
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
+        .collect();
+    pending
+        .ability
+        .add_cost_paid_objects_recursive(&chosen_snapshots);
 
     // CR 601.2h + CR 616.1: Discard each chosen card through the replacement pipeline
     // so Madness (CR 702.35) etc. can intercept.
@@ -1988,11 +1999,13 @@ fn commit_random_discard_cost_picks(
     pending: &mut PendingCast,
     picks: &[crate::types::game_state::RandomDiscardCostPick],
 ) {
-    let ids = picks
-        .iter()
-        .map(|pick| pick.occurrence.object_id)
-        .collect::<Vec<_>>();
-    pending.ability.add_cost_paid_object_ids_recursive(&ids);
+    // CR 601.2h + CR 602.2b + CR 400.7: each pick already carries the snapshot
+    // `discard_at_random` captured from the live card BEFORE it left the hand
+    // (CR 608.2h), so reuse it rather than re-reading a post-move object here —
+    // by the time this commit runs the discard has happened.
+    let snapshots: Vec<CostPaidObjectSnapshot> =
+        picks.iter().map(|pick| pick.snapshot.clone()).collect();
+    pending.ability.add_cost_paid_objects_recursive(&snapshots);
 
     // CR 400.7j + CR 608.2k + CR 701.9c: A cost-paid card remains a usable
     // referent only when its move delivered it to a public zone. If a future
@@ -3470,7 +3483,18 @@ pub(crate) fn handle_sacrifice_for_cost(
     // — a sacrifice cost paid before targets are chosen (this engine's
     // documented ordering shortcut, see issue #1301) can otherwise let a
     // just-sacrificed object leak into the ability's own candidate pool.
-    pending.ability.add_cost_paid_object_ids_recursive(chosen);
+    // CR 400.7 + CR 608.2h: captured HERE, before the sacrifice moves them, so
+    // each snapshot carries pre-move characteristics and its binding-time
+    // incarnation; `repin_cost_paid_object_recursive` fixes the epoch once the
+    // cost's own moves are done.
+    let chosen_snapshots: Vec<CostPaidObjectSnapshot> = chosen
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
+        .collect();
+    pending
+        .ability
+        .add_cost_paid_objects_recursive(&chosen_snapshots);
 
     // CR 702.48c / CR 702.119a: Offering and Emerge use different reduction
     // rules, but both must read the sacrificed permanent before it leaves.
@@ -4818,7 +4842,21 @@ fn finish_exile_selection_for_cost(
     // battlefield-permanent exile costs (Food Chain class) — either can
     // otherwise let a just-exiled object leak into an ability's own
     // "target card/permanent in exile" pool.
-    pending.ability.add_cost_paid_object_ids_recursive(chosen);
+    // CR 400.7 + CR 608.2h: captured HERE, before the exile moves them, so each
+    // snapshot carries pre-move characteristics and its binding-time
+    // incarnation. `repin_cost_paid_object_recursive` then re-pins to the
+    // post-cost epoch (CR 608.2k), which is what lets
+    // `ZoneChoiceCandidateSource::CostPaidObjects` read these as live referents
+    // (Coin of Fate) while still rejecting a card that later left exile and
+    // came back as a new object.
+    let chosen_snapshots: Vec<CostPaidObjectSnapshot> = chosen
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
+        .collect();
+    pending
+        .ability
+        .add_cost_paid_objects_recursive(&chosen_snapshots);
 
     if pending.activation_ability_index.is_some() {
         pending.mark_activation_cost_committed();

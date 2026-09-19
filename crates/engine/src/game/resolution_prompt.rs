@@ -611,7 +611,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         forward_result: _,               // bool
         chosen_x: _, // concrete cast-time X (chosen at announcement, not resolution)
         cost_paid_object: _, // concrete captured-object snapshot
-        cost_paid_object_ids: _, // concrete captured-object ids (issue #4948)
+        cost_paid_objects: _, // concrete captured-object snapshots (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
         amassed_army_object: _, // concrete captured-object snapshot
         ability_index: _, // usize provenance
