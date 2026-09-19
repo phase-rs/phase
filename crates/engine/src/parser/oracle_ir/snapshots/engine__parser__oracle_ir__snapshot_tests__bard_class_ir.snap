@@ -173,7 +173,8 @@ expression: "&ir"
                       "value": "Legendary"
                     }
                   ]
-                }
+                },
+                "reach": "ColoredManaOnly"
               }
             },
             "affected": {

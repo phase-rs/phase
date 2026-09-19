@@ -989,9 +989,25 @@ export interface ManaPool {
 
 export type ManaCost =
   | { type: "NoCost" }
-  | { type: "Cost"; shards: string[]; generic: number }
+  | { type: "Cost"; shards: ManaCostShard[]; generic: number }
   | { type: "SelfManaCost" }
   | { type: "SelfManaValue" };
+
+/**
+ * CR 107.4: one mana-cost component, serialized as its Rust enum variant name
+ * ("White", "GreenWhite", "ColorlessBlue", ...). Rendered, never parsed for
+ * meaning — the engine owns every decision that depends on what a shard is.
+ */
+export type ManaCostShard = string;
+
+/**
+ * CR 118.7b/c/d: how far a mana cost reduction reaches when one of its colored
+ * units finds no matching pip. "SpillsToGeneric" is the rules default;
+ * "ColoredManaOnly" is the card-level override printed as "This effect reduces
+ * only the amount of colored mana you pay". Omitted by the engine when it is
+ * the default.
+ */
+export type CostReductionReach = "SpillsToGeneric" | "ColoredManaOnly";
 
 export type CastFrequency =
   | "Unlimited"
@@ -2011,6 +2027,56 @@ export interface PendingCast {
   // CR 118.3a: pip ids the caster pinned to direct payment. `#[serde(default,
   // skip_serializing_if = "Vec::is_empty")]` — absent when no pin is recorded.
   pinned_pool_units?: number[];
+  // CR 601.2b + CR 601.2f: reductions the caster accepted that no board static
+  // reproduces (today: an accepted Defiler life payment). `#[serde(default,
+  // skip_serializing_if = "Vec::is_empty")]` — absent when none.
+  accepted_cost_reductions?: CostReductionEntry[];
+  // CR 601.2b + CR 601.2f: the caster's cost-determination election, once
+  // `WaitingFor::OrderCostReductions` has been answered. `#[serde(default,
+  // skip_serializing_if = "Option::is_none")]` — absent when neither axis was
+  // ever observable for this cast.
+  cost_reduction_election?: CostReductionElection;
+}
+
+/// CR 601.2b + CR 601.2f: the caster's announced nonhybrid equivalents and the
+/// order their reductions are applied in, as one recorded election.
+export interface CostReductionElection {
+  order: ReductionProvenance[];
+  // `#[serde(default, skip_serializing_if = "Vec::is_empty")]` — absent when
+  // the caster announced nothing.
+  hybrid_announcement?: ManaCostShard[];
+}
+
+/// CR 601.2f: where one snapshotted cost reduction came from. Typed rather
+/// than an object id because Affinity (CR 702.41a), Undaunted (CR 702.125a)
+/// and the one-shot pending reductions have no producing permanent.
+export type ReductionProvenance =
+  | { type: "Static"; data: { source: ObjectId; ordinal: number } }
+  | { type: "Defiler" }
+  | { type: "PendingOneShot"; data: { index: number } }
+  | { type: "Affinity" }
+  | { type: "Undaunted" };
+
+/// CR 601.2f: one cost reduction, snapshotted at the lock seam. `amount` ×
+/// `multiplier` is the effective reduction — every dynamic count is already
+/// resolved, so the frontend renders these fields and computes nothing.
+export interface CostReductionEntry {
+  amount: ManaCost;
+  multiplier: number;
+  reach?: CostReductionReach;
+  provenance: ReductionProvenance;
+  display_name: string;
+}
+
+/// CR 601.2b + CR 601.2f: one legal outcome — a representative election (the
+/// reduction order plus the announced nonhybrid equivalents) and the total cost
+/// it locks in. The engine authors all of it; the modal never derives a cost.
+export interface CostReductionOutcome {
+  order: number[];
+  // `#[serde(default, skip_serializing_if = "Vec::is_empty")]` — absent when
+  // this outcome announces nothing.
+  hybrid_announcement?: ManaCostShard[];
+  locked_cost: ManaCost;
 }
 
 export interface TargetSelectionSlot {
@@ -2312,7 +2378,13 @@ export type WaitingFor =
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; origin?: string; gift_kind?: { type: string }; pending_cast: PendingCast } }
   | { type: "CostTypeChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; pending_cast: PendingCast } }
   | { type: "SpliceOffer"; data: { player: PlayerId; pending_cast: PendingCast; eligible: ObjectId[] } }
-  | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
+  | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; reach?: CostReductionReach; pending_cast: PendingCast } }
+  // CR 601.2b + CR 601.2f: the caster's cost-determination election. Only
+  // raised when two legal elections lock in different total costs; `outcomes`
+  // is one representative per distinct cost, cheapest first. `hybrid_symbols`
+  // lists the cost's announceable hybrid symbols, parallel to each outcome's
+  // `hybrid_announcement`.
+  | { type: "OrderCostReductions"; data: { player: PlayerId; reductions: CostReductionEntry[]; hybrid_symbols?: ManaCostShard[]; outcomes: CostReductionOutcome[]; pending_cast: PendingCast } }
   | { type: "CastOffer"; data: { player: PlayerId; kind: CastOfferKind } }
   | { type: "ModalFaceChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
   // `keyword.type` mirrors engine `AlternativeCastKeyword` (game_state.rs) 1:1.
@@ -2849,6 +2921,9 @@ export type GameAction =
   | { type: "ChooseReplacement"; data: { index: number } }
   | { type: "ChooseEntryController"; data: { opponent: PlayerId } }
   | { type: "OrderTriggers"; data: { order: number[] } }
+  // CR 601.2f: the caster's elected cost-reduction order — a permutation of
+  // indices into the prompt's `reductions`; index 0 is applied first.
+  | { type: "OrderCostReductions"; data: { order: number[]; hybrid_announcement?: ManaCostShard[] } }
   | { type: "CancelCast" }
   | { type: "Equip"; data: { equipment_id: ObjectId; target_id: ObjectId } }
   | { type: "CrewVehicle"; data: { vehicle_id: ObjectId; creature_ids: ObjectId[] } }

@@ -138,6 +138,10 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
+        // CR 601.2f: the cost-reduction order election pauses cost determination,
+        // well before a resolution-owned paid cast exists, so it carries no
+        // cleanup authority to redact.
+        | WaitingFor::OrderCostReductions { .. }
         | WaitingFor::ModalFaceChoice { .. }
         | WaitingFor::AlternativeCastChoice { .. }
         | WaitingFor::MutateMergeChoice { .. }
@@ -2910,6 +2914,8 @@ mod tests {
             prepaid_actual_mana_spent: None,
             base_cost: None,
             declared_mana_additions: Vec::new(),
+            accepted_cost_reductions: Vec::new(),
+            cost_reduction_election: None,
             activation_cost: None,
             deferred_random_discard_cost: None,
             activation_ability_index: None,

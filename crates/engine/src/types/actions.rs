@@ -349,6 +349,20 @@ pub enum GameAction {
     OrderTriggers {
         order: Vec<usize>,
     },
+    /// CR 601.2b + CR 601.2f: Caster submits their cost-determination election.
+    /// `order` is a permutation of indices into the
+    /// `WaitingFor::OrderCostReductions.reductions` vec the caster was prompted
+    /// with; index 0 = applied first ("If multiple cost reductions apply, the
+    /// player may apply them in any order"). `hybrid_announcement` is the
+    /// announced nonhybrid equivalent for each entry of that prompt's
+    /// `hybrid_symbols` vec, in the same order ("the player announces the
+    /// nonhybrid equivalent cost they intend to pay"), or empty to announce
+    /// nothing and leave every hybrid symbol in the locked cost.
+    OrderCostReductions {
+        order: Vec<usize>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hybrid_announcement: Vec<crate::types::mana::ManaCostShard>,
+    },
     CancelCast,
     Equip {
         equipment_id: ObjectId,
@@ -1933,6 +1947,7 @@ impl GameAction {
             | Self::ChooseReplacement { .. }
             | Self::ChooseEntryController { .. }
             | Self::OrderTriggers { .. }
+            | Self::OrderCostReductions { .. }
             | Self::CancelCast
             | Self::SubmitSideboard { .. }
             | Self::ChoosePlayDraw { .. }
@@ -2272,6 +2287,7 @@ impl GameAction {
             | GameAction::ChooseReplacement { .. }
             | GameAction::ChooseEntryController { .. }
             | GameAction::OrderTriggers { .. }
+            | GameAction::OrderCostReductions { .. }
             | GameAction::CancelCast
             | GameAction::BackToManaPayment
             | GameAction::SubmitSideboard { .. }

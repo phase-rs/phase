@@ -283,7 +283,8 @@ fn complete_cost_payment(
                 );
             }
             let base_cost = pending.base_cost.clone();
-            super::super::casting_costs::pay_and_push(
+            let lock = super::super::casting_costs::CostLockInput::from_pending(&pending);
+            super::super::casting_costs::pay_and_push_with_lock(
                 state,
                 player,
                 pending.object_id,
@@ -297,6 +298,7 @@ fn complete_cost_payment(
                 pending.distribute,
                 pending.origin_zone,
                 pending.payment_mode,
+                lock,
                 events,
             )
         }

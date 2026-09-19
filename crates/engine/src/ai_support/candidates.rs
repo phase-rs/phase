@@ -2235,6 +2235,26 @@ pub fn candidate_actions_broad_with_probe(
                 Some(*player),
             ),
         ],
+        // CR 601.2f: one candidate per engine-authored representative order.
+        // The engine already proved that every distinct locked total cost is
+        // reachable by exactly one of these, so there is no size-based
+        // synthetic fallback to add here — enumerating more permutations would
+        // only hand the search duplicate outcomes to evaluate.
+        WaitingFor::OrderCostReductions {
+            player, outcomes, ..
+        } => outcomes
+            .iter()
+            .map(|outcome| {
+                candidate(
+                    GameAction::OrderCostReductions {
+                        order: outcome.order.clone(),
+                        hybrid_announcement: outcome.hybrid_announcement.clone(),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 118.3 + CR 601.2b + CR 605.3b: AI selects objects to pay a cost.
         // Single-object RemoveCounter chooses one source per candidate;
         // from-among RemoveCounter, Sacrifice, and optional zone-exile costs

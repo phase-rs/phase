@@ -13182,6 +13182,7 @@ mod tests {
             amount: ManaCost::default(),
             spell_filter: None,
             dynamic_count,
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         };
         assert!(
             !cover_with_static_on_stable(modify(Some(object_count_ref()))),
@@ -17895,6 +17896,7 @@ mod tests {
             amount: ManaCost::NoCost,
             spell_filter: None,
             dynamic_count: None,
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         })
         .affected(TargetFilter::SelfRef)
         .condition(StaticCondition::QuantityComparison {
@@ -18098,6 +18100,7 @@ mod tests {
                 amount: ManaCost::NoCost,
                 spell_filter: None,
                 dynamic_count: None,
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
             })
             .affected(TargetFilter::SelfRef)
             .condition(StaticCondition::QuantityComparison {

@@ -5044,6 +5044,7 @@ mod tests {
                     ],
                 }),
             }),
+            reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
         })
         .affected(TargetFilter::SelfRef);
         modifier.active_zones = engine::types::zones::self_spell_cost_mod_active_zones();

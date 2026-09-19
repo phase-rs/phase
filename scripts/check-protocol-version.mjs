@@ -11,7 +11,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 4;
+// +5: CR 601.2f caster-elected cost-reduction ordering adds a parse bump on top.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 5;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -39,7 +40,7 @@ const EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING = 6;
 // stayed green — a v(n-1) host and a v(n) guest would then complete a
 // handshake and only fail when the incompatible payload arrived.
 const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 3;
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 4;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

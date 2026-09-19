@@ -719,6 +719,40 @@ pub(crate) fn is_cost_modify_mode_reduce(mode: &CostModifyMode) -> bool {
     matches!(mode, CostModifyMode::Reduce)
 }
 
+/// CR 118.7b/c/d: How far a mana-cost REDUCTION reaches when one of its colored
+/// or colorless units finds no matching component left in the cost being reduced.
+///
+/// Orthogonal to [`CostModifyMode`], which is the direction axis. This is the
+/// reach axis, and it is meaningful only for [`CostModifyMode::Reduce`] — a
+/// `Raise` only ever adds mana, and `Minimum` is a floor, so neither can strand
+/// a unit that needs a spillover decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum CostReductionReach {
+    /// CR 118.7b/c/d (the rules default): a reduction unit whose color/colorless
+    /// component is absent from the cost (118.7b), or that exceeds what that
+    /// component had left (118.7c/d), reduces GENERIC mana instead. Aang, Master
+    /// of Elements — "Spells you cast cost {W}{U}{B}{R}{G} less to cast. (This
+    /// can reduce generic costs.)" — is the card that makes this visible.
+    #[default]
+    SpillsToGeneric,
+    /// "This effect reduces only the amount of colored mana you pay." The card
+    /// overrides CR 118.7b/c/d: an unmatched or excess unit is simply lost and
+    /// never touches the generic component. Morophon, the Boundless (whose
+    /// ruling spells it out: {4}{R}{W}{W} becomes {4}{W}), Edgewalker and
+    /// Ragemonger (whose reminder text gives worked examples), Bard Class,
+    /// Head of the Class, Nekrataal Avatar, Vorthos, Steward of Myth, and the
+    /// Defiler cycle ("... only the amount of blue mana you pay").
+    ColoredManaOnly,
+}
+
+impl CostReductionReach {
+    /// Serde `skip_serializing_if` for the CR 118.7b default, so card data that
+    /// predates this axis round-trips byte-identically.
+    pub(crate) fn is_spills_to_generic(&self) -> bool {
+        matches!(self, CostReductionReach::SpillsToGeneric)
+    }
+}
+
 /// CR 116.2: Stable registry string for a [`SpecialAction`], used by the
 /// `StaticMode::ReduceActionCost` Display/FromStr round-trip.
 fn special_action_registry_str(action: SpecialAction) -> &'static str {
@@ -1176,6 +1210,15 @@ pub enum StaticMode {
             deserialize_with = "super::ability::deserialize_optional_quantity_ref_compat"
         )]
         dynamic_count: Option<QuantityRef>,
+        /// CR 118.7b/c/d: whether an unmatched colored/colorless reduction unit
+        /// spills over into generic mana. Only meaningful for `Reduce`.
+        /// `#[serde(default)]` keeps card data serialized before this axis
+        /// existed reading as the CR 118.7b default.
+        #[serde(
+            default,
+            skip_serializing_if = "CostReductionReach::is_spills_to_generic"
+        )]
+        reach: CostReductionReach,
     },
     /// CR 601.2f + CR 118.8: Imposes an additional non-mana cost on spells or
     /// spells matching `spell_filter`. Distinct from [`StaticMode::ModifyCost`],
@@ -2008,9 +2051,10 @@ pub enum StaticMode {
     LegendRuleDoesntApply,
     /// Speed may increase beyond 4, and 4+ still counts as max speed for that player.
     SpeedCanIncreaseBeyondFour,
-    /// CR 118.12a: Defiler cycle — "As an additional cost to cast [color] permanent
-    /// spells, you may pay [N] life. Those spells cost {C} less to cast."
-    /// Optional life payment during casting with conditional mana reduction.
+    /// CR 118.8 + CR 118.8b: Defiler cycle — "As an additional cost to cast [color]
+    /// permanent spells, you may pay [N] life. Those spells cost {C} less to cast."
+    /// The life payment is an OPTIONAL additional cost (CR 118.8b), announced per
+    /// CR 601.2b, with the conditional mana reduction constrained by CR 118.7b/c/d.
     DefilerCostReduction {
         /// The color of permanent spells this applies to
         color: ManaColor,
@@ -2018,6 +2062,16 @@ pub enum StaticMode {
         life_cost: u32,
         /// Mana cost reduction if life is paid
         mana_reduction: ManaCost,
+        /// CR 118.7b/c/d: all five printed Defilers close with "This effect
+        /// reduces only the amount of [color] mana you pay", which is carried
+        /// here rather than assumed. The parser accepts the template without
+        /// that rider too — MTGJSON sometimes splits the Oracle text across
+        /// lines — and such a shape correctly keeps the CR 118.7b default.
+        #[serde(
+            default,
+            skip_serializing_if = "CostReductionReach::is_spills_to_generic"
+        )]
+        reach: CostReductionReach,
     },
     /// CR 614.1b + CR 614.10: "Skip your [step] step" — replacement effect that replaces
     /// the named step with nothing. Parameterized by Phase to cover draw/untap/upkeep.
@@ -3364,6 +3418,7 @@ impl FromStr for StaticMode {
                 amount: ManaCost::zero(),
                 spell_filter: None,
                 dynamic_count: None,
+                reach: CostReductionReach::SpillsToGeneric,
             },
             s if s.starts_with("ReduceAbilityCost(") => {
                 // Parse "ReduceAbilityCost([+|-]keyword,amount[,minimum_mana])".
@@ -3461,6 +3516,7 @@ impl FromStr for StaticMode {
                 amount: ManaCost::zero(),
                 spell_filter: None,
                 dynamic_count: None,
+                reach: CostReductionReach::SpillsToGeneric,
             },
             // CR 601.2f: Cost-floor static (Trinisphere class). Legacy unit-string
             // defaults to a zero floor — meaningful instances are constructed via
@@ -3470,6 +3526,7 @@ impl FromStr for StaticMode {
                 amount: ManaCost::zero(),
                 spell_filter: None,
                 dynamic_count: None,
+                reach: CostReductionReach::SpillsToGeneric,
             },
             "CantPayCost" => StaticMode::CantPayCost {
                 who: ProhibitionScope::AllPlayers,
@@ -4102,6 +4159,7 @@ fn deserialize_legacy_cost_modify_string(s: &str) -> Option<StaticMode> {
         amount: ManaCost::zero(),
         spell_filter: None,
         dynamic_count: None,
+        reach: CostReductionReach::SpillsToGeneric,
     })
 }
 
@@ -4116,6 +4174,10 @@ struct LegacyModifyCostPayload {
         deserialize_with = "super::ability::deserialize_optional_quantity_ref_compat"
     )]
     dynamic_count: Option<QuantityRef>,
+    /// CR 118.7b: absent in every legacy payload (the axis postdates this
+    /// shape), so it defaults to the rules-default spillover.
+    #[serde(default)]
+    reach: CostReductionReach,
 }
 
 fn deserialize_legacy_modify_cost_object(
@@ -4141,6 +4203,7 @@ fn deserialize_legacy_modify_cost_object(
                 amount: payload.amount,
                 spell_filter: payload.spell_filter,
                 dynamic_count: payload.dynamic_count,
+                reach: payload.reach,
             }
         }),
     )
@@ -4852,6 +4915,7 @@ mod tests {
                     amount: ManaCost::generic(2),
                     spell_filter: None,
                     dynamic_count: None,
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
                 }
             );
         }
@@ -4928,6 +4992,7 @@ mod tests {
                     amount: ManaCost::zero(),
                     spell_filter: None,
                     dynamic_count: None,
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
                 }
             );
         }

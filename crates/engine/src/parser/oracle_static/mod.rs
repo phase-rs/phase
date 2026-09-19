@@ -15,7 +15,9 @@ mod prelude {
     pub(super) use nom::sequence::{preceded, terminated};
     pub(super) use nom::Parser;
 
-    pub(super) use super::super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
+    pub(super) use super::super::oracle_cost::{
+        line_reduces_colored_mana_only, parse_gerund_cost, parse_oracle_cost,
+    };
     pub(super) use super::super::oracle_effect::subject::{
         parse_restriction_modes, static_mode_needs_grant_propagation,
     };
@@ -65,8 +67,8 @@ mod prelude {
         ActivationExemption, AdditionalCostTaxAction, AttackDefenderScope, BlockExceptionKind,
         CastCostMode, CastExtraCost, CastFreeOrigin, CastFrequency, CastingProhibitionCondition,
         CombatAloneAction, CombatAloneRequirement, CostModifyMode, CostPaymentProhibition,
-        CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost, ExileCastTiming,
-        HandSizeModification, ProhibitionScope, RequiredDefender, StaticMode,
+        CostReductionReach, CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost,
+        ExileCastTiming, HandSizeModification, ProhibitionScope, RequiredDefender, StaticMode,
         SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
     };
     pub(super) use crate::types::zones::Zone;

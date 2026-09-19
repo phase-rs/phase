@@ -149,6 +149,8 @@ fn translate_raise_cost(line: &ForgeAbilityLine) -> Result<StaticDefinition, For
         amount,
         spell_filter,
         dynamic_count: None,
+        // CR 118.7b: inert for a raise, which only ever adds mana.
+        reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
     });
 
     if let Some(desc) = params.get("Description") {
@@ -174,6 +176,10 @@ fn translate_reduce_cost(line: &ForgeAbilityLine) -> Result<StaticDefinition, Fo
         amount,
         spell_filter,
         dynamic_count: None,
+        // CR 118.7b: the Forge `Amount` parameter is a generic-mana count with
+        // no colored component, so the rules-default reach is both correct and
+        // inert here.
+        reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
     });
 
     if let Some(desc) = params.get("Description") {

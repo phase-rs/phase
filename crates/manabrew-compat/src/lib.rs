@@ -21,6 +21,7 @@ use engine::game::interaction::{derive_viewer_interaction, resolve_interaction_r
 use engine::game::turn_control;
 use engine::types::ability::TargetRef;
 use engine::types::card::CardFace;
+use engine::types::casting_costs::{CostReductionEntry, CostReductionOutcome};
 use engine::types::game_state::{
     GameState, ManaChoice, ManaChoicePrompt, MulliganDecisionPhase, PendingMulliganAction,
     ShardChoice, StackEntryKind, WaitingFor,
@@ -682,7 +683,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it,
 /// or a documented adapter-local extension is intentionally in use.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 92] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 93] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -989,6 +990,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 92] = [
         area: "responses",
         reason: "Emitted when a client sends ChooseBoardTargetsOutput::Cancel but the engine's current legal-action set contains no GameAction::CancelCast, the same CR 601.2 rollback boundary as the mana-payment cancel. Unlike that one, this should not be reachable by a conforming client: ChooseBoardTargetsInput.cancellable (new in 5.0.0) is built from the same action-table predicate that resolves the answer, so a client that respects the advertisement never sends a cancel the engine would reject. The arm exists because the wire cannot enforce it.",
         suggested_protocol_extension: "None needed — 5.0.0's cancellable field is the extension. This entry records a client-conformance boundary, not an engine or protocol gap.",
+    },
+    UnsupportedCapability {
+        code: "local.cancel-cost-reduction-order-unavailable",
+        area: "responses",
+        reason: "Emitted when a client picks the trailing 'Cancel the cast' option of the CR 601.2b/CR 601.2f cost-determination prompt but the engine's current legal-action set contains no GameAction::CancelCast — the same CR 601.2 rollback boundary as the mana-payment and target-selection cancels. Unlike ChooseBoardTargets, ChooseFromSelectionOutput has no Cancel variant and ChooseFromSelectionInput has no `cancellable` field, so the rollback has to travel as a labelled option; the option is only appended when the action table already offers CancelCast, so a client that answers the prompt it was actually sent never reaches this arm.",
+        suggested_protocol_extension: "Give ChooseFromSelectionInput the `cancellable` flag ChooseBoardTargetsInput gained in 5.0.0, plus a matching ChooseFromSelectionOutput::Cancel, so a pick-one prompt can advertise rollback as a control rather than smuggling it in as an option.",
     },
     UnsupportedCapability {
         code: "local.stack-target-ref-unsupported",
@@ -1733,6 +1740,68 @@ fn build_prompt_input(
                     .collect(),
             }))
         }
+        // CR 601.2b + CR 601.2f: the caster's cost-determination election.
+        //
+        // NOT `Reorder`, for two independent reasons. The decision is no longer
+        // one-dimensional: CR 601.2b's hybrid announcement rides the same
+        // answer, and `ReorderOutput` carries a single `ordered_ids` list that
+        // cannot express which half of `{G/W}` the caster announced. And
+        // `ReorderItem::card` is a required `CardDto`, while
+        // `ReductionProvenance::Defiler` carries no object id at all (the
+        // variant is bare — at most one Defiler reduction applies per cast, so
+        // it needs no discriminator), so half the reachable entries have no
+        // card to render and this adapter does not fabricate DTOs.
+        //
+        // `ChooseFromSelection` is the honest shape: the engine has already
+        // proved that `outcomes` is exactly the set of distinct locked total
+        // costs, one representative election each, so the question is a pick-one
+        // over a finite labelled list. Every reduction the caster was shown is
+        // named in the label it belongs to, and the answer maps straight back to
+        // that outcome's `order` + `hybrid_announcement`.
+        //
+        // The three non-renderable provenances cannot reach this prompt at all:
+        // Affinity (CR 702.41a), Undaunted (CR 702.125a) and the one-shot
+        // `pending_spell_cost_reductions` entries are collected into
+        // `CollectedCostModifiers::generic_only_units` as bare `{1}` multipliers
+        // and never become snapshot entries, and `order_relevant_reductions`
+        // additionally keeps only shard-bearing amounts. So every entry here is
+        // a `Static` or a `Defiler`, and both carry a `display_name`.
+        WaitingFor::OrderCostReductions {
+            reductions,
+            hybrid_symbols,
+            outcomes,
+            ..
+        } => {
+            let mut options: Vec<SelectionOption> = outcomes
+                .iter()
+                .map(|outcome| {
+                    selection_option(cost_reduction_outcome_label(
+                        outcome,
+                        reductions,
+                        hybrid_symbols,
+                    ))
+                })
+                .collect();
+            // CR 601.2 rollback. The engine accepts `CancelCast` at this prompt,
+            // but `ChooseFromSelectionOutput` has no `Cancel` variant the way
+            // `ChooseBoardTargetsOutput` does, so the cancel travels as a
+            // trailing labelled option — advertised only while the action table
+            // actually offers it, the same engine-state read `cancellable`
+            // performs for target selection.
+            if prepared
+                .actions
+                .iter()
+                .any(|action| matches!(action, GameAction::CancelCast))
+            {
+                options.push(selection_option(CANCEL_CAST_OPTION_LABEL.to_string()));
+            }
+            Ok(PromptInput::ChooseFromSelection(ChooseFromSelectionInput {
+                presentation: presentation("Choose the total cost to lock in"),
+                options,
+                min_total: 1,
+                max_total: 1,
+            }))
+        }
         WaitingFor::AssignBlockerDamage { .. } => {
             unsupported_prompt(waiting_for, "local.blocker-damage-banding-unsupported")
         }
@@ -2408,6 +2477,33 @@ pub fn translate_response(
                     indices: chosen_indices,
                 })
             }
+            // CR 601.2b + CR 601.2f: the cost-determination election. The
+            // prompt's options are the engine's own `outcomes`, in order, so the
+            // chosen index names one outright — no re-derivation, and the
+            // representative election it carries is submitted verbatim. The
+            // trailing index, present only while the engine's action table
+            // offers it, is the CR 601.2 rollback.
+            WaitingFor::OrderCostReductions { outcomes, .. } => {
+                let [index] = chosen_indices.as_slice() else {
+                    return Err(AdapterError::IllegalResponseForPrompt {
+                        response_kind: "chooseFromSelection",
+                    });
+                };
+                match outcomes.get(*index) {
+                    Some(outcome) => Ok(GameAction::OrderCostReductions {
+                        order: outcome.order.clone(),
+                        hybrid_announcement: outcome.hybrid_announcement.clone(),
+                    }),
+                    None if *index == outcomes.len() => prompt_level_action(
+                        context,
+                        |action| matches!(action, GameAction::CancelCast),
+                        "local.cancel-cost-reduction-order-unavailable",
+                    ),
+                    None => Err(AdapterError::IllegalResponseForPrompt {
+                        response_kind: "chooseFromSelection",
+                    }),
+                }
+            }
             _ => interaction_selection_action(state, context.deciding_player, &chosen_indices),
         },
         UpstreamPromptOutput::ChooseColor(ChooseColorOutput::ColorDecision { chosen_colors }) => {
@@ -2718,6 +2814,10 @@ pub fn convert_available_action(
         }
         // Answered through the Reorder prompt for `WaitingFor::OrderTriggers`.
         GameAction::OrderTriggers { .. } => AvailableActionConversion::Skip,
+        // CR 601.2b + CR 601.2f: answered through the `ChooseFromSelection`
+        // prompt for `WaitingFor::OrderCostReductions`, where each option is one
+        // of the engine's distinct locked totals — not by echoing an action id.
+        GameAction::OrderCostReductions { .. } => AvailableActionConversion::Skip,
         GameAction::Equip { .. }
         | GameAction::CrewVehicle { .. }
         | GameAction::ActivateStation { .. }
@@ -4396,6 +4496,52 @@ fn selection_option(label: String) -> SelectionOption {
         weight: 1,
         can_repeat: false,
     }
+}
+
+/// CR 601.2: the label the cost-reduction election's rollback option travels
+/// under, and the value the response translation recognizes it by position.
+const CANCEL_CAST_OPTION_LABEL: &str = "Cancel the cast";
+
+/// CR 601.2b + CR 601.2f: render one election outcome as a prompt label.
+///
+/// Pure presentation over values the engine authored — the locked total, the
+/// snapshot entries' own `display_name`s in the elected order, and the announced
+/// nonhybrid equivalents. Nothing here decides, orders, or computes a cost.
+fn cost_reduction_outcome_label(
+    outcome: &CostReductionOutcome,
+    reductions: &[CostReductionEntry],
+    hybrid_symbols: &[ManaCostShard],
+) -> String {
+    let total = mana_cost_string(&outcome.locked_cost);
+    let applied: Vec<&str> = outcome
+        .order
+        .iter()
+        .filter_map(|index| reductions.get(*index))
+        .map(|entry| entry.display_name.as_str())
+        .collect();
+    let mut label = if total.is_empty() {
+        "Pay nothing".to_string()
+    } else {
+        format!("Pay {total}")
+    };
+    if !applied.is_empty() {
+        label.push_str(&format!(" — apply {}", applied.join(", then ")));
+    }
+    if !outcome.hybrid_announcement.is_empty() {
+        let announced: Vec<String> = hybrid_symbols
+            .iter()
+            .zip(&outcome.hybrid_announcement)
+            .map(|(symbol, announced)| {
+                format!(
+                    "{{{}}} as {{{}}}",
+                    mana_shard_symbol(symbol),
+                    mana_shard_symbol(announced)
+                )
+            })
+            .collect();
+        label.push_str(&format!("; announce {}", announced.join(", ")));
+    }
+    label
 }
 
 fn attack_target_ref_id(target: &AttackTarget) -> String {
@@ -8566,13 +8712,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 92);
+        assert_eq!(capabilities.len(), 93);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 92, "capability codes must be unique");
+        assert_eq!(codes.len(), 93, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(
@@ -8864,6 +9010,252 @@ mod tests {
             })
             .unwrap(),
             r#"{"type":"mulliganUseSerumPowder","cardId":"card-1"}"#
+        );
+    }
+
+    /// A live board parked on the CR 601.2b + CR 601.2f cost-determination
+    /// prompt, driven through the production cast pipeline rather than assembled
+    /// by hand.
+    ///
+    /// Rigo, Streetwise Mentor's printed `{G/W}{W}{W/U}` under a Morophon-style
+    /// `{W}{U}{B}{R}{G}` reduction carrying the colored-only rider. Announcing
+    /// nothing leaves `{W}` (the reduction's `{W}` unit takes `{G/W}` — CR 107.4e
+    /// makes a hybrid symbol a symbol of both its colours — and its `{U}` unit
+    /// takes `{W/U}`); announcing `{G}` and `{U}` leaves `{G}{W}{U}`, which the
+    /// same reduction cancels outright. Two distinct legal locked totals, one of
+    /// them reached only through a NON-EMPTY `hybrid_announcement` — which is
+    /// what makes this board prove the announcement survives the round trip
+    /// rather than defaulting to empty at both ends.
+    ///
+    /// Built live, not from a fabricated `WaitingFor`, because the prompt's
+    /// trailing rollback option is gated on the engine's real legal-action set
+    /// offering `GameAction::CancelCast`.
+    fn cost_reduction_election_state() -> GameState {
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::types::ability::StaticDefinition;
+        use engine::types::game_state::CastPaymentMode;
+        use engine::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..3 {
+            scenario.add_basic_land(P0, EngineManaColor::White);
+        }
+        scenario
+            .add_creature(P0, "Morophon, the Boundless", 6, 6)
+            .with_static_definition(StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::Cost {
+                    shards: vec![
+                        ManaCostShard::White,
+                        ManaCostShard::Blue,
+                        ManaCostShard::Black,
+                        ManaCostShard::Red,
+                        ManaCostShard::Green,
+                    ],
+                    generic: 0,
+                },
+                spell_filter: None,
+                dynamic_count: None,
+                reach: CostReductionReach::ColoredManaOnly,
+            }));
+        let spell = scenario
+            .add_creature_to_hand(P0, "Rigo, Streetwise Mentor", 2, 2)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::GreenWhite,
+                    ManaCostShard::White,
+                    ManaCostShard::WhiteBlue,
+                ],
+                generic: 0,
+            })
+            .id();
+
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the cast must begin");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OrderCostReductions { .. }
+            ),
+            "the board must reach the cost-determination election, got {:?}",
+            runner.state().waiting_for
+        );
+        runner.state().clone()
+    }
+
+    /// CR 601.2b + CR 601.2f: the cost-determination election round-trips.
+    ///
+    /// The prompt is a `ChooseFromSelection` whose options ARE the engine's
+    /// `outcomes` — one per distinct locked total, in engine order — plus the
+    /// CR 601.2 rollback as a trailing labelled option, because
+    /// `ChooseFromSelectionOutput` has no `Cancel` variant to carry it.
+    ///
+    /// The round trip asserts the whole contract in one pass:
+    ///   * index *i* answers with outcome *i*'s `order` AND its
+    ///     `hybrid_announcement`, verbatim — nothing is re-derived adapter-side,
+    ///     which is the failure mode that would silently lock a total the caster
+    ///     never picked;
+    ///   * the trailing index is `GameAction::CancelCast`;
+    ///   * anything past it is refused rather than coerced.
+    ///
+    /// Revert guard: restore the `unsupported_prompt` arm and the projection
+    /// yields an unsupported prompt instead of a selection, so the family
+    /// assertion reds before any index is answered.
+    #[test]
+    fn the_cost_reduction_election_round_trips_through_choose_from_selection() {
+        let state = cost_reduction_election_state();
+        let WaitingFor::OrderCostReductions {
+            outcomes,
+            hybrid_symbols,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("the board must be parked on the election");
+        };
+        let outcomes = outcomes.clone();
+        assert_eq!(
+            hybrid_symbols,
+            &vec![ManaCostShard::GreenWhite, ManaCostShard::WhiteBlue],
+            "CR 601.2b: both of Rigo's hybrid symbols are announceable here"
+        );
+        assert_eq!(
+            outcomes.len(),
+            2,
+            "two distinct locked totals must be on offer, got {:?}",
+            outcomes
+                .iter()
+                .map(|outcome| outcome.locked_cost.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            outcomes
+                .iter()
+                .any(|outcome| !outcome.hybrid_announcement.is_empty()),
+            "at least one outcome must carry a real announcement, or this test \
+             would prove nothing about the announcement surviving the wire"
+        );
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("the election projects as a real prompt, not an unsupported one");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
+            panic!(
+                "a pick-one over the engine's own outcomes is ChooseFromSelection, got {prompt:?}"
+            );
+        };
+        assert_eq!(
+            (input.min_total, input.max_total),
+            (1, 1),
+            "the caster locks exactly one total"
+        );
+        let labels: Vec<String> = input
+            .options
+            .iter()
+            .map(|option| option.label.clone())
+            .collect();
+        assert_eq!(
+            labels.len(),
+            outcomes.len() + 1,
+            "one option per outcome plus the CR 601.2 rollback, got {labels:?}"
+        );
+        assert_eq!(
+            labels.last().map(String::as_str),
+            Some("Cancel the cast"),
+            "the rollback must be the TRAILING option — the response mapping \
+             recognizes it by position"
+        );
+        assert!(
+            labels[0].contains("announce"),
+            "the announced outcome's label must say what is announced, got {:?}",
+            labels[0]
+        );
+
+        let context = prepared.prompt_context();
+        for (index, outcome) in outcomes.iter().enumerate() {
+            let action = translate_response(
+                42,
+                PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                    chosen_indices: vec![index],
+                }),
+                &context,
+                &state,
+            )
+            .expect("an index the prompt offered must translate");
+            assert_eq!(
+                action,
+                GameAction::OrderCostReductions {
+                    order: outcome.order.clone(),
+                    hybrid_announcement: outcome.hybrid_announcement.clone(),
+                },
+                "index {index} must answer with outcome {index}'s own election, \
+                 verbatim — a re-derived order or a dropped announcement locks a \
+                 total the caster did not pick"
+            );
+        }
+
+        assert_eq!(
+            translate_response(
+                42,
+                PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                    chosen_indices: vec![outcomes.len()],
+                }),
+                &context,
+                &state,
+            )
+            .expect("the rollback option must translate while the engine offers it"),
+            GameAction::CancelCast,
+            "CR 601.2: the trailing option is the cast rollback"
+        );
+
+        assert!(
+            matches!(
+                translate_response(
+                    42,
+                    PromptOutput::ChooseFromSelection(
+                        ChooseFromSelectionOutput::SelectionDecision {
+                            chosen_indices: vec![outcomes.len() + 1],
+                        }
+                    ),
+                    &context,
+                    &state,
+                ),
+                Err(AdapterError::IllegalResponseForPrompt { .. })
+            ),
+            "an index past the rollback names no option and must be refused, not \
+             coerced onto an outcome"
+        );
+
+        // The capability guard: the same trailing index with no `CancelCast` in
+        // the engine's action table is the documented adapter-local boundary,
+        // not a silent no-op. (`context_with` mints its own prompt id, which
+        // `translate_response` checks before it reaches the arm under test.)
+        let empty_table = context_with(vec![]);
+        assert!(
+            matches!(
+                translate_response(
+                    empty_table.prompt_id,
+                    PromptOutput::ChooseFromSelection(
+                        ChooseFromSelectionOutput::SelectionDecision {
+                            chosen_indices: vec![outcomes.len()],
+                        }
+                    ),
+                    &empty_table,
+                    &state,
+                ),
+                Err(AdapterError::UnsupportedProtocolFeature {
+                    code: "local.cancel-cost-reduction-order-unavailable"
+                })
+            ),
+            "the rollback is only answerable while the engine offers it"
         );
     }
 

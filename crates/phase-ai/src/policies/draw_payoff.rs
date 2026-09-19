@@ -243,6 +243,7 @@ fn candidate_draws_structurally(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::ChooseReplacement { .. }
         | GameAction::ChooseEntryController { .. }
         | GameAction::OrderTriggers { .. }
+        | GameAction::OrderCostReductions { .. }
         | GameAction::CancelCast
         | GameAction::Equip { .. }
         | GameAction::CrewVehicle { .. }

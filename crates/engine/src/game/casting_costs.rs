@@ -12,6 +12,7 @@ use crate::types::ability::{
     TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
+use crate::types::casting_costs::{CostReductionElection, CostReductionEntry, ReductionProvenance};
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, AssistState, CastOccurrence, CastPaymentMode,
@@ -28,7 +29,7 @@ use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::resolution::OptionalEffectFrame;
 use crate::types::resolved_commands::ResolvedStackEntryFinalizeCommand;
-use crate::types::statics::{CostModifyMode, StaticMode, StaticModeKind};
+use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode, StaticModeKind};
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::casting::emit_targeting_events;
@@ -1523,7 +1524,11 @@ pub(crate) fn finish_pending_cost_or_cast(
         state.pending_cast = Some(Box::new(pending));
         return enter_payment_step(state, player, None, events);
     }
-    let waiting_for = pay_and_push(
+    // CR 601.2f: carry this cast's declared additional mana costs and any
+    // reduction the caster already accepted into the lock seam — the seam
+    // recomputes the total from `base_cost` and would otherwise drop them.
+    let lock = CostLockInput::from_pending(&pending);
+    let waiting_for = pay_and_push_with_lock(
         state,
         player,
         pending.object_id,
@@ -1537,6 +1542,7 @@ pub(crate) fn finish_pending_cost_or_cast(
         pending.distribute,
         pending.origin_zone,
         pending.payment_mode,
+        lock,
         events,
     )?;
     Ok(drain_deferred_triggers_after_stack_object_announcement(
@@ -7457,7 +7463,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
 
     // CR 601.2b: Check for Defiler cost reduction — optional life payment for colored mana
     // reduction on matching-color permanent spells.
-    if let Some((life_cost, mana_reduction)) = find_defiler_reduction(state, player, object_id) {
+    if let Some(defiler) = find_defiler_reduction(state, player, object_id) {
         let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
@@ -7469,8 +7475,9 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         pending.additional_cost_flow = imposed_required_cost.clone().map(AdditionalCost::Required);
         return Ok(WaitingFor::DefilerPayment {
             player,
-            life_cost,
-            mana_reduction,
+            life_cost: defiler.life_cost,
+            mana_reduction: defiler.mana_reduction,
+            reach: defiler.reach,
             pending_cast: Box::new(pending),
         });
     }
@@ -7548,14 +7555,29 @@ fn flash_timing_non_mana_additional_cost(
         })
 }
 
-/// CR 601.2b: Find the first applicable Defiler cost reduction for a spell being cast.
-/// Returns `Some((life_cost, mana_reduction))` if a controlled Defiler permanent has
-/// `DefilerCostReduction` matching one of the spell's colors and the spell is a permanent spell.
-fn find_defiler_reduction(
+/// CR 601.2b + CR 118.7b: The matched Defiler static's payable parameters — its
+/// life cost, its mana reduction, and the reach that reduction was printed with
+/// ("This effect reduces only the amount of [color] mana you pay").
+///
+/// Single authority for locating the applicable Defiler, so the offer path and
+/// the apply path cannot disagree about which static is in play.
+struct DefilerReduction {
+    life_cost: u32,
+    mana_reduction: crate::types::mana::ManaCost,
+    reach: CostReductionReach,
+    /// Display label for the CR 601.2f ordering prompt.
+    source_name: String,
+}
+
+/// CR 601.2b: Find the first applicable Defiler cost reduction for a spell being
+/// cast, WITHOUT the life-affordability gate. `Some` when a controlled Defiler
+/// permanent has `DefilerCostReduction` matching one of the spell's colors and
+/// the spell is a permanent spell.
+fn find_defiler_static(
     state: &GameState,
     caster: PlayerId,
     spell_id: ObjectId,
-) -> Option<(u32, crate::types::mana::ManaCost)> {
+) -> Option<DefilerReduction> {
     use crate::types::statics::StaticMode;
 
     let spell = state.objects.get(&spell_id)?;
@@ -7589,29 +7611,77 @@ fn find_defiler_reduction(
         if bf_obj.controller != caster {
             continue;
         }
+        if let StaticMode::DefilerCostReduction {
+            color,
+            life_cost,
+            mana_reduction,
+            reach,
+        } = &def.mode
         {
-            if let StaticMode::DefilerCostReduction {
-                color,
-                life_cost,
-                mana_reduction,
-            } = &def.mode
-            {
-                if spell_colors.contains(color) {
-                    // CR 118.3 + CR 119.4b + CR 119.8: Don't offer the Defiler
-                    // prompt when the caster can't actually pay the life — this
-                    // keeps the UI from presenting an impossible choice.
-                    if !super::life_costs::can_pay_life_cast_or_activation_cost(
-                        state, caster, *life_cost,
-                    ) {
-                        return None;
-                    }
-                    return Some((*life_cost, mana_reduction.clone()));
-                }
+            if spell_colors.contains(color) {
+                return Some(DefilerReduction {
+                    life_cost: *life_cost,
+                    mana_reduction: mana_reduction.clone(),
+                    reach: *reach,
+                    source_name: bf_obj.name.clone(),
+                });
             }
         }
     }
 
     None
+}
+
+/// CR 118.7b/c/d: The reach the applicable Defiler's reduction was printed with.
+/// Read once, at announcement, and carried on the prompt — re-deriving it when
+/// the answer comes back would silently fall back to the rules default if the
+/// source were no longer locatable (CR 601.2f locks cost modification at
+/// announcement, so the announced value is the correct one to apply).
+/// CR 601.2b: Find the first applicable Defiler cost reduction for a spell being cast.
+/// `Some` if a controlled Defiler permanent has `DefilerCostReduction` matching one of
+/// the spell's colors, the spell is a permanent spell, and the life is payable.
+fn find_defiler_reduction(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+) -> Option<DefilerReduction> {
+    let reduction = find_defiler_static(state, caster, spell_id)?;
+    // CR 118.3 + CR 119.4b + CR 119.8: Don't offer the Defiler prompt when the
+    // caster can't actually pay the life — this keeps the UI from presenting an
+    // impossible choice.
+    if !super::life_costs::can_pay_life_cast_or_activation_cost(state, caster, reduction.life_cost)
+    {
+        return None;
+    }
+    Some(reduction)
+}
+
+/// CR 601.2b + CR 601.2f: Package an accepted Defiler life payment as a cost
+/// reduction so it joins the CR 601.2f ordered reduction set instead of being
+/// shaved off an already-floored total.
+///
+/// `display_name` is re-derived from the board for the ordering prompt. The
+/// Defiler itself is a battlefield permanent that is still there in every
+/// realistic case; when it is not, the label falls back to a generic one. Only
+/// the label is re-derived — the amount and reach come from the announced
+/// prompt, which is what CR 601.2f locked in.
+fn accepted_defiler_reduction_entry(
+    state: &GameState,
+    player: PlayerId,
+    spell_id: ObjectId,
+    mana_reduction: &crate::types::mana::ManaCost,
+    reach: CostReductionReach,
+) -> CostReductionEntry {
+    let display_name = find_defiler_static(state, player, spell_id)
+        .map(|found| found.source_name)
+        .unwrap_or_else(|| "Defiler cost reduction".to_string());
+    CostReductionEntry {
+        amount: mana_reduction.clone(),
+        multiplier: 1,
+        reach,
+        provenance: ReductionProvenance::Defiler,
+        display_name,
+    }
 }
 
 /// CR 601.2f + CR 118.7: Preview the locked mana obligation after an
@@ -7623,25 +7693,27 @@ pub(crate) fn defiler_reduced_cost(
     spell_id: ObjectId,
     cost: &ManaCost,
 ) -> Option<ManaCost> {
-    let (_, reduction) = find_defiler_reduction(state, caster, spell_id)?;
+    let reduction = find_defiler_reduction(state, caster, spell_id)?;
     let mut reduced = cost.clone();
-    apply_defiler_mana_reduction(&mut reduced, &reduction);
+    apply_defiler_mana_reduction(&mut reduced, &reduction.mana_reduction, reduction.reach);
     Some(reduced)
 }
 
 /// CR 601.2b: Handle the player's decision on Defiler life payment.
 /// If accepted, pays life and reduces the spell's mana cost, then continues to mana payment.
 /// If declined, continues with the original cost.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_defiler_payment(
     state: &mut GameState,
     player: PlayerId,
     pending: PendingCast,
     life_cost: u32,
     mana_reduction: &crate::types::mana::ManaCost,
+    reach: CostReductionReach,
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let mut cost = pending.cost.clone();
+    let cost = pending.cost.clone();
 
     if pay {
         super::life_safety::begin_defiler_payment_attempt(
@@ -7664,9 +7736,29 @@ pub(crate) fn handle_defiler_payment(
             PayLifeCostResult::Paid { .. } => {}
             PayLifeCostResult::PaidWithDeferredSubstitution { .. }
             | PayLifeCostResult::DeferredReplacementChoice { .. } => {
-                apply_defiler_mana_reduction(&mut cost, mana_reduction);
+                // CR 601.2b + CR 601.2f: a life-payment replacement effect
+                // paused mid-cost. Record the accepted reduction on the parked
+                // `PendingCast` instead of subtracting it from the announced
+                // cost here: the resume runs `finish_pending_cost_or_cast`,
+                // which rebuilds the `CostLockInput` from this pending, so the
+                // reduction re-enters the CR 601.2f lock seam and is ordered
+                // against the board's reductions before the floor — exactly as
+                // on the unpaused path. Baking it into `pending.cost` instead
+                // would apply it AFTER the announced cost's floor (a total no
+                // legal CR 601.2f order can produce) and would leave
+                // `accepted_cost_reductions` empty, so a board that later
+                // raises an election would drop the discount the caster just
+                // paid life for.
                 let mut pending = pending;
-                pending.cost = cost;
+                pending
+                    .accepted_cost_reductions
+                    .push(accepted_defiler_reduction_entry(
+                        state,
+                        player,
+                        pending.object_id,
+                        mana_reduction,
+                        reach,
+                    ));
                 state.pending_deferred_life_cost_resume =
                     Some(crate::types::game_state::DeferredLifeCostResume::Cast {
                         player,
@@ -7679,7 +7771,8 @@ pub(crate) fn handle_defiler_payment(
             PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => {
                 // Proceed with the original cost; no reduction.
                 let base_cost = pending.base_cost.clone();
-                return pay_and_push(
+                let lock = CostLockInput::from_pending(&pending);
+                return pay_and_push_with_lock(
                     state,
                     player,
                     pending.object_id,
@@ -7693,16 +7786,39 @@ pub(crate) fn handle_defiler_payment(
                     pending.distribute,
                     pending.origin_zone,
                     pending.payment_mode,
+                    lock,
                     events,
                 );
             }
         }
-
-        apply_defiler_mana_reduction(&mut cost, mana_reduction);
     }
 
+    // CR 601.2b + CR 601.2f: hand the accepted reduction to the lock seam as an
+    // ordinary member of the reduction set instead of subtracting it from the
+    // already-floored announced cost. That is a real behaviour change and it is
+    // the rules-correct one: a cost floor (Trinisphere, CR 601.2f "effects that
+    // directly affect the total cost") is applied AFTER every reduction, so a
+    // {W} permanent spell reduced to {0} by an accepted Defiler floors up to
+    // {3}, where the old post-floor subtraction produced {2}.
+    let lock = CostLockInput {
+        accepted: if pay {
+            let mut accepted = pending.accepted_cost_reductions.clone();
+            accepted.push(accepted_defiler_reduction_entry(
+                state,
+                player,
+                pending.object_id,
+                mana_reduction,
+                reach,
+            ));
+            accepted
+        } else {
+            pending.accepted_cost_reductions.clone()
+        },
+        ..CostLockInput::from_pending(&pending)
+    };
+
     let base_cost = pending.base_cost.clone();
-    pay_and_push(
+    pay_and_push_with_lock(
         state,
         player,
         pending.object_id,
@@ -7716,6 +7832,66 @@ pub(crate) fn handle_defiler_payment(
         pending.distribute,
         pending.origin_zone,
         pending.payment_mode,
+        lock,
+        events,
+    )
+}
+
+/// CR 601.2b + CR 601.2f: Apply the caster's elected cost-determination choices
+/// and continue the cast.
+///
+/// `order` is validated as a strict permutation of the prompt's `reductions`
+/// (no duplicates, no out-of-range indices, exact length) and
+/// `hybrid_announcement` as a legal nonhybrid equivalent for each of the
+/// prompt's hybrid symbols. A malformed election is rejected with
+/// `InvalidAction` and the prompt stays live, so the caster can answer again —
+/// the cast is not silently resolved with an election nobody chose.
+pub(crate) fn handle_order_cost_reductions(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    reductions: &[CostReductionEntry],
+    order: &[usize],
+    hybrid_announcement: &[crate::types::mana::ManaCostShard],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let hybrid_symbols = super::casting::prompt_hybrid_symbols(&pending, reductions);
+    super::casting::validate_cost_reduction_election(
+        order,
+        hybrid_announcement,
+        reductions,
+        &hybrid_symbols,
+    )
+    .map_err(EngineError::InvalidAction)?;
+
+    let election = CostReductionElection {
+        order: order
+            .iter()
+            .map(|&index| reductions[index].provenance)
+            .collect(),
+        hybrid_announcement: hybrid_announcement.to_vec(),
+    };
+
+    let lock = CostLockInput {
+        election: Some(election),
+        ..CostLockInput::from_pending(&pending)
+    };
+    let base_cost = pending.base_cost.clone();
+    pay_and_push_with_lock(
+        state,
+        player,
+        pending.object_id,
+        pending.card_id,
+        *pending.ability,
+        &pending.cost,
+        base_cost,
+        pending.casting_variant,
+        pending.casting_permission_index,
+        pending.cast_timing_permission,
+        pending.distribute,
+        pending.origin_zone,
+        pending.payment_mode,
+        lock,
         events,
     )
 }
@@ -7723,6 +7899,7 @@ pub(crate) fn handle_defiler_payment(
 fn apply_defiler_mana_reduction(
     spell_cost: &mut crate::types::mana::ManaCost,
     reduction: &crate::types::mana::ManaCost,
+    reach: CostReductionReach,
 ) {
     let crate::types::mana::ManaCost::Cost {
         shards: spell_shards,
@@ -7739,12 +7916,22 @@ fn apply_defiler_mana_reduction(
         return;
     };
 
-    // CR 118.7b/c/d: unmatched or excess colored reduction spills over to
-    // generic, same as any other cost reduction (`apply_shard_reduction`).
+    // CR 118.7b/c/d + card text: every printed Defiler reads "This effect
+    // reduces only the amount of [color] mana you pay", which overrides the
+    // default spillover — a reduction unit with no matching pip in the spell's
+    // cost is lost rather than shaved off the generic component. (A white
+    // permanent spell whose cost carries no {W} — a color-indicator card or an
+    // MDFC back face — is exactly the case this protects.) `reach` is read off
+    // the static rather than assumed, so a Defiler-shaped ability parsed
+    // without that rider still gets the CR 118.7b default.
     for shard in reduction_shards {
-        super::casting::apply_shard_reduction(spell_shards, spell_generic, *shard);
+        super::casting::apply_shard_reduction(spell_shards, spell_generic, *shard, reach);
     }
-    *spell_generic = spell_generic.saturating_sub(*reduction_generic);
+    // CR 118.7a: the same rider confines the reduction to colored mana, so an
+    // explicit generic component may only apply under the default reach.
+    if matches!(reach, CostReductionReach::SpillsToGeneric) {
+        *spell_generic = spell_generic.saturating_sub(*reduction_generic);
+    }
 }
 
 /// CR 601.2b: Pay an additional cost, returning a WaitingFor if interactive input is needed
@@ -9585,6 +9772,12 @@ pub(super) fn can_pay_jumpstart_additional_cost(
     !super::casting::find_eligible_discard_targets(state, player, object_id, None).is_empty()
 }
 
+/// CR 601.2f: Announce-time entry to the lock seam, for the paths that reach it
+/// with no `PendingCast` in hand — nothing has been declared, accepted or
+/// elected yet. Any caller that DOES hold a `PendingCast` must call
+/// [`pay_and_push_with_lock`] with [`CostLockInput::from_pending`] instead, so
+/// the cast's declared additional mana costs and accepted reductions survive
+/// the seam's recompute.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn pay_and_push(
     state: &mut GameState,
@@ -9602,6 +9795,144 @@ pub(super) fn pay_and_push(
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    pay_and_push_with_lock(
+        state,
+        player,
+        object_id,
+        card_id,
+        ability,
+        cost,
+        base_cost,
+        casting_variant,
+        casting_permission_index,
+        cast_timing_permission,
+        distribute,
+        origin_zone,
+        payment_mode,
+        CostLockInput::default(),
+        events,
+    )
+}
+
+/// CR 601.2f: What the lock seam at the head of [`pay_and_push_with_lock`] needs
+/// beyond the board to determine the total cost.
+///
+/// The seam rebuilds a probe [`PendingCast`] from `pay_and_push`'s exploded
+/// parameters and hands it to [`super::casting::recompute_pending_mana_total_with`].
+/// EVERY `PendingCast` field that recompute reads and that is not one of those
+/// exploded parameters has to be carried here, or the probe silently drops its
+/// contribution from the locked total. Build it with
+/// [`CostLockInput::from_pending`] whenever a real `PendingCast` is in hand.
+#[derive(Debug, Clone, Default)]
+pub(super) struct CostLockInput {
+    /// CR 601.2b + CR 601.2f: the mana components of additional costs already
+    /// declared for this cast — kicker and every "as an additional cost, pay
+    /// {N}" (`split_declared_mana_addition_and_residual`), splice, and
+    /// modal-only mana. `base_cost` is the announcement-time base ONLY, so a
+    /// recomputing branch that does not re-add these underpays the spell by
+    /// exactly the declared amount (CR 601.2f: base plus all additional costs
+    /// minus reductions).
+    pub declared_mana_additions: Vec<ManaCost>,
+    /// Reductions the caster has accepted that no static reproduces — today
+    /// exactly an accepted Defiler life payment (CR 601.2b).
+    pub accepted: Vec<CostReductionEntry>,
+    /// The caster's answer to `WaitingFor::OrderCostReductions`, when the
+    /// prompt has already been shown and answered. `Some` also means "do not
+    /// re-analyze", which is what keeps the resume from prompting forever.
+    pub election: Option<CostReductionElection>,
+}
+
+impl CostLockInput {
+    /// Carry a live cast's cost-determination state into the seam. Use this in
+    /// preference to building the struct field-by-field: it is the single place
+    /// a newly added `PendingCast` cost input has to be wired up.
+    pub(super) fn from_pending(pending: &PendingCast) -> Self {
+        Self {
+            declared_mana_additions: pending.declared_mana_additions.clone(),
+            accepted: pending.accepted_cost_reductions.clone(),
+            election: pending.cost_reduction_election.clone(),
+        }
+    }
+
+    /// Stamp the carried state back onto a `PendingCast` the payment pipeline
+    /// builds from exploded fields, so the cast that is stashed in
+    /// `state.pending_cast` can still recompute its own total (CR 601.2f) —
+    /// the `{X}` re-derivation in `apply_post_x_cost_modifiers` reads exactly
+    /// these fields.
+    fn apply_to(&self, pending: &mut PendingCast) {
+        pending
+            .declared_mana_additions
+            .clone_from(&self.declared_mana_additions);
+        pending.accepted_cost_reductions.clone_from(&self.accepted);
+        pending.cost_reduction_election.clone_from(&self.election);
+    }
+}
+
+/// CR 601.2f: The single seam where a spell's total cost becomes "locked in".
+///
+/// Both the ordinary cast path and the Defiler resume funnel through here, so
+/// an accepted Defiler reduction is ordered against the board's reductions
+/// instead of being shaved off an already-floored total. If two legal reduction
+/// orders lock in different costs, the caster is asked which they want
+/// (`WaitingFor::OrderCostReductions`) before any mana is paid — CR 601.2g puts
+/// mana abilities *after* the total cost is determined, so the prompt has to
+/// come first.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn pay_and_push_with_lock(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: &crate::types::mana::ManaCost,
+    base_cost: Option<ManaCost>,
+    casting_variant: CastingVariant,
+    casting_permission_index: Option<CastingPermissionIndex>,
+    cast_timing_permission: Option<CastTimingPermission>,
+    distribute: Option<DistributionUnit>,
+    origin_zone: Zone,
+    payment_mode: CastPaymentMode,
+    lock: CostLockInput,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let build_pending = |cost: &crate::types::mana::ManaCost| {
+        let mut pending = PendingCast::new(object_id, card_id, ability.clone(), cost.clone());
+        pending.base_cost = base_cost.clone();
+        pending.casting_variant = casting_variant;
+        pending.casting_permission_index = casting_permission_index;
+        pending.cast_timing_permission = cast_timing_permission;
+        pending.distribute = distribute.clone();
+        pending.origin_zone = origin_zone;
+        pending.payment_mode = payment_mode;
+        lock.apply_to(&mut pending);
+        pending
+    };
+
+    let probe = build_pending(cost);
+    let locked_cost = match super::casting::lock_in_total_cost(
+        state,
+        player,
+        &probe,
+        &lock.accepted,
+        lock.election.as_ref(),
+    ) {
+        super::casting::CostLockOutcome::Locked(locked) => locked,
+        super::casting::CostLockOutcome::Election {
+            reductions,
+            hybrid_symbols,
+            outcomes,
+        } => {
+            return Ok(WaitingFor::OrderCostReductions {
+                player,
+                reductions,
+                hybrid_symbols,
+                outcomes,
+                pending_cast: Box::new(probe),
+            });
+        }
+    };
+    let cost = &locked_cost;
+
     // CR 702.180a/b: Harmonize — offer optional creature tap to reduce generic mana cost.
     // CR 601.2b: Creature chosen and tapped as part of cost payment step.
     // CR 302.6: Summoning sickness does not restrict tapping for costs.
@@ -9632,6 +9963,7 @@ pub(super) fn pay_and_push(
                 pending.cast_timing_permission = cast_timing_permission;
                 pending.origin_zone = origin_zone;
                 pending.payment_mode = payment_mode;
+                lock.apply_to(&mut pending);
                 return Ok(WaitingFor::HarmonizeTapChoice {
                     player,
                     eligible_creatures: eligible,
@@ -9655,6 +9987,7 @@ pub(super) fn pay_and_push(
         distribute,
         origin_zone,
         payment_mode,
+        lock,
         events,
     )
 }
@@ -9674,6 +10007,7 @@ pub(super) fn pay_and_push_adventure(
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
+    lock: CostLockInput,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // CR 702.51a: Convoke lets players tap creatures to reduce mana cost.
@@ -9725,6 +10059,11 @@ pub(super) fn pay_and_push_adventure(
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
+        // CR 601.2f: the `{X}` route re-derives the whole total in
+        // `apply_post_x_cost_modifiers` once X is concrete. Without these the
+        // re-derivation would drop the declared additional costs and silently
+        // discard the caster's elected reduction order.
+        lock.apply_to(&mut pending);
         state.pending_cast = Some(Box::new(pending));
         return enter_payment_step(state, player, convoke_mode, events);
     }
@@ -9742,6 +10081,7 @@ pub(super) fn pay_and_push_adventure(
     pending.distribute = distribute;
     pending.origin_zone = origin_zone;
     pending.payment_mode = payment_mode;
+    lock.apply_to(&mut pending);
 
     // CR 702.132a: Assist — the cost is now fully locked (no X / convoke / manual
     // step pending), so before finalizing, a spell with assist and a generic
@@ -13073,6 +13413,11 @@ pub(crate) fn post_origin_auto_payment_verdict(
         | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
+        // CR 601.2f: the reduction-order election is an unresolved inline cost
+        // prompt carrying its own `PendingCast`, exactly like `DefilerPayment`
+        // above — the caster has not yet chosen an order, so the mana
+        // obligation is not settled and the offer seam must defer.
+        | WaitingFor::OrderCostReductions { .. }
         | WaitingFor::ActivationCostOneOfChoice { .. }
         | WaitingFor::CostTypeChoice { .. }
         | WaitingFor::BlightChoice { .. }
@@ -15371,6 +15716,8 @@ mod tests {
             prepaid_actual_mana_spent: None,
             base_cost: None,
             declared_mana_additions: Vec::new(),
+            accepted_cost_reductions: Vec::new(),
+            cost_reduction_election: None,
             activation_cost: None,
             deferred_random_discard_cost: None,
             activation_ability_index: Some(0),
@@ -16249,6 +16596,7 @@ mod tests {
             None,
             Zone::Hand,
             CastPaymentMode::Manual,
+            CostLockInput::default(),
             &mut events,
         )
         .expect("manual payment should pause before paying mana");
@@ -16407,6 +16755,7 @@ mod tests {
             None,
             Zone::Hand,
             CastPaymentMode::Auto,
+            CostLockInput::default(),
             &mut events,
         )
         .expect("auto payment should fall back to manual mana payment");
@@ -19618,6 +19967,7 @@ mod tests {
                 color: ManaColor::Green,
                 life_cost: 2,
                 mana_reduction: reduction.clone(),
+                reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
             }));
 
         let result = find_defiler_reduction(&state, PlayerId(0), spell_id);
@@ -19625,9 +19975,15 @@ mod tests {
             result.is_some(),
             "Should find Defiler reduction for green spell"
         );
-        let (life, mana_red) = result.unwrap();
-        assert_eq!(life, 2);
-        assert_eq!(mana_red, reduction);
+        let found = result.unwrap();
+        assert_eq!(found.life_cost, 2);
+        assert_eq!(found.mana_reduction, reduction);
+        // CR 118.7b/c/d: the reach printed on the static must survive the lookup
+        // so the apply path can honor "reduces only the amount of green mana".
+        assert_eq!(
+            found.reach,
+            crate::types::statics::CostReductionReach::ColoredManaOnly
+        );
     }
 
     #[test]
@@ -19675,6 +20031,7 @@ mod tests {
                     shards: vec![ManaCostShard::Green],
                     generic: 0,
                 },
+                reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
             }));
 
         let result = find_defiler_reduction(&state, PlayerId(0), spell_id);
@@ -19729,6 +20086,7 @@ mod tests {
                     shards: vec![ManaCostShard::Green],
                     generic: 0,
                 },
+                reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
             }));
 
         let result = find_defiler_reduction(&state, PlayerId(0), spell_id);
@@ -19785,6 +20143,7 @@ mod tests {
             pending,
             2,
             &mana_reduction,
+            CostReductionReach::ColoredManaOnly,
             true,
             &mut events,
         );
@@ -19806,14 +20165,16 @@ mod tests {
         );
     }
 
-    /// CR 118.7b: a Defiler reduction shard with no matching colored component
-    /// in the spell's cost must spill over to reduce generic mana instead of
-    /// being silently dropped. Regression coverage for `apply_defiler_mana_reduction`
-    /// through its actual consumer, `handle_defiler_payment` — a bare
-    /// matching-shard check on `apply_defiler_mana_reduction` alone would not
-    /// catch a future regression that decouples the two.
+    /// CR 118.7b + card text: every printed Defiler reads "This effect reduces
+    /// only the amount of [color] mana you pay", which OVERRIDES the CR 118.7b
+    /// default. A reduction unit with no matching colored component in the
+    /// spell's cost is therefore lost, not spilled onto generic mana — a green
+    /// Defiler must not shave {1} off a green permanent spell that happens to
+    /// have no {G} in its printed cost. Exercised through the actual consumer,
+    /// `handle_defiler_payment`, rather than the private helper, so a future
+    /// regression that decouples the two is still caught.
     #[test]
-    fn handle_defiler_payment_spills_unmatched_colored_shard_to_generic() {
+    fn handle_defiler_payment_does_not_spill_unmatched_colored_shard_to_generic() {
         use crate::types::mana::ManaCostShard;
 
         let mut state = GameState::new_two_player(42);
@@ -19865,6 +20226,7 @@ mod tests {
             pending,
             2,
             &mana_reduction,
+            CostReductionReach::ColoredManaOnly,
             true,
             &mut events,
         )
@@ -19878,18 +20240,19 @@ mod tests {
             pending_cast.cost,
             ManaCost::Cost {
                 shards: vec![],
-                generic: 2,
+                generic: 3,
             },
-            "the unmatched green reduction unit must spill over to generic (3 -> 2), not be dropped (3 -> 3)",
+            "the Defiler rider confines the reduction to colored mana, so an \
+             unmatched green unit leaves {{3}} alone (3 -> 3), not (3 -> 2)",
         );
     }
 
-    /// CR 118.7c: a Defiler reduction that exceeds the spell's matching
-    /// colored component reduces that color to nothing, then spills the
-    /// excess to generic — again exercised through `handle_defiler_payment`
-    /// rather than the private helper directly.
+    /// CR 118.7c + card text: the same rider also suppresses the "excess"
+    /// spillover. Once the spell's pips of that color are exhausted, a further
+    /// reduction unit has no colored mana left to reduce and is lost rather
+    /// than reaching the generic component.
     #[test]
-    fn handle_defiler_payment_spills_excess_beyond_matching_color_to_generic() {
+    fn handle_defiler_payment_does_not_spill_excess_beyond_matching_color_to_generic() {
         use crate::types::mana::ManaCostShard;
 
         let mut state = GameState::new_two_player(42);
@@ -19943,6 +20306,7 @@ mod tests {
             pending,
             2,
             &mana_reduction,
+            CostReductionReach::ColoredManaOnly,
             true,
             &mut events,
         )
@@ -19956,9 +20320,10 @@ mod tests {
             pending_cast.cost,
             ManaCost::Cost {
                 shards: vec![],
-                generic: 1,
+                generic: 2,
             },
-            "both green pips must be removed and the excess third unit must spill to generic (2 -> 1), not leave generic untouched (2 -> 2)",
+            "both green pips must be removed, but the excess third unit is lost \
+             rather than spilling to generic (2 -> 2), not (2 -> 1)",
         );
     }
 
@@ -21161,6 +21526,8 @@ mod tests {
             prepaid_actual_mana_spent: None,
             base_cost: None,
             declared_mana_additions: Vec::new(),
+            accepted_cost_reductions: Vec::new(),
+            cost_reduction_election: None,
             activation_cost: None,
             deferred_random_discard_cost: None,
             activation_ability_index: None,
@@ -21300,6 +21667,8 @@ mod tests {
             prepaid_actual_mana_spent: None,
             base_cost: None,
             declared_mana_additions: Vec::new(),
+            accepted_cost_reductions: Vec::new(),
+            cost_reduction_election: None,
             activation_cost: None,
             deferred_random_discard_cost: None,
             activation_ability_index: None,
@@ -21408,6 +21777,8 @@ mod tests {
             prepaid_actual_mana_spent: None,
             base_cost: None,
             declared_mana_additions: Vec::new(),
+            accepted_cost_reductions: Vec::new(),
+            cost_reduction_election: None,
             activation_cost: None,
             deferred_random_discard_cost: None,
             activation_ability_index: None,
@@ -21505,6 +21876,8 @@ mod tests {
             prepaid_actual_mana_spent: None,
             base_cost: None,
             declared_mana_additions: Vec::new(),
+            accepted_cost_reductions: Vec::new(),
+            cost_reduction_election: None,
             activation_cost: None,
             deferred_random_discard_cost: None,
             activation_ability_index: None,
@@ -21635,6 +22008,8 @@ mod tests {
             prepaid_actual_mana_spent: None,
             base_cost: None,
             declared_mana_additions: Vec::new(),
+            accepted_cost_reductions: Vec::new(),
+            cost_reduction_election: None,
             activation_cost: None,
             deferred_random_discard_cost: None,
             activation_ability_index: None,
@@ -23969,6 +24344,7 @@ its replicate cost was paid.)\nDraw a card.";
                 filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
                 caused_by: None,
             }),
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         })
         .affected(TargetFilter::SelfRef)
         .condition(StaticCondition::And {

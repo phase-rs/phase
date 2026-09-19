@@ -107,6 +107,7 @@ import {
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { ResolveAllConsentModal } from "../components/modal/ResolveAllConsentModal.tsx";
 import { TriggerOrderModal } from "../components/modal/TriggerOrderModal.tsx";
+import { CostReductionOrderModal } from "../components/modal/CostReductionOrderModal.tsx";
 import { PeekTab } from "../components/modal/DialogShell.tsx";
 import { PeekRestoreTab } from "../components/modal/DialogHost.tsx";
 import { useModalPeek } from "../components/modal/useModalPeek.ts";
@@ -2016,6 +2017,8 @@ function GamePageContent({
         {canActForWaitingState && <ResolveAllConsentModal playerId={playerId} />}
         {waitingFor?.type === "OrderTriggers" &&
           canActForWaitingState && <TriggerOrderModal />}
+        {waitingFor?.type === "OrderCostReductions" &&
+          canActForWaitingState && <CostReductionOrderModal />}
         <BattleProtectorModal />
         <MeldChoiceModal />
         <AssistChoosePlayerModal />

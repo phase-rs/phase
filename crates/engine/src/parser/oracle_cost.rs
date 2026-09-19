@@ -1,7 +1,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, map, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, opt, peek, rest, value};
 use nom::error::ParseError;
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, separated_pair, terminated};
@@ -1499,6 +1499,66 @@ pub(crate) fn is_self_cost_reduction_prefix(lower: &str) -> bool {
     ))
     .parse(after_mana)
     .is_ok()
+}
+
+/// CR 118.7b/c/d: The mana scope named by a cost reduction's "This effect
+/// reduces only the amount of X mana you pay" rider.
+///
+/// Two printed forms exist — "colored" (Morophon, the Boundless; Edgewalker;
+/// Ragemonger; Bard Class; Head of the Class; Nekrataal Avatar; Vorthos,
+/// Steward of Myth) and a single named color (the Defiler cycle, "...only the
+/// amount of blue mana you pay"). Both express the SAME reach: the reduction
+/// may only cancel matching colored pips, and an unmatched unit is lost instead
+/// of spilling into generic mana the way CR 118.7b otherwise requires. The
+/// named color is preserved so a caller that must cross-check it against the
+/// reduction's own color (the Defiler cycle does) still can; callers that only
+/// need the reach discard the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ColoredManaOnlyScope {
+    /// "...only the amount of colored mana you pay."
+    AnyColor,
+    /// "...only the amount of [white|blue|black|red|green] mana you pay."
+    Single(crate::types::mana::ManaColor),
+}
+
+/// CR 118.7b/c/d: Recognize the colored-only rider sentence, positioned at its
+/// start ("this effect reduces only ..." — already lowercase).
+///
+/// Single authority for this clause so the general `ModifyCost` path and the
+/// Defiler cycle's dedicated parser cannot drift apart on which phrasings count.
+pub(crate) fn parse_colored_mana_only_clause(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, ColoredManaOnlyScope> {
+    let (rest, _) = tag("this effect reduces only the amount of ").parse(input)?;
+    let (rest, scope) = alt((
+        value(ColoredManaOnlyScope::AnyColor, tag("colored")),
+        map(nom_primitives::parse_color, ColoredManaOnlyScope::Single),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" mana you pay").parse(rest)?;
+    // Require a sentence boundary so a longer sentence that merely OPENS with
+    // this wording ("... mana you pay for that spell's kicker", say) cannot
+    // false-positive. Accepting a bare space here would admit exactly that
+    // continuation, so only a period or end-of-input terminates the rider.
+    // `peek` leaves the terminator for the caller — the Defiler parser consumes
+    // the trailing '.' itself. All 12 printed riders end with '.'; `eof` covers
+    // a line whose trailing period was already stripped upstream.
+    let (rest, _) = peek(alt((eof, tag(".")))).parse(rest)?;
+    Ok((rest, scope))
+}
+
+/// CR 118.7b/c/d: True when `lower` carries the colored-only rider anywhere in
+/// the line — the rider is a separate sentence appended to the reduction
+/// sentence, so it is scanned at word boundaries rather than anchored.
+///
+/// Known limitation: the answer is per-LINE, not bound to one specific
+/// reduction clause. A single Oracle line carrying two different reductions
+/// where only one takes the rider would attribute it to both. No printed card
+/// has that shape — all 12 riders in the corpus sit on a line with exactly one
+/// reduction — so binding the rider structurally to its clause is deferred
+/// until a card needs it.
+pub(crate) fn line_reduces_colored_mana_only(lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(lower, parse_colored_mana_only_clause).is_some()
 }
 
 /// CR 601.2f: Parse "this ability/spell costs {N} less/more to activate/cast for each [condition]".

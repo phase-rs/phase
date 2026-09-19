@@ -19539,6 +19539,7 @@ fn glamdring_foe_hammer_equipped_power_cost_reduction_and_equip_parse() {
         amount: ManaCost::Cost { generic: 1, .. },
         spell_filter: Some(TargetFilter::Or { ref filters }),
         dynamic_count: Some(QuantityRef::PropertyAggregate(ref aggregate)),
+        ..
     } = &r.statics[0].mode
     else {
         panic!(
@@ -24764,6 +24765,7 @@ fn defiler_single_line_cost_reduction_parses_as_dedicated_static() {
             color,
             life_cost,
             mana_reduction,
+            reach,
         } => {
             assert_eq!(*color, ManaColor::Blue);
             assert_eq!(*life_cost, 2);
@@ -24773,6 +24775,14 @@ fn defiler_single_line_cost_reduction_parses_as_dedicated_static() {
                     shards: vec![ManaCostShard::Blue],
                     generic: 0,
                 }
+            );
+            // CR 118.7b/c/d: the printed rider ("This effect reduces only the
+            // amount of blue mana you pay") must be captured, not dropped —
+            // it is what stops the {U} reduction shaving generic mana off a
+            // blue permanent spell whose cost has no {U} pip.
+            assert_eq!(
+                *reach,
+                crate::types::statics::CostReductionReach::ColoredManaOnly
             );
         }
         other => panic!("expected DefilerCostReduction, got {other:?}"),

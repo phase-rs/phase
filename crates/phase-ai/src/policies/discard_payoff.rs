@@ -221,6 +221,7 @@ fn candidate_discards_controller(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::ChooseReplacement { .. }
         | GameAction::ChooseEntryController { .. }
         | GameAction::OrderTriggers { .. }
+        | GameAction::OrderCostReductions { .. }
         | GameAction::CancelCast
         | GameAction::Equip { .. }
         | GameAction::CrewVehicle { .. }

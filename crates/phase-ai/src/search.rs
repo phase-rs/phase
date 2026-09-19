@@ -1681,6 +1681,25 @@ pub fn fallback_action(
             order: (0..triggers.len()).collect(),
         }),
 
+        // CR 601.2f: cost-reduction order. Take the engine's caster-optimal
+        // representative (`outcomes` is sorted cheapest-first), falling back to
+        // the identity permutation with nothing announced when the prompt
+        // somehow carries no outcome.
+        WaitingFor::OrderCostReductions {
+            reductions,
+            outcomes,
+            ..
+        } => Some(match outcomes.first() {
+            Some(outcome) => GameAction::OrderCostReductions {
+                order: outcome.order.clone(),
+                hybrid_announcement: outcome.hybrid_announcement.clone(),
+            },
+            None => GameAction::OrderCostReductions {
+                order: (0..reductions.len()).collect(),
+                hybrid_announcement: Vec::new(),
+            },
+        }),
+
         // CR 103.5 + 103.5b: Mulligan default. In `Declare`, keep unless the AI
         // has a Serum Powder in hand, in which case use it first (auto-heuristic
         // — see `first_serum_powder_in_hand`). In `BottomCards`, the owed count
