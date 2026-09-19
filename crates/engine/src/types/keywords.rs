@@ -946,6 +946,16 @@ pub enum Keyword {
     /// CR 701.57a: Discover N — exile from top until nonland card with MV ≤ N.
     Discover(u32),
     Spree,
+    /// CR 702.183a: Tiered is a static ability found on some modal spells that
+    /// applies while the spell is on the stack: "Choose one. As an additional
+    /// cost to cast this spell, pay the cost associated with that mode."
+    /// RUNTIME: no independent handler — the choose-exactly-one shape and the
+    /// per-mode additional cost (CR 700.2h) are carried by the spell's
+    /// `ModalChoice` (`min_choices = max_choices = 1`) plus `mode_costs`, composed
+    /// into the total cost by `game/casting_targets.rs::compute_modal_total_cost`.
+    /// This variant is the typed tag for that structure (the Spree precedent,
+    /// CR 702.172). It is not a stub.
+    Tiered,
     Ravenous,
     Daybound,
     Nightbound,
@@ -1399,6 +1409,7 @@ impl Keyword {
             | Keyword::Gift(_)
             | Keyword::Discover(_)
             | Keyword::Spree
+            | Keyword::Tiered
             | Keyword::Ravenous
             | Keyword::Enlist
             | Keyword::ReadAhead
@@ -1673,6 +1684,7 @@ impl Keyword {
             | Keyword::Spectacle(_)
             | Keyword::SplitSecond
             | Keyword::Spree
+            | Keyword::Tiered
             | Keyword::Squad(_)
             | Keyword::Storm
             | Keyword::Surge(_)
@@ -1801,6 +1813,7 @@ impl Keyword {
             | Keyword::Spectacle(_)
             | Keyword::SplitSecond
             | Keyword::Spree
+            | Keyword::Tiered
             | Keyword::Squad(_)
             | Keyword::StartingIntensity(_)
             | Keyword::Storm
@@ -3083,6 +3096,7 @@ impl FromStr for Keyword {
                 Ok(Keyword::Discover(n))
             }
             "spree" => Ok(Keyword::Spree),
+            "tiered" => Ok(Keyword::Tiered),
             "ravenous" => Ok(Keyword::Ravenous),
             "daybound" => Ok(Keyword::Daybound),
             "nightbound" => Ok(Keyword::Nightbound),
@@ -3452,6 +3466,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             .map(Keyword::Discover)
             .map_err(|error| format!("Discover: {error}")),
         "Spree" => Ok(Keyword::Spree),
+        "Tiered" => Ok(Keyword::Tiered),
         "Ravenous" => Ok(Keyword::Ravenous),
         "Daybound" => Ok(Keyword::Daybound),
         "Nightbound" => Ok(Keyword::Nightbound),
@@ -4172,6 +4187,28 @@ mod tests {
             let back: Keyword = serde_json::from_value(value.clone()).unwrap();
             assert_eq!(back, kw, "round-trip failed for {value:?}");
         }
+    }
+
+    /// CR 702.183a: Tiered is a unit keyword — `FromStr` accepts both the
+    /// lowercase MTGJSON spelling and the PascalCase Oracle spelling, and serde
+    /// round-trips it through the bare-string and externally-tagged shapes
+    /// (the latter pinned via `keyword_from_tagged`).
+    #[test]
+    fn tiered_from_str_and_serde_shapes() {
+        assert_eq!(Keyword::from_str("Tiered").unwrap(), Keyword::Tiered);
+        assert_eq!(Keyword::from_str("tiered").unwrap(), Keyword::Tiered);
+        assert_eq!(
+            serde_json::to_value(Keyword::Tiered).unwrap(),
+            serde_json::json!("Tiered")
+        );
+        assert_eq!(
+            serde_json::from_value::<Keyword>(serde_json::json!("Tiered")).unwrap(),
+            Keyword::Tiered
+        );
+        assert_eq!(
+            serde_json::from_value::<Keyword>(serde_json::json!({ "Tiered": null })).unwrap(),
+            Keyword::Tiered
+        );
     }
 
     #[test]
@@ -5808,6 +5845,7 @@ mod tests {
             | Keyword::Storm
             | Keyword::Totem
             | Keyword::Spree
+            | Keyword::Tiered
             | Keyword::Ravenous
             | Keyword::Daybound
             | Keyword::Nightbound
@@ -6019,6 +6057,7 @@ mod tests {
         Keyword::Storm,
         Keyword::Totem,
         Keyword::Spree,
+        Keyword::Tiered,
         Keyword::Ravenous,
         Keyword::Daybound,
         Keyword::Nightbound,

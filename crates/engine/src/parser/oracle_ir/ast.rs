@@ -50,7 +50,7 @@ pub(crate) struct ParsedEffectClause {
     /// Set when `parse_clause_ast` detects a leading conditional and the condition
     /// text is parseable by the nom condition combinator pipeline.
     pub(crate) condition: Option<AbilityCondition>,
-    /// CR 608.2c + CR 117.3a: Set when the parsed subject phrase carried a "may"
+    /// CR 608.2c + CR 608.2d: Set when the parsed subject phrase carried a "may"
     /// modal (e.g., "its controller may search their library"). Lowered into
     /// `AbilityDefinition.optional` so the resolver prompts the acting player.
     pub(crate) optional: bool,

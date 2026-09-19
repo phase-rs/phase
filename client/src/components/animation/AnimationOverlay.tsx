@@ -5,6 +5,7 @@ import {
   DAMAGE_FLURRY_SOURCE_SAMPLE_LIMIT,
   impactDelayMsForAnimationEvent,
   isPlayerDamageAnimationEvent,
+  lifeChangeImpactDelayMs,
   type StepEffect,
 } from "../../animation/types.ts";
 import { getCardColors } from "../../animation/wubrgColors.ts";
@@ -424,7 +425,24 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         }
 
         case "LifeChanged": {
-          const { player_id, amount } = event.data;
+          const { player_id, amount, new_total } = event.data;
+
+          // Tick every life readout the moment this hit lands, rather than
+          // leaving them on the pre-action snapshot until the whole step queue
+          // has drained. The engine supplies the resulting total, so nothing is
+          // derived here; an event from a peer that predates the field has none,
+          // and those readouts keep their snapshot value as before.
+          if (new_total !== undefined) {
+            const impactEpoch = useGameStore.getState().engineCommitEpoch;
+            scheduleStepTimeout(
+              () => useAnimationStore.getState().recordDisplayedLife(
+                player_id,
+                new_total,
+                impactEpoch,
+              ),
+              lifeChangeImpactDelayMs(effect, stepEffects, player_id) * speedMultiplier,
+            );
+          }
 
           // Skip floating number when DamageDealt already covers this player
           // in the same step (avoids duplicate floating numbers)

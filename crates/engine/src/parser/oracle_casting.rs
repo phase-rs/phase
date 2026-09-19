@@ -1846,6 +1846,52 @@ Trample";
         );
     }
 
+    /// CR 601.2f + CR 702.8a: Tegwyll's Scouring — the self-flash rider's
+    /// additional cost is a single-component "tapping three untapped creatures
+    /// you control with flying" phrase, so the per-component split must leave it
+    /// byte-identical to the pre-split lowering and the option must still carry
+    /// `TapCreatures { count: 3, …flying… }`. Sibling regression guard for
+    /// `parse_gerund_cost`'s component split.
+    #[test]
+    fn tegwyll_self_flash_gerund_survives_component_split() {
+        let option = parse_spell_casting_option_line(
+            "You may cast this spell as though it had flash by tapping three untapped creatures you control with flying in addition to paying its other costs.",
+            "Tegwyll's Scouring",
+        )
+        .expect("Tegwyll's single-component flash rider must survive the component split");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash,
+                cost:
+                    Some(AbilityCost::TapCreatures {
+                        ref requirement,
+                        ref filter,
+                    }),
+                condition: None,
+            } => {
+                assert_eq!(
+                    requirement.fixed_count(),
+                    Some(3),
+                    "Tegwyll taps three creatures, got {requirement:?}"
+                );
+                let TargetFilter::Typed(typed) = filter else {
+                    panic!("expected a Typed creature filter, got {filter:?}");
+                };
+                assert!(
+                    typed.type_filters.contains(&TypeFilter::Creature),
+                    "expected a Creature filter, got {typed:?}"
+                );
+                assert!(
+                    typed.properties.contains(&FilterProp::WithKeyword {
+                        value: Keyword::Flying
+                    }),
+                    "the flying restriction must survive the split, got {typed:?}"
+                );
+            }
+            other => panic!("expected AsThoughHadFlash with a TapCreatures cost, got {other:?}"),
+        }
+    }
+
     #[test]
     fn alt_cost_sacrifice_typed_creature_arm() {
         // Delraich — "sacrifice three black creatures"

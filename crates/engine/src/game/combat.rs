@@ -5850,7 +5850,9 @@ pub(super) fn commit_attack_declaration(
     // CR 508.1k + CR 506.4 + CR 613.1f: A chosen creature becomes attacking and
     // stays attacking until removed from combat or the combat phase ends. Marking
     // layers dirty forces Layer 6 ability-adding effects (CR 613.1f) with
-    // FilterProp::Attacking { defender: None } (e.g. Crossway Troublemakers) to re-evaluate now, so
+    // FilterProp::Attacking { defender: None } (e.g. Crossway Troublemakers) —
+    // and, once the per-turn ledgers below are written, FilterProp::AttackedThisTurn
+    // (e.g. Agent Frank Horrigan) — to re-evaluate now, so
     // the grant is live for the whole combat, not just after damage.
     state.layers_dirty.mark_full();
     let attacker_count = combat.attackers.len();
@@ -5875,6 +5877,26 @@ pub(super) fn commit_attack_declaration(
             .entry(*attacker_id)
             .or_default()
             .insert(*defending_player);
+    }
+
+    // CR 508.1a + CR 611.3a + CR 613.1f: "attacked this turn" is a
+    // declaration-time fact. Write the per-turn object ledgers BEFORE the
+    // declaration flush below so continuous effects gated on
+    // FilterProp::AttackedThisTurn (e.g. Agent Frank Horrigan's "has
+    // indestructible as long as it attacked this turn") are live from the
+    // declaration — exactly as `combat.attackers` is populated above before the
+    // flush for FilterProp::Attacking. The declaration snapshots
+    // (`attacker_declarations_this_turn`) stay AFTER the flush: they capture
+    // post-layer characteristics (CR 508.1k + CR 613.1).
+    state
+        .creatures_attacked_this_turn
+        .extend(attacker_ids.iter().copied());
+    for (attacker_id, defending_player) in creature_attacked_defenders {
+        state
+            .creature_attacked_defenders_this_turn
+            .entry(attacker_id)
+            .or_default()
+            .insert(defending_player);
     }
 
     // Use the first attacker's defending player for the event
@@ -5906,20 +5928,12 @@ pub(super) fn commit_attack_declaration(
         declaration_records: attacker_declarations.clone(),
     });
 
-    // CR 508.1a: Record attacker object IDs for per-turn tracking.
-    state
-        .creatures_attacked_this_turn
-        .extend(attacker_ids.iter().copied());
+    // CR 508.1a + CR 508.1k + CR 613.1: record the post-flush declaration
+    // snapshots for per-turn "attacked with <quality>" queries
+    // (QuantityRef::AttackedThisTurn).
     state
         .attacker_declarations_this_turn
         .extend(attacker_declarations);
-    for (attacker_id, defending_player) in creature_attacked_defenders {
-        state
-            .creature_attacked_defenders_this_turn
-            .entry(attacker_id)
-            .or_default()
-            .insert(defending_player);
-    }
 
     super::restrictions::record_attackers_declared(state, attacker_count);
 }

@@ -471,6 +471,13 @@ fn parse_event_history_conditions(input: &str) -> OracleResult<'_, StaticConditi
     alt((
         parse_damage_dealt_this_turn_conditions,
         parse_source_damage_threshold_this_turn,
+        // CR 508.1a: affirmative "<source> attacked this turn" — placed directly
+        // beside its negation twin below. No earlier arm can consume a
+        // "<self-subject> attacked" prefix (the state-group arms all require
+        // "is "/"isn't "/"has "/"hasn't "/"'s "/"entered ", and the two
+        // damage-history arms require a damage predicate), so the placement is
+        // order-independent.
+        parse_source_attacked_this_turn,
         parse_source_didnt_this_turn,
         parse_was_cast_condition,
         parse_entered_this_turn,
@@ -1922,6 +1929,26 @@ fn parse_attached_object_is_filter_condition(input: &str) -> OracleResult<'_, St
     Ok((rest, condition))
 }
 
+/// CR 201.5 + CR 611.3a: explicit self-subject vocabulary shared by
+/// [`parse_source_subject`], [`parse_self_source_subject`] and the did/didn't
+/// attacked-this-turn history pair. Excludes the attached-subject prefixes (an
+/// Aura/Equipment is never itself an attacker) and the bare pronoun, which is
+/// target-anaphoric in effect bodies (Berserk:
+/// `parse_target_attacked_this_turn_condition`) and recipient-bound in
+/// attached-subject statics; the SelfRef static path binds it via
+/// `rewrite_self_pronoun_subject`.
+fn parse_explicit_self_source_subject(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        tag("~ "),
+        tag("this creature "),
+        tag("this permanent "),
+        tag("this land "),
+        tag("this artifact "),
+        tag("this enchantment "),
+    ))
+    .parse(input)
+}
+
 /// Shared subject dispatcher for source-referential predicates.
 ///
 /// Consumes `"<subject> "` — the trailing `"is"` / `"isn't"` is dispatched by the
@@ -1940,12 +1967,7 @@ fn parse_attached_object_is_filter_condition(input: &str) -> OracleResult<'_, St
 /// the attached prefixes, because an Equipment/Aura is never an attacker.
 fn parse_source_subject(input: &str) -> OracleResult<'_, &str> {
     alt((
-        tag("~ "),
-        tag("this creature "),
-        tag("this permanent "),
-        tag("this land "),
-        tag("this artifact "),
-        tag("this enchantment "),
+        parse_explicit_self_source_subject,
         tag("equipped creature "),
         tag("enchanted creature "),
     ))
@@ -1963,12 +1985,7 @@ fn parse_source_subject(input: &str) -> OracleResult<'_, &str> {
 /// `parse_attached_subject_combat_state`).
 fn parse_self_source_subject(input: &str) -> OracleResult<'_, &str> {
     alt((
-        tag("~ "),
-        tag("this creature "),
-        tag("this permanent "),
-        tag("this land "),
-        tag("this artifact "),
-        tag("this enchantment "),
+        parse_explicit_self_source_subject,
         // CR 611.3a: bound "it" in a self-referential static binds to the source
         // permanent (Intrepid Ace "as long as it isn't attacking or blocking").
         tag("it "),
@@ -2728,7 +2745,8 @@ pub(crate) fn parse_source_power_toughness_condition(
 /// the object referenced by the trigger event (the creature that died); "had"
 /// is past tense because CR 603.10a's look-back reads the dying creature's
 /// last-known power from the graveyard at resolution. "~'s power" is the ability
-/// source's current power.
+/// source's current power. The present-tense possessive sibling ("its power is
+/// less than ~'s power") is [`parse_its_pt_vs_source_comparison`].
 ///
 /// Distinct from [`parse_source_power_toughness_condition`] ("its power is N",
 /// which compares the *source's* stat against a fixed threshold): here BOTH
@@ -2742,6 +2760,34 @@ fn parse_event_object_pt_vs_source_comparison(input: &str) -> OracleResult<'_, S
     // Subject: "it had " — the triggering-event object, past tense (LKI look-back).
     let (rest, _) = tag("it had ").parse(input)?;
     let (rest, lhs) = parse_pt_ref_scoped(rest, ObjectScope::EventSource)?;
+    parse_pt_vs_source_comparison_tail(rest, lhs)
+}
+
+/// CR 208.1: Present-tense possessive form "its <stat> is <comparator> ~'s
+/// <stat>" (Shelinda, Yevon Acolyte: "…on that creature if its power is less
+/// than ~'s power").
+///
+/// Deliberately NOT registered in [`parse_inner_condition`]: "its" is an
+/// anaphor with no fixed referent. In Shelinda it is the trigger's entering
+/// creature, but in Sage-Eye Avengers ("return target creature to its owner's
+/// hand if its power is less than this creature's power") it is the spell's
+/// target. Only a caller that knows the antecedent may bind it, which is why
+/// the subject scope is a parameter rather than a guess.
+pub(crate) fn parse_its_pt_vs_source_comparison(
+    input: &str,
+    subject: ObjectScope,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, lhs) =
+        delimited(tag("its "), |i| parse_pt_ref_scoped(i, subject), tag(" is")).parse(input)?;
+    parse_pt_vs_source_comparison_tail(rest, lhs)
+}
+
+/// CR 208.1: The shared "<comparator> ~'s <stat>" tail of an object-vs-source
+/// P/T comparison, applied to an already-parsed left-hand stat.
+fn parse_pt_vs_source_comparison_tail(
+    rest: &str,
+    lhs: QuantityRef,
+) -> OracleResult<'_, StaticCondition> {
     // Comparator between the two stats. Longer phrases precede their prefixes so
     // "greater than or equal to" wins over "greater than".
     let (rest, comparator) = alt((
@@ -8415,8 +8461,47 @@ fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     .parse(rest)
 }
 
+/// CR 508.1a + CR 611.3a: "<source> attacked this turn" — the source object was
+/// declared as an attacker this turn (Agent Frank Horrigan's indestructible
+/// gate, The Lunar Whale's play-from-top gate).
+///
+/// Composed from the already-evaluated `FilterProp::AttackedThisTurn`
+/// (`game/filter.rs`, checked against `state.creatures_attacked_this_turn`) via
+/// `SourceMatchesFilter` — the same composition the trigger intervening-if table
+/// and the target-anaphoric effect gate use, but type-free like its negation
+/// twin `make_source_history_absence` (those two carry a creature type filter;
+/// the fact is about the object regardless of its current type, so a crewed
+/// Vehicle or animated land that attacked and later stopped being a creature
+/// still matches) — so no new `StaticCondition` variant.
+///
+/// Affirmative twin of [`parse_source_didnt_this_turn`] (turn-scoped history
+/// ledger, hence the event-history group). Turn-scoped only; "this combat" is
+/// intentionally not accepted (no combat-scoped tracking).
+fn parse_source_attacked_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_explicit_self_source_subject(input)?;
+    value(
+        StaticCondition::SourceMatchesFilter {
+            filter: attacked_this_turn_source_filter(),
+        },
+        tag("attacked this turn"),
+    )
+    .parse(rest)
+}
+
+/// CR 508.1a: the type-free "this object attacked this turn" runtime filter —
+/// the same `FilterProp` its negation twin counts (see
+/// [`make_source_history_absence`]).
+fn attacked_this_turn_source_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::default().properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
+    )
+}
+
 fn parse_source_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("~ didn't "), tag("this creature didn't "))).parse(input)?;
+    // Shares the explicit self-subject vocabulary with its affirmative twin
+    // [`parse_source_attacked_this_turn`] (CR 201.5 + CR 611.3a).
+    let (rest, _) = parse_explicit_self_source_subject(input)?;
+    let (rest, _) = tag("didn't ").parse(rest)?;
     alt((
         value(
             make_source_history_absence(FilterProp::AttackedThisTurn { defender: None }),
@@ -18682,6 +18767,82 @@ mod tests {
         }
     }
 
+    /// CR 508.1a + CR 611.3a (P1): the affirmative "<source> attacked this turn"
+    /// gate types to `SourceMatchesFilter` over the type-free
+    /// `FilterProp::AttackedThisTurn` runtime property, for every explicit
+    /// self-subject in the shared vocabulary. `rest == ""` proves the arm is
+    /// placement-independent — no earlier arm in `parse_inner_condition` claims
+    /// a prefix of the phrase.
+    #[test]
+    fn source_attacked_this_turn_matches_source_with_history_filter() {
+        let expected = StaticCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::default()
+                    .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
+            ),
+        };
+        for phrase in [
+            "~ attacked this turn",
+            "this creature attacked this turn",
+            "this permanent attacked this turn",
+        ] {
+            let (rest, c) = parse_inner_condition(phrase).unwrap_or_else(|e| {
+                panic!("{phrase:?} must parse as a source history condition: {e:?}")
+            });
+            assert_eq!(rest, "", "{phrase:?} must be fully consumed");
+            assert_eq!(c, expected, "{phrase:?}");
+        }
+    }
+
+    /// CR 611.3a (P2): the context-free grammar must NOT bind a bare pronoun or
+    /// an anaphor. "it attacked this turn" is target-anaphoric in effect bodies
+    /// (Berserk) and recipient-bound in attached-subject statics; only the
+    /// SelfRef static path binds it, via `rewrite_self_pronoun_subject`. An
+    /// Aura/Equipment is never itself an attacker, so the attached subjects are
+    /// refused here too.
+    #[test]
+    fn it_attacked_this_turn_is_not_bound_context_free() {
+        // Positive control FIRST: the negatives below only mean something if the
+        // grammar can type this phrase at all when the subject IS explicit. Without
+        // it, a regression that deleted the whole attacked-this-turn arm would leave
+        // every `is_err()` assertion passing vacuously.
+        let (rest, bound) = parse_inner_condition("~ attacked this turn")
+            .expect("reach guard: the explicit self-subject form must still parse");
+        assert_eq!(rest, "", "reach guard: the control phrase must be consumed");
+        assert_eq!(
+            bound,
+            StaticCondition::SourceMatchesFilter {
+                filter: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
+                ),
+            },
+            "reach guard: the explicit self-subject form must bind the source"
+        );
+        for phrase in [
+            "it attacked this turn",
+            "that creature attacked this turn",
+            "enchanted creature attacked this turn",
+            "equipped creature attacked this turn",
+        ] {
+            assert!(
+                parse_inner_condition(phrase).is_err(),
+                "{phrase:?} must stay unbound in the context-free grammar"
+            );
+        }
+    }
+
+    /// CR 201.5 (P3b): the did/didn't pair shares one subject vocabulary, so the
+    /// negation accepts every explicit self-subject the affirmative does — and
+    /// still refuses the bare pronoun.
+    #[test]
+    fn source_didnt_attack_this_turn_accepts_explicit_self_subjects() {
+        let (rest, c) = parse_inner_condition("this permanent didn't attack this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_source_history_absence(c, FilterProp::AttackedThisTurn { defender: None });
+        assert!(parse_inner_condition("it didn't attack this turn").is_err());
+    }
+
     #[test]
     fn source_didnt_attack_this_turn_counts_self_with_history_filter() {
         let (rest, c) = parse_inner_condition("~ didn't attack this turn").unwrap();
@@ -20241,6 +20402,89 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 208.1: the present-tense possessive comparison "its <stat> is <cmp>
+    /// ~'s <stat>" (Shelinda, Yevon Acolyte). The subject scope is the
+    /// caller's to bind, so the left operand carries exactly the scope passed in.
+    #[test]
+    fn test_parse_its_pt_vs_source_comparison_binds_the_supplied_subject() {
+        use crate::types::ability::ObjectScope;
+        for (text, comparator, lhs_expected) in [
+            (
+                "its power is less than ~'s power",
+                Comparator::LT,
+                QuantityRef::Power {
+                    scope: ObjectScope::EventSource,
+                },
+            ),
+            (
+                "its power is greater than ~'s power",
+                Comparator::GT,
+                QuantityRef::Power {
+                    scope: ObjectScope::EventSource,
+                },
+            ),
+            (
+                "its toughness is greater than or equal to ~'s toughness",
+                Comparator::GE,
+                QuantityRef::Toughness {
+                    scope: ObjectScope::EventSource,
+                },
+            ),
+        ] {
+            let (rest, c) = parse_its_pt_vs_source_comparison(text, ObjectScope::EventSource)
+                .unwrap_or_else(|e| panic!("{text}: {e:?}"));
+            assert_eq!(rest, "", "{text}");
+            let StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref { qty: lhs },
+                comparator: got,
+                rhs: QuantityExpr::Ref { qty: rhs },
+            } = c
+            else {
+                panic!("{text}: expected ref-vs-ref QuantityComparison, got {c:?}");
+            };
+            assert_eq!(got, comparator, "{text}");
+            assert_eq!(lhs, lhs_expected, "{text}");
+            assert!(
+                matches!(
+                    rhs,
+                    QuantityRef::Power {
+                        scope: ObjectScope::Source
+                    } | QuantityRef::Toughness {
+                        scope: ObjectScope::Source
+                    }
+                ),
+                "{text}: rhs must be the source's stat, got {rhs:?}"
+            );
+        }
+    }
+
+    /// CR 208.1: the shared condition grammar must NOT bind a bare possessive
+    /// "its" to the trigger event object — in Sage-Eye Avengers the "its" is the
+    /// spell's target, so a shared-grammar reading would compare the attacking
+    /// source with itself and make the ability impossible to use.
+    #[test]
+    fn test_parse_condition_does_not_bind_bare_its_to_event_object() {
+        use crate::types::ability::ObjectScope;
+        let binds_event_object = matches!(
+            parse_condition("if its power is less than ~'s power"),
+            Ok((
+                _,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::EventSource
+                        }
+                    },
+                    ..
+                }
+            ))
+        );
+        assert!(
+            !binds_event_object,
+            "a bare possessive has no fixed referent in the shared grammar"
+        );
     }
 
     /// CR 702.191a: the reminder-text subject identifies the Increment keyword,

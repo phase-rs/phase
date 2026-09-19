@@ -4337,7 +4337,7 @@ fn effect_pay_cost_rider_waits_for_scry_post_effect_before_typed_root_settles() 
     let rider_life = resumed
         .events
         .iter()
-        .position(|event| matches!(event, GameEvent::LifeChanged { player_id, amount } if *player_id == P0 && *amount == 1))
+        .position(|event| matches!(event, GameEvent::LifeChanged { player_id, amount, .. } if *player_id == P0 && *amount == 1))
         .expect("the trailing PayCost rider resolves once");
     assert!(
         mana_added < rider_life,

@@ -26144,3 +26144,160 @@ mod absorb_synthesis_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tiered_synthesis_tests {
+    //! CR 702.183a: Tiered's runtime structure lives in the spell's
+    //! `ModalChoice` (choose exactly one) plus the per-mode additional costs
+    //! (CR 700.2h), not in an independent keyword handler. These tests drive the
+    //! production MTGJSON→face path (`build_oracle_face`) to prove the
+    //! `"tiered"` keyword maps to the typed variant and the modal carries the
+    //! per-mode costs.
+    use super::*;
+    use crate::database::mtgjson::AtomicIdentifiers;
+
+    /// Fire Magic's verbatim Oracle text (U+2022 bullets, U+2014 em-dashes).
+    const FIRE_MAGIC_ORACLE: &str = "Tiered (Choose one additional cost.)\n\
+        \u{2022} Fire \u{2014} {0} \u{2014} Fire Magic deals 1 damage to each creature.\n\
+        \u{2022} Fira \u{2014} {2} \u{2014} Fire Magic deals 2 damage to each creature.\n\
+        \u{2022} Firaga \u{2014} {5} \u{2014} Fire Magic deals 3 damage to each creature.";
+
+    fn tiered_atomic_card(name: &str, oracle: &str, keywords: Option<Vec<String>>) -> AtomicCard {
+        AtomicCard {
+            name: name.to_string(),
+            mana_cost: Some("{1}{R}".to_string()),
+            colors: vec!["R".to_string()],
+            color_identity: vec!["R".to_string()],
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            text: Some(oracle.to_string()),
+            layout: "normal".to_string(),
+            type_line: Some("Instant".to_string()),
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords,
+            side: None,
+            face_name: None,
+            mana_value: 2.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some(format!("{}-oracle", name.to_lowercase())),
+                scryfall_id: Some(format!("{}-face", name.to_lowercase())),
+            },
+            foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
+        }
+    }
+
+    /// Production `build_oracle_face`: MTGJSON's real Fire Magic keyword array
+    /// (`["Fira","Firaga","Fire","Tiered"]`) maps its one real keyword to
+    /// `Keyword::Tiered` — the three mode-name entries stay `Unknown` and are
+    /// filtered — and the Tiered header lowers to a `ModalChoice` whose per-mode
+    /// additional costs (CR 700.2h) are `{0}` / `{2}` / `{5}`.
+    ///
+    /// Revert-red: deleting the `"tiered"` `FromStr` arm leaves `face.keywords`
+    /// empty, failing the first assertion.
+    #[test]
+    fn tiered_fire_magic_face_carries_keyword_and_modal_mode_costs() {
+        let card = tiered_atomic_card(
+            "Fire Magic",
+            FIRE_MAGIC_ORACLE,
+            Some(vec![
+                "Fira".to_string(),
+                "Firaga".to_string(),
+                "Fire".to_string(),
+                "Tiered".to_string(),
+            ]),
+        );
+        let face = build_oracle_face(&card, None);
+
+        assert_eq!(
+            face.keywords,
+            vec![Keyword::Tiered],
+            "the MTGJSON \"Tiered\" keyword must map; the mode names stay Unknown"
+        );
+
+        let modal = face
+            .modal
+            .as_ref()
+            .expect("Tiered lowers to a modal choice");
+        assert_eq!(modal.min_choices, 1, "CR 702.183a: choose exactly one");
+        assert_eq!(modal.max_choices, 1, "CR 702.183a: choose exactly one");
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(
+            modal.mode_costs,
+            vec![ManaCost::zero(), ManaCost::generic(2), ManaCost::generic(5)],
+            "CR 700.2h: each mode's listed cost is an additional cost"
+        );
+
+        // Positive reach-guard: the three modes lowered to real abilities, not
+        // Unimplemented placeholders.
+        assert_eq!(face.abilities.len(), 3);
+        assert!(
+            !face
+                .abilities
+                .iter()
+                .any(|ability| matches!(&*ability.effect, Effect::Unimplemented { .. })),
+            "no Tiered mode may be an Unimplemented placeholder"
+        );
+
+        // Hostile rows — the mapping is not case-sensitive, and the Spree
+        // sibling arm is unaffected by the Tiered addition.
+        let lower = build_oracle_face(
+            &tiered_atomic_card(
+                "Fire Magic",
+                FIRE_MAGIC_ORACLE,
+                Some(vec!["tiered".to_string()]),
+            ),
+            None,
+        );
+        assert_eq!(
+            lower.keywords,
+            vec![Keyword::Tiered],
+            "\"tiered\" must map as well"
+        );
+        let upper = build_oracle_face(
+            &tiered_atomic_card(
+                "Fire Magic",
+                FIRE_MAGIC_ORACLE,
+                Some(vec!["Tiered".to_string()]),
+            ),
+            None,
+        );
+        assert_eq!(
+            upper.keywords,
+            vec![Keyword::Tiered],
+            "\"Tiered\" must map as well"
+        );
+
+        let spree = build_oracle_face(
+            &tiered_atomic_card(
+                "Modal Spree Test",
+                "Spree\n+ {1} \u{2014} Draw a card.",
+                Some(vec!["Spree".to_string()]),
+            ),
+            None,
+        );
+        assert_eq!(
+            spree.keywords,
+            vec![Keyword::Spree],
+            "the Spree arm must still map after the Tiered sibling lands"
+        );
+
+        let absent = build_oracle_face(
+            &tiered_atomic_card("Fire Magic", FIRE_MAGIC_ORACLE, None),
+            None,
+        );
+        assert!(
+            absent.keywords.is_empty(),
+            "no MTGJSON keyword array means no Tiered keyword on the face"
+        );
+    }
+}

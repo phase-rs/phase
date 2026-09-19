@@ -472,7 +472,7 @@ pub struct GameObject {
     /// zone exit that is not to the battlefield (CR 712.8a: front face only in
     /// zones other than battlefield/stack), unlike transform DFCs which use the
     /// `transformed` flag.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub modal_back_face: bool,
     /// CR 601.2b + CR 712.11b / CR 709.3 (#7565): a cast-time face choice for
     /// the CURRENT cast has been made — the cast pipeline's re-entries must
@@ -483,7 +483,7 @@ pub struct GameObject {
     /// split-cost handling, the recast prompt) for the object's lifetime:
     /// `layout_kind` answers "what shape is this card", this flag answers
     /// "is this cast's choice already made".
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub cast_face_committed: bool,
 
     // Combat
@@ -530,7 +530,7 @@ pub struct GameObject {
     /// characteristic application and incremented by `Effect::Intensify`. Like
     /// `counters`, it persists across zone changes (the object keeps its id), so
     /// a card's intensity follows it through hand/library/stack/battlefield.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_u32_field")]
     pub intensity: u32,
 
     /// Alchemy "perpetually" modifications applied to this card (digital-only, no
@@ -576,11 +576,11 @@ pub struct GameObject {
     pub attraction_lights: Vec<u8>,
     /// CR 717.2: Object is in the supplementary Attraction deck (command zone),
     /// tracked via `Player::attraction_deck` rather than `command_zone`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub in_attraction_deck: bool,
     /// Unstable Contraptions: object is in the supplementary Contraption deck
     /// (command zone), tracked via `Player::contraption_deck`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub in_contraption_deck: bool,
     /// Unstable Contraptions: the sprocket this Contraption occupies on the
     /// battlefield. `None` when it is not assembled.
@@ -609,6 +609,7 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleave_variant: Option<crate::types::card::CleaveVariant>,
     pub color: Vec<ManaColor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed_ref: Option<PrintedCardRef>,
     /// Exact token-art lookup metadata, populated only when the engine can
     /// identify one printed token catalog entry without guessing.
@@ -658,6 +659,7 @@ pub struct GameObject {
     pub parse_warnings: Vec<crate::parser::oracle_ir::diagnostic::OracleDiagnostic>,
 
     // Back face data for double-faced cards (DFCs)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub back_face: Option<BackFaceData>,
 
     /// Digital-only Specialize: specialized faces keyed by added color pip.
@@ -675,25 +677,27 @@ pub struct GameObject {
     // Base characteristics (for layer system)
     pub base_power: Option<i32>,
     pub base_toughness: Option<i32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_loyalty: Option<u32>,
     /// CR 306.5b: Printed-loyalty baseline restored after layered copy effects;
     /// live loyalty remains derived from counters on the battlefield (CR 306.5c).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4a: Printed defense number (off-battlefield defense).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_defense: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub base_card_types: CardType,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub base_mana_cost: ManaCost,
     pub base_keywords: Vec<Keyword>,
     /// CR 613.1: Printed baseline abilities. Wrapped in `Arc<Vec<_>>` so
     /// `GameState::clone()` (called constantly by the AI search) shares
     /// the printed-card slice instead of deep-cloning it per search node.
     /// Writes use `Arc::make_mut` for copy-on-write semantics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub base_abilities: Arc<Vec<AbilityDefinition>>,
     /// CR 613.1: Printed baselines captured at `GameObject` construction —
     /// the values on the card (or defined by the effect that created this
@@ -701,6 +705,7 @@ pub struct GameObject {
     /// runtime-mutated, so they intentionally use plain `Vec<T>` rather
     /// than the `Definitions<T>` wrapper that gates live reads.
     /// Wrapped in `Arc` for structural sharing across cloned `GameState`s.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub base_trigger_definitions: Arc<Vec<TriggerDefinition>>,
     /// Semantic printed origin for each materialized base trigger. Empty for an
     /// ordinary printed face (where `base_printed_ref` + local slot is enough);
@@ -710,19 +715,27 @@ pub struct GameObject {
     /// Current ordered printed/base trigger-set generation. This stays stable
     /// across ordinary layer resets and only changes when a caller intentionally
     /// installs a new base/face/cleave trigger set.
-    #[serde(default = "GameObject::initial_trigger_base_set_instance")]
+    #[serde(
+        default = "GameObject::initial_trigger_base_set_instance",
+        skip_serializing_if = "is_initial_trigger_base_set_instance"
+    )]
     pub trigger_base_set_instance: TriggerBaseSetInstanceRef,
     /// Next object-local base-set generation. Never rewound or reused.
-    #[serde(default = "GameObject::initial_next_trigger_base_set_instance")]
+    #[serde(
+        default = "GameObject::initial_next_trigger_base_set_instance",
+        skip_serializing_if = "is_initial_next_trigger_base_set_instance"
+    )]
     pub next_trigger_base_set_instance: u64,
     /// Recipient-local Layer-6 grant allocator and active producer table.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub trigger_occurrence_state: TriggerOccurrenceState,
     /// CR 613.1: printed-card baseline for replacement definitions. See
     /// `base_trigger_definitions`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub base_replacement_definitions: Arc<Vec<ReplacementDefinition>>,
     /// CR 613.1: printed-card baseline for static definitions. See
     /// `base_trigger_definitions`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub base_static_definitions: Arc<Vec<StaticDefinition>>,
     pub base_color: Vec<ManaColor>,
     /// Display-identity baseline for the layer system. `printed_ref` is the
@@ -731,9 +744,9 @@ pub struct GameObject {
     /// identity, so it is reset to this baseline each layer pass and overridden
     /// by copy effects (see `ContinuousModification::CopyValues`). Mirrors the
     /// `base_name`/`name` pair so a temporary copy's art reverts on expiry.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_printed_ref: Option<PrintedCardRef>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub base_characteristics_initialized: bool,
 
     // Timestamp for layer ordering
@@ -747,7 +760,7 @@ pub struct GameObject {
     /// the id with this counter distinguishes the new object from the old one at
     /// the same id, so a pending ability that captured the previous incarnation no
     /// longer resolves its self-reference against the moved object (blink/flicker).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub incarnation: u64,
 
     // CR 603.6a: Turn on which this object entered the battlefield (global turn
@@ -771,12 +784,12 @@ pub struct GameObject {
     /// to false at the start of controller's next turn (see `start_next_turn`).
     /// Query via `combat::has_summoning_sickness` which folds in Haste +
     /// non-creature short-circuits.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub summoning_sick: bool,
 
     /// CR 702.30a: Echo triggers at the controller's next upkeep after this
     /// permanent came under their control, then never again for the same object.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub echo_due: bool,
 
     /// CR 702.49 + CR 702.190a: Which alt-cost cast/activation variant was paid to put this
@@ -965,7 +978,7 @@ pub struct GameObject {
 
     // Derived field: true when this creature can't attack/block due to summoning sickness.
     // Computed before serialization, not persisted.
-    #[serde(skip_deserializing, default)]
+    #[serde(skip_deserializing, default, skip_serializing_if = "is_false")]
     pub has_summoning_sickness: bool,
 
     // Derived field: devotion count for cards that reference devotion.
@@ -975,7 +988,7 @@ pub struct GameObject {
 
     // Derived field: true when this permanent has an activatable mana ability.
     // Computed before serialization, not persisted.
-    #[serde(skip_deserializing, default)]
+    #[serde(skip_deserializing, default, skip_serializing_if = "is_false")]
     pub has_mana_ability: bool,
 
     // Derived field: ability index of the first mana ability, for frontend dispatch.
@@ -989,7 +1002,7 @@ pub struct GameObject {
     // "no producers" from "field absent" on the wire. Derived per-tick by
     // `display_land_mana_pips` from the source's mana abilities + activation
     // constraints.
-    #[serde(skip_deserializing, default)]
+    #[serde(skip_deserializing, default, skip_serializing_if = "Vec::is_empty")]
     pub available_mana_pips: Vec<ManaPip>,
 
     // CR 602.5: Derived read-out of which activated abilities on this object are
@@ -1008,11 +1021,11 @@ pub struct GameObject {
     /// "loyalty_activated_this_turn" is replaced by `count > 0`. Cleared at
     /// turn start (CR 606.3 "that turn" reset) and on battlefield re-entry
     /// (CR 400.7 — a re-entering permanent is a new object with no memory).
-    #[serde(skip_deserializing, default)]
+    #[serde(skip_deserializing, default, skip_serializing_if = "is_zero_u32_field")]
     pub loyalty_activations_this_turn: u32,
 
     // Commander: whether this object is a commander card
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub is_commander: bool,
     /// Oathbreaker RC: command-zone signature-spell role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1025,11 +1038,11 @@ pub struct GameObject {
 
     /// CR 702.112a: Whether this creature has become renowned.
     /// Set to true when renown triggers (damage dealt while not yet renowned).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub is_renowned: bool,
 
     /// CR 114.5: Whether this object is an emblem (immune to removal, persists in command zone)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub is_emblem: bool,
 
     /// CR 114: Display-only provenance of the source that created this emblem
@@ -1039,7 +1052,7 @@ pub struct GameObject {
     pub emblem_source: Option<EmblemSource>,
 
     /// CR 111.1: Whether this object is a token (not a card).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub is_token: bool,
 
     /// CR 707.10 + CR 707.12a: Whether this object is a COPY of a card or spell
@@ -1055,7 +1068,7 @@ pub struct GameObject {
     /// Image-lookup routing hint for the display layer. See `DisplaySource`
     /// for the rationale. Independent of `is_token` — a token-copy of a
     /// real card carries `is_token = true` AND `DisplaySource::Card`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub display_source: DisplaySource,
 
     /// Modal spell metadata ("Choose one —", etc.). Copied from CardFace at load time.
@@ -1084,7 +1097,7 @@ pub struct GameObject {
 
     /// CR 702.143c-d: Whether this card in exile is foretold. Cleared when
     /// the card leaves exile because a zone change creates a new object.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub foretold: bool,
 
     /// Choices made as this permanent entered (e.g., "choose a color").
@@ -1115,12 +1128,12 @@ pub struct GameObject {
     /// CR 701.60a: Whether this creature is currently suspected.
     /// The designation is the source of truth; menace and CantBlock are derived
     /// via `base_keywords`/`base_static_definitions` (Option C architecture).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub is_suspected: bool,
 
     /// CR 701.37b: Monstrous designation. Stays until the permanent leaves the battlefield.
     /// Not an ability or copiable value — purely a marker for monstrosity and related abilities.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub monstrous: bool,
 
     /// CR 701.64b: Harnessed designation. Once a permanent becomes harnessed it
@@ -1128,7 +1141,7 @@ pub struct GameObject {
     /// a pure marker — neither an ability nor part of copiable values. Only
     /// permanents can be harnessed. Read by the ∞ (Infinity) static-ability gate
     /// (CR 702.186b: "∞ — [Ability]" grants [Ability] as long as harnessed).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub harnessed: bool,
 
     /// CR 702.xxx: Prepared (Strixhaven) designation. Present only on a
@@ -1156,28 +1169,28 @@ pub struct GameObject {
     /// CR 702.171b: Saddled designation. A permanent stays saddled until the end
     /// of the turn or it leaves the battlefield. Not a copiable value — purely
     /// a marker for saddle-triggered abilities and "saddled Mount" filters.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub is_saddled: bool,
 
     /// CR 702.171c: The creatures that saddled this permanent (tapped to pay the
     /// saddle cost). Cleared in lockstep with `is_saddled` at end of turn or when
     /// the permanent leaves the battlefield.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub saddled_by: Vec<ObjectId>,
 
     /// CR 613.11 + CR 510.1a: This creature assigns combat damage equal to its
     /// toughness rather than its power. Set after object-characteristic layers.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub assigns_damage_from_toughness: bool,
 
     /// CR 510.1c: This creature assigns combat damage as though it weren't blocked.
     /// Set after object-characteristic layers.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub assigns_damage_as_though_unblocked: bool,
 
     /// CR 510.1a: This creature assigns no combat damage.
     /// Set after object-characteristic layers (e.g., "~ assigns no combat damage").
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub assigns_no_combat_damage: bool,
 
     /// CR 719.3b: Case enchantment solve state. Present only on Case permanents.
@@ -1280,7 +1293,7 @@ pub struct GameObject {
     /// CR 601.2h: Whether mana was actually spent to cast this object.
     /// Set during casting finalization when mana is paid. Used for trigger conditions
     /// like "if no mana was spent to cast it" (e.g., Satoru, the Infiltrator).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub mana_spent_to_cast: bool,
 
     /// CR 601.2h: Per-color breakdown of mana spent to cast this object.
@@ -1339,7 +1352,7 @@ pub struct GameObject {
     /// CR 702.26b / CR 702.26d: Phasing status. A phased-out permanent stays
     /// on the battlefield but is treated as though it doesn't exist for almost
     /// all rules queries. Defaults to `PhasedIn` for replay compatibility.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub phase_status: PhaseStatus,
 
     /// CR 106.1b + CR 602.2b (issue #6504): Mana type(s) spent to pay this
@@ -3570,6 +3583,22 @@ impl GameObject {
 /// Serde helper: skip serialization when a `u32` field is zero.
 fn is_zero_u32_field(n: &u32) -> bool {
     *n == 0
+}
+
+/// A field's `skip_serializing_if` predicate and its `#[serde(default)]` must name the
+/// same authority: an absent key means "the value `#[serde(default)]` will rebuild", so a
+/// predicate that answers `true` for any other value silently rewrites game state on
+/// restore.
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
+fn is_initial_trigger_base_set_instance(value: &TriggerBaseSetInstanceRef) -> bool {
+    *value == GameObject::initial_trigger_base_set_instance()
+}
+
+fn is_initial_next_trigger_base_set_instance(value: &u64) -> bool {
+    *value == GameObject::initial_next_trigger_base_set_instance()
 }
 
 fn is_false(value: &bool) -> bool {

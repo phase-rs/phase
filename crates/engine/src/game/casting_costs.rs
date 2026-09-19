@@ -15245,10 +15245,12 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: 0,
+            new_total: crate::types::events::LifeTotalReading::default(),
         });
         state.current_trigger_events = vec![GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: 0,
+            new_total: crate::types::events::LifeTotalReading::default(),
         }];
         state.current_trigger_match_count = Some(2);
         state.die_result_this_resolution = Some(4);
@@ -19796,7 +19798,8 @@ mod tests {
                 e,
                 GameEvent::LifeChanged {
                     player_id,
-                    amount: -2
+                    amount: -2,
+                    ..
                 } if *player_id == PlayerId(0)
             )),
             "Should emit LifeChanged event"

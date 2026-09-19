@@ -1642,36 +1642,282 @@ fn bind_chosen_number_anaphor(def: &mut AbilityDefinition, prior: &[AbilityDefin
     }
 }
 
-/// CR 608.2d + CR 603.7d: Which player announces a delayed-trigger payload's
-/// "may", when the clause names that player instead of leaving the choice with
-/// the ability's controller.
+/// CR 608.2d + CR 603.7b/d/e: WHEN a stamped announcer anaphor will be resolved.
+///
+/// CR 608.2c binds the clause's anaphor by the rules of English; CR 608.2d then
+/// has the player so named announce the choice *while the effect is being
+/// applied*. Which anaphors are still bound at that moment depends on which
+/// resolution that is. This is the only axis on which the two stamp sites
+/// differ, so it is spelled as a type rather than carried as a flag.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActorBindingWindow {
+    /// Announced during THIS resolution. Every event-context anaphor
+    /// (`state.current_trigger_event`) and resolution-scoped anaphor is live.
+    ThisResolution,
+    /// CR 603.7d + CR 603.7e: announced when a delayed triggered ability later
+    /// resolves, whose controller is the creating SPELL'S OR ABILITY'S controller
+    /// (603.7d is the spell case — Arcane Denial, an instant, is the one printed
+    /// card reaching the ADMIT arm; 603.7e the activated/triggered-ability case,
+    /// which is what every printed card reaching the REFUSAL arm today is).
+    /// Only anaphors carried on the ability's own target list survive the delay:
+    /// per CR 603.7b the delayed ability triggers on its OWN event, so an
+    /// event-context ref would read that firing event — a different event — and
+    /// is refused rather than silently mis-bound.
+    DeferredDelayedTrigger,
+}
+
+/// CR 608.2c + CR 608.2d (+ CR 603.7b/d/e for the deferred window): Which player
+/// announces a clause-local "may", when the clause NAMES that player instead of
+/// leaving the choice with the ability's controller.
 ///
 /// The subject grammar (`oracle_effect::subject`) lowers a subject-anchored
-/// modal — "its controller may …", "its owner may …", "that creature's
-/// controller may …" — to `optional: true` plus a parent-target player anaphor
-/// in the effect's own player slot. That anaphor IS the actor: CR 608.2d has the
-/// announcing player make the choice while the effect is applied, and CR 603.7d
-/// fixes the delayed ability's *controller* as the creating spell's controller,
-/// so the two differ exactly when the clause names someone else.
+/// modal — "that player may …", "its controller may …", "they may …" — to
+/// `optional: true` plus a player anaphor in the effect's own player slot.
+///
+/// CAVEAT, and it is load-bearing: the effect's player slot is NOT in general
+/// the announcer. `Dig { player }` holds the LIBRARY'S OWNER (Psychic Surgery:
+/// "you may look at the top two cards of that library" — the LOOKER is the
+/// controller); `Token { owner }`, `GainLife { player }`, `Mana { recipient }`
+/// and `SearchLibrary { target_player }` are likewise patient slots, not actor
+/// slots. What makes the stamp correct is the CONJUNCTION at the call site: an
+/// admitted anaphor in the slot AND subject-provenance, the latter supplied by
+/// `clause_shell::is_specialized_you_may_phrase` head-blocking "have " and
+/// "look ". See the call site's PROVENANCE comment; the blocklist is pinned by
+/// the test
+/// `you_may_have_and_you_may_look_stay_head_blocked_so_the_announcer_stamp_cannot_leak`.
 ///
 /// Returns the anaphor to stamp as `AbilityDefinition::optional_player` (the
 /// engine's single authority for "who receives this may", consumed by
 /// `game::effects::optional_prompt_player`), or `None` for a controller-held
 /// "may" — including a payload that is not optional at all.
-///
-/// Deliberately narrow: only the two parent-target PLAYER anaphors qualify.
-/// `TargetFilter::Player` is an announced target and `Controller` is the
-/// wrapper's own controller; neither shifts the announcing player away from the
-/// existing lift.
-fn delayed_payload_optional_actor(def: &AbilityDefinition) -> Option<TargetFilter> {
-    if !def.optional || def.optional_player.is_some() {
+fn subject_anchored_optional_actor(
+    def: &AbilityDefinition,
+    window: ActorBindingWindow,
+) -> Option<TargetFilter> {
+    // CR 608.2d + CR 101.4: an any-opponent permission (`optional_for`) already
+    // names its own announcing seats and fans them out in APNAP order. That
+    // fan-out is gated on `ability.optional` (`effects::resolve_chain_body`), so
+    // a subject stamp here would be a SECOND announcer authority on the same
+    // node AND would hold `optional` down on the payload, silently skipping the
+    // cascade. Refuse, so the may and its scope lift together to the wrapper and
+    // the fan-out still fires. The clause-level call site carries this guard
+    // explicitly; asking it here too makes BOTH sites inherit it — the same
+    // call-site symmetry whose absence produced the Arcane Denial regression.
+    // Measured: zero corpus nodes reach the deferred window with `optional_for`
+    // set, so this is a forward guard, not a fix for a live card.
+    if !def.optional || def.optional_for.is_some() {
         return None;
     }
-    match def.effect.target_filter()? {
-        actor @ (TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner) => {
-            Some(actor.clone())
-        }
-        _ => None,
+    // CR 608.2c: the clause's anaphor, read from wherever this node already
+    // records it. Both call sites live in ONE iteration of
+    // `assemble_effect_chain`'s clause loop and the clause-level site runs
+    // FIRST on the same node, so by the time the `CreateDelayedTrigger` wrap
+    // asks, the announcer may already have moved out of the effect's player
+    // slot and into `optional_player`. Both spellings denote the SAME clause
+    // anaphor, so admission is asked of the VALUE, never of which field held
+    // it. That makes this function idempotent — `f(stamp(x)) == f(x)` — and
+    // therefore independent of call order, which is the property whose absence
+    // regressed #8439's Arcane Denial when the second call site was added.
+    // It is also what keeps this correct for an announcer recorded in a slot
+    // `Effect::target_filter()` does not surface (`PayCost { payer }` and the
+    // rest of the named residue).
+    let actor = match def.optional_player.as_ref() {
+        Some(actor) => actor,
+        None => def.effect.target_filter()?,
+    };
+    match window {
+        // CR 603.7b: the delayed ability triggers on its OWN event, so only
+        // anaphors bound from the ability's own target list survive the delay;
+        // an event-context ref would read that firing event, a different event.
+        // (CR 603.7d/e fix only the delayed ability's source and controller —
+        // they are what make the lift land on the right seat, not what makes an
+        // event-context ref unsafe.)
+        ActorBindingWindow::DeferredDelayedTrigger => match actor {
+            TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner => {
+                Some(actor.clone())
+            }
+            // CR 603.7b: event-context and resolution-scoped anaphors do not
+            // survive the delay — they would resolve against the delayed
+            // ability's own firing event.
+            TargetFilter::TriggeringPlayer
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ScopedPlayer => None,
+            // Every remaining variant is refused for the SAME reason it is
+            // refused in `ThisResolution` below (CR 109.5 controller-relative,
+            // CR 601.2c announced targets, populations, dead admissions, and
+            // object filters). Enumerated so a new variant is a compile error
+            // in BOTH windows.
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Typed(_)
+            | TargetFilter::Not { .. }
+            | TargetFilter::Or { .. }
+            | TargetFilter::And { .. }
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringSource
+            | TargetFilter::EventTarget
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::HasChosenName
+            | TargetFilter::ChosenDamageSource { .. }
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers => None,
+        },
+        // CR 608.2c + CR 608.2d: during THIS resolution every event-context and
+        // resolution-scoped anaphor the clause named is still live.
+        ActorBindingWindow::ThisResolution => match actor {
+            TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ScopedPlayer => Some(actor.clone()),
+
+            // CR 109.5 + CR 608.2h: controller-relative refs. `Controller` IS
+            // the fallback and is the value `inject_subject_target` replaces, so
+            // its presence means "no player subject was named"; `SourceController`
+            // ("~'s controller") is the same family one indirection out and names
+            // the ability's own controller for every printed subject-anchored may.
+            // Corpus: 499 optional `Controller` nodes, ZERO `SourceController`.
+            TargetFilter::Controller | TargetFilter::SourceController => None,
+
+            // CR 601.2c: an announced target chosen by the controller at cast
+            // time, not an anaphor ("you may have target player mill a card" —
+            // Jace's Erasure). 76 corpus nodes.
+            TargetFilter::Player => None,
+
+            // CR 102.2 + CR 102.3 + CR 601.2c: the announcing player for a TARGET
+            // SLOT ("of an opponent's choice"), a `target_chooser` role — a
+            // different provenance. Its resolver arm falls back to the FIRST
+            // OPPONENT IN SEAT ORDER, which is not a seat a "may" may land on.
+            TargetFilter::Opponent => None,
+
+            // The announcer is NOT in this slot: "target opponent may have YOU
+            // draw a card" puts the DRAWER here (Bane, Shakedown Heavy). Known
+            // no-change; see the plan's Deferral 6. 5 corpus nodes.
+            TargetFilter::OriginalController => None,
+
+            // Populations and sets, never one announcer (CR 608.2d names ONE
+            // player). `AllPlayers` is additionally valid only as an
+            // `UnlessPayModifier.payer` per its own doc.
+            TargetFilter::AllPlayers
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Or { .. }
+            | TargetFilter::And { .. }
+            | TargetFilter::Not { .. } => None,
+
+            // An already-resolved `PlayerId`, not a reference to one. CR 109.5
+            // makes the "you"/named-player distinction one that is re-resolved at
+            // announcement time, and `optional_player` stores the REFERENCE that
+            // resolution reads; admitting a snapshotted seat would break this
+            // design's own provenance contract (parse time binds the reference,
+            // resolution time binds the seat). The reference-vs-seat distinction
+            // is a data-model fact about this variant's `PlayerId` payload, not a
+            // CR one, so only CR 109.5 is cited.
+            TargetFilter::SpecificPlayer { .. } => None,
+
+            // DEAD ADMISSIONS: player-denoting, but NO arm in
+            // `targeting::resolve_effect_player_ref` NOR in
+            // `resolve_event_context_target_for_event_or_state`, so each resolves
+            // to `None` on every board and silently falls back to the controller.
+            // `SourceChosenPlayer`'s authority is `effects::
+            // resolve_player_for_context_ref`, `Neighbor`'s is `players::neighbor`,
+            // `Owner`'s is the object's owner — none of which
+            // `optional_prompt_player` calls. See the plan's Deferral 7.
+            TargetFilter::SourceChosenPlayer
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::Owner => None,
+
+            // CR 113.7a + CR 108.3: the triggering SPELL's controller/owner. Both
+            // resolve, so this is a decision: the subject grammar never emits them
+            // for a subject-anchored may, and the referent they would name is
+            // already spelled `ParentTargetController`/`ParentTargetOwner` (Vex).
+            // A second spelling for one referent is the sibling cluster this
+            // design exists to avoid. Corpus-silent.
+            TargetFilter::TriggeringSpellController | TargetFilter::TriggeringSpellOwner => None,
+
+            // CR 615 replacement-time continuations, carried only inside
+            // `Effect::ApplyPostReplacementDamage`, whose `target_filter()` is
+            // `None` by an explicit arm — unreachable here by construction.
+            TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner => None,
+
+            // Object filters cannot denote an announcing player. The player
+            // spellings of the anaphoric ones are admitted above
+            // (`TriggeringSource` -> `TriggeringSourceController`, `EventTarget`
+            // -> `EventTargetController`, `ParentTarget` ->
+            // `ParentTargetController`/`ParentTargetOwner`).
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Typed(_)
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSource
+            | TargetFilter::EventTarget
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::OriginalSource
+            | TargetFilter::HasChosenName
+            | TargetFilter::ChosenDamageSource { .. }
+            | TargetFilter::Named { .. } => None,
+        },
     }
 }
 
@@ -2710,7 +2956,54 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             def.optional = true;
             def.optional_for = clause_ir.opponent_may_scope;
         }
-        // CR 117.3a + CR 608.2c: Propagate subject-phrase "may" modal.
+        // CR 608.2c + CR 608.2d: Propagate a clause-local "may" modal, and the player
+        // it NAMES.
+        //
+        // CR 608.2c ("read the whole text and apply the rules of English") binds the
+        // clause's anaphor — "that player", "its controller", "they" — to someone the
+        // clause names; CR 608.2d then has the player so named announce the choice
+        // while the effect is applied (608.2d says "the player announces these
+        // choices" — it is 608.2c that supplies WHICH player). CR 109.5 makes "you"
+        // the controller, so the two differ exactly when the clause names someone
+        // else. CR 608.2e covers the multi-step, multi-player chains this produces.
+        //
+        // (The previous `CR 117.3a` citation on this block was WRONG — 117.3a is the
+        // active-player-priority rule, not a rule about optional effects.)
+        //
+        // PROVENANCE — read this before changing the guard. `clause_ir.parsed.optional`
+        // is a UNION of two writers: the subject grammar
+        // (`lower_subject_predicate_ast`) and the clause shell's `"you may "` /
+        // opponent-may peel (`clause_shell::peel_clause` -> `apply_optional`). It does
+        // NOT by itself mean "the subject named an actor". What separates them here is
+        // the CONJUNCTION with an admitted player anaphor in the effect's own player
+        // slot.
+        //
+        // The slot is NOT an announcer slot in general — `Dig { player }` holds the
+        // LIBRARY'S OWNER (Psychic Surgery), `Token { owner }` the token's creator,
+        // `GainLife { player }` the life-gainer, `Mana { recipient }` the pool's owner,
+        // `SearchLibrary { target_player }` the searcher. The conjunction works because
+        // a controller-held "you may" leaves `Controller` in that slot (refused), and
+        // the only English constructions that put a DIFFERENT player there under a
+        // controller-held may are the causative "you may have ..." and the perception
+        // "you may look at ...", both head-blocked by
+        // `clause_shell::is_specialized_you_may_phrase`. That dependency is load-bearing
+        // and is pinned by the test
+        // `you_may_have_and_you_may_look_stay_head_blocked_so_the_announcer_stamp_cannot_leak`.
+        // Decisive evidence, stated at the level where it actually holds. "That
+        // attacking player may discard a card" (Curse of Chaos) and "you may have that
+        // player discard a card" (Slavering Nulls) lower to BYTE-IDENTICAL EFFECT NODES
+        // — `{"count":{"type":"Fixed","value":1},"target":{"type":"TriggeringPlayer"},
+        // "type":"Discard"}` — under `optional: true`, and need OPPOSITE announcers. So
+        // no predicate over the effect node plus `optional` can tell them apart, and
+        // that pair is the whole input an `optional_prompt_player` arm would get.
+        //
+        // Their enclosing definitions are NOT byte-identical (Curse of Chaos carries the
+        // "if the player does, they draw a card" rider as a `sub_ability`), and no two
+        // definitions in the 36,047-card corpus are byte-identical modulo
+        // `optional_player` with opposite announcers. That is not a hole in the argument:
+        // a rider's presence is not a provenance signal any sane predicate could key on —
+        // it says what happens NEXT, not who announced. Only the clause's own grammar,
+        // which exists solely here, records who was named.
         if clause_ir.parsed.optional
             && !matches!(
                 &clause_ir.parsed.effect,
@@ -2722,10 +3015,42 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             && !is_pay_to_end_effect_termination
         {
             def.optional = true;
+            // CR 608.2d: an any-opponent permission (`optional_for`) already names its
+            // own announcing seats in APNAP order and suppresses this gate entirely
+            // (`effects::upfront_optional_gate`), so never stamp a second authority.
+            //
+            // `optional_for` is populated by the CHUNK channel (`def.optional_for =
+            // clause_ir.opponent_may_scope`, the block just above at `:2682`).
+            // `peel_clause`'s own opponent-may peel DROPS its scope, so that path
+            // arrives here with `optional_for: None` — it is covered instead by the
+            // admitted set, which refuses `OriginalController` (the slot that path
+            // leaves the DRAWER in: "target opponent may have you draw a card" — Bane,
+            // Shakedown Heavy).
+            //
+            // The `optional_player.is_none()` conjunct is the PRECEDENCE guard:
+            // never overwrite an announcer another producer already recorded.
+            // Vacuous today — the only writers of this field are this block, the
+            // `SearchOutsideGame` clear below, the delayed wrap, and
+            // `oracle_trigger::optional_player_from_effect_body`, which runs
+            // AFTER assembly and is itself `is_none()`-guarded — so `def`
+            // provably arrives here unstamped. Stated explicitly because the
+            // helper no longer refuses a stamped node (it now READS the stamp),
+            // so precedence belongs at the writer, not at the classifier.
+            if def.optional_for.is_none() && def.optional_player.is_none() {
+                if let Some(actor) =
+                    subject_anchored_optional_actor(&def, ActorBindingWindow::ThisResolution)
+                {
+                    def.optional_player = Some(actor);
+                }
+            }
         }
         if matches!(&clause_ir.parsed.effect, Effect::SearchOutsideGame { .. }) {
             def.optional = false;
             def.optional_for = None;
+            // CR 608.2d: no gate opens, so no announcer exists. Inert at runtime
+            // (`upfront_optional_gate` requires `ability.optional`) but a stray key
+            // here would land in `card-data.json` and break V7's acceptance diff.
+            def.optional_player = None;
         }
         if let Some(ref qty) = clause_ir.repeat_for {
             if matches!(*def.effect, Effect::TargetOnly { .. }) {
@@ -3009,14 +3334,70 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // and the announcing player is the named one, not the wrapper's
                 // controller. Keep the flag on the payload and stamp the actor so
                 // `effects::optional_prompt_player` routes the prompt there.
-                let lifted_optional = match delayed_payload_optional_actor(&inner) {
-                    Some(actor) => {
-                        inner.optional_player = Some(actor);
-                        false
+                //
+                // CR 608.2d + CR 101.4: a delayed "any opponent/player may"
+                // permission is a THIRD case, and it keeps BOTH halves on the
+                // payload. Its APNAP fan-out (`effects::resolve_chain_body`) is
+                // gated on `ability.optional`, so the two are one unit: lifting
+                // `optional` to the wrapper would fire the cascade when the
+                // CREATING clause resolves — the wrong moment, since CR 603.7
+                // ("do something at a later time") plus CR 608.2d (choices are
+                // announced WHILE APPLYING the effect) put the permission at the
+                // delayed ability's own resolution —
+                // and lifting `optional_for` without it would strand a scope on a
+                // node whose gate never opens. The "harmlessly earlier moment"
+                // rationale above is specific to a CONTROLLER-held may; it does
+                // not extend to a permission whose eligible seats and timing are
+                // both determined at the delayed resolution. Subject-actor routing
+                // therefore applies only to the non-fan-out path.
+                // Measured: zero corpus payloads carry `optional_for`, so this is
+                // a forward guard rather than a fix for a live card.
+                let carries_delayed_fanout = inner.optional_for.is_some();
+                let lifted_optional = if carries_delayed_fanout {
+                    false
+                } else {
+                    match subject_anchored_optional_actor(
+                        &inner,
+                        ActorBindingWindow::DeferredDelayedTrigger,
+                    ) {
+                        Some(actor) => {
+                            inner.optional_player = Some(actor);
+                            false
+                        }
+                        None => {
+                            // CR 603.7d + CR 603.7e: the may belongs to the delayed
+                            // ability's own controller — the player who controlled the
+                            // creating spell or ability as it resolved — so it lifts to
+                            // the wrapper. Any announcer the CLAUSE-LEVEL stamp wrote on
+                            // this payload named a player the deferred window refuses (an
+                            // event-context anaphor resolves against
+                            // `state.current_trigger_event`, which at that later
+                            // resolution is the DELAYED ability's own trigger event per
+                            // CR 603.7b — a different event, and a referent CR 608.2c
+                            // never licensed), and it must not outlive the gate it
+                            // belonged to. Not merely a stray `card-data.json` key:
+                            // `stack.rs`'s three batch-collapse proofs read
+                            // `!*optional && optional_player.is_none()`, and a payload
+                            // whose `optional` was just lifted to `false` now REACHES
+                            // that conjunct, so a residue would silently defeat a
+                            // collapse base performed. Clearing restores the base node
+                            // byte for byte. Safe unconditionally: the only writer that
+                            // can have run before this point is the clause-level stamp,
+                            // on this same node, in this same clause iteration.
+                            inner.optional_player = None;
+                            std::mem::replace(&mut inner.optional, false)
+                        }
                     }
-                    None => std::mem::replace(&mut inner.optional, false),
                 };
-                let lifted_optional_for = std::mem::take(&mut inner.optional_for);
+                // The wrapper never carries a fan-out scope: a permission keeps
+                // `optional_for` on its payload (above), and every other payload
+                // has none to lift. Kept as a named binding so the wrapper's
+                // field assignment below still reads uniformly with its siblings.
+                let lifted_optional_for = if carries_delayed_fanout {
+                    None
+                } else {
+                    std::mem::take(&mut inner.optional_for)
+                };
                 let lifted_repeat_for = std::mem::take(&mut inner.repeat_for);
                 let lifted_player_scope = std::mem::take(&mut inner.player_scope);
                 // CR 608.2c: The `CreateDelayedTrigger` wrapper — not its payload —
@@ -4373,6 +4754,78 @@ mod arena_tests {
 
     fn chain_len(def: &AbilityDefinition) -> usize {
         1 + def.sub_ability.as_deref().map_or(0, chain_len)
+    }
+
+    /// CR 608.2d + CR 101.4 + CR 603.7: a delayed "any opponent may" permission
+    /// keeps `optional` AND `optional_for` TOGETHER on the payload.
+    ///
+    /// This drives `assemble_effect_chain` directly, which is the only way to
+    /// reach the branch: `clause_shell`'s opponent-may peel drops its scope
+    /// before assembly on the delayed path, so no Oracle text produces the shape
+    /// (measured: zero corpus delayed payloads carry `optional_for`). The
+    /// runtime half — that the payload's shape then fans out in APNAP order at
+    /// the delayed trigger — is pinned by
+    /// `a_delayed_any_opponent_permission_fans_out_in_apnap_order_at_the_delayed_trigger`
+    /// in `tests/integration/subject_anchored_optional_announcer.rs`.
+    ///
+    /// Reverting the `carries_delayed_fanout` guard flips `optional` onto the
+    /// wrapper and empties the payload's scope, failing both halves below.
+    #[test]
+    fn a_delayed_fanout_permission_keeps_optional_and_optional_for_on_the_payload() {
+        use crate::types::ability::OpponentMayScope;
+        let mut builder = ClauseIrBuilder::new("any opponent may shuffle at the next end step");
+        builder
+            .clause(
+                "any opponent may shuffle at the next end step",
+                parsed_clause(shuffle_effect()),
+                Some(ClauseBoundary::Sentence),
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .is_optional(true)
+            .opponent_may_scope(Some(OpponentMayScope::AnyOpponent))
+            .delayed_condition(Some(DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::End,
+            }))
+            .push();
+        let assembled = assemble_effect_chain(&chain_ir(builder.finish(), AbilityKind::Spell));
+
+        // Reach-guard: we really are looking at the delayed wrapper.
+        let Effect::CreateDelayedTrigger {
+            effect: payload, ..
+        } = &*assembled.effect
+        else {
+            panic!(
+                "reach-guard: the clause must assemble to a CreateDelayedTrigger, got {:?}",
+                assembled.effect
+            );
+        };
+
+        assert!(
+            payload.optional,
+            "CR 608.2d + CR 101.4: the permission's gate stays on the payload — lifting it \
+             to the wrapper fires the APNAP cascade when the CREATING clause resolves, not \
+             at the delayed trigger (CR 603.7 + CR 608.2d)"
+        );
+        assert_eq!(
+            payload.optional_for,
+            Some(OpponentMayScope::AnyOpponent),
+            "CR 101.4: the scope stays with the gate it belongs to"
+        );
+        assert!(
+            !assembled.optional,
+            "the wrapper must NOT carry the permission's gate"
+        );
+        assert_eq!(
+            assembled.optional_for, None,
+            "the wrapper must NOT carry the permission's scope"
+        );
+        assert_eq!(
+            payload.optional_player, None,
+            "CR 608.2d: a fan-out permission names its own seats; no subject stamp is added"
+        );
     }
 
     fn first_delayed_after(def: &AbilityDefinition) -> &AbilityDefinition {

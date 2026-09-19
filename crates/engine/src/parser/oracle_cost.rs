@@ -102,31 +102,68 @@ fn parse_oxford_mana_alternatives_nom(text: &str) -> Option<AbilityCost> {
     })
 }
 
-/// CR 601.2f: Parse a GERUND-form cost phrase ("discarding a card", "paying 1
-/// life", "sacrificing a creature") into an `AbilityCost` by de-conjugating the
-/// leading verb to its imperative stem and delegating to [`parse_oracle_cost`],
-/// the single cost authority.
+/// CR 601.2f + CR 118.8 + CR 601.2h: Parse a GERUND-form cost phrase
+/// ("discarding a card", "paying 2 life and sacrificing an artifact or
+/// creature") into an `AbilityCost` by de-conjugating each ` and `-joined
+/// component to its imperative stem and delegating the recomposed phrase to
+/// [`parse_oracle_cost`], the single cost authority.
 ///
 /// The gerund construction appears in "cast … by <doing X> in addition to
 /// (paying) its other costs" ADDITIONAL-cost riders (Festival of Embers pay-life;
-/// Dragon Man, Reformed Robot discard; Demilich / Helbrute exile-from-graveyard)
-/// and in the self-flash rider in `oracle_casting.rs`. English gerund→imperative
-/// is irregular (pay→paying, discard→discarding, sacrifice→sacrificing[−e],
+/// Dragon Man, Reformed Robot discard; Demilich / Helbrute exile-from-graveyard;
+/// Wickerfolk Indomitable / Demonic Embrace composite riders) and in the
+/// self-flash rider in `oracle_casting.rs`. English gerund→imperative is
+/// irregular (pay→paying, discard→discarding, sacrifice→sacrificing[−e],
 /// remove→removing[−e], exile→exiling[−e], tap→tapping[+p]), so it cannot be a
 /// generic `strip_suffix("ing")`; each verb is one composed `value(stem,
 /// tag(gerund))` arm. Extend by a single arm per cost verb, only once
 /// `parse_oracle_cost` models its imperative.
 ///
 /// Returns `AbilityCost::Unimplemented { .. }` when the leading verb is not a
-/// modeled cost gerund OR the delegated imperative is itself unmodeled, so
-/// callers can decline (or drop) rather than silently attach a wrong/absent cost.
+/// modeled cost gerund, **or any component's imperative is unmodeled**; never
+/// returns a tree containing an `Unimplemented` leg, so callers decline (or
+/// drop) rather than silently attaching a wrong or partially payable cost.
 pub(crate) fn parse_gerund_cost(phrase: &str) -> AbilityCost {
-    type E<'a> = super::oracle_nom::error::OracleError<'a>;
     let original = phrase.trim();
-    let lower = original.to_lowercase();
+    let parts = split_cost_parts(original);
+    let Some((first, rest)) = parts.split_first() else {
+        return AbilityCost::Unimplemented {
+            description: original.to_string(),
+        };
+    };
+    let Some(first) = deconjugate_gerund_component(first) else {
+        return AbilityCost::Unimplemented {
+            description: original.to_string(),
+        };
+    };
+    let recomposed =
+        std::iter::once(first)
+            .chain(rest.iter().map(|part| {
+                deconjugate_gerund_component(part).unwrap_or_else(|| (*part).to_string())
+            }))
+            .collect::<Vec<String>>()
+            .join(" and ");
+    let cost = parse_oracle_cost(&recomposed);
+    if cost.contains_unimplemented() {
+        AbilityCost::Unimplemented {
+            description: original.to_string(),
+        }
+    } else {
+        cost
+    }
+}
+
+/// De-conjugate one gerund cost component onto its imperative stem, preserving
+/// the component's remainder verbatim. `None` when the component does not open
+/// with a modeled cost gerund (the caller keeps it as-is; the imperative
+/// authority decides whether the recomposition is modeled).
+fn deconjugate_gerund_component(part: &str) -> Option<String> {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let part = part.trim();
+    let lower = part.to_lowercase();
     // Compose one `value(stem, tag(gerund))` arm per cost verb — each maps a
     // gerund onto the imperative stem `parse_oracle_cost` already recognizes.
-    let Some((stem, rest)) = nom_on_lower(original, &lower, |input| {
+    nom_on_lower(part, &lower, |input| {
         alt((
             value("pay", tag::<_, _, E<'_>>("paying ")),
             value("discard", tag("discarding ")),
@@ -136,12 +173,8 @@ pub(crate) fn parse_gerund_cost(phrase: &str) -> AbilityCost {
             value("exile", tag("exiling ")),
         ))
         .parse(input)
-    }) else {
-        return AbilityCost::Unimplemented {
-            description: original.to_string(),
-        };
-    };
-    parse_oracle_cost(&format!("{stem} {rest}"))
+    })
+    .map(|(stem, rest)| format!("{stem} {rest}"))
 }
 
 /// True when a top-level ` or ` branch parsed to a concrete activation cost
@@ -2731,10 +2764,11 @@ mod tests {
         assert_eq!(parse_oracle_cost("{T}"), AbilityCost::Tap);
     }
 
-    /// CR 601.2f: `parse_gerund_cost` de-conjugates the gerund verb and delegates
-    /// to the single cost authority, so a gerund cost phrase lowers identically to
-    /// its imperative form across the whole verb class — and an unmodeled verb
-    /// stays honest `Unimplemented`. Tests the building block, not one card.
+    /// CR 601.2f + CR 118.8: `parse_gerund_cost` de-conjugates the gerund verb
+    /// (per ` and `-joined component) and delegates to the single cost
+    /// authority, so a gerund cost phrase lowers identically to its imperative
+    /// form across the whole verb class — and an unmodeled verb stays honest
+    /// `Unimplemented`. Tests the building block, not one card.
     #[test]
     fn gerund_cost_matches_imperative_authority() {
         for (gerund, imperative) in [
@@ -2742,6 +2776,24 @@ mod tests {
             ("paying 1 life", "pay 1 life"),
             ("sacrificing a creature", "sacrifice a creature"),
             ("sacrificing a Vehicle", "sacrifice a Vehicle"),
+            // CR 118.8 + CR 601.2f: Wickerfolk Indomitable / Demonic Embrace
+            // composite riders — each ` and `-joined gerund component
+            // de-conjugates before the joined phrase is delegated.
+            (
+                "paying 2 life and sacrificing an artifact or creature",
+                "pay 2 life and sacrifice an artifact or creature",
+            ),
+            (
+                "paying 3 life and discarding a card",
+                "pay 3 life and discard a card",
+            ),
+            // S6 pin: the second component is a bare noun continuation, not a
+            // gerund; it must stay verbatim so the imperative authority's
+            // `fixup_bare_noun_continuations` rehydrates it onto the first verb.
+            (
+                "sacrificing an artifact and a creature",
+                "sacrifice an artifact and a creature",
+            ),
             // CR 701.13a: the exile arm — Demilich / Helbrute cast-from-graveyard
             // riders exile cards as an additional cost.
             (
@@ -2808,6 +2860,98 @@ mod tests {
                 AbilityCost::Unimplemented { .. }
             ),
             "an unmodeled gerund verb must lower to Unimplemented"
+        );
+
+        // Shape pins for the Wickerfolk Indomitable composite: the pay-life leg
+        // is fixed 2 and the sacrifice leg is a count-1 union.
+        let wickerfolk = parse_gerund_cost("paying 2 life and sacrificing an artifact or creature");
+        let AbilityCost::Composite { costs } = &wickerfolk else {
+            panic!("Wickerfolk's composite rider must lower to a Composite, got {wickerfolk:?}");
+        };
+        assert_eq!(
+            costs.len(),
+            2,
+            "composite must carry exactly two legs: {costs:?}"
+        );
+        assert_eq!(
+            costs[0],
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+        );
+        assert!(
+            matches!(
+                &costs[1],
+                AbilityCost::Sacrifice(SacrificeCost {
+                    target: TargetFilter::Or { .. },
+                    requirement: SacrificeRequirement::Count { count: 1 },
+                })
+            ),
+            "the sacrifice leg must union artifact/creature at count 1, got {:?}",
+            costs[1]
+        );
+
+        // Shape pin for Demonic Embrace's discard leg.
+        let demonic = parse_gerund_cost("paying 3 life and discarding a card");
+        let AbilityCost::Composite { costs } = &demonic else {
+            panic!("Demonic Embrace's composite rider must lower to a Composite, got {demonic:?}");
+        };
+        assert!(
+            matches!(
+                &costs[1],
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            ),
+            "the discard leg must be one card, got {:?}",
+            costs[1]
+        );
+
+        // S6 pin: the verb-before-bare-noun shape `fixup_bare_noun_continuations`
+        // requires survives the per-component split — both legs stay count-1
+        // Sacrifices, artifact filter first, creature filter second.
+        let s6 = parse_gerund_cost("sacrificing an artifact and a creature");
+        let AbilityCost::Composite { costs } = &s6 else {
+            panic!("the S6 pair must lower to a two-leg Composite, got {s6:?}");
+        };
+        assert_eq!(costs.len(), 2, "{costs:?}");
+        for (leg, expected) in costs
+            .iter()
+            .zip([TypeFilter::Artifact, TypeFilter::Creature])
+        {
+            let AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+                requirement,
+            }) = leg
+            else {
+                panic!("S6 leg must be a typed Sacrifice, got {leg:?}");
+            };
+            assert_eq!(type_filters, &[expected]);
+            assert_eq!(requirement, &SacrificeRequirement::Count { count: 1 });
+        }
+    }
+
+    /// CR 118.8 + CR 601.2f: a composite gerund containing an unmodeled leg
+    /// collapses to a single top-level `Unimplemented` — never a `Composite`
+    /// carrying an unpayable leg. The modeled analogue is the positive
+    /// reach-guard.
+    #[test]
+    fn composite_gerund_with_unmodeled_leg_collapses() {
+        assert!(
+            matches!(
+                parse_gerund_cost("paying 2 life and frobnicating a card"),
+                AbilityCost::Unimplemented { .. }
+            ),
+            "an unmodeled component must collapse the whole composite, got {:?}",
+            parse_gerund_cost("paying 2 life and frobnicating a card")
+        );
+        assert!(
+            matches!(
+                parse_gerund_cost("paying 2 life and discarding a card"),
+                AbilityCost::Composite { .. }
+            ),
+            "reach-guard: the same shape with a modeled component must stay a Composite"
         );
     }
 

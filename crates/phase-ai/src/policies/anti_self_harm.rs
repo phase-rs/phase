@@ -369,8 +369,24 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
 
     let effects = ctx.effects();
 
+    // A `ChangeZone` onto the battlefield draws its target from the library,
+    // graveyard, hand or exile — never from our own battlefield — so the
+    // "beneficial creature-targeting spell with no creature of ours to target"
+    // whiff check below cannot apply to it. Without this exclusion its
+    // permissive `TargetFilter::Any` reads as "targets a creature" via
+    // `targets_creatures`, and every such put is charged the full
+    // `wasted_cast_penalty` whenever the AI happens to control no creature.
+    // That covers a whole class, not one card: every printed fetchland's
+    // search-and-put chain, and reanimation-shaped puts alike.
     let mut has_beneficial_creature_target = effects.iter().any(|effect| {
-        matches!(effect_polarity(effect), EffectPolarity::Beneficial) && targets_creatures(effect)
+        !matches!(
+            effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ) && matches!(effect_polarity(effect), EffectPolarity::Beneficial)
+            && targets_creatures(effect)
     });
     // For harmful spells, only penalise when targeting is creature-exclusive.
     // Burn spells with TargetFilter::Any can still go face — don't block those.
@@ -7724,6 +7740,51 @@ mod tests {
         assert!(
             score <= -8.0,
             "White removal with only a hexproof-from-white target should be penalized, got {score}"
+        );
+    }
+
+    /// A beneficial `ChangeZone` onto the battlefield draws its target from
+    /// another zone, so controlling no creature is not a whiff for it. Its
+    /// permissive `TargetFilter::Any` otherwise reads as "targets a creature"
+    /// and collects the full `wasted_cast_penalty` on an empty board — which is
+    /// what kept the AI from cracking a fetchland in the early game, and would
+    /// equally mis-score a reanimation-shaped put.
+    #[test]
+    fn pre_cast_does_not_whiff_a_put_onto_the_battlefield_without_own_creatures() {
+        let mut state = make_state();
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Put Onto Battlefield".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.abilities = Arc::new(vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )]);
+
+        assert_eq!(
+            pre_cast_score_for_spell(&state, id),
+            0.0,
+            "a put onto the battlefield must not be charged the no-own-creature whiff penalty"
         );
     }
 

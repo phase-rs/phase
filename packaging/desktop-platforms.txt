@@ -1,0 +1,11 @@
+# Desktop platforms the shell release publishes: os arch triple.
+# os/arch are spelled as std::env::consts::{OS, ARCH} spells them, which is also
+# how shell-release.yml's build-shell matrix spells them. Held to that matrix by
+# scripts/check_desktop_platform_matrix.py, and to native_engine.rs's
+# ServerPlatform (whose triple each desktop downloads) by that module's own test.
+# That script holds the triple column to preview-server.yml and release.yml too.
+# preview-server.yml's publish job holds its own upload list to it at run time.
+macos   aarch64 aarch64-apple-darwin
+windows x86_64  x86_64-pc-windows-msvc
+linux   x86_64  x86_64-unknown-linux-musl
+linux   aarch64 aarch64-unknown-linux-musl

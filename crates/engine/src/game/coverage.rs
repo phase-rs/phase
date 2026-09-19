@@ -5688,15 +5688,15 @@ fn append_effect_static_carrier_items(
     });
 }
 
-/// Build `ParsedItem` nodes for ability costs, only emitting items for
-/// composite or unimplemented costs (simple costs are not interesting).
+/// Build `ParsedItem` nodes for ability costs, emitting an unsupported item
+/// for every unpayable leaf in the tree.
+///
+/// Traversal delegates to [`AbilityCost::for_each_cost_node`], the single
+/// cost-tree shape authority, so this collector, the gap collector below, and
+/// `AbilityCost::contains_unimplemented` all see the same subtrees — including
+/// `OneOf`/`PerCounter` nesting and an `EffectCost`'s embedded effect.
 fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
-    match cost {
-        AbilityCost::Composite { costs } => {
-            for nested in costs {
-                build_cost_item(nested, items);
-            }
-        }
+    cost.for_each_cost_node(&mut |node| match node {
         AbilityCost::Unimplemented { description } => {
             items.push(ParsedItem {
                 category: ParseCategory::Cost,
@@ -5707,8 +5707,20 @@ fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
                 children: vec![],
             });
         }
+        AbilityCost::EffectCost { effect } => {
+            if let Effect::Unimplemented { name, description } = effect.as_ref() {
+                items.push(ParsedItem {
+                    category: ParseCategory::Cost,
+                    label: name.clone(),
+                    source_text: description.clone().or_else(|| Some(name.clone())),
+                    supported: false,
+                    details: vec![],
+                    children: vec![],
+                });
+            }
+        }
         _ => {}
-    }
+    });
 }
 
 /// Build `ParsedItem` nodes for additional costs (kicker, etc.).
@@ -5777,23 +5789,22 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
 }
 
 /// Returns true if any leaf `AbilityCost` in the tree is `Unimplemented`.
+///
+/// Delegates to [`AbilityCost::contains_unimplemented`], the single
+/// containment authority over the cost tree. That method is a strict superset
+/// of the two former coverage-private `Composite`-only copies: it also
+/// recurses `OneOf` and `PerCounter`.
 fn additional_cost_has_unimplemented(additional_cost: &AdditionalCost) -> bool {
     match additional_cost {
         AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
-            ability_cost_has_unimplemented(cost)
+            cost.contains_unimplemented()
         }
-        AdditionalCost::Kicker { costs, .. } => costs.iter().any(ability_cost_has_unimplemented),
+        AdditionalCost::Kicker { costs, .. } => {
+            costs.iter().any(AbilityCost::contains_unimplemented)
+        }
         AdditionalCost::Choice(first, second) => {
-            ability_cost_has_unimplemented(first) || ability_cost_has_unimplemented(second)
+            first.contains_unimplemented() || second.contains_unimplemented()
         }
-    }
-}
-
-fn ability_cost_has_unimplemented(cost: &AbilityCost) -> bool {
-    match cost {
-        AbilityCost::Unimplemented { .. } => true,
-        AbilityCost::Composite { costs } => costs.iter().any(ability_cost_has_unimplemented),
-        _ => false,
     }
 }
 
@@ -5815,7 +5826,7 @@ fn build_casting_option_item(option: &SpellCastingOption, items: &mut Vec<Parsed
     let supported = option
         .cost
         .as_ref()
-        .is_none_or(|c| !ability_cost_has_unimplemented(c));
+        .is_none_or(|c| !c.contains_unimplemented());
     items.push(ParsedItem {
         category: ParseCategory::Cost,
         label: format!("CastingOption:{kind_label}"),
@@ -6879,7 +6890,7 @@ pub fn card_face_has_unimplemented_parts(face: &CardFace) -> bool {
         || face
             .additional_cost
             .as_ref()
-            .is_some_and(additional_cost_has_unimplemented_parts)
+            .is_some_and(additional_cost_has_unimplemented)
         || face.triggers.iter().any(trigger_has_unimplemented_parts)
         || face
             .replacements
@@ -7964,7 +7975,7 @@ fn ability_definition_has_unimplemented_parts(
         || def
             .cost
             .as_ref()
-            .is_some_and(ability_cost_has_unimplemented_parts)
+            .is_some_and(|c| c.contains_unimplemented())
         || def.sub_ability.as_ref().is_some_and(|sub| {
             ability_definition_has_unimplemented_parts(sub, token_static_traversal)
         })
@@ -8025,29 +8036,6 @@ fn effect_static_carriers_have_unimplemented_parts(
                 modification_has_unimplemented_parts(modification, token_static_traversal);
         });
         has_unimplemented_parts
-    }
-}
-
-fn additional_cost_has_unimplemented_parts(additional_cost: &AdditionalCost) -> bool {
-    match additional_cost {
-        AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
-            ability_cost_has_unimplemented_parts(cost)
-        }
-        AdditionalCost::Kicker { costs, .. } => {
-            costs.iter().any(ability_cost_has_unimplemented_parts)
-        }
-        AdditionalCost::Choice(first, second) => {
-            ability_cost_has_unimplemented_parts(first)
-                || ability_cost_has_unimplemented_parts(second)
-        }
-    }
-}
-
-fn ability_cost_has_unimplemented_parts(cost: &AbilityCost) -> bool {
-    match cost {
-        AbilityCost::Composite { costs } => costs.iter().any(ability_cost_has_unimplemented_parts),
-        AbilityCost::Unimplemented { .. } => true,
-        _ => false,
     }
 }
 
@@ -8561,21 +8549,29 @@ fn collect_source_texts(items: &[ParsedItem], out: &mut Vec<String>) {
     }
 }
 
+/// Collect the coverage gaps for an ability cost tree. Traversal delegates to
+/// [`AbilityCost::for_each_cost_node`], the single cost-tree shape authority,
+/// so the gap set cannot miss a subtree the containment predicate sees
+/// (`OneOf`/`PerCounter` nesting, and an `EffectCost` whose embedded effect is
+/// `Unimplemented`).
 fn collect_ability_cost_missing_parts(cost: &AbilityCost, missing: &mut Vec<String>) {
-    match cost {
-        AbilityCost::Composite { costs } => {
-            for nested_cost in costs {
-                collect_ability_cost_missing_parts(nested_cost, missing);
-            }
-        }
+    cost.for_each_cost_node(&mut |node| match node {
         AbilityCost::Unimplemented { description } => {
             let label = format!("Cost:{description}");
             if !missing.contains(&label) {
                 missing.push(label);
             }
         }
+        AbilityCost::EffectCost { effect } => {
+            if let Effect::Unimplemented { name, .. } = effect.as_ref() {
+                let label = format!("Cost:{name}");
+                if !missing.contains(&label) {
+                    missing.push(label);
+                }
+            }
+        }
         _ => {}
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -13610,6 +13606,8 @@ mod tests {
 
     use super::*;
     use crate::database::legality::{legalities_to_export_map, LegalityStatus};
+    use crate::database::mtgjson::{AtomicCard, AtomicIdentifiers};
+    use crate::database::synthesis::build_oracle_face;
     use crate::parser::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
     use crate::types::ability::{
         AbilityCondition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
@@ -14925,6 +14923,227 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             .into_iter()
             .find(|card| card.card_name == card_name)
             .expect("coverage should include test card")
+    }
+
+    /// Build an `AtomicCard` for a FIN Tiered spell with its real MTGJSON
+    /// keyword array, so the tests exercise the production MTGJSON→face path.
+    fn tiered_atomic_card(name: &str, oracle: &str, keywords: &[&str]) -> AtomicCard {
+        AtomicCard {
+            name: name.to_string(),
+            mana_cost: Some("{1}{R}".to_string()),
+            colors: vec!["R".to_string()],
+            color_identity: vec!["R".to_string()],
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            text: Some(oracle.to_string()),
+            layout: "normal".to_string(),
+            type_line: Some("Instant".to_string()),
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: if keywords.is_empty() {
+                None
+            } else {
+                Some(keywords.iter().map(|k| (*k).to_string()).collect())
+            },
+            side: None,
+            face_name: None,
+            mana_value: 2.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some(format!("{}-oracle", name.to_lowercase())),
+                scryfall_id: Some(format!("{}-face", name.to_lowercase())),
+            },
+            foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
+        }
+    }
+
+    const FIRE_MAGIC_ORACLE: &str = "Tiered (Choose one additional cost.)\n\
+        \u{2022} Fire \u{2014} {0} \u{2014} Fire Magic deals 1 damage to each creature.\n\
+        \u{2022} Fira \u{2014} {2} \u{2014} Fire Magic deals 2 damage to each creature.\n\
+        \u{2022} Firaga \u{2014} {5} \u{2014} Fire Magic deals 3 damage to each creature.";
+
+    /// CR 702.183a: the `Tiered` header line is a printed line the parser
+    /// represents as the typed `Keyword::Tiered` parse item (the MTGJSON keyword
+    /// array is the only source for it), which is exactly what closes the
+    /// cardinality gap that made the whole modal block a `SilentDrop` before the
+    /// variant landed. Faces are built through the production MTGJSON→face path
+    /// and reloaded through the serde-backed coverage harness.
+    ///
+    /// Vincent's Limit Break keeps its separate, deferred swallow seam:
+    /// `Swallow:Duration_UntilEndOfTurn` is its only residual gap. Update the
+    /// Vincent expectation when that duration-attribution seam is fixed.
+    #[test]
+    fn tiered_modal_blocks_are_not_silent_drops() {
+        // (name, verbatim Oracle text, real MTGJSON keywords, fully supported?)
+        let cases: &[(&str, &str, &[&str], bool)] = &[
+            (
+                "Fire Magic",
+                FIRE_MAGIC_ORACLE,
+                &["Fira", "Firaga", "Fire", "Tiered"],
+                true,
+            ),
+            (
+                "Ice Magic",
+                "Tiered (Choose one additional cost.)\n\
+                 \u{2022} Blizzard \u{2014} {0} \u{2014} Return target creature to its owner's hand.\n\
+                 \u{2022} Blizzara \u{2014} {2} \u{2014} Target creature's owner puts it on their choice of the top or bottom of their library.\n\
+                 \u{2022} Blizzaga \u{2014} {5}{U} \u{2014} Target creature's owner shuffles it into their library.",
+                &["Blizzaga", "Blizzara", "Blizzard", "Tiered"],
+                true,
+            ),
+            (
+                "Thunder Magic",
+                "Tiered (Choose one additional cost.)\n\
+                 \u{2022} Thunder \u{2014} {0} \u{2014} Thunder Magic deals 2 damage to target creature.\n\
+                 \u{2022} Thundara \u{2014} {3} \u{2014} Thunder Magic deals 4 damage to target creature.\n\
+                 \u{2022} Thundaga \u{2014} {5}{R} \u{2014} Thunder Magic deals 8 damage to target creature.",
+                &["Thundaga", "Thundara", "Thunder", "Tiered"],
+                true,
+            ),
+            (
+                "Cloud's Limit Break",
+                "Tiered (Choose one additional cost.)\n\
+                 \u{2022} Cross-Slash \u{2014} {0} \u{2014} Destroy target tapped creature.\n\
+                 \u{2022} Blade Beam \u{2014} {1} \u{2014} Destroy any number of target tapped creatures with different controllers.\n\
+                 \u{2022} Omnislash \u{2014} {3}{W} \u{2014} Destroy all tapped creatures.",
+                &["Blade Beam", "Cross-Slash", "Omnislash", "Tiered"],
+                true,
+            ),
+            (
+                "Tifa's Limit Break",
+                "Tiered (Choose one additional cost.)\n\
+                 \u{2022} Somersault \u{2014} {0} \u{2014} Target creature gets +2/+2 until end of turn.\n\
+                 \u{2022} Meteor Strikes \u{2014} {2} \u{2014} Double target creature's power and toughness until end of turn.\n\
+                 \u{2022} Final Heaven \u{2014} {6}{G} \u{2014} Triple target creature's power and toughness until end of turn.",
+                &[
+                    "Double",
+                    "Final Heaven",
+                    "Meteor Strikes",
+                    "Somersault",
+                    "Tiered",
+                    "Triple",
+                ],
+                true,
+            ),
+            (
+                "Restoration Magic",
+                "Tiered (Choose one additional cost.)\n\
+                 \u{2022} Cure \u{2014} {0} \u{2014} Target permanent gains hexproof and indestructible until end of turn.\n\
+                 \u{2022} Cura \u{2014} {1} \u{2014} Target permanent gains hexproof and indestructible until end of turn. You gain 3 life.\n\
+                 \u{2022} Curaga \u{2014} {3}{W} \u{2014} Permanents you control gain hexproof and indestructible until end of turn. You gain 6 life.",
+                &["Cura", "Curaga", "Cure", "Tiered"],
+                true,
+            ),
+            (
+                "Vincent's Limit Break",
+                "Tiered (Choose one additional cost.)\n\
+                 Until end of turn, target creature you control gains \"When this creature dies, return it to the battlefield tapped under its owner's control\" and has the chosen base power and toughness.\n\
+                 \u{2022} Galian Beast \u{2014} {0} \u{2014} 3/2.\n\
+                 \u{2022} Death Gigas \u{2014} {1} \u{2014} 5/2.\n\
+                 \u{2022} Hellmasker \u{2014} {3} \u{2014} 7/2.",
+                &["Death Gigas", "Galian Beast", "Hellmasker", "Tiered"],
+                false,
+            ),
+        ];
+
+        for (name, oracle, keywords, fully_supported) in cases {
+            let face = build_oracle_face(&tiered_atomic_card(name, oracle, keywords), None);
+            let mode_count = face
+                .modal
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} must parse as a Tiered modal"))
+                .mode_count;
+            let card = coverage_result_for_face(face);
+
+            assert!(
+                !card
+                    .gap_details
+                    .iter()
+                    .any(|gap| gap.handler.starts_with("SilentDrop")),
+                "{name} must not report a SilentDrop: {:?}",
+                card.gap_details
+            );
+
+            if *fully_supported {
+                assert!(
+                    card.gap_details.is_empty(),
+                    "{name} must be fully covered: {:?}",
+                    card.gap_details
+                );
+                assert!(card.supported, "{name} must be supported");
+            } else {
+                let handlers: Vec<&str> = card
+                    .gap_details
+                    .iter()
+                    .map(|gap| gap.handler.as_str())
+                    .collect();
+                assert_eq!(
+                    handlers,
+                    vec!["Swallow:Duration_UntilEndOfTurn"],
+                    "Vincent's only residual gap is the deferred duration-attribution \
+                     swallow seam; update this expectation when that seam is fixed"
+                );
+                assert!(!card.supported, "Vincent must remain unsupported");
+            }
+
+            // Positive reach-guard (non-vacuity): the Tiered header is
+            // represented by exactly one Keyword parse item, so the top-level
+            // parse-item count is one keyword plus one item per mode.
+            if *name == "Fire Magic" {
+                let tiered_items: Vec<&ParsedItem> = card
+                    .parse_details
+                    .iter()
+                    .filter(|item| {
+                        item.category == ParseCategory::Keyword && item.label == "Tiered"
+                    })
+                    .collect();
+                assert_eq!(
+                    tiered_items.len(),
+                    1,
+                    "exactly one typed Tiered keyword item: {:?}",
+                    card.parse_details
+                );
+                assert!(tiered_items[0].supported);
+                assert_eq!(
+                    card.parse_details.len(),
+                    1 + mode_count,
+                    "one Tiered keyword item plus one parse root per mode"
+                );
+            }
+        }
+    }
+
+    /// Paired negative: the same Fire Magic face built with **no** MTGJSON
+    /// keyword array still trips the silent-drop guard with the exact
+    /// pre-fix label. Proves the fix is the typed keyword item and that the
+    /// guard still bites when it is absent.
+    #[test]
+    fn tiered_block_without_mtgjson_keyword_still_reports_silent_drop() {
+        let face = build_oracle_face(
+            &tiered_atomic_card("Fire Magic", FIRE_MAGIC_ORACLE, &[]),
+            None,
+        );
+        let card = coverage_result_for_face(face);
+
+        assert!(
+            !card.supported,
+            "without the Tiered keyword item the card remains unsupported"
+        );
+        assert!(
+            card.gap_details
+                .iter()
+                .any(|gap| gap.handler == "SilentDrop:3_of_4"),
+            "expected SilentDrop:3_of_4, got {:?}",
+            card.gap_details
+        );
     }
 
     #[test]
@@ -19314,6 +19533,131 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 options: vec![crate::types::card_type::CoreType::Artifact],
             }),
             "restricted card type"
+        );
+    }
+
+    /// The coverage walker delegates containment to
+    /// `AbilityCost::contains_unimplemented` — the single authority. The
+    /// `OneOf` case is revert-discriminating: the deleted `Composite`-only
+    /// private copy answered `false` for an `Unimplemented` nested under a
+    /// disjunction.
+    #[test]
+    fn additional_cost_unimplemented_delegates_to_ability_cost_authority() {
+        use crate::types::ability::{Effect, QuantityExpr};
+        use crate::types::mana::ManaCost;
+
+        let pay_life = || AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+        };
+        let unimplemented = || AbilityCost::Unimplemented {
+            description: "frobnicate".to_string(),
+        };
+
+        assert!(additional_cost_has_unimplemented(
+            &AdditionalCost::Required(AbilityCost::Composite {
+                costs: vec![pay_life(), unimplemented()],
+            }),
+        ));
+        assert!(additional_cost_has_unimplemented(
+            &AdditionalCost::Required(AbilityCost::OneOf {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                    AbilityCost::Composite {
+                        costs: vec![unimplemented()],
+                    },
+                ],
+            }),
+        ));
+        assert!(additional_cost_has_unimplemented(
+            &AdditionalCost::Required(AbilityCost::EffectCost {
+                effect: Box::new(Effect::Unimplemented {
+                    name: "static_structure".to_string(),
+                    description: None,
+                }),
+            }),
+        ));
+    }
+
+    /// The parsed-item and gap collectors must traverse the same complete
+    /// cost-tree shape as `AbilityCost::contains_unimplemented` — including
+    /// `OneOf`/`PerCounter` nesting and an `EffectCost`'s embedded effect —
+    /// otherwise a nested unpayable cost is reported as supported.
+    #[test]
+    fn cost_tree_collectors_traverse_oneof_percounter_and_effect_cost() {
+        use crate::types::ability::{QuantityExpr, TargetFilter};
+        use crate::types::counter::CounterType;
+
+        let unimplemented = || AbilityCost::Unimplemented {
+            description: "frobnicate".to_string(),
+        };
+        let one_of = || AbilityCost::OneOf {
+            costs: vec![
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+                unimplemented(),
+            ],
+        };
+        let per_counter = || AbilityCost::PerCounter {
+            counter: CounterType::Age,
+            target: TargetFilter::SelfRef,
+            base: Box::new(unimplemented()),
+        };
+        let effect_cost = || AbilityCost::EffectCost {
+            effect: Box::new(Effect::Unimplemented {
+                name: "unparsed_verb_arguments".to_string(),
+                description: None,
+            }),
+        };
+        let modeled = || AbilityCost::OneOf {
+            costs: vec![
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+                AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::generic(1),
+                },
+            ],
+        };
+
+        for (cost, expected_gap, expected_label) in [
+            (one_of(), "Cost:frobnicate", "frobnicate"),
+            (per_counter(), "Cost:frobnicate", "frobnicate"),
+            (
+                effect_cost(),
+                "Cost:unparsed_verb_arguments",
+                "unparsed_verb_arguments",
+            ),
+        ] {
+            let mut missing = Vec::new();
+            collect_ability_cost_missing_parts(&cost, &mut missing);
+            assert_eq!(
+                missing,
+                vec![expected_gap.to_string()],
+                "gap collector must see the nested unpayable leaf in {cost:?}"
+            );
+
+            let mut items = Vec::new();
+            build_cost_item(&cost, &mut items);
+            assert!(
+                items
+                    .iter()
+                    .any(|item| !item.supported && item.label == expected_label),
+                "parsed-item collector must emit the unsupported leaf for {cost:?}"
+            );
+        }
+
+        // Reach-guard: a fully modeled disjunction collects nothing.
+        let mut missing = Vec::new();
+        collect_ability_cost_missing_parts(&modeled(), &mut missing);
+        assert!(missing.is_empty(), "modeled tree must collect no gap");
+        let mut items = Vec::new();
+        build_cost_item(&modeled(), &mut items);
+        assert!(
+            items.is_empty(),
+            "modeled tree must emit no unsupported item"
         );
     }
 }

@@ -1990,9 +1990,35 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // quantities to `PlayerScope::ScopedPlayer` so they resolve against the
     // damaged/attacked player rather than an absent chosen target.
     let mut execute = execute;
+    // CR 608.2c + CR 608.2d — PRECEDENCE between the two `optional_player`
+    // producers. This detector reads the TRIGGER BODY's head (`tag("they may ")`,
+    // `optional_player_from_effect_body`) and can only ever say `TriggeringPlayer`.
+    // `oracle_effect::assembly::subject_anchored_optional_actor` reads the CLAUSE's
+    // own anaphor out of the effect's player slot and is strictly more precise, and
+    // it runs FIRST. So this writer only fills a gap it is uniquely able to fill —
+    // the shapes whose named actor never reaches `Effect::target_filter()` at all:
+    // object slots (Bow to My Command, Charismatic Conqueror, My Forces Are
+    // Innumerable), `PayCost { payer }` (Horn of Plenty, Meathook Massacre II,
+    // Wandering Archaic) and unparsed bodies (Game Knights Live). MEASURED: the two
+    // cards both producers see (Miss Highwater, Tarnation) agree on
+    // `TriggeringPlayer`, so the guard is byte-neutral on today's corpus; without
+    // it, a future "they may"-headed trigger whose clause names a DIFFERENT anaphor
+    // would have the correct stamp overwritten.
+    //
+    // CR 608.2d + CR 101.4: the `optional_for` conjunct keeps this writer inside
+    // the same single-announcer invariant `subject_anchored_optional_actor` now
+    // enforces at the other two sites — an any-opponent permission names its own
+    // seats in APNAP order, so a subject stamp beside it would be a second
+    // authority. Unreachable today (a `"they may "` body head and an
+    // `"any opponent may"` head are mutually exclusive) and runtime-inert if it
+    // were reached, because the fan-out returns before `optional_player` is read;
+    // the stamp would only land as a stray serialized key. Guarded for the
+    // invariant, not for a live card.
     if let Some(optional_player) = &modifiers.optional_player {
         if let Some(ability) = execute.as_deref_mut() {
-            ability.optional_player = Some(optional_player.clone());
+            if ability.optional_player.is_none() && ability.optional_for.is_none() {
+                ability.optional_player = Some(optional_player.clone());
+            }
         }
     }
     // CR 603.2c: A `TrackedSetAggregate { source: TriggeringBatch }` reduces the

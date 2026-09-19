@@ -62,7 +62,9 @@ pub fn resolve_log_entries(
 /// instruction begins, so unrelated life loss is not hidden by later damage.
 fn is_redundant_log_event(events: &[GameEvent], index: usize) -> bool {
     match events.get(index) {
-        Some(GameEvent::LifeChanged { player_id, amount }) if *amount < 0 => {
+        Some(GameEvent::LifeChanged {
+            player_id, amount, ..
+        }) if *amount < 0 => {
             let mut next_index = index + 1;
             let mut poison_seen = false;
             loop {
@@ -1164,7 +1166,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             segments
         }
 
-        GameEvent::LifeChanged { player_id, amount } => {
+        GameEvent::LifeChanged {
+            player_id, amount, ..
+        } => {
             if *amount >= 0 {
                 vec![
                     player_seg(state, *player_id),
@@ -2583,6 +2587,7 @@ mod tests {
             &GameEvent::LifeChanged {
                 player_id: PlayerId(0),
                 amount: 3,
+                new_total: crate::types::events::LifeTotalReading::default(),
             },
             &state,
         );
@@ -2598,6 +2603,7 @@ mod tests {
             &GameEvent::LifeChanged {
                 player_id: PlayerId(0),
                 amount: -3,
+                new_total: crate::types::events::LifeTotalReading::default(),
             },
             &state,
         );
@@ -2615,6 +2621,7 @@ mod tests {
                 GameEvent::LifeChanged {
                     player_id: PlayerId(1),
                     amount: -5,
+                    new_total: crate::types::events::LifeTotalReading::default(),
                 },
                 GameEvent::ReplacementApplied {
                     source_id: ObjectId(9),
@@ -2696,6 +2703,7 @@ mod tests {
             &[GameEvent::LifeChanged {
                 player_id: PlayerId(1),
                 amount: -5,
+                new_total: crate::types::events::LifeTotalReading::default(),
             }],
             &state,
             &state,
@@ -2716,6 +2724,7 @@ mod tests {
                 GameEvent::LifeChanged {
                     player_id: PlayerId(1),
                     amount: -5,
+                    new_total: crate::types::events::LifeTotalReading::default(),
                 },
                 GameEvent::EffectResolved {
                     kind: crate::types::ability::EffectKind::LoseLife,
@@ -2725,6 +2734,7 @@ mod tests {
                 GameEvent::LifeChanged {
                     player_id: PlayerId(1),
                     amount: -5,
+                    new_total: crate::types::events::LifeTotalReading::default(),
                 },
                 GameEvent::DamageDealt {
                     source_id: ObjectId(7),
@@ -2887,10 +2897,12 @@ mod tests {
                 GameEvent::LifeChanged {
                     player_id: PlayerId(0),
                     amount: 3,
+                    new_total: crate::types::events::LifeTotalReading::default(),
                 },
                 GameEvent::LifeChanged {
                     player_id: PlayerId(1),
                     amount: -3,
+                    new_total: crate::types::events::LifeTotalReading::default(),
                 },
                 GameEvent::TappedForMana {
                     source_id: ObjectId(1),
@@ -2928,6 +2940,7 @@ mod tests {
                 GameEvent::LifeChanged {
                     player_id: PlayerId(0),
                     amount: 1,
+                    new_total: crate::types::events::LifeTotalReading::default(),
                 },
                 LogImportance::Essential,
                 LogTone::Positive,

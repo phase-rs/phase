@@ -36,6 +36,7 @@ fn exquisite_blood_heals_controller_not_triggering_opponent() {
     state.current_trigger_event = Some(GameEvent::LifeChanged {
         player_id: opponent,
         amount: -5,
+        new_total: engine::types::events::LifeTotalReading::default(),
     });
 
     // Build the parsed shape Exquisite Blood lowers to:

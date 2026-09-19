@@ -2166,9 +2166,8 @@ impl ServerPlatform {
     ];
 
     /// The pair as `std::env::consts::{OS, ARCH}` spells it, which is also how
-    /// the `build-shell` matrix spells its `os` and `arch`.
-    /// `scripts/check_shell_platform_mapping.py` reads these arms to hold that
-    /// matrix to this enum.
+    /// `packaging/desktop-platforms.txt` and the `build-shell` matrix spell
+    /// their `os` and `arch`.
     fn os_arch(self) -> (&'static str, &'static str) {
         match self {
             Self::MacosAarch64 => ("macos", "aarch64"),
@@ -3464,14 +3463,25 @@ mod tests {
 
     #[test]
     fn server_target_triple_maps_every_published_desktop_platform() {
-        for (os, arch, triple) in [
-            ("macos", "aarch64", "aarch64-apple-darwin"),
-            ("windows", "x86_64", "x86_64-pc-windows-msvc"),
-            ("linux", "x86_64", "x86_64-unknown-linux-musl"),
-            ("linux", "aarch64", "aarch64-unknown-linux-musl"),
-        ] {
+        let mut listed = HashSet::new();
+        for line in include_str!("../../../packaging/desktop-platforms.txt").lines() {
+            let content = line.split_once('#').map_or(line, |(before, _)| before);
+            let fields: Vec<&str> = content.split_whitespace().collect();
+            if fields.is_empty() {
+                continue;
+            }
+            let [os, arch, triple] = fields[..] else {
+                panic!("expected `os arch triple`, got {line:?}")
+            };
             assert_eq!(server_target_triple(os, arch), Some(triple), "{os}-{arch}");
+            listed.insert((os, arch));
         }
+        // The set, not its size: a duplicated row would otherwise stand in for
+        // a variant no row covers.
+        assert_eq!(
+            listed,
+            HashSet::from(ServerPlatform::ALL.map(ServerPlatform::os_arch))
+        );
         for (os, arch) in [
             ("macos", "x86_64"),
             ("windows", "aarch64"),

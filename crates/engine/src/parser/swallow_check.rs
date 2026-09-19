@@ -1681,8 +1681,8 @@ fn static_is_replacement_carrier(static_def: &StaticDefinition) -> bool {
         static_def.mode,
         // CR 614.1a: "if a spell cast this way would be put into your graveyard, exile it
         // instead". `Some(zone)` IS the rider; `None` means this printing dropped it, so
-        // it must NOT suppress — `glimpse the cosmos` and `maestros ascendancy` both carry
-        // `None` here and correctly keep warning.
+        // it must NOT suppress — `glimpse the cosmos` (whose variant sentence is still
+        // unmodeled) carries `None` here and correctly keeps warning.
         StaticMode::GraveyardCastPermission {
             graveyard_destination_replacement: Some(_),
             ..

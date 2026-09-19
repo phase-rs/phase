@@ -116,9 +116,11 @@ jobs:
         run: python3 scripts/release_dispatch_guard_tests.py
 
       - name: Preview data wait tests
-        # preview-server.yml signs the preview manifest only after this script
-        # sees its data URLs served; the tests drive the script against a local
-        # HTTP server and check the publish job waits on every manifest data URL.
+        # The manifest is signed only after this script sees its data URLs
+        # served, so the tests drive it against a local HTTP server. They also
+        # run the publish step's own shell over a stubbed checkout, holding
+        # packaging/desktop-platforms.txt to the binaries that step uploads: a
+        # listed triple it does not publish leaves that desktop with no preview.
         run: python3 scripts/preview_data_wait_tests.py
 
       - name: Action pin checker unit tests
@@ -158,23 +160,23 @@ jobs:
         # while only the .deb side was current.
         run: python3 scripts/check_media_plugin_packaging.py
 
-      - name: Desktop platform mapping checker unit tests
+      - name: Desktop platform matrix checker unit tests
         # Exercises the checker against throwaway trees only; it does not read
         # this repository's own files. The direction that matters is refusal: an
-        # unreadable matrix reads as an empty published set, and the empty set is
-        # a subset of any mapping, so a checker that understood nothing would
-        # report a clean pass.
-        run: python3 scripts/check_shell_platform_mapping_tests.py
+        # unreadable list must raise, not read as an empty list.
+        run: python3 scripts/check_desktop_platform_matrix_tests.py
 
-      - name: Desktop platform mapping coverage
-        # Two directions across three files. Every platform shell-release.yml's
-        # build-shell matrix publishes must be a native_engine.rs ServerPlatform
-        # variant, or that desktop ships unable to fetch an engine; and every
-        # triple that enum resolves must reach release.yml signed, with both the
-        # binary and its signature attached, or the desktop's download 404s on
-        # whichever half is missing. The Rust-side test pins the pairs it expects
-        # and cannot see either set grow past them.
-        run: python3 scripts/check_shell_platform_mapping.py
+      - name: Desktop platform matrix coverage
+        # packaging/desktop-platforms.txt is the published desktop platform set.
+        # A platform shell-release.yml's build-shell matrix builds with no row
+        # there ships a desktop whose ServerPlatform resolves no triple, so it can
+        # never fetch an engine; preview-server.yml's build and release.yml's
+        # build-server triples are held to the same file by equality, so a triple
+        # published for no listed desktop is an error, not a harmless extra. The
+        # enum half is native_engine.rs's own test, which runs at tag time in
+        # shell-release.yml's shell-preflight — tauri-check is disabled here, so
+        # no PR-time job compiles it.
+        run: python3 scripts/check_desktop_platform_matrix.py
 
       - name: Resolution-frame boundary guard
         # Full-tree guard: legacy resolution keys are reader/fixture-only, and

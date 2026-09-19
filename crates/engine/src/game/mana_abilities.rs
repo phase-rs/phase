@@ -9760,6 +9760,7 @@ mod tests {
             GameEvent::LifeChanged {
                 player_id,
                 amount: -1,
+                ..
             } if *player_id == PlayerId(0)
         )));
         assert!(events

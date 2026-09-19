@@ -3955,6 +3955,7 @@ fn owner_collected_filter_never_drops_non_zone_change_events() {
     let life = GameEvent::LifeChanged {
         player_id: PlayerId(0),
         amount: -1,
+        new_total: crate::types::events::LifeTotalReading::default(),
     };
     let events = vec![zone_change.clone(), life.clone()];
     state

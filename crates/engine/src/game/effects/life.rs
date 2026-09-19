@@ -5,7 +5,7 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, LifeTotalReading};
 use crate::types::game_state::{
     GameState, PendingEffectResolutionEvent, PendingEffectResolved, PendingLifeTotalAssignment,
     WaitingFor,
@@ -271,6 +271,15 @@ pub fn apply_life_gain_after_replacement(
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: gain_amount as i32,
+        // CR 119.1: read back after the edit, so a run of life changes carries
+        // each intermediate total rather than only the final snapshot's.
+        new_total: LifeTotalReading(
+            state
+                .players
+                .iter()
+                .find(|player| player.id == pid)
+                .map(|player| player.life),
+        ),
     });
     gain_amount
 }
@@ -397,6 +406,15 @@ pub fn apply_life_loss_after_replacement(
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: -(loss_amount as i32),
+        // CR 119.3: read back after the edit, so a run of combat-damage life
+        // losses carries each intermediate total rather than only the final one.
+        new_total: LifeTotalReading(
+            state
+                .players
+                .iter()
+                .find(|player| player.id == pid)
+                .map(|player| player.life),
+        ),
     });
     loss_amount
 }
@@ -1029,6 +1047,56 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::LifeChanged { amount, .. } if *amount == -2)));
+    }
+
+    /// CR 119.1 + CR 119.3: every `LifeChanged` reports the player's life total
+    /// as it stands once that one change is applied — not the total after the
+    /// whole action. A run of changes is therefore replayable one at a time,
+    /// which is what lets a presentation layer show intermediate totals without
+    /// summing amounts (a sum diverges once a replacement alters one of them).
+    #[test]
+    fn life_changed_reports_the_total_after_each_individual_change() {
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+
+        for amount in [3, 4] {
+            let ability = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: amount },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            resolve_gain(&mut state, &ability, &mut events).unwrap();
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: None,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        resolve_lose(&mut state, &ability, &mut events).unwrap();
+
+        let totals: Vec<(i32, Option<i32>)> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::LifeChanged {
+                    player_id,
+                    amount,
+                    new_total,
+                } if *player_id == PlayerId(0) => Some((*amount, new_total.0)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(totals, vec![(3, Some(23)), (4, Some(27)), (-5, Some(22))]);
+        assert_eq!(state.players[0].life, 22);
     }
 
     /// CR 119.7: "can't gain life" suppresses life gain, life total unchanged.

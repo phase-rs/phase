@@ -1722,11 +1722,12 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
 /// CR 104.1: end the game, with `winner: None` for a draw (CR 104.4). The single writer of
 /// the terminal result: it records it on [`GameState::game_end`], emits the one
-/// `GameEvent::GameOver`, and parks the game on `WaitingFor::GameOver`. The record is what
-/// lets [`ensure_game_over_if_terminal`] restore that wait when a later step of the same
-/// action overwrites it; a result that `is_eliminated` cannot re-derive (the CR 104.4b
-/// mandatory-loop draw) would otherwise be lost. Callers that finish the match themselves
-/// still call `match_flow::handle_game_over_transition` afterwards.
+/// `GameEvent::GameOver`, parks the game on `WaitingFor::GameOver`, and ends every CR 723
+/// player-control effect. The record is what lets [`ensure_game_over_if_terminal`] restore
+/// that wait when a later step of the same action overwrites it; a result that
+/// `is_eliminated` cannot re-derive (the CR 104.4b mandatory-loop draw) would otherwise be
+/// lost. Callers that finish the match themselves still call
+/// `match_flow::handle_game_over_transition` afterwards.
 pub(super) fn end_game(
     state: &mut GameState,
     winner: Option<PlayerId>,
@@ -1735,6 +1736,15 @@ pub(super) fn end_game(
     state.game_end = Some(GameEnd { winner });
     events.push(GameEvent::GameOver { winner });
     state.waiting_for = WaitingFor::GameOver { winner };
+
+    // CR 104.1: this is the game-layer instant at which the game ends, so player
+    // control ends here too. CR 800.4a's leave-game teardown covers only the
+    // entries the departing player is a party to (`do_eliminate` matches on
+    // `controller` or `target_player`), so an entry between two surviving seats
+    // outlives it — and a game that ends with nobody eliminated at all, the
+    // CR 104.4b mandatory-loop draw, never reaches that teardown in the first
+    // place and would otherwise hand the between-games prompts to the controller.
+    super::turn_control::end_all_player_control(state);
 }
 
 /// Re-establish the CR 104 terminal-state invariant if an outer action path
@@ -1749,17 +1759,18 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        Effect, EffectKind, PostReplacementContinuation, ReplacementDefinition, ReplacementMode,
-        ResolvedAbility, TargetRef,
+        ControlWindow, Effect, EffectKind, PostReplacementContinuation, ReplacementDefinition,
+        ReplacementMode, ResolvedAbility, TargetRef,
     };
     use crate::types::actions::GameAction;
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        CastingVariant, NamedChoiceSource, NamedChoiceSourceBinding, OpponentGuessOwner,
-        OpponentGuessSource, PendingCast, PendingConniveReentry, PendingContinuation,
-        PendingReplacement, PendingSpellResolution, PendingZoneChangeDelivery, PromptSourceBinding,
-        ResolutionSourceRelatch, StackEntry, StackEntryKind,
+        ActivePlayerControl, CastingVariant, ExtraTurn, NamedChoiceSource,
+        NamedChoiceSourceBinding, OpponentGuessOwner, OpponentGuessSource, PendingCast,
+        PendingConniveReentry, PendingContinuation, PendingReplacement, PendingSpellResolution,
+        PendingZoneChangeDelivery, PromptSourceBinding, ResolutionSourceRelatch,
+        ScheduledTurnControl, StackEntry, StackEntryKind,
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
@@ -2774,6 +2785,257 @@ mod tests {
         ensure_game_over_if_terminal(&mut state, &mut events);
 
         assert_eq!(state.waiting_for, sideboard_prompt);
+    }
+
+    fn control_entry(
+        target_player: PlayerId,
+        controller: PlayerId,
+        timestamp: u64,
+        window: ControlWindow,
+    ) -> ScheduledTurnControl {
+        ScheduledTurnControl {
+            target_player,
+            controller,
+            timestamp,
+            grant_extra_turn_after: false,
+            window,
+        }
+    }
+
+    /// A game carrying a CR 723 player-control effect: `latch` is the derived
+    /// decision controller with its timestamp (a `None` timestamp is the
+    /// legacy-save shape `active_control_identity` reads as zero), `afc` / `acc`
+    /// are the two typed window identities, `entries` the schedule backing them.
+    fn state_under_player_control(
+        latch: Option<(PlayerId, Option<u64>)>,
+        afc: Option<ActivePlayerControl>,
+        acc: Option<ActivePlayerControl>,
+        entries: Vec<ScheduledTurnControl>,
+    ) -> GameState {
+        let mut state = setup_three_player();
+        state.turn_decision_controller = latch.map(|(controller, _)| controller);
+        state.turn_decision_control_timestamp = latch.and_then(|(_, timestamp)| timestamp);
+        state.active_full_turn_control = afc;
+        state.active_combat_phase_control = acc;
+        state.scheduled_turn_controls = entries;
+        state
+    }
+
+    /// CR 104.1 + CR 723.1: a game that has ended takes no further turn and no
+    /// further combat phase, so no player-control effect survives it in any of
+    /// the four places one is recorded. `clause` names the clause of `end_game`'s
+    /// teardown the calling fixture discriminates.
+    fn assert_no_control_survives(state: &GameState, clause: &str) {
+        assert!(
+            state.game_end.is_some(),
+            "reach guard: the fixture reached end_game (clause: {clause})"
+        );
+        assert_eq!(
+            state.turn_decision_controller, None,
+            "a decision controller outlived the game (clause: {clause})"
+        );
+        assert_eq!(
+            state.turn_decision_control_timestamp, None,
+            "a control timestamp outlived the game (clause: {clause})"
+        );
+        assert_eq!(
+            state.active_full_turn_control, None,
+            "a full-turn control window outlived the game (clause: {clause})"
+        );
+        assert_eq!(
+            state.active_combat_phase_control, None,
+            "a combat-phase control window outlived the game (clause: {clause})"
+        );
+        assert!(
+            state.scheduled_turn_controls.is_empty(),
+            "a scheduled control outlived the game (clause: {clause})"
+        );
+    }
+
+    #[test]
+    fn end_game_clears_an_active_full_turn_control() {
+        let mut state = state_under_player_control(
+            Some((PlayerId(1), Some(1))),
+            Some(ActivePlayerControl {
+                controller: PlayerId(1),
+                timestamp: 1,
+            }),
+            None,
+            vec![control_entry(
+                PlayerId(0),
+                PlayerId(1),
+                1,
+                ControlWindow::NextTurn,
+            )],
+        );
+        let mut events = Vec::new();
+
+        end_game(&mut state, None, &mut events);
+
+        assert_no_control_survives(&state, "the `while` release loop");
+    }
+
+    #[test]
+    fn end_game_clears_a_latch_whose_identity_matches_no_entry() {
+        let mut state = state_under_player_control(
+            Some((PlayerId(1), Some(3))),
+            None,
+            None,
+            vec![control_entry(
+                PlayerId(0),
+                PlayerId(2),
+                9,
+                ControlWindow::NextTurn,
+            )],
+        );
+        let mut events = Vec::new();
+
+        end_game(&mut state, None, &mut events);
+
+        assert_no_control_survives(&state, "`recompute_active_player_control`");
+    }
+
+    /// A direct fixture, not a production board: it pins `end_game`'s "no window
+    /// identity survives" postcondition against `release_control_at`'s narrower
+    /// per-entry contract, which clears a window only for the exact entry that
+    /// created it.
+    #[test]
+    fn end_game_clears_an_orphaned_full_turn_window() {
+        let mut state = state_under_player_control(
+            Some((PlayerId(1), Some(1))),
+            Some(ActivePlayerControl {
+                controller: PlayerId(1),
+                timestamp: 1,
+            }),
+            None,
+            vec![control_entry(
+                PlayerId(0),
+                PlayerId(2),
+                9,
+                ControlWindow::NextTurn,
+            )],
+        );
+        let mut events = Vec::new();
+
+        end_game(&mut state, None, &mut events);
+
+        assert_no_control_survives(&state, "`active_full_turn_control = None`");
+    }
+
+    /// A direct fixture, not a production board — the CR 723.2 mirror of
+    /// `end_game_clears_an_orphaned_full_turn_window`.
+    #[test]
+    fn end_game_clears_an_orphaned_combat_window() {
+        let mut state = state_under_player_control(
+            Some((PlayerId(2), Some(5))),
+            None,
+            Some(ActivePlayerControl {
+                controller: PlayerId(2),
+                timestamp: 5,
+            }),
+            vec![control_entry(
+                PlayerId(0),
+                PlayerId(1),
+                9,
+                ControlWindow::NextTurn,
+            )],
+        );
+        let mut events = Vec::new();
+
+        end_game(&mut state, None, &mut events);
+
+        assert_no_control_survives(&state, "`active_combat_phase_control = None`");
+    }
+
+    /// CR 723.1a: two windows with different controllers, so the recompute must
+    /// land on no controller rather than on the higher-timestamp survivor.
+    #[test]
+    fn end_game_clears_both_control_windows() {
+        let mut state = state_under_player_control(
+            Some((PlayerId(2), Some(5))),
+            Some(ActivePlayerControl {
+                controller: PlayerId(1),
+                timestamp: 1,
+            }),
+            Some(ActivePlayerControl {
+                controller: PlayerId(2),
+                timestamp: 5,
+            }),
+            vec![
+                control_entry(PlayerId(0), PlayerId(1), 1, ControlWindow::NextTurn),
+                control_entry(PlayerId(0), PlayerId(2), 5, ControlWindow::NextCombatPhase),
+            ],
+        );
+        let mut events = Vec::new();
+
+        end_game(&mut state, None, &mut events);
+
+        assert_no_control_survives(&state, "the `while` release loop, both windows");
+    }
+
+    /// CR 723.1a: a save predating window-identity serialization restores as a
+    /// latch with no timestamp, which `active_control_identity` reads as zero.
+    #[test]
+    fn end_game_clears_a_legacy_latch_with_no_serialized_timestamp() {
+        let mut state = state_under_player_control(
+            Some((PlayerId(1), None)),
+            None,
+            None,
+            vec![control_entry(
+                PlayerId(0),
+                PlayerId(1),
+                0,
+                ControlWindow::NextTurn,
+            )],
+        );
+        let mut events = Vec::new();
+
+        end_game(&mut state, None, &mut events);
+
+        assert_no_control_survives(&state, "the `while` release loop, legacy latch identity");
+    }
+
+    /// CR 104.1 over CR 500.7: the game is already over, so a released control
+    /// that would have granted an extra turn (Emrakul, the Promised End) grants
+    /// none. The seeded turn makes the assertion two-sided — it fails whether the
+    /// teardown queues a grant or drops the queue.
+    #[test]
+    fn end_game_does_not_queue_an_extra_turn() {
+        let mut state = state_under_player_control(
+            Some((PlayerId(2), Some(5))),
+            Some(ActivePlayerControl {
+                controller: PlayerId(1),
+                timestamp: 1,
+            }),
+            Some(ActivePlayerControl {
+                controller: PlayerId(2),
+                timestamp: 5,
+            }),
+            vec![
+                ScheduledTurnControl {
+                    grant_extra_turn_after: true,
+                    ..control_entry(PlayerId(0), PlayerId(1), 1, ControlWindow::NextTurn)
+                },
+                ScheduledTurnControl {
+                    grant_extra_turn_after: true,
+                    ..control_entry(PlayerId(0), PlayerId(2), 5, ControlWindow::NextCombatPhase)
+                },
+            ],
+        );
+        state.extra_turns = vec![ExtraTurn {
+            player: PlayerId(2),
+            anchor: PlayerId(2),
+        }];
+        let queued_before = state.extra_turns.clone();
+        let mut events = Vec::new();
+
+        end_game(&mut state, None, &mut events);
+
+        assert_eq!(
+            state.extra_turns, queued_before,
+            "the teardown discards `release_control_at`'s CR 500.7 grant and leaves the queue alone"
+        );
+        assert_no_control_survives(&state, "the `while` release loop, extra-turn grants set");
     }
 
     // --- 3-player elimination (game continues) ---

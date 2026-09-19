@@ -120,6 +120,13 @@ fn is_plain_parent_target_delivery(delivery: &ResolvedAbility) -> bool {
     // `ZoneMoveRequest`, where neither provenance field changes the delivery;
     // rejecting them would make an otherwise identical triggered search fall
     // back to sequential resolution while the spell form batches correctly.
+    //
+    // `description` is deliberately absent from this list for the same reason.
+    // It is display text for whatever prompt a link raises, never behavior the
+    // `ZoneMoveRequest` would have to preserve — and since CR 608.2c chain
+    // links inherit the head's printed text
+    // (`ResolvedAbility::backfill_chain_description`), every delivery now
+    // carries one, so its presence discriminates nothing.
     delivery.targets.is_empty()
         && delivery.sub_ability.is_none()
         && delivery.else_ability.is_none()
@@ -133,7 +140,6 @@ fn is_plain_parent_target_delivery(delivery: &ResolvedAbility) -> bool {
         && matches!(delivery.target_choice_timing, TargetChoiceTiming::Stack)
         && delivery.target_selection_mode.is_chosen()
         && delivery.target_chooser.is_none()
-        && delivery.description.is_none()
         && delivery.repeat_for.is_none()
         && delivery.min_x_value == 0
         && !delivery.cant_be_copied

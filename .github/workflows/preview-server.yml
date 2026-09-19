@@ -272,6 +272,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: steps.publication-gate.outputs.already_published != 'true'
         with:
+          # This job publishes `commit`, so it reads the scripts and the
+          # platform contract from it rather than from the workflow ref.
+          # Known split: the YAML around them still comes from the workflow ref,
+          # so a deploy one commit behind pairs an older contract with a newer
+          # binaries list. The sign step's diff refuses that pair, publishing
+          # nothing rather than a partial set, and the next deploy heals it.
+          ref: ${{ inputs.commit }}
           persist-credentials: false
 
       - name: Wait for the data files the manifest names
@@ -350,6 +357,20 @@ jobs:
           # Each binary is downloaded into a directory named for its target
           # triple, which is the key the manifest publishes it under.
           platform_of() { basename "$(dirname "$1")"; }
+
+          # Every desktop that asks for a preview has a row in the contract, so a
+          # listed triple with no binary above publishes no URL for it and that
+          # desktop silently never sees a preview. Held here, before the first
+          # upload: a mismatch publishes nothing rather than half a manifest.
+          listed_triples=$(awk '{sub(/#.*/, ""); if (NF) print $3}' packaging/desktop-platforms.txt | sort -u)
+          published_triples=$(for binary in "${binaries[@]}"; do platform_of "$binary"; done | sort)
+          printf 'desktop-platforms.txt triples: %s\nthis job publishes:            %s\n' \
+            "${listed_triples//$'\n'/ }" "${published_triples//$'\n'/ }"
+          if [ -z "$listed_triples" ] \
+            || ! diff <(printf '%s\n' "$listed_triples") <(printf '%s\n' "$published_triples"); then
+            echo "::error::packaging/desktop-platforms.txt (<) is not the set of platforms this job publishes (>); a listed triple with no binary here gets no preview URL, and one published without a row goes to no desktop."
+            exit 1
+          fi
 
           declare -A sha256_of
           for binary in "${binaries[@]}"; do

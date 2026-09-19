@@ -3059,7 +3059,11 @@ export type GameEvent =
   | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId } }
   | { type: "ExhaustAbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; is_mana_ability: boolean } }
   | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone; to: Zone } }
-  | { type: "LifeChanged"; data: { player_id: PlayerId; amount: number } }
+  // `new_total` is the player's life total once this change is applied, supplied
+  // by the engine (`LifeTotalReading`, serialized transparently) so a mid-animation
+  // display can show intermediate totals. Absent on an event from a peer older than
+  // the field; fall back to the state snapshot.
+  | { type: "LifeChanged"; data: { player_id: PlayerId; amount: number; new_total?: number } }
   | { type: "ManaAdded"; data: { player_id: PlayerId; mana_type: ManaType; source_id: ObjectId; tapped_for_mana?: boolean } }
   | { type: "PermanentTapped"; data: { object_id: ObjectId } }
   | { type: "PlayerLost"; data: { player_id: PlayerId } }

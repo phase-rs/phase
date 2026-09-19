@@ -24438,7 +24438,7 @@ fn lower_subject_predicate_ast(
             if clause.multi_target.is_none() {
                 clause.multi_target = subject.multi_target;
             }
-            // CR 608.2c + CR 117.3a: Propagate the subject phrase's "may" modal
+            // CR 608.2c + CR 608.2d: Propagate the subject phrase's "may" modal
             // so the lowered ability is marked optional (e.g., "its controller
             // may search their library").
             if subject.is_optional {

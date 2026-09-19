@@ -2676,6 +2676,38 @@ fn parse_source_pt_comparison_condition_text(text: &str) -> Option<AbilityCondit
     }
 }
 
+/// CR 208.1: Recognize a trailing "if its <stat> is <comparator> ~'s <stat>"
+/// whose possessive "its" refers to the trigger's event object, and bridge it to
+/// a clause-level `AbilityCondition::QuantityCheck`.
+///
+/// "its" is anaphoric, so it binds `ObjectScope::EventSource` only when the
+/// clause's own object is the event object's demonstrative — "that creature" /
+/// "that permanent" (Shelinda, Yevon Acolyte). A clause acting on a chosen
+/// target ("return target creature to its owner's hand if its power is less
+/// than ~'s power" — Sage-Eye Avengers) declines, because there "its" is the
+/// target, not the event object.
+fn parse_event_object_pt_vs_source_condition_text(
+    effect_lower: &str,
+    condition_text: &str,
+) -> Option<AbilityCondition> {
+    let acts_on_event_object = ["that creature", "that permanent"]
+        .into_iter()
+        .any(|phrase| nom_primitives::scan_contains(effect_lower, phrase));
+    if !acts_on_event_object {
+        return None;
+    }
+    let lower = condition_text
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let (_, sc) = all_consuming(|i| {
+        nom_condition::parse_its_pt_vs_source_comparison(i, ObjectScope::EventSource)
+    })
+    .parse(lower.as_str())
+    .ok()?;
+    static_condition_to_ability_condition(&sc, &mut ParseContext::default())
+}
+
 pub(super) fn try_parse_type_setting(text: &str) -> Option<AbilityDefinition> {
     let lower = text.to_lowercase();
     let lower = lower.trim_end_matches('.');
@@ -3694,6 +3726,20 @@ pub(super) fn strip_suffix_conditional(
     // (threshold forms are owned upstream by strip_property_conditional).
     if let Some(cond) = parse_source_pt_comparison_condition_text(condition_text) {
         return (Some(cond), text[..if_pos].trim().to_string());
+    }
+    // CR 208.1 + CR 608.2c: trailing "…on that creature if its power is less
+    // than ~'s power" (Shelinda, Yevon Acolyte) compares the trigger's event
+    // object against the source. "its power is " is in
+    // NON_REHOMEABLE_CONDITION_PREFIXES, so — like the source-P/T gate above —
+    // it must be recognized BEFORE the rehomeable bail. Gated on trigger
+    // context: `ObjectScope::EventSource` only has a referent while a trigger
+    // resolves.
+    if ctx.in_trigger {
+        if let Some(cond) =
+            parse_event_object_pt_vs_source_condition_text(&lower[..if_pos], condition_text)
+        {
+            return (Some(cond), text[..if_pos].trim().to_string());
+        }
     }
     // CR 608.2c: "that creature has <keyword>" / "that permanent has <keyword>"
     // are in NON_REHOMEABLE_CONDITION_PREFIXES, so — like the "it has " colored-

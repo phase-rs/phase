@@ -63563,6 +63563,988 @@ fn subject_anchored_delayed_may_binds_the_named_player_not_the_caster() {
     }
 }
 
+/// CR 608.2c + CR 608.2d: the subject-anchored "may" class stamps
+/// `optional_player` from the clause's own anaphor across the anaphor family
+/// and across every effect shape whose player slot `Effect::target_filter()`
+/// surfaces — not just `Draw`. Each row pairs the discriminating assertion with
+/// a reach-guard proving the fixture actually parsed to the expected effect and
+/// slot, so a silent `Unimplemented` short-circuit cannot pass vacuously.
+#[test]
+fn subject_anchored_may_names_the_announcing_player_across_the_anaphor_family() {
+    // Minamo — TriggeringPlayer / Draw.
+    {
+        let parsed = parse_oracle_text(
+            "Whenever a player casts a spell, that player may draw a card.\nWhenever chaos ensues, each player may return a blue card from their graveyard to their hand.",
+            "Minamo",
+            &[],
+            &["Land".to_string()],
+            &[],
+        );
+        let node = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Minamo has a cast-spell trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert!(
+            matches!(&*node.effect, Effect::Draw { target, .. } if *target == TargetFilter::TriggeringPlayer),
+            "reach-guard: expected Draw{{TriggeringPlayer}}, got {:?}",
+            node.effect
+        );
+        assert_eq!(
+            node.optional_player,
+            Some(TargetFilter::TriggeringPlayer),
+            "the casting player announces their own optional draw"
+        );
+    }
+
+    // Edric, Spymaster of Trest — ParentTargetController / Draw.
+    {
+        let parsed = parse_oracle_text(
+            "Whenever a creature deals combat damage to one of your opponents, its controller may draw a card.",
+            "Edric, Spymaster of Trest",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Wizard".to_string()],
+        );
+        let node = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Edric has a combat-damage trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert!(
+            matches!(&*node.effect, Effect::Draw { target, .. } if *target == TargetFilter::ParentTargetController),
+            "reach-guard: expected Draw{{ParentTargetController}}, got {:?}",
+            node.effect
+        );
+        assert_eq!(
+            node.optional_player,
+            Some(TargetFilter::ParentTargetController),
+            "the dealing creature's controller announces the optional draw"
+        );
+    }
+
+    // Academy Loremaster — ScopedPlayer / Draw.
+    {
+        let parsed = parse_oracle_text(
+            "At the beginning of each player's draw step, that player may draw an additional card. If they do, spells they cast this turn cost {2} more to cast.",
+            "Academy Loremaster",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Wizard".to_string()],
+        );
+        let node = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Academy Loremaster has a draw-step trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert!(
+            matches!(&*node.effect, Effect::Draw { target, .. } if *target == TargetFilter::ScopedPlayer),
+            "reach-guard: expected Draw{{ScopedPlayer}}, got {:?}",
+            node.effect
+        );
+        assert_eq!(
+            node.optional_player,
+            Some(TargetFilter::ScopedPlayer),
+            "P7: bare ScopedPlayer is admitted, so each player announces their own additional draw"
+        );
+    }
+
+    // Smart Ass — DefendingPlayer / RevealHand, on a sub_ability node.
+    {
+        let parsed = parse_oracle_text(
+            "Whenever this creature attacks, choose a card name. If defending player has no cards with the chosen name in their hand, they may reveal their hand. If they don't reveal their hand, this creature can't be blocked this turn.",
+            "Smart Ass",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Rogue".to_string()],
+        );
+        let execute = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Smart Ass has an attacks trigger");
+        let node = execute
+            .sub_ability
+            .as_deref()
+            .expect("the reveal clause is the sub_ability of the attacks trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert!(
+            matches!(&*node.effect, Effect::RevealHand { target, .. } if *target == TargetFilter::DefendingPlayer),
+            "reach-guard: expected RevealHand{{DefendingPlayer}}, got {:?}",
+            node.effect
+        );
+        assert_eq!(
+            node.optional_player,
+            Some(TargetFilter::DefendingPlayer),
+            "\"they\" is anchored to defending player, who announces the reveal"
+        );
+    }
+
+    // Brood Sliver — ParentTargetController / Token{owner}.
+    {
+        let parsed = parse_oracle_text(
+            "Whenever a Sliver deals combat damage to a player, its controller may create a 1/1 colorless Sliver creature token.",
+            "Brood Sliver",
+            &[],
+            &["Creature".to_string()],
+            &["Sliver".to_string()],
+        );
+        let node = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Brood Sliver has a combat-damage trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert!(
+            matches!(&*node.effect, Effect::Token { owner, .. } if *owner == TargetFilter::ParentTargetController),
+            "reach-guard: expected Token{{owner: ParentTargetController}}, got {:?}",
+            node.effect
+        );
+        assert_eq!(
+            node.optional_player,
+            Some(TargetFilter::ParentTargetController),
+            "the damaged Sliver's controller announces the optional token creation"
+        );
+    }
+
+    // Fields of Summer — TriggeringPlayer / GainLife{player}.
+    {
+        let parsed = parse_oracle_text(
+            "Whenever a player casts a spell, that player may gain 2 life.\nWhenever chaos ensues, you may gain 10 life.",
+            "Fields of Summer",
+            &[],
+            &["Land".to_string()],
+            &[],
+        );
+        let node = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Fields of Summer has a cast-spell trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert!(
+            matches!(&*node.effect, Effect::GainLife { player, .. } if *player == TargetFilter::TriggeringPlayer),
+            "reach-guard: expected GainLife{{player: TriggeringPlayer}}, got {:?}",
+            node.effect
+        );
+        assert_eq!(
+            node.optional_player,
+            Some(TargetFilter::TriggeringPlayer),
+            "the casting player announces their own optional life gain"
+        );
+    }
+
+    // Snowfall — ParentTargetController / Mana{Recipient}.
+    {
+        let parsed = parse_oracle_text(
+            "Cumulative upkeep {U} (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)\nWhenever an Island is tapped for mana, its controller may add an additional {U}. If that Island is snow, its controller may add an additional {U}{U} instead. Spend this mana only to pay cumulative upkeep costs.",
+            "Snowfall",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let node = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Snowfall has an Island-tapped trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        let recipient = match &*node.effect {
+            Effect::Mana {
+                target: Some(role), ..
+            } => role.recipient().cloned(),
+            other => panic!("reach-guard: expected Mana{{target: Some(Recipient)}}, got {other:?}"),
+        };
+        assert_eq!(
+            recipient,
+            Some(TargetFilter::ParentTargetController),
+            "reach-guard: the Mana role must be a Recipient naming the tapped Island's controller"
+        );
+        assert_eq!(
+            node.optional_player,
+            Some(TargetFilter::ParentTargetController),
+            "the tapped Island's controller announces the optional extra mana"
+        );
+    }
+
+    // Path to Exile — ParentTargetController / SearchLibrary{target_player}.
+    //
+    // This assertion is DATA-discriminating but RUNTIME-NEUTRAL.
+    // `effects::optional_prompt_player` already routes this exact shape through
+    // its dedicated `SearchLibrary { target_player: Some(ParentTargetController) }`
+    // arm (`effects/mod.rs:10009-10021`), and the new `optional_player` arm
+    // (`:9951`) resolves the same filter through the same
+    // `resolve_effect_player_ref`, so the prompt seat is identical before and
+    // after. What this row proves is that the stamp is keyed on the real
+    // `Effect::target_filter()` — which surfaces `SearchLibrary.target_player`
+    // at `types/ability.rs:20724-20740` — and not on a hand-curated slot walk.
+    // It is 23 of the 40 corpus movers, and it is NOT a behavioural fix.
+    {
+        let parsed = parse_oracle_text(
+            "Exile target creature. Its controller may search their library for a basic land card, put that card onto the battlefield tapped, then shuffle.",
+            "Path to Exile",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let ability = parsed
+            .abilities
+            .first()
+            .expect("Path to Exile has a spell ability");
+        let node = ability
+            .sub_ability
+            .as_deref()
+            .expect("the search clause is the spell's sub_ability");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert!(
+            matches!(
+                &*node.effect,
+                Effect::SearchLibrary { target_player: Some(tp), .. }
+                    if *tp == TargetFilter::ParentTargetController
+            ),
+            "reach-guard: expected SearchLibrary{{target_player: Some(ParentTargetController)}}, got {:?}",
+            node.effect
+        );
+        assert_eq!(
+            node.optional_player,
+            Some(TargetFilter::ParentTargetController),
+            "the exiled creature's controller announces the optional search"
+        );
+    }
+}
+
+/// CR 608.2c + CR 608.2d hostile fixture: the same anaphor (`DefendingPlayer`)
+/// in the same `RevealHand` player slot under `optional: true`, but opposite
+/// provenance and therefore opposite routing.
+///
+/// These two are NOT byte-identical (Smart Ass carries `reveal: true` and a
+/// `sub_ability`; Port Inspector does not) — the byte-identical pair is
+/// `curse of chaos` vs `slavering nulls`, both
+/// `{"count":{"type":"Fixed","value":1},"target":{"type":"TriggeringPlayer"},
+/// "type":"Discard"}`, and that pair is what proves no predicate over the
+/// lowered `AbilityDefinition` could separate the class. This pair proves the
+/// weaker but still load-bearing point: the ANAPHOR AND SLOT are the same, so a
+/// design keyed on "which player does the effect's slot name" gets one of them
+/// wrong. Only clause-level provenance (subject-anchored vs "you may look at")
+/// separates them.
+#[test]
+fn defending_player_reveal_pair_splits_on_provenance_not_on_effect_shape() {
+    let smart_ass = parse_oracle_text(
+        "Whenever this creature attacks, choose a card name. If defending player has no cards with the chosen name in their hand, they may reveal their hand. If they don't reveal their hand, this creature can't be blocked this turn.",
+        "Smart Ass",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Rogue".to_string()],
+    );
+    let smart_ass_node = smart_ass
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .and_then(|execute| execute.sub_ability.as_deref())
+        .expect("Smart Ass has an attacks trigger with a reveal sub_ability");
+    assert!(smart_ass_node.optional);
+    assert!(matches!(
+        &*smart_ass_node.effect,
+        Effect::RevealHand { target, .. } if *target == TargetFilter::DefendingPlayer
+    ));
+    assert_eq!(
+        smart_ass_node.optional_player,
+        Some(TargetFilter::DefendingPlayer),
+        "subject-anchored \"they may\" is announced by the named defending player"
+    );
+
+    let port_inspector = parse_oracle_text(
+        "Whenever this creature becomes blocked, you may look at defending player's hand.",
+        "Port Inspector",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Soldier".to_string()],
+    );
+    let port_inspector_node = port_inspector
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("Port Inspector has a becomes-blocked trigger");
+    assert!(port_inspector_node.optional);
+    assert!(matches!(
+        &*port_inspector_node.effect,
+        Effect::RevealHand { target, .. } if *target == TargetFilter::DefendingPlayer
+    ));
+    assert_eq!(
+        port_inspector_node.optional_player, None,
+        "\"you may look at\" is head-blocked, so the controller keeps the may"
+    );
+}
+
+/// CR 608.2c + CR 608.2d: the causative "you may have ..." and the perception
+/// "you may look at ..." constructions leave the may with the controller, even
+/// when an admitted player anaphor sits in the effect's player slot. Psychic
+/// Surgery is the slot-semantics counterexample: its `Dig { player:
+/// ParentTargetOwner }` holds the shuffling opponent's LIBRARY, not the
+/// looker — only the `"look "` head-block in
+/// `clause_shell::is_specialized_you_may_phrase` keeps it on the STAY side.
+#[test]
+fn chunk_level_you_may_have_keeps_the_may_with_the_controller() {
+    // Slavering Nulls — "you may have that player discard a card."
+    {
+        let parsed = parse_oracle_text(
+            "Whenever this creature deals combat damage to a player, if you control a Swamp, you may have that player discard a card.",
+            "Slavering Nulls",
+            &[],
+            &["Creature".to_string()],
+            &["Zombie".to_string()],
+        );
+        let node = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Slavering Nulls has a combat-damage trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert!(
+            matches!(&*node.effect, Effect::Discard { target, .. } if *target == TargetFilter::TriggeringPlayer),
+            "reach-guard: expected Discard{{TriggeringPlayer}}, got {:?}",
+            node.effect
+        );
+        assert_eq!(node.optional_player, None);
+    }
+
+    // Blood Seeker — "you may have that player lose 1 life."
+    {
+        let parsed = parse_oracle_text(
+            "Whenever a creature an opponent controls enters, you may have that player lose 1 life.",
+            "Blood Seeker",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Cleric".to_string()],
+        );
+        let node = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Blood Seeker has an enters trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert!(
+            matches!(&*node.effect, Effect::LoseLife { target: Some(t), .. } if *t == TargetFilter::TriggeringPlayer),
+            "reach-guard: expected LoseLife{{target: Some(TriggeringPlayer)}}, got {:?}",
+            node.effect
+        );
+        assert_eq!(node.optional_player, None);
+    }
+
+    // Natural Selection — "You may have that player shuffle."
+    {
+        let parsed = parse_oracle_text(
+            "Look at the top three cards of target player's library, then put them back in any order. You may have that player shuffle.",
+            "Natural Selection",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let ability = parsed
+            .abilities
+            .first()
+            .expect("Natural Selection has a spell ability");
+        let node = ability
+            .sub_ability
+            .as_deref()
+            .expect("the shuffle clause is the spell's sub_ability");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert!(
+            matches!(&*node.effect, Effect::Shuffle { target } if *target == TargetFilter::ParentTargetController),
+            "reach-guard: expected Shuffle{{ParentTargetController}}, got {:?}",
+            node.effect
+        );
+        assert_eq!(node.optional_player, None);
+    }
+
+    // Mindleech Mass — "you may look at that player's hand."
+    {
+        let parsed = parse_oracle_text(
+            "Trample\nWhenever this creature deals combat damage to a player, you may look at that player's hand. If you do, you may cast a spell from among those cards without paying its mana cost.",
+            "Mindleech Mass",
+            &[],
+            &["Creature".to_string()],
+            &["Eldrazi".to_string()],
+        );
+        let node = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Mindleech Mass has a combat-damage trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert!(
+            matches!(&*node.effect, Effect::RevealHand { target, .. } if *target == TargetFilter::TriggeringPlayer),
+            "reach-guard: expected RevealHand{{TriggeringPlayer}}, got {:?}",
+            node.effect
+        );
+        assert_eq!(node.optional_player, None);
+    }
+
+    // Psychic Surgery — the slot-semantics counterexample.
+    {
+        let parsed = parse_oracle_text(
+            "Whenever an opponent shuffles their library, you may look at the top two cards of that library. You may exile one of those cards. Then put the rest on top of that library in any order.",
+            "Psychic Surgery",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let node = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Psychic Surgery has a shuffles trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert!(
+            matches!(&*node.effect, Effect::Dig { player, .. } if *player == TargetFilter::ParentTargetOwner),
+            "reach-guard: expected Dig{{player: ParentTargetOwner}}, got {:?}",
+            node.effect
+        );
+        assert_eq!(
+            node.optional_player, None,
+            "the slot holds the shuffling opponent's LIBRARY OWNER, not the looker; only the \
+             \"look \" head-block keeps this on the STAY side"
+        );
+    }
+
+    // Port Inspector — "you may look at defending player's hand."
+    {
+        let parsed = parse_oracle_text(
+            "Whenever this creature becomes blocked, you may look at defending player's hand.",
+            "Port Inspector",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Soldier".to_string()],
+        );
+        let node = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Port Inspector has a becomes-blocked trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert!(
+            matches!(&*node.effect, Effect::RevealHand { target, .. } if *target == TargetFilter::DefendingPlayer),
+            "reach-guard: expected RevealHand{{DefendingPlayer}}, got {:?}",
+            node.effect
+        );
+        assert_eq!(node.optional_player, None);
+    }
+}
+
+/// CR 608.2c + CR 608.2d: the `Draw { target: OriginalController }` opponent-may
+/// class is a KNOWN NO-CHANGE (Deferral 6), not a fix. "Target opponent may have
+/// YOU draw a card" puts the DRAWER (not the announcer) in the effect's player
+/// slot, so no predicate over that slot can name the announcer correctly. This
+/// pins the honest non-change: admitting `OriginalController` would route the
+/// prompt to the drawer, which is worse than today's controller-held behaviour.
+#[test]
+fn target_opponent_may_have_you_draw_is_not_the_announcer_slot() {
+    // Bane, Lord of Darkness.
+    {
+        let parsed = parse_oracle_text(
+            "As long as your life total is less than or equal to half your starting life total, Bane has indestructible.\nWhenever another nontoken creature you control dies, target opponent may have you draw a card. If they don't, you may put a creature card with equal or lesser toughness from your hand onto the battlefield.",
+            "Bane, Lord of Darkness",
+            &[],
+            &["Creature".to_string()],
+            &["Devil".to_string()],
+        );
+        let node = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Bane has a creature-dies trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert_eq!(
+            node.optional_for, None,
+            "reach-guard: the shell peel drops the scope"
+        );
+        assert!(
+            matches!(&*node.effect, Effect::Draw { target, .. } if *target == TargetFilter::OriginalController),
+            "reach-guard: expected Draw{{OriginalController}}, got {:?}",
+            node.effect
+        );
+        assert_eq!(node.optional_player, None);
+    }
+
+    // Shakedown Heavy.
+    {
+        let parsed = parse_oracle_text(
+            "Menace\nWhenever this creature attacks, defending player may have you draw a card. If they do, untap this creature and remove it from combat.",
+            "Shakedown Heavy",
+            &[],
+            &["Creature".to_string()],
+            &["Goblin".to_string(), "Berserker".to_string()],
+        );
+        let node = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Shakedown Heavy has an attacks trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert_eq!(
+            node.optional_for, None,
+            "reach-guard: the shell peel drops the scope"
+        );
+        assert!(
+            matches!(&*node.effect, Effect::Draw { target, .. } if *target == TargetFilter::OriginalController),
+            "reach-guard: expected Draw{{OriginalController}}, got {:?}",
+            node.effect
+        );
+        assert_eq!(node.optional_player, None);
+    }
+}
+
+/// CR 601.2c: `TargetFilter::Player` is an ANNOUNCED TARGET chosen by the
+/// controller at cast time, not a clause anaphor, so it is never stamped. 76
+/// corpus nodes carry a bare `Player` slot under `optional: true` — the largest
+/// refusal class after `Typed`.
+#[test]
+fn announced_target_player_is_never_the_announcer() {
+    let parsed = parse_oracle_text(
+        "Whenever you draw a card, you may have target player mill a card.",
+        "Jace's Erasure",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let node = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("Jace's Erasure has a draw-a-card trigger");
+    assert!(node.optional, "reach-guard: the clause carries a may");
+    assert!(
+        matches!(&*node.effect, Effect::Mill { target, .. } if *target == TargetFilter::Player),
+        "reach-guard: expected Mill{{Player}}, got {:?}",
+        node.effect
+    );
+    assert_eq!(
+        node.optional_player, None,
+        "CR 601.2c: an announced target is not an anaphor the stamp may name"
+    );
+}
+
+/// CR 608.2c + CR 608.2d: the load-bearing blocklist that keeps the causative
+/// "you may have ..." and the perception "you may look at ..." constructions
+/// off the subject-anchored stamp. If either head is ever relaxed, this test
+/// fails HERE and `chunk_level_you_may_have_keeps_the_may_with_the_controller`
+/// (V4a) fails at the stamp — a tripwire in both directions. The `"look "` arm
+/// specifically is what protects Psychic Surgery's slot-semantics
+/// counterexample.
+#[test]
+fn you_may_have_and_you_may_look_stay_head_blocked_so_the_announcer_stamp_cannot_leak() {
+    assert!(
+        crate::parser::clause_shell::is_specialized_you_may_phrase(
+            "have that player discard a card"
+        ),
+        "clause_shell.rs:609 — the causative \"have\" head must stay blocked"
+    );
+    assert!(
+        crate::parser::clause_shell::is_specialized_you_may_phrase(
+            "look at the top two cards of that library"
+        ),
+        "clause_shell.rs:624 — the perception \"look\" head must stay blocked, protecting Psychic \
+         Surgery's slot-semantics counterexample"
+    );
+    assert!(
+        !crate::parser::clause_shell::is_specialized_you_may_phrase("draw a card"),
+        "positive control: an ordinary subject-anchored payload is NOT head-blocked"
+    );
+}
+
+/// CR 608.2c + CR 608.2d: the `oracle_trigger.rs` "they may" trigger-head
+/// detector still covers the shapes `assembly::subject_anchored_optional_actor`
+/// cannot see — the named actor never reaches `Effect::target_filter()` at all
+/// (an object slot, a `PayCost {{ payer }}`, or an unparsed body). Retiring the
+/// detector would lose these cards; this is the coverage half of V13.
+#[test]
+fn they_may_trigger_head_still_covers_the_shapes_assembly_cannot_see() {
+    // Object-slot shapes: the named actor is never in `target_filter()`.
+    for (name, text, card_types) in [
+        (
+            "Bow to My Command",
+            "(An ongoing scheme remains face up until it's abandoned.)\nAs you set this scheme in motion, choose an opponent.\nCreatures the chosen player controls can't attack you or planeswalkers you control.\nAt the beginning of your opponents' end step, they may tap any number of untapped creatures they control with total power 8 or greater. If they do, abandon this scheme.",
+            &["Scheme"][..],
+        ),
+        (
+            "Charismatic Conqueror",
+            "Vigilance\nWhenever an artifact or creature an opponent controls enters untapped, they may tap that permanent. If they don't, you create a 1/1 white Vampire creature token with lifelink.",
+            &["Creature"][..],
+        ),
+        (
+            "My Forces Are Innumerable",
+            "(An ongoing scheme remains face up until it's abandoned.)\nAt the beginning of your end step, create a 3/3 black Horror creature token.\nAt the beginning of your opponents' end step, they may sacrifice two creatures of their choice. If they do, abandon this scheme.",
+            &["Scheme"][..],
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &card_types.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &[]);
+        let node = parsed
+            .triggers
+            .iter()
+            .find(|t| {
+                t.execute
+                    .as_deref()
+                    .is_some_and(|e| e.optional_player == Some(TargetFilter::TriggeringPlayer))
+            })
+            .and_then(|t| t.execute.as_deref())
+            .unwrap_or_else(|| panic!("{name}: expected a trigger stamped Some(TriggeringPlayer) by the detector"));
+        assert!(node.optional, "{name}: reach-guard: the clause carries a may");
+    }
+
+    // `PayCost {{ payer }}` shapes: the payer never reaches `target_filter()`.
+    for (name, text) in [
+        (
+            "Horn of Plenty",
+            "Whenever a player casts a spell, they may pay {1}. If the player does, they draw a card at the beginning of the next end step.",
+        ),
+        (
+            "Wandering Archaic",
+            "Whenever an opponent casts an instant or sorcery spell, they may pay {2}. If they don't, you may copy that spell. You may choose new targets for the copy.",
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &["Creature".to_string()], &[]);
+        let node = parsed
+            .triggers
+            .iter()
+            .find(|t| {
+                t.execute
+                    .as_deref()
+                    .is_some_and(|e| e.optional_player == Some(TargetFilter::TriggeringPlayer))
+            })
+            .and_then(|t| t.execute.as_deref())
+            .unwrap_or_else(|| panic!("{name}: expected a trigger stamped Some(TriggeringPlayer) by the detector"));
+        assert!(node.optional, "{name}: reach-guard: the clause carries a may");
+    }
+
+    // Meathook Massacre II — the third trigger, `PayCost { payer }`.
+    {
+        let parsed = parse_oracle_text(
+            "When Meathook Massacre II enters, each player sacrifices X creatures of their choice.\nWhenever a creature you control dies, you may pay 3 life. If you do, return that card under your control with a finality counter on it.\nWhenever a creature an opponent controls dies, they may pay 3 life. If they don't, return that card under your control with a finality counter on it.",
+            "Meathook Massacre II",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        // Select by the TRIGGER'S OWN condition — "a creature an opponent
+        // controls dies" — never by the value under assertion. Meathook has two
+        // optional PayCost triggers: the sibling "you may pay 3 life" fires on a
+        // creature YOU control dying and is also `optional: true`, so a selector
+        // keyed on `optional_player` (or on the effect shape, which is `PayCost`
+        // for both) would pick the sibling on a mis-stamp and still pass.
+        let node = parsed
+            .triggers
+            .iter()
+            .find(|t| {
+                // Condition AND effect identity together: `valid_card` controller
+                // separates the two PayCost triggers ("a creature an opponent
+                // controls dies" vs "a creature you control dies"), and the
+                // `PayCost` shape pins which effect we are asserting about.
+                matches!(
+                    &t.valid_card,
+                    Some(TargetFilter::Typed(tf))
+                        if tf.controller == Some(ControllerRef::Opponent)
+                ) && t
+                    .execute
+                    .as_deref()
+                    .is_some_and(|e| matches!(&*e.effect, Effect::PayCost { .. }))
+            })
+            .and_then(|t| t.execute.as_deref())
+            .expect("Meathook Massacre II: expected the opponent-creature-dies trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert_eq!(
+            node.optional_player,
+            Some(TargetFilter::TriggeringPlayer),
+            "CR 608.2c + CR 608.2d: \"they may pay 3 life\" names the triggering player"
+        );
+    }
+
+    // Game Knights Live ×2 — unparsed `Effect::Unimplemented` bodies. The
+    // weaker guard (`optional == true` alone, no effect-shape check) is
+    // deliberate: the body itself never lowered past `Unimplemented`.
+    {
+        let parsed = parse_oracle_text(
+            "Whenever a player casts their commander or attacks with their commander, they may say \"Only one may stand.\" If they do, that commander becomes a Knight in addition to its other types until a player planeswalks away from Game Knights Live.\nKnights you control have double strike and trample.\nWhenever chaos ensues, commanders you control can't be blocked this turn and gain \"Whenever this creature deals combat damage to a player, draw a card\" until end of turn.",
+            "Game Knights Live",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let stamped: Vec<_> = parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .filter(|e| e.optional_player == Some(TargetFilter::TriggeringPlayer))
+            .collect();
+        assert!(
+            !stamped.is_empty(),
+            "expected at least one Game Knights Live trigger stamped Some(TriggeringPlayer)"
+        );
+        for node in stamped {
+            assert!(node.optional, "reach-guard: the clause carries a may");
+        }
+    }
+
+    // Miss Highwater and Tarnation — the two-producer agreement case: both the
+    // clause-local stamp and the trigger-head detector see these and must agree.
+    {
+        let parsed = parse_oracle_text(
+            "Menace\nWhenever Miss Highwater deals combat damage to a player who doesn't have a contract counter, they may discard their hand. If they do, they draw seven cards and get a contract counter. For as long as they have a contract counter, when they lose the game, for each artifact and creature they controlled, create a token that's a copy of it.",
+            "Miss Highwater",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Pirate".to_string()],
+        );
+        let node = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Miss Highwater has a combat-damage trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert_eq!(node.optional_player, Some(TargetFilter::TriggeringPlayer));
+    }
+    {
+        let parsed = parse_oracle_text(
+            "Whenever a player commits a crime, they may draw a card. (Targeting opponents, anything they control, and/or cards in their graveyards is a crime.)\nWhenever chaos ensues, Tarnation deals 1 damage to any target.",
+            "Tarnation",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Rogue".to_string()],
+        );
+        let node = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("Tarnation has a commits-a-crime trigger");
+        assert!(node.optional, "reach-guard: the clause carries a may");
+        assert_eq!(node.optional_player, Some(TargetFilter::TriggeringPlayer));
+    }
+}
+
+/// CR 608.2c + CR 608.2d: the `oracle_trigger.rs` `"they may"` trigger-head
+/// detector must DEFER to a clause-local anaphor rather than clobber it. This
+/// is a parser-shape test on a SYNTHETIC fixture, not a card-test violation:
+/// `/card-test`'s verbatim-Oracle rule binds cast-pipeline RUNTIME tests, where
+/// a fabricated card would put fabricated behaviour on a real board. This is a
+/// parser-shape test whose subject is the grammar, and the clobber shape has no
+/// printed representative (measured, P9.3): no corpus card pairs a trigger-head
+/// "they may" with a clause naming a non-`TriggeringPlayer` admitted anaphor.
+#[test]
+fn they_may_trigger_head_defers_to_a_clause_local_anaphor() {
+    use nom::Parser as _;
+    // Fixture A: Smart Ass's own second sentence, single-sentence so the
+    // RevealHand node IS the top-level execute (the only node the detector can
+    // write to).
+    let fixture_a = "Whenever this creature becomes blocked, if defending player has no cards in hand, they may reveal their hand.";
+    // Reach-guard: the trigger body head matches the SAME combinator the
+    // detector uses, so the fixture provably reaches the clobber surface.
+    let after_if = fixture_a
+        .rsplit_once("if defending player has no cards in hand, ")
+        .map(|(_, rest)| rest)
+        .expect("fixture contains the intervening-if");
+    // Bind the lowercase body to a local: the parser's output borrows from it,
+    // so a temporary would be dropped while still borrowed (E0716).
+    let after_if_lower = after_if.to_lowercase();
+    assert!(
+        nom::bytes::complete::tag::<_, _, crate::parser::oracle_nom::error::OracleError<'_>>(
+            "they may "
+        )
+        .parse(after_if_lower.as_str())
+        .is_ok(),
+        "reach-guard: the post-if body head must match the detector's own tag(\"they may \")"
+    );
+
+    let parsed = parse_oracle_text(
+        fixture_a,
+        "Synthetic Fixture A",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let node = match parsed.triggers.iter().find_map(|t| t.execute.as_deref()) {
+        Some(node) => node,
+        None => {
+            // Fallback ladder: Fixture A's reach-guards did not hold. Try Fixture B.
+            they_may_trigger_head_defers_to_a_clause_local_anaphor_fixture_b();
+            return;
+        }
+    };
+    let slot = node.effect.target_filter().cloned();
+    if !matches!(slot, Some(TargetFilter::DefendingPlayer)) {
+        they_may_trigger_head_defers_to_a_clause_local_anaphor_fixture_b();
+        return;
+    }
+    assert_ne!(
+        slot,
+        Some(TargetFilter::TriggeringPlayer),
+        "a TriggeringPlayer slot would make this vacuous: both producers would agree"
+    );
+    assert!(node.optional, "reach-guard: the clause carries a may");
+    assert_eq!(
+        node.optional_player, slot,
+        "CR 608.2c + CR 608.2d: the clause-local anaphor must win over the trigger-head detector"
+    );
+}
+
+/// Fallback ladder for `they_may_trigger_head_defers_to_a_clause_local_anaphor`:
+/// Fixture B, whose expected slot is `Draw {{ target: ParentTargetController }}`.
+fn they_may_trigger_head_defers_to_a_clause_local_anaphor_fixture_b() {
+    let fixture_b = "Whenever a creature deals combat damage to you, if that creature's controller controls no artifacts, they may draw a card.";
+    let parsed = parse_oracle_text(
+        fixture_b,
+        "Synthetic Fixture B",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let node = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect(
+            "UNTESTED FORWARD GUARD: neither Fixture A nor Fixture B reaches the clobber surface; \
+             the oracle_trigger.rs precedence guard is pinned only structurally, by \
+             the_they_may_detector_write_is_guarded_by_an_is_none_precedence_check",
+        );
+    let slot = node.effect.target_filter().cloned();
+    assert!(
+        matches!(slot, Some(TargetFilter::ParentTargetController)),
+        "UNTESTED FORWARD GUARD: Fixture B did not reach the expected ParentTargetController slot, \
+         got {slot:?}"
+    );
+    assert_ne!(slot, Some(TargetFilter::TriggeringPlayer));
+    assert!(node.optional);
+    assert_eq!(node.optional_player, slot);
+}
+
+/// CR 603.7b + CR 603.7e: a delayed payload whose CLAUSE named an event-context
+/// anaphor must lift its "may" to the wrapper AND drop the stamp.
+///
+/// This pins the `None` arm of the `DeferredDelayedTrigger` window — the arm the
+/// Arcane Denial regression fix added (`inner.optional_player = None`).
+///
+/// Corpus position, stated precisely (the loose version of this sentence was wrong):
+/// of 965 `CreateDelayedTrigger` nodes, Arcane Denial is the only printed card that
+/// arrives at THIS window carrying an ADMITTED anaphor, and no printed card reaches
+/// the refusal arm with a clause-level stamp present to clear. (26 nodes do carry an
+/// `optional: true` payload, but 25 of those are built by the other
+/// `CreateDelayedTrigger` producers in `parser/oracle.rs`, which never run this wrap;
+/// and the 2 wrappers that are themselves `optional: true` — `breathkeeper seraph`,
+/// `tiana, ship's caretaker` — take this refusal arm on `ParentTarget`, an object
+/// filter, with no stamp to clear.) So the clear would otherwise ship unfixtured, and
+/// deleting it would fail no test. This synthetic is the fixture.
+///
+/// Why the clear is load-bearing rather than cosmetic: the delayed ability fires on
+/// its OWN event (CR 603.7b), and CR 603.7d/e fix only its source and controller —
+/// here CR 603.7e, since a TRIGGERED ability creates this one — so an event-context
+/// anaphor resolved at that later moment names a player CR 608.2c never licensed.
+/// And a lifted payload has `optional: false`, which makes a residual stamp REACH
+/// `stack.rs`'s three `!*optional && optional_player.is_none()` batch-collapse proofs
+/// and silently defeat a collapse the base performed.
+#[test]
+fn a_delayed_payload_with_an_event_context_anaphor_lifts_the_may_and_drops_the_stamp() {
+    // "that player" in a trigger body binds to the triggering player; the
+    // temporal suffix wraps the clause in a CreateDelayedTrigger.
+    let parsed = parse_oracle_text(
+        "Whenever a player casts a spell, that player may draw a card at the beginning of the next end step.",
+        "Synthetic Deferred Clear Fixture",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let wrapper = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("reach-guard: the synthetic parses to a trigger with an execute chain");
+
+    let Effect::CreateDelayedTrigger {
+        effect: payload, ..
+    } = &*wrapper.effect
+    else {
+        // Fail loudly rather than returning: a silent pass here would leave the
+        // `inner.optional_player = None` clear unfixtured again, which is the
+        // exact state this test exists to end.
+        panic!(
+            "reach-guard: the synthetic must lower to a CreateDelayedTrigger, got {:?}",
+            wrapper.effect
+        );
+    };
+
+    // Reach-guard: the payload really does carry an event-context anaphor in its
+    // player slot, so the deferred window's REFUSAL arm is the one under test.
+    let slot = payload.effect.target_filter().cloned();
+    assert!(
+        matches!(
+            slot,
+            Some(
+                TargetFilter::TriggeringPlayer
+                    | TargetFilter::DefendingPlayer
+                    | TargetFilter::TriggeringSourceController
+                    | TargetFilter::EventTargetController
+                    | TargetFilter::ScopedPlayer
+            )
+        ),
+        "reach-guard: expected an event-context anaphor the deferred window refuses, got {slot:?}"
+    );
+
+    // The refusal lifts the may to the wrapper ...
+    assert!(
+        wrapper.optional,
+        "CR 603.7e: an ability created this delayed trigger, so its may belongs to that ability's own controller and lifts to the wrapper"
+    );
+    assert!(
+        !payload.optional,
+        "CR 603.7e: the payload must not keep a may the deferred window refused"
+    );
+    // ... and must NOT leave the clause-level stamp behind on it.
+    assert_eq!(
+        payload.optional_player, None,
+        "CR 603.7b: an event-context anaphor would resolve against the DELAYED ability's own \
+         firing event, so the refused stamp must be cleared, not merely bypassed"
+    );
+}
+
+/// CR 608.2c + CR 608.2d: the precedence guard at `oracle_trigger.rs:1992-1996`
+/// exists deterministically. Routed through `crate::source_census::code` (the
+/// path-qualified marker `no_source_reading_file_carries_a_private_comment_policy`
+/// looks for — a bare `source_census` import is a measured FALSE PASS).
+/// `subject_anchored_optional_actor` (`assembly.rs`) is the authority that wins;
+/// this file's detector only fills in where that authority declined
+/// (`ability.optional_player.is_none()`).
+#[test]
+fn the_they_may_detector_write_is_guarded_by_an_is_none_precedence_check() {
+    let text = include_str!("../oracle_trigger.rs");
+    let lines: Vec<&str> = text.lines().collect();
+    let needle = "ability.optional_player = Some(";
+    let guard = "optional_player.is_none()";
+    let mut assign_count = 0usize;
+    let mut guarded_count = 0usize;
+    for (i, raw) in lines.iter().enumerate() {
+        if crate::source_census::code(raw).contains(needle) {
+            assign_count += 1;
+            let window_start = i.saturating_sub(10);
+            let is_guarded = lines[window_start..=i]
+                .iter()
+                .any(|l| crate::source_census::code(l).contains(guard));
+            if is_guarded {
+                guarded_count += 1;
+            }
+        }
+    }
+    assert_eq!(
+        assign_count, 1,
+        "positive control: the write must exist exactly once in oracle_trigger.rs"
+    );
+    assert_eq!(
+        guarded_count, assign_count,
+        "every `ability.optional_player = Some(` assignment in oracle_trigger.rs must be preceded, \
+         within its enclosing block, by an `optional_player.is_none()` precedence guard"
+    );
+}
+
 /// CR 611.2a + CR 608.2g + CR 117.1a: a stated lifetime and a during-resolution
 /// cast are mutually exclusive, and CR 118.9 (who pays) does not enter the
 /// question. All three free members of the "for as long as it remains exiled"

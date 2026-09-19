@@ -33455,6 +33455,7 @@ mod tests {
         let event = GameEvent::LifeChanged {
             player_id: PlayerId(1),
             amount: -2,
+            new_total: crate::types::events::LifeTotalReading::default(),
         };
         state.current_trigger_events = vec![event.clone()];
 

@@ -12702,3 +12702,170 @@ fn derived_fodder_class_is_one_class_multiset_gate() {
          reconciliation and this returns Some((class, 1)))"
     );
 }
+
+/// CR 732.2a: `entry_publishes_pin_slots` must withhold the CR 603.5 "may" pin
+/// slot once the stamped announcer is not the proposer — a shortcut cannot
+/// describe "a sequence of game choices" that includes a choice which will
+/// never be posed to the proposer. Academy Loremaster's bare-`ScopedPlayer`
+/// stamp (P7: `filter_uses_relative_controller_scoped` does not match a bare
+/// `ScopedPlayer`, so this route is genuinely new) moves the announcer seat to
+/// whichever player's draw step it is, so once the draw step belongs to
+/// someone other than the ability's controller (== the proposer here), the
+/// slot this instrument publishes for that proposer must disappear.
+///
+/// Direction: strictly FEWER offers, never more — a shortcut slot is withheld
+/// when the announcer is not the proposer, never published to a seat that will
+/// not be asked. (The "Direction: strictly FEWER offers, never more." comment
+/// at `engine.rs:3894` documents a PRIOR change — the `optional_for`/infeasible
+/// withholds — and is not the evidence for this one; this test is.)
+///
+/// Willie cannot reach this branch (his stamp lives on a `sub_ability`; the
+/// stack entry's ability is the unstamped top-level), and none of the 23
+/// `SearchLibrary` movers reach it either (their `prompt_player` does not
+/// move — P2 runtime neutrality). Academy Loremaster is the fixture because
+/// its stamp lands on the top-level `execute` this instrument reads.
+///
+/// Positive control IN THIS SAME TEST: at the controller's own draw step, the
+/// identical call publishes a `may` slot — proving the instrument publishes a
+/// slot at all, and that the withhold below is caused by the seat move and not
+/// by a broken instrument.
+#[test]
+fn academy_loremaster_may_slot_is_withheld_when_the_announcer_is_not_the_proposer() {
+    const ACADEMY_LOREMASTER_ORACLE: &str = "At the beginning of each player's draw step, that \
+         player may draw an additional card. If they do, spells they cast this turn cost {2} \
+         more to cast.";
+
+    fn advance_to_priority_with_nonempty_stack(runner: &mut crate::game::scenario::GameRunner) {
+        for _ in 0..240 {
+            match runner.state().waiting_for.clone() {
+                // The `phase == Draw` conjunct makes the caller's reach-guard a
+                // loop invariant rather than a post-hoc hope: without it this
+                // could stop on an unrelated non-empty-stack priority window if
+                // the fixture ever gains another trigger source.
+                WaitingFor::Priority { .. }
+                    if !runner.state().stack.is_empty() && runner.state().phase == Phase::Draw =>
+                {
+                    return
+                }
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).ok();
+                }
+                WaitingFor::DeclareAttackers { .. } => {
+                    runner
+                        .act(GameAction::DeclareAttackers {
+                            attacks: vec![],
+                            bands: vec![],
+                        })
+                        .ok();
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    runner
+                        .act(GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        })
+                        .ok();
+                }
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: false })
+                        .ok();
+                }
+                _ => return,
+            }
+        }
+    }
+
+    fn settle_optional_effect_and_pass(runner: &mut crate::game::scenario::GameRunner) {
+        for _ in 0..240 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: false })
+                        .ok();
+                }
+                // Stop as soon as THIS trigger has finished resolving. Without
+                // this guard the loop passes straight through the OTHER player's
+                // draw step and consumes the very trigger the negative half
+                // below inspects, then burns the whole iteration budget and
+                // lands back on the controller's own draw step.
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).ok();
+                }
+                WaitingFor::DeclareAttackers { .. } => {
+                    runner
+                        .act(GameAction::DeclareAttackers {
+                            attacks: vec![],
+                            bands: vec![],
+                        })
+                        .ok();
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    runner
+                        .act(GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        })
+                        .ok();
+                }
+                _ => return,
+            }
+        }
+    }
+
+    let proposer = P0;
+    let restricted = crate::game::scenario::P1;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    for &pid in &[P0, restricted] {
+        scenario.with_library_top(pid, &["Lib A", "Lib B", "Lib C", "Lib D", "Lib E", "Lib F"]);
+    }
+    scenario.add_creature_from_oracle(P0, "Academy Loremaster", 2, 2, ACADEMY_LOREMASTER_ORACLE);
+    let mut runner = scenario.build();
+
+    // ---- Positive control: the controller's OWN draw step (this turn). ----
+    advance_to_priority_with_nonempty_stack(&mut runner);
+    assert_eq!(
+        runner.state().active_player,
+        P0,
+        "reach-guard: this must be the controller's own draw step"
+    );
+    assert_eq!(runner.state().phase, Phase::Draw);
+    {
+        let state = runner.state();
+        let entry = state
+            .stack
+            .back()
+            .expect("Academy Loremaster's draw-step trigger is on the stack");
+        let pins = entry_publishes_pin_slots(state, entry, proposer)
+            .expect("the controller's own draw step must publish a pin slot at all");
+        assert!(
+            pins.may.is_some(),
+            "positive control: at the controller's own draw step the may slot IS published"
+        );
+    }
+    settle_optional_effect_and_pass(&mut runner);
+
+    // ---- Negative: the OTHER player's draw step (next occurrence). ----
+    advance_to_priority_with_nonempty_stack(&mut runner);
+    assert_eq!(
+        runner.state().active_player,
+        restricted,
+        "reach-guard: this must be the OTHER player's draw step"
+    );
+    assert_eq!(runner.state().phase, Phase::Draw);
+    {
+        let state = runner.state();
+        let entry = state
+            .stack
+            .back()
+            .expect("Academy Loremaster's draw-step trigger is on the stack");
+        let pins = entry_publishes_pin_slots(state, entry, proposer);
+        let withheld = pins.is_none_or(|p| p.may.is_none());
+        assert!(
+            withheld,
+            "CR 732.2a: the announcer moved to the other player, who is not the proposer, so the \
+             may slot must be withheld"
+        );
+    }
+}

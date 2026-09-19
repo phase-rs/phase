@@ -5454,6 +5454,7 @@ pub(crate) fn keyword_cost_reads_growing_class(kw: &Keyword) -> bool {
         | Keyword::Spectacle(_)
         | Keyword::SplitSecond
         | Keyword::Spree
+        | Keyword::Tiered
         | Keyword::Squad(_)
         | Keyword::Storm
         | Keyword::Surge(_)
@@ -5674,6 +5675,7 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
         | Keyword::WebSlinging(_)
         | Keyword::Discover(_)
         | Keyword::Spree
+        | Keyword::Tiered
         | Keyword::Ravenous
         | Keyword::Daybound
         | Keyword::Nightbound

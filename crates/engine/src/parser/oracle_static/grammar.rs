@@ -2002,15 +2002,26 @@ pub(crate) fn parse_graveyard_permission_condition(
     Ok((rest, condition))
 }
 
+/// CR 614.1a + CR 607.1: The linked stack-exit destination sentence shared by
+/// every "cast this way" permission ("… If a spell cast this way would be put
+/// into your graveyard, exile it instead."). Single authority for the literal:
+/// both the all-consuming recognizer below and
+/// `restriction::split_exile_spell_cast_this_way_rider` (which peels the
+/// sentence off a rider run before the additional-cost parse) key on this text.
+pub(crate) const EXILE_SPELL_CAST_THIS_WAY_RIDER: &str =
+    "if a spell cast this way would be put into your graveyard, exile it instead";
+
+/// CR 614.1a + CR 607.1: Recognize the trailing "If a spell cast this way
+/// would be put into your graveyard, exile it instead." sentence as a
+/// whole-text suffix (leading period/space tolerated). The sentence is the
+/// CR 614.1a replacement of the stack→graveyard event, linked back to the
+/// cast permission by "this way" (CR 607.1).
 pub(crate) fn parse_exile_spell_cast_this_way_rider(input: &str) -> OracleResult<'_, ()> {
     all_consuming(preceded(
         terminated(opt(tag(".")), space0),
         value(
             (),
-            terminated(
-                tag("if a spell cast this way would be put into your graveyard, exile it instead"),
-                opt(tag(".")),
-            ),
+            terminated(tag(EXILE_SPELL_CAST_THIS_WAY_RIDER), opt(tag("."))),
         ),
     ))
     .parse(input)

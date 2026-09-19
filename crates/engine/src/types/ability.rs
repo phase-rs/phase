@@ -13065,6 +13065,77 @@ impl AbilityCost {
         }
     }
 
+    /// Visit every node of this cost tree in pre-order, recursing the container
+    /// arms (`Composite`, `OneOf`, `PerCounter`). The exhaustive match keeps
+    /// the traversal shape in lockstep with the enum — a new container variant
+    /// is a compile error here rather than a silently missed subtree — so every
+    /// cost-tree consumer (containment, coverage's parsed-item and gap
+    /// collectors) traverses the same complete shape.
+    pub(crate) fn for_each_cost_node<'a>(&'a self, visit: &mut impl FnMut(&'a AbilityCost)) {
+        visit(self);
+        match self {
+            AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                for cost in costs {
+                    cost.for_each_cost_node(visit);
+                }
+            }
+            AbilityCost::PerCounter { base, .. } => base.for_each_cost_node(visit),
+            AbilityCost::Mana { .. }
+            | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::Sacrifice(_)
+            | AbilityCost::PayLife { .. }
+            | AbilityCost::Discard { .. }
+            | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::ExileWithAggregate { .. }
+            | AbilityCost::TapCreatures { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::PayEnergy { .. }
+            | AbilityCost::PaySpeed { .. }
+            | AbilityCost::ReturnToHand { .. }
+            | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Blight { .. }
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Behold { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::EffectCost { .. }
+            | AbilityCost::KeywordCostOfCastSpell { .. }
+            | AbilityCost::GetPlayerCounters { .. }
+            | AbilityCost::Unimplemented { .. } => {}
+        }
+    }
+
+    /// True when this cost tree contains an [`AbilityCost::Unimplemented`] leaf
+    /// or an [`AbilityCost::EffectCost`] whose embedded payment effect is itself
+    /// [`Effect::Unimplemented`] — either means the cost cannot be paid.
+    ///
+    /// Traversal delegates to [`AbilityCost::for_each_cost_node`], the single
+    /// cost-tree shape authority, so this predicate and coverage's parsed-item
+    /// and gap collectors cannot disagree about which subtrees exist.
+    ///
+    /// Mirrors `StaticCondition::contains_unrecognized`.
+    pub(crate) fn contains_unimplemented(&self) -> bool {
+        let mut found = false;
+        self.for_each_cost_node(&mut |node| {
+            found |= match node {
+                AbilityCost::Unimplemented { .. } => true,
+                AbilityCost::EffectCost { effect } => {
+                    matches!(effect.as_ref(), Effect::Unimplemented { .. })
+                }
+                _ => false,
+            };
+        });
+        found
+    }
+
     /// CR 601.2h + CR 602.2b: a disjunctive cost leg is resolved to the chosen
     /// instruction and the total cost is then paid as a whole.
     ///
@@ -32191,6 +32262,47 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 608.2c: A parsed ability chain is ONE printed ability — every link is
+    /// a later instruction of the same text, not an ability of its own. The
+    /// parser records the printed text only on the chain head, so any prompt a
+    /// chained link opens has nothing to show the player.
+    ///
+    /// That is not cosmetic. A `WaitingFor::OptionalEffectChoice` raised by a
+    /// chained link ("If you do, you may cast the copy without paying its mana
+    /// cost" — Isochron Scepter) rendered as a bare Yes/No with no question, so
+    /// declining it looked identical to dismissing a stray dialog. The player
+    /// had already paid the activation cost, and the decline silently discarded
+    /// the copy. 152 optional chain links in the 4k-card test fixture alone open
+    /// a prompt this way.
+    ///
+    /// Fill every link that carries no text of its own with the head's printed
+    /// text. A link that DOES carry its own text — a modal branch label such as
+    /// "tap" / "untap" — keeps it, while the head's text still reaches that
+    /// link's own children: one value propagated down the chain, mirroring
+    /// [`Self::set_scoped_player_recursive`]. Idempotent, so a chain built once
+    /// and re-backfilled after a later head assignment is unchanged.
+    pub fn backfill_chain_description(&mut self) {
+        let Some(description) = self.description.clone() else {
+            return;
+        };
+        self.fill_missing_link_descriptions(&description);
+    }
+
+    /// Recursive half of [`Self::backfill_chain_description`], kept separate so
+    /// the public entry always sources the text from the chain head rather than
+    /// from whichever link the recursion currently sits on.
+    fn fill_missing_link_descriptions(&mut self, description: &str) {
+        for link in [self.sub_ability.as_mut(), self.else_ability.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            if link.description.is_none() {
+                link.description = Some(description.to_string());
+            }
+            link.fill_missing_link_descriptions(description);
+        }
+    }
+
     /// CR 608.2c: Stamp `context.optional_effect_performed` across the local
     /// ability chain. Used when an optional effect is accepted after its prompt
     /// suspended the parent chain — the stashed "If you do" continuation was
@@ -36996,6 +37108,66 @@ mod tests {
             })
         );
     }
+
+    /// `AbilityCost::contains_unimplemented` is the single containment
+    /// authority: it recurses `Composite`/`OneOf`/`PerCounter`, answers `true`
+    /// for a bare `Unimplemented`, and classifies an `EffectCost` by its
+    /// embedded payment effect.
+    #[test]
+    fn contains_unimplemented_recurses_composition_and_classifies_effect_cost() {
+        assert!(AbilityCost::Unimplemented {
+            description: "frobnicate".to_string(),
+        }
+        .contains_unimplemented());
+        assert!(AbilityCost::Composite {
+            costs: vec![
+                pay_life_cost(2),
+                AbilityCost::Unimplemented {
+                    description: "sacrifice a thing".to_string(),
+                },
+            ],
+        }
+        .contains_unimplemented());
+        assert!(AbilityCost::OneOf {
+            costs: vec![
+                generic_mana_cost(2),
+                AbilityCost::Composite {
+                    costs: vec![AbilityCost::Unimplemented {
+                        description: "frobnicate".to_string(),
+                    }],
+                },
+            ],
+        }
+        .contains_unimplemented());
+        assert!(AbilityCost::PerCounter {
+            counter: CounterType::Age,
+            target: TargetFilter::SelfRef,
+            base: Box::new(AbilityCost::Unimplemented {
+                description: "frobnicate".to_string(),
+            }),
+        }
+        .contains_unimplemented());
+        assert!(!AbilityCost::Composite {
+            costs: vec![pay_life_cost(2), generic_mana_cost(1)],
+        }
+        .contains_unimplemented());
+        // An `EffectCost` is classified by its embedded payment effect: an
+        // unimplemented payload is unpayable, a modeled one is not.
+        assert!(AbilityCost::EffectCost {
+            effect: Box::new(Effect::Unimplemented {
+                name: "static_structure".to_string(),
+                description: None,
+            }),
+        }
+        .contains_unimplemented());
+        assert!(!AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+            }),
+        }
+        .contains_unimplemented());
+    }
 }
 
 #[cfg(test)]
@@ -38293,6 +38465,160 @@ mod cast_cost_modifier_serde_tests {
             }
             .cast_cost_modifier(),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod chain_description_backfill_tests {
+    use super::*;
+
+    /// Build a three-deep chain: a head with printed text, a middle link with
+    /// none (the shape Isochron Scepter's "If you do, you may cast the copy"
+    /// sub-ability has), and a leaf that carries its own modal branch label.
+    fn three_deep_chain() -> ResolvedAbility {
+        let leaf = ResolvedAbility {
+            description: Some("tap".to_string()),
+            ..ResolvedAbility::new(
+                Effect::Surveil {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let middle = ResolvedAbility {
+            sub_ability: Some(Box::new(leaf)),
+            ..ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        ResolvedAbility {
+            description: Some("printed ability text".to_string()),
+            sub_ability: Some(Box::new(middle)),
+            ..ResolvedAbility::new(
+                Effect::Scry {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ObjectId(1),
+                PlayerId(0),
+            )
+        }
+    }
+
+    #[test]
+    fn backfill_fills_textless_links_and_preserves_their_own_text() {
+        let mut chain = three_deep_chain();
+        chain.backfill_chain_description();
+
+        let middle = chain.sub_ability.as_deref().expect("middle link");
+        assert_eq!(
+            middle.description.as_deref(),
+            Some("printed ability text"),
+            "a link with no text of its own inherits the head's printed text"
+        );
+
+        let leaf = middle.sub_ability.as_deref().expect("leaf link");
+        assert_eq!(
+            leaf.description.as_deref(),
+            Some("tap"),
+            "a link that carries its own label keeps it"
+        );
+    }
+
+    /// The head's text must reach links BELOW one that carries its own label —
+    /// a recursion that sourced the text from the current link would stamp
+    /// "tap" here instead.
+    #[test]
+    fn backfill_reaches_links_below_a_labelled_link() {
+        let mut chain = three_deep_chain();
+        let deepest = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        chain
+            .sub_ability
+            .as_mut()
+            .and_then(|middle| middle.sub_ability.as_mut())
+            .expect("leaf link")
+            .sub_ability = Some(Box::new(deepest));
+
+        chain.backfill_chain_description();
+
+        let below_label = chain
+            .sub_ability
+            .as_deref()
+            .and_then(|middle| middle.sub_ability.as_deref())
+            .and_then(|leaf| leaf.sub_ability.as_deref())
+            .expect("link below the labelled one");
+        assert_eq!(
+            below_label.description.as_deref(),
+            Some("printed ability text"),
+            "the head's text propagates past a labelled link, not the label"
+        );
+    }
+
+    /// `else_ability` is the branch sibling of `sub_ability` and raises its own
+    /// prompts, so it takes the same backfill.
+    #[test]
+    fn backfill_covers_the_else_branch() {
+        let mut chain = three_deep_chain();
+        chain.else_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        )));
+
+        chain.backfill_chain_description();
+
+        assert_eq!(
+            chain
+                .else_ability
+                .as_deref()
+                .expect("else branch")
+                .description
+                .as_deref(),
+            Some("printed ability text"),
+        );
+    }
+
+    /// A head with no text of its own leaves the chain untouched rather than
+    /// stamping `None` over a link that has one.
+    #[test]
+    fn backfill_with_no_head_text_is_a_no_op() {
+        let mut chain = three_deep_chain();
+        chain.description = None;
+        chain.backfill_chain_description();
+
+        let middle = chain.sub_ability.as_deref().expect("middle link");
+        assert_eq!(middle.description, None);
+        assert_eq!(
+            middle
+                .sub_ability
+                .as_deref()
+                .expect("leaf link")
+                .description
+                .as_deref(),
+            Some("tap"),
         );
     }
 }
