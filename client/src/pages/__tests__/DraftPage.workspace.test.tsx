@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
 import { DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../constants/storage";
+import { createDefaultDraftWorkspacePreferences } from "../../components/draft/workspace/workspacePreferences";
 import type { LocalDeckBuilderController } from "../../components/draft/LimitedDeckBuilder";
 import type { PackDisplayController, PackDisplayPresentation } from "../../components/draft/PackDisplay";
 import { projectWorkspaceLandCounts } from "../../components/draft/workspace/workspaceProjection";
@@ -74,6 +75,8 @@ const captured = vi.hoisted(() => ({
   intro: null as DraftIntroCapture | null,
 }));
 
+const arrivingPreferences = vi.hoisted(() => vi.fn());
+
 vi.mock("@wasm/draft", () => wasm);
 vi.mock("../../services/quickDraftPersistence", () => persistence);
 vi.mock("../../services/engineRuntime", () => ({
@@ -133,6 +136,23 @@ vi.mock("../../components/draft/DraftIntro", () => ({
     return <button type="button" onClick={props.onContinue}>Continue</button>;
   },
 }));
+// Spied on the module the page imports it from. `setArrivingCardBoardPreferences`
+// lives in `workspacePreferences` rather than in either store, because both
+// draft stores read the published value. Everything else in the module is the
+// real implementation, including the `loadDraftWorkspacePreferences` /
+// `saveDraftWorkspacePreferences` pair these tests already exercise.
+vi.mock("../../components/draft/workspace/workspacePreferences", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("../../components/draft/workspace/workspacePreferences")
+  >();
+  // FORWARDS to the real setter rather than swallowing the call. The stores read
+  // the published value back through `getArrivingCardBoardPreferences` in this
+  // same module, so a bare `vi.fn()` would sever the page-to-store seam and any
+  // later placement assertion here would silently measure the module's seeded
+  // default instead of what the page published.
+  arrivingPreferences.mockImplementation(actual.setArrivingCardBoardPreferences);
+  return { ...actual, setArrivingCardBoardPreferences: arrivingPreferences };
+});
 
 import { useDraftStore } from "../../stores/draftStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
@@ -375,6 +395,50 @@ describe("DraftPage local deckbuilding wiring", () => {
 
     expect(useDraftStore.getState().workspaceState?.placements["three-drop"])
       .toMatchObject({ zone: "deck", column: 3, row: 0 });
+  });
+
+  it("publishes_the_stored_board_columns_on_mount", () => {
+    // The arriving-card placement in `draftStore.installWorkspace` reads the
+    // published value, and a `kind: "state"` install can land before the page
+    // has changed anything — a resumed draft, a fresh Sealed pool. Without this
+    // publication those cards lay out against the module's seeded default
+    // rather than the columns this player actually chose.
+    localStorage.setItem(DRAFT_WORKSPACE_PREFERENCES_KEY, JSON.stringify({
+      ...createDefaultDraftWorkspacePreferences(),
+      deck: { sort: "color", columnCount: 5, rows: "one", showHeaders: true },
+    }));
+    arrivingPreferences.mockClear();
+
+    render(<MemoryRouter><DraftPage /></MemoryRouter>);
+
+    expect(arrivingPreferences).toHaveBeenCalledWith(
+      expect.objectContaining({ sort: "color", columnCount: 5 }),
+    );
+  });
+
+  it("publishes_board_columns_during_the_preference_change_not_after_a_commit", async () => {
+    // The solo twin of `DraftPodPage.winston.test.tsx`'s "publishes board
+    // columns during the preference change, not after a commit". Deliberately
+    // NOT wrapped in `act`: were the publication moved into an effect, nothing
+    // would have flushed it by the time this assertion runs.
+    localStorage.setItem(DRAFT_WORKSPACE_PREFERENCES_KEY, JSON.stringify({
+      ...createDefaultDraftWorkspacePreferences(),
+      deck: { sort: "rarity", columnCount: 4, rows: "one", showHeaders: true },
+    }));
+    wasm.start_quick_draft.mockReturnValue(view({ current_pack: [card("c1")] }));
+    await act(async () => useDraftStore.getState().startDraft("pool", "TST", "Test", 2));
+    render(<MemoryRouter><DraftPage /></MemoryRouter>);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    arrivingPreferences.mockClear();
+
+    // `setPackScale` routes through `handleWorkspacePreferencesChange`, the one
+    // path that publishes, spreading the rest of the preferences unchanged.
+    captured.presentation!.setPackScale(1.2);
+
+    expect(arrivingPreferences).toHaveBeenCalledTimes(1);
+    expect(arrivingPreferences).toHaveBeenCalledWith({
+      sort: "rarity", columnCount: 4, rows: "one", showHeaders: true,
+    });
   });
 
   it("uses_the_frozen_full_width_shell_fragment", () => {

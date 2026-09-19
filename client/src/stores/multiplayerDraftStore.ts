@@ -33,12 +33,10 @@ import {
   makeInteractiveVirtualBasicInstanceId,
   placeArrivingPoolCards,
   reconcileWorkspaceState,
+  unplacedPoolIds,
   updateWorkspacePlacement,
 } from "../components/draft/workspace/workspacePlacement";
-import {
-  loadDraftWorkspacePreferences,
-  type DraftBoardPreferences,
-} from "../components/draft/workspace/workspacePreferences";
+import { getArrivingCardBoardPreferences } from "../components/draft/workspace/workspacePreferences";
 import {
   addVirtualBasic,
   countProjectedNames,
@@ -670,70 +668,6 @@ function publishWorkspace(workspace: DraftWorkspaceState): Promise<void> {
   );
 }
 
-/**
- * The deck board's sort and geometry, as the player has them set right now.
- *
- * Module state rather than store state, and deliberately so: it is a
- * PRESENTATION preference that lives in `localStorage` and belongs to the page,
- * not a piece of draft state any view publishes. What it is needed for here is
- * narrow — cards arrive in the pool on paths that resolve no placement of their
- * own (a shared-stack take collects a whole pile; a timed-out seat's decision is
- * applied by the host and broadcast), and those cards have to land in the column
- * the board's sort means rather than all in column 0.
- *
- * Seeded from the player's STORED preferences, not from the module defaults,
- * and the difference is not cosmetic. On a resume or a rejoin the first
- * `viewUpdated` is what flips `phase` to `"drafting"`, which is what mounts the
- * page component that publishes this value — and React effects run after that
- * render, so the first `placeArrivingPoolCards` call happens BEFORE the page
- * can say anything. On that first call `unplacedPoolIds` returns the WHOLE
- * restored pool, and the layout it produces is the one that gets published and
- * persisted. Seeded from the defaults, a player who drafts by colour across
- * five columns would find their entire resumed pool laid out by mana value
- * across seven, with only later arrivals placed correctly.
- *
- * The page's effect then carries in-session changes, which is what it is for.
- */
-/**
- * Pool cards the workspace had no placement for BEFORE this reconcile.
- *
- * The question "which cards are new" asked structurally rather than by diffing
- * two pools. A pool diff answers it for a card that arrived between two views,
- * but not for the first view of a lifecycle — a reconnect, a resume, a restored
- * session — where there is no earlier pool and every card is new. Both cases
- * are the same question: `reconcileWorkspaceState` is about to invent a
- * default placement for exactly these ids, and this is the list it will invent
- * them for.
- *
- * A workspace restored with the player's own saved placements therefore yields
- * an empty list and nothing is re-sorted, which is the right answer: their
- * layout wins.
- */
-function unplacedPoolIds(
-  workspace: DraftWorkspaceState | null,
-  pool: DraftPlayerView["pool"],
-): string[] {
-  if (workspace === null) return pool.map((card) => card.instance_id);
-  return pool
-    .filter((card) => workspace.placements[card.instance_id] === undefined)
-    .map((card) => card.instance_id);
-}
-
-let arrivingCardBoardPreferences: DraftBoardPreferences =
-  loadDraftWorkspacePreferences().deck;
-
-/**
- * Tell this module which columns the deck board currently means.
- *
- * A module function rather than a store action, because the value is not draft
- * state: no view publishes it, nothing is persisted with it, and a mocked store
- * in a test has no business carrying it. The page calls this whenever the
- * player's board preferences load or change.
- */
-export function setArrivingCardBoardPreferences(preferences: DraftBoardPreferences): void {
-  arrivingCardBoardPreferences = preferences;
-}
-
 function installWorkspace(input: {
   view: DraftPlayerView;
   base: DraftWorkspaceState;
@@ -884,7 +818,62 @@ async function performPick(request: MultiplayerPickRequest): Promise<DraftPickOu
       cleanup();
       return { status: "rejected", reason: "unacknowledged" };
     }
-    let workspace = reconcileWorkspaceState(state.workspaceState, acknowledgedView.pool);
+    // Sorted placement for a pick that resolved no hint of its own. The pod page
+    // resolves one in `handleConfirmPick` and `handleAutoPick`, but
+    // `PackDisplay`'s `request` dispatches `pickCard`,
+    // `pickCardStep` and `pickCardWithDraftEffect` with no hint at all, and `applyDestination` then
+    // falls back to `placement.column` — reconcile's column-0 default.
+    //
+    // Ids this request places itself, which the arriving pass must leave alone.
+    //
+    // A `sideboard` destination, because the pass is deck-only: the card still
+    // carries reconcile's `"deck"` default when the pass runs, so the pass would
+    // stamp a deck-geometry column that `applyDestination` carries into the
+    // sideboard, to be clamped by `normalizeWorkspaceForBoardGeometry` to that
+    // zone's last column once it overflows the narrower sideboard.
+    //
+    // A `placementHint`, because `applyDestination` falls back per FIELD:
+    // `placementHint?.row ?? placement.row`. A drag that hits a column but no
+    // row band omits `row` (`useDraftWorkspaceDrag` sends none when
+    // `target.row === null`), so on a two-row board the pass would decide that
+    // card's row through the engine classification instead of leaving the
+    // reconcile default the hint path has always fallen back to. That card's own
+    // column is unaffected — the hint always wins there — so `row` is the whole
+    // of what this arm protects.
+    //
+    // `auto-pick` types its `destination` as the literal `"deck"`, and carries
+    // per-id hints rather than one.
+    const ownPlacement = request.kind === "auto-pick"
+      ? request.instanceIds.filter((instanceId) => request.placementHints?.[instanceId] !== undefined)
+      : request.placementHint !== undefined || request.destination !== "deck"
+        ? request.instanceIds
+        : [];
+    // BEFORE the `applyDestination` below, and the order is load-bearing — do
+    // not move this under it. For a multi-id hint-less DECK pick — what
+    // `PackDisplay`'s `request` sends as `pickCardWithDraftEffect(effect, ids,
+    // destination)` with no hint, which `DraftPodPage`'s controller forwards to
+    // `submitPickWithDraftEffect` — both calls write the same two ids'
+    // placements: this pass appends them in POOL order, `applyDestination`
+    // appends them in REQUEST order and re-appends an id it finds already
+    // placed (`if (!placement) continue` is its only skip). Whichever runs last
+    // decides the stack order. Pinned by `appends a hint-less deck draft-effect
+    // pick in request order`, which was the single placement failure of a full
+    // `npx vitest run` with this call moved below the `applyDestination`
+    // assignment — it failed there on `second.order`, expecting 0 and getting
+    // 1, the pool-order result. Count the placement failures, not the failures:
+    // `devServerPort.test.ts` times out beside it in some runs of that move,
+    // and timed out on this tree with nothing moved too.
+    let workspace = placeArrivingPoolCards(
+      reconcileWorkspaceState(state.workspaceState, acknowledgedView.pool),
+      // Against the PRE-reconcile workspace, so the cards this pick just added
+      // still count as arriving; asked afterwards they would already hold
+      // reconcile's column-0 default and be filtered out.
+      unplacedPoolIds(state.workspaceState, acknowledgedView.pool)
+        .filter((instanceId) => !ownPlacement.includes(instanceId)),
+      acknowledgedView.pool,
+      acknowledgedView.pool_groups,
+      getArrivingCardBoardPreferences(),
+    );
     workspace = request.kind === "auto-pick"
       ? request.instanceIds.reduce(
         (next, instanceId) => applyDestination(
@@ -1030,7 +1019,7 @@ async function performSharedStackDecision(
         unplacedPoolIds(state.workspaceState, acknowledgedView.pool),
         acknowledgedView.pool,
         acknowledgedView.pool_groups,
-        arrivingCardBoardPreferences,
+        getArrivingCardBoardPreferences(),
       ),
       publish: true,
       patch: {
@@ -3136,7 +3125,7 @@ function installEventView(view: DraftPlayerView): void {
     unplacedPoolIds(base, view.pool),
     view.pool,
     view.pool_groups,
-    arrivingCardBoardPreferences,
+    getArrivingCardBoardPreferences(),
   );
   const publish = restored !== null
     ? (restored.state === null ? view.pool.length > 0 : workspace !== base)

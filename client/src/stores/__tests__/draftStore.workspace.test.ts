@@ -22,6 +22,11 @@ import {
   makeInteractiveVirtualBasicInstanceId,
 } from "../../components/draft/workspace/workspacePlacement";
 import {
+  createDefaultDraftWorkspacePreferences,
+  setArrivingCardBoardPreferences,
+} from "../../components/draft/workspace/workspacePreferences";
+import { DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../constants/storage";
+import {
   projectWorkspaceLandCounts,
   projectWorkspaceMainDeck,
 } from "../../components/draft/workspace/workspaceProjection";
@@ -97,6 +102,15 @@ function card(instanceId: string, name = instanceId): DraftCardInstance {
   };
 }
 
+/** A card whose mana value decides its column under the default `cmc` board sort.
+ *  `manaValueColumn` truncates and clamps to `columnCount - 1`, and the deck board
+ *  defaults to 7 columns against the sideboard's 6 — so cmc 6 is the value that
+ *  distinguishes "sorted into the deck's last column" from "clamped into the
+ *  sideboard's last column", which is the confusion these tests exist to pin. */
+function cardWithCmc(instanceId: string, cmc: number): DraftCardInstance {
+  return { ...card(instanceId), cmc };
+}
+
 function view(pool: DraftCardInstance[] = []): DraftPlayerView {
   return {
     status: "Drafting",
@@ -161,6 +175,9 @@ describe("draft store workspace authority", () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(null);
+    // Module state, so it survives `reset()` and would otherwise leak the
+    // geometry one test publishes into the next.
+    setArrivingCardBoardPreferences(createDefaultDraftWorkspacePreferences().deck);
     useDraftStore.getState().reset();
   });
 
@@ -189,6 +206,128 @@ describe("draft store workspace authority", () => {
       useDraftStore.getState().workspaceState!,
       useDraftStore.getState().view!.pool,
     )).toEqual([]);
+  });
+
+  it("sorts_a_pool_arriving_on_a_state_install_into_the_boards_columns", async () => {
+    // `startDraft` installs the whole pool through a `kind: "state"` operation,
+    // which resolves no placement hint for any card — the path a restored Sealed
+    // pool and a resumed Quick draft both take. Before `placeArrivingPoolCards`
+    // was wired into this store every one of these landed in column 0.
+    await start([cardWithCmc("cheap", 1), cardWithCmc("costly", 6)]);
+
+    const placements = useDraftStore.getState().workspaceState!.placements;
+    expect(placements.cheap.column).toBe(1);
+    expect(placements.costly.column).toBe(6);
+  });
+
+  it("sorts_a_hint_less_deck_pick_into_the_column_its_mana_value_means", async () => {
+    // `PackDisplay.request` dispatches `pickCard` with no placement hint, so
+    // `applyDestination` has only reconcile's column-0 default to fall back on.
+    await start();
+    wasm.submit_pick.mockReturnValue(view([cardWithCmc("picked", 6)]));
+
+    await useDraftStore.getState().pickCard("picked", "deck");
+
+    expect(useDraftStore.getState().workspaceState!.placements.picked.column).toBe(6);
+  });
+
+  it("keeps_the_hint_column_on_a_deck_pick_that_resolved_one", async () => {
+    // The arriving pass must not overrule a column someone chose — this is the
+    // drag-and-drop target as well as `DraftPage.handleConfirmPick`'s resolution.
+    await start();
+    wasm.submit_pick.mockReturnValue(view([cardWithCmc("picked", 6)]));
+
+    await useDraftStore.getState().pickCard("picked", "deck", { column: 2 });
+
+    expect(useDraftStore.getState().workspaceState!.placements.picked.column).toBe(2);
+  });
+
+  it("places_a_pick_against_the_columns_the_page_published_not_the_module_default", async () => {
+    // The seam the whole feature rests on: `installWorkspace` reads the board
+    // geometry through `getArrivingCardBoardPreferences`, so a page that has
+    // published three columns must get three-column placement. Three is chosen
+    // because `manaValueColumn` clamps to `columnCount - 1`: a six-drop lands in
+    // column 2 here and column 6 under the seven-column default, so no default
+    // can produce this result.
+    setArrivingCardBoardPreferences({
+      sort: "cmc", columnCount: 3, rows: "one", showHeaders: true,
+    });
+    await start();
+    wasm.submit_pick.mockReturnValue(view([cardWithCmc("picked", 6)]));
+
+    await useDraftStore.getState().pickCard("picked", "deck");
+
+    expect(useDraftStore.getState().workspaceState!.placements.picked.column).toBe(2);
+  });
+
+  it("places_an_install_before_any_publish_against_the_stored_preferences", async () => {
+    // The OTHER end of that seam: `arrivingCardBoardPreferences` is seeded at
+    // module init from `loadDraftWorkspacePreferences()`, and this install
+    // reaches it with no `setArrivingCardBoardPreferences` call on the module
+    // instance it reads — the `beforeEach` one lands on this file's static
+    // instance, not the one imported below. Three stored columns against the
+    // seven-column module default: `manaValueColumn` clamps a six-drop to 2
+    // here and to 6 under the defaults, so only the stored value produces this,
+    // and replacing that initializer with `{ ...DECK_DEFAULTS }` reds this test
+    // with `expected 6 to be 2`.
+    localStorage.setItem(DRAFT_WORKSPACE_PREFERENCES_KEY, JSON.stringify({
+      ...createDefaultDraftWorkspacePreferences(),
+      deck: { sort: "cmc", columnCount: 3, rows: "one", showHeaders: true },
+    }));
+    // A fresh module registry: the initializer runs once per module instance,
+    // and the instance this file imported statically is not it — drop
+    // `vi.resetModules()` and this install places against the seven-column
+    // default instead, `expected 6 to be 2`. `vi.mock` registrations survive
+    // `resetModules`: the pool asserted on below is the one
+    // `wasm.start_quick_draft` returns, so the re-imported store is still
+    // running against the mocked engine.
+    vi.resetModules();
+    const { useDraftStore: freshStore } = await import("../draftStore");
+    wasm.start_quick_draft.mockReturnValue(view([cardWithCmc("costly", 6)]));
+
+    await freshStore.getState().startDraft("pool", "TST", "Test", 2);
+
+    expect(freshStore.getState().workspaceState!.placements.costly.column).toBe(2);
+    localStorage.removeItem(DRAFT_WORKSPACE_PREFERENCES_KEY);
+  });
+
+  it("leaves_a_hint_less_sideboard_pick_in_the_first_column", async () => {
+    // The arriving pass is deck-only. Were it allowed to run for a sideboard
+    // pick it would stamp this card with a column from the DECK's geometry —
+    // 6, asserted above as the stored value on the deck-pick case — which the
+    // sideboard's narrower six columns cannot hold, so
+    // `normalizeWorkspaceForBoardGeometry` would clamp it at render to 5, the
+    // sideboard's last column, rather than leaving it in the first. A cheaper
+    // card would land mid-board instead; the clamp is the overflow case, not
+    // the general one.
+    await start();
+    wasm.submit_pick.mockReturnValue(view([cardWithCmc("picked", 6)]));
+
+    await useDraftStore.getState().pickCard("picked", "sideboard");
+
+    const placement = useDraftStore.getState().workspaceState!.placements.picked;
+    expect(placement.zone).toBe("sideboard");
+    expect(placement.column).toBe(0);
+  });
+
+  it("leaves_a_row_less_hint_on_a_two_row_board_in_the_reconcile_default_row", async () => {
+    // `applyDestination` falls back per FIELD, so a hint naming only a column
+    // leaves `row` to whatever placement is in the workspace. A drag that hits a
+    // column but no row band sends exactly that shape. The arriving pass must
+    // therefore skip hinted ids: were it to run, it would resolve this card's
+    // row through the engine classification and change where a drag lands on a
+    // two-row board, which is not this change's business.
+    setArrivingCardBoardPreferences({
+      sort: "cmc", columnCount: 7, rows: "two", showHeaders: true,
+    });
+    await start();
+    wasm.submit_pick.mockReturnValue(view([cardWithCmc("picked", 6)]));
+
+    await useDraftStore.getState().pickCard("picked", "deck", { column: 2 });
+
+    const placement = useDraftStore.getState().workspaceState!.placements.picked;
+    expect(placement.column).toBe(2);
+    expect(placement.row).toBe(0);
   });
 
   it("has_exactly_one_reconciliation_call_inside_install_workspace", () => {
@@ -396,6 +535,31 @@ describe("draft store workspace authority", () => {
     expect(adapterIds).not.toBe(tuple);
   });
 
+  it("appends_a_hint_less_deck_draft_effect_pick_in_request_order", async () => {
+    // `appends_acknowledged_draft_effect_cards_in_request_order`, below, sends
+    // `"sideboard"` with a `{ column: 4 }` hint, so `operationResolvesOwnPlacement`
+    // excludes both ids from the arriving pass and that test stays green whichever
+    // side of the switch the pass runs on. THIS case — deck, no hint — is what
+    // `PackDisplay.request` dispatches, and it is the one that makes the pass's
+    // position relative to the switch observable: run the pass after
+    // `applyDestination` instead and these two land in POOL order (`first` then
+    // `second`) rather than the requested order.
+    await start([card("effect")]);
+    wasm.submit_pick_with_draft_effect.mockReturnValue(view([
+      { ...cardWithCmc("effect", 3) },
+      { ...cardWithCmc("first", 3) },
+      { ...cardWithCmc("second", 3) },
+    ]));
+
+    await expect(useDraftStore.getState().pickCardWithDraftEffect(
+      "effect", ["second", "first"], "deck",
+    )).resolves.toEqual({ status: "acknowledged" });
+
+    const placements = useDraftStore.getState().workspaceState!.placements;
+    expect(placements.second.order).toBe(0);
+    expect(placements.first.order).toBe(1);
+  });
+
   it("appends_acknowledged_draft_effect_cards_in_request_order", async () => {
     await start([card("effect")]);
     wasm.submit_pick_with_draft_effect.mockReturnValue(view([
@@ -421,6 +585,45 @@ describe("draft store workspace authority", () => {
     await expect(useDraftStore.getState().pickCardWithDraftEffect("effect", ["first", "second"]))
       .resolves.toEqual({ status: "rejected", reason: "unacknowledged" });
     expect(useDraftStore.getState().workspaceState).toBe(original);
+  });
+
+  it("sorts_an_auto_picked_card_that_carries_no_hint_of_its_own", async () => {
+    // The other direction of the `acknowledged-auto-pick` arm, and the solo twin
+    // of the pod store's `sorts an auto-picked card that carries no hint of its
+    // own`. `performPick` builds this card's hint as
+    // `request.placementHints?.[addedInstanceId]`, so an id the page's
+    // pack-keyed map does not cover — or any bare `autoPickCard("deck")` —
+    // arrives with no decision of its own and must be sorted, not parked in
+    // column 0.
+    await start();
+    wasm.auto_pick.mockReturnValue(view([cardWithCmc("added", 6)]));
+
+    await expect(useDraftStore.getState().autoPickCard("deck"))
+      .resolves.toEqual({ status: "acknowledged" });
+
+    expect(useDraftStore.getState().workspaceState!.placements.added.column).toBe(6);
+  });
+
+  it("leaves_a_row_less_auto_pick_hint_on_a_two_row_board_in_the_reconcile_default_row", async () => {
+    // The `acknowledged-auto-pick` arm of the same exclusion. `validPlacementHint`
+    // admits a hint with no `row`, and `DraftPage.handleAutoPick` builds its hints
+    // from `resolveWorkspacePickPlacement`, which omits `row` on a one-row board —
+    // a persisted or restored intent can therefore carry that shape into a
+    // two-row board. Without the arm the arriving pass decides the row instead.
+    setArrivingCardBoardPreferences({
+      sort: "cmc", columnCount: 7, rows: "two", showHeaders: true,
+    });
+    await start();
+    wasm.auto_pick.mockReturnValue(view([
+      { ...cardWithCmc("added", 6), type_line: "Creature — Bear" },
+    ]));
+
+    await expect(useDraftStore.getState().autoPickCard("deck", { added: { column: 2 } }))
+      .resolves.toEqual({ status: "acknowledged" });
+
+    const placement = useDraftStore.getState().workspaceState!.placements.added;
+    expect(placement.column).toBe(2);
+    expect(placement.row).toBe(0);
   });
 
   it("appends_the_acknowledged_auto_pick_to_its_resolved_target_stack", async () => {

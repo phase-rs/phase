@@ -49,6 +49,7 @@ import {
   repairDraftWorkspacePackScale,
   repairDraftWorkspacePileScale,
   saveDraftWorkspacePreferences,
+  setArrivingCardBoardPreferences,
   type DraftWorkspacePreferences,
   type ResponsiveDraftLayout,
 } from "../components/draft/workspace/workspacePreferences";
@@ -72,7 +73,6 @@ import {
   DRAFT_OFFLINE_ERROR,
   intergamePromptKey,
   isMultiplayerDraftPodLive,
-  setArrivingCardBoardPreferences,
   useMultiplayerDraftStore,
   type DraftPodScreen,
   type GuestDraftResumeOutcome,
