@@ -12,9 +12,9 @@
 //! is rules-correct, not arguable.
 //! CR 603.10a — abilities that trigger when a player sacrifices a permanent are
 //! look-back triggers.
-//! CR 605.3a — a mana ability may be activated mid-cast or mid-resolution; it
-//! does not use the stack, which is why its cost events settle outside the
-//! ordinary priority-driven trigger cycle.
+//! CR 605.3a — an activated mana ability may be activated when a mana payment
+//! is required, including during casting or resolution. CR 605.3b — it does not
+//! use the stack and resolves immediately after activation.
 //!
 //! This file is a DISCRIMINATOR, not a single repro. The report blames the
 //! token, but that is only one of three candidate axes. The 2x2 below separates
@@ -132,8 +132,8 @@ fn sacrifice_a_creature_with(outlet: Outlet, victim_kind: Victim, observer: Obse
                     })
                     .expect("sacrificing the chosen creature must succeed");
             }
-            // The Altar adds "one mana of any color" (CR 605.3b). MEASURED from
-            // the first run's prompt trail rather than assumed.
+            // Phyrexian Altar's Oracle text adds "one mana of any color". The
+            // prompt was measured from the first run rather than assumed.
             WaitingFor::ChooseManaColor { .. } => {
                 runner
                     .act(GameAction::ChooseManaColor {
