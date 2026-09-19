@@ -5024,6 +5024,10 @@ fn parse_unless_sacrifice_filter(rest: &str) -> Option<AbilityCost> {
 /// - "another creature you control to its owner's hand"
 /// - "an untapped island you control to its owner's hand"
 /// - "a non-lair land you control to its owner's hand"
+/// - "a basic land card from your graveyard to your hand"
+/// - "an enchantment to its owner's hand" (Drake Familiar — no controller
+///   restriction; any enchantment on the battlefield, yours or an
+///   opponent's, may be returned)
 fn parse_unless_return_to_hand(rest: &str) -> Option<AbilityCost> {
     let to_pos = rest.find(" to ")?; // allow-noncombinator: delimiter split on pre-tokenized unless clause text
     let filter_part = rest[..to_pos].trim().trim_end_matches('.').trim();
@@ -5061,12 +5065,19 @@ fn parse_unless_return_to_hand(rest: &str) -> Option<AbilityCost> {
     let from_zone = filter.extract_in_zone();
 
     // Ensure controller scoping — parse_target sets it from "you control" but
-    // some forms omit it (e.g., "a basic land card from your graveyard").
+    // some forms omit it while still implying ownership through a possessive
+    // source zone (e.g. "a basic land card from your graveyard": the zone
+    // itself is "yours", so the object is too). A BARE battlefield noun with
+    // neither "you control" nor a possessive zone (Drake Familiar — "an
+    // enchantment to its owner's hand") carries NO ownership restriction in
+    // the printed text and must not be scoped to the controller — any
+    // enchantment on the battlefield, yours or an opponent's, is eligible.
     let filter = match &filter {
         TargetFilter::Typed(tf) if tf.controller.is_some() => filter,
-        _ => TargetFilter::And {
+        _ if from_zone.is_some() => TargetFilter::And {
             filters: vec![TargetFilter::Controller, filter],
         },
+        _ => filter,
     };
 
     Some(AbilityCost::ReturnToHand {
