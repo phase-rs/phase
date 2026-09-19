@@ -12296,9 +12296,29 @@ fn auto_tap_mana_sources_inner(
             if generic_priority(option) != class {
                 continue;
             }
-            let eligible_width = option_mana_types_for_context(option, effective_ctx).len();
+            let mut eligible_width = option_mana_types_for_context(option, effective_ctx).len();
             if !option_allowed_for_context(option, effective_ctx) || eligible_width == 0 {
                 continue;
+            }
+            // CR 605.3b + CR 614.1a: a single-type option whose ability adds more
+            // mana when a condition holds ("Add {C}. If you control an Urza's Mine
+            // and an Urza's Power-Plant, add {C}{C}{C} instead.") pays that much
+            // generic in one activation. Counting only the base unit tapped every
+            // Tron land for {4} and stranded the surplus in the pool.
+            if option.atomic_combination.is_none() {
+                if let (Some(ability_index), Some(object)) =
+                    (option.ability_index, state.objects.get(&option.object_id))
+                {
+                    if let Some(ability) = object.abilities.get(ability_index) {
+                        let gross = super::mana_sources::gross_mana_output(
+                            state,
+                            ability,
+                            option.object_id,
+                            object.controller,
+                        ) as usize;
+                        eligible_width = eligible_width.max(gross);
+                    }
+                }
             }
             if used_sources.insert(option.object_id) {
                 to_tap.push(option.clone());
