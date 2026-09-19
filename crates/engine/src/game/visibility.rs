@@ -6962,6 +6962,7 @@ mod tests {
                 paused_at_index: 0,
                 destination: Zone::Exile,
                 completion: PendingCostMoveCompletion::FinishPending,
+                requested_cost_count: None,
             },
             PendingCostMoveResume::Foretell {
                 player: PlayerId(0),
