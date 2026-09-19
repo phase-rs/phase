@@ -3288,6 +3288,7 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell,
             cast_mana_value: None,
+            incarnation: None,
         });
 
         // The exile-until hit — Target, mana value 1.
@@ -3445,6 +3446,7 @@ mod tests {
             controller: PlayerId(0),
             object_id: spell,
             cast_mana_value: None,
+            incarnation: None,
         });
 
         // Two exile-until hits — both bound as object targets on the parent, so the
