@@ -1555,7 +1555,16 @@ fn graveyard_object_castable_by_permission_sources(
         frequency_slot_available(state, source.source_id, obj_id, source.frequency) && {
             let ctx =
                 super::filter::FilterContext::from_source_with_controller(source.source_id, player);
-            super::filter::matches_target_filter(state, obj_id, source.filter, &ctx)
+            // CR 109.4 + CR 108.4a + CR 109.5: a card in a graveyard has NO
+            // controller, so "your graveyard" resolves to its OWNER. See the
+            // note on the sibling consumer in `graveyard_permission_source`.
+            super::filter::matches_target_filter_for_zone(
+                state,
+                obj_id,
+                Zone::Graveyard,
+                source.filter,
+                &ctx,
+            )
         }
     })
 }
@@ -5343,9 +5352,18 @@ fn graveyard_permission_source(
             if !frequency_slot_available(state, source.source_id, object_id, source.frequency) {
                 return false;
             }
-            super::filter::matches_target_filter(
+            // CR 109.4 + CR 108.4a + CR 109.5: a card in a graveyard has NO controller
+            // ("objects that are neither on the stack nor on the battlefield aren't
+            // controlled by any player"), so "your graveyard" resolves to its OWNER.
+            // `matches_target_filter` reads the LKI controller for an off-battlefield
+            // object, which for a permanent that died under an opponent's control is
+            // the THIEF -- excluding the card from its own owner's permission.
+            // `matches_target_filter_for_zone` is the single authority for that
+            // substitution.
+            super::filter::matches_target_filter_for_zone(
                 state,
                 object_id,
+                Zone::Graveyard,
                 source.filter,
                 &super::filter::FilterContext::from_source_with_controller(
                     source.source_id,
@@ -5381,6 +5399,22 @@ fn filter_has_keyword_kind_constraint(filter: &TargetFilter, kind: KeywordKind) 
     }
 }
 
+/// Test-only accessor for [`has_graveyard_cast_permission_without_keyword_constraint`].
+///
+/// That consumer is one of the four graveyard-permission call sites that resolve
+/// "your graveyard" against the card's OWNER (CR 109.4 + CR 108.4a). It is
+/// reachable in production only from the bestow lane, so integration coverage of
+/// the owner substitution needs to query its verdict directly.
+#[doc(hidden)]
+pub fn has_graveyard_cast_permission_without_keyword_constraint_for_test(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    kind: KeywordKind,
+) -> bool {
+    has_graveyard_cast_permission_without_keyword_constraint(state, player, object_id, kind)
+}
+
 fn has_graveyard_cast_permission_without_keyword_constraint(
     state: &GameState,
     player: PlayerId,
@@ -5392,9 +5426,12 @@ fn has_graveyard_cast_permission_without_keyword_constraint(
         .any(|source| {
             !filter_has_keyword_kind_constraint(source.filter, kind)
                 && frequency_slot_available(state, source.source_id, object_id, source.frequency)
-                && super::filter::matches_target_filter(
+                // CR 109.4 + CR 108.4a: owner-scoped, as in the sibling
+                // consumers -- see `graveyard_permission_source`.
+                && super::filter::matches_target_filter_for_zone(
                     state,
                     object_id,
+                    Zone::Graveyard,
                     source.filter,
                     &super::filter::FilterContext::from_source_with_controller(
                         source.source_id,
@@ -5745,7 +5782,15 @@ pub fn graveyard_lands_playable_by_permission(
                 if !frequency_slot_available(state, source.source_id, gy_obj_id, source.frequency) {
                     continue;
                 }
-                if super::filter::matches_target_filter(state, gy_obj_id, source.filter, &ctx) {
+                // CR 109.4 + CR 108.4a: owner-scoped, as in the sibling
+                // consumers -- see `graveyard_permission_source`.
+                if super::filter::matches_target_filter_for_zone(
+                    state,
+                    gy_obj_id,
+                    Zone::Graveyard,
+                    source.filter,
+                    &ctx,
+                ) {
                     results.push((gy_obj_id, source.source_id));
                 }
             }

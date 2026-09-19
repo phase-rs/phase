@@ -378,6 +378,7 @@ mod granted_alt_cost_hand_keyword;
 mod granted_bloodthirst_5802;
 mod granted_storm_snapshot;
 mod granted_sunburst_5337;
+mod graveyard_permission_owner_zone;
 mod graveyard_to_hand_activation_zone;
 mod great_aurora_owner_shuffle;
 mod greater_good_activation;
