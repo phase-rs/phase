@@ -1929,7 +1929,24 @@ export type StackEntryKind =
   | { type: "Spell"; data: { card_id: CardId; ability?: ResolvedAbility; actual_mana_spent?: number } }
   | { type: "ActivatedAbility"; data: { source_id: ObjectId; ability: ResolvedAbility } }
   | { type: "TriggeredAbility"; data: { source_id: ObjectId; ability: ResolvedAbility; description?: string; source_name?: string; provenance?: SyntheticTriggerProvenance } }
-  | { type: "KeywordAction"; data: { action: KeywordAction } };
+  | { type: "KeywordAction"; data: { action: KeywordAction } }
+  // Pre-M10 combat damage on the stack: one object per combat damage step,
+  // holding that step's frozen assignments. Neither a spell nor an ability, so
+  // no counter/retarget UI affordance applies to it. Render it from
+  // `StackEntryDisplay.kind_label` like every other entry.
+  | {
+      type: "CombatDamage";
+      data: {
+        sub_step: "FirstStrike" | "Regular";
+        assignments: {
+          source: { object_id: ObjectId; incarnation: number };
+          target:
+            | { type: "Object"; data: { object_id: ObjectId; incarnation: number } }
+            | { type: "Player"; data: PlayerId };
+          amount: number;
+        }[];
+      };
+    };
 
 /** Engine-authored identity for a synthesized triggered ability. */
 export type SyntheticTriggerProvenance =

@@ -7024,6 +7024,14 @@ fn normalized_stack_entries(state: &GameState) -> Vec<(StackEntry, Option<Trigge
                 } => crate::game::triggers::normalize_ability_identity(ability),
                 StackEntryKind::Spell { ability: None, .. }
                 | StackEntryKind::KeywordAction { .. } => {}
+                // The payload keeps its `ObjectIncarnationRef`s: `norm.id` /
+                // `norm.source_id` zeroing does not reach inside it, so two
+                // otherwise-identical entries normalize unequal. That is
+                // fail-safe here — retained content differences only SUPPRESS a
+                // coverability match, never manufacture one (see this
+                // function's own contract). Re-audit when these entries carry
+                // live assignments.
+                StackEntryKind::CombatDamage { .. } => {}
             }
             (norm, firing)
         })
@@ -7244,7 +7252,11 @@ fn stack_entry_resolution_choice_freedom(
         }
         StackEntryKind::Spell { .. }
         | StackEntryKind::ActivatedAbility { .. }
-        | StackEntryKind::KeywordAction { .. } => ResolutionChoiceFreedom::MayPrompt,
+        | StackEntryKind::KeywordAction { .. }
+        // Fail-closed, per the classifier's contract: a choice-free verdict is
+        // a soundness claim requiring a resolver trace, and this kind has no
+        // resolver until combat-damage timing lands.
+        | StackEntryKind::CombatDamage { .. } => ResolutionChoiceFreedom::MayPrompt,
     }
 }
 

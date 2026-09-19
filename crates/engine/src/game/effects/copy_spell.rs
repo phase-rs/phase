@@ -177,6 +177,13 @@ pub fn resolve(
                 preserve_ability_copy_source_recursive(ability);
             }
             StackEntryKind::KeywordAction { .. } => {}
+            // CR 707.10 copies a spell or ability the effect named. A
+            // combat-damage entry is neither and can never be named
+            // (`targeting::stack_entry_matches_filter_with_context` refuses it),
+            // so this arm is unreachable in production — but it stays a no-op
+            // rather than a panic, because this match also runs over
+            // already-built copies.
+            StackEntryKind::CombatDamage { .. } => {}
         }
         set_copied_kind_controller(&mut kind, copy_controller);
         kind
@@ -200,7 +207,8 @@ pub fn resolve(
         StackEntryKind::Spell { card_id, .. } => Some(*card_id),
         StackEntryKind::ActivatedAbility { .. }
         | StackEntryKind::TriggeredAbility { .. }
-        | StackEntryKind::KeywordAction { .. } => None,
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => None,
     };
 
     // CR 707.10: the copy-onto-stack authority stamps the CR 701.27f
@@ -863,7 +871,10 @@ fn set_copied_kind_controller(kind: &mut StackEntryKind, controller: PlayerId) {
         StackEntryKind::TriggeredAbility { ability, .. } => {
             set_resolved_controller_recursive(ability, controller);
         }
-        StackEntryKind::Spell { ability: None, .. } | StackEntryKind::KeywordAction { .. } => {}
+        StackEntryKind::Spell { ability: None, .. }
+        | StackEntryKind::KeywordAction { .. }
+        // No resolved ability chain to re-controller.
+        | StackEntryKind::CombatDamage { .. } => {}
     }
 }
 
@@ -940,7 +951,9 @@ fn rewrite_copy_spell_object_targets(
 
 fn stack_entry_source_id_for_copy(kind: &StackEntryKind, copy_id: ObjectId) -> ObjectId {
     match kind {
-        StackEntryKind::Spell { .. } | StackEntryKind::KeywordAction { .. } => copy_id,
+        StackEntryKind::Spell { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => copy_id,
         StackEntryKind::ActivatedAbility { source_id, .. }
         | StackEntryKind::TriggeredAbility { source_id, .. } => *source_id,
     }
