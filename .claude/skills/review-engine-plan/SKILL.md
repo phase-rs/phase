@@ -7,17 +7,18 @@ description: Review phase.rs engine, parser, AI, frontend, or rules implementati
 
 Review the plan as an architectural gate. Reject the plan if any required dimension is missing, superficial, or contradicted by code evidence.
 
-## Probe policy — you MAY and SHOULD run code
+## Probe policy — answer a concrete design uncertainty
 
 **You are not a read-only reviewer.** Building and running throwaway probes is an expected part of this
 review, and it is the only instrument that can refute a plan whose prose is internally consistent but
 whose runtime behaviour differs. Static review structurally cannot catch a predicate that reads
 correctly and answers wrongly on a real board.
 
-Use an isolated `CARGO_TARGET_DIR` and the worktree's absolute path; never build in a checkout another
-process (e.g. Tilt) owns; serialize probe activity behind any active implementation executor. That
-isolation is why no brief needs to withhold builds from you — if one says "do not run cargo", use your
-own target dir and note it in your report.
+Prefer existing tests, fixtures, commands or supported tool APIs. Small probes may answer a disputed premise; they do not authorize a separate driver, seeding service or verification framework. Honor the caller's execution constraints, including a no-build constraint, and report unavailable evidence rather than bypassing it.
+
+In every engine-implementer mode, use the supplied original task and scope/attempt history and follow its [task scope](../engine-implementer/SKILL.md#task-scope-and-verification-work) and [run limits](../engine-implementer/SKILL.md#run-limits). This includes proposed machinery corrections before measurement. A reviewer can identify a missing check, but returns it to the orchestrator instead of independently expanding or repairing tooling. Required correctness evidence remains required.
+
+When execution is permitted, use an isolated `CARGO_TARGET_DIR` and the worktree's absolute path; never build in a checkout another process (e.g. Tilt) owns; serialize probe activity behind any active implementation executor.
 
 ## Required Checks
 
@@ -144,7 +145,7 @@ Check **only** Sizing consistency against the plan body (check 12's substance, n
 
 ## Review Loop
 
-Return every gap to the planner. Require a revised full plan, then re-review the entire revised plan with fresh context. Repeat until a full round returns clean or the caller stops the process.
+Return every gap to the planner. Require a revised full plan, then re-review the entire revised plan with fresh context. Repeat until a full round returns clean or the caller stops the process, subject to the caller's scope and attempt limits. In the engine-implementer pipeline, return each result to the orchestrator before another revision; switching modes or phases does not reset that history.
 
 ## Output
 
