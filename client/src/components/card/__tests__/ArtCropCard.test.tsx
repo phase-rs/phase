@@ -11,6 +11,12 @@ vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardImage: vi.fn(() => ({ src: null, isLoading: true })),
 }));
 
+const localizedNames = vi.hoisted(() => new Map<string, string>());
+
+vi.mock("../../../hooks/useEngineCardData.ts", () => ({
+  useLocalizedCardName: (name: string | null) => localizedNames.get(name ?? "") ?? name,
+}));
+
 const mockUseCardImage = vi.mocked(useCardImage);
 
 function transformedPermanent(): GameObject {
@@ -67,6 +73,7 @@ function transformedPermanent(): GameObject {
 describe("ArtCropCard", () => {
   beforeEach(() => {
     const permanent = transformedPermanent();
+    localizedNames.clear();
     mockUseCardImage.mockClear();
     useGameStore.setState({
       gameState: {
@@ -146,6 +153,25 @@ describe("ArtCropCard", () => {
     expect(screen.getByText("1")).toBeInTheDocument();
     // Name appears in both the frame header and the fallback tile's label.
     expect(screen.getAllByText("Banana").length).toBeGreaterThan(0);
+  });
+
+  it("localizes the visible battlefield name without changing the art lookup key", () => {
+    localizedNames.set("Kuruk, the Mastodon", "クルーク・巨象");
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.getAllByText("クルーク・巨象").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Kuruk, the Mastodon")).toBeNull();
+    expect(mockUseCardImage).toHaveBeenCalledWith(
+      "The Legend of Kuruk",
+      expect.objectContaining({ faceIndex: 1 }),
+    );
   });
 
   it("falls back to the tile when resolved art fails to load", () => {

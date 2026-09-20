@@ -15,10 +15,21 @@ import {
   buildPlayers,
   buildPriorityWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
+import { CommandDock } from "../CommandDock.tsx";
 import { CommanderCardZone } from "../CommanderCardZone.tsx";
 
 vi.mock("../../../game/dispatch.ts", () => ({
   dispatchAction: vi.fn(),
+}));
+
+vi.mock("../../../hooks/useResolvedCommandZoneDisplay.ts", () => ({
+  useResolvedCommandZoneDisplay: () => "compact",
+}));
+
+const localizedNames = vi.hoisted(() => new Map<string, string>());
+
+vi.mock("../../../hooks/useEngineCardData.ts", () => ({
+  useLocalizedCardName: (name: string | null) => localizedNames.get(name ?? "") ?? name,
 }));
 
 // Keep the test hermetic: the card-image hook otherwise fires a dev-server
@@ -118,6 +129,7 @@ function seedStores(
 
 describe("CommanderCardZone commander ninjutsu (issue #5239)", () => {
   beforeEach(() => {
+    localizedNames.clear();
     vi.mocked(dispatchAction).mockClear();
   });
 
@@ -213,6 +225,7 @@ describe("CommanderCardZone commander ninjutsu (issue #5239)", () => {
  */
 describe("CommanderCardZone activation gate", () => {
   beforeEach(() => {
+    localizedNames.clear();
     vi.mocked(dispatchAction).mockClear();
   });
 
@@ -317,6 +330,7 @@ describe("CommanderCardZone art resolution", () => {
   }
 
   beforeEach(() => {
+    localizedNames.clear();
     cardImage.calls.length = 0;
     cardImage.result = { src: null, isLoading: false };
     seedWithPrintedRef();
@@ -358,6 +372,21 @@ describe("CommanderCardZone art resolution", () => {
     // surface does.
     expect(screen.getByRole("img", { name: "Kefka, Court Mage" })).toBeInTheDocument();
     expect(screen.getByText("Kefka, Court Mage")).toBeInTheDocument();
+  });
+
+  it("uses the localized commander name for visible fallback and tooltip text", () => {
+    localizedNames.set("Kefka, Court Mage", "ケフカ・宮廷魔道士");
+    cardImage.result = { src: null, isLoading: false };
+
+    render(<CommanderCardZone playerId={0} />);
+
+    expect(screen.getByRole("img", { name: "ケフカ・宮廷魔道士" })).toBeInTheDocument();
+    expect(screen.getByRole("button")).toHaveAttribute("title", expect.stringContaining("ケフカ・宮廷魔道士"));
+
+    cleanup();
+    render(<CommandDock playerId={0} isMirrored={false} />);
+    expect(screen.getByRole("img", { name: "ケフカ・宮廷魔道士" })).toBeInTheDocument();
+    expect(cardImage.calls[cardImage.calls.length - 1]?.name).toBe("Kefka, Court Mage");
   });
 
   it("renders the resolved art", () => {

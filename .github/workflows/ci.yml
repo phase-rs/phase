@@ -123,6 +123,9 @@ jobs:
         # listed triple it does not publish leaves that desktop with no preview.
         run: python3 scripts/preview_data_wait_tests.py
 
+      - name: Localized card image fallback tests
+        run: python3 scripts/lib/localized_image_fallback_tests.py
+
       - name: Action pin checker unit tests
         # Exercises the checker against throwaway repositories only; it does
         # not walk this repository's own workflows. The gate over the real tree

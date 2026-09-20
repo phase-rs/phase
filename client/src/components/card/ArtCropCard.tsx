@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import type { PTColor } from "../../viewmodel/cardProps";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useLocalizedCardName } from "../../hooks/useEngineCardData.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
@@ -42,9 +43,11 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   // permanent (the live face is blanked per CR 708.2a); the controller's peek
   // is the hover preview (#7547).
   const renderCardBack = obj?.face_down === true;
+  const canonicalCardName = obj?.name ?? "";
+  const localizedCardName = useLocalizedCardName(renderCardBack ? null : canonicalCardName) ?? canonicalCardName;
   const cardName = renderCardBack
     ? (faceDownMarkerName(true, obj?.face_down_cause) ?? t("card.faceDownName"))
-    : (obj?.name ?? "");
+    : localizedCardName;
   const imageLookup = obj
     ? cardImageLookup(obj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };

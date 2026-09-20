@@ -8,6 +8,7 @@ import { dispatchAction } from "../../game/dispatch.ts";
 import { previewAutomaticManaPayment } from "../../game/manaPaymentPreview.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useLocalizedCardName } from "../../hooks/useEngineCardData.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { getPlayerId, useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useDragToCast } from "../../hooks/useDragToCast.ts";
@@ -72,6 +73,7 @@ function CommanderCard({
 }) {
   const { t } = useTranslation("game");
   const isSignatureSpell = commander.signature_spell != null;
+  const displayName = useLocalizedCardName(commander.name) ?? commander.name;
   const isCompactHeight = useIsCompactHeight();
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const effectiveCost = useGameStore(
@@ -241,20 +243,20 @@ function CommanderCard({
         canCast
           ? isSignatureSpell
             ? tax > 0
-              ? t("zone.castSignatureSpellTax", { name: commander.name, tax })
-              : t("zone.castSignatureSpell", { name: commander.name })
+              ? t("zone.castSignatureSpellTax", { name: displayName, tax })
+              : t("zone.castSignatureSpell", { name: displayName })
             : tax > 0
-              ? t("zone.castCommanderTax", { name: commander.name, tax })
-              : t("zone.castCommander", { name: commander.name })
+              ? t("zone.castCommanderTax", { name: displayName, tax })
+              : t("zone.castCommander", { name: displayName })
           : canNinjutsu
-            ? t("zone.ninjutsuCommander", { name: commander.name })
+            ? t("zone.ninjutsuCommander", { name: displayName })
             : isSignatureSpell
               ? tax > 0
-                ? t("zone.signatureSpellTitleTax", { name: commander.name, tax })
-                : t("zone.signatureSpellTitle", { name: commander.name })
+                ? t("zone.signatureSpellTitleTax", { name: displayName, tax })
+                : t("zone.signatureSpellTitle", { name: displayName })
               : tax > 0
-                ? t("zone.commanderTitleTax", { name: commander.name, tax })
-                : t("zone.commanderTitle", { name: commander.name })
+                ? t("zone.commanderTitleTax", { name: displayName, tax })
+                : t("zone.commanderTitle", { name: displayName })
       }
       style={{ width: "var(--card-w)", height: "var(--card-h)" }}
     >
@@ -272,7 +274,7 @@ function CommanderCard({
           <img
             src={src}
             {...getCardImageSrcSetProps(src, rungs)}
-            alt={commander.name}
+            alt={displayName}
             className="h-full w-full object-cover"
             draggable={false}
             onError={() => advanceFailedSource?.(src)}
@@ -280,7 +282,7 @@ function CommanderCard({
         ) : (
           /* `artCrop` centres and wraps the name; `fullCard` top-aligns and
              truncates it, which this tile is too narrow to read. */
-          <CardArtFallback name={commander.name} variant="artCrop" className="h-full w-full" />
+          <CardArtFallback name={displayName} variant="artCrop" className="h-full w-full" />
         )}
 
         {/* Translucent overlay — amber tint, lighter when actionable (castable
