@@ -780,9 +780,11 @@ fn derive_and_perform_player_scope_sacrifice(
 
 /// CR 701.21a: sweep every in-scope permanent the keepers did not protect.
 /// Called only from `sacrifice_unchosen`'s `keeper_counter: None` branch —
-/// the printed instruction has no counter mark to place first, so there is
-/// nothing to pause on. Shares its derive-and-perform body with
-/// `continue_player_scope_sacrifice` via `derive_and_perform_player_scope_sacrifice`.
+/// the printed instruction has no counter mark to place first, so this path
+/// needs no resume entry point. The sweep itself may still pause
+/// (`PausedForReplacement`), which the inline caller handles by returning.
+/// Shares its derive-and-perform body with `continue_player_scope_sacrifice`
+/// via `derive_and_perform_player_scope_sacrifice`.
 fn run_player_scope_sacrifice(
     state: &mut GameState,
     kept: &[ObjectId],
