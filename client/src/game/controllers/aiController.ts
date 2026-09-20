@@ -4,6 +4,10 @@ import type { AiActionProposal, GameAction, GameState, WaitingFor } from "../../
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { pressureMultiplier } from "../../utils/stackPressure";
 import { effectiveStackPressure } from "../../utils/stackThroughput";
+import {
+  clearAiDecisionDiagnostic,
+  recordAiDecisionDiagnostic,
+} from "../aiDecisionDiagnostics";
 import { debugLog } from "../debugLog";
 import { dispatchAiActionProposal } from "../dispatch";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "../engineRecovery";
@@ -200,6 +204,7 @@ export function createAIController(config: AIControllerConfig): AIController {
   function invalidateAttempt(): void {
     attemptGeneration++;
     pending = false;
+    clearAiDecisionDiagnostic();
     if (timeoutId != null) {
       clearTimeout(timeoutId);
       timeoutId = null;
@@ -285,7 +290,17 @@ export function createAIController(config: AIControllerConfig): AIController {
       : adapter?.getAiActionProposal;
     if (!getProposal) return;
     const attempt = beginAttempt(scheduledWaitingFor, playerId);
-    const proposalPromise: Promise<AiActionProposal | null> = Promise.resolve(
+    const waitingFor = waitingForDebugLabel(scheduledWaitingFor);
+    recordAiDecisionDiagnostic({
+      stage: "awaiting-proposal",
+      playerId,
+      difficulty,
+      waitingFor,
+    });
+    // Defer invocation into the promise chain. `Promise.resolve(call())`
+    // evaluates `call()` first, so a synchronous adapter exception used to
+    // bypass the timeout callback's catch/finally and strand `pending = true`.
+    const proposalPromise: Promise<AiActionProposal | null> = Promise.resolve().then(() =>
       getProposal.call(adapter, difficulty, playerId),
     );
     // Suppress unhandled-rejection warnings if stop() cancels the timeout
@@ -385,6 +400,12 @@ export function createAIController(config: AIControllerConfig): AIController {
         // prompt, which keeps controlled turns and simultaneous decisions in
         // the authority boundary.
         if (!isAttemptCurrent(attempt)) return;
+        recordAiDecisionDiagnostic({
+          stage: "submitting-proposal",
+          playerId,
+          difficulty,
+          waitingFor,
+        });
         const submission = await dispatchAiActionProposal(proposal);
         if (!isAttemptCurrent(attempt)) return;
         // The proposal boundary returns a tagged stale result without mutating
@@ -398,6 +419,13 @@ export function createAIController(config: AIControllerConfig): AIController {
       } catch (e) {
         if (!isAttemptCurrent(attempt)) return;
         lastDispatchError = e instanceof Error ? e.message : String(e);
+        recordAiDecisionDiagnostic({
+          stage: "failed",
+          playerId,
+          difficulty,
+          waitingFor,
+          error: lastDispatchError,
+        });
         debugLog(`AI error choosing action: ${lastDispatchError}`);
         failed = true;
       } finally {
@@ -406,7 +434,10 @@ export function createAIController(config: AIControllerConfig): AIController {
             consecutiveFailures++;
             totalFailures++;
           }
-          if (active) checkAndSchedule();
+          if (active) {
+            checkAndSchedule();
+            if (!pending) clearAiDecisionDiagnostic();
+          }
         }
       }
     }, delay);
@@ -414,6 +445,7 @@ export function createAIController(config: AIControllerConfig): AIController {
 
   function start() {
     active = true;
+    clearAiDecisionDiagnostic();
     if (unsubscribe) {
       unsubscribe();
       unsubscribe = null;
@@ -453,6 +485,7 @@ export function createAIController(config: AIControllerConfig): AIController {
   function stop() {
     active = false;
     invalidateAttempt();
+    clearAiDecisionDiagnostic();
   }
 
   function dispose() {

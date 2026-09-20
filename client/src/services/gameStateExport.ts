@@ -1,6 +1,10 @@
 import { strToU8, zipSync } from "fflate";
 
 import type { EngineAdapter, GameState } from "../adapter/types.ts";
+import {
+  currentAiDecisionDiagnostic,
+  type AiDecisionDiagnostic,
+} from "../game/aiDecisionDiagnostics";
 import { canExportAuthoritativeState, useGameStore } from "../stores/gameStore.ts";
 import { copyText } from "./copyText";
 import { downloadBlob, type DownloadResult } from "./fileDownload";
@@ -10,6 +14,7 @@ interface GameStateDebugSnapshot {
   waitingFor: GameState["waiting_for"];
   legalActions: ReturnType<typeof useGameStore.getState>["legalActions"];
   turnCheckpoints: ReturnType<typeof useGameStore.getState>["turnCheckpoints"];
+  clientAiDecision: AiDecisionDiagnostic;
 }
 
 async function downloadZip(
@@ -31,6 +36,7 @@ export function buildGameStateDebugSnapshot(gameState: GameState): GameStateDebu
     waitingFor: gameState.waiting_for,
     legalActions: store.legalActions,
     turnCheckpoints: store.turnCheckpoints,
+    clientAiDecision: currentAiDecisionDiagnostic(),
   };
 }
 

@@ -130,6 +130,22 @@ describe("AI proposal controller", () => {
     controller.dispose();
   });
 
+  it("retries after a synchronous proposal lookup error instead of stranding the controller pending", async () => {
+    const getAiActionProposal = vi.fn(() => {
+      throw new Error("synchronous adapter failure");
+    });
+    storeState.adapter = { getAiActionProposal };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+    await runOnce();
+
+    expect(getAiActionProposal.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(dispatchAiActionProposal).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
   it("re-queries after the dispatch layer returns the engine's tagged stale outcome without fabricating an action", async () => {
     const issued = proposal(PASS);
     const getAiActionProposal = vi
