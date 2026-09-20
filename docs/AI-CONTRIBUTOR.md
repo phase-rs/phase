@@ -135,6 +135,8 @@ git push origin main                                     # keep the fork's main 
 
 If `git merge --ff-only` fails, your fork's `main` has diverged from upstream — do **not** force it. Proceed to §4 regardless: that step cuts your working branch directly from `upstream/main`, so a diverged fork `main` never contaminates your change.
 
+**Refresh upstream again before expensive final verification**, especially after long waits or review rounds. Follow §4's sync procedure before selecting the committed candidate to verify; §6 records that evidence after §5's final review. A later merge or rebase changes the candidate and invalidates the previous head-bound review and Gate A records. Re-verify the resulting candidate and rerun §5 followed by Gate A; never reuse PASS records from the old head.
+
 ---
 
 ## 2.5. Bootstrap the repo (Developer track only)
@@ -158,6 +160,8 @@ The `--agent` flag skips the three Scryfall image sidecars (`scryfall-data.json`
 - `client/node_modules/` — required by `pnpm` commands. Same caveat.
 
 Agent mode also implies `--no-tilt` internally: even if `tilt` is on your PATH, setup.sh runs `gen-card-data.sh` and `build-wasm.sh` inline rather than deferring them to `tilt up`, so the required artifacts above are guaranteed present when the script exits.
+
+**Tilt is optional.** For repeated Developer-track iterations, an existing Tilt session can reuse incremental builds. On macOS with Homebrew, install it with `brew install tilt-dev/tap/tilt`, then run `tilt up -- test lint` from the checkout being verified. The first run with a cold cache can compile substantial dependencies for the selected resources and their dependencies; later runs can reuse those artifacts. Startup is profile-dependent: plain `tilt up` does not automatically start all test and lint resources, and Tauri is opt-in. Avoid starting another session against a checkout already managed by Tilt. See the [project-reference skill](../.claude/skills/project-reference/SKILL.md#tilt-resources--operational-rules) for resource names, freshness checks, and log/wait commands.
 
 Skip this section entirely on the Non-developer track — CI runs everything `--agent` mode produces.
 
@@ -245,13 +249,13 @@ done
 git checkout -b "$slug" upstream/main   # cut from current upstream, not a stale fork main
 ```
 
-If your work spans more than a few minutes and upstream `main` advances, keep current with `git fetch upstream main && git merge --no-edit upstream/main` so the final diff contains only your change.
+Before selecting the candidate for expensive final verification, fetch upstream again. If `upstream/main` has advanced, integrate it on your feature branch with `git merge --no-edit upstream/main` from a clean working tree containing only your committed work. Resolve any conflicts before selecting the candidate. Do not merge or rebase underneath an active verification/review run; a later sync requires fresh evidence for the resulting head (§2.1).
 
 Then invoke the `$engine-implementer` skill with this prompt, substituting `<NAME>`:
 
 > Implement full engine support for the card "<NAME>". Follow `CLAUDE.md` and `AGENTS.md` design principles without exception: build for the class not the card, nom combinators on first pass, CR annotations verified against `docs/MagicCompRules.txt` (and for each cited rule, also read its adjacent rules in the same section — cite the *authorizing* rule for the effect, not just the *layering* rule), idiomatic Rust, engine owns all logic, frontend is display-only. Reuse existing building blocks before writing new ones. Do not ask for clarification — on ordinary implementation ambiguity, take the architecturally idiomatic path. If the card requires protected architecture scope, stop without opening a PR unless a maintainer explicitly appointed you to that work beforehand or the PR closes an issue labeled `accepted`.
 
-`$engine-implementer`'s published contract is: plan with `engine-planner` → review the plan with `$review-engine-plan` until clean → implement → verify → review the implementation with `$review-impl` until clean → commit. Validate the committed result next.
+`$engine-implementer`'s published contract is: plan with `engine-planner` → review the plan with `$review-engine-plan` until clean → implement → checkpoint the candidate commit → verify the committed candidate → review it with `$review-impl` → accept the clean candidate. Findings return through the skill's fix/checkpoint/verify/review loop. Follow the [skill](../.claude/skills/engine-implementer/SKILL.md) for its stop and escalation rules. Validate the accepted committed result next.
 
 **All tiers:** Gate B and its anchors must exist before implementation. After `$engine-implementer` completes and commits, run the final read-only review in §5 against that committed head, then run Gate A. This is one post-commit loop: if the review finds anything or any later change creates a commit, address it and rerun both the final review and Gate A against the new head. If either gate fails, do NOT continue to §7 — return to fix the violations, or stop per §0.1.3 if they cannot be fixed.
 
@@ -259,7 +263,7 @@ Then invoke the `$engine-implementer` skill with this prompt, substituting `<NAM
 
 ## 5. Validate the review actually happened and was addressed
 
-> This is the most important step. `$engine-implementer` must actually run `$review-impl` and address findings before committing. The outside caller (you, the LLM reading this) must verify.
+> This is the most important step. `$engine-implementer` must actually run `$review-impl` against the committed candidate and address findings before accepting it. The outside caller (you, the LLM reading this) must verify.
 
 **A final read-only `$review-impl` pass is mandatory against the committed head before Gate A and before the PR opens.** Address findings with code, amend or add the final commit, and rerun until the reviewer reports clean. Then run Gate A against that same committed head. Record the exact line `Final review-impl PASS head=<40-hex-sha>` under `## Final review-impl`; that SHA must equal the PR's current head. Acknowledgement without a diff, a dirty-tree review, or a later push does not satisfy the gate. Any later commit invalidates both records and requires rerunning the final review followed by Gate A.
 
@@ -275,11 +279,13 @@ Apply **all three** checks:
 
 ## 6. Record verification and run Gate A (track-specific)
 
-**Developer track** — the implementation workflow must run the mechanical checks below before its final commit. On any failure, fix in-loop (max 2 retries) before committing. If still failing after retries, record the failure in the PR body under "CI Failures" and continue to Step 7 — do not abort. After §5's clean read-only review, run only the Gate A command shown after the mechanical checks; if it finds a problem, change and commit the fix, rerun §5, and then rerun Gate A.
+**Developer track** — the implementation workflow must run the mechanical checks below against its committed candidate before acceptance. On any failure, fix in-loop (max 2 retries), commit the fix, and verify the new candidate. If still failing after retries, record the failure in the PR body under "CI Failures" and continue to Step 7 — do not abort. After §5's clean read-only review, run only the Gate A command shown after the mechanical checks; if it finds a problem, change and commit the fix, rerun §5, and then rerun Gate A.
+
+**Avoid redundant confirmation builds.** Reuse evidence from the same candidate and build configuration instead of adding a one-off build merely to reproduce it for the PR body. Changing Cargo features, profile, or target can trigger additional compilation. Run extra checks when they answer a specific unresolved correctness question or are required by the changed surface; this guidance does not waive required tests, coverage, semantic audits, or parser measurements. Prefer existing production-path tests and required audit output as evidence. For Markdown-only policy changes, inspect the diff, scope, and referenced workflow contracts; Cargo, Tilt, and frontend builds provide no additional signal.
 
 Step 2.5 (`./scripts/setup.sh --agent`) is a prerequisite for this section — `cargo coverage` and `cargo semantic-audit` both read `client/public/card-data.json`, and the integration suite self-skips without it.
 
-If Tilt is running locally (`tilt get uiresource clippy >/dev/null 2>&1` succeeds), prefer `tilt-wait.sh` for clippy/tests/card-data — it reuses Tilt's already-warm rebuild loop instead of fighting it for the cargo target lock. See CLAUDE.md § "Canonical verification pattern".
+If Tilt is running locally (`tilt get uiresource clippy >/dev/null 2>&1` succeeds), prefer `tilt-wait.sh` for clippy/tests/card-data — it reuses Tilt's already-warm rebuild loop instead of fighting it for the cargo target lock. See the [project-reference skill](../.claude/skills/project-reference/SKILL.md#tilt-resources--operational-rules). Results from Tilt watching another checkout do not verify this candidate; `tilt-wait.sh` exit 3 means unavailable evidence, not a failed build.
 
 ```bash
 cargo fmt --all                               # always direct — Tilt doesn't auto-format
