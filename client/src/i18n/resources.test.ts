@@ -76,6 +76,7 @@ describe("i18n resources", () => {
 
   it("normalizes browser and persisted locale tags to a supported app locale", () => {
     expect(normalizeSupportedLng("PT-br", "en")).toBe("pt");
+    expect(normalizeSupportedLng("ja-JP", "en")).toBe("ja");
     expect(normalizeSupportedLng(" de-CH ", "en")).toBe("de");
     expect(normalizeSupportedLng("zh-Hans", "fr")).toBe("fr");
     expect(normalizeSupportedLng(null, "it")).toBe("it");

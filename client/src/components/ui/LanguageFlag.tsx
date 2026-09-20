@@ -102,8 +102,17 @@ function FlagPL({ className }: { className?: string }) {
   );
 }
 
+function FlagJA({ className }: { className?: string }) {
+  return (
+    <svg viewBox={VIEW_BOX} className={className} aria-hidden="true">
+      <rect width="60" height="40" fill="#fff" />
+      <circle cx="30" cy="20" r="12" fill="#BC002D" />
+    </svg>
+  );
+}
+
 export function LanguageFlag({ lng, className }: { lng: SupportedLng; className?: string }) {
-  // Exhaustive over SupportedLng — a new language without a flag is a compile error.
+  // Keep in sync with SupportedLng.
   switch (lng) {
     case "en":
       return <FlagEN className={className} />;
@@ -119,5 +128,7 @@ export function LanguageFlag({ lng, className }: { lng: SupportedLng; className?
       return <FlagPT className={className} />;
     case "pl":
       return <FlagPL className={className} />;
+    case "ja":
+      return <FlagJA className={className} />;
   }
 }

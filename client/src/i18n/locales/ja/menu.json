@@ -1,0 +1,364 @@
+{
+  "backButton": {
+    "label": "戻る"
+  },
+  "aiDifficulty": {
+    "label": "AI難易度",
+    "ariaLabel": "AI難易度: {{difficulty}}",
+    "levels": {
+      "VeryEasy": "とても簡単",
+      "Easy": "簡単",
+      "Medium": "普通",
+      "Hard": "難しい",
+      "VeryHard": "とても難しい",
+      "CEDH": "cEDH"
+    }
+  },
+  "bracketFilter": {
+    "label": "ブラケットフィルター"
+  },
+  "gamePresets": {
+    "heading": "クイックスタート"
+  },
+  "shell": {
+    "disclaimer": "phase.rsは非商用のファンプロジェクトであり、Wizards of the Coastとは提携・承認関係にありません。Magic: The GatheringはWizards of the Coast LLCの©著作物です。カード画像は実行時にScryfallから取得し、カードデータはMTGJSONを使用しています。WotCの著作権資産は本プロジェクトに同梱していません。"
+  },
+  "home": {
+    "resume": {
+      "title": "ゲームを再開",
+      "description": "現在のターンと盤面から、最後に保存したマッチを続行します。"
+    },
+    "setup": {
+      "title": "AIと対戦",
+      "titleSaved": "新しいAIマッチ",
+      "description": "AIとソロ対戦します。フォーマット、デッキ、アーキタイプ、難易度を選択できます。"
+    },
+    "online": {
+      "title": "オンラインでプレイ",
+      "description": "ルームの作成、コードでの参加、対戦への再接続ができます。"
+    },
+    "draft": {
+      "title": "ドラフト",
+      "description": "AIとのクイック・ドラフト、キューブ・ドラフト、卓でドラフトを行います。"
+    },
+    "decks": {
+      "title": "デッキ",
+      "description": "保存済みデッキを開き、使用中のリストを切り替え、構築を編集します。"
+    },
+    "social": {
+      "sponsor": "スポンサー"
+    },
+    "preview": {
+      "cta": "プレビューを試す",
+      "tooltip": "最新のプレビュービルドをプレイできます。各リリース前に新カードと修正が先行して反映されます。",
+      "backCta": "リリース版に戻る",
+      "backTooltip": "現在のリリースビルドに戻ります。"
+    },
+    "coverage": {
+      "title": "対応率ダッシュボードを開く",
+      "ariaLabel": "カード対応率ダッシュボードを開く",
+      "heading": "カード対応率ダッシュボード",
+      "viewDetails": "詳細を表示"
+    },
+    "preparingCards": "カードを準備中…",
+    "alpha": {
+      "label": "初期アルファ",
+      "message": " — 動かないカードや未実装の機能があります。"
+    },
+    "savedMatchAvailable": "保存済みマッチがあります",
+    "load": {
+      "title": "ゲーム状態を読み込む"
+    },
+    "exit": "終了",
+    "dashboard": {
+      "welcome": "おかえりなさい",
+      "enter": "開始",
+      "continue": "前回の続きから",
+      "resumeDraft": "ドラフトを再開",
+      "draftPod": "卓でドラフト",
+      "activeDeck": "使用中のデッキ",
+      "noActiveDeck": "デッキを選んで開始",
+      "fromFeeds": "フィードから",
+      "feedsEmpty": "フィードを購読して新しいデッキを見る",
+      "cards": "{{count}}枚",
+      "mode": {
+        "ai": "AI対戦",
+        "online": "オンライン",
+        "local": "ローカル",
+        "p2p-host": "P2P",
+        "p2p-join": "P2P"
+      },
+      "tagline": "オープンソースのMagic: The Gatheringルールエンジンとゲームクライアント",
+      "turn": "{{n}}ターン目",
+      "yourTurn": "あなたのターン",
+      "opponentTurn": "対戦相手のターン",
+      "yourLife": "あなた {{life}}"
+    }
+  },
+  "loadState": {
+    "title": "ゲーム状態を読み込む",
+    "subtitle": "エクスポートまたは貼り付けた状態を復元し、AIとの対戦を続けます。",
+    "tabPaste": "JSONを貼り付け",
+    "tabFile": "ファイルから",
+    "pastePlaceholder": "GameState JSONを貼り付け…",
+    "fileSupports": "デバッグパネルからエクスポートした.json、.txt、.zipに対応",
+    "chooseFile": "ファイルを選択",
+    "load": "読み込む"
+  },
+  "aiOpponent": {
+    "heading": "AI対戦相手",
+    "headingMulti": "AI対戦相手（{{count}}人）",
+    "analyzingDecks": "デッキを分析中…",
+    "noLegalDecks": "このフォーマットで使用可能なAIデッキがありません。",
+    "catalogUnavailable": "AIデッキカタログを利用できません: {{error}}",
+    "randomPoolFilters": "ランダムプールのフィルター",
+    "archetype": "アーキタイプ",
+    "cardCoverage": "カード対応率",
+    "coverageThresholdHint": "このエンジン対応率未満のデッキを除外",
+    "bracket": "ブラケット",
+    "bracketHint": "このブラケットからAIがランダムに選びます。フィルター時はタグなしデッキを除外します。",
+    "opponentLabel": "対戦相手{{number}}",
+    "deck": "デッキ",
+    "difficulty": "難易度",
+    "deckRandom": "ランダム",
+    "deckRandomCount": "ランダム（{{count}}）",
+    "cedhToggle": {
+      "label": "cEDHモード",
+      "hint": "すべての対戦相手がcEDHでプレイします。すべてのデッキはブラケット5でなければなりません。",
+      "badge": "cEDH"
+    },
+    "source": {
+      "feed": "フィード",
+      "user": "ユーザー",
+      "precon": "構築済み"
+    }
+  },
+  "feedManager": {
+    "title": "フィードを管理",
+    "refreshing": "更新中…",
+    "refreshAll": "すべて更新",
+    "refresh": "更新",
+    "subscribe": "購読",
+    "unsubscribe": "購読解除",
+    "lastRefreshed": "最終更新: {{date}}",
+    "addCustomFeed": "カスタムフィードを追加",
+    "add": "追加",
+    "offlineUnavailable": "オフライン中はフィードを更新できません。",
+    "done": "完了"
+  },
+  "importDeck": {
+    "title": "デッキをインポート",
+    "tabPaste": "テキストを貼り付け",
+    "tabUrl": "URLから",
+    "tabFile": "ファイルから",
+    "deckNamePlaceholder": "デッキ名",
+    "urlPlaceholder": "https://moxfield.com/decks/… または https://archidekt.com/decks/…",
+    "urlHint": "MoxfieldまたはArchidektから公開デッキをインポートします。",
+    "import": "インポート",
+    "importing": "インポート中…",
+    "importAsOathbreaker": "オースブレイカーデッキとしてセットアップ",
+    "oathbreakerSetupTitle": "オースブレイカーをセットアップ",
+    "oathbreakerSetupDescription": "このリストからオースブレイカーと署名呪文を選択してください。",
+    "oathbreakerLabel": "オースブレイカー",
+    "signatureSpellLabel": "署名呪文",
+    "chooseOathbreaker": "オースブレイカーを選択",
+    "chooseSignatureSpell": "署名呪文を選択",
+    "confirmOathbreakerImport": "オースブレイカーデッキをインポート",
+    "backToImport": "インポートに戻る",
+    "errorInvalidUrl": "有効なMoxfieldまたはArchidektデッキURLを入力してください。",
+    "errorOffline": "オフライン中はURLからインポートできません。テキスト貼り付けまたはファイルからを使用してください。",
+    "errorNetworkFailure": "デッキインポートサービスに接続できませんでした。接続を確認して、もう一度試してください。",
+    "errorGeneric": "デッキのインポートに失敗しました。",
+    "errorNoOathbreaker": "このリストに使用可能なオースブレイカーがありません。",
+    "errorNoSignatureSpell": "このオースブレイカーに使用可能な署名呪文がリスト内にありません。",
+    "errorNoCards": "カードが見つかりません。MTGAまたは.dck形式のデッキを貼り付けてください。",
+    "fileSupports": ".dck、.dec、.txt、MTGA形式に対応",
+    "chooseFile": "ファイルを選択",
+    "importedSuccessTitle": "デッキをインポートしました",
+    "importedSuccessDescription": "「{{name}}」をデッキに追加しました。"
+  },
+  "precon": {
+    "savePrompt": "構築済みデッキを次の名前で保存:",
+    "overwriteConfirm": "「{{name}}」はすでに存在します。上書きしますか？",
+    "overwriteAllConfirm": "選択した{{count}}個のデッキがすべて存在します。上書きしますか？",
+    "overwriteSomeConfirm": "選択したデッキのうち{{conflicts}}/{{total}}個がすでに存在します。重複を上書きしますか？（キャンセルすると既存のコピーを残し、残りをインポートします。）",
+    "importedSkipped_one": "{{count}}個のデッキをインポートし、既存の{{skipped}}個をスキップしました。",
+    "importedSkipped_other": "{{count}}個のデッキをインポートし、既存の{{skipped}}個をスキップしました。",
+    "title": "構築済みデッキ",
+    "subtitle": "MTGJSON AllDeckFilesから取得 — WotCが印刷したすべての構築済みデッキ。",
+    "totalCount": "· 合計{{count}}",
+    "searchPlaceholder": "名前、セットコード、タイプで検索…",
+    "allTypes": "すべて（{{count}}）",
+    "typeFilter": "デッキタイプ",
+    "loadingCatalog": "デッキカタログを読み込み中…",
+    "loadFailed": "構築済みデッキカタログを読み込めませんでした。接続を確認して、もう一度試してください。",
+    "noMatch": "一致するデッキはありません。",
+    "selectDeck": "{{name}}を選択",
+    "cardCount_one": "{{count}}枚",
+    "cardCount_other": "{{count}}枚",
+    "commanderSuffix": " · 統率者",
+    "showingFirst": "先頭{{count}}件を表示中 — 検索を絞り込んでください。",
+    "selectAllVisible": "表示中をすべて選択",
+    "clearSelection": "クリア（{{count}}）",
+    "importSelected": "選択した{{count}}個をインポート"
+  },
+  "deckTile": {
+    "feedBadge": "フィード",
+    "edit": "{{name}}を編集",
+    "delete": "削除",
+    "deleteTitle": "デッキを削除",
+    "copy": "マイデッキにコピー",
+    "copyTitle": "マイデッキにコピー（フィード追跡を解除）",
+    "cardCount_one": "{{count}}枚",
+    "cardCount_other": "{{count}}枚",
+    "preconBadge": "構築済み",
+    "unknown": "不明{{count}}枚",
+    "unknownCardsTitle": "不明なカード:\n{{cards}}",
+    "unsupportedTitle": "未対応（固有{{unique}}枚、コピー{{copies}}枚）:\n{{cards}}",
+    "setIconAlt": "{{code}}セットアイコン",
+    "actionsMenu": "デッキのオプション",
+    "star": "スターを付ける",
+    "unstar": "スターを外す",
+    "moveToFolder": "フォルダーへ移動",
+    "unfiled": "未分類",
+    "newFolder": "新しいフォルダー…"
+  },
+  "myDecks": {
+    "headingManage": "マイデッキ",
+    "headingSelect": "デッキを選択",
+    "tabDecks": "マイデッキ",
+    "tabSubscriptions": "購読",
+    "createNew": "新規作成",
+    "refreshing": "更新中…",
+    "refreshAll": "すべて更新",
+    "manageFeeds": "フィードを管理",
+    "searchPlaceholder": "デッキを検索…",
+    "formatLabel": "フォーマット",
+    "sourceFilterLabel": "デッキソース",
+    "sourceFilter": {
+      "all": "すべてのソース",
+      "user": "自分のデッキ",
+      "feed": "フィード",
+      "precon": "構築済み"
+    },
+    "preconSetFilterLabel": "構築済みセット",
+    "preconSetFilterAll": "すべてのセット",
+    "preconSetSearchPlaceholder": "セットを検索…",
+    "preconSetNoMatches": "一致するセットはありません",
+    "browseAetherhub": "Aetherhubで{{format}}デッキを閲覧",
+    "showAllDecks": "すべてのデッキを表示",
+    "showLegalOnly": "使用可能なものだけ表示",
+    "showAllDecksButton": "すべてのデッキを表示",
+    "sortName": "名前",
+    "sortDateAdded": "追加日",
+    "sortFormat": "フォーマット",
+    "ascending": "昇順",
+    "descending": "降順",
+    "saveAsPrompt": "名前を付けて保存:",
+    "banner": {
+      "showingAllFor": "保存済みデッキをすべて表示中:",
+      "showingLegalIn": "使用可能なデッキを表示中:",
+      "deckCount": "· {{visible}} / {{total}}"
+    },
+    "status": {
+      "fallbackUserDeck": "ユーザーデッキ",
+      "fallbackVisibleDeck": "表示中のデッキ",
+      "startingWorker": "互換性ワーカーを起動中…",
+      "loadingDatabase": "互換性データベースを読み込み中…",
+      "checkingDeck": "{{deck}}を確認中…",
+      "checkedDeck": "{{deck}}を確認しました",
+      "checkingRandom": "ランダムデッキ候補を確認中…",
+      "loadingCoverage": "{{deck}}の対応率を読み込み中…",
+      "checkingSelected": "選択したデッキの互換性を確認中…",
+      "evaluatingVisible": "表示中のデッキを評価中…",
+      "remaining": "残り{{count}}"
+    },
+    "compatibilityError": "互換性確認を利用できません: {{error}}",
+    "empty": {
+      "title": "このフィルターに一致するデッキはありません。",
+      "selectHint": "使用可能なデッキを確認するには、互換性のあるデッキをインポートするかフォーマットを変更してください。",
+      "manageHint": "別のフィルターを選ぶかすべてのデッキを表示して、コレクションから選択してください。"
+    },
+    "sectionMyDecks": "マイデッキ",
+    "sectionStarterDecks": "スターターデッキ",
+    "sectionLegalPrecons": "使用可能な構築済み",
+    "randomDeckTile": "ランダムデッキ",
+    "randomDeckTileBusy": "選択中…",
+    "importDeckTile": "デッキをインポート",
+    "preconstructedTile": "構築済み",
+    "browseAll": "すべて閲覧",
+    "loadMore": "さらに読み込む",
+    "selectedDeck": "選択中のデッキ",
+    "chooseDeckToContinue": "続行するデッキを選択",
+    "filterAll": "すべて",
+    "sectionStarred": "スター付き",
+    "sectionUnfiled": "未分類",
+    "collapseAll": "すべて折りたたむ",
+    "expandAll": "すべて展開"
+  },
+  "subscriptions": {
+    "emptyTitle": "フィードを購読していません",
+    "emptyDescription": "デッキフィードを購読すると、自動更新される厳選デッキコレクションを取得できます。",
+    "feedMeta_one": "· {{count}}デッキ · 更新{{date}}",
+    "feedMeta_other": "· {{count}}デッキ · 更新{{date}}",
+    "error": "エラー: {{error}}"
+  },
+  "myDecksPage": {
+    "eyebrow": "デッキ",
+    "title": "デッキ。",
+    "description": "保存済みリストを開くか、新しいリストをインポートするか、デッキ構築を続けます。"
+  },
+  "loadGameState": {
+    "readFailed": "ファイルの読み込みに失敗しました"
+  },
+  "nav": {
+    "label": "メインナビゲーション",
+    "home": "ホーム",
+    "play": "プレイ",
+    "online": "オンライン",
+    "draft": "ドラフト",
+    "decks": "デッキ",
+    "tournament": "トーナメント",
+    "alpha": "アルファ",
+    "profile": "プロフィール",
+    "settings": "設定",
+    "whatsNew": "新着情報"
+  },
+  "folder": {
+    "actionsMenu": "フォルダーのオプション",
+    "rename": "名前を変更",
+    "delete": "削除",
+    "newFolder": "新しいフォルダー",
+    "newFolderPrompt": "フォルダー名:",
+    "createButton": "作成",
+    "renamePrompt": "フォルダー名を変更:",
+    "deleteConfirm": "フォルダー「{{name}}」を削除しますか？デッキは未分類へ移動します。",
+    "emptyHint": "このフォルダーは空です。",
+    "unfiledEmptyHint": "未分類のデッキはありません。"
+  },
+  "whatsNew": {
+    "title": "新着情報",
+    "empty": "更新はまだありません — また後で確認してください。",
+    "loading": "更新を読み込み中…",
+    "failed": "更新を読み込めませんでした。接続を確認して、もう一度試してください。",
+    "retry": "再試行",
+    "discordLink": "Discordで読む",
+    "unread": "新しい更新があります",
+    "searchPlaceholder": "更新を検索…",
+    "noResults": "検索に一致する更新はありません。",
+    "pageStatus": "{{current}} / {{total}}ページ",
+    "prevPage": "前へ",
+    "nextPage": "次へ",
+    "showMore": "さらに表示",
+    "showLess": "折りたたむ",
+    "tag": {
+      "new-cards": "新カード",
+      "card-fixes": "カード修正",
+      "gameplay": "ゲームプレイ",
+      "interface": "インターフェース",
+      "localization": "ローカライズ",
+      "ai": "AI",
+      "multiplayer": "マルチプレイヤー"
+    }
+  }
+}

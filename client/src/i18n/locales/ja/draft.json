@@ -1,0 +1,770 @@
+{
+  "intro": {
+    "quickTitle": "クイック・ドラフト",
+    "podTitle": "卓でドラフト",
+    "winstonTitle": "ウィンストン・ドラフト",
+    "commanderTitle": "統率者ドラフト",
+    "subtitle": "遊び方",
+    "startDrafting": "ドラフトを開始",
+    "quantity": {
+      "packsOpened_one": "{{count, number}}パック",
+      "packsOpened_few": "{{count, number}}パック",
+      "packsOpened_many": "{{count, number}}パック",
+      "packsOpened_other": "{{count, number}}パック",
+      "cardsContained_one": "{{count, number}}枚",
+      "cardsContained_few": "{{count, number}}枚",
+      "cardsContained_many": "{{count, number}}枚",
+      "cardsContained_other": "{{count, number}}枚",
+      "packSizeEntry_one": "{{count, number}}枚",
+      "packSizeEntry_few": "{{count, number}}枚",
+      "packSizeEntry_many": "{{count, number}}枚",
+      "packSizeEntry_other": "{{count, number}}枚",
+      "minimumDeckCards_one": "{{count, number}}枚",
+      "minimumDeckCards_few": "{{count, number}}枚",
+      "minimumDeckCards_many": "{{count, number}}枚",
+      "minimumDeckCards_other": "{{count, number}}枚",
+      "pilesDealt_one": "1枚ずつの山を{{count, number}}個",
+      "pilesDealt_few": "1枚ずつの山を{{count, number}}個",
+      "pilesDealt_many": "1枚ずつの山を{{count, number}}個",
+      "pilesDealt_other": "1枚ずつの山を{{count, number}}個"
+    },
+    "packPassing_one": "このドラフトは1パック分のみのため、回す方向は変わりません",
+    "packPassing_few": "複数のパックを使う場合、開封するたびに回す方向が交互に変わります",
+    "packPassing_many": "複数のパックを使う場合、開封するたびに回す方向が交互に変わります",
+    "packPassing_other": "複数のパックを使う場合、開封するたびに回す方向が交互に変わります",
+    "quick": {
+      "step1": "{{packs}}を開封します。各パックには{{cardsPerPack}}入っています",
+      "step2": "パックから1枚を選び、残りをAIに回します",
+      "step4": "すべて選び終えたら、{{minimumDeckCards}}以上のデッキを組んで対戦します",
+      "step1Mixed": "枚数の異なる{{packs}}を、{{packSizes, list}}の順に開封します"
+    },
+    "pod": {
+      "step1": "{{count}}人の卓でドラフトします",
+      "step2": "各{{cardsPerPack}}入りの{{packs}}を開封し、1枚選んで残りを回します",
+      "step2Mixed": "枚数の異なる{{packs}}を{{packSizes, list}}の順に開封し、1枚選んで残りを回します",
+      "step4": "ドラフト後、{{minimumDeckCards}}以上のデッキを組んで大会形式で対戦します"
+    },
+    "winston": {
+      "step2": "各プレイヤーの{{packs}}を誰も中身を見ずに開封し、すべてのカードを混ぜて裏向きの山札にします",
+      "step2Mixed": "各プレイヤーの枚数の異なる{{packs}}（{{packSizes, list}}の順）を誰も中身を見ずに開封し、混ぜて裏向きの山札にします",
+      "step3": "山札の上から{{piles}}を作ります。自分の番には最初の山を見て、取るか、見送って次の山に進みます",
+      "step4": "見送った山には山札の一番上のカードを加えます。すべての山を見送った場合、代わりに山札の一番上を見ずに取ります",
+      "step5": "カードがなくなるまで交互に繰り返し、{{minimumDeckCards}}以上のデッキを組んで大会形式で対戦します"
+    },
+    "commander": {
+      "step2": "各{{cardsPerPack}}入りの{{packs}}を開封し、2枚選んで残りを回します",
+      "step2Mixed": "枚数の異なる{{packs}}を{{packSizes, list}}の順に開封し、2枚選んで残りを回します",
+      "step4": "ドラフト後、{{minimumDeckCards}}以上の統率者デッキを組んで多人数戦を1ゲーム行います"
+    }
+  },
+  "steps": {
+    "navLabel": "ドラフトの進行",
+    "chooseSet": "セットを選択",
+    "draft": "ドラフト",
+    "buildDeck": "デッキ構築",
+    "play": "対戦"
+  },
+  "bracket": {
+    "title": "対戦表",
+    "versus": "対",
+    "quarterfinals": "準々決勝",
+    "semifinals": "準決勝",
+    "final": "決勝"
+  },
+  "hostControls": {
+    "title": "ホストの操作",
+    "resumeDraft": "ドラフトを再開",
+    "pauseDraft": "ドラフトを一時停止",
+    "startNextRound": "次のラウンドを開始",
+    "overrideResult": "結果を上書き",
+    "versusPair": "{{a}} 対 {{b}}",
+    "kickReplace": "退出させて交代",
+    "replaceWithBot": "{{name}}をボットに交代",
+    "endDraft": "ドラフトを終了",
+    "endDraftConfirm": "全員のドラフトを終了しますか？この操作は取り消せません。"
+  },
+  "manaCurve": {
+    "title": "マナカーブ",
+    "bucketLabel": "マナ総量{{bucket}}"
+  },
+  "pickTimer": {
+    "label": "ピックの制限時間",
+    "seconds": "{{count}}秒"
+  },
+  "pickStatus": {
+    "Pending": "選択中",
+    "Picked": "選択済み",
+    "Waiting": "待機中",
+    "TimedOut": "時間切れ",
+    "NotDrafting": "ドラフト不参加"
+  },
+  "scoreBadge": {
+    "label": "成績：{{count}}勝"
+  },
+  "seat": {
+    "label": "席{{number}}",
+    "passingLeft": "→ 左に回す →",
+    "passingRight": "← 右に回す ←",
+    "connected": "接続中",
+    "disconnected": "切断中",
+    "faceUpDraftCards": "表向き：{{cards}}",
+    "activePackCount_one": "{{player}}の手元に{{count}}パック",
+    "activePackCount_few": "{{player}}の手元に{{count}}パック",
+    "activePackCount_many": "{{player}}の手元に{{count}}パック",
+    "activePackCount_other": "{{player}}の手元に{{count}}パック",
+    "draftedCardCount_one": "{{player}}が{{count}}枚獲得",
+    "draftedCardCount_few": "{{player}}が{{count}}枚獲得",
+    "draftedCardCount_many": "{{player}}が{{count}}枚獲得",
+    "draftedCardCount_other": "{{player}}が{{count}}枚獲得"
+  },
+  "setSelector": {
+    "botDifficulty": "ボットの強さ",
+    "difficultyLevels": {
+      "VeryEasy": "とても易しい",
+      "Easy": "易しい",
+      "Medium": "普通",
+      "Hard": "難しい",
+      "VeryHard": "とても難しい"
+    },
+    "noPools": "ドラフト用のカードプールがありません。先にドラフトデータを生成してください。",
+    "setIconAlt": "{{name}}のセットアイコン",
+    "loadFailed": "セットを読み込めませんでした",
+    "packOrder": "パックの順序",
+    "candidateSets": "候補のセット",
+    "clearPacks": "クリア",
+    "emptyPacks_one": "各パックのセットを選んでください。標準では{{count}}パックを使います。同じセットでも、複数のセットを組み合わせても遊べます。",
+    "emptyPacks_other": "各パックのセットを選んでください。標準では{{count}}パックを使います。同じセットでも、複数のセットを組み合わせても遊べます。",
+    "emptyPacksFixed_one": "シールドでは{{count}}パックを使います。各パックのセットを選んでください。同じセットでも、複数のセットでも構いません。",
+    "emptyPacksFixed_other": "シールドでは{{count}}パックを使います。各パックのセットを選んでください。同じセットでも、複数のセットでも構いません。",
+    "emptyCandidates": "候補のセットを1つ以上選んでください。各プレイヤーのパックを候補からランダムに割り当てます。",
+    "packCountFixed": "{{required}}パック中{{selected}}パックを選択",
+    "packCountFlexible": "{{selected}}パックを選択（最大{{max}}）",
+    "candidateCount": "候補のセットを{{selected}}個選択",
+    "addPackFromSet": "パックを追加",
+    "addCandidateSet": "候補のセットを追加",
+    "packsFull": "パック数が上限に達しています",
+    "addPackOf": "{{name}}のパックを追加",
+    "addCandidate": "{{name}}を候補に追加",
+    "movePackEarlier": "パック{{number}}を前へ",
+    "movePackLater": "パック{{number}}を後ろへ",
+    "removePack": "パック{{number}}を削除",
+    "chooseSet": "セットを選択",
+    "draftSet": "{{name}}でドラフト",
+    "fillRemaining_one": "最後のパックを{{name}}にする",
+    "fillRemaining_other": "残りの{{count}}パックを{{name}}にする",
+    "startDraft": "ドラフトを開始",
+    "startSealed": "シールドを開始"
+  },
+  "pack": {
+    "confirmPick": "ピックを確定",
+    "selected": "選択中",
+    "draftEffects": "ドラフト中の効果：",
+    "waitingNext": "次のパックを待っています…",
+    "cardsInPack_one": "パック内に{{count}}枚",
+    "cardsInPack_few": "パック内に{{count}}枚",
+    "cardsInPack_many": "パック内に{{count}}枚",
+    "cardsInPack_other": "パック内に{{count}}枚",
+    "currentPick": "パック{{pack}}・{{pick}}手目",
+    "picking": "選択中…",
+    "autoPick": "自動ピック",
+    "scale": "パックの表示倍率",
+    "scaleDecrease": "パック表示を縮小",
+    "scaleReset": "パックの表示倍率をリセット",
+    "scaleIncrease": "パック表示を拡大",
+    "pickToDeck": "{{card}}を選んでデッキへ",
+    "pickToSideboard": "{{card}}を選んでサイドボードへ"
+  },
+  "sealedOpening": {
+    "title": "シールドのパックを開封",
+    "subtitle_one": "{{count}}パックを開封します。",
+    "subtitle_few": "{{count}}パックを1つずつ開封します。",
+    "subtitle_many": "{{count}}パックを1つずつ開封します。",
+    "subtitle_other": "{{count}}パックを1つずつ開封します。",
+    "packProgress": "パック {{current}} / {{total}}",
+    "openPack": "パックを開封",
+    "openPackArt": "パック開封の画像",
+    "pulls": "開封したカード",
+    "nextPack": "次のパック",
+    "viewPool": "カードプールを表示",
+    "poolTitle": "シールドのカードプール",
+    "poolSubtitle_one": "全{{count}}枚をタイプ別に表示します。",
+    "poolSubtitle_few": "全{{count}}枚をタイプ別に表示します。",
+    "poolSubtitle_many": "全{{count}}枚をタイプ別に表示します。",
+    "poolSubtitle_other": "全{{count}}枚をタイプ別に表示します。",
+    "buildDeck": "デッキを組む"
+  },
+  "pool": {
+    "cardsDrafted_one": "{{count}}枚獲得",
+    "cardsDrafted_few": "{{count}}枚獲得",
+    "cardsDrafted_many": "{{count}}枚獲得",
+    "cardsDrafted_other": "{{count}}枚獲得",
+    "empty": "まだカードを獲得していません",
+    "sortColor": "色",
+    "sortType": "タイプ",
+    "sortCmc": "マナ総量",
+    "grantedFiller": "＋{{name}}を最大{{maximum}}枚（統率者としてのみ）",
+    "groups": {
+      "white": "白",
+      "blue": "青",
+      "black": "黒",
+      "red": "赤",
+      "green": "緑",
+      "multicolor": "多色",
+      "colorless": "無色",
+      "creature": "クリーチャー",
+      "instant": "インスタント",
+      "sorcery": "ソーサリー",
+      "enchantment": "エンチャント",
+      "artifact": "アーティファクト",
+      "planeswalker": "プレインズウォーカー",
+      "land": "土地",
+      "other": "その他",
+      "mythic": "神話レア",
+      "rare": "レア",
+      "uncommon": "アンコモン",
+      "common": "コモン",
+      "rarityOther": "その他のレアリティ",
+      "manaValue0": "マナ総量0",
+      "manaValue1": "マナ総量1",
+      "manaValue2": "マナ総量2",
+      "manaValue3": "マナ総量3",
+      "manaValue4": "マナ総量4",
+      "manaValue5": "マナ総量5",
+      "manaValue6Plus": "マナ総量6以上"
+    }
+  },
+  "workspace": {
+    "locked": "ピック処理中です。",
+    "shell": {
+      "label": "デッキ構築エリア",
+      "show": "デッキ構築エリアを表示",
+      "hide": "デッキ構築エリアを隠す",
+      "title": "デッキを組む"
+    },
+    "view": {
+      "label": "構築エリアの表示",
+      "board": "ボード",
+      "compact": "コンパクト"
+    },
+    "preview": {
+      "label": "カードプレビュー",
+      "none": "なし",
+      "follow": "追従",
+      "side": "横に固定",
+      "shift": "Shiftキー"
+    },
+    "count": {
+      "deck_one": "デッキ（{{count}}枚）",
+      "deck_few": "デッキ（{{count}}枚）",
+      "deck_many": "デッキ（{{count}}枚）",
+      "deck_other": "デッキ（{{count}}枚）",
+      "sideboard_one": "サイドボード（{{count}}枚）",
+      "sideboard_few": "サイドボード（{{count}}枚）",
+      "sideboard_many": "サイドボード（{{count}}枚）",
+      "sideboard_other": "サイドボード（{{count}}枚）"
+    },
+    "empty": {
+      "sideboard": "サイドボードにカードはありません"
+    },
+    "sideboard": {
+      "expand_one": "サイドボードを表示（{{count}}枚）",
+      "expand_few": "サイドボードを表示（{{count}}枚）",
+      "expand_many": "サイドボードを表示（{{count}}枚）",
+      "expand_other": "サイドボードを表示（{{count}}枚）",
+      "collapse": "サイドボードを隠す"
+    },
+    "pool": {
+      "label": "カードプール",
+      "filterLabel": "カードプールの領域フィルター",
+      "sortLabel": "カードプールの並び順",
+      "empty": "この表示に該当するカードはありません",
+      "filter": {
+        "combined_one": "すべて（{{count}}）",
+        "combined_few": "すべて（{{count}}）",
+        "combined_many": "すべて（{{count}}）",
+        "combined_other": "すべて（{{count}}）",
+        "deck_one": "デッキ（{{count}}）",
+        "deck_few": "デッキ（{{count}}）",
+        "deck_many": "デッキ（{{count}}）",
+        "deck_other": "デッキ（{{count}}）",
+        "sideboard_one": "サイドボード（{{count}}）",
+        "sideboard_few": "サイドボード（{{count}}）",
+        "sideboard_many": "サイドボード（{{count}}）",
+        "sideboard_other": "サイドボード（{{count}}）"
+      }
+    },
+    "compact": {
+      "sideboardRegion": "コンパクトなサイドボード"
+    },
+    "toolbar": {
+      "label": "ボードの配置"
+    },
+    "layout": {
+      "label": "配置",
+      "columns": "列",
+      "maxPerRow": "1行の最大列数",
+      "decreaseMaxPerRow": "1行の最大列数を減らす",
+      "increaseMaxPerRow": "1行の最大列数を増やす"
+    },
+    "sort": {
+      "label": "グループ分け",
+      "group": "グループ分け",
+      "cmc": "マナ総量",
+      "color": "色",
+      "rarity": "レアリティ",
+      "type": "タイプ"
+    },
+    "rows": {
+      "label": "ボードの行",
+      "one": "1行",
+      "two": "2行"
+    },
+    "rowHeaders": {
+      "creatures": "クリーチャー",
+      "nonCreatures": "クリーチャー以外"
+    },
+    "columns": {
+      "label": "ボードの列",
+      "add": "列を追加",
+      "removeFinal": "最後の列を削除",
+      "removeHeader": "列{{column}}を削除"
+    },
+    "headers": {
+      "compact": "見出し",
+      "show": "見出しを表示",
+      "addedBasics": "追加した基本土地",
+      "unclassified": "未分類",
+      "emptyOrdinal": "空の列{{column}}",
+      "accessible_one": "列{{column}}：{{labels}}、{{count}}枚",
+      "accessible_few": "列{{column}}：{{labels}}、{{count}}枚",
+      "accessible_many": "列{{column}}：{{labels}}、{{count}}枚",
+      "accessible_other": "列{{column}}：{{labels}}、{{count}}枚"
+    },
+    "card": {
+      "inspect": "{{card}}の詳細",
+      "moveToZone": "{{card}}を{{zone}}へ移動"
+    },
+    "zone": {
+      "deck": "デッキ",
+      "sideboard": "サイドボード"
+    },
+    "drop": {
+      "zone": "この領域にドロップ",
+      "column": "この列にドロップ",
+      "row": "この行にドロップ"
+    },
+    "drag": {
+      "started": "{{card}}をドラッグ中です。",
+      "target": "{{zone}}の列{{column}}にドロップ。",
+      "success": "{{card}}を選びました。",
+      "moved": "{{card}}を移動しました。",
+      "cancelled": "ピックをキャンセルしました。",
+      "rejected": "{{card}}を選べなかったため元に戻しました。",
+      "dispatchError": "{{card}}を送信できませんでした。もう一度お試しください。"
+    },
+    "announcement": {
+      "moved": "{{card}}を{{zone}}の列{{column}}、位置{{position}}に移動しました。",
+      "columnRemoved": "列{{column}}を削除し、ボードを再配置しました。"
+    }
+  },
+  "standings": {
+    "title": "順位 — ラウンド{{round}}",
+    "rank": "順位",
+    "player": "プレイヤー",
+    "record": "成績",
+    "gwp": "GWP",
+    "currentPairings": "現在の組み合わせ",
+    "versus": "対"
+  },
+  "limitedDeck": {
+    "poolHeading": "カードプール（{{count}}）",
+    "searchPool": "カードプールを検索…",
+    "allAdded": "すべてのカードをデッキに追加しました。",
+    "noFilterMatches": "条件に一致するカードはありません",
+    "filterUnavailable": "現在フィルターを利用できないため、すべてのカードを表示しています。",
+    "mainDeck": "メインデッキ",
+    "emptyDeckHint": "カードプールのカードをクリックしてデッキに追加してください。",
+    "addableCards": "追加できるカード",
+    "searchAddableCards": "追加できるカードを検索…",
+    "addLands": "土地を追加",
+    "lands": "土地",
+    "snowCovered": "冠雪",
+    "autoLands": "土地を自動追加",
+    "visualBuilder": "画像で構築",
+    "textBasedBuilder": "テキストで構築",
+    "textBuilder": "テキスト入力",
+    "averageManaCost": "平均マナ・コスト",
+    "deckStats": "デッキの統計",
+    "manaColor": "マナの色",
+    "countInCost": "コスト内の数",
+    "type": "タイプ",
+    "count": "枚数",
+    "percent": "%",
+    "basicLand": "基本土地",
+    "total": "合計",
+    "suggestDeck": "デッキを提案",
+    "submitDeck": "デッキを提出",
+    "validationTitle": "デッキを確認してください",
+    "submitFailed": "デッキを提出できません",
+    "removeCard": "{{name}}を外す",
+    "addCard": "{{name}}を追加",
+    "cardCount": "/ {{min}}枚",
+    "spellCount_one": "呪文{{count}}枚",
+    "spellCount_few": "呪文{{count}}枚",
+    "spellCount_many": "呪文{{count}}枚",
+    "spellCount_other": "呪文{{count}}枚",
+    "landCount_one": "土地{{count}}枚",
+    "landCount_few": "土地{{count}}枚",
+    "landCount_many": "土地{{count}}枚",
+    "landCount_other": "土地{{count}}枚",
+    "readyToSubmit": "提出できます",
+    "moreNeeded": "あと{{count}}枚必要です",
+    "commanderRequired": "提出するにはカードプールから統率者を指定してください。",
+    "commanderUnavailable": "カードデータベースを読み込めなかったため、現在統率者を指定できません。",
+    "compatibilityPending": "デッキの適合性を確認中…",
+    "compatibilityUnavailable": "現在デッキの適合性を確認できません。提出前にもう一度お試しください。",
+    "grantedFiller": "カードプールには{{name}}も最大{{maximum}}枚含まれます。統率者としてのみ使用できます。"
+  },
+  "landing": {
+    "title": "ドラフト",
+    "eyebrow": "ドラフト",
+    "description": "AIとのクイック・ドラフト、キューブの作成、友人との卓でドラフトを楽しめます。",
+    "startNew": "新しく開始",
+    "quickDraft": {
+      "title": "クイック・ドラフト",
+      "description": "7人のAIと3パックをドラフトし、40枚のデッキを組んでAIの1人と1本勝負を行います。"
+    },
+    "sealed": {
+      "title": "シールド",
+      "description": "6パックを開封してカードプールを確認し、40枚のデッキを組んで1本勝負を行います。"
+    },
+    "cubeDraft": {
+      "title": "キューブ・ドラフト",
+      "description": "キューブのリストを貼り付けるか読み込み、パックとデッキのルールを設定してAIとクイック・ドラフトを行います。"
+    },
+    "podDraft": {
+      "title": "卓でドラフト",
+      "description": "最大8人の卓を作成または参加し、一緒にドラフトした後、スイス式または勝ち抜き式の大会で対戦します。"
+    },
+    "commanderDraft": {
+      "title": "統率者ドラフト",
+      "description": "卓で一度に2枚ずつドラフトし、60枚の統率者デッキを組んで多人数戦を1ゲーム行います。"
+    },
+    "winstonDraft": {
+      "title": "ウィンストン・ドラフト",
+      "description": "2人で裏向きの山札と3つの山を使います。山を取るか見送り、最後にデッキを組んで対戦します。"
+    },
+    "podInProgress": "卓でのドラフトが進行中",
+    "guestPodInProgress": "参加した卓に再接続できます",
+    "podLabel": "{{kind}}の卓",
+    "guestPodLabel": "ドラフト卓",
+    "seatCount_one": "{{count}}席",
+    "seatCount_few": "{{count}}席",
+    "seatCount_many": "{{count}}席",
+    "seatCount_other": "{{count}}席",
+    "roomLabel": "ルーム {{code}}",
+    "cardsPicked_one": "{{count}}枚獲得",
+    "cardsPicked_few": "{{count}}枚獲得",
+    "cardsPicked_many": "{{count}}枚獲得",
+    "cardsPicked_other": "{{count}}枚獲得",
+    "resume": "再開",
+    "reconnect": "再接続",
+    "draftInProgress": "ドラフト進行中",
+    "draftComplete": "ドラフト完了",
+    "resumeMatch": "対戦を再開",
+    "viewResults": "結果を表示",
+    "setIconAlt": "{{code}}のアイコン"
+  },
+  "offline": {
+    "unavailableTitle": "オフラインでは多人数ドラフトを利用できません。",
+    "unavailableDescription": "多人数ドラフトを作成・参加・開始・観戦するには、再接続するかオフラインモードを解除してください。",
+    "startUnavailable": "オフラインでは多人数ドラフトを開始できません。再接続するかオフラインモードを解除してください。",
+    "watchUnavailable": "オフラインでは多人数ドラフトを観戦できません。再接続するかオフラインモードを解除してください。"
+  },
+  "podPhase": {
+    "lobby": "ロビー",
+    "drafting": "ドラフト中",
+    "deckbuilding": "デッキ構築中",
+    "pairing": "組み合わせ作成中",
+    "matchInProgress": "対戦中",
+    "complete": "完了"
+  },
+  "quickPhase": {
+    "drafting": "ドラフト中",
+    "opening": "パック開封中",
+    "deckbuilding": "デッキ構築中",
+    "matchRecord": "第{{number}}試合 — {{wins}}勝{{losses}}敗",
+    "record": "{{wins}}勝{{losses}}敗",
+    "runComplete": "連戦終了 — {{wins}}勝{{losses}}敗"
+  },
+  "relativeTime": {
+    "justNow": "たった今",
+    "minutes": "{{count}}分前",
+    "hours": "{{count}}時間前",
+    "days": "{{count}}日前"
+  },
+  "cubeSetup": {
+    "defaultCubeName": "カスタムキューブ",
+    "fetchError": "キューブのリストを取得できませんでした",
+    "startError": "キューブ・ドラフトを開始できませんでした",
+    "cubeName": "キューブ名",
+    "seats": "席数",
+    "packs": "パック数",
+    "packSize": "1パックの枚数",
+    "minDeck": "デッキの最小枚数",
+    "exportUrl": "CubeCobraのエクスポートURL",
+    "exportUrlPlaceholder": "直接取得できるURLを入力するか、下にリストを貼り付けてください",
+    "loadUrl": "URLから読み込む",
+    "offlineUrlUnavailable": "オフラインではURLからキューブのリストを読み込めません。",
+    "deckAddables": "デッキに追加できるカード",
+    "addablesStandardBasics": "通常の基本土地",
+    "addablesBasicsPlusCustom": "基本土地と指定したカード",
+    "addablesCustomOnly": "指定したカードのみ",
+    "customAddableCards": "追加を許可するカード",
+    "customAddablePlaceholder": "1行に1枚のカード名",
+    "startCubeDraft": "キューブ・ドラフトを開始"
+  },
+  "formatPicker": {
+    "title": "デッキの準備ができました",
+    "subtitle": "対戦形式を選んでください。",
+    "startMatch": "対戦を開始",
+    "single": {
+      "label": "1試合",
+      "description": "ドラフトしたデッキで1本勝負を行います。"
+    },
+    "bo3": {
+      "label": "2本先取",
+      "description": "ゲーム間にサイドボードを入れ替えて、2本先取のマッチを行います。"
+    },
+    "run": {
+      "label": "連戦",
+      "description": "7勝または3敗に達するまで1本勝負を繰り返します。"
+    }
+  },
+  "run": {
+    "draftRun": "ドラフト連戦",
+    "upNext": "次は第{{number}}試合",
+    "nextMatch": "次の対戦",
+    "endRun": "連戦を終了",
+    "done": "完了",
+    "perfectRun": "全勝達成",
+    "runComplete": "連戦完了",
+    "runOver": "連戦終了",
+    "finishedFlawless": "{{wins}}勝{{losses}}敗。全勝です！",
+    "finishedCongrats": "{{wins}}勝{{losses}}敗。おめでとうございます！",
+    "finishedRecord": "{{wins}}勝{{losses}}敗で終了しました。",
+    "wins": "勝ち",
+    "losses": "負け",
+    "drawCount_one": "＋{{count}}引き分け",
+    "drawCount_other": "＋{{count}}引き分け",
+    "matchLog": "対戦履歴",
+    "matchResultTitle": "第{{number}}試合：{{result}}",
+    "result": {
+      "win": "勝ち",
+      "loss": "負け",
+      "draw": "引き分け"
+    },
+    "resultShort": {
+      "win": "勝",
+      "loss": "敗",
+      "draw": "分"
+    }
+  },
+  "page": {
+    "cubeDraftTitle": "キューブ・ドラフト",
+    "quickDraftTitle": "クイック・ドラフト",
+    "sealedTitle": "シールド",
+    "setDraftTab": "セットでドラフト",
+    "cubeTab": "キューブ"
+  },
+  "podSetup": {
+    "title": "卓でドラフト",
+    "subtitle": "友人とパックを開けてカードを選び、大会形式で対戦します。",
+    "hostCardTitle": "卓を作成",
+    "hostCardDesc": "ドラフトのルームを作成します。セット・形式・人数を選び、ルームコードを友人に共有してください。空席にはボットを入れられます。",
+    "joinCardTitle": "卓に参加",
+    "joinCardDesc": "ホストから教えてもらったルームコードでドラフトに参加します。空席に入り、全員でリアルタイムにドラフトします。",
+    "howItWorksTitle": "卓でのドラフトの遊び方",
+    "howItWorks1": "各プレイヤーが14枚入りを3パック開け、1枚選んで残りを回します",
+    "howItWorks2": "パックを開けるたびに回す方向を変えます（左→右→左）",
+    "howItWorks3": "ドラフト後、それぞれのカードプールから40枚のデッキを組みます",
+    "howItWorks4": "スイス式またはシングルエリミネーションの大会で対戦します",
+    "back": "← 戻る",
+    "hostTitle": "卓を作成",
+    "joinTitle": "卓に参加",
+    "displayName": "表示名",
+    "namePlaceholder": "名前を入力…",
+    "draftType": "ドラフトの種類",
+    "kindPremier": "プレミア",
+    "kindPremierDesc": "デッキ構築後、1本勝負の大会で対戦します。ラウンドが短く、ゲーム間のサイドボード入れ替えはありません。",
+    "kindTraditional": "トラディショナル",
+    "kindTraditionalDesc": "デッキ構築後、2本先取の大会で対戦します。ゲーム間にサイドボードを入れ替えられます。",
+    "kindSealed": "シールド",
+    "kindSealedDesc": "各プレイヤーが6パックを開封し、そのカードプールから1本勝負の大会用デッキを組みます。",
+    "kindCommanderDraft": "統率者",
+    "kindCommanderDraftDesc": "一度に2枚ずつドラフトして60枚の統率者デッキを組み、卓全員で多人数戦を1ゲーム行います。",
+    "kindWinston": "ウィンストン",
+    "kindWinstonDesc": "2〜4人で裏向きの山札と3つの山を使います。自分の番に山を見て取るか、見送ってその山に1枚加えます。",
+    "tournamentFormat": "大会方式",
+    "tournamentSwiss": "スイス式",
+    "tournamentSwissDesc": "負けても対戦を続け、全員が3ラウンド遊びます。",
+    "tournamentElimination": "シングルエリミネーション",
+    "tournamentEliminationDesc": "マッチに負けたプレイヤーは敗退し、最後に1人が残るまで対戦します。",
+    "podPolicy": "卓の進行方針",
+    "policyCompetitive": "競技向け",
+    "policyCompetitiveDesc": "ピックに制限時間があり、時間切れは自動ピック。ラウンドも自動で進みます。",
+    "policyCasual": "カジュアル",
+    "policyCasualDesc": "ピックの制限時間はなく、ラウンドは手動で進めます。問題が起きた場合はホストが調整できます。",
+    "podSize": "卓の人数",
+    "podSizeDesc": "全{{count}}席。ドラフト開始前にロビーで空席をボットにできます。",
+    "playerCount": "{{count}}人",
+    "setSelectorHint": "開封順に各パックのセットを指定してください。同じセットですべて埋めることもできます。卓の作成時にカードプールを読み込みます。",
+    "setDraftMode": "セットの選び方",
+    "uniformPacks": "組み合わせを指定",
+    "chaosPacks": "カオス・ドラフト",
+    "chaosSelectorHint": "候補のセットを選んでください。開始時にホストが各プレイヤーのパックを非公開でランダムに割り当てます。",
+    "chaosSelectorDetail": "各プレイヤーの各パックに、候補からランダムなセットが割り当てられます。本人が開封するまで割り当ては非公開です。",
+    "createPod": "卓を作成",
+    "loadingPool": "セットのカードプールを読み込み中…",
+    "roomCode": "ルームコード",
+    "roomCodePlaceholder": "ルームコードを入力…",
+    "joinPod": "卓に参加",
+    "tabs": {
+      "set": "セット",
+      "cube": "キューブ"
+    }
+  },
+  "podPhaseView": {
+    "tournamentPairings": "大会の組み合わせ",
+    "matchesInProgress": "進行中の対戦",
+    "yourMatch": "あなたの対戦",
+    "versusOpponent": "対 {{name}}",
+    "youAreHosting": "あなたがホストです",
+    "connectingOpponent": "対戦相手に接続中…",
+    "waitingResults": "対戦結果を待っています…",
+    "hidePool": "カードプールを隠す",
+    "reviewPool": "カードプールを確認",
+    "roundComplete": "ラウンド完了",
+    "waitingNextRound": "ホストが次のラウンドを開始するのを待っています…",
+    "nextRoundShortly": "まもなく次のラウンドが始まります…",
+    "pauseReason": {
+      "PlayerDisconnected": "プレイヤーの切断によりドラフトを一時停止しています。",
+      "PausedByHost": "ホストがドラフトを一時停止しました。",
+      "DisconnectGraceExpired": "プレイヤーが制限時間内に戻りませんでした。"
+    }
+  },
+  "betweenGames": {
+    "game": "ゲーム{{number}}",
+    "lostPreviousGame": "前のゲームで負けました。先攻・後攻を選んでください：",
+    "seconds": "{{count}}秒",
+    "secondsRemaining": "残り{{count}}秒",
+    "playFirst": "先攻",
+    "drawFirst": "後攻",
+    "sideboarding": "サイドボード入れ替え",
+    "waitingSideboard": "対戦相手のサイドボード提出を待っています…",
+    "sideboardGame": "サイドボード — ゲーム{{number}}",
+    "sideboardHint": "サイドボードを入れ替えて提出してください。下にカードプールを表示しています。",
+    "submitSideboard": "サイドボードを提出",
+    "preparingNext": "次のゲームを準備中…",
+    "hideOverlay": "この画面を隠す",
+    "showOverlay": "この画面を表示",
+    "hiddenNotice": "このゲームのサイドボード入れ替えはまだ可能です。",
+    "hiddenNoticePlayDraw": "このゲームの先攻・後攻をまだ選択できます。"
+  },
+  "podComplete": {
+    "title": "ドラフト完了",
+    "launchCommanderGame": "統率者戦を開始",
+    "launchLocalCommanderGame": "ローカルの統率者戦を開始",
+    "waitingForPlayers": "プレイヤーの参加を待っています…",
+    "cancelCommanderLaunch": "開始をキャンセル",
+    "joinCommanderGame": "統率者戦に参加",
+    "joiningCommanderGame": "参加中 — 他のプレイヤーを待っています…",
+    "seatCeiling": "この卓は{{seats}}人ですが、P2Pの統率者戦は最大{{max}}人です。全員のドラフト済みデッキを使い、ローカルでエンジン相手に対戦します。",
+    "returnToMenu": "メニューに戻る"
+  },
+  "podError": {
+    "kicked": "卓から退出させられました",
+    "hostLeft": "ホストがドラフトから退出しました",
+    "connection": "接続エラー",
+    "retry": "再接続を試す"
+  },
+  "spectator": {
+    "eyebrow": "ドラフト観戦",
+    "title": "ドラフト{{code}}を観戦中",
+    "missingCode": "ドラフトのコードを入力してください",
+    "connecting": "ドラフトに接続中…",
+    "errorGeneric": "観戦者として接続できませんでした",
+    "backToLobby": "ロビーに戻る",
+    "banner": "この卓のドラフトを観戦中",
+    "omniscient": "すべての情報を表示",
+    "seats": "席",
+    "deckSubmitted": "デッキ提出済み",
+    "standings": "順位",
+    "pairings": "組み合わせ",
+    "pools": "カードプール（全員分）",
+    "poolSize": "{{count}}枚獲得",
+    "seat": "席{{index}}"
+  },
+  "winston": {
+    "heading": "ウィンストン・ドラフト",
+    "yourTurn": "あなたの番 — 山{{index}}",
+    "otherSeatTurn": "{{name}}が選択中",
+    "seatFallback": "席{{index}}",
+    "turnHint": "山を取るか見送ります。見送ると山札からその山に1枚加え、次の山に進みます。最後の山も見送ると、代わりに山札の一番上のカードを取ります。",
+    "mainStackRemaining_one": "山札に裏向きで{{count, number}}枚",
+    "mainStackRemaining_few": "山札に裏向きで{{count, number}}枚",
+    "mainStackRemaining_many": "山札に裏向きで{{count, number}}枚",
+    "mainStackRemaining_other": "山札に裏向きで{{count, number}}枚",
+    "cardsLeft_one": "ドラフトの残り{{count, number}}枚",
+    "cardsLeft_few": "ドラフトの残り{{count, number}}枚",
+    "cardsLeft_many": "ドラフトの残り{{count, number}}枚",
+    "cardsLeft_other": "ドラフトの残り{{count, number}}枚",
+    "stackShare": "ドラフトの残りカードのうち、まだ裏向きの山札にある割合",
+    "pileLabel": "山{{index}}",
+    "pileTotal_one": "{{count, number}}枚",
+    "pileTotal_few": "{{count, number}}枚",
+    "pileTotal_many": "{{count, number}}枚",
+    "pileTotal_other": "{{count, number}}枚",
+    "pileFaceDown": "裏向き",
+    "deciding": "この山を検討中",
+    "hiddenPiles": "自分の番になるまで山は裏向きです。",
+    "take": "取る",
+    "takeAria": "山{{index}}を取る",
+    "decline": "見送る",
+    "declineAria": "山{{index}}を見送る",
+    "refusal": {
+      "PileNotActive": "今選択しているのはこの山ではありません。",
+      "PileEmpty": "この山は空なので、取れるカードはありません。",
+      "NoGuaranteedCard": "見送るとこの番にカードを取れなくなるため、この山を取ることだけが可能です。"
+    },
+    "refusalUnpublished": "この選択に対する判定がドラフトから届いていません。",
+    "playFirstChooser": "{{name}}がドラフト後の対戦で先攻のプレイヤーを選びます。",
+    "scale": "山の表示倍率",
+    "scaleDecrease": "山の表示を縮小",
+    "scaleReset": "山の表示倍率をリセット",
+    "scaleIncrease": "山の表示を拡大",
+    "faceDownStack_one": "裏向き{{count, number}}枚",
+    "faceDownStack_few": "裏向き{{count, number}}枚",
+    "faceDownStack_many": "裏向き{{count, number}}枚",
+    "faceDownStack_other": "裏向き{{count, number}}枚",
+    "forcedDraw": "すべての山を見送ったため、山札の一番上から{{name}}を取りました。",
+    "forcedDrawLabel": "山札の一番上から獲得"
+  },
+  "lobby": {
+    "title": "ドラフト卓のロビー",
+    "draftKind": "{{kind}}ドラフト",
+    "botSeat": "ボット",
+    "waitingSeat": "待機中…",
+    "seatNumber": "席{{number}}",
+    "hostBadge": "ホスト",
+    "kick": "退出させる",
+    "copyRoomCodeTitle": "クリックしてルームコードをコピー",
+    "roomCode": "ルームコード",
+    "clickToCopy": "クリックしてコピー",
+    "seatsFilled": "{{current}} / {{total}}席に参加済み",
+    "fillWithBots": "空席をボットで埋める",
+    "leave": "退出",
+    "startDraft": "ドラフトを開始",
+    "waitingForHost": "ホストがドラフトを開始するのを待っています…"
+  }
+}

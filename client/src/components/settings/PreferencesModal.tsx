@@ -80,6 +80,7 @@ const LANGUAGE_OPTIONS: { value: SupportedLng; label: string }[] = [
   { value: "it", label: "Italiano" },
   { value: "pt", label: "Português" },
   { value: "pl", label: "Polski" },
+  { value: "ja", label: "日本語" },
 ];
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
