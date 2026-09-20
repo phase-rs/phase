@@ -779,10 +779,8 @@ fn derive_and_perform_player_scope_sacrifice(
 }
 
 /// CR 701.21a: sweep every in-scope permanent the keepers did not protect.
-/// Called only from `sacrifice_unchosen`'s `keeper_counter: None` branch —
-/// the printed instruction has no counter mark to place first, so this path
-/// needs no resume entry point. The sweep itself may still pause
-/// (`PausedForReplacement`), which the inline caller handles by returning.
+/// Called only from `sacrifice_unchosen`'s `keeper_counter: None` branch.
+/// The sweep itself may still pause (`PausedForReplacement`).
 /// Shares its derive-and-perform body with `continue_player_scope_sacrifice`
 /// via `derive_and_perform_player_scope_sacrifice`.
 fn run_player_scope_sacrifice(
@@ -846,8 +844,7 @@ pub(crate) fn continue_player_scope_sacrifice(
         // condition as `PausedForReplacement` — so `false` is the only safe mapping.
         // `true` would let `drain_pending_counter_additions` keep draining and emit
         // the terminal event over a live prompt. DECLARED MUTATION NULL: no test can
-        // redden this arm (see `choose_and_sacrifice_rest.rs`'s module doc / U1 plan
-        // §5.10) — it is unreachable through this callee by construction.
+        // redden this arm — it is unreachable through this callee by construction.
         Ok(super::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice) => {
             debug_assert!(
                 false,

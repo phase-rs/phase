@@ -70484,7 +70484,7 @@ fn keeper_dispose_controller_branch_ast_unchanged() {
 /// `keeper_counter` field, so sentence one's root effect IS the whole first
 /// printed instruction and sentence two (the grant) is its direct
 /// `sub_ability`. This also flips the grant's anaphor label from `TrackedSet`
-/// to `ParentTarget` (§1 of the U1 plan): `publishes_tracked_set_from_resolution`
+/// to `ParentTarget`: `publishes_tracked_set_from_resolution`
 /// no longer sees a `PutCounterAll` node ahead of the grant, and
 /// `ChooseAndSacrificeRest` is deliberately not itself a member (see that
 /// predicate's doc). The runtime half of the label flip — that the

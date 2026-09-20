@@ -436,7 +436,9 @@ fn hexproof_creature_is_eligible_and_choosable_as_a_keeper() {
 }
 
 /// V4 — CR 611.2b: the duration is re-evaluated, so removing the last vow
-/// counter lifts the restriction; removing one of two does not.
+/// counter lifts the restriction; removing one of two does not. The full-removal
+/// case also cross-checks that the OTHER seat's still-marked keeper is
+/// unaffected, ruling out a shared expiry across the whole printed instruction.
 #[test]
 fn promise_of_loyalty_keeper_attacks_after_vow_counter_removed() {
     // Partial removal first: two counters, remove one, restriction persists.
@@ -474,6 +476,7 @@ fn promise_of_loyalty_keeper_attacks_after_vow_counter_removed() {
     // Full removal: the restriction retires.
     let PromiseBoard {
         mut runner,
+        p0_keeper,
         p1_keeper,
         ..
     } = resolve_promise_of_loyalty();
@@ -484,7 +487,48 @@ fn promise_of_loyalty_keeper_attacks_after_vow_counter_removed() {
         .expect("keeper exists")
         .counters
         .remove(&VOW());
+
+    // Cross-seat control: the caster's own keeper ("Caster Keeper") still carries
+    // its own vow counter, untouched by p1_keeper's removal above. Moving it to
+    // P1's control lets P1 legally declare it as an attacker against P0 — CR
+    // 508.1a's active-team exclusion, which normally makes "a creature attacks
+    // its own controller" untestable, no longer applies once P0 isn't P1's
+    // teammate — so its restriction becomes observable in the SAME window
+    // p1_keeper's restriction just expired. A regression that gave the whole
+    // printed instruction one shared expiry (instead of a separate duration
+    // check per marked creature) would wrongly lift this restriction too.
+    //
+    // Mutating `transient_duration_holds`'s `None` arm to collapse every
+    // sibling TCE under one `source_id` onto the max `ObjectId` (one shared
+    // expiry for the whole instruction, since `register_transient_effect`'s
+    // `ParentTarget` arm gives every per-keeper TCE that same `source_id`)
+    // reddens the `expect_err` below: the attack against P0 succeeds instead
+    // of erroring.
+    {
+        let keeper = runner
+            .state_mut()
+            .objects
+            .get_mut(&p0_keeper)
+            .expect("keeper exists");
+        keeper.base_controller = Some(P1);
+        keeper.controller = P1;
+    }
+    runner.state_mut().layers_dirty.mark_full();
+
     advance_to_declare_attackers_for(&mut runner, P1);
+    // Non-vacuous against CR 302.6 summoning sickness, the obvious alternative
+    // source of a refusal right after a control change: the refusal is the CR
+    // 508.1c/d attack restriction with `summoning_sick` false at the check —
+    // `advance_to_declare_attackers_for` crosses into P1's own turn, and
+    // `start_next_turn`'s CR 302.6 handling has already cleared sickness for
+    // every object P1 controls by then, this keeper included.
+    let refusal = runner
+        .declare_attackers(&[(p0_keeper, AttackTarget::Player(P0))])
+        .expect_err("the caster's own keeper still has its own vow counter");
+    assert!(
+        !format!("{refusal:?}").contains("not controlled by the active player"),
+        "the refusal must come from the prohibition, not from a control mismatch: {refusal:?}"
+    );
     runner
         .declare_attackers(&[(p1_keeper, AttackTarget::Player(P0))])
         .expect("CR 611.2b: with no vow counter left, the prohibition is gone");
@@ -610,9 +654,7 @@ fn keeper_still_cannot_attack_original_caster_after_control_change() {
 
 /// V7 — the polarity-and-cardinality inversion. At BASE_SHA these two cards
 /// lowered to `Effect::TargetOnly` followed by a sacrifice of the TRACKED set —
-/// i.e. they sacrificed the keeper, and dropped the printed count. Regenerate
-/// that baseline with
-/// `jq -c '.["razia'\''s purification"].abilities[0].effect.type' client/public/card-data.json`.
+/// i.e. they sacrificed the keeper, and dropped the printed count.
 #[test]
 fn razias_purification_sacrifices_the_unchosen_not_the_keeper() {
     let mut scenario = GameScenario::new();

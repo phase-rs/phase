@@ -274,11 +274,9 @@ pub fn add_counter_with_replacement(
 /// re-parked here — the post-action owns its resumption (the same contract
 /// `apply_object_counter_addition`'s `false` carries).
 ///
-/// This is the generic "counter batch, then typed work" primitive that
-/// `resolve_add_all`, `resolve_multiply`, proliferate, amass and token-entry
-/// each open-code; it exists so callers outside this module compose it instead
-/// of reaching for the private `object_counter_addition` /
-/// `apply_object_counter_addition` pair.
+/// This is the generic "counter batch, then typed work" primitive; it exists
+/// so callers outside this module compose it instead of reaching for the
+/// private `object_counter_addition` / `apply_object_counter_addition` pair.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn add_object_counters_then(
     state: &mut GameState,

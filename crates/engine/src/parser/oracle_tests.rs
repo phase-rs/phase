@@ -30933,11 +30933,6 @@ fn rose_room_treasurer_otherwise_remains_fallback() {
 /// `oracle_effect::is_keeper_dispose_head` arm from
 /// `oracle_classifier::should_defer_spell_to_effect` puts `statics` back to one
 /// entry and `abilities` back to zero here.
-///
-/// Regenerate the BASE_SHA baseline with
-/// `jq -c '.["promise of loyalty"] | {ab:(.abilities|length),
-/// st:((.static_abilities//[])|length), wa:((.parse_warnings//[])|length)}'
-/// client/public/card-data.json`.
 #[test]
 fn promise_of_loyalty_routes_to_the_effect_chain_not_a_whole_line_static() {
     let parsed = parse_oracle_text(
