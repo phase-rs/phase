@@ -15849,9 +15849,15 @@ fn parse_keeper_count(input: &str) -> OracleResult<'_, u32> {
 /// six lands they control. Destroy all other permanents" (Urza's Sylex) fail
 /// here, at the separator and at `" the rest"` respectively.
 ///
-/// The supported-combination gate lives INSIDE this combinator so grammar
-/// acceptance, recognizer acceptance and the classifier predicate
-/// (`is_keeper_dispose_head`) can never disagree about one line.
+/// The supported-combination gate lives INSIDE this combinator, so the
+/// classifier predicate (`is_keeper_dispose_head`) — which runs this same
+/// grammar to decide whether to route a line here at all — never routes away
+/// a line the gate itself refuses. That does not extend past the head: the
+/// lowering that consumes this head's output (`parse_keeper_dispose_rest_ir`)
+/// has its own post-head `return None` paths (for example the
+/// `TargetFilter::Typed` refutation in the `Controller` scope arm), which this
+/// grammar cannot see and which are fail-soft — a line that reaches one is
+/// declined, not misparsed, and no printed card currently reaches one.
 fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead> {
     let start = input;
     let offset = |rest: &str| start.len() - rest.len();
@@ -16131,8 +16137,15 @@ fn parse_keeper_dispose_rest_ir(
             // effect iterates players itself, so the keeper filter carries NO
             // controller and the printed control clause is expressed here.
             let player_scope = match head.scope {
+                KeeperChooserScope::EachPlayer => PlayerFilter::All,
                 KeeperChooserScope::EachOpponent => PlayerFilter::Opponent,
-                _ => PlayerFilter::All,
+                // Unreachable: this whole block is inside the
+                // `KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent`
+                // match arm above (`Controller` is handled by the sibling arm),
+                // so a `Controller` value can never flow through this branch.
+                KeeperChooserScope::Controller => {
+                    unreachable!("excluded by the outer scope match arm above")
+                }
             };
             let counter_clause = match &head.head {
                 KeeperHead::Choose => None,

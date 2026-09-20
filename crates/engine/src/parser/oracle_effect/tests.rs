@@ -63775,14 +63775,15 @@ fn subject_anchored_may_names_the_announcing_player_across_the_anaphor_family() 
     // Path to Exile — ParentTargetController / SearchLibrary{target_player}.
     //
     // This assertion is DATA-discriminating but RUNTIME-NEUTRAL.
-    // `effects::optional_prompt_player` already routes this exact shape through
-    // its dedicated `SearchLibrary { target_player: Some(ParentTargetController) }`
-    // arm (`effects/mod.rs:10009-10021`), and the new `optional_player` arm
-    // (`:9951`) resolves the same filter through the same
-    // `resolve_effect_player_ref`, so the prompt seat is identical before and
-    // after. What this row proves is that the stamp is keyed on the real
-    // `Effect::target_filter()` — which surfaces `SearchLibrary.target_player`
-    // at `types/ability.rs:20724-20740` — and not on a hand-curated slot walk.
+    // `effects::optional_prompt_player`'s dedicated
+    // `SearchLibrary { target_player: Some(ParentTargetController) }` arm
+    // already routes this exact shape, and its `ability.optional_player` arm
+    // (checked first in that same function) resolves the same filter through
+    // the same `targeting::resolve_effect_player_ref`, so the prompt seat is
+    // identical before and after. What this row proves is that the stamp is
+    // keyed on the real `Effect::target_filter()` — whose `SearchLibrary`
+    // match arm surfaces `SearchLibrary.target_player` — and not on a
+    // hand-curated slot walk.
     // It is 23 of the 40 corpus movers, and it is NOT a behavioural fix.
     {
         let parsed = parse_oracle_text(
@@ -70379,6 +70380,14 @@ fn promise_of_loyalty_binds_outer_tracked_set_inner_selfref() {
         .sub_ability
         .as_deref()
         .expect("the counter clause must chain after the keeper clause");
+    assert_eq!(
+        counters.sub_link,
+        crate::types::ability::SubAbilityLink::ContinuationStep,
+        "CR 608.2c: the counter and the sacrifice are one printed instruction \
+         joined by \"and\", so the counter clause is a step of the keeper \
+         instruction (`keeper_boundary` = `ClauseBoundary::Then` in \
+         `parse_keeper_dispose_rest_ir`), not the next printed sentence"
+    );
     assert_eq!(
         counters.effect.as_ref(),
         &Effect::PutCounterAll {

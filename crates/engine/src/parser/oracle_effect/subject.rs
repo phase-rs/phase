@@ -6112,8 +6112,15 @@ fn build_restriction_clause(
     //
     // The mandatory `eof` is load-bearing twice: refusing a `None` defended
     // scope leaves the bare "can't attack" to `parse_restriction_modes`, and
-    // refusing any trailing text declines the "… this turn" / "… this combat" /
-    // "… unless their controller pays" riders this grant shape cannot express.
+    // refusing trailing text this grant shape cannot express declines the
+    // "… unless their controller pays" rider (Sivitri, Dragon Master). A
+    // trailing "… this turn" / "… this combat" duration is NOT one of the
+    // riders `eof` rejects — `strip_trailing_duration` above already peels it
+    // before this branch runs, so `eof` never sees it and the grant claims
+    // the duration-scoped form too (CR 611.2a: the effect lasts as long as
+    // the spell states). See
+    // `tests.rs::keeper_dispose_sentence_two_requires_a_bare_defended_scope`'s
+    // `DURATION_SCOPED` probe, which measures this directly.
     if let Ok((_, Some(defended))) = terminated(
         preceded(
             tag::<_, _, OracleError<'_>>("can't attack"),
@@ -6171,10 +6178,19 @@ fn build_restriction_clause(
             // DEFERRED — player-scoped subject. "…they can't attack you this
             // combat" restricts a PLAYER (CR 508.1c), not objects, and an
             // object-local `StaticMode::CantAttack` cannot express it. Card:
-            // Champions of Minas Tirith. Every remaining variant is either a
-            // player reference, an event/replacement reference with no fixed
-            // object set at parse time, or a composite whose members this
-            // adjudication has not been made for.
+            // Champions of Minas Tirith. Most of the remaining variants are
+            // player references or event/replacement references with no
+            // fixed object set at parse time, but not all — `AttachedTo`,
+            // `AmassedArmy`, `ChosenCard`, `ExiledBySource`, `LastCreated`, and
+            // `TrackedSetFiltered` are fixed object references whose
+            // fixed-vs-live adjudication for THIS branch has not been made
+            // (`TrackedSetFiltered`'s sibling `TrackedSet` sits in the fixed
+            // arm above and `additive_type_subject_application` treats the two
+            // identically as an anaphoric subject kind, but that does not by
+            // itself settle whether this branch's freeze-vs-broadcast choice
+            // is correct for `TrackedSetFiltered` too). Fail-closed keeps this
+            // honest: every one of these declines to `Effect::Unimplemented`
+            // rather than silently landing on the wrong side.
             TargetFilter::None
             | TargetFilter::Any
             | TargetFilter::Player

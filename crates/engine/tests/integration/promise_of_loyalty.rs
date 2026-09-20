@@ -751,7 +751,7 @@ fn razias_purification_clamps_a_seat_with_fewer_permanents_than_the_count() {
 /// cast-refusal assertion here still passed — so that refusal did not come from
 /// the prohibition.
 #[test]
-fn single_combat_keeps_one_and_still_prohibits_creature_casts() {
+fn single_combat_keeps_one_and_installs_the_creature_cast_ban() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 

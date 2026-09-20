@@ -623,10 +623,18 @@ fn sacrifice_unchosen(
     // funnel once, when no player remains, so `kept` is the UNION across seats
     // rather than the last seat's choice.
     //
-    // `publish_fresh_tracked_set`, not `publish_tracked_set`: it rebinds
-    // `state.chain_tracked_set_id`, which is what both
-    // `register_transient_effect`'s `ParentTarget` arm and
-    // `counters::resolve_add_all`'s `TrackedSetId(0)` sentinel read.
+    // `publish_fresh_tracked_set`, not `publish_tracked_set`: both allocate and
+    // bind a fresh id when no ancestor in the chain has published yet (the
+    // ONLY case any printed card currently reaches), so the choice is
+    // observationally identical there. They diverge only when an ancestor
+    // clause in the same resolution chain already published: `publish_tracked_set`
+    // would UNION this keeper population into that ancestor's set and leave
+    // `chain_tracked_set_id` pointed at it, while `publish_fresh_tracked_set`
+    // always rebinds `chain_tracked_set_id` to a brand-new id, which is what
+    // both `register_transient_effect`'s `ParentTarget` arm and
+    // `counters::resolve_add_all`'s `TrackedSetId(0)` sentinel then read. That
+    // divergent case is driven directly (no corpus card reaches it) by
+    // `tests::sacrifice_unchosen_starts_a_fresh_tracked_set_over_an_active_ancestor_publish`.
     // `PendingPlayerScopeSacrificeCompletion.publish_fresh_tracked_set` stays
     // false: that field publishes the SACRIFICED set, the opposite population.
     super::publish_fresh_tracked_set(state, kept.to_vec());
@@ -723,8 +731,8 @@ fn dedupe_object_ids(ids: &mut Vec<ObjectId>) {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::Effect;
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::ability::{Effect, QuantityExpr};
+    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -1305,6 +1313,115 @@ mod tests {
             !state.battlefield.contains(&p1_sacrificed),
             "opponent's non-kept creature MUST be sacrificed — proves the sweep fired"
         );
+    }
+
+    #[test]
+    fn sacrifice_unchosen_starts_a_fresh_tracked_set_over_an_active_ancestor_publish() {
+        // T7 — `sacrifice_unchosen` calls `publish_fresh_tracked_set`, NOT
+        // `publish_tracked_set`. The two funnels are identical when no
+        // ancestor in the resolution chain has published yet (both allocate
+        // and bind fresh); this test drives the one case where they diverge:
+        // an ancestor clause in the SAME chain already published before this
+        // instruction's sacrifice step runs. `publish_fresh_tracked_set`
+        // always rebinds `chain_tracked_set_id` to a brand-new id; the
+        // rejected alternative, `publish_tracked_set`, would instead UNION the
+        // keeper population into the ancestor's existing set and leave
+        // `chain_tracked_set_id` pointed at the ancestor.
+        //
+        // No printed card currently reaches this branch — no corpus card puts
+        // a tracked-set producer ahead of a keeper-dispose instruction in the
+        // same chain — so this drives `resolve` with a hand-built ability and
+        // a hand-seeded ancestor publish, the same direct-call pattern every
+        // other test in this module already uses (`make_ability` /
+        // `make_scoped_ability` + `resolve`), rather than through a parsed
+        // card.
+        let mut state = setup_two_player();
+        let p0_creature = add_battlefield_permanent(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Kept Zero",
+            vec![CoreType::Creature],
+        );
+        let p1_creature = add_battlefield_permanent(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Kept One",
+            vec![CoreType::Creature],
+        );
+
+        // Simulate an ancestor clause in the same resolution chain having
+        // already published a tracked set (e.g. a preceding "exile those
+        // cards" step) BEFORE this keeper-dispose instruction resolves.
+        let ancestor_id = TrackedSetId(5);
+        let ancestor_member = ObjectId(999);
+        state
+            .tracked_object_sets
+            .insert(ancestor_id, vec![ancestor_member]);
+        state.chain_tracked_set_id = Some(ancestor_id);
+        state.next_tracked_set_id = 10;
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ChooseAndSacrificeRest {
+                categories: vec![],
+                chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                choose_filter: permanent_filter(),
+                sacrifice_filter: permanent_filter(),
+                total_power_cap: None,
+                keeper_constraint: Some(KeeperConstraint::ExactCount {
+                    count: QuantityExpr::Fixed { value: 1 },
+                }),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::All);
+
+        let mut events = Vec::new();
+        // Both players have exactly one eligible creature for a
+        // keep-exactly-one constraint, so `step_exact_count` auto-keeps both
+        // and reaches `sacrifice_unchosen` synchronously — no interactive
+        // `WaitingFor::KeepExactPermanentsChoice` in between.
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(
+            !matches!(
+                state.waiting_for,
+                WaitingFor::KeepExactPermanentsChoice { .. }
+            ),
+            "both players' single creature must auto-keep with no interactive choice"
+        );
+
+        // DISCRIMINATING ASSERTION 1: the chain id moved OFF the ancestor.
+        // `publish_tracked_set` would have taken the `Some(chain_id)` branch
+        // and left `chain_tracked_set_id` unchanged at `ancestor_id`.
+        let published_id = state
+            .chain_tracked_set_id
+            .expect("sacrifice_unchosen must publish a tracked set");
+        assert_ne!(
+            published_id, ancestor_id,
+            "publish_fresh_tracked_set must allocate a NEW id rather than reuse \
+             the ancestor's, which is what distinguishes it from publish_tracked_set"
+        );
+
+        // DISCRIMINATING ASSERTION 2: the ancestor's own set is untouched.
+        // `publish_tracked_set` would have pushed the keeper population into
+        // this very entry.
+        assert_eq!(
+            state.tracked_object_sets.get(&ancestor_id),
+            Some(&vec![ancestor_member]),
+            "the ancestor's tracked set must not be extended by this instruction"
+        );
+
+        // The fresh set holds exactly the keeper population.
+        let published_members = state
+            .tracked_object_sets
+            .get(&published_id)
+            .expect("the freshly published set must exist");
+        assert_eq!(published_members.len(), 2);
+        assert!(published_members.contains(&p0_creature));
+        assert!(published_members.contains(&p1_creature));
     }
 
     #[test]
