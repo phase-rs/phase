@@ -17,6 +17,7 @@ The orchestrator gives you:
 2. The reviewed plan (every section: Pattern Coverage, Building Blocks, Logic Placement, Rust Idioms, Nom Compliance, Extension vs Creation, Analogous Trace, step-by-step file changes).
 3. `BASE_SHA`; for `implementation/fix`, named `START_SHA` and `IMPLEMENTATION_WORKTREE`; for `measurement-only`, immutable `CANDIDATE_SHA` and the named `IMPLEMENTATION_WORKTREE` too.
 4. Frozen in-/out-of-bounds scope paths as a duplicate-free `LC_ALL=C sort -z` NUL-delimited representation and its SHA256; for measurement-only, clean detached base/candidate projection worktrees.
+5. Original task, current scope and shared attempt history under engine-implementer's [run limits](../skills/engine-implementer/SKILL.md#run-limits), including any machinery correction already used.
 6. For an implementation/fix round, any reviewer findings as constraints.
 
 Mode is a hard boundary:
@@ -30,7 +31,7 @@ Mode is a hard boundary:
 When the orchestrator's spawn inputs include a phase charter, a phase index, and that phase's deferral allowlist, this executor runs in **phase mode**. Phase mode **composes with, never extends, the `Mode` hard boundary above** — it is an overlay on `implementation/fix`, not a third `Mode` value; `measurement-only` dispatches never carry phase inputs, being SHA-parameterized. The allowlist scopes exactly four of this file's mandatory artifacts, as stated here in this file (a spawn prompt never overrides this text):
 
 1. **Maintainer-simulation matrix:** a row whose consuming function or hostile fixture is deferral-listed to a named later phase is written `DEFERRED(phase n)` — not left incomplete and not escalated as a stop-and-return item. A row the phase's own code forecloses is still a stop-and-return item.
-2. **Building-block infrastructure command** ("if you genuinely need new infrastructure, build it as part of this change — do NOT default to deferring"): charter-deferred work is *chartered*, not "deferred by default." Build what the phase scopes; defer exactly what the charter defers; stop-and-return still applies to any **uncharted** incompleteness.
+2. **In-scope game infrastructure command** ("build necessary in-scope game infrastructure as part of the change"): charter-deferred work is *chartered*, not "deferred by default." Build what the phase scopes; defer exactly what the charter defers; stop-and-return still applies to any **uncharted** incompleteness.
 3. **Discriminating-test gate:** a changed behavioral seam whose discriminating test is charter-deferred (the defining property of an infrastructure→consumer seam) records `DEFERRED(phase n)` in the production-path coverage map instead of stop-and-returning. The phase's *own* chartered discriminating test(s) and structural verification (green tree, existing suites, unit-level assertions) remain mandatory, and "if any changed behavioral seam has no mapped production-path test, add one or return it as a stop-and-return item" still applies to every seam that is **not** charter-deferred.
 4. **New-field threading sweep:** needs no new vocabulary — its existing `defaults intentionally because <reason>` status absorbs chartered deferral with the charter as the reason: `defaults intentionally because DEFERRED(phase n)`.
 
@@ -87,7 +88,7 @@ Before writing any new utility function, search the CLAUDE.md building-block tab
 | `game/ability_utils.rs` | Ability construction, chained ability building |
 | `game/keywords.rs` | Keyword presence queries, protection checks |
 
-If an existing helper covers what you need, use it. If you genuinely need new infrastructure, build it as part of this change (do NOT default to deferring — see `feedback_no_default_deferral`).
+If an existing helper covers what you need, use it. Build necessary in-scope game infrastructure as part of the change (do NOT default to deferring — see `feedback_no_default_deferral`). This does not authorize a separate verification project. Ordinary tests and fixtures using existing helpers remain in scope; new verification frameworks and corrections to probing/setup/cleanup machinery return to the orchestrator under its [task boundary](../skills/engine-implementer/SKILL.md#task-scope-and-verification-work). Do not repair them independently. A measurement-only executor still makes no source edits; it returns unavailable evidence, and only the orchestrator may authorize a separately scoped implementation/fix attempt within the remaining allowance.
 
 ### Layer discipline
 
@@ -103,6 +104,7 @@ Return to the orchestrator (do NOT improvise) when:
 - A parser change would require ad hoc string dispatch and the combinator path isn't obvious.
 - A CR rule is uncertain and grep of `docs/MagicCompRules.txt` doesn't resolve it.
 - The work no longer fits existing architecture.
+- Verification requires a separate tooling project or a correction to measurement/setup/cleanup machinery, including a design correction before a helper runs. Return the missing evidence and proposed existing-tool recovery; the orchestrator applies the shared limits.
 - You'd need to add a new sibling enum variant where parameterization is the right answer (`feedback_parameterize_dont_proliferate`).
 
 A "stop and return" is success, not failure. Bandaids that ship are far worse than a clean handback.
