@@ -5,8 +5,11 @@ use crate::types::ability::{
     ResolvedAbility, TargetFilter,
 };
 use crate::types::card_type::CoreType;
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingPlayerScopeSacrificeCompletion, WaitingFor};
+use crate::types::game_state::{
+    GameState, PendingCounterPostAction, PendingPlayerScopeSacrificeCompletion, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
@@ -26,6 +29,7 @@ pub fn resolve(
         sacrifice_filter,
         total_power_cap,
         keeper_constraint,
+        keeper_counter,
     ) = match &ability.effect {
         Effect::ChooseAndSacrificeRest {
             categories,
@@ -34,6 +38,7 @@ pub fn resolve(
             sacrifice_filter,
             total_power_cap,
             keeper_constraint,
+            keeper_counter,
         } => (
             categories.clone(),
             *chooser_scope,
@@ -41,6 +46,7 @@ pub fn resolve(
             sacrifice_filter.clone(),
             total_power_cap.clone(),
             keeper_constraint.clone(),
+            keeper_counter.clone(),
         ),
         _ => {
             return Err(EffectError::MissingParam(
@@ -48,6 +54,22 @@ pub fn resolve(
             ))
         }
     };
+
+    // CR 122.1 + CR 608.2c: the keeper mark is a step of the exact-cardinality
+    // nomination. No other keeper mode has a nomination step to place it in, and the
+    // parser's head gate cannot produce the combination. Refuse loudly rather than
+    // resolve with the printed instruction silently dropped. Placed ABOVE the
+    // `KeeperConstraint::ExactCount` early return below: every other mode is reachable
+    // only below BOTH early returns -- total_power_cap returns first, so a guard
+    // sited between the two would miss it.
+    if keeper_counter.is_some()
+        && !matches!(keeper_constraint, Some(KeeperConstraint::ExactCount { .. }))
+    {
+        return Err(EffectError::InvalidParam(
+            "ChooseAndSacrificeRest: keeper_counter requires KeeperConstraint::ExactCount"
+                .to_string(),
+        ));
+    }
 
     // CR 101.4: Determine player order using APNAP.
     // CR 102.2 (two-player) / CR 102.3 (team multiplayer): An ability with
@@ -109,6 +131,14 @@ pub fn resolve(
         let keep_count =
             crate::game::quantity::resolve_quantity_with_targets(state, &count, ability).max(0)
                 as usize;
+        // CR 608.2h: the printed count is resolved once, here, at the same
+        // point the keeper cardinality itself resolves.
+        let keeper_counter = keeper_counter.map(|mark| {
+            let count =
+                crate::game::quantity::resolve_quantity_with_targets(state, &mark.count, ability)
+                    .max(0) as u32;
+            (mark.counter_type, count)
+        });
         return step_exact_count(
             state,
             ability.source_id,
@@ -119,6 +149,7 @@ pub fn resolve(
             &choose_filter,
             &sacrifice_filter,
             keep_count,
+            keeper_counter.as_ref(),
             &player_order,
             events,
         );
@@ -145,6 +176,8 @@ pub fn resolve(
 
     // If all categories are empty for all players, skip directly to sacrifice.
     if eligible.iter().all(|e| e.is_empty()) && remaining_players.is_empty() {
+        // Category mode has no nomination step to carry a keeper mark in — the
+        // `resolve` guard above refuses `keeper_counter` outside `ExactCount`.
         sacrifice_unchosen(
             state,
             &[],
@@ -152,6 +185,7 @@ pub fn resolve(
             &sacrifice_filter,
             ability.source_id,
             ability.controller,
+            None,
             events,
         )?;
         return Ok(());
@@ -178,6 +212,7 @@ pub fn resolve(
     if let Some(auto_choices) = try_auto_resolve(&eligible) {
         let kept: Vec<ObjectId> = auto_choices.iter().filter_map(|&opt| opt).collect();
         if remaining_players.is_empty() {
+            // Category mode: same reason as the empty-categories branch above.
             sacrifice_unchosen(
                 state,
                 &kept,
@@ -185,6 +220,7 @@ pub fn resolve(
                 &sacrifice_filter,
                 ability.source_id,
                 ability.controller,
+                None,
                 events,
             )?;
             return Ok(());
@@ -305,6 +341,8 @@ pub(crate) fn step_total_power(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let Some((&current_player, rest)) = players_remaining.split_first() else {
+        // Total-power mode has no nomination step to carry a keeper mark in —
+        // the `resolve` guard above refuses `keeper_counter` outside `ExactCount`.
         sacrifice_unchosen(
             state,
             &all_kept,
@@ -312,6 +350,7 @@ pub(crate) fn step_total_power(
             sacrifice_filter,
             source_id,
             source_controller,
+            None,
             events,
         )?;
         return Ok(());
@@ -388,6 +427,7 @@ pub(crate) fn step_exact_count(
     choose_filter: &TargetFilter,
     sacrifice_filter: &TargetFilter,
     count: usize,
+    keeper_counter: Option<&(CounterType, u32)>,
     scoped_players: &[PlayerId],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
@@ -399,6 +439,7 @@ pub(crate) fn step_exact_count(
             sacrifice_filter,
             source_id,
             source_controller,
+            keeper_counter,
             events,
         )?;
         return Ok(());
@@ -419,6 +460,7 @@ pub(crate) fn step_exact_count(
             choose_filter,
             sacrifice_filter,
             count,
+            keeper_counter,
             scoped_players,
             events,
         );
@@ -437,6 +479,7 @@ pub(crate) fn step_exact_count(
         target_player,
         eligible,
         required_count,
+        keeper_counter: keeper_counter.cloned(),
         choose_filter: choose_filter.clone(),
         sacrifice_filter: sacrifice_filter.clone(),
         chooser_scope,
@@ -486,6 +529,8 @@ pub(crate) fn advance_to_next_player(
 ) -> Result<(), EffectError> {
     dedupe_object_ids(&mut all_kept);
     if remaining.is_empty() {
+        // Category mode has no nomination step to carry a keeper mark in — the
+        // `resolve` guard above refuses `keeper_counter` outside `ExactCount`.
         sacrifice_unchosen(
             state,
             &all_kept,
@@ -493,6 +538,7 @@ pub(crate) fn advance_to_next_player(
             sacrifice_filter,
             source_id,
             controller,
+            None,
             events,
         )?;
         return Ok(());
@@ -576,6 +622,9 @@ pub(crate) fn sacrifice_unchosen_from_handler(
     source_controller: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // Category mode has no nomination step to carry a keeper mark in — the
+    // `resolve` guard above refuses `keeper_counter` outside `ExactCount`, and
+    // this handler resumes only the category-choice path.
     sacrifice_unchosen(
         state,
         kept,
@@ -583,11 +632,18 @@ pub(crate) fn sacrifice_unchosen_from_handler(
         sacrifice_filter,
         source_id,
         source_controller,
+        None,
         events,
     )
 }
 
 /// CR 701.21a: Sacrifice all permanents on the battlefield that were not chosen.
+///
+/// `keeper_counter`, when `Some`, is the printed mark (CR 608.2c + CR 122.1)
+/// this instruction owes each keeper BEFORE the sweep — placed here, after
+/// publication, so the CR 616.1 pause it may raise resumes into the sweep
+/// through `ContinuePlayerScopeSacrifice` rather than skipping ahead of it.
+#[allow(clippy::too_many_arguments)]
 fn sacrifice_unchosen(
     state: &mut GameState,
     kept: &[ObjectId],
@@ -595,6 +651,7 @@ fn sacrifice_unchosen(
     sacrifice_filter: &TargetFilter,
     source_id: ObjectId,
     source_controller: PlayerId,
+    keeper_counter: Option<&(CounterType, u32)>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     // CR 701.21a: Sacrifice each permanent NOT chosen, restricted to the
@@ -637,11 +694,69 @@ fn sacrifice_unchosen(
     // `tests::sacrifice_unchosen_starts_a_fresh_tracked_set_over_an_active_ancestor_publish`.
     // `PendingPlayerScopeSacrificeCompletion.publish_fresh_tracked_set` stays
     // false: that field publishes the SACRIFICED set, the opposite population.
+    //
+    // CR 608.2c + CR 614.1: the printed counter precedes the sacrifice, and
+    // replacement effects apply as the placement event happens — a would-be
+    // multiplier that is itself unchosen must still be on the battlefield here.
+    // Sited AFTER `publish_fresh_tracked_set` so the mark has a correct subject
+    // and `chain_tracked_set_id` is already bound at any pause; the
+    // continuation (`run_player_scope_sacrifice`) must not publish again.
     super::publish_fresh_tracked_set(state, kept.to_vec());
+    match keeper_counter {
+        Some((counter_type, count)) => {
+            let tail = PendingCounterPostAction::ContinuePlayerScopeSacrifice {
+                kept: kept.to_vec(),
+                scoped_players: effective_scope.clone(),
+                sacrifice_filter: sacrifice_filter.clone(),
+                source_id,
+                source_controller,
+            };
+            // A `false` return means either the counter batch or the sacrifice
+            // parked its own continuation; neither is an error and neither needs
+            // re-parking here (see `add_object_counters_then`).
+            let _ = super::counters::add_object_counters_then(
+                state,
+                source_controller,
+                kept,
+                counter_type,
+                *count,
+                EffectKind::ChooseAndSacrificeRest,
+                source_id,
+                tail,
+                events,
+            );
+            Ok(())
+        }
+        None => run_player_scope_sacrifice(
+            state,
+            kept,
+            &effective_scope,
+            sacrifice_filter,
+            source_id,
+            source_controller,
+            events,
+        ),
+    }
+}
+
+/// CR 701.21a: sweep every in-scope permanent the keepers did not protect.
+/// Called inline when no keeper mark paused, and from
+/// `PendingCounterPostAction::ContinuePlayerScopeSacrifice` when one did — the
+/// selections are derived HERE in both cases, never carried across the pause,
+/// and the keeper tracked set is NOT re-published here (see `sacrifice_unchosen`).
+fn run_player_scope_sacrifice(
+    state: &mut GameState,
+    kept: &[ObjectId],
+    effective_scope: &[PlayerId],
+    sacrifice_filter: &TargetFilter,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
     let selections = unchosen_sacrifice_selections_for_scope(
         state,
         kept,
-        &effective_scope,
+        effective_scope,
         sacrifice_filter,
         source_id,
         source_controller,
@@ -659,6 +774,76 @@ fn sacrifice_unchosen(
         events,
     )?;
     Ok(())
+}
+
+/// CR 701.21a + CR 616.1: resume the disposal half after the keeper marks
+/// settled. Returns `true` when the sacrifice ran to completion, `false` when it
+/// parked its own continuation — the contract `apply_pending_counter_post_action`
+/// consumes, mirroring `proliferate::continue_proliferate_actions`.
+pub(crate) fn continue_player_scope_sacrifice(
+    state: &mut GameState,
+    kept: &[ObjectId],
+    scoped_players: &[PlayerId],
+    sacrifice_filter: &TargetFilter,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let selections = unchosen_sacrifice_selections_for_scope(
+        state,
+        kept,
+        scoped_players,
+        sacrifice_filter,
+        source_id,
+        source_controller,
+    );
+    let completion = PendingPlayerScopeSacrificeCompletion {
+        effect_kind: Some(EffectKind::ChooseAndSacrificeRest),
+        ..Default::default()
+    };
+    match super::perform_collected_player_scope_sacrifices_with_completion(
+        state,
+        source_id,
+        source_controller,
+        selections,
+        completion,
+        events,
+    ) {
+        Ok(super::PendingPlayerScopeSacrificeOutcome::Completed { .. }) => true,
+        // A live prompt is installed; do not let the counter drain continue past it.
+        Ok(super::PendingPlayerScopeSacrificeOutcome::PausedForReplacement) => false,
+        // UNREACHABLE THROUGH THIS CALLEE (B-2), and mapped the SAFE way.
+        // MEASURED: `perform_collected_player_scope_sacrifices_with_completion`
+        // matches over `PlayerScopeSacrificePerformOutcome`, which has exactly TWO
+        // variants, and maps them one-to-one onto `Completed` /
+        // `PausedForReplacement`; it can never yield this third variant. The variant
+        // is constructed only inside `advance_pending_player_scope_sacrifice_choice`
+        // and in `effects/sacrifice.rs`, none of which this callee reaches.
+        // Direction: at its live construction site it is returned immediately AFTER
+        // `set_player_scope_sacrifice_waiting_for` installs a prompt — the same
+        // condition as `PausedForReplacement` — so `false` is the only safe mapping.
+        // `true` would let `drain_pending_counter_additions` keep draining and emit
+        // the terminal event over a live prompt. DECLARED MUTATION NULL: no test can
+        // redden this arm (see `choose_and_sacrifice_rest.rs`'s module doc / U1 plan
+        // §5.10) — it is unreachable through this callee by construction.
+        Ok(super::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice) => {
+            debug_assert!(
+                false,
+                "perform_collected_player_scope_sacrifices_with_completion cannot yield \
+                 WaitingForNextChoice"
+            );
+            false
+        }
+        // DECLARED MUTATION NULL: same treatment as the arm above — no test can
+        // redden this arm; `debug_assert!` is the only instrument.
+        Err(_) => {
+            debug_assert!(
+                false,
+                "player-scope sacrifice error inside a counter post-action"
+            );
+            false
+        }
+    }
 }
 
 fn unchosen_sacrifice_selections_for_scope(
@@ -731,7 +916,7 @@ fn dedupe_object_ids(ids: &mut Vec<ObjectId>) {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, QuantityExpr};
+    use crate::types::ability::{Effect, KeeperCounterMark, QuantityExpr};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -764,6 +949,7 @@ mod tests {
                 sacrifice_filter: permanent_filter(),
                 total_power_cap: None,
                 keeper_constraint: None,
+                keeper_counter: None,
             },
             vec![],
             ObjectId(100),
@@ -785,6 +971,7 @@ mod tests {
                 sacrifice_filter: permanent_filter(),
                 total_power_cap: None,
                 keeper_constraint: None,
+                keeper_counter: None,
             },
             vec![],
             ObjectId(100),
@@ -984,6 +1171,7 @@ mod tests {
                 sacrifice_filter: nonland_permanent_filter(),
                 total_power_cap: None,
                 keeper_constraint: None,
+                keeper_counter: None,
             },
             vec![],
             ObjectId(100),
@@ -1134,6 +1322,7 @@ mod tests {
                 sacrifice_filter: permanent_filter(),
                 total_power_cap: None,
                 keeper_constraint: None,
+                keeper_counter: None,
             },
             vec![],
             ObjectId(100),
@@ -1372,6 +1561,7 @@ mod tests {
                 keeper_constraint: Some(KeeperConstraint::ExactCount {
                     count: QuantityExpr::Fixed { value: 1 },
                 }),
+                keeper_counter: None,
             },
             vec![],
             ObjectId(100),
@@ -1447,5 +1637,108 @@ mod tests {
         assert_eq!(eligible[0].len(), 1);
         assert_eq!(eligible[1].len(), 1);
         assert_eq!(eligible[0][0], eligible[1][0]);
+    }
+
+    /// V-F1d — CR 122.1 + CR 608.2c: `keeper_counter` requires
+    /// `KeeperConstraint::ExactCount`; every other keeper mode refuses rather
+    /// than silently dropping the printed instruction.
+    ///
+    /// M-e: the category-mode row and the total-power-mode row are BOTH
+    /// required, not redundant — `resolve`'s two early returns fire in the
+    /// order `total_power_cap` THEN `KeeperConstraint::ExactCount`, so a guard
+    /// placed between them would see the `ExactCount` early return happen
+    /// first and never observe a total-power effect at all. Only a guard
+    /// placed ABOVE both catches the total-power row; reverting the guard's
+    /// placement to between the two early returns reddens the total-power row
+    /// specifically while leaving the category row green.
+    #[test]
+    fn keeper_counter_refuses_a_non_exact_count_mode() {
+        let mark = KeeperCounterMark {
+            counter_type: CounterType::Generic("vow".to_string()),
+            count: QuantityExpr::Fixed { value: 1 },
+        };
+
+        // Category mode: no nomination step to carry the mark.
+        let mut state = setup_two_player();
+        let category_ability = ResolvedAbility::new(
+            Effect::ChooseAndSacrificeRest {
+                categories: vec![CoreType::Creature],
+                chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                choose_filter: permanent_filter(),
+                sacrifice_filter: permanent_filter(),
+                total_power_cap: None,
+                keeper_constraint: None,
+                keeper_counter: Some(mark.clone()),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        assert!(
+            matches!(
+                resolve(&mut state, &category_ability, &mut events),
+                Err(EffectError::InvalidParam(_))
+            ),
+            "category mode must refuse a keeper_counter mark"
+        );
+
+        // Total-power mode: also no nomination step, and structurally the
+        // FIRST early return in `resolve` — the row `resolve`'s guard
+        // placement must not miss.
+        let mut state = setup_two_player();
+        let total_power_ability = ResolvedAbility::new(
+            Effect::ChooseAndSacrificeRest {
+                categories: vec![],
+                chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                choose_filter: permanent_filter(),
+                sacrifice_filter: permanent_filter(),
+                total_power_cap: Some(QuantityExpr::Fixed { value: 4 }),
+                keeper_constraint: None,
+                keeper_counter: Some(mark.clone()),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        assert!(
+            matches!(
+                resolve(&mut state, &total_power_ability, &mut events),
+                Err(EffectError::InvalidParam(_))
+            ),
+            "total-power mode must refuse a keeper_counter mark"
+        );
+
+        // Positive: ExactCount mode accepts the mark and proceeds.
+        let mut state = setup_two_player();
+        let _creature = add_battlefield_permanent(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear",
+            vec![CoreType::Creature],
+        );
+        let exact_count_ability = ResolvedAbility::new(
+            Effect::ChooseAndSacrificeRest {
+                categories: vec![],
+                chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                choose_filter: permanent_filter(),
+                sacrifice_filter: permanent_filter(),
+                total_power_cap: None,
+                keeper_constraint: Some(KeeperConstraint::ExactCount {
+                    count: QuantityExpr::Fixed { value: 1 },
+                }),
+                keeper_counter: Some(mark),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        assert!(
+            resolve(&mut state, &exact_count_ability, &mut events).is_ok(),
+            "ExactCount mode must accept the keeper_counter mark"
+        );
     }
 }

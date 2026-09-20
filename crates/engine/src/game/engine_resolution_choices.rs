@@ -7848,6 +7848,7 @@ pub(super) fn handle_resolution_choice(
                 target_player: _,
                 eligible,
                 required_count,
+                keeper_counter,
                 choose_filter,
                 sacrifice_filter,
                 chooser_scope,
@@ -7893,6 +7894,7 @@ pub(super) fn handle_resolution_choice(
                 &choose_filter,
                 &sacrifice_filter,
                 required_count,
+                keeper_counter.as_ref(),
                 &scoped_players,
                 events,
             )

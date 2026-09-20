@@ -1644,6 +1644,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             sacrifice_filter,
             total_power_cap,
             keeper_constraint,
+            keeper_counter,
             categories: _,
             chooser_scope: _,
         } => {
@@ -1655,6 +1656,10 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             }
             if let Some(KeeperConstraint::ExactCount { count }) = keeper_constraint {
                 acc = acc.or(scan_quantity_expr(count, mode));
+            }
+            // CR 608.2c + CR 122.1: the printed keeper mark's count.
+            if let Some(mark) = keeper_counter {
+                acc = acc.or(scan_quantity_expr(&mark.count, mode));
             }
             acc
         }

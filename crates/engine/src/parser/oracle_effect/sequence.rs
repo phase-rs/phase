@@ -10551,6 +10551,7 @@ mod tests {
             sacrifice_filter: TargetFilter::Typed(TypedFilter::permanent()),
             total_power_cap: None,
             keeper_constraint: None,
+            keeper_counter: None,
         };
         assert_eq!(
             parse_followup_continuation_ast(

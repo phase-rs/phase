@@ -43112,6 +43112,7 @@ pub mod tests {
                 ),
                 total_power_cap: None,
                 keeper_constraint: None,
+                keeper_counter: None,
             },
         );
         let trigger = TriggerDefinition::new(TriggerMode::Phase).execute(ability);

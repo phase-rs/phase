@@ -115,19 +115,19 @@ use crate::types::ability::{
     DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
     DieResultBranch, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     GameRestriction, GuardReading, GuessSubject, IntensityScope, IterationKindBinding,
-    KeeperConstraint, LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole,
-    MassLibraryShuffleMode, MultiTargetSpec, NumberDistinctness, ObjectProperty, ObjectScope,
-    OriginConstraint, PerPlayerScope, PerpetualModification, PlayPermissionInvalidation,
-    PlayerChoiceDistinctness, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount,
-    PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
-    ReciprocalZoneChoiceRole, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
-    RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
-    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
-    TargetFilter, TargetSelectionMode, ThisWayCause, TrackedAnaphorSource, TriggerCondition,
-    TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier, UnloweredGuard,
-    UntilCondition, VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser,
-    ZoneOwner,
+    KeeperConstraint, KeeperCounterMark, LibraryPosition, ManaProduction, ManaSpendPermission,
+    ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec, NumberDistinctness, ObjectProperty,
+    ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
+    PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
+    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue,
+    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ReplacementCondition,
+    ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
+    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
+    SkipScope, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
+    SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
+    UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry,
+    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
 };
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
@@ -15816,9 +15816,6 @@ struct KeeperDisposeHead {
     filter: TargetFilter,
     verb: KeeperDisposalVerb,
     connector: KeeperTailConnector,
-    /// Span of the head verb phrase — "puts a vow counter on" — used as the
-    /// counter clause's verbatim fragment.
-    head_span: (usize, usize),
     /// Offset at which the keeper phrase ends (the connector's first byte).
     keeper_end: usize,
     /// Span of the disposal tail — "sacrifices the rest".
@@ -15871,7 +15868,6 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
     )
     .parse(input)?;
 
-    let head_start = offset(rest);
     let (rest, head) = alt((
         value(KeeperHead::Choose, alt((tag("chooses "), tag("choose ")))),
         map(
@@ -15890,7 +15886,6 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
         ),
     ))
     .parse(rest)?;
-    let head_end = offset(rest);
 
     let (rest, quantifier) = alt((
         map(
@@ -16046,7 +16041,6 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
             filter,
             verb,
             connector,
-            head_span: (head_start, head_end),
             keeper_end,
             disposal_span: (disposal_start, disposal_end),
             remainder_len,
@@ -16073,19 +16067,17 @@ pub(crate) fn is_keeper_dispose_head(lower: &str) -> bool {
 ///   player (Single Combat, Razia's Purification, Planetary Annihilation,
 ///   Limited Resources, No One Will Hear Your Cries, Promise of Loyalty).
 ///
-/// A `KeeperHead::Counter` head adds a `PutCounterAll` over the tracked set:
-/// CR 122.1's counter is what nominates the keeper, and
-/// `counters::resolve_add_all` is the only counter resolver carrying the
-/// `TrackedSetId(0)` → `state.chain_tracked_set_id` sentinel ladder.
-///
-/// CR 608.2c orders the printed counter before the sacrifice ("puts a vow
-/// counter on a creature they control and sacrifices the rest"), while this
-/// lowering sacrifices first and places counters second. The reordering is
-/// unobservable: the keeper is never in the sacrificed set under either order,
-/// no counter is read while the sacrifice happens, and CR 603.3 puts a
-/// triggered ability on the stack only "the next time a player would receive
-/// priority" — which CR 117.3b places after this spell has finished resolving —
-/// so no observer sits between the two steps.
+/// CR 608.2c: "The controller of the spell or ability follows its instructions
+/// in the order written. However, replacement effects may modify these actions."
+/// The printed counter precedes the sacrifice, and CR 614.1 makes that order
+/// observable: replacement effects "apply continuously as events happen — they
+/// aren't locked in ahead of time", so a permanent that would modify the counter
+/// placement and is itself about to be sacrificed must still be on the
+/// battlefield when the counter is placed. The mark therefore rides on
+/// `Effect::ChooseAndSacrificeRest` as `keeper_counter` and is placed inside the
+/// resolver's single funnel, ahead of the disposal — not as a chained clause
+/// after it. Driven by
+/// `tests/integration/promise_of_loyalty.rs::promise_of_loyalty_marks_the_keeper_before_the_sacrifice`.
 fn parse_keeper_dispose_rest_ir(
     text: &str,
     kind: AbilityKind,
@@ -16204,20 +16196,22 @@ fn parse_keeper_dispose_rest_ir(
                     unreachable!("excluded by the outer scope match arm above")
                 }
             };
-            let counter_clause = match &head.head {
+            // CR 122.1 + CR 608.2c: a `KeeperHead::Counter` head's printed
+            // counter nominates the keeper AS PART of this same instruction,
+            // so it rides on the effect's `keeper_counter` field rather than a
+            // following `PutCounterAll` clause — F1's fix. `Choose` heads carry
+            // no counter.
+            let keeper_counter = match &head.head {
                 KeeperHead::Choose => None,
                 KeeperHead::Counter {
                     counter_type,
                     count,
-                } => Some((counter_type.clone(), i32::try_from(*count).ok()?)),
-            };
-            let keeper_boundary = if counter_clause.is_some() {
-                // CR 608.2c: the counter and the sacrifice are one printed
-                // instruction joined by "and", so the counter clause is a step
-                // of it rather than the next printed instruction.
-                Some(ClauseBoundary::Then)
-            } else {
-                remainder_source.map(|_| ClauseBoundary::Sentence)
+                } => Some(KeeperCounterMark {
+                    counter_type: counter_type.clone(),
+                    count: QuantityExpr::Fixed {
+                        value: i32::try_from(*count).ok()?,
+                    },
+                }),
             };
             builder
                 .clause(
@@ -16235,8 +16229,9 @@ fn parse_keeper_dispose_rest_ir(
                         keeper_constraint: Some(KeeperConstraint::ExactCount {
                             count: QuantityExpr::Fixed { value: keep_count },
                         }),
+                        keeper_counter,
                     }),
-                    keeper_boundary,
+                    remainder_source.map(|_| ClauseBoundary::Sentence),
                     ClauseDisposition::Emit {
                         followup: None,
                         intrinsic: None,
@@ -16244,31 +16239,6 @@ fn parse_keeper_dispose_rest_ir(
                 )
                 .player_scope(Some(player_scope))
                 .push();
-            if let Some((counter_type, count)) = counter_clause {
-                // CR 122.1: the counter marks the keepers the preceding
-                // instruction fixed. `TrackedSetId(0)` is the chain sentinel
-                // `counters::resolve_add_all` resolves against
-                // `state.chain_tracked_set_id`, which the keeper effect
-                // publishes as it finishes sacrificing.
-                let counter_source = text.get(head.head_span.0..head.head_span.1)?.trim();
-                builder
-                    .clause(
-                        counter_source,
-                        parsed_clause(Effect::PutCounterAll {
-                            counter_type,
-                            count: QuantityExpr::Fixed { value: count },
-                            target: TargetFilter::TrackedSet {
-                                id: TrackedSetId(0),
-                            },
-                        }),
-                        remainder_source.map(|_| ClauseBoundary::Sentence),
-                        ClauseDisposition::Emit {
-                            followup: None,
-                            intrinsic: None,
-                        },
-                    )
-                    .push();
-            }
         }
     }
 
@@ -16748,6 +16718,7 @@ fn parse_threshold_land_balance_ir(
                 keeper_constraint: Some(KeeperConstraint::ExactCount {
                     count: QuantityExpr::Fixed { value: keep_count },
                 }),
+                keeper_counter: None,
             }),
             None,
             ClauseDisposition::Emit {
@@ -31154,6 +31125,14 @@ pub(super) fn publishes_exiled_cause_at_resolution(effect: &Effect) -> bool {
 /// wrapper (`conqueror's galleon`, `end-blaze epiphany`, `fire giant's fury`,
 /// `priority boarding`, `storm herald`, `waltz of rage`) back to the
 /// unrewritten `ParentTarget` binding.
+///
+/// `Effect::ChooseAndSacrificeRest` is deliberately absent even though
+/// `sacrifice_unchosen` does publish a tracked set at resolution: the effect
+/// names TWO populations (the keepers and the sacrificed rest), and which one
+/// a following anaphor means is resolved at resolution time by
+/// `publish_fresh_tracked_set`, not classified here. See
+/// `oracle_effect/tests.rs::counter_less_keeper_sibling_still_grants_the_selfref_prohibition`
+/// for the measured argument against widening this predicate.
 fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
     is_exile_effect(effect)
         || publishes_exiled_cause_at_resolution(effect)

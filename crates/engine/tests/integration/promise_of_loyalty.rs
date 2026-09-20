@@ -18,16 +18,19 @@ use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    GameRestriction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
+    AbilityDefinition, AbilityKind, Effect, EffectKind, GameRestriction, ProhibitedActivity,
+    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::{EtbTapState, Zone};
 
 /// Scryfall Oracle text, byte-identical to `client/public/card-data.json`.
 const PROMISE_OF_LOYALTY: &str = "Each player puts a vow counter on a creature they control and sacrifices the rest. Each of those creatures can't attack you or planeswalkers you control for as long as it has a vow counter on it.";
@@ -41,6 +44,26 @@ const PLANETARY_ANNIHILATION: &str = "Each player chooses six lands they control
 /// Limited Resources' enters-the-battlefield trigger, verbatim.
 const LIMITED_RESOURCES: &str =
     "When this enchantment enters, each player chooses five lands they control and sacrifices the rest.";
+/// Winding Constrictor, verbatim. Regenerate with
+/// `jq -r '.["winding constrictor"].oracle_text' client/public/card-data.json`.
+/// U1's F1 fixture: a real counter-doubling multiplier, controlled by the same
+/// player as the vow-counter recipient, that is itself among the sacrificed
+/// permanents — the exact shape CR 608.2c + CR 614.1 require the keeper mark
+/// to be placed BEFORE the sacrifice for.
+const WINDING_CONSTRICTOR: &str = "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.\nIf you would get one or more counters, you get that many plus one of each of those kinds of counters instead.";
+/// Doubling Season, verbatim. A second, non-commuting counter multiplier,
+/// used together with Winding Constrictor to force a CR 616.1
+/// replacement-ordering choice on the printed vow counter. Recipient-scoped
+/// ("a permanent you control") rather than actor-scoped, so it applies
+/// correctly under the same `controller: You` filter Winding Constrictor uses
+/// regardless of which player's `Effect::ChooseAndSacrificeRest` instance
+/// actually performs the placement — unlike an actor-scoped multiplier
+/// (Vorinclex's "if you would put"), which resolves its "you" against
+/// `add_object_counters_then`'s single per-batch `actor` parameter, a
+/// pre-existing convention `resolve_add_all` shares (both stamp the whole
+/// ability's controller, not each recipient's own controller) and which is
+/// therefore out of scope for this fix.
+const DOUBLING_SEASON_ORACLE: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
 const P2: PlayerId = PlayerId(2);
 
 const VOW: fn() -> CounterType = || CounterType::Generic("vow".to_string());
@@ -990,4 +1013,514 @@ fn planetary_annihilation_deals_six_to_each_surviving_creature() {
         6,
         "each creature takes the printed six damage"
     );
+}
+
+// ---------------------------------------------------------------------------
+// U1 (F1, CR 608.2c) — the keeper mark precedes the sacrifice.
+// ---------------------------------------------------------------------------
+
+/// CR 616.1: a redirect replacement forcing a CR 616.1 ordering choice when
+/// paired with another applicable replacement on the same object's departure.
+/// Mirrors `cost_zone_pipeline.rs`'s `redirect_self_moved_to` — no shared
+/// helper exists between the two integration test files.
+fn redirect_self_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(destination)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                destination: redirected_to,
+                origin: None,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        ))
+}
+
+/// V-F1a — CR 608.2c + CR 614.1: the vow counter is placed BEFORE the
+/// sacrifice. P0 keeps a vanilla 2/2 while a REAL Winding Constrictor
+/// (verbatim Oracle) is among the sacrificed creatures; because the mark now
+/// precedes the sweep, the Constrictor is still on the battlefield when the
+/// counter lands and its "plus one" replacement applies, so the keeper ends
+/// up with TWO vow counters instead of the printed one.
+///
+/// Reverting the ordering (placing the counters after the sweep, as
+/// `PutCounterAll` used to) reddens this to 1 — the Constrictor is already
+/// gone by the time the counter would land.
+///
+/// P1's keeper stays at exactly ONE: Winding Constrictor's replacement is
+/// `controller: You`-scoped to P0, so it never reaches P1's board.
+#[test]
+fn promise_of_loyalty_marks_the_keeper_before_the_sacrifice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let p0_keeper = scenario.add_creature(P0, "Vanilla Keeper", 2, 2).id();
+    let p0_constrictor = scenario
+        .add_creature_from_oracle(P0, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR)
+        .id();
+    let p1_keeper = scenario.add_creature(P1, "Rival Keeper", 2, 2).id();
+    let p1_doomed = scenario.add_creature(P1, "Rival Doomed", 2, 2).id();
+    stock_libraries(&mut scenario, &[P0, P1]);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Promise of Loyalty", false, PROMISE_OF_LOYALTY)
+        .id();
+
+    let mut runner = scenario.build();
+    drop(runner.cast(spell).resolve());
+    for (player, keeper) in [(P0, p0_keeper), (P1, p1_keeper)] {
+        runner
+            .act(GameAction::ChooseKeptPermanents { kept: vec![keeper] })
+            .unwrap_or_else(|e| panic!("{player:?} keeps its own creature: {e:?}"));
+    }
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&p0_constrictor].zone,
+        Zone::Graveyard,
+        "the multiplier itself must be among the sacrificed permanents"
+    );
+    assert_eq!(
+        vow_counters(&runner, p0_keeper),
+        2,
+        "CR 608.2c + CR 614.1: the mark precedes the sacrifice, so Winding \
+         Constrictor's replacement is still live when the counter is placed"
+    );
+    assert_eq!(
+        vow_counters(&runner, p1_keeper),
+        1,
+        "Winding Constrictor's replacement is controller-scoped to P0 and \
+         must not reach P1's board"
+    );
+    assert_eq!(
+        runner.state().objects[&p1_doomed].zone,
+        Zone::Graveyard,
+        "P1's unchosen creature is still swept"
+    );
+}
+
+/// Paired positive control for V-F1a: when P0 keeps the Constrictor ITSELF,
+/// the count is 2 whether the fix is present or not (the Constrictor never
+/// left the battlefield), so this row must stay green across the revert and
+/// is what proves `promise_of_loyalty_marks_the_keeper_before_the_sacrifice`
+/// is measuring the ordering, not something else about the multiplier.
+#[test]
+fn promise_of_loyalty_marks_a_keeper_that_is_its_own_multiplier() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let p0_constrictor = scenario
+        .add_creature_from_oracle(P0, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR)
+        .id();
+    let p0_doomed = scenario.add_creature(P0, "Caster Doomed", 2, 2).id();
+    stock_libraries(&mut scenario, &[P0]);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Promise of Loyalty", false, PROMISE_OF_LOYALTY)
+        .id();
+
+    let mut runner = scenario.build();
+    drop(runner.cast(spell).resolve());
+    runner
+        .act(GameAction::ChooseKeptPermanents {
+            kept: vec![p0_constrictor],
+        })
+        .expect("P0 keeps the Constrictor itself");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&p0_constrictor].zone,
+        Zone::Battlefield
+    );
+    assert_eq!(runner.state().objects[&p0_doomed].zone, Zone::Graveyard);
+    assert_eq!(
+        vow_counters(&runner, p0_constrictor),
+        2,
+        "the kept multiplier doubles-plus-one its own vow counter regardless \
+         of ordering — the positive control for V-F1a"
+    );
+}
+
+/// V-F1c — CR 616.1: a replacement-ordering choice raised INSIDE the keeper
+/// marking step still resumes into the sacrifice. Two non-commuting
+/// multipliers (Winding Constrictor's "plus one", Doubling Season's "twice")
+/// both apply to the printed vow counter, so the marking step itself must
+/// pause on `WaitingFor::ReplacementChoice` BEFORE either non-keeper leaves
+/// the battlefield; after answering, both non-keepers are in the graveyard
+/// and the keeper holds the chosen arithmetic.
+///
+/// The one-multiplier board (`promise_of_loyalty_marks_the_keeper_before_the_sacrifice`)
+/// pauses not at all — the paired reach-guard proving the pause here is
+/// genuinely load-bearing rather than a property of every fixture.
+#[test]
+fn promise_of_loyalty_keeper_mark_survives_a_replacement_order_choice() {
+    for (index, expected_vow_counters) in [(0usize, 3u32), (1usize, 4u32)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let keeper = scenario.add_creature(P0, "Vanilla Keeper", 2, 2).id();
+        let constrictor = scenario
+            .add_creature_from_oracle(P0, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR)
+            .id();
+        let doubling_season = scenario
+            .add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE)
+            .id();
+        stock_libraries(&mut scenario, &[P0]);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Promise of Loyalty", false, PROMISE_OF_LOYALTY)
+            .id();
+
+        let mut runner = scenario.build();
+        drop(runner.cast(spell).resolve());
+        runner
+            .act(GameAction::ChooseKeptPermanents { kept: vec![keeper] })
+            .expect("P0 keeps the vanilla creature");
+
+        // CR 616.1: both multipliers are still on the battlefield when the
+        // ordering choice for the vow counter opens.
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "the keeper mark's two competing multipliers must raise a CR \
+             616.1 ordering choice, got {:?}",
+            runner.state().waiting_for
+        );
+        for multiplier in [constrictor, doubling_season] {
+            assert_eq!(
+                runner.state().objects[&multiplier].zone,
+                Zone::Battlefield,
+                "no non-keeper may leave the battlefield before the \
+                 ordering choice is answered"
+            );
+        }
+
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("ordering the two vow-counter multipliers must be legal");
+        runner.advance_until_stack_empty();
+
+        assert_eq!(
+            runner.state().objects[&constrictor].zone,
+            Zone::Graveyard,
+            "the sacrifice must still run after the ordering choice resumes"
+        );
+        // Doubling Season is an enchantment: Promise of Loyalty's sacrifice
+        // sweep is creature-scoped and never reaches it.
+        assert_eq!(
+            runner.state().objects[&doubling_season].zone,
+            Zone::Battlefield
+        );
+        assert_eq!(
+            vow_counters(&runner, keeper),
+            expected_vow_counters,
+            "index {index}: the keeper's count must reflect the CHOSEN order"
+        );
+    }
+}
+
+/// Three boards shared by `V-F1g` / `MO-2` / `MO-3` (unpaused, single
+/// counter-placement pause, and a double pause that also pauses the sacrifice
+/// sweep itself) and by `V-F1h-E` / `MO-1`.
+///
+/// P0 casts with an EMPTY board (auto-keeps nothing, no prompt — CR 609.3)
+/// so the fixture stays single-seat for combat: P1 is the seat that
+/// nominates a keeper, so "the keeper can't attack YOU (=P0, the caster)" is
+/// a real cross-seat restriction rather than a creature refusing to attack
+/// its own controller.
+///
+/// `double_pause`: when `true`, one of P1's non-keepers additionally carries
+/// two competing move-redirect replacements, so answering the counter-pause's
+/// ordering choice runs straight into a SECOND `WaitingFor::ReplacementChoice`
+/// for that creature's own departure — the double-pause board.
+struct PauseBoard {
+    runner: GameRunner,
+    keeper: ObjectId,
+    bystander_a: ObjectId,
+    bystander_b: ObjectId,
+    /// Every `GameEvent` emitted by the cast and by each subsequent
+    /// `GameAction` this builder submitted to reach the settled board — the
+    /// union `MO-1` / `V-F1h-E` count over.
+    events: Vec<GameEvent>,
+}
+
+fn build_pause_board(multipliers: bool, double_pause: bool) -> PauseBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // P0 casts with no creatures — its own APNAP keeper step auto-resolves
+    // with nothing kept (CR 609.3) and never prompts.
+    let keeper = scenario.add_creature(P1, "Vanilla Keeper", 2, 2).id();
+    let bystander_a = if double_pause {
+        scenario
+            .add_creature(P1, "Doubly Redirected Bystander", 2, 2)
+            .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+            .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+            .id()
+    } else {
+        scenario.add_creature(P1, "Plain Bystander A", 2, 2).id()
+    };
+    let bystander_b = scenario.add_creature(P1, "Plain Bystander B", 2, 2).id();
+    if multipliers {
+        scenario.add_creature_from_oracle(P1, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR);
+        scenario.add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON_ORACLE);
+    }
+    stock_libraries(&mut scenario, &[P0, P1]);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Promise of Loyalty", false, PROMISE_OF_LOYALTY)
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).resolve();
+    let mut events: Vec<GameEvent> = outcome.events().to_vec();
+    drop(outcome);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::KeepExactPermanentsChoice { .. }
+        ),
+        "P1 must be prompted directly — P0's empty board must not prompt: {:?}",
+        runner.state().waiting_for
+    );
+    let result = runner
+        .act(GameAction::ChooseKeptPermanents { kept: vec![keeper] })
+        .expect("P1 keeps the vanilla creature");
+    events.extend(result.events);
+
+    if multipliers {
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "the counter-placement pause must be raised: {:?}",
+            runner.state().waiting_for
+        );
+        // MO-4: `chain_tracked_set_id` must already be bound (by
+        // `publish_fresh_tracked_set`, ahead of the counter step) at the
+        // moment of the pause, and must not change across it — a rebind
+        // would invalidate the `ParentTarget` binding `V-F1g` depends on.
+        // MEASURED (temporary instrumentation, run and reverted byte-exact):
+        // `Some(TrackedSetId(_))` immediately after `publish_fresh_tracked_set`,
+        // at this pause, and again inside `continue_player_scope_sacrifice` —
+        // the SAME id all three times; the continuation never re-publishes.
+        let bound_before_pause = runner.state().chain_tracked_set_id;
+        assert!(
+            bound_before_pause.is_some(),
+            "chain_tracked_set_id must already be bound at the pause"
+        );
+        let result = runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("ordering the counter multipliers must be legal");
+        events.extend(result.events);
+    }
+
+    if double_pause {
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "the sacrifice's own departure pause must be raised: {:?}",
+            runner.state().waiting_for
+        );
+        let result = runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("ordering the bystander's competing redirects must be legal");
+        events.extend(result.events);
+    }
+
+    PauseBoard {
+        runner,
+        keeper,
+        bystander_a,
+        bystander_b,
+        events,
+    }
+}
+
+/// V-F1g + MO-2 + MO-3 — sentence two still binds to the keepers after the
+/// anaphor's label flip (§1: `ChooseAndSacrificeRest` is not a member of
+/// `publishes_tracked_set_from_resolution`, so the grant's `affected` is
+/// `ParentTarget`, not `TrackedSet`), on all three pause shapes.
+///
+/// Reverting the funnel's publish-before-counters order (or re-publishing the
+/// tracked set from `run_player_scope_sacrifice`) makes
+/// `state.chain_tracked_set_id` wrong or unset at install time, so the
+/// `ParentTarget` arm's `unwrap_or_default()` installs on an empty set —
+/// nothing is refused, and the keeper attacks freely. RED on that mutation.
+///
+/// MO-2, MEASURED on the double-pause board (temporary instrumentation, run
+/// and reverted byte-exact): the sacrifice stage's own `Completed` arm in
+/// `game/engine_replacement.rs`'s `ReplacementResult::Execute` arm is what
+/// calls `effects::drain_pending_continuation` and installs sentence two —
+/// the general continuation stage's OWN call to the same function never
+/// fires for this resolution, because the sacrifice-stage arm already
+/// drained the continuation by the time control would reach it.
+#[test]
+fn promise_of_loyalty_sentence_two_binds_to_the_keepers_on_every_pause_path() {
+    for (label, multipliers, double_pause) in [
+        ("unpaused", false, false),
+        ("single-pause", true, false),
+        ("double-pause", true, true),
+    ] {
+        let PauseBoard {
+            mut runner,
+            keeper,
+            bystander_a,
+            bystander_b,
+            events: _,
+        } = build_pause_board(multipliers, double_pause);
+        runner.advance_until_stack_empty();
+
+        assert_eq!(
+            runner.state().objects[&bystander_b].zone,
+            Zone::Graveyard,
+            "{label}: every ordinary non-keeper must still be swept"
+        );
+        // `bystander_a` carries two competing move-redirects in the
+        // `double_pause` board (that is what raises its own second
+        // `WaitingFor::ReplacementChoice`), so ITS zone is whichever
+        // redirect answering `index: 0` chose (MEASURED: Exile) rather than
+        // Graveyard — the sacrifice still ran, it was just redirected away.
+        assert_eq!(
+            runner.state().objects[&bystander_a].zone,
+            if double_pause {
+                Zone::Exile
+            } else {
+                Zone::Graveyard
+            },
+            "{label}: bystander_a must still have left the battlefield"
+        );
+        assert_eq!(
+            vow_counters(&runner, keeper),
+            // MEASURED on THIS fixture (index 0, answered in `build_pause_board`):
+            // the resulting count on a base of 1 vow counter is 4. The
+            // candidate-order → arithmetic mapping is a property of this
+            // specific board (it differs from
+            // `promise_of_loyalty_keeper_mark_survives_a_replacement_order_choice`'s
+            // board, which measures 3 at index 0) — this row does not assume
+            // the two fixtures share a mapping, only asserts what THIS one
+            // measures.
+            if multipliers { 4 } else { 1 },
+            "{label}: the keeper must still be marked"
+        );
+
+        let unmarked = spawn_creature(runner.state_mut(), P1, "Unmarked Bystander");
+        advance_to_declare_attackers_for(&mut runner, P1);
+        assert!(
+            runner
+                .declare_attackers(&[(keeper, AttackTarget::Player(P0))])
+                .is_err(),
+            "{label}: the keeper must still be refused the attack on the caster \
+             after the label flip"
+        );
+        runner
+            .declare_attackers(&[(unmarked, AttackTarget::Player(P0))])
+            .expect("{label}: a creature with no vow counter attacks the caster freely");
+    }
+}
+
+/// V-F1h-E + MO-1 — the counter queue's own completion does not add an
+/// OBSERVABLE THIRD `EffectResolved{ChooseAndSacrificeRest}` push beyond the
+/// pre-existing baseline, on every pause shape.
+///
+/// MEASURED, and NOT the plan's predicted "exactly 1 on every board": a real
+/// interactive exact-keeper choice emits TWO such events even at BASE_SHA,
+/// for reasons unrelated to U1 — `step_exact_count` pushes one when it first
+/// raises `WaitingFor::KeepExactPermanentsChoice` (unchanged by this plan),
+/// and `perform_player_scope_sacrifices`'s completion tail pushes a second
+/// when the sacrifice actually finishes (also unchanged). BASELINE = 2 on
+/// every board, including "unpaused": `add_object_counters_then`'s inline
+/// path never constructs a completion frame at all, so neither mode is even
+/// consulted there.
+///
+/// `add_object_counters_then`'s `Suppress` mode (B-1) is what keeps the
+/// PAUSED boards at that same baseline instead of adding a THIRD push for the
+/// counter queue's own completion. Positive control, run and reverted byte-
+/// exact: flipping `Suppress` to `Emit` in `counters.rs::add_object_counters_then`
+/// measures 2 / 3 / 3 (unpaused / single-pause / double-pause) — proving (a)
+/// the instrument moves, and (b) the extra push happens ONCE per
+/// `add_object_counters_then` call regardless of how many NESTED pauses that
+/// one post-action itself takes (double-pause does not compound to 4).
+fn count_choose_and_sacrifice_resolved(events: &[GameEvent], source_id: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ChooseAndSacrificeRest,
+                    source_id: event_source,
+                    ..
+                } if *event_source == source_id
+            )
+        })
+        .count()
+}
+
+#[test]
+fn promise_of_loyalty_resolves_exactly_once_on_every_pause_path() {
+    for (label, multipliers, double_pause) in [
+        ("unpaused", false, false),
+        ("single-pause", true, false),
+        ("double-pause", true, true),
+    ] {
+        let PauseBoard {
+            mut runner,
+            keeper: _,
+            bystander_a: _,
+            bystander_b: _,
+            events: mut all_events,
+        } = build_pause_board(multipliers, double_pause);
+
+        while !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            let result = runner
+                .act(GameAction::PassPriority)
+                .unwrap_or_else(|e| panic!("{label}: could not settle the stack: {e:?}"));
+            all_events.extend(result.events);
+        }
+
+        // Reach guard: at least one OTHER `EffectResolved` kind exists in the
+        // same stream, so the filter below is not vacuously matching nothing.
+        assert!(
+            all_events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved { kind, .. } if *kind != EffectKind::ChooseAndSacrificeRest
+            )),
+            "{label}: reach guard — an unrelated EffectResolved kind must be present"
+        );
+
+        let spell_source = all_events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ChooseAndSacrificeRest,
+                    source_id,
+                    ..
+                } => Some(*source_id),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("{label}: at least one EffectResolved{{ChooseAndSacrificeRest}} must exist")
+            });
+
+        assert_eq!(
+            count_choose_and_sacrifice_resolved(&all_events, spell_source),
+            2,
+            "{label}: the counter queue's completion must not add a third \
+             EffectResolved{{ChooseAndSacrificeRest}} beyond the pre-existing \
+             two-push baseline"
+        );
+    }
 }

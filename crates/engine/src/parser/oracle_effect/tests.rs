@@ -69973,6 +69973,84 @@ fn keeper_dispose_head_captures_printed_counter_count() {
     );
 }
 
+/// V-F1f — U1 (F1, CR 608.2c): the chain is now TWO clauses, not three. The
+/// printed counter rides on `Effect::ChooseAndSacrificeRest`'s own
+/// `keeper_counter` field rather than a chained `PutCounterAll`, and the link
+/// into sentence two is unchanged (`SequentialSibling`, since the keeper
+/// clause is now the whole first printed instruction). Reverting the
+/// lowering (reintroducing the `PutCounterAll` clause, or dropping
+/// `keeper_counter` entirely) reddens the assertions below.
+///
+/// This item is also **V-HONEST's reach-guard** (M-g): it asserts
+/// `keeper_counter: Some(("vow", Fixed(1)))` is actually populated, which is
+/// what keeps `promise_of_loyalty_binds_outer_tracked_set_inner_selfref`'s
+/// `parse_warnings.is_empty()` negative from passing vacuously — if the line
+/// stopped parsing, this positive assertion fails first.
+#[test]
+fn keeper_dispose_counter_head_lowers_to_the_effect_field() {
+    let parsed = sorcery(PROMISE_OF_LOYALTY_ORACLE, "Promise of Loyalty");
+    let keeper = &parsed.abilities[0];
+    assert!(
+        matches!(
+            keeper.effect.as_ref(),
+            Effect::ChooseAndSacrificeRest {
+                keeper_counter: Some(KeeperCounterMark {
+                    counter_type: CounterType::Generic(name),
+                    count: QuantityExpr::Fixed { value: 1 },
+                }),
+                ..
+            } if name == "vow"
+        ),
+        "the printed counter must ride on the effect field: {:?}",
+        keeper.effect
+    );
+
+    // No PutCounterAll anywhere in the chain.
+    let mut current = Some(keeper);
+    while let Some(ability) = current {
+        assert!(
+            !matches!(ability.effect.as_ref(), Effect::PutCounterAll { .. }),
+            "the chain must not carry a PutCounterAll clause: {:?}",
+            ability.effect
+        );
+        current = ability.sub_ability.as_deref();
+    }
+
+    let grant = keeper
+        .sub_ability
+        .as_deref()
+        .expect("sentence two must chain directly after the keeper clause");
+    assert_eq!(
+        grant.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling,
+        "the keeper clause is now the whole first printed instruction"
+    );
+
+    // Paired positive: the choose-head sibling (no printed counter) still
+    // lowers with `keeper_counter: None` and the same link.
+    const CHOOSE_HEAD_SIBLING: &str = "Each player chooses a creature they control, then sacrifices the rest. Each of those creatures can't attack you or planeswalkers you control.";
+    let choose_parsed = sorcery(CHOOSE_HEAD_SIBLING, "Synthetic Choose Head Sibling");
+    let choose_keeper = &choose_parsed.abilities[0];
+    assert!(
+        matches!(
+            choose_keeper.effect.as_ref(),
+            Effect::ChooseAndSacrificeRest {
+                keeper_counter: None,
+                ..
+            }
+        ),
+        "a Choose head carries no keeper mark: {:?}",
+        choose_keeper.effect
+    );
+    assert_eq!(
+        choose_keeper
+            .sub_ability
+            .as_deref()
+            .map(|ability| ability.sub_link),
+        Some(crate::types::ability::SubAbilityLink::SequentialSibling)
+    );
+}
+
 /// N1 — the head-verb axis. A subject the grammar does not model declines
 /// BEFORE the quantifier, so Archfiend of Depravity ("that player chooses"),
 /// Natural Balance ("each player who controls six or more lands"), Tragic
@@ -70401,11 +70479,23 @@ fn keeper_dispose_controller_branch_ast_unchanged() {
 
 /// V16 — Promise of Loyalty's built AST binds as designed, end to end.
 ///
-/// The three load-bearing shapes, each of which a named mutation flips:
-/// moving the counter clause out of the chain assembler's publisher walk flips
-/// the installer's `affected` off `TrackedSet`; hard-coding a `target` on the
-/// grant clause flips `target == None`; letting the anaphor rewrite recurse
-/// into `modifications` flips the granted definition off `SelfRef`.
+/// U1 (F1, CR 608.2c) deletes the chained `PutCounterAll` clause: the printed
+/// vow counter now rides on `Effect::ChooseAndSacrificeRest`'s own
+/// `keeper_counter` field, so sentence one's root effect IS the whole first
+/// printed instruction and sentence two (the grant) is its direct
+/// `sub_ability`. This also flips the grant's anaphor label from `TrackedSet`
+/// to `ParentTarget` (§1 of the U1 plan): `publishes_tracked_set_from_resolution`
+/// no longer sees a `PutCounterAll` node ahead of the grant, and
+/// `ChooseAndSacrificeRest` is deliberately not itself a member (see that
+/// predicate's doc). The runtime half of the label flip — that the
+/// installed prohibition still binds to exactly the keepers, on every pause
+/// path — is `V-F1g` in
+/// `crates/engine/tests/integration/promise_of_loyalty.rs::promise_of_loyalty_sentence_two_binds_to_the_keepers_on_every_pause_path`.
+///
+/// Two load-bearing shapes remain, each of which a named mutation flips:
+/// hard-coding a `target` on the grant clause flips `target == None`; letting
+/// the anaphor rewrite recurse into `modifications` flips the granted
+/// definition off `SelfRef`.
 ///
 /// `target == None` is the AST-level statement that this clause declares no
 /// target slot — `Effect::target_filter()` returns this field — which is what
@@ -70437,41 +70527,22 @@ fn promise_of_loyalty_binds_outer_tracked_set_inner_selfref() {
                 keeper_constraint: Some(KeeperConstraint::ExactCount {
                     count: QuantityExpr::Fixed { value: 1 }
                 }),
+                keeper_counter: Some(KeeperCounterMark {
+                    counter_type: CounterType::Generic(counter_name),
+                    count: QuantityExpr::Fixed { value: 1 },
+                }),
                 choose_filter: TargetFilter::Typed(filter),
                 ..
-            } if *filter == TypedFilter::creature()
+            } if *filter == TypedFilter::creature() && counter_name == "vow"
         ),
-        "sentence one keeps exactly one creature per player: {:?}",
+        "sentence one keeps exactly one creature per player and carries the printed vow mark: {:?}",
         keeper.effect
     );
 
-    let counters = keeper
+    let grant = keeper
         .sub_ability
         .as_deref()
-        .expect("the counter clause must chain after the keeper clause");
-    assert_eq!(
-        counters.sub_link,
-        crate::types::ability::SubAbilityLink::ContinuationStep,
-        "CR 608.2c: the counter and the sacrifice are one printed instruction \
-         joined by \"and\", so the counter clause is a step of the keeper \
-         instruction (`keeper_boundary` = `ClauseBoundary::Then` in \
-         `parse_keeper_dispose_rest_ir`), not the next printed sentence"
-    );
-    assert_eq!(
-        counters.effect.as_ref(),
-        &Effect::PutCounterAll {
-            counter_type: CounterType::Generic("vow".to_string()),
-            count: QuantityExpr::Fixed { value: 1 },
-            target: TargetFilter::TrackedSet {
-                id: TrackedSetId(0),
-            },
-        }
-    );
-
-    let grant = counters
-        .sub_ability
-        .as_deref()
-        .expect("sentence two must be spliced into the same chain");
+        .expect("sentence two must chain directly after the keeper clause");
     assert_eq!(
         grant.sub_link,
         crate::types::ability::SubAbilityLink::SequentialSibling
@@ -70513,10 +70584,11 @@ fn promise_of_loyalty_binds_outer_tracked_set_inner_selfref() {
     );
     assert_eq!(
         installer.affected,
-        Some(TargetFilter::TrackedSet {
-            id: TrackedSetId(0),
-        }),
-        "the installer binds to the anaphorically-fixed keeper set"
+        Some(TargetFilter::ParentTarget),
+        "U1 (§1): with the `PutCounterAll` chain clause gone, \
+         `publishes_tracked_set_from_resolution` no longer sees a publisher \
+         ahead of the grant, so the anaphor keeps its `ParentTarget` label \
+         instead of `TrackedSet`"
     );
     assert_eq!(installer.modifications.len(), 1);
     let ContinuousModification::GrantStaticAbility { definition } = &installer.modifications[0]
@@ -70543,15 +70615,54 @@ fn promise_of_loyalty_binds_outer_tracked_set_inner_selfref() {
     );
 }
 
-/// N13 — the class boundary of the sentence-two branch, on the one axis no
-/// printed card occupies: a keeper sibling with NO counter head. The branch
-/// still claims it; only the anaphor's label differs, because the keeper effect
-/// is deliberately not on the chain assembler's parse-time publisher list while
-/// `PutCounterAll` is. Promise of Loyalty's own row above is the paired
-/// positive: same grammar, `TrackedSet` label.
+/// N13 — the class boundary of the sentence-two branch. Since U1 (F1, CR
+/// 608.2c) moved the printed counter onto `ChooseAndSacrificeRest`'s own
+/// `keeper_counter` field, `ChooseAndSacrificeRest` is not itself a member of
+/// `publishes_tracked_set_from_resolution` (see that predicate's doc), so
+/// EVERY keeper-and-dispose sibling — counter head or not — lowers sentence
+/// two's anaphor to the `ParentTarget` label. This row and Promise of
+/// Loyalty's own row (`promise_of_loyalty_binds_outer_tracked_set_inner_selfref`,
+/// above) are therefore the SAME grammar shape, not a contrast.
 ///
-/// Do NOT "fix" this row by widening `publishes_tracked_set_from_resolution` —
-/// both labels install the identical transient effects at runtime.
+/// The two labels are not interchangeable, which is why the shared label
+/// matters rather than being incidental:
+/// * `game/effects/effect.rs`'s `Some(TargetFilter::ParentTarget) if
+///   ability.targets.is_empty()` arm reads `state.chain_tracked_set_id` and
+///   `.unwrap_or_default()`s it — no fallback ladder. Unset ⇒ empty set ⇒
+///   nothing installed.
+/// * `game/targeting.rs::resolve_tracked_set_sentinel` gives the
+///   `TrackedSet { id: TrackedSetId(0) }` sentinel three fallback rungs
+///   instead. Below `state.chain_tracked_set_id`, `ParentTarget` fails
+///   CLOSED while the sentinel would fail OPEN onto an unrelated population —
+///   strictly better for a "can't attack" restriction.
+///
+/// The two labels agree exactly when `state.chain_tracked_set_id` is `Some`
+/// at install time AND every member of that set is still a live object. U1's
+/// funnel (`sacrifice_unchosen`) makes the first condition structural: every
+/// path to sentence two passes through `publish_fresh_tracked_set` first. The
+/// second condition — a departed keeper — is a NAMED ACCEPTED DIVERGENCE: the
+/// `ParentTarget` arm has no `live_object_id` liveness guard, unlike its
+/// `CostPaidObject` / `AmassedArmy` neighbours (CR 400.7), but nothing between
+/// the funnel's publish and this install can move a keeper off the
+/// battlefield — CR 704.3 checks state-based actions only when a player would
+/// get priority, CR 117.3b gives priority only after the whole spell
+/// resolves, and CR 603.3 leaves the sweep's dies-triggers on the stack
+/// unresolved. This is a property of the shared `ParentTarget` arm, not of
+/// this class, and closing it (routing that arm through `live_object_id` too)
+/// is a separate contribution.
+///
+/// `publishes_tracked_set_from_resolution` is deliberately NOT widened to
+/// include `ChooseAndSacrificeRest`: a jq census over
+/// `client/public/card-data.json` finds exactly 17 corpus cards reaching
+/// `Effect::ChooseAndSacrificeRest`, and of those, only Promise of Loyalty and
+/// Natural Balance carry any anaphor after it at all — widening would move
+/// Promise of Loyalty's OWN label back to the `TrackedSet` sentinel (zero
+/// coverage gained, and the fail-open direction above is the worse one for
+/// this class). `ChooseAndSacrificeRest` is also genuinely ambiguous as a
+/// publisher — it names two populations, the keepers and the sacrificed rest —
+/// and `publish_fresh_tracked_set` resolving that ambiguity at RESOLUTION time
+/// is what lets `ParentTarget` read whichever population the funnel actually
+/// published, rather than guessing at parse time.
 #[test]
 fn counter_less_keeper_sibling_still_grants_the_selfref_prohibition() {
     // Synthetic: zero printed cards pair a counter-less keeper choice with a
