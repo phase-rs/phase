@@ -18,7 +18,7 @@ use engine::types::game_state::{
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::log::{LogCategory, LogSegment};
-use engine::types::mana::ManaType;
+use engine::types::mana::{ManaColor, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use phase_ai::auto_play::{run_ai_actions, run_ai_actions_bounded, run_driver_loop, DriverExit};
@@ -2376,5 +2376,70 @@ fn ai_drops_a_block_it_cannot_pay_the_tax_for() {
         ),
         "an unaffordable block must never open a tax prompt, got {:?}",
         runner.state().waiting_for
+    );
+}
+
+/// CR 302.6 + CR 508.1j: a tapped, summoning-sick source with a tapless
+/// sacrifice ability remains available after the two Forests pay Propaganda.
+/// Counting only tap-mana sources incorrectly applies the tap-out penalty and
+/// suppresses this otherwise worthwhile two-power attack.
+#[test]
+fn ai_tax_decision_counts_a_tapped_sick_tapless_mana_source() {
+    let mut scenario = GameScenario::new();
+    scenario.add_enchantment_from_oracle(P0, "Propaganda", PROPAGANDA_ORACLE);
+    let attacker = scenario.add_creature(P1, "Bear", 2, 2).id();
+    let source = scenario
+        .add_creature_from_oracle(
+            P1,
+            "Tapless Mana Source",
+            0,
+            1,
+            "Sacrifice this creature: Add one mana of any color.",
+        )
+        .id();
+    for _ in 0..2 {
+        scenario.add_basic_land(P1, ManaColor::Green);
+    }
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    let object = state.objects.get_mut(&source).unwrap();
+    object.tapped = true;
+    object.summoning_sick = true;
+    state.active_player = P1;
+    state.priority_player = P1;
+    state.phase = Phase::DeclareAttackers;
+    state.turn_number = 2;
+    state.waiting_for = WaitingFor::DeclareAttackers {
+        player: P1,
+        valid_attacker_ids: vec![attacker],
+        valid_attack_targets: vec![AttackTarget::Player(P0)],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    assert!(engine::game::combat::attack_tax_is_affordable(
+        runner.state(),
+        &[(attacker, AttackTarget::Player(P0))],
+    ));
+    let (action, declared) = ai_declared_attackers(&runner);
+    assert_eq!(declared, vec![attacker]);
+    runner.act(action).expect("the taxed attack must be legal");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CombatTaxPayment { .. }
+    ));
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    let mut rng = SmallRng::seed_from_u64(7);
+    let answer = choose_action(runner.state(), P1, &config, &mut rng)
+        .expect("the AI must answer its tax prompt");
+    assert_eq!(answer, GameAction::PayCombatTax { accept: true });
+    runner.act(answer).expect("the tax must be paid");
+    assert!(runner.state().combat.as_ref().is_some_and(|combat| combat
+        .attackers
+        .iter()
+        .any(|entry| entry.object_id == attacker)));
+    assert!(
+        !engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P1)
+            .is_empty(),
+        "another legal mana source remains after paying the tax"
     );
 }

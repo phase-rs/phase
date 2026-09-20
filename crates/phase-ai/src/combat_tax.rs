@@ -22,7 +22,7 @@ use engine::game::combat::{
     AttackTarget, CombatTaxPosture,
 };
 use engine::game::combat_damage::lethal_damage_needed;
-use engine::game::mana_sources::activatable_mana_options;
+use engine::game::mana_sources::activatable_mana_source_selections;
 use engine::types::game_state::{CombatTaxContext, GameState};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -282,19 +282,17 @@ fn is_worth_paying(
     pay_value > decline_value
 }
 
-/// Count the mana sources the seat could tap for mana right now.
+/// Count distinct sources with a currently legal mana activation.
 ///
-/// Delegates to `activatable_mana_options`, the engine's readiness check for
-/// tapping a source for mana now. It excludes tapped sources, sources the seat
-/// does not control, lands without a mana ability, and summoning-sick
-/// creatures (CR 302.6); layers give a basic-typed land its intrinsic mana
-/// ability (CR 305.6).
+/// CR 302.6 + CR 305.6: use the engine's complete selection authority so
+/// tapless mana costs and intrinsic basic-land abilities retain their own
+/// readiness rules. A source offering several colors still counts only once.
 fn count_untapped_mana_sources(state: &GameState, player: PlayerId) -> u32 {
-    state
-        .battlefield
-        .iter()
-        .filter(|&&id| !activatable_mana_options(state, id, player).is_empty())
-        .count() as u32
+    activatable_mana_source_selections(state, player)
+        .into_iter()
+        .map(|selection| selection.source.object_id)
+        .collect::<HashSet<_>>()
+        .len() as u32
 }
 
 /// Deck archetype weighting: aggro decks push harder on paying the attack tax (so
@@ -316,6 +314,8 @@ fn archetype_multiplier(features: &DeckFeatures, context: CombatTaxContext) -> f
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::mana::ManaColor;
 
     fn features_with(aggro: f32, control: f32) -> DeckFeatures {
         let mut features = DeckFeatures::default();
@@ -375,6 +375,62 @@ mod tests {
             count_untapped_mana_sources(runner.state(), P0),
             1,
             "only the Forest counts while the elf is summoning sick"
+        );
+    }
+
+    /// CR 302.6: sickness gates a tap cost, not a tapless sacrifice cost.
+    /// Multiple color choices from the same source must not inflate the count.
+    #[test]
+    fn tapless_sick_source_preserves_mana_after_a_one_mana_tax() {
+        let mut scenario = GameScenario::new();
+        scenario.add_basic_land(P0, ManaColor::Green);
+        let source = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Tapless Mana Source",
+                1,
+                1,
+                "Sacrifice this creature: Add one mana of any color.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .summoning_sick = true;
+        assert_eq!(count_untapped_mana_sources(runner.state(), P0), 2);
+        assert_one_mana_attack_is_worth_paying(runner.state());
+    }
+
+    /// CR 305.6: the intrinsic basic-subtype fallback is a real mana source
+    /// even when no explicit mana ability is stored on the land.
+    #[test]
+    fn intrinsic_land_source_preserves_mana_after_a_one_mana_tax() {
+        let mut scenario = GameScenario::new();
+        scenario.add_basic_land(P0, ManaColor::Green);
+        let land = scenario.add_land_from_oracle(P0, "Subtype Land", "").id();
+        let mut runner = scenario.build();
+        let object = runner.state_mut().objects.get_mut(&land).unwrap();
+        object.card_types.subtypes.push("Forest".to_string());
+        assert!(object.abilities.is_empty(), "reach the intrinsic fallback");
+        assert_eq!(count_untapped_mana_sources(runner.state(), P0), 2);
+        assert_one_mana_attack_is_worth_paying(runner.state());
+    }
+
+    fn assert_one_mana_attack_is_worth_paying(state: &GameState) {
+        let cost = ManaCost::generic(1);
+        let quote = TaxQuote {
+            context: CombatTaxContext::Attacking,
+            total_cost: &cost,
+            damage_at_stake: 1,
+            taxed_count: 1,
+            total_declared: 1,
+        };
+        assert!(
+            is_worth_paying(state, P0, &DeckFeatures::default(), &quote),
+            "paying one mana leaves another source available, so no tap-out penalty applies"
         );
     }
 
