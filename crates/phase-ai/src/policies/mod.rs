@@ -11,6 +11,7 @@ mod chalice_avoidance;
 mod combat_tax;
 mod combat_withdrawal;
 pub(crate) mod combo_line;
+mod commander_zone_return;
 mod condition_gated_activation;
 pub(crate) mod context;
 mod control_change_awareness;

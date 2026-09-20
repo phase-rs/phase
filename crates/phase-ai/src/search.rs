@@ -1616,10 +1616,12 @@ pub fn fallback_action(
                 }
             )
         }),
+        WaitingFor::CommanderZoneChoice { .. } => {
+            issued(|action| matches!(action, GameAction::DecideOptionalEffect { accept: true }))
+        }
         WaitingFor::OptionalEffectChoice { .. }
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::TributeChoice { .. }
-        | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::MiracleReveal { .. }
         | WaitingFor::CastOffer {
             kind: CastOfferKind::Miracle { .. } | CastOfferKind::Madness { .. },
@@ -5972,6 +5974,69 @@ mod tests {
             &create_config(AiDifficulty::VeryHard, Platform::Native),
             &test_contract(state),
         )
+    }
+
+    #[test]
+    fn fallback_preserves_commander_zone_return_behavior() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let commander = scenario
+            .add_creature_to_graveyard(P0, "Fallback Commander Return", 2, 2)
+            .id();
+        scenario.with_commander(commander);
+        let mut runner = scenario.build();
+        runner.state_mut().format_config.command_zone = true;
+        let mut events = Vec::new();
+        engine::game::zones::move_to_zone(
+            runner.state_mut(),
+            commander,
+            Zone::Graveyard,
+            &mut events,
+        );
+        engine::game::sba::check_state_based_actions(runner.state_mut(), &mut events);
+
+        let state = runner.state().clone();
+        let action = fallback_action_default(&state).expect("commander fallback must be issued");
+        assert_eq!(action, GameAction::DecideOptionalEffect { accept: true });
+        assert!(test_contract(&state).contains_action(&state, &action));
+        let mut applied = state;
+        engine::game::engine::apply_as_current(&mut applied, action)
+            .expect("the issued fallback must complete the real commander choice");
+        assert_eq!(applied.objects[&commander].zone, Zone::Command);
+        assert!(matches!(
+            applied.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+    }
+
+    #[test]
+    fn chooser_keeps_historical_return_behavior_with_complete_domain() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let commander = scenario
+            .add_creature_to_graveyard(P0, "Chooser Commander Return", 2, 2)
+            .id();
+        scenario.with_commander(commander);
+        let mut runner = scenario.build();
+        runner.state_mut().format_config.command_zone = true;
+        let mut events = Vec::new();
+        engine::game::zones::move_to_zone(
+            runner.state_mut(),
+            commander,
+            Zone::Graveyard,
+            &mut events,
+        );
+        engine::game::sba::check_state_based_actions(runner.state_mut(), &mut events);
+
+        let config = create_config(AiDifficulty::VeryEasy, Platform::Native);
+        let action = choose_action(
+            runner.state(),
+            P0,
+            &config,
+            &mut SmallRng::seed_from_u64(8874),
+        )
+        .expect("the chooser must answer the commander prompt");
+        assert_eq!(action, GameAction::DecideOptionalEffect { accept: true });
     }
 
     /// Issue the decision contract for the seat a test state is prompting.

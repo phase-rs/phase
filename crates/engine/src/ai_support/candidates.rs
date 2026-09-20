@@ -2854,16 +2854,16 @@ pub fn candidate_actions_broad_with_probe(
             })
             .collect(),
         // CR 903.9a: Commander owner may return it to the command zone.
-        // AI policy: always return to the command zone. Leaving a commander in
-        // the graveyard or exile forfeits a high-value reusable threat that the
-        // search has no reliable signal to value; declining is almost never
-        // correct and was misleading users into thinking the AI was throwing
-        // its commander away. Restrict the AI to the accept branch only.
-        WaitingFor::CommanderZoneChoice { player, .. } => vec![candidate(
-            GameAction::DecideOptionalEffect { accept: true },
-            TacticalClass::Selection,
-            Some(*player),
-        )],
+        WaitingFor::CommanderZoneChoice { player, .. } => [true, false]
+            .into_iter()
+            .map(|accept| {
+                candidate(
+                    GameAction::DecideOptionalEffect { accept },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 310.11 + CR 704.5x: controller chooses a new protector.
         WaitingFor::BattleProtectorChoice {
             player, candidates, ..

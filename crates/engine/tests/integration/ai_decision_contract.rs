@@ -1,4 +1,4 @@
-use engine::ai_support::AiDecisionContract;
+use engine::ai_support::{candidate_actions, legal_actions_for_viewer, AiDecisionContract};
 use engine::game::engine::{apply_as_current, EngineError};
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::create_object;
@@ -19,6 +19,78 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 use std::sync::Arc;
+
+#[test]
+fn commander_zone_choice_exposes_both_rule_legal_answers_and_settles_either_branch() {
+    for arrival_zone in [Zone::Graveyard, Zone::Exile] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let commander = scenario
+            .add_creature_to_graveyard(P0, "AI Commander Choice Contract", 2, 2)
+            .id();
+        scenario.with_commander(commander);
+        let mut runner = scenario.build();
+        runner.state_mut().format_config.command_zone = true;
+        let mut events = Vec::new();
+        engine::game::zones::move_to_zone(runner.state_mut(), commander, arrival_zone, &mut events);
+        engine::game::sba::check_state_based_actions(runner.state_mut(), &mut events);
+
+        let state = runner.state();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::CommanderZoneChoice {
+                player: P0,
+                commander_id,
+                current_zone,
+            } if commander_id == commander && current_zone == arrival_zone
+        ));
+        let contract = AiDecisionContract::issue(state, P0);
+        let accept = GameAction::DecideOptionalEffect { accept: true };
+        let decline = GameAction::DecideOptionalEffect { accept: false };
+        assert!(contract.contains_action(state, &accept));
+        assert!(contract.contains_action(state, &decline));
+        assert!(contract.permits(state, P0, &accept));
+        assert!(contract.permits(state, P0, &decline));
+        let candidates = candidate_actions(state);
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|candidate| matches!(
+                    candidate.action,
+                    GameAction::DecideOptionalEffect { .. }
+                ))
+                .count(),
+            2,
+            "the engine domain must issue both commander answers"
+        );
+        assert_eq!(
+            legal_actions_for_viewer(state, P0)
+                .0
+                .into_iter()
+                .filter(|action| matches!(action, GameAction::DecideOptionalEffect { .. }))
+                .count(),
+            2
+        );
+        assert!(legal_actions_for_viewer(state, P1).0.is_empty());
+
+        let mut declined = state.clone();
+        apply_as_current(&mut declined, decline).expect("decline must remain reducer-legal");
+        assert_eq!(declined.objects[&commander].zone, arrival_zone);
+        assert!(declined.commander_declined_zone_return.contains(&commander));
+        assert!(matches!(
+            declined.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+
+        let mut accepted = state.clone();
+        apply_as_current(&mut accepted, accept).expect("accept must remain reducer-legal");
+        assert_eq!(accepted.objects[&commander].zone, Zone::Command);
+        assert!(matches!(
+            accepted.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+    }
+}
 
 const ROUSING_REFRAIN_ORACLE: &str = "Add {R} for each card in target opponent's hand. Until end of turn, you don't lose this mana as steps and phases end. Exile Rousing Refrain with three time counters on it.";
 
