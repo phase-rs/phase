@@ -103,7 +103,8 @@
     "firstMessageInvalid": "Host odrzucił połączenie przed konfiguracją. Odśwież oba okna i spróbuj ponownie.",
     "versionRequired": "Ten host wymaga protokołu połączenia v{{version}}. Odśwież oba okna i spróbuj ponownie.",
     "versionMismatch": "Niezgodność protokołu połączenia: klient wysłał v{{guestVersion}}, ale host używa v{{hostVersion}}. Odśwież oba okna.",
-    "malformedAuthority": "Host odrzucił nieprawidłowe uprawnienia połączenia. Dołącz ponownie, używając nowego kodu pokoju."
+    "malformedAuthority": "Host odrzucił nieprawidłowe uprawnienia połączenia. Dołącz ponownie, używając nowego kodu pokoju.",
+    "frameUndecodable": "Host wysłał wiadomość, której ten klient nie mógł odczytać. Odśwież oba okna i spróbuj ponownie."
   },
   "serverOfflinePrompt": {
     "title": "Dobieranie graczy nieosiągalne",

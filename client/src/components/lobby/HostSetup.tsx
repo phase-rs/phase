@@ -1228,7 +1228,7 @@ export function HostSetup({
                         <button
                           type="button"
                           onClick={() => toggleAiSeat(seatIndex)}
-                          className={`rounded-badge px-2 py-0.5 text-[11px] font-semibold transition-colors ${
+                          className={`shrink-0 whitespace-nowrap rounded-badge px-2 py-0.5 text-[11px] font-semibold transition-colors ${
                             aiSeat ? "bg-amber-500/20 text-amber-300" : "bg-cyan-500/20 text-cyan-300"
                           }`}
                         >

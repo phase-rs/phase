@@ -1134,6 +1134,9 @@ const PARTITION_FIXTURES: Record<
   CostTypeChoice: NO_TARGET_REF_LEGAL_SET,
   SpliceOffer: NO_TARGET_REF_LEGAL_SET,
   DefilerPayment: NO_TARGET_REF_LEGAL_SET,
+  // CR 601.2f: the prompt carries reduction snapshots and locked costs, not a
+  // legal-target set — the caster reorders a list, they do not pick an object.
+  OrderCostReductions: NO_TARGET_REF_LEGAL_SET,
   CastOffer: NO_TARGET_REF_LEGAL_SET,
   ModalFaceChoice: NO_TARGET_REF_LEGAL_SET,
   AlternativeCastChoice: NO_TARGET_REF_LEGAL_SET,

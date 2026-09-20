@@ -3102,7 +3102,11 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
                 // (including KeywordAction) are abilities, not objects.
                 StackEntryKind::ActivatedAbility { .. }
                 | StackEntryKind::TriggeredAbility { .. }
-                | StackEntryKind::KeywordAction { .. } => None,
+                | StackEntryKind::KeywordAction { .. }
+                // Historically combat damage on the stack *was* an object, but
+                // this collection feeds source-has-trigger scanning over objects
+                // with a `GameObject` row, and a combat-damage entry has none.
+                | StackEntryKind::CombatDamage { .. } => None,
             })
             .collect(),
         // CR 114.4 + CR 113.6b: Abilities of emblems function in the command
@@ -45576,7 +45580,8 @@ pub mod tests {
                                 StackEntryKind::TriggeredAbility { .. }
                                 | StackEntryKind::Spell { .. }
                                 | StackEntryKind::ActivatedAbility { .. }
-                                | StackEntryKind::KeywordAction { .. } => None,
+                                | StackEntryKind::KeywordAction { .. }
+                                | StackEntryKind::CombatDamage { .. } => None,
                             })
                             .collect::<Vec<_>>();
                         actual_subjects.sort_unstable();
@@ -46963,7 +46968,8 @@ pub mod tests {
                     }
                     StackEntryKind::Spell { .. }
                     | StackEntryKind::ActivatedAbility { .. }
-                    | StackEntryKind::KeywordAction { .. } => None,
+                    | StackEntryKind::KeywordAction { .. }
+                    | StackEntryKind::CombatDamage { .. } => None,
                 })
                 .collect::<Vec<_>>();
             placed_refs.sort_unstable();
@@ -47739,7 +47745,8 @@ pub mod tests {
                     StackEntryKind::TriggeredAbility { .. }
                     | StackEntryKind::Spell { .. }
                     | StackEntryKind::ActivatedAbility { .. }
-                    | StackEntryKind::KeywordAction { .. } => None,
+                    | StackEntryKind::KeywordAction { .. }
+                    | StackEntryKind::CombatDamage { .. } => None,
                 })
                 .collect::<Vec<_>>();
             observed_subjects.sort_unstable();

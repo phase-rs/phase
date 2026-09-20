@@ -11515,6 +11515,7 @@ fn apply_non_priority_pass_action(
                 player,
                 life_cost,
                 mana_reduction,
+                reach,
                 pending_cast,
             },
             GameAction::DecideOptionalCost { pay },
@@ -11524,11 +11525,42 @@ fn apply_non_priority_pass_action(
             *pending_cast.clone(),
             *life_cost,
             mana_reduction,
+            *reach,
             pay,
             &mut events,
         )?,
         (
             WaitingFor::DefilerPayment {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        // CR 601.2f: "If multiple cost reductions apply, the player may apply
+        // them in any order." The caster submits that order here.
+        (
+            WaitingFor::OrderCostReductions {
+                player,
+                reductions,
+                pending_cast,
+                ..
+            },
+            GameAction::OrderCostReductions {
+                order,
+                hybrid_announcement,
+            },
+        ) => engine_casting::handle_order_cost_reductions(
+            state,
+            *player,
+            *pending_cast.clone(),
+            &reductions.clone(),
+            &order,
+            &hybrid_announcement,
+            &mut events,
+        )?,
+        (
+            WaitingFor::OrderCostReductions {
                 player,
                 pending_cast,
                 ..

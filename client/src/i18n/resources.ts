@@ -9,7 +9,7 @@ const modules = import.meta.glob("./locales/*/*.json", {
 
 /** Languages the app ships chrome catalogs for. English is the typing oracle and
  *  the `fallbackLng`; the others may lag without breaking the build. */
-export const SUPPORTED_LNGS = ["en", "es", "fr", "de", "it", "pt", "pl"] as const;
+export const SUPPORTED_LNGS = ["en", "es", "fr", "de", "it", "pt", "pl", "ja"] as const;
 export type SupportedLng = (typeof SUPPORTED_LNGS)[number];
 
 function isSupportedLng(value: string): value is SupportedLng {

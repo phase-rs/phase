@@ -3,7 +3,7 @@ import type { TFunction } from "i18next";
 import type { CatalogRoot, PackId } from "../../../services/visualPacks/types.ts";
 
 const PRINTING = /^printing:([a-z0-9]{3,6})$/;
-const LOCALE = /^locale:(de|es|fr|it|pt):([a-z0-9]{3,6})$/;
+const LOCALE = /^locale:(de|es|fr|it|ja|pt):([a-z0-9]{3,6})$/;
 
 /**
  * How much of a 64-hex digest is shown.

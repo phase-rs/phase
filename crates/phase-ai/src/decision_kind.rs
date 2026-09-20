@@ -104,6 +104,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::MeldAttackTargetChoice { .. }
         | WaitingFor::EntryAttackTargetChoice { .. }
         | WaitingFor::OrderTriggers { .. }
+        | WaitingFor::OrderCostReductions { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }

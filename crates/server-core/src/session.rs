@@ -1196,6 +1196,12 @@ impl GameSession {
         // can surface them; the broadcaster clears `start_events` afterward so
         // joiners/reconnects do not re-see the dice.
         let result = start_game(&mut self.state);
+        // `start_game` advances `waiting_for` from the pregame Priority state
+        // to the first real interaction (normally the two-seat mulligan).
+        // Rebind the same trusted session after that transition so the
+        // authority slots match the newly active semantic owners before the
+        // first public projection.
+        bind_interaction_session(&mut self.state, &self.game_code);
         // Per-game JSON debug log (issue #7978): "Game started"/"Turn 1" rows
         // — otherwise every game's events.jsonl would start mid-game.
         self.game_log
@@ -8476,6 +8482,23 @@ mod tests {
         let session = mgr.sessions.get_mut(&code).unwrap();
         session.start_game(&db).expect("a fully decked room starts");
         assert!(session.to_persisted().deck_choices.is_empty());
+    }
+
+    #[test]
+    fn starting_two_seat_room_rebinds_first_interaction_projection() {
+        let db = lands_db();
+        let data = name_deck("Forest", 40);
+        let (mut mgr, code) = seated_room(&db, &data);
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.start_game(&db).expect("a fully decked room starts");
+        assert_eq!(session.state.active_interaction_slots.len(), 2);
+        for player in [PlayerId(0), PlayerId(1)] {
+            let filtered = filter_state_for_player(&session.state, player);
+            let projection = derive_viewer_interaction(&session.state, &filtered, player);
+            assert!(projection.can_submit);
+            assert_eq!(projection.opportunities.len(), 1);
+        }
     }
 
     #[test]

@@ -386,6 +386,7 @@ fn permission_reduction_and_static_raise_apply_in_cr_order() {
             amount: ManaCost::generic(2),
             spell_filter: None,
             dynamic_count: None,
+            reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
         });
     let spell = scenario
         .add_creature_to_exile(P0, "Arcanum Spell", 2, 2)

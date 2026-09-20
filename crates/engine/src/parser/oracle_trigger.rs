@@ -14,7 +14,7 @@ use super::oracle_effect::{
     try_parse_reanimator_aura_etb_effect_ir, try_parse_reanimator_aura_grant_etb_effect_ir,
 };
 use super::oracle_ir::ast::parsed_clause;
-use super::oracle_ir::context::{ParseContext, TriggerConditionScope};
+use super::oracle_ir::context::{ParseContext, TriggerConditionScope, TriggerZoneChangeProvenance};
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::{DieResultBranchIr, EffectChainIr};
 use super::oracle_ir::trigger::{
@@ -1589,6 +1589,15 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             &if_condition,
         ),
         in_trigger: true,
+        // CR 603.10 + CR 400.7 + CR 122.2: establish the zone-change authority
+        // this trigger body's past-tense predicates read. Only a head shape that
+        // PROVES the pair may do so — `trigger_head_dies_zone_change` returns
+        // `None` for every non-dies head, so an ETB/attack/cast body keeps no
+        // authority and its "if it had …" text stays an honest gap.
+        trigger_zone_change: trigger_head_dies_zone_change(&cond_lower).map_or_else(
+            TriggerZoneChangeProvenance::none,
+            |(origin, destination)| TriggerZoneChangeProvenance::established(origin, destination),
+        ),
         ..Default::default()
     };
 
@@ -1619,6 +1628,10 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // The body parser mutates its working context while it walks clauses, whereas
     // each nested modal mode must begin from the same trigger-level facts.
     let body_context = effect_ctx.clone();
+    // CR 608.2c: a nested modal MODE body is ordinary text of THIS trigger body,
+    // so the plain clone correctly carries this trigger's zone-change authority
+    // (see `TriggerZoneChangeProvenance`: ordinary `Clone` continues the same
+    // body; entering an independent one is spelled by name).
     // Snapshot the condition-established scope before body parsing (which may
     // temporarily rebind it via `with_player_scope`) so lowering sees the scope
     // the condition introduced, not a transient nested-clause value.
@@ -1636,8 +1649,38 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             split_reflexive_optional_payment(&effect_for_parse)
         {
             optional = false;
-            let effect_chain =
-                parse_effect_chain_ir(&reflexive_effect_text, AbilityKind::Spell, &mut effect_ctx);
+            // CR 603.12: a reflexive "When you do" body is created by the
+            // resolving ability and has its OWN event authority — the reflexive
+            // trigger event, not the outer trigger's zone change. This site
+            // passes the outer `effect_ctx` by `&mut` and never clones it, so
+            // the reset-on-`Clone` contract cannot protect it; the reset has to
+            // be explicit. Restored afterwards so the outer context is unchanged
+            // for any later reader.
+            //
+            // SCOPE, stated honestly: this is the SPLIT representation, where the
+            // reflexive body is parsed as its own chain. The in-chain "When you
+            // do, …" CLAUSE form (an `EffectOutcome` guard on a sibling chunk of
+            // the same chain) is NOT this site and deliberately keeps the
+            // trigger's authority — that clause resolves inside the same
+            // triggered ability, so `state.current_trigger_event` is still the
+            // outer event when its gate is evaluated. Resetting here is the
+            // conservative side of that line: a split body that would have been
+            // answerable stays an honest gap rather than a guessed binding.
+            let mut reflexive_ctx = effect_ctx.clone_for_independent_body();
+            let mut effect_chain = parse_effect_chain_ir(
+                &reflexive_effect_text,
+                AbilityKind::Spell,
+                &mut reflexive_ctx,
+            );
+            effect_ctx.diagnostics = reflexive_ctx.diagnostics;
+            // CR 118.12 + CR 608.2c: bind a trailing "Otherwise, …" in the
+            // reflexive body to the outcome gate that LOWERING stamps onto this
+            // chain's root (see `lower_trigger_ir`'s
+            // `reflexive_ability.condition = connector`). Rent Is Due.
+            crate::parser::oracle_effect::bind_otherwise_to_reflexive_chain_root(
+                &mut effect_chain,
+                &connector,
+            );
             Some(TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
                 parent: ReflexiveParent::MayPay {
                     cost,
@@ -6236,6 +6279,20 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     extract_if_condition_with_card_name(text, "", None, None)
 }
 
+/// CR 603.4: the bare `if ` keyword token that opens a condition clause.
+fn parse_if_keyword(input: &str) -> OracleResult<'_, ()> {
+    value((), tag("if ")).parse(input)
+}
+
+/// CR 608.2c: the connectors that open the ELSE branch of a written-order
+/// if/else pair. Delegates to the single shared authority in `oracle_nom`, which
+/// the effect-side chain binder calls too — the trigger side must decline to
+/// hoist exactly the antecedents the effect side is able to bind, and one
+/// combinator is what makes that agreement structural rather than conventional.
+fn parse_otherwise_branch_connector(input: &str) -> OracleResult<'_, ()> {
+    crate::parser::oracle_nom::condition::parse_otherwise_branch_connector(input)
+}
+
 /// Extract an intervening-if condition from effect text.
 /// Returns (cleaned effect text, optional condition).
 ///
@@ -6280,6 +6337,26 @@ fn extract_if_condition_with_card_name(
         // more mana was spent to cast that spell, this creature also gains
         // double strike ..." — the second sentence's "if" must NOT hoist.
         if lower[..first_if].contains(". ") {
+            return (text.to_string(), None);
+        }
+    }
+
+    // CR 603.4 (last sentence): the rule "only applies to an `if` that
+    // immediately follows a trigger condition". CR 608.2c: an `if` that follows
+    // an INSTRUCTION, paired with a later `Otherwise`/`If not` branch, is
+    // ordinary resolution text — the two branches are one written-order
+    // if/else that the effect-clause parser owns. Hoisting the antecedent onto
+    // the trigger envelope would turn it into the CR 603.4 candidate-survival
+    // test, so the trigger would not fire at all when the condition is false
+    // (and would run BOTH branches when it is true). Bogardan Phoenix: "exile
+    // it if it had a death counter on it. Otherwise, return it …".
+    //
+    // A LEADING `if` (empty text before it) is still a genuine intervening-if
+    // and keeps hoisting, even when an `Otherwise` follows later.
+    if let Some((before_if, (), after_if)) = scan_preceded(lower.as_str(), parse_if_keyword) {
+        if !before_if.trim().is_empty()
+            && scan_preceded(after_if, parse_otherwise_branch_connector).is_some()
+        {
             return (text.to_string(), None);
         }
     }

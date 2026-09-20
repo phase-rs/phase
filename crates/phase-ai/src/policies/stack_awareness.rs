@@ -292,6 +292,11 @@ pub(crate) fn assess_spell_impact(state: &GameState, entry: &StackEntry) -> f64 
         StackEntryKind::ActivatedAbility { .. }
         | StackEntryKind::TriggeredAbility { .. }
         | StackEntryKind::KeywordAction { .. } => 0.5,
+        // Combat damage on the stack is neither a spell nor an ability, so no
+        // counter can target it (CR 112.1 + CR 113.3b) and no protect-my-spell
+        // incentive applies. This function values COUNTER TARGETS, so an entry
+        // that can never be one is worth nothing to it.
+        StackEntryKind::CombatDamage { .. } => 0.0,
     }
 }
 

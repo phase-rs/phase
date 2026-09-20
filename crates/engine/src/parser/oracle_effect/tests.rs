@@ -66034,7 +66034,10 @@ fn counter_gate_guard_is_claimed_upstream_of_the_guard_ownership_seam() {
     const GUARD_BODY: &str = "that artifact had counters on it";
 
     // Half 1 — the chunk seam claims the guard.
-    let (claimed, remainder) = conditions::strip_counter_conditional(CHUNK, false);
+    let (claimed, remainder) = conditions::strip_counter_conditional(
+        CHUNK,
+        conditions::CounterConditionalContext::standalone(),
+    );
     let claimed = claimed.expect(
         "the chunk-level stripper must claim the counter gate; if it declines, the \
          guard reaches the clause-level dispatch and is dropped, not gapped",
@@ -69703,4 +69706,207 @@ fn zenos_bare_parse_effect_choice_stays_target_only() {
         ),
         "no chain context ⇒ Gate A must decline (fail-closed); got {effect:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// CR 603.10 + CR 608.2h + CR 122.2 + CR 400.7 — trigger-body PAST-tense counter
+// predicates over the zone-change event object.
+//
+// Population/predicate for this group: the seven printed surface forms the
+// grammar claims, plus the two forms it must REFUSE (no provenance, double
+// negative). Each positive row asserts the exact condition shape; each negative
+// row asserts the clause is left untouched so it stays a visible gap.
+// ---------------------------------------------------------------------------
+
+fn dies_counter_ctx() -> conditions::CounterConditionalContext {
+    conditions::CounterConditionalContext::in_trigger_zone_change(
+        Zone::Battlefield,
+        Zone::Graveyard,
+    )
+}
+
+fn zone_change_counter_gate(
+    counters: crate::types::counter::CounterMatch,
+    comparator: Comparator,
+    count: i32,
+) -> AbilityCondition {
+    AbilityCondition::ZoneChangeObjectMatchesFilter {
+        origin: Some(Zone::Battlefield),
+        destination: Zone::Graveyard,
+        filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::Counters {
+                counters,
+                comparator,
+                count: QuantityExpr::Fixed { value: count },
+            },
+        ])),
+    }
+}
+
+/// Without a proven enclosing zone change there is nothing for the gate to
+/// read, so the clause must be left whole — an honest gap, not a
+/// silently-always-false condition.
+#[test]
+fn trigger_zone_past_counter_requires_proven_provenance() {
+    let (cond, body) = conditions::strip_counter_conditional(
+        "exile it if it had a death counter on it",
+        conditions::CounterConditionalContext::standalone(),
+    );
+    assert!(
+        cond.is_none(),
+        "no zone-change authority must yield no condition, got {cond:#?}"
+    );
+    assert_eq!(body, "exile it if it had a death counter on it");
+}
+
+/// Bogardan Phoenix's printed surface.
+#[test]
+fn trigger_zone_past_counter_had_typed_counter_positive() {
+    let (cond, body) = conditions::strip_counter_conditional(
+        "exile it if it had a death counter on it",
+        dies_counter_ctx(),
+    );
+    assert_eq!(
+        cond,
+        Some(zone_change_counter_gate(
+            crate::types::counter::CounterMatch::OfType(
+                crate::types::counter::CounterType::Generic("death".to_string())
+            ),
+            Comparator::GE,
+            1,
+        ))
+    );
+    assert_eq!(body, "exile it");
+}
+
+/// The untyped form gates on the TOTAL count across every kind.
+#[test]
+fn trigger_zone_past_counter_had_untyped_counters_positive() {
+    let (cond, body) = conditions::strip_counter_conditional(
+        "draw a card if it had counters on it",
+        dies_counter_ctx(),
+    );
+    assert_eq!(
+        cond,
+        Some(zone_change_counter_gate(
+            crate::types::counter::CounterMatch::Any,
+            Comparator::GE,
+            1,
+        ))
+    );
+    assert_eq!(body, "draw a card");
+}
+
+/// The numeric threshold axis composes with the past tense.
+#[test]
+fn trigger_zone_past_counter_had_numeric_typed_threshold() {
+    let (cond, _) = conditions::strip_counter_conditional(
+        "draw a card if it had two or more death counters on it",
+        dies_counter_ctx(),
+    );
+    assert_eq!(
+        cond,
+        Some(zone_change_counter_gate(
+            crate::types::counter::CounterMatch::OfType(
+                crate::types::counter::CounterType::Generic("death".to_string())
+            ),
+            Comparator::GE,
+            2,
+        ))
+    );
+}
+
+/// POLARITY: the quantifier "no" is `EQ 0` DIRECTLY. Wrapping a positive
+/// predicate in `Not` would be the same truth value here but a different shape,
+/// and it is what makes the double-negative refusal below detectable.
+#[test]
+fn trigger_zone_past_counter_had_no_typed_uses_eq_zero_directly() {
+    let (cond, _) = conditions::strip_counter_conditional(
+        "draw a card if it had no death counters on it",
+        dies_counter_ctx(),
+    );
+    assert_eq!(
+        cond,
+        Some(zone_change_counter_gate(
+            crate::types::counter::CounterMatch::OfType(
+                crate::types::counter::CounterType::Generic("death".to_string())
+            ),
+            Comparator::EQ,
+            0,
+        ))
+    );
+    assert!(
+        !matches!(cond, Some(AbilityCondition::Not { .. })),
+        "the `no` quantifier must not be modelled as a negation wrapper"
+    );
+}
+
+#[test]
+fn trigger_zone_past_counter_had_no_counters_uses_any_eq_zero() {
+    let (cond, _) = conditions::strip_counter_conditional(
+        "draw a card if it had no counters on it",
+        dies_counter_ctx(),
+    );
+    assert_eq!(
+        cond,
+        Some(zone_change_counter_gate(
+            crate::types::counter::CounterMatch::Any,
+            Comparator::EQ,
+            0,
+        ))
+    );
+}
+
+/// VERB negation is the other axis, and it DOES wrap the positive predicate.
+#[test]
+fn trigger_zone_past_counter_didnt_have_wraps_positive_predicate() {
+    let (cond, _) = conditions::strip_counter_conditional(
+        "draw a card if it didn't have a death counter on it",
+        dies_counter_ctx(),
+    );
+    assert_eq!(
+        cond,
+        Some(AbilityCondition::Not {
+            condition: Box::new(zone_change_counter_gate(
+                crate::types::counter::CounterMatch::OfType(
+                    crate::types::counter::CounterType::Generic("death".to_string())
+                ),
+                Comparator::GE,
+                1,
+            ))
+        })
+    );
+}
+
+#[test]
+fn trigger_zone_past_counter_did_not_have_counters_wraps_any_positive_predicate() {
+    let (cond, _) = conditions::strip_counter_conditional(
+        "draw a card if it did not have counters on it",
+        dies_counter_ctx(),
+    );
+    assert_eq!(
+        cond,
+        Some(AbilityCondition::Not {
+            condition: Box::new(zone_change_counter_gate(
+                crate::types::counter::CounterMatch::Any,
+                Comparator::GE,
+                1,
+            ))
+        })
+    );
+}
+
+/// A double negative has no printed analogue; claiming it would ship a guessed
+/// truth value. Refuse and leave the clause visible instead.
+#[test]
+fn trigger_zone_past_counter_double_negative_remains_unsupported() {
+    let (cond, body) = conditions::strip_counter_conditional(
+        "draw a card if it didn't have no counters on it",
+        dies_counter_ctx(),
+    );
+    assert!(
+        cond.is_none(),
+        "double negative must not be claimed: {cond:#?}"
+    );
+    assert_eq!(body, "draw a card if it didn't have no counters on it");
 }

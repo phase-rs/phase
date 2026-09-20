@@ -28,6 +28,7 @@ LOCALE_MAP='{
   "Spanish": "es",
   "French": "fr",
   "Italian": "it",
+  "Japanese": "ja",
   "Portuguese (Brazil)": "pt"
 }'
 

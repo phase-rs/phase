@@ -6585,6 +6585,85 @@ fn static_spells_cost_less() {
     ));
 }
 
+// CR 118.7b/c/d: "This effect reduces only the amount of colored mana you pay"
+// is a card-level override of the default spillover, so it must survive parsing
+// as a `CostReductionReach` on the emitted reducer. Covers all seven printed
+// cards in the class that lower to `ModifyCost` (the Defiler cycle carries the
+// same rider but lowers to `DefilerCostReduction`, tested in `oracle_tests`),
+// plus the counterexample that established the default (Aang, Master of
+// Elements #6405).
+#[test]
+fn colored_only_rider_sets_the_cost_reduction_reach() {
+    use crate::types::statics::CostReductionReach;
+
+    fn reach(line: &str) -> CostReductionReach {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("line must parse: {line}"));
+        let StaticMode::ModifyCost { reach, .. } = def.mode else {
+            panic!(
+                "expected a ModifyCost static for {line}, got {:?}",
+                def.mode
+            );
+        };
+        reach
+    }
+
+    // Printed cards whose reduction sentence carries the rider.
+    for line in [
+        // Morophon, the Boundless (the reported bug, #8432).
+        "Spells of the chosen type you cast cost {W}{U}{B}{R}{G} less to cast. This effect reduces only the amount of colored mana you pay.",
+        // Bard Class, level 2.
+        "Legendary spells you cast cost {R}{G} less to cast. This effect reduces only the amount of colored mana you pay.",
+        // Edgewalker (its reminder text gives the worked example {1}{W} → {1}).
+        "Cleric spells you cast cost {W}{B} less to cast. This effect reduces only the amount of colored mana you pay.",
+        // Head of the Class.
+        "The first spell you cast during each of your turns that targets a creature costs {W}{B} less to cast. This effect reduces only the amount of colored mana you pay.",
+        // Nekrataal Avatar.
+        "Creature spells you cast cost {B} less to cast. This effect reduces only the amount of colored mana you pay.",
+        // Ragemonger (reminder text: {2}{R} → {2}).
+        "Minotaur spells you cast cost {B}{R} less to cast. This effect reduces only the amount of colored mana you pay.",
+        // Vorthos, Steward of Myth — the "name, flavor text, or art" subject is
+        // the odd one out in this class, so it gets its own row.
+        "Each spell you cast with the chosen character in its name, flavor text, or art costs {W}{U}{B}{R}{G} less to cast. This effect reduces only the amount of colored mana you pay.",
+    ] {
+        assert_eq!(
+            reach(line),
+            CostReductionReach::ColoredManaOnly,
+            "the colored-only rider must suppress CR 118.7b spillover: {line}"
+        );
+    }
+
+    // CR 118.7b default — no rider. Aang, Master of Elements spells it out with
+    // "(This can reduce generic costs.)"; the reminder is stripped before this
+    // point, so the bare sentence is what the parser sees.
+    for line in [
+        "Spells you cast cost {W}{U}{B}{R}{G} less to cast.",
+        "Spells you cast cost {1} less to cast.",
+        "Creature spells you cast cost {B} less to cast.",
+    ] {
+        assert_eq!(
+            reach(line),
+            CostReductionReach::SpillsToGeneric,
+            "a reduction with no rider keeps the CR 118.7b default: {line}"
+        );
+    }
+
+    // Sentence-boundary guard: a longer sentence that merely OPENS with the
+    // rider wording says something the engine has not been taught, so it must
+    // NOT be read as the rider. Without the boundary check these fall through
+    // to `ColoredManaOnly` and silently narrow the reduction.
+    for line in [
+        "Creature spells you cast cost {B} less to cast. This effect reduces only the amount of colored mana you pay for that spell's kicker.",
+        "Creature spells you cast cost {B} less to cast. This effect reduces only the amount of colored mana you pay during your turn.",
+    ] {
+        assert_eq!(
+            reach(line),
+            CostReductionReach::SpillsToGeneric,
+            "an unsupported continuation of the rider wording must not be \
+             classified as the rider: {line}"
+        );
+    }
+}
+
 // CR 205.4a: Kethis, the Hidden Hand — "Legendary spells you cast cost {1} less
 // to cast" must restrict to legendary spells via a HasSupertype filter, not drop
 // the restriction (spell_filter: None) and cheapen EVERY spell. `parse_type_phrase_folding`
@@ -7391,6 +7470,7 @@ fn static_spells_with_chosen_name_cost_more_disruptor_flute() {
         amount,
         spell_filter,
         dynamic_count,
+        ..
     } = def.mode
     else {
         panic!("expected RaiseCost, got {:?}", def.mode);
@@ -31594,6 +31674,7 @@ fn cost_mod_color_and_or_disjunction_builds_anyof_filter() {
         amount,
         spell_filter,
         dynamic_count,
+        ..
     } = def.mode
     else {
         panic!("expected ModifyCost{{Reduce}}, got {:?}", def.mode);

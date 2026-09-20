@@ -29,6 +29,7 @@ use super::parse_effect_chain;
 use super::sequence::parse_dig_from_among;
 use super::{scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst};
+use crate::parser::oracle_ir::context::TriggerZoneChangeProvenance;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
@@ -3035,11 +3036,52 @@ fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, Option<Counte
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("no ").parse(text) {
         // CR 122.1 + CR 122.1b: shared counter-type combinator handles
         // multi-word keyword counter names.
-        let (after_type, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
-        let after_type = after_type.trim_start();
-        let after_on = parse_counter_on_suffix(after_type)?;
-        let consumed = original_len - after_on.len();
-        return Some((Comparator::EQ, 0, Some(counter_type), consumed));
+        if let Ok((after_type, counter_type)) = nom_primitives::parse_counter_type_typed(rest) {
+            let after_type = after_type.trim_start();
+            if let Some(after_on) = parse_counter_on_suffix(after_type) {
+                let consumed = original_len - after_on.len();
+                return Some((Comparator::EQ, 0, Some(counter_type), consumed));
+            }
+        }
+        // CR 122.1: UNTYPED "no counters on it" — the gate is on the TOTAL count
+        // of counters of any kind, mirroring the untyped positive branch below.
+        // Polarity note: `no` is expressed DIRECTLY as `EQ 0`, never as a `Not`
+        // wrapper around a positive predicate, so a caller that also carries a
+        // verb negation ("didn't have no counters") can recognize the double
+        // negative instead of silently inverting twice.
+        if let Some(after_on) = parse_counter_on_suffix(rest) {
+            let consumed = original_len - after_on.len();
+            return Some((Comparator::EQ, 0, None, consumed));
+        }
+        return None;
+    }
+
+    // CR 107.1 + CR 122.1: strict inequalities ("fewer than two counters on it",
+    // "more than two +1/+1 counters on it"). Routed through the single
+    // comparator-prefix authority in `oracle_nom::condition` rather than a
+    // reduced local grammar, so this past-tense route supports exactly the
+    // bounds the present-tense route does. Placed before the article and
+    // numeric branches, whose `parse_number` would fail on "fewer"/"more".
+    if let Ok((rest, comparator)) =
+        crate::parser::oracle_nom::condition::parse_strict_comparator_prefix(text)
+    {
+        if let Ok((after_n, n)) = nom_primitives::parse_number(rest) {
+            let after_n = after_n.trim_start();
+            if let Ok((after_type, counter_type)) =
+                nom_primitives::parse_counter_type_typed(after_n)
+            {
+                if let Some(after_on) = parse_counter_on_suffix(after_type.trim_start()) {
+                    let consumed = original_len - after_on.len();
+                    return Some((comparator, n as i32, Some(counter_type), consumed));
+                }
+            }
+            // UNTYPED strict form — the gate is on the TOTAL counter count.
+            if let Some(after_on) = parse_counter_on_suffix(after_n) {
+                let consumed = original_len - after_on.len();
+                return Some((comparator, n as i32, None, consumed));
+            }
+        }
+        return None;
     }
 
     // CR 122.1 + CR 122.1a: an indefinite "a [type] counter" means one or more (>= 1).
@@ -3123,10 +3165,128 @@ pub(super) fn counter_gate_qty(cond: &AbilityCondition) -> Option<&QuantityRef> 
     }
 }
 
+/// Typed context for [`strip_counter_conditional`].
+///
+/// Replaces the former bare `in_trigger: bool` parameter. The two facts the
+/// grammar needs — "are we inside a trigger body" and "did that trigger head
+/// PROVE a zone-change pair" — are not independent: zone-change authority only
+/// exists inside a trigger body. Modelling them as a bool beside an `Option`
+/// would admit the impossible state (outside a trigger, yet carrying an
+/// established pair), so they are one enum instead.
+pub(super) enum CounterConditionalContext {
+    /// No enclosing trigger body. The demonstrative subject set ("that creature
+    /// has …") names the spell's target here, not an event object.
+    OutsideTrigger,
+    /// Inside a trigger body. `zone_change` carries the enclosing head's PROVEN
+    /// pair when it proved one (CR 603.10 + CR 400.7 + CR 122.2), and is empty
+    /// for every trigger whose head does not prove a zone change.
+    TriggerBody {
+        zone_change: TriggerZoneChangeProvenance,
+    },
+}
+
+impl CounterConditionalContext {
+    /// Whether this clause is being parsed inside a trigger body. Gates the
+    /// demonstrative ("that creature has …") subject set.
+    pub(super) fn in_trigger(&self) -> bool {
+        matches!(self, Self::TriggerBody { .. })
+    }
+
+    /// The enclosing trigger head's proven `(origin, destination)` pair, or
+    /// `None` outside a trigger body or when the head proved nothing.
+    pub(super) fn zone_change_pair(&self) -> Option<(Zone, Zone)> {
+        match self {
+            Self::OutsideTrigger => None,
+            Self::TriggerBody { zone_change } => zone_change.as_pair(),
+        }
+    }
+
+    /// Derive from the live parse context. Ordinary `Clone` on `ParseContext`
+    /// continues the same body, so whatever authority `ctx` holds here is the
+    /// authority this clause may use.
+    pub(super) fn from_parse_context(ctx: &ParseContext) -> Self {
+        if ctx.in_trigger {
+            Self::TriggerBody {
+                zone_change: ctx.trigger_zone_change.clone(),
+            }
+        } else {
+            Self::OutsideTrigger
+        }
+    }
+
+    /// A clause parsed with no enclosing trigger and no zone-change authority.
+    #[cfg(test)]
+    pub(super) fn standalone() -> Self {
+        Self::OutsideTrigger
+    }
+
+    /// A trigger-body clause whose enclosing trigger head PROVED `origin` →
+    /// `destination`.
+    #[cfg(test)]
+    pub(super) fn in_trigger_zone_change(origin: Zone, destination: Zone) -> Self {
+        Self::TriggerBody {
+            zone_change: TriggerZoneChangeProvenance::established(origin, destination),
+        }
+    }
+}
+
+/// CR 608.2c: the possession verb of a trigger-body PAST-tense counter
+/// predicate. `true` is explicit verb negation ("didn't have"), which wraps the
+/// positive predicate in `AbilityCondition::Not`; the quantifier `no` is NOT
+/// routed through here — it is expressed directly as `EQ 0` by
+/// `parse_counter_threshold`, so the two negation axes stay distinguishable.
+fn parse_past_counter_possession_verb(input: &str) -> OracleResult<'_, bool> {
+    alt((
+        value(false, tag("had ")),
+        value(
+            true,
+            alt((
+                tag("didn't have "),
+                tag("didn’t have "),
+                tag("did not have "),
+            )),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 122.2 + CR 400.7 + CR 603.10 + CR 608.2h: build the trigger-body
+/// past-tense counter gate against the zone-change event object.
+///
+/// CR 122.2 makes the counters cease to exist the instant the object changes
+/// zones, so the predicate can only be answered from last-known information;
+/// `ZoneChangeObjectMatchesFilter` is the condition that reads it (via
+/// `game::filter::matches_zone_change_event_object_filter`, which answers
+/// `FilterProp::Counters` off `state.lki_cache` for a record-backed event).
+fn build_zone_change_past_counter_condition(
+    origin: Zone,
+    destination: Zone,
+    counter_type: Option<CounterType>,
+    comparator: Comparator,
+    threshold: i32,
+    verb_negated: bool,
+) -> AbilityCondition {
+    maybe_negate(
+        AbilityCondition::ZoneChangeObjectMatchesFilter {
+            origin: Some(origin),
+            destination,
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::Counters {
+                    counters: counter_type.map_or(CounterMatch::Any, CounterMatch::OfType),
+                    comparator,
+                    count: QuantityExpr::Fixed { value: threshold },
+                },
+            ])),
+        },
+        verb_negated,
+    )
+}
+
 pub(super) fn strip_counter_conditional(
     text: &str,
-    in_trigger: bool,
+    ctx: CounterConditionalContext,
 ) -> (Option<AbilityCondition>, String) {
+    let in_trigger = ctx.in_trigger();
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
@@ -3221,6 +3381,51 @@ pub(super) fn strip_counter_conditional(
                         )),
                         text[offset..].to_string(),
                     );
+                }
+            }
+        }
+    }
+
+    // CR 608.2c + CR 603.10 + CR 608.2h + CR 122.2 + CR 400.7: trailing,
+    // PAST-tense, EVENT-OBJECT form — "[effect] if it had [no] [N] [type]
+    // counter(s) on it" inside a trigger body whose head PROVED a zone change
+    // (Bogardan Phoenix's "exile it if it had a death counter on it").
+    //
+    // This is NOT a CR 603.4 intervening-if: the `if` follows an instruction, so
+    // CR 603.4's "immediately follows the trigger condition" clause does not
+    // apply and the gate is ordinary CR 608.2c resolution text. `oracle_trigger`
+    // declines to hoist exactly this shape when an `Otherwise` branch follows.
+    //
+    // GATED on proven provenance: without an enclosing zone-change event there is
+    // nothing for `ZoneChangeObjectMatchesFilter` to read, so the clause must
+    // stay an honest gap rather than emit an always-false gate. The provenance is
+    // reset by default on every derived context (`TriggerZoneChangeProvenance`),
+    // so delayed (CR 603.7), reflexive (CR 603.12) and probe sub-parses decline
+    // here by construction.
+    if let Some((origin, destination)) = ctx.zone_change_pair() {
+        if let Some((before, after)) = tp.rsplit_around(" if it ") {
+            if let Ok((body, verb_negated)) = parse_past_counter_possession_verb(after.lower) {
+                if let Some((comparator, threshold, counter_type, consumed)) =
+                    parse_counter_threshold(body)
+                {
+                    let remaining = body[consumed..].trim();
+                    // "didn't have no counters" is a double negative with no
+                    // printed analogue; reject rather than invert twice.
+                    let double_negative =
+                        verb_negated && matches!(comparator, Comparator::EQ) && threshold == 0;
+                    if (remaining.is_empty() || remaining == ".") && !double_negative {
+                        return (
+                            Some(build_zone_change_past_counter_condition(
+                                origin,
+                                destination,
+                                counter_type,
+                                comparator,
+                                threshold,
+                                verb_negated,
+                            )),
+                            before.original.trim_end_matches('.').trim().to_string(),
+                        );
+                    }
                 }
             }
         }

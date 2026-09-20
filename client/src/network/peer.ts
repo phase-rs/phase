@@ -27,6 +27,9 @@ export interface PeerSession {
   close(reason?: string): void;
 }
 
+/** Why an inbound frame could not be delivered to `onMessage` handlers. */
+export type UndeliverableFrame = "non-binary" | "decode-failed";
+
 export interface PeerSessionOptions {
   /**
    * Optional callback invoked exactly once when this session ends, after
@@ -39,6 +42,13 @@ export interface PeerSessionOptions {
   onSessionEnd?: () => void;
   /** Round-trip latency, or null when the last measurement is stale. */
   onLatency?: (latencyMs: number | null) => void;
+  /**
+   * An inbound frame reached this session but could not be handed to any
+   * `onMessage` handler. Reported, never acted on here: whether anything will
+   * resend the lost frame depends on adapter state the transport cannot see,
+   * and host and guest need opposite responses to the same drop.
+   */
+  onUndeliverableFrame?: (cause: UndeliverableFrame) => void;
 }
 
 export function createPeerSession(
@@ -302,6 +312,7 @@ export function createPeerSession(
         // depending on msgpack unwrap path. Anything else means a version
         // mismatch (old-bundle peer sending plain JSON objects) or corruption.
         console.warn("[PeerSession] received non-binary message; dropping:", typeof data);
+        options.onUndeliverableFrame?.("non-binary");
         return;
       }
       const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
@@ -310,6 +321,7 @@ export function createPeerSession(
         msg = await decodeWireMessage(bytes);
       } catch (e) {
         console.warn("Failed to decode message from peer:", e);
+        options.onUndeliverableFrame?.("decode-failed");
         return;
       }
       lastReceivedAt = Date.now();

@@ -35710,6 +35710,80 @@ fn clause_has_anaphoric_control_condition(clause: &ClauseIr) -> bool {
     )
 }
 
+/// CR 118.12 + CR 603.12 + CR 608.2c: bind a trailing `Otherwise, …` inside a
+/// REFLEXIVE OPTIONAL PAYMENT body to the outcome gate that will sit on this
+/// chain's root definition.
+///
+/// The class is CR 118.12's verbatim template — "[A player] may [do something].
+/// If [that player] [does], [effect]" — with a written-order else branch
+/// (CR 608.2c). Rent Is Due is the current corpus member: "you may tap two
+/// untapped creatures and/or Treasures you control. If you do, draw a card.
+/// Otherwise, sacrifice this enchantment."
+///
+/// WHY A SECOND AUTHORITY IS NEEDED, stated once. `oracle_trigger` splits that
+/// body into (cost, connector, "draw a card. Otherwise, sacrifice ~"), so the
+/// `EffectOutcome` connector is NOT part of the text the chain parser sees. The
+/// chain's own clauses therefore all carry `condition: None`, the in-loop
+/// `OtherwiseKind` predicate honestly reports "no antecedent", and the branch
+/// degrades to the `Fallback` marker. Lowering then stamps the connector onto
+/// the chain ROOT (`lower_trigger_ir`: `reflexive_ability.condition = connector`),
+/// which is exactly the node the else branch belongs on.
+///
+/// This runs at PARSE time, before any lowering, and writes the SAME
+/// `AbilityCondition` lowering will write — so the two views cannot diverge and
+/// the in-loop invariant ("Bound/Fallback is decided at parse time, never
+/// recomputed at lowering") is preserved: the decision is simply completed here
+/// with the one fact the chunk loop could not see.
+///
+/// FAIL-CLOSED. It upgrades ONLY the FIRST `Fallback` branch, ONLY when no
+/// clause BEFORE that branch already carries its own condition (a nearer
+/// antecedent inside the chain stays authoritative), and ONLY when a distinct
+/// root clause exists to anchor to. Any later `Otherwise` keeps its honest
+/// `Effect::unimplemented("otherwise", …)` marker, so a shape this does not
+/// genuinely support cannot read as covered.
+pub(crate) fn bind_otherwise_to_reflexive_chain_root(
+    chain: &mut EffectChainIr,
+    connector: &AbilityCondition,
+) {
+    // CR 608.2c: clauses lower in SOURCE ORDER, so only a condition that
+    // PRECEDES the fallback branch can be its nearer antecedent. A whole-chain
+    // scan would let a conditional clause written AFTER the `Otherwise` veto a
+    // binding it can never serve as the antecedent for, leaving the branch as
+    // `Effect::unimplemented`.
+    let Some(fallback_index) = chain.clauses.iter().position(|c| {
+        matches!(
+            c.disposition,
+            ClauseDisposition::BranchOtherwise {
+                kind: OtherwiseKind::Fallback,
+                ..
+            }
+        )
+    }) else {
+        return;
+    };
+    // The root of the lowered chain is the FIRST clause, and `AssemblyEnv`
+    // registers a conditional antecedent off the emitted root def's `condition`
+    // — so stamping clause 0 is what makes `LastWithRole(Conditional)` resolve.
+    // A branch AT index 0 has no root to anchor to.
+    if fallback_index == 0 {
+        return;
+    }
+    if chain.clauses[..fallback_index]
+        .iter()
+        .any(|c| c.condition.is_some())
+    {
+        return;
+    }
+    chain.clauses[0].condition = Some(connector.clone());
+    // Upgrade ONLY this branch. A second `Otherwise` further down the chain has
+    // a different antecedent question and is not answered by the root stamp.
+    if let ClauseDisposition::BranchOtherwise { kind, .. } =
+        &mut chain.clauses[fallback_index].disposition
+    {
+        *kind = OtherwiseKind::Bound;
+    }
+}
+
 /// Produce an intermediate representation of an effect chain from Oracle text.
 ///
 /// This is the IR-production half of the parse/lower split (Phase 48).
@@ -36630,20 +36704,12 @@ pub(crate) fn parse_effect_chain_ir(
         }
 
         // CR 608.2c: "Otherwise, [effect]" — attach as else_ability on the
-        // most recent conditional def in the chain.
+        // most recent conditional def in the chain. The connector grammar is the
+        // shared `oracle_nom` authority the trigger-side hoist gate also calls,
+        // so the two sides cannot disagree about which antecedents are bindable.
         let lower_check = normalized_text.to_lowercase();
         let otherwise_rest = nom_on_lower(normalized_text, &lower_check, |i| {
-            value(
-                (),
-                alt((
-                    tag("otherwise, "),
-                    tag("otherwise "),
-                    tag("if not, "),
-                    tag("if no player does, "),
-                    tag("if no one does, "),
-                )),
-            )
-            .parse(i)
+            crate::parser::oracle_nom::condition::parse_otherwise_branch_connector(i)
         });
         if let Some((_, else_text)) = otherwise_rest {
             // CR 608.2c: The else-branch is parsed as its own chain, so its anaphors
@@ -36683,6 +36749,14 @@ pub(crate) fn parse_effect_chain_ir(
             // PARSE-TIME Bound/Fallback determination — this predicate MUST stay
             // exactly here (parse time). Recomputing "prior conditional present?"
             // at lowering could diverge from this state and move output.
+            //
+            // One fact is structurally invisible from inside this loop: a chain
+            // parsed as a CR 603.12 reflexive-payment BODY receives its outcome
+            // gate on the chain ROOT after this loop returns, because the
+            // connector text was split off before the chain parser ever saw it.
+            // `bind_otherwise_to_reflexive_chain_root` completes the decision for
+            // that one shape, still at parse time and with the identical
+            // `AbilityCondition` lowering will use.
             let kind = if has_condition || has_optional_may_head {
                 OtherwiseKind::Bound
             } else {
@@ -37501,7 +37575,10 @@ pub(crate) fn parse_effect_chain_ir(
         // on the text output from strip_if_you_do_conditional. For compound
         // "when you do, if it has N counters" patterns, WhenYouDo is always true for
         // non-optional parents (CR 603.12), so the QuantityCheck is the meaningful gate.
-        let (counter_cond, text) = strip_counter_conditional(&text, ctx.in_trigger);
+        let (counter_cond, text) = strip_counter_conditional(
+            &text,
+            conditions::CounterConditionalContext::from_parse_context(ctx),
+        );
         // CR 202.3 + CR 608.2c: Mana value threshold condition — same priority as counter_cond.
         let (mv_cond, text) = strip_mana_value_conditional(&text);
         // CR 608.2c: Spell-target superlative gate — "if it has the least/greatest
@@ -38453,6 +38530,13 @@ pub(crate) fn parse_effect_chain_ir(
             // `Effect::Meld { partner, .. }`. Without this the sub-clause loses
             // the partner and lowers to `Unimplemented`.
             pending_meld_partner: ctx.pending_meld_partner.clone(),
+            // CR 608.2c + CR 603.10: this chunk is ordinary text of the SAME
+            // trigger body, so it keeps the enclosing trigger's proven
+            // zone-change authority — that is what lets a trailing past-tense
+            // predicate ("… if it had a death counter on it") read the event
+            // object's LKI. This struct literal REPLACES the parent context, so
+            // the carry has to be spelled; `..Default::default()` would reset it.
+            trigger_zone_change: ctx.trigger_zone_change.clone(),
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;

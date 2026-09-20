@@ -39,7 +39,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::{CostModifyMode, StaticMode};
+use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::{EtbTapState, Zone};
 use nom::branch::alt;
@@ -11163,9 +11163,19 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             // CR 601.2f: ReduceCost / RaiseCost / MinimumCost coverage markers,
             // discriminated by the `mode` axis. Trinisphere's "would cost less than"
             // distinguishes Minimum from Reduce ("less to cast") and Raise ("more").
-            StaticMode::ModifyCost { mode, .. } => match mode {
+            StaticMode::ModifyCost { mode, reach, .. } => match mode {
+                // CR 118.7b/c/d: a reduction line that PRINTS "this effect
+                // reduces only the amount of [colored] mana you pay" is only
+                // covered when the emitted reducer actually carries that reach.
+                // Without this arm a parser that silently drops the rider still
+                // reports the card supported while playing it wrong — which is
+                // exactly how Morophon shipped reducing generic mana (#8432).
                 CostModifyMode::Reduce => {
-                    effective_lower.contains("cost") && effective_lower.contains("less")
+                    effective_lower.contains("cost")
+                        && effective_lower.contains("less")
+                        && (!crate::parser::oracle_cost::line_reduces_colored_mana_only(
+                            &effective_lower,
+                        ) || matches!(reach, CostReductionReach::ColoredManaOnly))
                 }
                 CostModifyMode::Raise => {
                     effective_lower.contains("cost") && effective_lower.contains("more")
@@ -11251,6 +11261,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 color,
                 life_cost,
                 mana_reduction,
+                reach,
             } => {
                 let color_word = mana_color_word(*color);
                 let color_symbol = mana_color_symbol(*color);
@@ -11259,7 +11270,16 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 )) && effective_lower.contains(&format!("pay {life_cost} life"));
                 let reduction_line = effective_lower
                     .contains(&format!("those spells cost {color_symbol} less to cast"));
-                (life_line || reduction_line) && mana_cost_is_single_color(mana_reduction, *color)
+                // CR 118.7b/c/d: mirror the `ModifyCost` arm above — a Defiler
+                // line that PRINTS the colored-only rider is only covered when
+                // the emitted reducer carries that reach. Gated on the rider
+                // being present so a split/abbreviated line that never prints it
+                // still passes on the CR 118.7b default.
+                (life_line || reduction_line)
+                    && mana_cost_is_single_color(mana_reduction, *color)
+                    && (!crate::parser::oracle_cost::line_reduces_colored_mana_only(
+                        &effective_lower,
+                    ) || matches!(reach, CostReductionReach::ColoredManaOnly))
             }
             StaticMode::CantBeBlocked => effective_lower.contains("can't be blocked"),
             StaticMode::CantBeBlockedExceptBy { .. } => {
@@ -18591,6 +18611,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     shards: vec![ManaCostShard::Blue],
                     generic: 0,
                 },
+                reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
             },
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
@@ -18614,6 +18635,54 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         assert!(audit_card_lines(oracle, &face).is_empty());
     }
 
+    /// CR 118.7b/c/d: the reach guard for the arm above. A Defiler line that
+    /// PRINTS "This effect reduces only the amount of blue mana you pay" while
+    /// emitting the CR 118.7b default reach is the engine playing the card
+    /// wrong, so coverage must refuse to call it supported. Identical to
+    /// `defiler_cost_reduction_static_does_not_count_as_silent_drop` except for
+    /// the reach, so a regression that stops reading `reach` turns this red
+    /// while leaving that one green.
+    #[test]
+    fn defiler_cost_reduction_static_with_dropped_rider_counts_as_silent_drop() {
+        let mut face = make_face();
+        let oracle = "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost {U} less to cast if you paid life this way. This effect reduces only the amount of blue mana you pay.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::DefilerCostReduction {
+                color: ManaColor::Blue,
+                life_cost: 2,
+                mana_reduction: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                },
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+            },
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![],
+            condition: None,
+            per_player_condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some(
+                "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost less to cast.".to_string(),
+            ),
+            attack_defended: None,
+            source_controller: None,
+            source_object: None,
+            bypass_beneficiary: None,
+            protection_does_not_remove: None,
+            room_door: None,
+        });
+
+        assert!(
+            !audit_card_lines(oracle, &face).is_empty(),
+            "a Defiler reducer that drops the printed colored-only rider must \
+             not be reported as covered"
+        );
+    }
+
     #[test]
     fn split_defiler_cost_reduction_static_does_not_count_as_silent_drop() {
         let mut face = make_face();
@@ -18627,6 +18696,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     shards: vec![ManaCostShard::Blue],
                     generic: 0,
                 },
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
             },
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
@@ -18663,6 +18733,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     shards: vec![ManaCostShard::Blue],
                     generic: 0,
                 },
+                reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
             },
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],

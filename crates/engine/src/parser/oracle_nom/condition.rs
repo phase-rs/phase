@@ -4271,11 +4271,42 @@ fn parse_ge_threshold(input: &str) -> OracleResult<'_, u32> {
 /// `parse_there_are_conditions` ("there are fewer than six creature cards in
 /// your graveyard"), and `parse_strict_n_counters` ("has fewer than three
 /// +1/+1 counters on it" / "has more than two +1/+1 counters on it").
-fn parse_strict_comparator_prefix(input: &str) -> OracleResult<'_, Comparator> {
+pub(crate) fn parse_strict_comparator_prefix(input: &str) -> OracleResult<'_, Comparator> {
     alt((
         value(Comparator::LT, tag("fewer than ")),
         value(Comparator::GT, tag("more than ")),
     ))
+    .parse(input)
+}
+
+/// CR 608.2c: the connectors that open the ELSE branch of a written-order
+/// if/else pair ("Otherwise, …", "If not, …", "If no one does, …").
+///
+/// SINGLE AUTHORITY for this grammar axis, shared by the two sides that must
+/// agree about it:
+///
+/// * `oracle_trigger`'s hoist gate, which declines to lift a trailing `if` onto
+///   the trigger envelope (CR 603.4) when one of these connectors follows; and
+/// * `oracle_effect`'s chain binder, which turns the clause they introduce into
+///   a `ClauseDisposition::BranchOtherwise`.
+///
+/// Those two decisions are one decision: the trigger side must decline to hoist
+/// exactly the antecedents the effect side is able to bind. Two hand-maintained
+/// `alt()` lists would drift the first time a phrasing is added to only one of
+/// them, and the failure is silent — the trigger keeps hoisting, the clause
+/// loses its antecedent, and the else branch degrades to an
+/// `Effect::unimplemented` marker with nothing pointing at the cause.
+pub(crate) fn parse_otherwise_branch_connector(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("otherwise, "),
+            tag("otherwise "),
+            tag("if not, "),
+            tag("if no player does, "),
+            tag("if no one does, "),
+        )),
+    )
     .parse(input)
 }
 

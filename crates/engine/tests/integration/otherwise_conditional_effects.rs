@@ -834,3 +834,318 @@ fn run_thought_stalker(opp_lost_life: bool) -> bool {
     }
     saw_controller_choice
 }
+
+// ===========================================================================
+// Bogardan Phoenix — dies trigger, trailing past-tense counter gate
+// "When this creature dies, exile it if it had a death counter on it.
+//  Otherwise, return it to the battlefield under your control and put a death
+//  counter on it."
+//
+// CR 603.4's intervening-if rule "only applies to an `if` that immediately
+// follows a trigger condition" — this one follows an INSTRUCTION, so it is
+// CR 608.2c resolution text. Hoisting it onto the trigger envelope makes it the
+// CR 603.4 candidate-survival test, which is a LIVE GAMEPLAY BUG in both
+// directions: a counter-less Phoenix never triggers at all, and a countered one
+// runs BOTH branches. CR 122.2 makes the counters cease to exist on the zone
+// change, so the gate is answered from last-known information (CR 608.2h,
+// CR 400.7).
+// ===========================================================================
+
+const BOGARDAN_PHOENIX: &str = "Flying\nWhen this creature dies, exile it if it had a death counter on it. Otherwise, return it to the battlefield under your control and put a death counter on it.";
+const PLAIN_DESTROY: &str = "Destroy target creature.";
+
+/// Drive every prompt a dies trigger can raise until the stack is empty.
+fn drain_stack(runner: &mut engine::game::scenario::GameRunner) {
+    for _ in 0..200 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                if runner
+                    .act(GameAction::OrderTriggers { order: vec![0] })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+}
+
+/// Build a board with P0's Phoenix and a `Destroy target creature.` in hand.
+fn phoenix_board() -> (engine::game::scenario::GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let phoenix = scenario
+        .add_creature_from_oracle(P0, "Bogardan Phoenix", 3, 3, BOGARDAN_PHOENIX)
+        .id();
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P0, "Plain Destroy", false, PLAIN_DESTROY)
+        .id();
+    let runner = scenario.build();
+    (runner, phoenix, destroy)
+}
+
+/// NO death counter: the `if` branch must NOT fire, the trigger must still
+/// resolve, and the `Otherwise` branch returns the Phoenix under its
+/// controller's control with one death counter.
+///
+/// Revert discriminators, both live bugs:
+///   * with the CR 603.4 hoist restored the trigger never goes on the stack at
+///     all, so the Phoenix stays in the graveyard;
+///   * with the `Otherwise` binder reverted the branch is an honest
+///     `Unimplemented`, so nothing returns either.
+#[test]
+fn bogardan_phoenix_without_death_counter_returns_with_a_counter() {
+    let (mut runner, phoenix, destroy) = phoenix_board();
+    assert_eq!(
+        counters_on(&runner, phoenix, CounterType::Generic("death".to_string())),
+        0,
+        "precondition: the Phoenix starts with no death counter"
+    );
+
+    runner.cast(destroy).target_object(phoenix).resolve();
+    drain_stack(&mut runner);
+
+    assert_eq!(
+        zone_of(&runner, phoenix),
+        Zone::Battlefield,
+        "a Phoenix that died WITHOUT a death counter must come back \
+         (with the CR 603.4 hoist in place the trigger never even fires)"
+    );
+    assert_eq!(
+        runner.state().objects[&phoenix].controller,
+        P0,
+        "it returns under its controller's control"
+    );
+    assert_eq!(
+        counters_on(&runner, phoenix, CounterType::Generic("death".to_string())),
+        1,
+        "the else branch also puts a death counter on it"
+    );
+}
+
+/// WITH a death counter: the `if` branch exiles it, and the `Otherwise` branch
+/// must NOT also run.
+///
+/// Honest note on discrimination: unlike its sibling, this test does NOT
+/// revert-fail. Measured against the pre-fix parse, a Phoenix that died WITH a
+/// death counter already ended in exile — the hoisted CR 603.4 intervening-if was
+/// true, so the trigger fired and exiled it, and the unconditional
+/// `Otherwise`-fallback siblings that followed were no-ops because the object had
+/// already left the battlefield. That branch was therefore accidentally correct
+/// before the fix, and the live defect is one-directional (see the sibling test).
+///
+/// It is kept deliberately as a forward regression guard: binding the else branch
+/// makes it newly possible for the `Otherwise` to fire on the wrong side, and this
+/// pins that it must not.
+#[test]
+fn bogardan_phoenix_with_death_counter_is_exiled_only() {
+    let (mut runner, phoenix, destroy) = phoenix_board();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&phoenix)
+        .unwrap()
+        .counters
+        .insert(CounterType::Generic("death".to_string()), 1);
+
+    runner.cast(destroy).target_object(phoenix).resolve();
+    drain_stack(&mut runner);
+
+    assert_eq!(
+        zone_of(&runner, phoenix),
+        Zone::Exile,
+        "a Phoenix that died WITH a death counter must be exiled (the 'if' branch)"
+    );
+    assert!(
+        !runner.state().battlefield.contains(&phoenix),
+        "the 'Otherwise' branch must NOT also return it — running both branches \
+         is the second half of the hoisted-condition bug"
+    );
+}
+
+// ===========================================================================
+// Rent Is Due — CR 118.12 optional payment with a written-order else branch
+// "At the beginning of your end step, you may tap two untapped creatures
+//  and/or Treasures you control. If you do, draw a card. Otherwise, sacrifice
+//  this enchantment."
+// ===========================================================================
+
+const RENT_IS_DUE: &str = "At the beginning of your end step, you may tap two untapped creatures and/or Treasures you control. If you do, draw a card. Otherwise, sacrifice this enchantment.";
+
+/// Board: P0 controls Rent Is Due plus two untapped creatures to tap, and has a
+/// non-empty library so the paid branch's draw is observable.
+fn rent_board() -> (engine::game::scenario::GameRunner, ObjectId, Vec<ObjectId>) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let rent = scenario
+        .add_enchantment_from_oracle(P0, "Rent Is Due", RENT_IS_DUE)
+        .id();
+    let a = scenario.add_creature(P0, "Tenant A", 2, 2).id();
+    let b = scenario.add_creature(P0, "Tenant B", 2, 2).id();
+    scenario.add_card_to_library_top(P0, "Rent Payment");
+    scenario.add_card_to_library_top(P0, "Rent Payment");
+    let runner = scenario.build();
+    (runner, rent, vec![a, b])
+}
+
+/// Drive the end-step trigger, answering its CR 118.12 optional payment with
+/// `pay`, tapping `tappers` when accepting. Returns whether the payment prompt
+/// was actually reached — the reach guard that keeps both branch assertions
+/// from passing vacuously if the trigger never fires.
+fn drive_rent_end_step(
+    runner: &mut engine::game::scenario::GameRunner,
+    pay: bool,
+    tappers: &[ObjectId],
+) -> bool {
+    let mut saw_payment_prompt = false;
+    runner.advance_to_end_step();
+    for _ in 0..200 {
+        if runner.state().phase != Phase::End {
+            // Combat's turn-based actions (CR 508.1 / CR 509.1) block
+            // `advance_to_phase`; declare nothing and keep walking to the end
+            // step where Rent's trigger lives.
+            match runner.state().waiting_for.clone() {
+                WaitingFor::DeclareAttackers { .. } => {
+                    if runner
+                        .act(GameAction::DeclareAttackers {
+                            attacks: vec![],
+                            bands: vec![],
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    runner.advance_to_end_step();
+                    continue;
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    if runner
+                        .act(GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    runner.advance_to_end_step();
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { .. } => {
+                saw_payment_prompt = true;
+                if runner.act(GameAction::DecideOptionalCost { pay }).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                saw_payment_prompt = true;
+                if runner
+                    .act(GameAction::DecideOptionalEffect { accept: pay })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            WaitingFor::PayCost { .. } => {
+                saw_payment_prompt = true;
+                if runner
+                    .act(GameAction::SelectCards {
+                        cards: tappers.to_vec(),
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                if runner
+                    .act(GameAction::OrderTriggers { order: vec![0] })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    saw_payment_prompt
+}
+
+/// ACCEPT: tap the two permanents, draw exactly one card, and KEEP Rent Is Due.
+#[test]
+fn rent_is_due_paying_the_tap_draws_and_keeps_the_enchantment() {
+    let (mut runner, rent, tenants) = rent_board();
+    let hand_before = runner.state().players[0].hand.len();
+
+    let reached = drive_rent_end_step(&mut runner, true, &tenants);
+    assert!(
+        reached,
+        "reach guard: the end-step trigger must actually raise its CR 118.12 payment prompt"
+    );
+
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand_before + 1,
+        "paying the CR 118.12 cost draws exactly one card"
+    );
+    assert_eq!(
+        zone_of(&runner, rent),
+        Zone::Battlefield,
+        "the 'Otherwise' sacrifice must NOT fire when the cost was paid"
+    );
+    assert!(
+        tenants.iter().all(|&t| is_tapped(&runner, t)),
+        "the chosen permanents must actually be tapped"
+    );
+}
+
+/// DECLINE: no draw, and the `Otherwise` branch sacrifices Rent Is Due.
+///
+/// Revert discriminator: with the `Otherwise` binder reverted the branch is an
+/// honest `Unimplemented` placeholder, so the enchantment survives.
+#[test]
+fn rent_is_due_declining_the_tap_sacrifices_the_enchantment() {
+    let (mut runner, rent, tenants) = rent_board();
+    let hand_before = runner.state().players[0].hand.len();
+
+    let reached = drive_rent_end_step(&mut runner, false, &tenants);
+    assert!(
+        reached,
+        "reach guard: the end-step trigger must actually raise its CR 118.12 payment prompt"
+    );
+
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand_before,
+        "declining the cost must draw nothing"
+    );
+    assert_eq!(
+        zone_of(&runner, rent),
+        Zone::Graveyard,
+        "declining must fire the 'Otherwise' branch and sacrifice the enchantment"
+    );
+    assert!(
+        tenants.iter().all(|&t| !is_tapped(&runner, t)),
+        "declining must not tap anything"
+    );
+}

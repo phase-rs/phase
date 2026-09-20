@@ -31,6 +31,7 @@ import {
   loadDraftWorkspacePreferences,
   repairDraftWorkspacePackScale,
   saveDraftWorkspacePreferences,
+  setArrivingCardBoardPreferences,
   type DraftWorkspacePreferences,
   type ResponsiveDraftLayout,
 } from "../components/draft/workspace/workspacePreferences";
@@ -491,6 +492,25 @@ export function DraftPage() {
     if (useDraftStore.getState().pickInteractionLocked) return;
     setWorkspacePreferences(next);
     saveDraftWorkspacePreferences(next);
+    // SYNCHRONOUSLY, not from an effect. An effect runs after commit, and an
+    // install landing in that window would place its arriving cards against the
+    // PREVIOUS columns. A pick is not the case to worry about here — the guard
+    // above returns while `pickInteractionLocked` is set, which
+    // `draftStore.performPick` sets before its first await — but a `kind:
+    // "state"` install takes no such lock, so `resumeDraft` finishing in that
+    // window would lay out the whole restored pool against stale columns.
+    // The drafting screen's `handlePreferencesChange` in `DraftPodPage` — one of
+    // three same-named handlers there, and the only one that publishes —
+    // publishes synchronously for the same reason, against its own unguarded
+    // `viewUpdated` broadcasts.
+    //
+    // This is the only path that changes `deck`; `setPackScale` below spreads
+    // `workspacePreferences` and touches one numeric field.
+    setArrivingCardBoardPreferences(next.deck);
+  }, []);
+  // Mount only. The change path publishes for itself, above.
+  useEffect(() => {
+    setArrivingCardBoardPreferences(loadDraftWorkspacePreferences().deck);
   }, []);
 
   const handleDrop = useCallback((request: DraftDropRequest) => {

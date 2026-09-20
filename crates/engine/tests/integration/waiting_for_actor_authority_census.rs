@@ -757,9 +757,16 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // `WaitingFor::acting_authority` as `ActingAuthority::One(player)`. Not
     // actorless: the prompt cannot advance without that player's
     // `GameAction::SelectDieRolls`.
-    if declared.len() != 136 {
+    // 136 -> 137 is adjudicated: CR 601.2f's caster-elected cost-reduction
+    // ordering added `OrderCostReductions`. It names one acting `player` —
+    // CR 601.2f gives the choice to "the player" determining the total cost,
+    // i.e. the caster — and is classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance
+    // without that caster's `GameAction::OrderCostReductions` (or a
+    // `GameAction::CancelCast`).
+    if declared.len() != 137 {
         failures.push(format!(
-            "PIN declared.len()={} != 136.\n\
+            "PIN declared.len()={} != 137.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\

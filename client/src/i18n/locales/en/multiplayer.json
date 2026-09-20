@@ -103,7 +103,8 @@
     "firstMessageInvalid": "The host rejected the connection before setup. Refresh both windows and try again.",
     "versionRequired": "This host requires wire protocol v{{version}}. Refresh both windows and try again.",
     "versionMismatch": "Wire protocol mismatch: your client sent v{{guestVersion}}, but the host uses v{{hostVersion}}. Refresh both windows.",
-    "malformedAuthority": "The host rejected invalid connection authority. Rejoin using a new room code."
+    "malformedAuthority": "The host rejected invalid connection authority. Rejoin using a new room code.",
+    "frameUndecodable": "The host sent a message this client could not read. Refresh both windows and try again."
   },
   "serverOfflinePrompt": {
     "title": "Matchmaking unreachable",

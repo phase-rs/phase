@@ -10,11 +10,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   draftPodScreen,
   isMultiplayerDraftPodLive,
-  setArrivingCardBoardPreferences,
   useMultiplayerDraftStore,
   type DraftPodScreen,
 } from "../multiplayerDraftStore";
-import { createDefaultDraftWorkspacePreferences } from "../../components/draft/workspace/workspacePreferences";
+import {
+  createDefaultDraftWorkspacePreferences,
+  setArrivingCardBoardPreferences,
+} from "../../components/draft/workspace/workspacePreferences";
 import { DraftPodHostAdapter } from "../../adapter/draftPodHostAdapter";
 import { DraftPodGuestAdapter } from "../../adapter/draftPodGuestAdapter";
 import type { DraftPlayerView } from "../../adapter/draft-adapter";
@@ -1666,6 +1668,49 @@ describe("multiplayerDraftStore", () => {
       expect(mockHostAdapter.updateWorkspace).toHaveBeenCalledTimes(1);
     });
 
+    // The pod twin of the solo store's
+    // `appends_a_hint_less_deck_draft_effect_pick_in_request_order`, and the
+    // sibling above cannot stand in for it: that one sends `"sideboard"`, which
+    // puts both ids in `ownPlacement` and out of the arriving pass. THIS case —
+    // deck, no hint — is what `PackDisplay.request` dispatches through
+    // `DraftPodPage`, and it is the one that makes the pass's position relative
+    // to `applyDestination` observable: both write these two ids' placements,
+    // the pass in POOL order and `applyDestination` in REQUEST order, and
+    // whichever runs last decides the stack. Run the pass after
+    // `applyDestination` instead and these land `first` then `second`.
+    it("appends a hint-less deck draft-effect pick in request order", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      // Two fixture choices, each measured by breaking it: drop the effect card
+      // from the pre-pick pool and `exactAddedIds` counts three additions
+      // against two requested ids, so the pick settles `rejected`
+      // `"unacknowledged"`; give it the pair's cmc 1 instead of 5 and it shares
+      // their column, so their `order` values start at 1 rather than 0.
+      const effect = { ...card("effect"), cmc: 5 };
+      capturedHostEventHandler!({
+        type: "viewUpdated",
+        view: { ...mockView("Drafting"), pool: [effect] },
+      });
+      mockHostAdapter.submitPickWithDraftEffect.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [effect, card("first"), card("second")],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPickWithDraftEffect(
+        "effect", ["second", "first"], "deck",
+      )).resolves.toEqual({ status: "acknowledged" });
+
+      const placements = useMultiplayerDraftStore.getState().workspaceState!.placements;
+      expect(placements.second.order).toBe(0);
+      expect(placements.first.order).toBe(1);
+    });
+
     it("appends_an_acknowledged_host_pick_to_its_resolved_target_stack", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
@@ -1762,6 +1807,155 @@ describe("multiplayerDraftStore", () => {
       expect(useMultiplayerDraftStore.getState().selectedCard).toBeNull();
     });
 
+    // A PREMIER pod, deliberately — not Winston. `submitPick` is what
+    // `PackDisplay.request` reaches with no placement hint at all, so before
+    // `performPick` ran the arriving pass this card had only reconcile's
+    // column-0 default to fall back on, in every pick-and-pass format.
+    it("sorts a hint-less pick into the column the board's sort means", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+      const picked = { ...card("costly"), cmc: 5 };
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [picked],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPick("costly", "deck"))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      // The seeded default sort is by mana value, so a five-drop belongs in
+      // column 5 rather than the first column it would otherwise land in.
+      expect(useMultiplayerDraftStore.getState().workspaceState!.placements.costly.column)
+        .toBe(5);
+    });
+
+    // The companion claim: a hint is a column someone chose — the drop target
+    // from a drag, or `DraftPodPage.handleConfirmPick`'s resolution — and the
+    // arriving pass must not re-derive over it.
+    it("keeps the hint column on a pick that carries one", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+      const picked = { ...card("costly"), cmc: 5 };
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [picked],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPick("costly", "deck", { column: 2 }))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      expect(useMultiplayerDraftStore.getState().workspaceState!.placements.costly.column)
+        .toBe(2);
+    });
+
+    // The pod half of the same seam: `performPick` reads the geometry through
+    // `getArrivingCardBoardPreferences`. A six-drop clamps to column 2 under
+    // three columns and column 6 under the seven-column default, so the
+    // assertion cannot be satisfied by any default.
+    it("places a pick against the columns the page published, not the module default", async () => {
+      setArrivingCardBoardPreferences({
+        sort: "cmc", columnCount: 3, rows: "one", showHeaders: true,
+      });
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [{ ...card("costly"), cmc: 6 }],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPick("costly", "deck"))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      expect(useMultiplayerDraftStore.getState().workspaceState!.placements.costly.column)
+        .toBe(2);
+    });
+
+    // The sibling of the solo store's
+    // `leaves_a_hint_less_sideboard_pick_in_the_first_column`. The arriving pass
+    // is deck-only, so a sideboard-bound pick must be excluded from it: left in,
+    // it would carry a column from the DECK's seven-column geometry into the
+    // six-column sideboard, to be clamped at render to that zone's last column.
+    it("leaves a hint-less sideboard pick in the first column", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+      // cmc 6, matching the solo sibling: the deck board's seven columns can hold
+      // it and the sideboard's six cannot, so this is the fixture that actually
+      // reaches the clamp the comment above describes. A five-drop would land in
+      // sideboard column 5 unclamped and prove less.
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [{ ...card("costly"), cmc: 6 }],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPick("costly", "sideboard"))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      const placement = useMultiplayerDraftStore.getState().workspaceState!.placements.costly;
+      expect(placement.zone).toBe("sideboard");
+      expect(placement.column).toBe(0);
+    });
+
+    // The pod sibling of the solo store's
+    // `leaves_a_row_less_hint_on_a_two_row_board_in_the_reconcile_default_row`.
+    // `DraftPodPage`'s drop handler passes `request.placementHint` straight to
+    // `submitPick`, so the pod path sends the same column-only hint shape a drag
+    // produces when it misses the row bands. Without the `placementHint` arm of
+    // the exclusion the arriving pass resolves that card's row from the engine
+    // classification and the drop lands somewhere the player did not choose.
+    it("leaves a row-less hint on a two-row board in the reconcile default row", async () => {
+      setArrivingCardBoardPreferences({
+        sort: "cmc", columnCount: 7, rows: "two", showHeaders: true,
+      });
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [{ ...card("costly"), cmc: 5, type_line: "Creature — Bear" }],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPick("costly", "deck", { column: 2 }))
+        .resolves.toEqual({ status: "acknowledged" });
+
+      const placement = useMultiplayerDraftStore.getState().workspaceState!.placements.costly;
+      expect(placement.column).toBe(2);
+      expect(placement.row).toBe(0);
+    });
+
     it("ignores selection replacement while pick interaction is locked", () => {
       useMultiplayerDraftStore.setState({ selectedCard: "prior", pickInteractionLocked: true });
 
@@ -1816,6 +2010,78 @@ describe("multiplayerDraftStore", () => {
       expect(mockHostAdapter.submitPick).toHaveBeenCalledWith(["card-123"]);
       expect(useMultiplayerDraftStore.getState().workspaceState?.placements["card-123"])
         .toMatchObject({ zone: "deck", column: 3, row: 1 });
+    });
+
+    // The pod twin of the solo store's
+    // `leaves_a_row_less_auto_pick_hint_on_a_two_row_board_in_the_reconcile_default_row`.
+    // Pins the `auto-pick` arm of `ownPlacement`, which filters per id on
+    // `placementHints?.[id] !== undefined`: a hint naming only a column must
+    // still keep the arriving pass off that card's row.
+    it("leaves a row-less auto-pick hint on a two-row board in the reconcile default row", async () => {
+      setArrivingCardBoardPreferences({
+        sort: "cmc", columnCount: 7, rows: "two", showHeaders: true,
+      });
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      const picked = { ...card("costly"), cmc: 5, type_line: "Creature — Bear" };
+      capturedHostEventHandler!({
+        type: "viewUpdated",
+        // `required_pick_count` drives `chooseAutoPickCards`, which slices the
+        // scored pack to that length — left at `mockView`'s 0 the auto-pick
+        // selects nothing and never reaches the adapter.
+        view: {
+          ...mockView("Drafting"), pool: [], current_pack: [picked], required_pick_count: 1,
+        },
+      });
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [picked],
+      });
+
+      await useMultiplayerDraftStore.getState().autoPickCard({ costly: { column: 2 } });
+
+      const placement = useMultiplayerDraftStore.getState().workspaceState!.placements.costly;
+      expect(placement.column).toBe(2);
+      expect(placement.row).toBe(0);
+    });
+
+    // The other direction of the same arm: an auto-pick carrying NO hint for a
+    // card has no placement decision of its own, so the arriving pass must sort
+    // it rather than leave it at reconcile's column 0.
+    it("sorts an auto-picked card that carries no hint of its own", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      const picked = { ...card("costly"), cmc: 5 };
+      capturedHostEventHandler!({
+        type: "viewUpdated",
+        // `required_pick_count` drives `chooseAutoPickCards`, which slices the
+        // scored pack to that length — left at `mockView`'s 0 the auto-pick
+        // selects nothing and never reaches the adapter.
+        view: {
+          ...mockView("Drafting"), pool: [], current_pack: [picked], required_pick_count: 1,
+        },
+      });
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [picked],
+      });
+
+      await useMultiplayerDraftStore.getState().autoPickCard();
+
+      expect(useMultiplayerDraftStore.getState().workspaceState!.placements.costly.column)
+        .toBe(5);
     });
 
     it("applies_each_multi-card_auto-pick_placement_hint_to_its_own_card", async () => {

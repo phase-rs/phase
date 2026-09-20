@@ -6965,6 +6965,23 @@ pub struct PendingCast {
     /// apply cost modifiers and floors in total-cost order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declared_mana_additions: Vec<ManaCost>,
+    /// CR 601.2b + CR 601.2f: Cost reductions the caster has affirmatively
+    /// accepted for this cast and that no static on the board can reproduce —
+    /// today exactly the Defiler cycle's optional life payment. They join the
+    /// ordered reduction set at the CR 601.2f lock seam, so they are ordered
+    /// against the board's reductions instead of being shaved off an
+    /// already-floored total.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_cost_reductions: Vec<crate::types::casting_costs::CostReductionEntry>,
+    /// CR 601.2b + CR 601.2f: The caster's cost-determination election — the
+    /// announced nonhybrid equivalent for the cost's hybrid symbols and the
+    /// order the applicable reductions are applied in ("If multiple cost
+    /// reductions apply, the player may apply them in any order") — recorded
+    /// once `WaitingFor::OrderCostReductions` is answered. `None` means neither
+    /// axis was ever observable for this cast and the engine's caster-optimal
+    /// default governs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_reduction_election: Option<crate::types::casting_costs::CostReductionElection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_cost: Option<AbilityCost>,
     /// CR 601.2h: Random cost elements are paid after every nonrandom element.
@@ -7624,6 +7641,8 @@ impl PendingCast {
             prepaid_actual_mana_spent: None,
             base_cost: None,
             declared_mana_additions: Vec::new(),
+            accepted_cost_reductions: Vec::new(),
+            cost_reduction_election: None,
             activation_cost: None,
             deferred_random_discard_cost: None,
             activation_ability_index: None,
@@ -12373,6 +12392,8 @@ pub struct PreparedPersistedGameState {
 pub enum PersistedRestoreError {
     #[error("persisted state uses an unsupported format configuration: {0}")]
     UnsupportedFormat(String),
+    #[error("persisted state contains an unsupported stack object: {0}")]
+    UnsupportedStackObject(&'static str),
     #[error("persisted restore finalization policy mismatch: {0}")]
     FinalizationPolicyMismatch(&'static str),
     #[error("persisted state runtime rehydration failed: {0}")]
@@ -12571,6 +12592,26 @@ impl PersistedGameState {
             .format_config
             .reject_unimplemented_range_of_influence()
             .map_err(PersistedRestoreError::UnsupportedFormat)?;
+        if state
+            .stack
+            .iter()
+            .chain(state.resolving_stack_entry.iter())
+            .any(|entry| matches!(entry.kind, StackEntryKind::CombatDamage { .. }))
+        {
+            return Err(PersistedRestoreError::UnsupportedStackObject(
+                "combat damage on the stack is not resolvable in this build",
+            ));
+        }
+        // Decoding a type and admitting it as a PLAYABLE persisted game are
+        // separate contracts. `StackEntryKind::CombatDamage` is serde-decodable
+        // so later phases can round-trip it, but no phase before the pushing
+        // one can resolve its assignments — so a restored state carrying one
+        // has pending damage this build cannot deal. Admitting it would either
+        // crash resolution or silently drop that damage; both are worse than
+        // refusing the load. Rejected here, at the single chokepoint every
+        // production restore funnels through (WASM `prepare_restored_game_state`,
+        // `server-core`'s `from_persisted`, and offline tooling), rather than at
+        // each caller.
         let recovered_terminal_rest =
             crate::game::engine::recover_terminal_resolution_rest_on_restore(&mut state)?;
         Ok(PreparedPersistedGameState {
@@ -13666,6 +13707,50 @@ pub enum WaitingFor {
         life_cost: u32,
         /// Mana cost reduction if life is paid (e.g. {G})
         mana_reduction: ManaCost,
+        /// CR 118.7b/c/d + CR 601.2f: the reach the Defiler's reduction was
+        /// printed with ("This effect reduces only the amount of [color] mana
+        /// you pay"), captured at announcement so the answer applies the value
+        /// that was locked in rather than re-deriving it from the board.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::statics::CostReductionReach::is_spills_to_generic"
+        )]
+        reach: crate::types::statics::CostReductionReach,
+        pending_cast: Box<PendingCast>,
+    },
+    /// CR 601.2f: "If multiple cost reductions apply, the player may apply them
+    /// in any order." Presented only when the order is *observable* — when two
+    /// permutations of the applicable reductions lock in genuinely different
+    /// total costs, which needs a `ColoredManaOnly` reduction (the printed
+    /// "This effect reduces only the amount of colored mana you pay" rider) to
+    /// meet a `SpillsToGeneric` one over the same pip. Ordinary casts never
+    /// reach this prompt: a reduction with no colored/colorless component
+    /// commutes with every other reduction, so it is excluded from the
+    /// permutation set outright.
+    ///
+    /// CR 601.2h: `reductions` is a snapshot taken when the total cost is being
+    /// determined, not a live re-read of the board — the Altar's Reap /
+    /// Thunderscape Familiar example turns on a reduction staying determined
+    /// after its source has left the battlefield.
+    OrderCostReductions {
+        player: PlayerId,
+        /// The order-relevant reductions, in canonical collection order. A
+        /// submitted `GameAction::OrderCostReductions` order is a permutation
+        /// of indices into this vec; index 0 is applied first.
+        reductions: Vec<crate::types::casting_costs::CostReductionEntry>,
+        /// CR 601.2b: the cost's *announceable* hybrid symbols, in cost order.
+        /// A submitted `GameAction::OrderCostReductions.hybrid_announcement` is
+        /// parallel to this vec — one announced nonhybrid half per entry — or
+        /// empty to announce nothing. Empty here means the cast has no hybrid
+        /// symbol any applicable reduction could cancel, so the election is
+        /// purely an ordering.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hybrid_symbols: Vec<crate::types::mana::ManaCostShard>,
+        /// One representative per distinct locked total cost, cheapest
+        /// first. Elections that lock the same cost are indistinguishable to the
+        /// game (a reduction emits no event, and converge/sunburst read the
+        /// mana actually paid in CR 601.2h), so only one is offered.
+        outcomes: Vec<crate::types::casting_costs::CostReductionOutcome>,
         pending_cast: Box<PendingCast>,
     },
     /// CR 715.3a + CR 702.94a + CR 702.35a + CR 702.85a + CR 701.57a + CR 702.xxx:
@@ -15357,6 +15442,7 @@ impl WaitingFor {
             WaitingFor::ChooseGiftRecipient { .. } => "ChooseGiftRecipient",
             WaitingFor::SpliceOffer { .. } => "SpliceOffer",
             WaitingFor::DefilerPayment { .. } => "DefilerPayment",
+            WaitingFor::OrderCostReductions { .. } => "OrderCostReductions",
             WaitingFor::CastOffer { .. } => "CastOffer",
             WaitingFor::ModalFaceChoice { .. } => "ModalFaceChoice",
             WaitingFor::AlternativeCastChoice { .. } => "AlternativeCastChoice",
@@ -15515,6 +15601,7 @@ impl WaitingFor {
             | WaitingFor::ChooseGiftRecipient { player, .. }
             | WaitingFor::SpliceOffer { player, .. }
             | WaitingFor::DefilerPayment { player, .. }
+            | WaitingFor::OrderCostReductions { player, .. }
             | WaitingFor::AbilityModeChoice { player, .. }
             | WaitingFor::MultiTargetSelection { player, .. }
             | WaitingFor::CastOffer { player, .. }
@@ -15675,6 +15762,7 @@ impl WaitingFor {
             | WaitingFor::ChooseGiftRecipient { pending_cast, .. }
             | WaitingFor::SpliceOffer { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
+            | WaitingFor::OrderCostReductions { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
             | WaitingFor::CostTypeChoice { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
@@ -15710,6 +15798,7 @@ impl WaitingFor {
             | WaitingFor::ChooseGiftRecipient { pending_cast, .. }
             | WaitingFor::SpliceOffer { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
+            | WaitingFor::OrderCostReductions { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
             | WaitingFor::CostTypeChoice { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
@@ -16139,6 +16228,12 @@ pub enum StackResolutionEntryProvenance {
     KeywordAction {
         action: KeywordAction,
     },
+    /// Pre-M10 combat damage on the stack. Carries the same payload the entry
+    /// does, so the fence stays a complete entry-local snapshot.
+    CombatDamage {
+        sub_step: CombatDamageSubStep,
+        assignments: Vec<AssignedCombatDamage>,
+    },
 }
 
 /// Captured fields for a triggered stack entry. Heap indirection keeps the
@@ -16204,6 +16299,13 @@ impl StackResolutionEntryFence {
                     action: action.clone(),
                 }
             }
+            StackEntryKind::CombatDamage {
+                sub_step,
+                assignments,
+            } => StackResolutionEntryProvenance::CombatDamage {
+                sub_step: *sub_step,
+                assignments: assignments.clone(),
+            },
         };
         let (target_incarnations, selected_target_incarnations) = entry
             .ability()
@@ -16430,28 +16532,30 @@ pub struct ResolutionSourceRelatch {
 
 impl StackEntry {
     /// Access the resolved ability for this stack entry (immutable).
-    /// Returns `None` for permanent spells with no spell-level effect, and for
+    /// Returns `None` for permanent spells with no spell-level effect, for
     /// `KeywordAction` entries which carry a typed payload instead of a
-    /// `ResolvedAbility`.
+    /// `ResolvedAbility`, and for `CombatDamage`, which is not an ability at
+    /// all (CR 113.3b) and carries frozen assignments instead.
     pub fn ability(&self) -> Option<&ResolvedAbility> {
         match &self.kind {
             StackEntryKind::Spell { ability, .. } => ability.as_deref(),
             StackEntryKind::ActivatedAbility { ability, .. } => Some(ability),
             StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
-            StackEntryKind::KeywordAction { .. } => None,
+            StackEntryKind::KeywordAction { .. } | StackEntryKind::CombatDamage { .. } => None,
         }
     }
 
     /// Access the resolved ability for this stack entry (mutable).
-    /// Returns `None` for permanent spells with no spell-level effect, and for
+    /// Returns `None` for permanent spells with no spell-level effect, for
     /// `KeywordAction` entries which carry a typed payload instead of a
-    /// `ResolvedAbility`.
+    /// `ResolvedAbility`, and for `CombatDamage`, which is not an ability at
+    /// all (CR 113.3b) and carries frozen assignments instead.
     pub fn ability_mut(&mut self) -> Option<&mut ResolvedAbility> {
         match &mut self.kind {
             StackEntryKind::Spell { ability, .. } => ability.as_deref_mut(),
             StackEntryKind::ActivatedAbility { ability, .. } => Some(ability),
             StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
-            StackEntryKind::KeywordAction { .. } => None,
+            StackEntryKind::KeywordAction { .. } | StackEntryKind::CombatDamage { .. } => None,
         }
     }
 }
@@ -17076,6 +17180,68 @@ pub enum StackEntryKind {
     /// additionally carries its own typed object ids (equipment_id, vehicle_id,
     /// mount_id, spacecraft_id) needed at resolution.
     KeywordAction { action: KeywordAction },
+    /// Pre-M10 combat damage on the stack: one object per combat damage step,
+    /// holding every assignment made in that step.
+    ///
+    /// Neither a spell (CR 112.1: a spell is a card on the stack) nor an
+    /// ability (CR 113.3b), which is why [`StackEntryKind::class`] answers with
+    /// its own [`StackObjectClass`] variant rather than joining either. The
+    /// 1999–2009 rules called this an object that "can't be countered" and put
+    /// all of a step's assignments on the stack as a single one; those rule
+    /// numbers are deliberately not cited as `CR` annotations, because the
+    /// current CR reuses them for Battles.
+    ///
+    /// Assignments are frozen at push time and carry
+    /// [`ObjectIncarnationRef`](crate::types::identifiers::ObjectIncarnationRef)
+    /// rather than a bare `ObjectId`: dealing-time identity turns on whether the
+    /// source or recipient is still the same object (CR 400.7).
+    ///
+    /// RUNTIME: type-only in this phase — nothing constructs this variant in
+    /// production. It is pushed and resolved in the combat-damage-timing phase
+    /// that follows; see `docs/proposals/custom-format-engine/`.
+    CombatDamage {
+        sub_step: CombatDamageSubStep,
+        assignments: Vec<AssignedCombatDamage>,
+    },
+}
+
+/// One combat-damage assignment, frozen when the damage went on the stack.
+///
+/// Distinct from [`DamageAssignment`](crate::game::combat::DamageAssignment),
+/// which is the live modern-rules shape keyed by a bare `ObjectId`: under the
+/// pre-M10 procedure the source and recipient may change or leave between
+/// assignment and dealing, so identity is pinned to the CR 400.7 incarnation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssignedCombatDamage {
+    pub source: crate::types::identifiers::ObjectIncarnationRef,
+    pub target: AssignedDamageRecipient,
+    pub amount: u32,
+}
+
+/// Recipient of a frozen combat-damage assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum AssignedDamageRecipient {
+    Object(crate::types::identifiers::ObjectIncarnationRef),
+    Player(PlayerId),
+}
+
+/// What kind of object a stack entry is, for every rules purpose that asks.
+///
+/// CR 112.1 makes a spell a card on the stack and CR 113.3b makes an activated
+/// ability an ability; the two are disjoint, and combat damage on the stack is
+/// neither. This projection is the single authority for that question — it
+/// replaced an `Option<StackAbilityKind>` whose `None` meant "spell", a shape
+/// that structurally could not express a third kind.
+///
+/// Engine-internal: never serialized, never part of the wire format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackObjectClass {
+    Spell,
+    Ability(StackAbilityKind),
+    /// Neither a spell nor an ability, so no "target spell" or "target
+    /// ability" effect can ever name it.
+    CombatDamage,
 }
 
 impl StackEntryKind {
@@ -17098,15 +17264,23 @@ impl StackEntryKind {
     /// stack for every rules purpose — including being a legal target of
     /// "target activated ability" effects (Squelch, Interdict, Reroute).
     ///
+    /// `CombatDamage` is neither: CR 112.1 makes a spell a card on the stack and
+    /// CR 113.3b makes an activated ability an ability, and pre-M10 combat
+    /// damage on the stack is not a card and not an ability. It therefore
+    /// matches no "target spell" or "target ability" filter at all.
+    ///
     /// Exhaustive on purpose: a future `StackEntryKind` variant must make this
     /// classification decision explicitly instead of silently defaulting.
-    pub fn stack_ability_kind(&self) -> Option<StackAbilityKind> {
+    pub fn class(&self) -> StackObjectClass {
         match self {
-            StackEntryKind::Spell { .. } => None,
+            StackEntryKind::Spell { .. } => StackObjectClass::Spell,
             StackEntryKind::ActivatedAbility { .. } | StackEntryKind::KeywordAction { .. } => {
-                Some(StackAbilityKind::Activated)
+                StackObjectClass::Ability(StackAbilityKind::Activated)
             }
-            StackEntryKind::TriggeredAbility { .. } => Some(StackAbilityKind::Triggered),
+            StackEntryKind::TriggeredAbility { .. } => {
+                StackObjectClass::Ability(StackAbilityKind::Triggered)
+            }
+            StackEntryKind::CombatDamage { .. } => StackObjectClass::CombatDamage,
         }
     }
 
@@ -17118,9 +17292,11 @@ impl StackEntryKind {
     /// Mana abilities never reach the stack (CR 605.3b), so every ability entry
     /// reaching this predicate is targetable in principle.
     pub fn matches_stack_ability_kind(&self, kind: Option<&StackAbilityKind>) -> bool {
-        match self.stack_ability_kind() {
-            None => false,
-            Some(entry_kind) => kind.is_none_or(|wanted| *wanted == entry_kind),
+        match self.class() {
+            StackObjectClass::Spell | StackObjectClass::CombatDamage => false,
+            StackObjectClass::Ability(entry_kind) => {
+                kind.is_none_or(|wanted| *wanted == entry_kind)
+            }
         }
     }
 }
@@ -25446,9 +25622,13 @@ impl GameState {
                         }
                     }
             }),
+            // CR 117.3d: a yield is a pre-commitment to pass priority for a
+            // specific triggered ability. Combat damage on the stack is not an
+            // ability and is never yielded.
             StackEntryKind::Spell { .. }
             | StackEntryKind::ActivatedAbility { .. }
-            | StackEntryKind::KeywordAction { .. } => false,
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => false,
         }
     }
 
@@ -36024,6 +36204,8 @@ mod tests {
                 prepaid_actual_mana_spent: None,
                 base_cost: None,
                 declared_mana_additions: Vec::new(),
+                accepted_cost_reductions: Vec::new(),
+                cost_reduction_election: None,
                 activation_cost: None,
                 deferred_random_discard_cost: None,
                 activation_ability_index: None,
@@ -36425,9 +36607,18 @@ mod tests {
             player: PlayerId(0),
             life_cost: 2,
             mana_reduction: ManaCost::zero(),
+            reach: crate::types::statics::CostReductionReach::ColoredManaOnly,
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 39);
+        // CR 601.2f: the caster-elected cost-reduction ordering prompt.
+        variants.push(Box::new(WaitingFor::OrderCostReductions {
+            player: PlayerId(0),
+            reductions: Vec::new(),
+            hybrid_symbols: Vec::new(),
+            outcomes: Vec::new(),
+            pending_cast: dummy_pending(),
+        }));
+        assert_eq!(variants.len(), 40);
     }
 
     #[test]
@@ -36455,6 +36646,8 @@ mod tests {
             prepaid_actual_mana_spent: None,
             base_cost: None,
             declared_mana_additions: Vec::new(),
+            accepted_cost_reductions: Vec::new(),
+            cost_reduction_election: None,
             activation_cost: None,
             deferred_random_discard_cost: None,
             activation_ability_index: None,

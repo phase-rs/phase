@@ -21,9 +21,12 @@ import {
   appendWorkspaceInstanceToResolvedDestination,
   createDraftWorkspaceState,
   makeInteractiveVirtualBasicInstanceId,
+  placeArrivingPoolCards,
   reconcileWorkspaceState,
+  unplacedPoolIds,
   updateWorkspacePlacement,
 } from "../components/draft/workspace/workspacePlacement";
+import { getArrivingCardBoardPreferences } from "../components/draft/workspace/workspacePreferences";
 import {
   addVirtualBasic,
   projectDeckNames,
@@ -391,10 +394,71 @@ type WorkspaceInstallOperation =
       readonly persistence: "schedule";
     };
 
+/**
+ * Ids this operation resolves a placement for ITSELF, which the arriving pass
+ * must leave alone.
+ *
+ * A `sideboard` destination, because the pass is deck-only: the card still
+ * carries reconcile's `"deck"` default when the pass runs, so the pass would
+ * stamp a deck-geometry column that `applyDestination` then carries into the
+ * sideboard, to be clamped by `normalizeWorkspaceForBoardGeometry` to that
+ * zone's last column once it overflows the narrower sideboard.
+ *
+ * A `placementHint`, because `applyDestination` falls back per FIELD:
+ * `placementHint?.row ?? placement.row`. `DraftPickPlacementHint.row` is
+ * optional, and `useDraftWorkspaceDrag` omits it whenever the drop hit a column
+ * but no row band. On a two-row board the pass would then decide that card's
+ * row through the engine classification, where the hint path has always fallen
+ * back to reconcile's default — a drag-behaviour change this change has no
+ * business making. That card's own COLUMN is unaffected either way, since a
+ * hint always wins there — `row` is the whole of what this arm protects.
+ *
+ * `acknowledged-auto-pick` installs to `"deck"` unconditionally below, so only
+ * its hint can exclude it.
+ */
+function operationResolvesOwnPlacement(operation: WorkspaceInstallOperation): readonly string[] {
+  switch (operation.kind) {
+    case "state":
+      return [];
+    case "acknowledged-pick":
+      return operation.placementHint !== undefined || operation.destination !== "deck"
+        ? operation.placeInstanceIds
+        : [];
+    case "acknowledged-auto-pick":
+      return operation.placementHint !== undefined ? [operation.addedInstanceId] : [];
+  }
+}
+
 function installWorkspace(operation: WorkspaceInstallOperation): void {
-  let workspace = reconcileWorkspaceState(
-    operation.baseWorkspace,
+  const ownPlacement = operationResolvesOwnPlacement(operation);
+  // Against `operation.baseWorkspace`, the PRE-reconcile workspace, so a card
+  // that entered the pool on this install still counts as arriving. Asked after
+  // the reconcile below it would already hold the column-0 default and be
+  // filtered out, which is why the id list is computed here and not inside the
+  // placement call.
+  const arriving = unplacedPoolIds(operation.baseWorkspace, operation.authoritativeView.pool)
+    .filter((instanceId) => !ownPlacement.includes(instanceId));
+  // Sorted placement for cards that reach the pool with no hint resolved for
+  // them: the `kind: "state"` installs `startLocalDraft` and `resumeDraft` make,
+  // plus the hint-less deck picks `PackDisplay.request` dispatches through
+  // `pickCard`, `pickCardStep` and `pickCardWithDraftEffect`. Without this they
+  // stack in the board's first column whatever the sort says.
+  // BEFORE the switch, and the order is load-bearing — do not move this below
+  // it. For a multi-id hint-less DECK pick (`pickCardWithDraftEffect` from
+  // `PackDisplay.request`) both calls write the same two ids' placements: this
+  // pass appends them in POOL order, `applyDestination` appends them in REQUEST
+  // order and re-appends an id it finds already placed (`if (!placement)
+  // continue` is its only skip). Whichever runs last decides the stack order.
+  // Pinned by `appends_a_hint_less_deck_draft_effect_pick_in_request_order`,
+  // which was the single placement failure of a full `npx vitest run` with this
+  // call moved below the switch — it failed there on `second.order`, expecting
+  // 0 and getting 1, the pool-order result.
+  let workspace = placeArrivingPoolCards(
+    reconcileWorkspaceState(operation.baseWorkspace, operation.authoritativeView.pool),
+    arriving,
     operation.authoritativeView.pool,
+    operation.authoritativeView.pool_groups,
+    getArrivingCardBoardPreferences(),
   );
   switch (operation.kind) {
     case "state":

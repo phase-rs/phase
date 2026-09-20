@@ -103,7 +103,8 @@
     "firstMessageInvalid": "Der Host hat die Verbindung vor der Einrichtung abgelehnt. Aktualisiere beide Fenster und versuche es erneut.",
     "versionRequired": "Dieser Host benötigt das Übertragungsprotokoll v{{version}}. Aktualisiere beide Fenster und versuche es erneut.",
     "versionMismatch": "Übertragungsprotokoll stimmt nicht überein: Dein Client hat v{{guestVersion}} gesendet, der Host verwendet jedoch v{{hostVersion}}. Aktualisiere beide Fenster.",
-    "malformedAuthority": "Der Host hat eine ungültige Verbindungsberechtigung abgelehnt. Tritt mit einem neuen Raumcode erneut bei."
+    "malformedAuthority": "Der Host hat eine ungültige Verbindungsberechtigung abgelehnt. Tritt mit einem neuen Raumcode erneut bei.",
+    "frameUndecodable": "Der Host hat eine Nachricht gesendet, die dieser Client nicht lesen konnte. Aktualisiere beide Fenster und versuche es erneut."
   },
   "serverOfflinePrompt": {
     "title": "Matchmaking nicht erreichbar",

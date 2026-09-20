@@ -51,6 +51,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "OptionalCostChoice",
     "ActivationCostOneOfChoice",
     "DefilerPayment",
+    // CR 601.2f: caster-elected cost-reduction ordering
+    // (CostReductionOrderModal).
+    "OrderCostReductions",
     "ModeChoice",
     "AbilityModeChoice",
     "ModalFaceChoice",
@@ -273,6 +276,8 @@ export function waitingForReason(
       return { key: "status.reason.discarding" };
     case "OrderTriggers":
       return { key: "status.reason.orderingTriggers" };
+    case "OrderCostReductions":
+      return { key: "status.reason.orderingCostReductions" };
     case "Priority": {
       // CR 117: the priority window. The engine-provided stack depth and phase
       // tell us what kind of window this is — purely descriptive labeling.
