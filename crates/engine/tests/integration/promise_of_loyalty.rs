@@ -1354,8 +1354,7 @@ fn build_pause_board(multipliers: bool, double_pause: bool) -> PauseBoard {
 /// `publishes_tracked_set_from_resolution`, so the grant's `affected` is
 /// `ParentTarget`, not `TrackedSet`), on all three pause shapes.
 ///
-/// Reverting the funnel's publish-before-counters order (or re-publishing the
-/// tracked set from `run_player_scope_sacrifice`) makes
+/// Reverting the funnel's publish-before-counters order makes
 /// `state.chain_tracked_set_id` wrong or unset at install time, so the
 /// `ParentTarget` arm's `unwrap_or_default()` installs on an empty set —
 /// nothing is refused, and the keeper attacks freely. RED on that mutation.
@@ -1427,7 +1426,11 @@ fn promise_of_loyalty_sentence_two_binds_to_the_keepers_on_every_pause_path() {
         );
         runner
             .declare_attackers(&[(unmarked, AttackTarget::Player(P0))])
-            .expect("{label}: a creature with no vow counter attacks the caster freely");
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{label}: a creature with no vow counter must attack the caster freely: {e:?}"
+                )
+            });
     }
 }
 
@@ -1470,7 +1473,7 @@ fn count_choose_and_sacrifice_resolved(events: &[GameEvent], source_id: ObjectId
 }
 
 #[test]
-fn promise_of_loyalty_resolves_exactly_once_on_every_pause_path() {
+fn promise_of_loyalty_adds_no_extra_effect_resolved_on_any_pause_path() {
     for (label, multipliers, double_pause) in [
         ("unpaused", false, false),
         ("single-pause", true, false),

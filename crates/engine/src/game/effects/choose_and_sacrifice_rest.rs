@@ -700,7 +700,7 @@ fn sacrifice_unchosen(
     // multiplier that is itself unchosen must still be on the battlefield here.
     // Sited AFTER `publish_fresh_tracked_set` so the mark has a correct subject
     // and `chain_tracked_set_id` is already bound at any pause; the
-    // continuation (`run_player_scope_sacrifice`) must not publish again.
+    // continuation (`continue_player_scope_sacrifice`) must not publish again.
     super::publish_fresh_tracked_set(state, kept.to_vec());
     match keeper_counter {
         Some((counter_type, count)) => {
@@ -739,12 +739,15 @@ fn sacrifice_unchosen(
     }
 }
 
-/// CR 701.21a: sweep every in-scope permanent the keepers did not protect.
-/// Called inline when no keeper mark paused, and from
-/// `PendingCounterPostAction::ContinuePlayerScopeSacrifice` when one did — the
-/// selections are derived HERE in both cases, never carried across the pause,
-/// and the keeper tracked set is NOT re-published here (see `sacrifice_unchosen`).
-fn run_player_scope_sacrifice(
+/// CR 701.21a + CR 616.1: derive the unchosen selections and run the disposal
+/// sweep — the single body shared by `run_player_scope_sacrifice` (the
+/// `keeper_counter: None` path, called inline from `sacrifice_unchosen`) and
+/// `continue_player_scope_sacrifice` (the `keeper_counter: Some` path, resumed
+/// from `PendingCounterPostAction::ContinuePlayerScopeSacrifice`). Selections
+/// are derived HERE in both cases, never carried across the pause, and the
+/// keeper tracked set is NOT re-published here — `sacrifice_unchosen` already
+/// published it via `publish_fresh_tracked_set` before either path runs.
+fn derive_and_perform_player_scope_sacrifice(
     state: &mut GameState,
     kept: &[ObjectId],
     effective_scope: &[PlayerId],
@@ -752,7 +755,7 @@ fn run_player_scope_sacrifice(
     source_id: ObjectId,
     source_controller: PlayerId,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
+) -> Result<super::PendingPlayerScopeSacrificeOutcome, EffectError> {
     let selections = unchosen_sacrifice_selections_for_scope(
         state,
         kept,
@@ -765,12 +768,37 @@ fn run_player_scope_sacrifice(
         effect_kind: Some(EffectKind::ChooseAndSacrificeRest),
         ..Default::default()
     };
-    let _ = super::perform_collected_player_scope_sacrifices_with_completion(
+    super::perform_collected_player_scope_sacrifices_with_completion(
         state,
         source_id,
         source_controller,
         selections,
         completion,
+        events,
+    )
+}
+
+/// CR 701.21a: sweep every in-scope permanent the keepers did not protect.
+/// Called only from `sacrifice_unchosen`'s `keeper_counter: None` branch —
+/// the printed instruction has no counter mark to place first, so there is
+/// nothing to pause on. Shares its derive-and-perform body with
+/// `continue_player_scope_sacrifice` via `derive_and_perform_player_scope_sacrifice`.
+fn run_player_scope_sacrifice(
+    state: &mut GameState,
+    kept: &[ObjectId],
+    effective_scope: &[PlayerId],
+    sacrifice_filter: &TargetFilter,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let _ = derive_and_perform_player_scope_sacrifice(
+        state,
+        kept,
+        effective_scope,
+        sacrifice_filter,
+        source_id,
+        source_controller,
         events,
     )?;
     Ok(())
@@ -779,7 +807,10 @@ fn run_player_scope_sacrifice(
 /// CR 701.21a + CR 616.1: resume the disposal half after the keeper marks
 /// settled. Returns `true` when the sacrifice ran to completion, `false` when it
 /// parked its own continuation — the contract `apply_pending_counter_post_action`
-/// consumes, mirroring `proliferate::continue_proliferate_actions`.
+/// consumes, mirroring `proliferate::continue_proliferate_actions`. Shares its
+/// derive-and-perform body with `run_player_scope_sacrifice` via
+/// `derive_and_perform_player_scope_sacrifice`; only the outcome-to-`bool`
+/// mapping below is local to this resumed path.
 pub(crate) fn continue_player_scope_sacrifice(
     state: &mut GameState,
     kept: &[ObjectId],
@@ -789,24 +820,13 @@ pub(crate) fn continue_player_scope_sacrifice(
     source_controller: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    let selections = unchosen_sacrifice_selections_for_scope(
+    match derive_and_perform_player_scope_sacrifice(
         state,
         kept,
         scoped_players,
         sacrifice_filter,
         source_id,
         source_controller,
-    );
-    let completion = PendingPlayerScopeSacrificeCompletion {
-        effect_kind: Some(EffectKind::ChooseAndSacrificeRest),
-        ..Default::default()
-    };
-    match super::perform_collected_player_scope_sacrifices_with_completion(
-        state,
-        source_id,
-        source_controller,
-        selections,
-        completion,
         events,
     ) {
         Ok(super::PendingPlayerScopeSacrificeOutcome::Completed { .. }) => true,

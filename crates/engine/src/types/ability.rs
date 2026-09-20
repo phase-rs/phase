@@ -33679,7 +33679,7 @@ mod tests {
     #[test]
     fn keeper_counter_quantity_visitor_includes_the_mark() {
         let keeper_count = QuantityExpr::Fixed { value: 1 };
-        let mark_count = QuantityExpr::Fixed { value: 1 };
+        let mark_count = QuantityExpr::Fixed { value: 2 };
         let effect = Effect::ChooseAndSacrificeRest {
             categories: Vec::new(),
             chooser_scope: CategoryChooserScope::EachPlayerSelf,
