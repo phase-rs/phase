@@ -5177,6 +5177,7 @@ fn zone_change_filter_inner(
                     ability,
                     trigger_source,
                     None,
+                    triggering_object,
                 )
                 .chosen_attributes
                 .iter()
