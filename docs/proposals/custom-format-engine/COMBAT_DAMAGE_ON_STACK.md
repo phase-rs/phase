@@ -622,12 +622,16 @@ parameterizes an existing axis rather than adding a sibling predicate.
 
 ### 3.6 Match sites
 
-**The audit rule for Phase 3a.** Every `match`, `matches!`, `if let` and
-`let … else` on `StackEntryKind`, every reader of `StackEntry::ability()` that
-treats `None` as a particular kind, and (with D9) every reader of
-`StackEntry.controller` gets an explicit decision. This applies across
-`engine`, `phase-ai`, `server-core`, `phase-server`, `engine-wasm` and
-`manabrew-compat`.
+**The audit rule for Phase 3a — classification only.** Every `match`,
+`matches!`, `if let` and `let … else` on `StackEntryKind`, and every reader of
+`StackEntry::ability()` that treats `None` as a particular kind, gets an
+explicit decision. This applies across `engine`, `phase-ai`, `server-core`,
+`phase-server`, `engine-wasm` and `manabrew-compat`.
+
+**`StackEntry.controller` readers are NOT part of this audit.** They belong to
+Phase 3a-II together with the rest of the D9 work, so the two phases keep the
+disjoint break sets the split exists to create. 3a does not read, write, or
+re-type that field.
 
 ```bash
 git grep -n "StackEntryKind::" -- 'crates/*/src/**' ':!*tests*'   # 87 files at pin
@@ -644,7 +648,6 @@ authoritative):
 | `game_state.rs:16042` `StackResolutionEntryProvenance` | new provenance |
 | `game_state.rs:16946` `stack_ability_kind` | replaced by D5 |
 | `game_state.rs:25101` yield scopes | waits for it like any entry |
-| `stack.rs:1033`; `elimination.rs:970-984`; `filter.rs:2998,3019` | `controller: None` (D9) |
 | `stack.rs:1372` / `:1424` | resolver arm / `unreachable!` |
 | `stack.rs:5031,5086,5102` | never grouped |
 | `resolved_commands.rs:1139-1142` (journaled stack-kind rewrite) | not rewritable; journaled (§3.10) |
@@ -847,11 +850,28 @@ no push authority, so nothing can ever serialize one. Three supports:
    the Rust and TS constants AGREE, not that they were incremented — stated in
    the v64 changelog entry.
 
-The bump therefore belongs to **Phase 3c**, the first phase that pushes the
-object. Had 3a bumped, it would have had to move five surfaces — lobby broker,
+Had 3a bumped, it would have had to move five surfaces — lobby broker,
 server-core (whose pinning test embeds the numeral in its *function name*), the
 client adapter, the P2P `WIRE_PROTOCOL_VERSION`, and the checker's expectations
 — for a tag nothing can emit.
+
+### Wire-emission matrix — each bump assigned exactly once
+
+The rule above ("bump when a peer can receive the shape") decides ownership.
+This matrix is the single authority for which phase performs which bump; no
+phase section may claim a bump that is not listed here.
+
+| Phase | Serialized shape it introduces | Can a peer receive it in this phase? | Bump |
+|---|---|---|---|
+| **3a** | `StackEntryKind::CombatDamage`, `AssignedCombatDamage`, `AssignedDamageRecipient` | **No** — no push authority exists, so nothing serializes one | **None** |
+| **3a-II** | `StackEntry.controller: Option<PlayerId>`, `StackEntryDisplay.controller` | **Yes** — the controller field is on every existing entry, so every peer receives the changed shape immediately | **Bump #1** |
+| **3b** | `DamageSourceRef` in damage events / `ProposedEvent` / `DamageContext`; chosen-source filter; `LKISnapshot.is_commander` + `is_token` | **Yes** — damage events are emitted by every game | **Bump #2** |
+| **3c** | `PendingCombatLifelink.origin`; the first pushes of the 3a variant | **Yes** — both | **Bump #3** |
+| **3d** | none (gate flip + preset data) | — | **None** |
+
+Each phase performs exactly the bump on its own row, with that bump's changelog
+line, value pins and client mirror. A phase whose row says **None** must not
+touch `PROTOCOL_VERSION`, and its section says so explicitly.
 
 Rules that hold for every bump above:
 - Additive fields take `#[serde(default)]`.
@@ -957,7 +977,8 @@ sharp by mutating the fix and pasting the failure.
   - `StackObjectClass` (D5) — **without** the controller, which moves to 3a-II;
   - every §3.6 decision, the display label, TS types;
   - fix the `CombatDamageTiming` doc comment;
-  - **no protocol bump** (§4).
+  - **no protocol bump** — 3a's row in §4's wire-emission matrix is **None**,
+    and this phase must not touch `PROTOCOL_VERSION`.
 - **Tests:**
   1. No ability-filter effect can target it — decided by `class()`, so the
      `class()`-revert mutation must turn it red. Control: real activated and
@@ -998,7 +1019,8 @@ so adding the controller to the projection later is a three-site edit.
     `StackEntry.tsx`'s fallback chain — `PlayerId::default()` is a real seat, so
     a missing value must not render as seat 0;
   - the AI planner's transposition hash and the manabrew encode;
-  - protocol bump for the serialized controller shape (§4).
+  - **Bump #1** per §4's wire-emission matrix — the controller field rides every
+    existing entry, so every peer receives the changed shape at once.
 - **Tests:**
   1. **The phase's rules claim:** a controllerless entry survives a player
      leaving the game (2009 CR 600.4a: "A player leaving the game doesn't affect
@@ -1022,7 +1044,8 @@ so adding the controller to the projection later is a three-site edit.
   - `LKISnapshot.is_commander` and `is_token`;
   - the stamping rule, and the legacy-payload compat deserializer;
   - the client event-type mirrors;
-  - protocol bump.
+  - **Bump #2** per §4's wire-emission matrix (damage events are emitted by
+    every game).
 - **Tests (building block):**
   1. `damage_source_view` returns `Live` for the same incarnation and `Lki` for
      a departed one.
@@ -1051,7 +1074,8 @@ so adding the controller to the projection later is a three-site edit.
   - the D6 widening;
   - journaling (§3.10);
   - `combat_damage_timing.rs`;
-  - the protocol bump for `origin`;
+  - **Bump #3** per §4's wire-emission matrix — `PendingCombatLifelink.origin`
+    and the first pushes of the 3a variant, which land together here;
   - R1–R10 traced.
 - **Tests:**
   1. *Window exists:* Priority with exactly one `CombatDamage` entry. Modern
