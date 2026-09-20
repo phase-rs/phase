@@ -125,14 +125,25 @@ fn grant_control(
     evaluate_layers(runner.state_mut());
 }
 
+fn guardian_project_trigger_is_pending(runner: &GameRunner, project: ObjectId) -> bool {
+    runner.state().stack.iter().any(|entry| {
+        matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == project
+        )
+    })
+}
+
 /// Move a creature from hand onto the battlefield through the real zone-change
 /// path, then run the trigger pass. Returns the net cards drawn by `watch`.
 fn enter_creature_and_count_draws(
     runner: &mut GameRunner,
+    project: ObjectId,
     owner: PlayerId,
     name: &str,
     is_token: bool,
     watch: PlayerId,
+    should_trigger: bool,
 ) -> i64 {
     let creature = place_creature(runner, owner, name, Zone::Hand, is_token);
     let mut events = Vec::new();
@@ -144,6 +155,14 @@ fn enter_creature_and_count_draws(
     let before = runner.state().players[watch.0 as usize].hand.len() as i64;
     process_triggers(runner.state_mut(), &events);
     drain_order_triggers_with_identity(runner.state_mut());
+    assert_eq!(
+        guardian_project_trigger_is_pending(runner, project),
+        should_trigger,
+        "CR 603.4: Guardian Project must {} reach the stack when its \
+         intervening-if is {} at trigger creation",
+        if should_trigger { "" } else { "not" },
+        if should_trigger { "true" } else { "false" },
+    );
     runner.advance_until_stack_empty();
     runner.state().players[watch.0 as usize].hand.len() as i64 - before
 }
@@ -174,7 +193,11 @@ fn creature_token_spec(controller: PlayerId) -> TokenSpec {
 
 /// Create a token through the production replacement and entry pipeline, then
 /// measure any Guardian Project draw from its actual battlefield-entry event.
-fn create_token_and_count_draws(runner: &mut GameRunner, watch: PlayerId) -> i64 {
+fn create_token_and_count_draws(
+    runner: &mut GameRunner,
+    project: ObjectId,
+    watch: PlayerId,
+) -> i64 {
     let mut events = Vec::new();
     let proposed = ProposedEvent::CreateToken {
         owner: P0,
@@ -205,6 +228,10 @@ fn create_token_and_count_draws(runner: &mut GameRunner, watch: PlayerId) -> i64
     let before = runner.state().players[watch.0 as usize].hand.len() as i64;
     process_triggers(runner.state_mut(), &events);
     drain_order_triggers_with_identity(runner.state_mut());
+    assert!(
+        !guardian_project_trigger_is_pending(runner, project),
+        "CR 111.1: a token entrant must not create a Guardian Project trigger"
+    );
     runner.advance_until_stack_empty();
     runner.state().players[watch.0 as usize].hand.len() as i64 - before
 }
@@ -214,8 +241,9 @@ fn create_token_and_count_draws(runner: &mut GameRunner, watch: PlayerId) -> i64
 /// refusing rather than the trigger having been deleted.
 #[test]
 fn unique_name_entering_draws_a_card() {
-    let (mut runner, _project) = setup();
-    let drawn = enter_creature_and_count_draws(&mut runner, P0, "Runeclaw Bear", false, P0);
+    let (mut runner, project) = setup();
+    let drawn =
+        enter_creature_and_count_draws(&mut runner, project, P0, "Runeclaw Bear", false, P0, true);
     assert_eq!(
         drawn, 1,
         "CR 201.2a: a creature sharing no name with anything must satisfy the \
@@ -227,9 +255,10 @@ fn unique_name_entering_draws_a_card() {
 /// Fails on revert — the swallowed clause drew unconditionally.
 #[test]
 fn duplicate_name_on_battlefield_does_not_draw() {
-    let (mut runner, _project) = setup();
+    let (mut runner, project) = setup();
     place_creature(&mut runner, P0, "Grizzly Bears", Zone::Battlefield, false);
-    let drawn = enter_creature_and_count_draws(&mut runner, P0, "Grizzly Bears", false, P0);
+    let drawn =
+        enter_creature_and_count_draws(&mut runner, project, P0, "Grizzly Bears", false, P0, false);
     assert_eq!(
         drawn, 0,
         "CR 201.2a: the entrant shares a name with another creature you control, \
@@ -242,8 +271,9 @@ fn duplicate_name_on_battlefield_does_not_draw() {
 /// This is the row that fails if the trigger-object exclusion is inert.
 #[test]
 fn entrant_does_not_match_itself() {
-    let (mut runner, _project) = setup();
-    let drawn = enter_creature_and_count_draws(&mut runner, P0, "Llanowar Elves", false, P0);
+    let (mut runner, project) = setup();
+    let drawn =
+        enter_creature_and_count_draws(&mut runner, project, P0, "Llanowar Elves", false, P0, true);
     assert_eq!(
         drawn, 1,
         "CR 201.2a + CR 603.6a: every object shares a name with itself, so \
@@ -255,9 +285,10 @@ fn entrant_does_not_match_itself() {
 /// is against a creature CARD in your graveyard (CR 109.2a).
 #[test]
 fn duplicate_name_in_graveyard_does_not_draw() {
-    let (mut runner, _project) = setup();
+    let (mut runner, project) = setup();
     place_creature(&mut runner, P0, "Grizzly Bears", Zone::Graveyard, false);
-    let drawn = enter_creature_and_count_draws(&mut runner, P0, "Grizzly Bears", false, P0);
+    let drawn =
+        enter_creature_and_count_draws(&mut runner, project, P0, "Grizzly Bears", false, P0, false);
     assert_eq!(
         drawn, 0,
         "CR 109.2a: \"a creature card in your graveyard\" is the second reference \
@@ -269,9 +300,10 @@ fn duplicate_name_in_graveyard_does_not_draw() {
 /// same-named creature does not block the draw.
 #[test]
 fn opponent_creature_with_same_name_still_draws() {
-    let (mut runner, _project) = setup();
+    let (mut runner, project) = setup();
     place_creature(&mut runner, P1, "Grizzly Bears", Zone::Battlefield, false);
-    let drawn = enter_creature_and_count_draws(&mut runner, P0, "Grizzly Bears", false, P0);
+    let drawn =
+        enter_creature_and_count_draws(&mut runner, project, P0, "Grizzly Bears", false, P0, true);
     assert_eq!(
         drawn, 1,
         "the battlefield leg is scoped to creatures you control, so an \
@@ -288,7 +320,8 @@ fn controlled_opponents_creature_with_same_name_does_not_draw() {
     assert_eq!(runner.state().objects[&creature].owner, P1);
     assert_eq!(runner.state().objects[&creature].controller, P0);
 
-    let drawn = enter_creature_and_count_draws(&mut runner, P0, "Grizzly Bears", false, P0);
+    let drawn =
+        enter_creature_and_count_draws(&mut runner, project, P0, "Grizzly Bears", false, P0, false);
     assert_eq!(
         drawn, 0,
         "the battlefield reference is a creature you CONTROL even when its owner is P1"
@@ -300,9 +333,10 @@ fn controlled_opponents_creature_with_same_name_does_not_draw() {
 /// graveyard does not block the draw.
 #[test]
 fn duplicate_name_in_opponents_graveyard_still_draws() {
-    let (mut runner, _project) = setup();
+    let (mut runner, project) = setup();
     place_creature(&mut runner, P1, "Grizzly Bears", Zone::Graveyard, false);
-    let drawn = enter_creature_and_count_draws(&mut runner, P0, "Grizzly Bears", false, P0);
+    let drawn =
+        enter_creature_and_count_draws(&mut runner, project, P0, "Grizzly Bears", false, P0, true);
     assert_eq!(
         drawn, 1,
         "CR 109.2a: \"a creature card in your graveyard\" is owner-scoped, so \
@@ -324,7 +358,8 @@ fn your_graveyard_creature_with_opponents_last_control_does_not_draw() {
     assert_eq!(runner.state().objects[&creature].zone, Zone::Graveyard);
     assert_eq!(runner.state().lki_cache[&creature].controller, P1);
 
-    let drawn = enter_creature_and_count_draws(&mut runner, P0, "Grizzly Bears", false, P0);
+    let drawn =
+        enter_creature_and_count_draws(&mut runner, project, P0, "Grizzly Bears", false, P0, false);
     assert_eq!(
         drawn, 0,
         "a P0-owned creature card in your graveyard remains in Guardian Project's pool"
@@ -335,8 +370,8 @@ fn your_graveyard_creature_with_opponents_last_control_does_not_draw() {
 /// of its name — this guards the head against accidental widening.
 #[test]
 fn token_entering_does_not_draw() {
-    let (mut runner, _project) = setup();
-    let drawn = create_token_and_count_draws(&mut runner, P0);
+    let (mut runner, project) = setup();
+    let drawn = create_token_and_count_draws(&mut runner, project, P0);
     assert_eq!(
         drawn, 0,
         "CR 111.1: the trigger watches NONTOKEN creatures, so a token entering \
