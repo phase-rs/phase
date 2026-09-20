@@ -125,6 +125,19 @@ describe("gameStateExport", () => {
     );
   });
 
+  it("rejects a display snapshot before the restore path discards it", () => {
+    const displaySnapshot = JSON.stringify({
+      gameState: buildGameState({ turn_number: 7 }),
+      waitingFor: { type: "Priority" },
+      legalActions: [],
+      turnCheckpoints: [],
+    });
+
+    expect(gameStateFromImportText(displaySnapshot)).toBe(
+      "This is a display snapshot, not a restorable game state. Export an Authoritative Game State from the Debug Panel instead.",
+    );
+  });
+
   it("exports the trusted envelope from the P2P host", async () => {
     const trustedState = JSON.stringify({ state: { players: [{ hand: ["host-only-card"] }] } });
     const adapter = buildEngineAdapterMock(undefined, {
