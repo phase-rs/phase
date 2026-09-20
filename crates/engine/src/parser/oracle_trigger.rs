@@ -5950,8 +5950,12 @@ pub(crate) fn static_condition_to_trigger_condition(
 /// the `WasCast` arm scopes BOTH the caster (`cast_controller`) and the
 /// origin-zone owner (`owner`, CR 400.3 + CR 404.1). The compact "a graveyard"
 /// form (Twilight Diviner) carries neither caster nor owner constraint.
-fn graveyard_origin_or_condition(owner: Option<ControllerRef>) -> TriggerCondition {
-    let filter = match owner {
+fn graveyard_origin_or_condition(
+    entered_owner: Option<ControllerRef>,
+    cast_owner: Option<ControllerRef>,
+    caster: Option<ControllerRef>,
+) -> TriggerCondition {
+    let filter = match entered_owner {
         Some(ref controller) => with_owner_scope(TargetFilter::Any, controller.clone()),
         None => TargetFilter::Any,
     };
@@ -5964,8 +5968,8 @@ fn graveyard_origin_or_condition(owner: Option<ControllerRef>) -> TriggerConditi
             },
             TriggerCondition::WasCast {
                 zone: Some(Zone::Graveyard),
-                controller: owner.clone(),
-                owner,
+                controller: caster,
+                owner: cast_owner,
             },
         ],
     }
@@ -5979,11 +5983,12 @@ fn graveyard_origin_or_condition(owner: Option<ControllerRef>) -> TriggerConditi
 /// matched clause from the effect text.
 ///
 /// Grammar (subject anaphor × graveyard-origin disjunction):
-///   "if " ( "it " | "they " )
-///   ( <compact-form> | <split-your-form> )
+///   "if " ( "it " | "they " | "that creature " )
+///   ( <compact-form> | <split-your-form> | <split-a-form> )
 /// where
 ///   <compact-form>     = "entered or " ( "was" | "were" ) " cast from a graveyard"
 ///   <split-your-form>  = "entered from your graveyard or you cast it from your graveyard"
+///   <split-a-form>     = "entered from a graveyard or you cast it from a graveyard"
 /// CR 701.54a + CR 603.4: "if you chose a creature other than ~ as your
 /// ring-bearer, " — Aragorn, Company Leader's intervening-if. The card name is
 /// already normalized to `~` at the parser entry point (CR 201.5: a name in an
@@ -5998,7 +6003,10 @@ fn parse_chose_other_ring_bearer_intervening_if(input: &str) -> OracleResult<'_,
 
 fn parse_graveyard_origin_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
     let (rest, _) = tag("if ").parse(input)?;
-    let (rest, _) = alt((tag("it "), tag("they "))).parse(rest)?;
+    // "that creature" (Breathless Knight: "Whenever ~ or another creature you
+    // control enters, if that creature entered from a graveyard or you cast it
+    // from a graveyard") is the same anaphor as "it": the entering object.
+    let (rest, _) = alt((tag("it "), tag("they "), tag("that creature "))).parse(rest)?;
     // Compact "a graveyard" form: "entered or (was|were) cast from a graveyard".
     let compact = map(
         (
@@ -6006,12 +6014,27 @@ fn parse_graveyard_origin_intervening_if(input: &str) -> OracleResult<'_, Trigge
             alt((tag("was"), tag("were"))),
             tag(" cast from a graveyard"),
         ),
-        |_| graveyard_origin_or_condition(None),
+        |_| graveyard_origin_or_condition(None, None, None),
     );
-    // Owner-scoped "your graveyard" form with an explicit "you cast it" arm.
-    let split_your = map(
-        tag("entered from your graveyard or you cast it from your graveyard"),
-        |_| graveyard_origin_or_condition(Some(ControllerRef::You)),
+    // CR 400.3 + CR 404.1: each graveyard phrase scopes its own owner;
+    // the explicit "you cast it" independently scopes the caster.
+    let split = map(
+        (
+            tag("entered from "),
+            alt((
+                value(Some(ControllerRef::You), tag("your ")),
+                value(None, tag("a ")),
+            )),
+            tag("graveyard or you cast it from "),
+            alt((
+                value(Some(ControllerRef::You), tag("your ")),
+                value(None, tag("a ")),
+            )),
+            tag("graveyard"),
+        ),
+        |(_, entered_owner, _, cast_owner, _)| {
+            graveyard_origin_or_condition(entered_owner, cast_owner, Some(ControllerRef::You))
+        },
     );
     // CR 601.2 + CR 603.4: bare "(was|were) cast from [a|your] graveyard" with no
     // "entered" disjunction (Rocket-Powered Goblin Glider's Mayhem-gated ETB
@@ -6036,7 +6059,7 @@ fn parse_graveyard_origin_intervening_if(input: &str) -> OracleResult<'_, Trigge
             owner,
         },
     );
-    alt((compact, split_your, bare_cast)).parse(rest)
+    alt((compact, split, bare_cast)).parse(rest)
 }
 
 /// CR 701.26 + CR 603.4: "if it's the first time that creature/permanent has become

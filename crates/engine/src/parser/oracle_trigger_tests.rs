@@ -33433,7 +33433,6 @@ fn non_dies_trigger_head_establishes_no_zone_change_provenance() {
         "reach control: the dies head still binds: {ordinary:#?}"
     );
 }
-
 /// CR 201.2a + CR 603.4 + CR 603.6a: shared assertion for the entering-object
 /// same-name intervening-`if`. Returns the parsed reference so each caller can
 /// make its own claim about the reference pool.
@@ -33562,4 +33561,48 @@ fn disjunctive_enters_or_dies_head_does_not_prove_enters_battlefield() {
     assert!(trigger_head_enters_battlefield(
         "whenever a nontoken creature you control enters the battlefield"
     ));
+}
+
+/// SHAPE: the split form keeps each origin owner independent of the caster.
+#[test]
+fn split_graveyard_origin_owner_axes() {
+    for (entered_phrase, cast_phrase, entered_owner, cast_owner) in [
+        ("a", "a", None, None),
+        (
+            "your",
+            "your",
+            Some(ControllerRef::You),
+            Some(ControllerRef::You),
+        ),
+        ("a", "your", None, Some(ControllerRef::You)),
+        ("your", "a", Some(ControllerRef::You), None),
+    ] {
+        let text = format!(
+            "if that creature entered from {entered_phrase} graveyard or you cast it from {cast_phrase} graveyard"
+        );
+        let (rest, condition) = parse_graveyard_origin_intervening_if(&text).unwrap();
+        assert!(rest.is_empty());
+        let TriggerCondition::Or { conditions } = condition else {
+            panic!("expected the entry/cast disjunction");
+        };
+        let expected_filter = entered_owner.map_or(TargetFilter::Any, |owner| {
+            with_owner_scope(TargetFilter::Any, owner)
+        });
+        assert_eq!(
+            conditions[0],
+            TriggerCondition::ZoneChangeObjectMatchesFilter {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                filter: expected_filter,
+            }
+        );
+        assert_eq!(
+            conditions[1],
+            TriggerCondition::WasCast {
+                zone: Some(Zone::Graveyard),
+                controller: Some(ControllerRef::You),
+                owner: cast_owner,
+            }
+        );
+    }
 }
