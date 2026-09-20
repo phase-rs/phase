@@ -1680,7 +1680,7 @@
     "wardSacrifice": {
       "title_one": "護法 — パーマネント1つを生け贄に捧げる",
       "title_other": "護法 — パーマネント{{count}}個を生け贄に捧げる",
-      "subtitle": "選択：パーマネント へ 生け贄に捧げる"
+      "subtitle": "生け贄に捧げるパーマネントを選択"
     },
     "unlessBounce": {
       "title_one": "パーマネント1つを手札に戻す",
@@ -1894,11 +1894,11 @@
     "warpAltLabel": "Warpで唱える",
     "warpAltSuffix": "（終了ステップに追放）",
     "warpSubtitle": "{{name}}を通常どおり唱えるか、Warpコストを使用する。",
-    "dashEyebrow": "疾走",
+    "dashEyebrow": "疾駆",
     "dashNormalLabel": "通常どおり唱える",
-    "dashAltLabel": "疾走で唱える",
+    "dashAltLabel": "疾駆で唱える",
     "dashAltSuffix": "（速攻を得て、終了ステップに手札へ戻る）",
-    "dashSubtitle": "{{name}}を通常どおり唱えるか、疾走コストを使用する。",
+    "dashSubtitle": "{{name}}を通常どおり唱えるか、疾駆コストを使用する。",
     "faceDownEyebrow": "裏向き",
     "faceDownNormalLabel": "通常どおり唱える",
     "faceDownAltLabel": "裏向きで唱える",
@@ -1927,10 +1927,10 @@
       "sorcery": "ソーサリー1つ",
       "subtype": "{{subtype}}のパーマネント1つ"
     },
-    "impendingEyebrow": "差し迫る",
+    "impendingEyebrow": "兆候",
     "impendingNormalLabel": "通常どおり唱える",
-    "impendingAltLabel": "差し迫るで唱える",
-    "impendingSubtitle": "{{name}}を通常どおり唱えるか、差し迫るコストを支払う — 時間カウンターが置かれ、最後の1個が取り除かれるまでクリーチャーではない。",
+    "impendingAltLabel": "兆候で唱える",
+    "impendingSubtitle": "{{name}}を通常どおり唱えるか、兆候コストを支払う — 時間カウンターが置かれ、最後の1個が取り除かれるまでクリーチャーではない。",
     "prototypeEyebrow": "試作",
     "prototypeNormalLabel": "通常どおり唱える",
     "prototypeAltLabel": "試作で唱える",
@@ -2098,7 +2098,7 @@
     "variantMutate": "変容で唱える",
     "variantAwaken": "覚醒で唱える",
     "variantCleave": "切除で唱える",
-    "variantImpending": "Impendingで唱える",
+    "variantImpending": "兆候で唱える",
     "variantMoreThanMeetsTheEye": "変身した状態で唱える",
     "variantPrototype": "試作で唱える",
     "variantFaceDown": "裏向きで唱える",
