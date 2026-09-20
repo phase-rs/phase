@@ -25,6 +25,7 @@ impl TacticalPolicy for CommanderZoneReturnPolicy {
         _state: &engine::types::game_state::GameState,
         _player: engine::types::player::PlayerId,
     ) -> Option<f32> {
+        // activation-constant: unconditional return preference; prompt gating lives in `verdict`.
         Some(1.0)
     }
 
