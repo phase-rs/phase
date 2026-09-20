@@ -73,6 +73,9 @@ class LocalizedImageFallbackTests(unittest.TestCase):
                     "ja-missing-art", "ja", "missing-art", "Missing",
                     image_status="missing", image_uris=face(MODULE.PLACEHOLDER_URL),
                 ),
+                card("en-placeholder", "en", "placeholder", "Placeholder"),
+                card("ja-placeholder", "ja", "placeholder", "Placeholder",
+                     image_status="placeholder", image_uris=face("not-soon.jpg")),
             ]
             bulk = root / "all-cards.json"
             bulk.write_text(json.dumps(cards), encoding="utf-8")
@@ -84,7 +87,30 @@ class LocalizedImageFallbackTests(unittest.TestCase):
             self.assertEqual(result["en-dfc"]["faces"][1]["normal"], "back-normal")
             self.assertEqual(result["en-root"]["faces"], [face("root")])
             self.assertNotIn("en-missing-art", result)
+            self.assertNotIn("en-placeholder", result)
             self.assertNotIn("en-missing", json.loads((output / "scryfall-images.v2.de.json").read_text()))
+
+    def test_reversible_cards_match_ordered_face_oracle_ids(self) -> None:
+        faces = [{"name": "Front", "oracle_id": "front", "image_uris": face("front")},
+                 {"name": "Back", "oracle_id": "back", "image_uris": face("back")}]
+        english = card("en-reversible", "en", "unused", "Front // Back",
+                       layout="reversible_card", card_faces=faces)
+        del english["oracle_id"]
+        japanese = dict(english, id="ja-reversible", lang="ja")
+        wrong_back = dict(japanese, id="ja-wrong", released_at="2099-01-01",
+                          card_faces=[faces[0], dict(faces[1], oracle_id="other")])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            map_path = root / "scryfall-images.v2.ja.json"
+            map_path.write_text("{}", encoding="utf-8")
+            bulk = root / "all-cards.json"
+            bulk.write_text(json.dumps([english, japanese, wrong_back]), encoding="utf-8")
+            self.assertEqual(MODULE.augment_maps(bulk, root), {"ja": 1})
+            result = json.loads(map_path.read_text(encoding="utf-8"))["en-reversible"]
+            self.assertEqual(result["id"], "ja-reversible")
+            self.assertEqual(result["faces"], [face("front"), face("back")])
+        self.assertIsNone(MODULE.card_identity(dict(english, card_faces=[])))
+        self.assertIsNone(MODULE.card_identity(dict(english, card_faces=[{"name": "Front"}])))
 
     def test_stream_boundaries_and_incomplete_input_do_not_publish(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

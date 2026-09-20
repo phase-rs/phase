@@ -123,12 +123,12 @@ def stream_json_array(path: Path, *, chunk_size: int = 1 << 20) -> Iterator[Any]
             raise JsonArrayError("Expected ',' or ']' in Scryfall JSON array")
 
 
-def card_identity(card: dict[str, Any]) -> tuple[str, str, tuple[str, ...]] | None:
+def card_identity(card: dict[str, Any]) -> tuple[tuple[str, ...], str, tuple[str, ...]] | None:
     """Return the identity that must match across printings."""
     oracle_id = card.get("oracle_id")
     layout = card.get("layout")
     faces = card.get("card_faces")
-    if not isinstance(oracle_id, str) or not isinstance(layout, str):
+    if not isinstance(layout, str):
         return None
     if isinstance(faces, list):
         names = tuple(face.get("name") for face in faces if isinstance(face, dict))
@@ -139,7 +139,17 @@ def card_identity(card: dict[str, Any]) -> tuple[str, str, tuple[str, ...]] | No
         if not isinstance(name, str):
             return None
         names = (name,)
-    return oracle_id, layout, names
+    if layout == "reversible_card":
+        if not isinstance(faces, list) or not faces:
+            return None
+        oracle_ids = tuple(face.get("oracle_id") for face in faces)
+        if not all(isinstance(value, str) and value for value in oracle_ids):
+            return None
+    else:
+        if not isinstance(oracle_id, str) or not oracle_id:
+            return None
+        oracle_ids = (oracle_id,)
+    return oracle_ids, layout, names
 
 
 def exact_faces(card: dict[str, Any]) -> list[dict[str, str]] | None:
@@ -214,8 +224,8 @@ def _atomic_json(path: Path, value: Any) -> None:
 def augment_maps(bulk: Path, output: Path, *, schema_version: str = "v2") -> dict[str, int]:
     maps = _maps(output, schema_version)
     locales = tuple(sorted(maps))
-    identities: dict[tuple[str, str, tuple[str, ...]], dict[str, set[str]]] = {}
-    best: dict[tuple[str, tuple[str, str, tuple[str, ...]]], tuple[tuple[bool, bool, bool, str, str], dict[str, Any]]] = {}
+    identities: dict[tuple[tuple[str, ...], str, tuple[str, ...]], dict[str, set[str]]] = {}
+    best: dict[tuple[str, tuple[tuple[str, ...], str, tuple[str, ...]]], tuple[tuple[bool, bool, bool, str, str], dict[str, Any]]] = {}
 
     for card in stream_json_array(bulk):
         card_id = card.get("id")
@@ -228,7 +238,7 @@ def augment_maps(bulk: Path, output: Path, *, schema_version: str = "v2") -> dic
             if absent:
                 identities.setdefault(identity, {}).setdefault(card_id, set()).update(absent)
             continue
-        if language not in maps or card.get("image_status") == "missing":
+        if language not in maps or card.get("image_status") in {"missing", "placeholder"}:
             continue
         faces = exact_faces(card)
         if faces is None:
