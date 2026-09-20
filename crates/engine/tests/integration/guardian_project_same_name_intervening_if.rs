@@ -29,6 +29,7 @@ use engine::game::trigger_index::reindex_object_triggers;
 use engine::game::triggers::{drain_order_triggers_with_identity, process_triggers};
 use engine::game::zones::{create_object, move_to_zone};
 use engine::types::card_type::CoreType;
+use engine::types::game_state::StackEntryKind;
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -213,7 +214,7 @@ fn token_entering_does_not_draw() {
 /// delta is exactly the first trigger's recheck and nothing else.
 #[test]
 fn reentered_incarnation_counts_as_another_creature() {
-    let (mut runner, _project) = setup();
+    let (mut runner, project) = setup();
 
     let entrant = place_creature(&mut runner, P0, "Grizzly Bears", Zone::Hand, false);
     let mut events = Vec::new();
@@ -223,6 +224,17 @@ fn reentered_incarnation_counts_as_another_creature() {
     // Put the ETB trigger on the stack; do NOT resolve it yet.
     process_triggers(runner.state_mut(), &events);
     drain_order_triggers_with_identity(runner.state_mut());
+    assert!(
+        runner.state().stack.iter().any(|entry| {
+            matches!(
+                &entry.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == project
+            )
+        }),
+        "CR 603.4 reach guard: Guardian Project's original ETB trigger must be \
+         pending on the stack before the blink; otherwise zero draws after the \
+         blink would not prove the resolution-time recheck"
+    );
 
     let entry_incarnation = runner.state().objects[&entrant].incarnation;
 

@@ -33432,6 +33432,8 @@ fn non_dies_trigger_head_establishes_no_zone_change_provenance() {
         renders_zone_change_object_gate(&ordinary),
         "reach control: the dies head still binds: {ordinary:#?}"
     );
+}
+
 /// CR 201.2a + CR 603.4 + CR 603.6a: shared assertion for the entering-object
 /// same-name intervening-`if`. Returns the parsed reference so each caller can
 /// make its own claim about the reference pool.
