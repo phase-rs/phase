@@ -4199,9 +4199,13 @@ pub fn matches_zone_change_event_object_filter(
                     .and_then(|history| history.get(&incarnation))
             })
             .or_else(|| {
-                // CR 400.7: once history exists for this id, the legacy slot
-                // might describe a later incarnation and must not be reused.
-                (!state.lki_by_incarnation.contains_key(object_id))
+                // CR 400.7: an event without an incarnation cannot select an
+                // exact history entry, so it retains the legacy cache behavior.
+                // A proven incarnation never falls back to this slot because it
+                // might describe a later incarnation at the same storage id.
+                record
+                    .entered_incarnation
+                    .is_none()
                     .then(|| state.lki_cache.get(object_id))
                     .flatten()
             })
