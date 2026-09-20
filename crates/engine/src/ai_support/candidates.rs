@@ -5127,7 +5127,15 @@ fn attacker_actions(
     // assignment (completion collapses many illegal proposals to the same witness).
     let mut seen: HashSet<Vec<(ObjectId, AttackTarget)>> = HashSet::new();
     let mut actions = Vec::new();
-    for action in crate::game::combat::complete_attacker_proposals(state, &proposals) {
+    // CR 508.1d: the combat AI completes its own declaration with the tax
+    // posture it planned, at the root and in rollouts alike. These enumerated
+    // proposals carry no such plan, so they complete tax-free: no scorer here is
+    // positioned to commit to paying for an arbitrary proposal.
+    for action in crate::game::combat::complete_attacker_proposals(
+        state,
+        &proposals,
+        crate::game::combat::CombatTaxPosture::Refuse,
+    ) {
         if let GameAction::DeclareAttackers { attacks, .. } = &action {
             let mut key = attacks.clone();
             key.sort_unstable();
@@ -5204,18 +5212,23 @@ fn blocker_actions(
     }
 
     let mut seen = HashSet::new();
-    crate::game::combat::complete_blocker_proposals(state, player, &proposals)
-        .into_iter()
-        .filter_map(|action| {
-            let GameAction::DeclareBlockers { assignments } = &action else {
-                return None;
-            };
-            let mut key = assignments.clone();
-            key.sort_unstable();
-            seen.insert(key)
-                .then(|| candidate(action, TacticalClass::Block, Some(player)))
-        })
-        .collect()
+    crate::game::combat::complete_blocker_proposals(
+        state,
+        player,
+        &proposals,
+        crate::game::combat::CombatTaxPosture::Refuse,
+    )
+    .into_iter()
+    .filter_map(|action| {
+        let GameAction::DeclareBlockers { assignments } = &action else {
+            return None;
+        };
+        let mut key = assignments.clone();
+        key.sort_unstable();
+        seen.insert(key)
+            .then(|| candidate(action, TacticalClass::Block, Some(player)))
+    })
+    .collect()
 }
 
 fn select_cards_variants(

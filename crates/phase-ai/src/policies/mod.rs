@@ -8,7 +8,6 @@ mod board_development;
 mod board_wipe_telegraph;
 mod card_advantage;
 mod chalice_avoidance;
-mod combat_tax;
 mod combat_withdrawal;
 pub(crate) mod combo_line;
 mod commander_zone_return;

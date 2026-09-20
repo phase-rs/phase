@@ -2357,25 +2357,47 @@ fn blocker_assignment_choices(
 }
 
 /// CR 509.1c: complete an AI/generated blocker proposal through the same
-/// maximum-requirement authority as a player declaration. A valid, tax-free
-/// maximum proposal is preserved; every other proposal becomes the deterministic
-/// tax-free witness so callers cannot wedge on a rejected declaration.
+/// maximum-requirement authority as a player declaration. A valid maximum
+/// proposal whose tax (if any) `posture` admits is preserved; every other
+/// proposal becomes the deterministic tax-free witness so callers cannot wedge
+/// on a rejected declaration.
 pub fn complete_blocker_proposal(
     state: &GameState,
     player: PlayerId,
     proposed: &[(ObjectId, ObjectId)],
+    posture: CombatTaxPosture,
 ) -> crate::types::actions::GameAction {
     let constraints = BlockDeclarationConstraints::build(state, player);
     let required = constraints.max_free_score(state);
     let valid = validate_blockers_core(state, player, proposed).is_ok()
         && constraints.score_with_state(state, proposed) >= required
-        && compute_block_tax(state, proposed).is_none();
+        && !block_tax_rejects(state, player, proposed, posture);
     let assignments = if valid {
         proposed.to_vec()
     } else {
         constraints.best_free_declaration(state).0
     };
     crate::types::actions::GameAction::DeclareBlockers { assignments }
+}
+
+/// CR 509.1c + CR 509.1f: does this proposal's block tax disqualify it under `posture`?
+///
+/// Under `Refuse` any quote does. Under `Accept` only a quote the defending
+/// player cannot cover does, so an accepted completion never opens a prompt the
+/// declaring AI is unable to answer with a payment.
+fn block_tax_rejects(
+    state: &GameState,
+    player: PlayerId,
+    proposed: &[(ObjectId, ObjectId)],
+    posture: CombatTaxPosture,
+) -> bool {
+    if compute_block_tax(state, proposed).is_none() {
+        return false;
+    }
+    match posture {
+        CombatTaxPosture::Refuse => true,
+        CombatTaxPosture::Accept => !block_tax_is_affordable(state, player, proposed),
+    }
 }
 
 /// Batch form of [`complete_blocker_proposal`] for engine legal-action
@@ -2385,6 +2407,7 @@ pub fn complete_blocker_proposals(
     state: &GameState,
     player: PlayerId,
     proposals: &[Vec<(ObjectId, ObjectId)>],
+    posture: CombatTaxPosture,
 ) -> Vec<crate::types::actions::GameAction> {
     let constraints = BlockDeclarationConstraints::build(state, player);
     let required = constraints.max_free_score(state);
@@ -2394,7 +2417,7 @@ pub fn complete_blocker_proposals(
         .map(|proposal| {
             let valid = validate_blockers_core(state, player, proposal).is_ok()
                 && constraints.score_with_state(state, proposal) >= required
-                && compute_block_tax(state, proposal).is_none();
+                && !block_tax_rejects(state, player, proposal, posture);
             crate::types::actions::GameAction::DeclareBlockers {
                 assignments: if valid {
                     proposal.clone()
@@ -5009,6 +5032,86 @@ const _: fn(&crate::types::ability::UnlessPayScaling) = |scaling| {
     }
 };
 
+/// CR 508.1d + CR 509.1c: how a proposal's author treats a combat-tax quote.
+///
+/// Declaring a combat tax is the paying player's choice, so a proposal cannot be
+/// completed without knowing whether its author intends to pay. Under `Refuse`
+/// any taxed proposal collapses to the deterministic tax-free witness, so no
+/// `CombatTaxPayment` prompt is ever opened. `Accept` keeps a taxed proposal
+/// intact, but only while the paying player can actually cover the quote, so a
+/// completed declaration never opens a prompt whose price its author cannot meet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombatTaxPosture {
+    /// Drop taxed creatures rather than open a tax prompt.
+    Refuse,
+    /// Keep taxed creatures and pay the quote.
+    Accept,
+}
+
+/// CR 508.1i + CR 508.1j: can the attacking player cover this proposal's tax?
+///
+/// An untaxed proposal is trivially affordable. A taxed one is probed with the
+/// same auto-tap payment authority `handle_pay_combat_tax` spends through
+/// (`pay_unless_cost` -> `pay_effect_mana_cost`). That spend has no resumable
+/// root, so a mana source whose own cost would pause for a replacement choice
+/// counts as unaffordable here, keeping the probe and the spend in agreement.
+pub fn attack_tax_is_affordable(state: &GameState, attacks: &[(ObjectId, AttackTarget)]) -> bool {
+    let Some((total_cost, _)) = compute_attack_tax(state, attacks) else {
+        return true;
+    };
+    super::casting::can_pay_effect_mana_cost_after_auto_tap(
+        state,
+        state.active_player,
+        ObjectId(0),
+        &total_cost,
+        super::casting::PausedManaPayment::Unresumable,
+    )
+}
+
+/// CR 509.1e + CR 509.1f: can `player` cover this block proposal's tax?
+///
+/// Block-side twin of [`attack_tax_is_affordable`]; the defending player pays.
+pub fn block_tax_is_affordable(
+    state: &GameState,
+    player: PlayerId,
+    blocks: &[(ObjectId, ObjectId)],
+) -> bool {
+    let Some((total_cost, _)) = compute_block_tax(state, blocks) else {
+        return true;
+    };
+    super::casting::can_pay_effect_mana_cost_after_auto_tap(
+        state,
+        player,
+        ObjectId(0),
+        &total_cost,
+        super::casting::PausedManaPayment::Unresumable,
+    )
+}
+
+/// CR 508.1j + CR 509.1f: can the seat answering a live `CombatTaxPayment`
+/// prompt cover its locked-in quote?
+///
+/// A completion only opens that prompt for a proposal made under
+/// `CombatTaxPosture::Accept`, which already required this same affordability,
+/// so this is the whole answer an AI seat needs at the prompt: paying what it
+/// chose to incur is exactly what keeps the round trip from looping (declining
+/// rebuilds the identical declare prompt). Returns `false` outside that prompt.
+pub fn pending_combat_tax_is_affordable(state: &GameState) -> bool {
+    let crate::types::game_state::WaitingFor::CombatTaxPayment {
+        player, total_cost, ..
+    } = &state.waiting_for
+    else {
+        return false;
+    };
+    super::casting::can_pay_effect_mana_cost_after_auto_tap(
+        state,
+        *player,
+        ObjectId(0),
+        total_cost,
+        super::casting::PausedManaPayment::Unresumable,
+    )
+}
+
 /// CR 508.1d: whether attacking `target` with `creature` alone would incur an
 /// "unless pay" tax. Thin per-pairing wrapper over `compute_attack_tax`; see the
 /// affected-ness-independence tripwire above for why the isolated verdict is exact.
@@ -5496,16 +5599,22 @@ fn consider_suffix(
 
 /// CR 508.1d: engine-owned AI attacker-declaration completion. Returns the AI's
 /// heuristic proposal UNCHANGED when it is hard-legal, meets the maximum
-/// requirement score, and incurs no tax; otherwise returns the deterministic
-/// tax-free maximum witness (`best_free_declaration`). Because the witness is
-/// tax-free by construction, the completed declaration NEVER opens a
-/// `CombatTaxPayment` prompt, so a tax-decline re-entry terminates (Decision 3 —
-/// no repeat-proposal loop, no policy state in serialized rules state). This is
-/// the single AI legality authority — it does not create a second validator.
+/// requirement score, and its tax (if any) is one `posture` admits; otherwise
+/// returns the deterministic tax-free maximum witness (`best_free_declaration`).
+/// This is the single AI legality authority — it does not create a second
+/// validator.
+///
+/// Termination (Decision 3 — no repeat-proposal loop, no policy state in
+/// serialized rules state): a completed declaration opens a `CombatTaxPayment`
+/// prompt only under `CombatTaxPosture::Accept`, and only for a quote the paying
+/// player can cover. A caller that derives its posture from a pure function of
+/// `state` therefore answers that prompt the same way it authorized the
+/// proposal, so a decline can never re-enter with the identical proposal.
 pub fn complete_attacker_proposal(
     state: &GameState,
     proposed_attacks: &[(ObjectId, AttackTarget)],
     proposed_bands: &[Vec<ObjectId>],
+    posture: CombatTaxPosture,
 ) -> crate::types::actions::GameAction {
     let constraints = AttackDeclarationConstraints::build(state);
     let required = max_no_payment(&constraints, state);
@@ -5515,6 +5624,7 @@ pub fn complete_attacker_proposal(
         proposed_bands,
         &constraints,
         required,
+        posture,
         &mut None,
     )
 }
@@ -5530,6 +5640,7 @@ pub fn complete_attacker_proposal(
 pub fn complete_attacker_proposals(
     state: &GameState,
     proposals: &[Vec<(ObjectId, AttackTarget)>],
+    posture: CombatTaxPosture,
 ) -> Vec<crate::types::actions::GameAction> {
     let constraints = AttackDeclarationConstraints::build(state);
     let required = max_no_payment(&constraints, state);
@@ -5543,6 +5654,7 @@ pub fn complete_attacker_proposals(
                 &[],
                 &constraints,
                 required,
+                posture,
                 &mut witness_cache,
             )
         })
@@ -5551,15 +5663,17 @@ pub fn complete_attacker_proposals(
 
 /// Shared per-proposal completion against a prebuilt model + `required` bar.
 /// Returns the proposal unchanged when it is hard-legal, meets the maximum
-/// requirement score, and is tax-free; otherwise returns the deterministic
-/// tax-free maximum witness. The witness is identical for every proposal in a
-/// batch, so it is computed at most once and cached in `witness_cache`.
+/// requirement score, and carries no tax `posture` rejects; otherwise returns
+/// the deterministic tax-free maximum witness. The witness is identical for
+/// every proposal in a batch, so it is computed at most once and cached in
+/// `witness_cache`.
 fn complete_one(
     state: &GameState,
     proposed_attacks: &[(ObjectId, AttackTarget)],
     proposed_bands: &[Vec<ObjectId>],
     constraints: &AttackDeclarationConstraints,
     required: u32,
+    posture: CombatTaxPosture,
     witness_cache: &mut Option<AttackAssignment>,
 ) -> crate::types::actions::GameAction {
     let proposal_legal = validate_declaration_core(
@@ -5571,10 +5685,17 @@ fn complete_one(
     )
     .is_ok();
     let proposal_score = score_declaration(constraints, proposed_attacks);
+    // CR 508.1d: the per-pair probe is the cheap gate — only a proposal that is
+    // actually taxed pays for the full quote + auto-tap affordability probe.
     let proposal_taxed = proposed_attacks
         .iter()
         .any(|(c, t)| attack_incurs_tax(state, *c, *t));
-    if proposal_legal && proposal_score >= required && !proposal_taxed {
+    let tax_rejected = proposal_taxed
+        && match posture {
+            CombatTaxPosture::Refuse => true,
+            CombatTaxPosture::Accept => !attack_tax_is_affordable(state, proposed_attacks),
+        };
+    if proposal_legal && proposal_score >= required && !tax_rejected {
         return crate::types::actions::GameAction::DeclareAttackers {
             attacks: proposed_attacks.to_vec(),
             bands: proposed_bands.to_vec(),
@@ -11062,6 +11183,197 @@ mod tests {
         id
     }
 
+    /// Float `amount` green mana in `player`'s pool so an affordability probe has
+    /// something to find without modelling lands and mana abilities.
+    fn float_mana(state: &mut GameState, player: PlayerId, amount: u32) {
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let pool = &mut state
+            .players
+            .iter_mut()
+            .find(|candidate| candidate.id == player)
+            .expect("player exists")
+            .mana_pool;
+        for _ in 0..amount {
+            pool.add(ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]));
+        }
+    }
+
+    /// CR 508.1d: under `CombatTaxPosture::Refuse` any taxed proposal collapses
+    /// to the tax-free witness, which with no must-attack requirement on the
+    /// board is the empty declaration.
+    #[test]
+    fn complete_attacker_proposal_refuses_taxed_attack_by_default() {
+        let mut state = setup();
+        let _prison = create_ghostly_prison(&mut state, PlayerId(1));
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        float_mana(&mut state, PlayerId(0), 2);
+        let attacks = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+
+        let action = complete_attacker_proposal(&state, &attacks, &[], CombatTaxPosture::Refuse);
+        let crate::types::actions::GameAction::DeclareAttackers { attacks, .. } = action else {
+            panic!("expected DeclareAttackers");
+        };
+        assert!(
+            attacks.is_empty(),
+            "a refusing caller must not keep a taxed attacker, got {attacks:?}"
+        );
+    }
+
+    /// CR 508.1d + CR 508.1j: `Accept` preserves a taxed proposal whose quote the
+    /// attacking player can actually cover, so a seat facing a Ghostly Prison
+    /// or Propaganda can still attack by paying.
+    #[test]
+    fn complete_attacker_proposal_accepts_affordable_taxed_attack() {
+        let mut state = setup();
+        let _prison = create_ghostly_prison(&mut state, PlayerId(1));
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        float_mana(&mut state, PlayerId(0), 2);
+        let proposal = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+
+        let action = complete_attacker_proposal(&state, &proposal, &[], CombatTaxPosture::Accept);
+        let crate::types::actions::GameAction::DeclareAttackers { attacks, .. } = action else {
+            panic!("expected DeclareAttackers");
+        };
+        assert_eq!(
+            attacks, proposal,
+            "an affordable {{2}} tax must not cost the attacker its attack"
+        );
+    }
+
+    /// CR 508.1j: `Accept` is not a promise the engine will honour blindly — a
+    /// quote the player cannot pay still falls back to the tax-free witness, so
+    /// the completion never opens a prompt whose only answer is a decline.
+    #[test]
+    fn complete_attacker_proposal_rejects_unaffordable_taxed_attack() {
+        let mut state = setup();
+        let _prison = create_ghostly_prison(&mut state, PlayerId(1));
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let proposal = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+
+        let action = complete_attacker_proposal(&state, &proposal, &[], CombatTaxPosture::Accept);
+        let crate::types::actions::GameAction::DeclareAttackers { attacks, .. } = action else {
+            panic!("expected DeclareAttackers");
+        };
+        assert!(
+            attacks.is_empty(),
+            "an empty mana pool cannot fund {{2}}, so the witness must stand, got {attacks:?}"
+        );
+    }
+
+    /// An untaxed board is unaffected by the posture: both postures return the
+    /// proposal unchanged, so the new parameter cannot regress ordinary combat.
+    #[test]
+    fn complete_attacker_proposal_is_posture_invariant_without_a_tax() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let proposal = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+
+        for posture in [CombatTaxPosture::Refuse, CombatTaxPosture::Accept] {
+            let action = complete_attacker_proposal(&state, &proposal, &[], posture);
+            let crate::types::actions::GameAction::DeclareAttackers { attacks, .. } = action else {
+                panic!("expected DeclareAttackers");
+            };
+            assert_eq!(
+                attacks, proposal,
+                "untaxed attack changed under {posture:?}"
+            );
+        }
+    }
+
+    /// P0 attacks P1 with a 3/3 carrying Archangel of Tithes' verified block
+    /// tax ({1} per blocker); P1 has one 2/2 that can block it. Returns the
+    /// attacker and the would-be blocker.
+    fn block_tax_scenario() -> (GameState, ObjectId, ObjectId) {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Taxing Raider", 3, 3);
+        let block_tax = parse_static_line(
+            "As long as this creature is attacking, creatures can't block unless their \
+             controller pays {1} for each of those creatures.",
+        )
+        .expect("the block-tax static should parse");
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .static_definitions
+            .push(block_tax);
+        let blocker = create_creature(&mut state, PlayerId(1), "Wall", 2, 2);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        assert!(
+            compute_block_tax(&state, &[(blocker, attacker)]).is_some(),
+            "premise: the block must be taxed"
+        );
+        (state, attacker, blocker)
+    }
+
+    /// CR 509.1c: under `Refuse` a taxed block collapses to the tax-free
+    /// witness, which drops the taxed blocker.
+    #[test]
+    fn complete_blocker_proposal_refuses_taxed_block() {
+        let (mut state, attacker, blocker) = block_tax_scenario();
+        float_mana(&mut state, PlayerId(1), 1);
+
+        let crate::types::actions::GameAction::DeclareBlockers { assignments } =
+            complete_blocker_proposal(
+                &state,
+                PlayerId(1),
+                &[(blocker, attacker)],
+                CombatTaxPosture::Refuse,
+            )
+        else {
+            panic!("expected DeclareBlockers");
+        };
+        assert!(
+            assignments.is_empty(),
+            "a refusing caller must not keep a taxed blocker, got {assignments:?}"
+        );
+    }
+
+    /// CR 509.1c + CR 509.1f: `Accept` preserves a taxed block whose quote the
+    /// defending player can cover.
+    #[test]
+    fn complete_blocker_proposal_accepts_affordable_taxed_block() {
+        let (mut state, attacker, blocker) = block_tax_scenario();
+        float_mana(&mut state, PlayerId(1), 1);
+        let proposal = vec![(blocker, attacker)];
+
+        let crate::types::actions::GameAction::DeclareBlockers { assignments } =
+            complete_blocker_proposal(&state, PlayerId(1), &proposal, CombatTaxPosture::Accept)
+        else {
+            panic!("expected DeclareBlockers");
+        };
+        assert_eq!(
+            assignments, proposal,
+            "an affordable {{1}} block tax must not cost the blocker its block"
+        );
+    }
+
+    /// CR 509.1f: `Accept` does not override affordability. A quote the
+    /// defender cannot pay still falls back to the tax-free witness.
+    #[test]
+    fn complete_blocker_proposal_rejects_unaffordable_taxed_block() {
+        let (state, attacker, blocker) = block_tax_scenario();
+
+        let crate::types::actions::GameAction::DeclareBlockers { assignments } =
+            complete_blocker_proposal(
+                &state,
+                PlayerId(1),
+                &[(blocker, attacker)],
+                CombatTaxPosture::Accept,
+            )
+        else {
+            panic!("expected DeclareBlockers");
+        };
+        assert!(
+            assignments.is_empty(),
+            "an empty mana pool cannot fund {{1}}, so the witness must stand, got {assignments:?}"
+        );
+    }
+
     /// CR 702.22b/c: Bands are only assigned when explicitly declared.
     #[test]
     fn declare_attackers_does_not_auto_band_banding_creatures() {
@@ -14435,7 +14747,7 @@ mod tests {
         });
 
         let crate::types::actions::GameAction::DeclareBlockers { assignments } =
-            complete_blocker_proposal(&state, PlayerId(1), &[])
+            complete_blocker_proposal(&state, PlayerId(1), &[], CombatTaxPosture::Refuse)
         else {
             panic!("blocker completion must return a blocker declaration");
         };

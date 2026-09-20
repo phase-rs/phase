@@ -378,7 +378,16 @@ fn resolution_mana_x_max(
     loop {
         let mut concrete = cost.clone();
         concrete.concretize_x(max);
-        if casting::can_pay_effect_mana_cost_after_auto_tap(state, payer, source_id, &concrete) {
+        // CR 605.3b + CR 616.1: the chosen amount is paid through
+        // `pay_unless_cost`, which has no resume root, so the offered range must
+        // not count a mana source whose own cost would pause.
+        if casting::can_pay_effect_mana_cost_after_auto_tap(
+            state,
+            payer,
+            source_id,
+            &concrete,
+            casting::PausedManaPayment::Unresumable,
+        ) {
             return Some(max);
         }
         if max == 0 {
