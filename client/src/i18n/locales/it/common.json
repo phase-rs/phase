@@ -6,6 +6,7 @@
     "closeNamed": "Chiudi {{name}}"
   },
   "debug": {
+    "copyDisplaySnapshot": "Copia istantanea di visualizzazione (non ripristinabile)",
     "exportAuthoritative": "Esporta lo stato di gioco autorevole",
     "exportAuthoritativeTitle": "Scarica lo stato gestito dal motore usato per diagnosticare e ripristinare questa partita"
   },

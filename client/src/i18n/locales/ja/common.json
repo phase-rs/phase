@@ -6,6 +6,7 @@
     "closeNamed": "{{name}}を閉じる"
   },
   "debug": {
+    "copyDisplaySnapshot": "表示スナップショットをコピー（復元不可）",
     "exportAuthoritative": "正本ゲーム状態をエクスポート",
     "exportAuthoritativeTitle": "ゲームの診断と復元に使うエンジン管理状態をダウンロード"
   },

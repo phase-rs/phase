@@ -537,7 +537,7 @@ export function DebugPanel({
             disabled={!gameState}
             className="w-full rounded bg-gray-800 px-2 py-1 text-xs transition-colors hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            Copy Display Snapshot (not restorable)
+            {t("debug.copyDisplaySnapshot")}
           </button>
           <button
             onClick={handleExportGameState}

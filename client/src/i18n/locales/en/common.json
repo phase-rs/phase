@@ -6,6 +6,7 @@
     "closeNamed": "Close {{name}}"
   },
   "debug": {
+    "copyDisplaySnapshot": "Copy Display Snapshot (not restorable)",
     "exportAuthoritative": "Export Authoritative Game State",
     "exportAuthoritativeTitle": "Download the engine-owned state used to diagnose and restore this game"
   },

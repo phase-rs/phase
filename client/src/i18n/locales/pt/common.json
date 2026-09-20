@@ -6,6 +6,7 @@
     "closeNamed": "Fechar {{name}}"
   },
   "debug": {
+    "copyDisplaySnapshot": "Copiar instantâneo de exibição (não restaurável)",
     "exportAuthoritative": "Exportar estado de jogo autoritativo",
     "exportAuthoritativeTitle": "Baixa o estado controlado pelo mecanismo usado para diagnosticar e restaurar este jogo"
   },

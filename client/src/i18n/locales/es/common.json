@@ -6,6 +6,7 @@
     "closeNamed": "Cerrar {{name}}"
   },
   "debug": {
+    "copyDisplaySnapshot": "Copiar instantánea de pantalla (no restaurable)",
     "exportAuthoritative": "Exportar estado de juego autoritativo",
     "exportAuthoritativeTitle": "Descarga el estado propiedad del motor que se usa para diagnosticar y restaurar esta partida"
   },

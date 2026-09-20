@@ -6,6 +6,7 @@
     "closeNamed": "Zamknij {{name}}"
   },
   "debug": {
+    "copyDisplaySnapshot": "Kopiuj migawkę widoku (nie można przywrócić)",
     "exportAuthoritative": "Eksportuj autorytatywny stan gry",
     "exportAuthoritativeTitle": "Pobiera stan należący do silnika, używany do diagnozowania i przywracania tej gry"
   },
