@@ -70230,6 +70230,75 @@ fn keeper_dispose_gate_declines_a_controller_scope_sacrifice_tail() {
     );
 }
 
+/// V-F2a — the gate's `(Controller, Counter, _, _)` axis. No printed card
+/// nominates a controller-scope keeper by placing a counter, and the
+/// controller-scope lowering (`ChooseObjectsIntoTrackedSet` + `DestroyAll`
+/// over the tracked-set complement) has no step to place one in.
+///
+/// Unlike every other zero-card axis in this grammar, the HEAD is still
+/// accepted here (not an `Err` from `parse_keeper_dispose_head`): MEASURED
+/// that refusing it at the head-grammar level de-routes the whole line past
+/// `parse_keeper_dispose_rest_ir` and into the general effect-chain parser,
+/// which independently and coincidentally parses "puts N counters on ...
+/// creatures" as a real targeted `Effect::PutCounter` and "destroy/sacrifice
+/// the rest" as `Effect::Destroy`/`Effect::Sacrifice { target:
+/// TrackedSet(0) }` over a tracked set NOTHING ever publishes — a
+/// well-formed-looking but silently WRONG parse with no
+/// `Effect::Unimplemented` anywhere, strictly worse than today's defect. So
+/// the head still parses (`keeper_head` returns `Some`), and it is the
+/// LOWERING that marks the whole instruction `Effect::unimplemented(..)`.
+/// Reverting the gate's `KeeperHead::Counter { .. } => {}` arm back to
+/// `return Err(oracle_err(start))` reddens the first assertion below (the
+/// pipeline row falls through to the dangerous general parse instead).
+/// Reverting the lowering's `KeeperHead::Counter` branch (deleting it, or
+/// folding it into the `Choose` branch so it silently lowers to
+/// `ChooseObjectsIntoTrackedSet` + `DestroyAll`) reddens the same row a
+/// different way — the resulting effect stops being `Unimplemented`.
+#[test]
+fn keeper_dispose_gate_marks_a_controller_scope_counter_head_unimplemented() {
+    // Synthetic — no printed card in this class nominates a controller-scope
+    // keeper by placing a counter.
+    const SYNTHETIC: &str = "Put a +1/+1 counter on up to two creatures, then destroy the rest.";
+
+    // The head still parses structurally (routing stays with this
+    // recognizer, per the gate's comment), and reports the Counter head.
+    let head = keeper_head(&SYNTHETIC.to_ascii_lowercase()).expect(
+        "the (Controller, Counter, _, _) head must still parse, so the line is not de-routed \
+         into the dangerous general fallback",
+    );
+    assert!(matches!(head.head, KeeperHead::Counter { .. }));
+
+    // The full pipeline must land on an honest `Effect::Unimplemented`, never
+    // on `ChooseObjectsIntoTrackedSet` (the silently-dropped shape) and never
+    // on a standalone `Effect::PutCounter` (the dangerous general-fallback
+    // shape this test's doc comment measured).
+    let parsed = sorcery(SYNTHETIC, "Synthetic Controller Counter Head");
+    let root = &parsed.abilities[0];
+    assert!(
+        root.effect
+            .unimplemented_description()
+            .is_some_and(|fragment| fragment.eq_ignore_ascii_case(SYNTHETIC.trim_end_matches('.'))),
+        "the printed instruction must be claimed and marked as one honest gap, got {:?}",
+        root.effect
+    );
+
+    // Paired positive: the same shape with a `Choose` head (Mount Doom) keeps
+    // its existing accepted lowering.
+    assert_eq!(
+        keeper_head("choose up to two creatures, then destroy the rest.").map(|head| head.head),
+        Some(KeeperHead::Choose),
+        "Mount Doom's printed Choose-head shape must be unaffected"
+    );
+    let mount_doom = sorcery(
+        "Choose up to two creatures, then destroy the rest.",
+        "Mount Doom Probe",
+    );
+    assert!(matches!(
+        mount_doom.abilities[0].effect.as_ref(),
+        Effect::ChooseObjectsIntoTrackedSet { .. }
+    ));
+}
+
 /// T3' — an unparseable trailing sentence is MARKED, never dropped. Both
 /// halves: the head reports the remainder verbatim, and the spliced clause is
 /// an `Effect::Unimplemented` the coverage audit can see.
@@ -70533,49 +70602,101 @@ fn counter_less_keeper_sibling_still_grants_the_selfref_prohibition() {
 /// Paired positive: the exact printed predicate is claimed.
 #[test]
 fn keeper_dispose_sentence_two_requires_a_bare_defended_scope() {
-    fn grants_selfref_prohibition(predicate: &str) -> bool {
+    /// What sentence two became. Four states, not a bool: a `declined` row
+    /// that cannot tell "no sub-ability at all" from "an honest
+    /// `Effect::Unimplemented`" from "claimed by the restriction-mode path"
+    /// passes whichever way the tail went. MEASURED — the two declined rows
+    /// below decline DIFFERENTLY (one is an honest `Unimplemented` gap, the
+    /// other is claimed by `parse_restriction_modes`'s `AddStaticMode` path),
+    /// so a single boolean predicate asserts something false for one of them.
+    #[derive(Debug, PartialEq, Eq)]
+    enum SentenceTwoOutcome {
+        /// The grant branch claimed it: `GrantStaticAbility` with
+        /// `affected == SelfRef`.
+        SelfRefGrant,
+        /// `parse_restriction_modes` claimed it: `AddStaticMode` on a
+        /// `GenericEffect` static ability.
+        RestrictionMode,
+        /// Declined into an honest gap — `Effect::Unimplemented` carrying the
+        /// fragment.
+        Gap,
+        /// The printed tail was lost: no sub-ability was spliced in at all.
+        Dropped,
+    }
+    fn classify_sentence_two(predicate: &str) -> SentenceTwoOutcome {
         let oracle =
             format!("Each player chooses a creature they control, then sacrifices the rest. Each of those creatures {predicate}.");
         let parsed = sorcery(&oracle, "Synthetic Sentence Two Probe");
         let Some(grant) = parsed.abilities[0].sub_ability.as_deref() else {
-            return false;
+            return SentenceTwoOutcome::Dropped;
         };
+        if grant.effect.unimplemented_description().is_some() {
+            return SentenceTwoOutcome::Gap;
+        }
         let Effect::GenericEffect {
             static_abilities, ..
         } = grant.effect.as_ref()
         else {
-            return false;
+            panic!(
+                "unanticipated sentence-two shape for {predicate:?}: {:?}",
+                grant.effect
+            );
         };
-        static_abilities.iter().any(|def| {
+        let has_selfref_grant = static_abilities.iter().any(|def| {
             def.modifications.iter().any(|m| {
                 matches!(m, ContinuousModification::GrantStaticAbility { definition }
                     if definition.affected == Some(TargetFilter::SelfRef))
             })
-        })
+        });
+        if has_selfref_grant {
+            return SentenceTwoOutcome::SelfRefGrant;
+        }
+        let has_restriction_mode = static_abilities.iter().any(|def| {
+            def.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddStaticMode { .. }))
+        });
+        if has_restriction_mode {
+            return SentenceTwoOutcome::RestrictionMode;
+        }
+        panic!(
+            "unanticipated sentence-two shape for {predicate:?}: {:?}",
+            grant.effect
+        );
     }
     assert!(
-        grants_selfref_prohibition("can't attack you or planeswalkers you control"),
+        matches!(
+            classify_sentence_two("can't attack you or planeswalkers you control"),
+            SentenceTwoOutcome::SelfRefGrant
+        ),
         "the printed predicate must be claimed"
     );
     assert!(
-        grants_selfref_prohibition("can't attack you"),
+        matches!(
+            classify_sentence_two("can't attack you"),
+            SentenceTwoOutcome::SelfRefGrant
+        ),
         "the shorter printed defended scope must be claimed too"
     );
-    for declined in [
-        // A payment rider the grant shape has no slot for — Sivitri, Dragon
-        // Master's "[…] unless their controller pays 2 life for each of those
-        // creatures". (Sivitri's own line also declines a step earlier, on its
-        // broadcast subject; see the sibling row.)
-        "can't attack you unless their controller pays 2 life",
-        // No defended scope at all — this belongs to `parse_restriction_modes`,
-        // whose mode list owns the bare prohibition.
-        "can't attack",
-    ] {
-        assert!(
-            !grants_selfref_prohibition(declined),
-            "the grant branch must decline a non-bare predicate: {declined}"
-        );
-    }
+    // A payment rider the grant shape has no slot for — Sivitri, Dragon
+    // Master's "[…] unless their controller pays 2 life for each of those
+    // creatures". (Sivitri's own line also declines a step earlier, on its
+    // broadcast subject; see the sibling row.) This decline is an honest
+    // coverage gap.
+    assert_eq!(
+        classify_sentence_two("can't attack you unless their controller pays 2 life"),
+        SentenceTwoOutcome::Gap,
+        "a payment rider the grant shape has no slot for must decline into an honest gap"
+    );
+    // No defended scope at all — this belongs to `parse_restriction_modes`,
+    // whose mode list owns the bare prohibition. This decline is CLAIMED by a
+    // different, correct path, not an honest gap.
+    assert_eq!(
+        classify_sentence_two("can't attack"),
+        SentenceTwoOutcome::RestrictionMode,
+        "a bare prohibition with no defended scope must be claimed by parse_restriction_modes, \
+         not left as a gap"
+    );
     // MEASURED, and NOT what the "… this turn" row of the plan predicted: a
     // trailing duration phrase is peeled by `strip_trailing_duration` BEFORE
     // this branch runs, so `eof` never sees it and the branch claims the
