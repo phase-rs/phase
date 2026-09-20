@@ -6986,6 +6986,45 @@ pub(crate) fn this_way_cause_for_zone(destination: Zone) -> Option<ThisWayCause>
     }
 }
 
+/// CR 608.2c + CR 611.2c: a targeted `Pump` is an antecedent of a following plural
+/// anaphor only when every instruction between it and that anaphor is itself a
+/// `Pump` and the anaphor is a continuous grant or pump over the chain tracked set
+/// ("... gets +2/+2, and up to one other target creature gets +1/+1. Those creatures
+/// gain vigilance until end of turn.").
+///
+/// The gate's reason is NARROW, and is written narrowly on purpose: this arm exists
+/// ONLY to feed the tracked set that the parse-layer stamp points a grant or pump at.
+/// It is NOT a claim that every other consumer names some other population. On
+/// Triton Tactics and Colossal Heroics ("Untap those creatures") the pump IS the
+/// antecedent. Those cards are preserved by a different mechanism: a consumer bound
+/// to `TargetFilter::ParentTarget` reads the ability's declared targets and never
+/// consults the tracked set, because `effect.rs` gates that fallback on
+/// `ability.targets.is_empty()`. Publishing there would REPLACE a population that is
+/// already right, so this arm declines and base behaviour stands. Urge to Feed
+/// ("... on each of those Vampires") is the witness for a consumer that really does
+/// name its own population.
+fn pump_run_feeds_tracked_set_grant(ability: &ResolvedAbility) -> bool {
+    let mut node = ability.sub_ability.as_deref();
+    while let Some(next) = node {
+        match &next.effect {
+            Effect::Pump {
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            } => return true,
+            Effect::Pump { .. } => node = next.sub_ability.as_deref(),
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                return static_abilities.iter().any(|static_def| {
+                    matches!(static_def.affected, Some(TargetFilter::TrackedSet { .. }))
+                })
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn affected_objects_from_events(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -7057,8 +7096,8 @@ fn affected_objects_from_events(
         // CR 611.2c (issue #6857): the set of objects a resolution-generated
         // continuous effect modifies is determined when that effect BEGINS and
         // never changes afterwards, so the population these heads froze is the
-        // antecedent a following "those creatures" names (CR 608.2c). Unlike
-        // every other producer here they move nothing and emit no per-object
+        // antecedent a following "those creatures" names (CR 608.2c). Like the
+        // targeted `Pump` arm, they move nothing and emit no per-object
         // event, so without their own arm the `_ =>` `ZoneChanged` harvest
         // publishes an EMPTY set — the WRONG set, not merely an unhelpful one —
         // and "Untap those creatures" (CR 701.26b) binds nothing.
@@ -7100,6 +7139,32 @@ fn affected_objects_from_events(
         Effect::GiveControl { target, .. } if is_sole_chain_producer(state, ability) => {
             gain_control::give_control_object_targets(state, ability, target)
         }
+        // CR 611.2c + CR 608.2c: a targeted P/T modification affects exactly the
+        // objects its target instance declared, fixed when the effect begins, so
+        // those objects are what a following "those creatures" names. Chain
+        // unification in `publish_tracked_set` unions several such instructions; a
+        // declined "up to one" instance declared none and adds none (CR 115.6).
+        //
+        // This arm deliberately OMITS `is_sole_chain_producer`, unlike its three
+        // neighbours. Leg 2 ("no later producer in publisher position") is INVERTED
+        // for this shape by design: several targeted `Pump`s legitimately union into
+        // ONE antecedent, so each is a later producer relative to the one before it
+        // and the guard would make every pump decline. That is measured — re-adding
+        // it turns Arm the Cathars' runtime row red. Legs 1 and 3 (no earlier
+        // producer; the `DetachedRemainder` player-scope fan-out) are dropped with
+        // MEASURED zero reach: the gate above admits only a pure `Pump` run ending in
+        // a tracked-set consumer, which corpus-wide is 3 nodes on 1 card. Do NOT
+        // "harmonise" this arm with its neighbours.
+        Effect::Pump {
+            target: TargetFilter::Typed(_),
+            ..
+        } if pump_run_feeds_tracked_set_grant(ability) => fallback_targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
         Effect::GainControl { .. } => fallback_targets
             .iter()
             .filter_map(|target| match target {

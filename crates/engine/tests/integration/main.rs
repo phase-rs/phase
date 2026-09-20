@@ -1675,6 +1675,7 @@ mod yurlok_of_scorch_thrash;
 mod zenos_yae_galvus_chosen_object;
 mod zhulodok_double_cascade;
 
+mod arm_the_cathars_conjunct_anaphor_p6;
 mod context_ref_slot_hygiene;
 mod declared_target_damage_source;
 mod dismantle;

@@ -71030,3 +71030,315 @@ fn keeper_dispose_trigger_entry_points_scope_to_the_printed_players() {
         "\"each opponent\" must scope the iteration to the opponents"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6 / U6a + U6b rows. Synthetic or verbatim-Oracle input; the card-level
+// runtime rows live in `tests/integration/arm_the_cathars_conjunct_anaphor_p6.rs`.
+// ---------------------------------------------------------------------------
+
+/// Chain shape: one entry per link, as `(power, toughness, target, multi_target,
+/// duration)` for a `Pump` and the grant's `affected` list for a `GenericEffect`.
+fn p6_chain(text: &str) -> Vec<String> {
+    let parsed = parse_oracle_text(text, "P6 U6a Probe", &[], &["Sorcery".to_string()], &[]);
+    let root = parsed
+        .abilities
+        .first()
+        .unwrap_or_else(|| panic!("one spell chain expected: {text}"));
+    p6_chain_of(root)
+}
+
+fn p6_chain_of(root: &AbilityDefinition) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut node = Some(root);
+    while let Some(def) = node {
+        out.push(match &*def.effect {
+            Effect::Pump {
+                power,
+                toughness,
+                target,
+            } => format!(
+                "Pump({power:?},{toughness:?},{target:?},mt={:?},dur={:?})",
+                def.multi_target, def.duration
+            ),
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => format!(
+                "GenericEffect(affected={:?},dur={:?})",
+                static_abilities
+                    .iter()
+                    .map(|s| s.affected.clone())
+                    .collect::<Vec<_>>(),
+                def.duration
+            ),
+            other => format!("{other:?}"),
+        });
+        node = def.sub_ability.as_deref();
+    }
+    out
+}
+
+fn p6_typed_pump_count(text: &str) -> usize {
+    p6_chain(text)
+        .iter()
+        .filter(|link| link.starts_with("Pump(") && link.contains("Typed("))
+        .count()
+}
+
+/// **H-3 CASE-MAPPING TABLE (charter §H-3 / U6a) — case -> row.**
+///
+/// The charter enumerates the cases U6a must cover; its absence as an explicit
+/// table is what let the trailing-rider case go uncovered through two planning
+/// rounds. Every case below names the row that discharges it. A row NAME is a
+/// CLAIM and rots independently of the text beside it, so each row's doc states
+/// the case it carries and each name is checked against its own text.
+///
+/// | charter case | row | location |
+/// |---|---|---|
+/// | a comma join | `targeted_pt_conjunct_starts_after_comma` (H-3a.1) | `sequence.rs` |
+/// | an "and" join | `another_target_pt_conjunct_starts_after_bare_and` (H-3a.3) | `sequence.rs` |
+/// | a ", and" join | `targeted_pt_conjunct_starts_after_comma_and` (H-3a.2) | `sequence.rs` |
+/// | "up to one other target" subject | H-3a.1 (2nd conjunct) + H-3a.3 (2nd assert) | `sequence.rs` |
+/// | "another target" subject | H-3a.3 (1st assert) | `sequence.rs` |
+/// | a leading shared duration | `leading_duration_shared_by_every_conjunct` (H-3a.4) | here |
+/// | a trailing "where X is ..." rider | `trailing_where_x_rider_keeps_both_conjuncts` (H-3a.7) | here |
+///
+/// Two further rows are NOT charter cases and must not be read as one:
+/// `trailing_duration_keeps_both_conjuncts` (H-3a.5) carries a trailing
+/// DURATION, and `x_valued_pt_conjunct_is_outside_the_recognizer` (H-3a.6) is
+/// the recognizer's X-BOUND LOCK.
+///
+/// This test body asserts only that the table is anchored to real row names;
+/// each row asserts its own behaviour.
+#[test]
+fn h3_case_map_comma_and_and_join_rider_and_duration() {
+    // Every charter case has a row, and every row named above exists in this
+    // crate's test surface. The two rows in this file are called directly so a
+    // rename of either breaks this anchor rather than silently orphaning the
+    // table.
+    leading_duration_shared_by_every_conjunct();
+    trailing_where_x_rider_keeps_both_conjuncts();
+}
+
+/// CR 601.2c + CR 115.6 — H-3a.4 (H-3 case: a LEADING SHARED DURATION).
+/// The printed duration governs every conjunct, and each conjunct still
+/// announces its own target.
+///
+/// PAIR: M-1 (revert the comma disjunct).
+#[test]
+fn leading_duration_shared_by_every_conjunct() {
+    let text = "Until end of turn, target creature gets +1/+1, up to one other target creature gets +1/+0, and another target creature gets -1/-0.";
+    assert_eq!(
+        p6_typed_pump_count(text),
+        3,
+        "three announced instances, three targeted continuous nodes: {:?}",
+        p6_chain(text)
+    );
+    for link in p6_chain(text) {
+        assert!(
+            link.contains("dur=Some(UntilEndOfTurn)"),
+            "the leading duration governs every conjunct: {link}"
+        );
+    }
+}
+
+/// CR 601.2c + CR 115.6 — H-3a.5, RENAMED in execution.
+///
+/// The row previously shipped as `trailing_rider_keeps_both_conjuncts`, a name
+/// that was FALSE of its own text: the text carries a trailing DURATION, which
+/// is the duration axis, not the charter's trailing "where X is ..." rider.
+/// The rider case is `trailing_where_x_rider_keeps_both_conjuncts` (H-3a.7).
+///
+/// PAIR: M-1, M-2.
+#[test]
+fn trailing_duration_keeps_both_conjuncts() {
+    let text = "Target creature you control gets +2/+0, up to one other target creature gets -0/-2 until end of turn.";
+    assert_eq!(
+        p6_typed_pump_count(text),
+        2,
+        "a trailing duration does not merge the two announced instances: {:?}",
+        p6_chain(text)
+    );
+}
+
+/// H-3a.6 — the recognizer's **X-BOUND LOCK**. This is NOT the charter's
+/// trailing-rider case (that is H-3a.7); it locks the MEASURED acceptance set
+/// of the P/T discriminator.
+///
+/// `nom_primitives::parse_pt_modifier` accepts an explicitly SIGNED INTEGER on
+/// both components and nothing else. A sign glued to `X` is outside it, and so
+/// is the X-capable sibling `parse_pt_value` (which accepts bare `X/X` and
+/// `+1/+1`, but not `+X/+0` or `-0/-X`). A comma-joined X conjunct therefore
+/// does NOT split, and this row pins that bound so widening the discriminator
+/// is a deliberate, measured act rather than a silent one.
+///
+/// PAIR: M-7 (`parse_pt_modifier` -> `nom::combinator::rest`), which admits the
+/// X conjunct and splits this text in two.
+#[test]
+fn x_valued_pt_conjunct_is_outside_the_recognizer() {
+    let text = "Target creature you control gets +X/+0, up to one other target creature gets -0/-X, where X is the number of artifacts you control.";
+    let chain = p6_chain(text);
+    assert_eq!(
+        chain.len(),
+        1,
+        "the X conjunct is outside the recognizer's acceptance set: {chain:?}"
+    );
+    assert_eq!(
+        p6_typed_pump_count(text),
+        0,
+        "and it does not lower to two targeted Pumps: {chain:?}"
+    );
+}
+
+/// CR 601.2c + CR 115.6 — H-3a.7 (H-3 case: a TRAILING "where X is ..." RIDER).
+/// NEW in execution, adopted by lead ruling as the charter's own rider
+/// exemplar. Text is **verbatim** Oracle for Monoist Circuit-Feeder, read from
+/// the pinned `AtomicCards.json` with every face name matched (1 face).
+///
+/// **GREEN AT BASE, and EXPLICITLY NON-DISCRIMINATING.** §H-3 requires
+/// red-at-base only where a row discriminates; this one is a regression lock on
+/// a case the charter names. It is paired with M-7 and MEASURED not to move,
+/// and no phase-6 mutation can redden it, for one measured reason:
+///
+///   The two conjuncts are joined by a bare `" and "` with a bare `"target "`
+///   subject, so they split through the PRE-EXISTING verb-only arm
+///   `starts_target_continuous_clause_lower`, which sits EARLIER in
+///   `starts_bare_and_clause_lower`'s `.or()` chain than the phase-6 arm and
+///   succeeds first. The phase-6 recognizer never SUCCEEDS for this text — two
+///   of the three boundaries provably never reach it, and the `", where X is"`
+///   comma is unsettled, but if it does reach S1 the recognizer rejects at the
+///   subject prefix. Either way, reverting it (M-2), dropping its modifier step
+///   (M-7) or narrowing its bound (M-8) cannot move the row. The U6b probes (M-3..M-6, M-13) cannot
+///   either: the card prints no anaphor.
+///
+/// Documented vacuity is acceptable; undocumented vacuity is not.
+#[test]
+fn trailing_where_x_rider_keeps_both_conjuncts() {
+    let text = "Flying\nWhen this creature enters, until end of turn, target creature you control gets +X/+0 and target creature an opponent controls gets -0/-X, where X is the number of artifacts you control.";
+    let parsed = parse_oracle_text(
+        text,
+        "Monoist Circuit-Feeder",
+        &[],
+        &["Creature".to_string()],
+        &["Construct".to_string()],
+    );
+    let execute = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .expect("the enters trigger must carry an execute chain");
+    let chain = p6_chain_of(execute);
+    assert_eq!(
+        chain.len(),
+        2,
+        "one targeted continuous node per conjunct, with the rider consumed: {chain:?}"
+    );
+    for link in &chain {
+        assert!(
+            link.starts_with("Pump(") && link.contains("Typed("),
+            "each conjunct announces its own target: {chain:?}"
+        );
+    }
+}
+
+/// CR 611.2c + CR 608.2c — **H-4.1**, Arm the Cathars' shape. Verbatim Oracle
+/// from the pinned corpus.
+#[test]
+fn arm_the_cathars_shape() {
+    let text = "Until end of turn, target creature gets +3/+3, up to one other target creature gets +2/+2, and up to one other target creature gets +1/+1. Those creatures gain vigilance until end of turn.";
+    let chain = p6_chain(text);
+    assert_eq!(chain.len(), 4, "three conjuncts plus the grant: {chain:?}");
+    assert_eq!(p6_typed_pump_count(text), 3, "{chain:?}");
+    assert!(
+        chain[1].contains("mt=Some("),
+        "the 2nd instance is declinable (CR 115.6): {chain:?}"
+    );
+    assert!(
+        chain[2].contains("mt=Some("),
+        "the 3rd instance is declinable (CR 115.6): {chain:?}"
+    );
+    assert!(
+        chain[3].contains("TrackedSet { id:"),
+        "CR 608.2c: the plural anaphor names every declared object: {chain:?}"
+    );
+    for link in &chain {
+        assert!(
+            link.contains("dur=Some(UntilEndOfTurn)"),
+            "every link carries the printed duration: {chain:?}"
+        );
+    }
+}
+
+/// CR 601.2c — **H-4.2**, Rookie Mistake's shape. Verbatim Oracle.
+#[test]
+fn rookie_mistake_shape() {
+    let text =
+        "Until end of turn, target creature gets +0/+2 and another target creature gets -2/-0.";
+    let chain = p6_chain(text);
+    assert_eq!(p6_typed_pump_count(text), 2, "{chain:?}");
+    // ORDERED: `p6_chain` prints `Pump(<power>,<toughness>,...)`, so matching the
+    // pair in order is what makes a power/toughness swap fail here.
+    assert!(
+        chain[0].contains("Pump(Fixed(0),Fixed(2),"),
+        "1st conjunct is +0/+2, power then toughness: {chain:?}"
+    );
+    assert!(
+        chain[1].contains("Pump(Fixed(-2),Fixed(0),"),
+        "2nd conjunct is -2/-0, power then toughness: {chain:?}"
+    );
+}
+
+/// CR 608.2c — **H-6b**, HOSTILE NEIGHBOUR and the DISCRIMINATING preservation
+/// row for the plural-anaphor promise. Verbatim Oracle for Frost Breath.
+///
+/// Frost Breath's antecedent is ONE declared multi-target instance
+/// (`multi_target {min 0, max 2}`), so it is outside U6b's class, and it DOES
+/// reach the stamp's host branch: `"those creatures"` is one of the eleven
+/// explicit phrases and `SetTapState` is not a resolution publisher, so
+/// `any_prior_publishes` is false. Its grant must keep `ParentTarget`.
+///
+/// **Why this row is at the PARSE layer.** The parse layer is where the binding
+/// AUTHORITY is chosen, and stamping `TrackedSet { id: 0 }` here SWITCHES that
+/// authority rather than restating it: `game/effects/effect.rs` gates its
+/// tracked-set fallback on `ability.targets.is_empty()`, and Frost Breath
+/// DECLARES targets, so a `ParentTarget` grant on this card never reads the
+/// tracked set at all. The two populations also differ in fact — `tap_untap.rs`
+/// pushes `PermanentTapped` only when the object edit CHANGED something, and
+/// the publish arm prefers those events over the declared targets whenever any
+/// were emitted, so a board with one already-tapped and one untapped target
+/// publishes only the untapped one while the declared-target reading keeps
+/// both. That makes a runtime row staging exactly that board a SECOND
+/// discriminating witness; it is recorded as a candidate future row, not
+/// phase-6 scope.
+///
+/// PAIR: M-12 (the stamp's count gate made unconditional), measured red.
+#[test]
+fn frost_breath_plural_anaphor_keeps_parent_target() {
+    let text = "Tap up to two target creatures. Those creatures don't untap during their controller's next untap step.";
+    let parsed = parse_oracle_text(text, "Frost Breath", &[], &["Instant".to_string()], &[]);
+    let root = parsed.abilities.first().expect("one spell chain");
+    assert!(
+        root.multi_target.is_some(),
+        "REACH GUARD: the head must declare its multi-target instance, or the row \
+         is not standing the shape it names: {:?}",
+        root.multi_target
+    );
+    let grant = root
+        .sub_ability
+        .as_deref()
+        .expect("the anaphoric grant is the second link");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*grant.effect
+    else {
+        panic!("expected the anaphoric grant, got {:?}", grant.effect);
+    };
+    assert_eq!(
+        static_abilities
+            .iter()
+            .map(|s| s.affected.clone())
+            .collect::<Vec<_>>(),
+        vec![Some(TargetFilter::ParentTarget)],
+        "CR 608.2c: one declared instance is not two, so the grant keeps its \
+         parent's declared targets"
+    );
+}
