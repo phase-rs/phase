@@ -665,6 +665,67 @@ fn persisted_admission_refuses_combat_damage_and_still_admits_ordinary_states() 
     }
 }
 
+/// Persisted admission also owns the entry already popped for resolution.
+/// A non-Priority prompt keeps terminal-rest recovery from masking this gate.
+#[test]
+fn persisted_admission_refuses_paused_combat_damage_carriers() {
+    for raw in [true, false] {
+        for unsupported in [false, true] {
+            let mut runner = GameScenario::new().build();
+            let entry = if unsupported {
+                combat_damage_entry(
+                    ObjectId(9_603),
+                    CombatDamageSubStep::Regular,
+                    ObjectId(1),
+                    ObjectId(2),
+                    3,
+                )
+            } else {
+                activated_entry(ObjectId(9_604), ObjectId(1), P0)
+            };
+            runner.state_mut().resolving_stack_entry = Some(entry);
+            // Synthetic persisted boundary fixture: both payload kinds use the
+            // same paused prompt; this does not claim a Phase 3c damage resolver.
+            runner.state_mut().waiting_for = WaitingFor::ScryChoice {
+                player: P0,
+                cards: vec![],
+            };
+            let state = runner.state().clone();
+            let persisted = if raw {
+                PersistedGameState::Raw(Box::new(state))
+            } else {
+                PersistedGameState::capture(state)
+            };
+            let json = serde_json::to_string(&persisted).expect("carrier serializes");
+            let decoded: PersistedGameState = serde_json::from_str(&json).expect("carrier decodes");
+            let restored = decoded.into_game_state();
+            if unsupported {
+                assert!(
+                    matches!(
+                        restored,
+                        Err(PersistedRestoreError::UnsupportedStackObject(_))
+                    ),
+                    "raw={raw}: reject the unsupported resolving carrier at admission"
+                );
+            } else {
+                let restored = restored.expect("ordinary paused carrier still restores");
+                assert!(restored.stack.is_empty());
+                assert!(matches!(
+                    restored.waiting_for,
+                    WaitingFor::ScryChoice { .. }
+                ));
+                assert!(matches!(
+                    restored
+                        .resolving_stack_entry
+                        .as_ref()
+                        .map(|entry| &entry.kind),
+                    Some(StackEntryKind::ActivatedAbility { .. })
+                ));
+            }
+        }
+    }
+}
+
 /// Row 7 — the storm count ignores a combat-damage entry rather than treating
 /// it as a shadowing stack object.
 #[test]

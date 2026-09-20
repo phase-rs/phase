@@ -12576,6 +12576,7 @@ impl PersistedGameState {
         if state
             .stack
             .iter()
+            .chain(state.resolving_stack_entry.iter())
             .any(|entry| matches!(entry.kind, StackEntryKind::CombatDamage { .. }))
         {
             return Err(PersistedRestoreError::UnsupportedStackObject(
