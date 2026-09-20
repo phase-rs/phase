@@ -24,15 +24,26 @@
 //!     ("a creature card in your graveyard") keeps that zone — the two legs of
 //!     the reference pool.
 //!   - CR 111.1: the "nontoken" head.
+use std::collections::HashSet;
+
+use engine::game::effects::token::apply_create_token_after_replacement;
+use engine::game::layers::evaluate_layers;
+use engine::game::replacement::{replace_event, ReplacementResult};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::trigger_index::reindex_object_triggers;
 use engine::game::triggers::{drain_order_triggers_with_identity, process_triggers};
-use engine::game::zones::{create_object, move_to_zone};
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
+use engine::game::zones::create_object;
+use engine::types::ability::{ContinuousModification, Duration, TargetFilter};
 use engine::types::card_type::CoreType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::StackEntryKind;
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::proposed_event::{
+    EtbTapState, ProposedEvent, TokenCharacteristics, TokenHostRequest, TokenSpec,
+};
 use engine::types::zones::Zone;
 
 /// Verbatim Oracle text (confirmed against the Scryfall API this session).
@@ -78,6 +89,42 @@ fn place_creature(
     id
 }
 
+/// Exercise the production zone-change pipeline, including replacement effects.
+fn move_through_pipeline(
+    runner: &mut GameRunner,
+    object_id: ObjectId,
+    destination: Zone,
+    events: &mut Vec<GameEvent>,
+) {
+    assert!(
+        !move_object_for_test(
+            runner.state_mut(),
+            ZoneMoveRequest::effect(object_id, destination, object_id),
+            events,
+        ),
+        "the Guardian Project fixture move must not pause for a replacement choice"
+    );
+}
+
+/// Install the same Layer-2 control effect produced by GainControl, then
+/// evaluate layers so the fixture cannot conflate ownership with control.
+fn grant_control(
+    runner: &mut GameRunner,
+    source: ObjectId,
+    controller: PlayerId,
+    target: ObjectId,
+) {
+    runner.state_mut().add_transient_continuous_effect(
+        source,
+        controller,
+        Duration::Permanent,
+        TargetFilter::SpecificObject { id: target },
+        vec![ContinuousModification::ChangeController],
+        None,
+    );
+    evaluate_layers(runner.state_mut());
+}
+
 /// Move a creature from hand onto the battlefield through the real zone-change
 /// path, then run the trigger pass. Returns the net cards drawn by `watch`.
 fn enter_creature_and_count_draws(
@@ -89,11 +136,72 @@ fn enter_creature_and_count_draws(
 ) -> i64 {
     let creature = place_creature(runner, owner, name, Zone::Hand, is_token);
     let mut events = Vec::new();
-    move_to_zone(runner.state_mut(), creature, Zone::Battlefield, &mut events);
+    move_through_pipeline(runner, creature, Zone::Battlefield, &mut events);
     // Baseline AFTER the zone change and BEFORE the triggered ability resolves, so
     // the delta counts only cards drawn by the trigger. Taking it before the move
     // would also have to model the entrant leaving hand, which differs between
     // tokens and nontokens and would measure the harness rather than the engine.
+    let before = runner.state().players[watch.0 as usize].hand.len() as i64;
+    process_triggers(runner.state_mut(), &events);
+    drain_order_triggers_with_identity(runner.state_mut());
+    runner.advance_until_stack_empty();
+    runner.state().players[watch.0 as usize].hand.len() as i64 - before
+}
+
+fn creature_token_spec(controller: PlayerId) -> TokenSpec {
+    TokenSpec {
+        characteristics: TokenCharacteristics {
+            display_name: "Zombie".to_string(),
+            power: Some(2),
+            toughness: Some(2),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Zombie".to_string()],
+            supertypes: Vec::new(),
+            colors: Vec::new(),
+            keywords: Vec::new(),
+        },
+        script_name: "Zombie".to_string(),
+        static_abilities: Vec::new(),
+        enter_with_counters: Vec::new(),
+        tapped: false,
+        enters_attacking: false,
+        sacrifice_at: None,
+        source_id: ObjectId(0),
+        controller,
+        attach_to: TokenHostRequest::NotRequested,
+    }
+}
+
+/// Create a token through the production replacement and entry pipeline, then
+/// measure any Guardian Project draw from its actual battlefield-entry event.
+fn create_token_and_count_draws(runner: &mut GameRunner, watch: PlayerId) -> i64 {
+    let mut events = Vec::new();
+    let proposed = ProposedEvent::CreateToken {
+        owner: P0,
+        spec: Box::new(creature_token_spec(P0)),
+        copy: None,
+        enter_tapped: EtbTapState::Unspecified,
+        count: 1,
+        applied: HashSet::new(),
+    };
+    match replace_event(runner.state_mut(), proposed, &mut events) {
+        ReplacementResult::Execute(event) => {
+            assert!(apply_create_token_after_replacement(
+                runner.state_mut(),
+                event,
+                &mut events,
+            ));
+        }
+        other => panic!("token creation must execute, got {other:?}"),
+    }
+    let token = runner
+        .state()
+        .last_created_token_ids
+        .last()
+        .copied()
+        .expect("the production token pipeline must report its created token");
+    assert_eq!(runner.state().objects[&token].zone, Zone::Battlefield);
+
     let before = runner.state().players[watch.0 as usize].hand.len() as i64;
     process_triggers(runner.state_mut(), &events);
     drain_order_triggers_with_identity(runner.state_mut());
@@ -171,6 +279,22 @@ fn opponent_creature_with_same_name_still_draws() {
     );
 }
 
+/// The battlefield leg is controller-scoped, not owner-scoped.
+#[test]
+fn controlled_opponents_creature_with_same_name_does_not_draw() {
+    let (mut runner, project) = setup();
+    let creature = place_creature(&mut runner, P1, "Grizzly Bears", Zone::Battlefield, false);
+    grant_control(&mut runner, project, P0, creature);
+    assert_eq!(runner.state().objects[&creature].owner, P1);
+    assert_eq!(runner.state().objects[&creature].controller, P0);
+
+    let drawn = enter_creature_and_count_draws(&mut runner, P0, "Grizzly Bears", false, P0);
+    assert_eq!(
+        drawn, 0,
+        "the battlefield reference is a creature you CONTROL even when its owner is P1"
+    );
+}
+
 /// H-1 mirror for the graveyard leg: "a creature card in your graveyard"
 /// (CR 109.2a) is owner-scoped, so a same-named card in an OPPONENT's
 /// graveyard does not block the draw.
@@ -186,12 +310,33 @@ fn duplicate_name_in_opponents_graveyard_still_draws() {
     );
 }
 
+/// The graveyard leg is owner-scoped, not scoped to the creature's last
+/// battlefield controller.
+#[test]
+fn your_graveyard_creature_with_opponents_last_control_does_not_draw() {
+    let (mut runner, project) = setup();
+    let creature = place_creature(&mut runner, P0, "Grizzly Bears", Zone::Battlefield, false);
+    grant_control(&mut runner, project, P1, creature);
+    assert_eq!(runner.state().objects[&creature].owner, P0);
+    assert_eq!(runner.state().objects[&creature].controller, P1);
+    let mut events = Vec::new();
+    move_through_pipeline(&mut runner, creature, Zone::Graveyard, &mut events);
+    assert_eq!(runner.state().objects[&creature].zone, Zone::Graveyard);
+    assert_eq!(runner.state().lki_cache[&creature].controller, P1);
+
+    let drawn = enter_creature_and_count_draws(&mut runner, P0, "Grizzly Bears", false, P0);
+    assert_eq!(
+        drawn, 0,
+        "a P0-owned creature card in your graveyard remains in Guardian Project's pool"
+    );
+}
+
 /// V-D: the "nontoken" head. A token entering never triggers at all, regardless
 /// of its name — this guards the head against accidental widening.
 #[test]
 fn token_entering_does_not_draw() {
     let (mut runner, _project) = setup();
-    let drawn = enter_creature_and_count_draws(&mut runner, P0, "Zombie", true, P0);
+    let drawn = create_token_and_count_draws(&mut runner, P0);
     assert_eq!(
         drawn, 0,
         "CR 111.1: the trigger watches NONTOKEN creatures, so a token entering \
@@ -210,15 +355,16 @@ fn token_entering_does_not_draw() {
 /// reference pool, so a same-named board answered "no same name" and drew.
 ///
 /// The re-entry's own Guardian Project trigger is deliberately NOT collected
-/// here (its events are never handed to `process_triggers`), so the measured
-/// delta is exactly the first trigger's recheck and nothing else.
+/// here. The test isolates the original trigger's CR 603.4 recheck; collecting
+/// the re-entry event would add a distinct, valid trigger whose draw is outside
+/// this regression's assertion.
 #[test]
 fn reentered_incarnation_counts_as_another_creature() {
     let (mut runner, project) = setup();
 
     let entrant = place_creature(&mut runner, P0, "Grizzly Bears", Zone::Hand, false);
     let mut events = Vec::new();
-    move_to_zone(runner.state_mut(), entrant, Zone::Battlefield, &mut events);
+    move_through_pipeline(&mut runner, entrant, Zone::Battlefield, &mut events);
     let before = runner.state().players[P0.0 as usize].hand.len() as i64;
 
     // Put the ETB trigger on the stack; do NOT resolve it yet.
@@ -240,13 +386,8 @@ fn reentered_incarnation_counts_as_another_creature() {
 
     // CR 400.7: blink the entrant. Same storage id, new object.
     let mut blink_events = Vec::new();
-    move_to_zone(runner.state_mut(), entrant, Zone::Exile, &mut blink_events);
-    move_to_zone(
-        runner.state_mut(),
-        entrant,
-        Zone::Battlefield,
-        &mut blink_events,
-    );
+    move_through_pipeline(&mut runner, entrant, Zone::Exile, &mut blink_events);
+    move_through_pipeline(&mut runner, entrant, Zone::Battlefield, &mut blink_events);
     let returned = &runner.state().objects[&entrant];
     assert_eq!(
         returned.zone,

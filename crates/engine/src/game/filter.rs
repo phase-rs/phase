@@ -3916,6 +3916,21 @@ pub fn matches_target_filter_on_lki_snapshot(
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
+    matches_target_filter_on_lki_snapshot_with_incarnation(state, object_id, lki, filter, ctx, None)
+}
+
+/// CR 400.7 + CR 608.2h: Evaluate a target filter against LKI for a known
+/// incarnation. The synthesized record preserves the proven incarnation so
+/// record-side identity predicates such as `OtherThanTriggerObject` do not
+/// collapse a later object at the same storage id into the original object.
+fn matches_target_filter_on_lki_snapshot_with_incarnation(
+    state: &GameState,
+    object_id: ObjectId,
+    lki: &LKISnapshot,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+    entered_incarnation: Option<u64>,
+) -> bool {
     let record = ZoneChangeRecord {
         object_id,
         name: lki.name.clone(),
@@ -3953,7 +3968,7 @@ pub fn matches_target_filter_on_lki_snapshot(
         combat_status: Default::default(),
         co_departed: Vec::new(),
         attached_to: None,
-        entered_incarnation: None,
+        entered_incarnation,
         turn_zone_change_index: 0,
         recorded_turn_number: 0,
         // CR 701.60b: Carry suspected status from the LKI snapshot so
@@ -4175,11 +4190,33 @@ pub fn matches_zone_change_event_object_filter(
         });
         if still_on_battlefield {
             matches_target_filter(state, *object_id, filter, ctx)
-        } else if let Some(lki) = state.lki_cache.get(object_id) {
+        } else if let Some(lki) = record
+            .entered_incarnation
+            .and_then(|incarnation| {
+                state
+                    .lki_by_incarnation
+                    .get(object_id)
+                    .and_then(|history| history.get(&incarnation))
+            })
+            .or_else(|| {
+                // CR 400.7: once history exists for this id, the legacy slot
+                // might describe a later incarnation and must not be reused.
+                (!state.lki_by_incarnation.contains_key(object_id))
+                    .then(|| state.lki_cache.get(object_id))
+                    .flatten()
+            })
+        {
             // CR 608.2h: the entrant has left the battlefield — evaluate against
             // its exit-time LKI (the most-recently-existed battlefield
             // characteristics, snapshotted before the base revert).
-            matches_target_filter_on_lki_snapshot(state, *object_id, lki, filter, ctx)
+            matches_target_filter_on_lki_snapshot_with_incarnation(
+                state,
+                *object_id,
+                lki,
+                filter,
+                ctx,
+                record.entered_incarnation,
+            )
         } else {
             // No exit LKI cached (defensive — a battlefield exit always caches
             // one). Use the zone-change record rather than the reverted live
@@ -15986,6 +16023,144 @@ mod tests {
             &filter,
             &FilterContext::from_source(&state, source),
         ));
+    }
+
+    /// CR 400.7 + CR 603.4: a known triggering incarnation must remain visible
+    /// to record-side `OtherThanTriggerObject` checks while evaluating its LKI.
+    #[test]
+    fn lki_snapshot_preserves_triggering_incarnation_for_other_than_filter() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let lki = crate::types::game_state::LKISnapshot {
+            name: "Original Entrant".into(),
+            token_image_ref: None,
+            power: Some(2),
+            toughness: Some(2),
+            base_power: Some(2),
+            base_toughness: Some(2),
+            mana_value: 2,
+            controller: PlayerId(0),
+            owner: PlayerId(0),
+            card_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            chosen_attributes: Vec::new(),
+            counters: Default::default(),
+            tapped: false,
+            is_suspected: false,
+            attachments: Vec::new(),
+        };
+        let entrant = ObjectId(700);
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::OtherThanTriggerObject]),
+        );
+        let ctx = FilterContext::from_source(&state, source)
+            .with_triggering_object(TriggeringObjectRef::from_zone_change(entrant, Some(3)));
+
+        assert!(
+            !matches_target_filter_on_lki_snapshot_with_incarnation(
+                &state,
+                entrant,
+                &lki,
+                &filter,
+                &ctx,
+                Some(3),
+            ),
+            "the original triggering incarnation is not another object"
+        );
+        assert!(
+            matches_target_filter_on_lki_snapshot_with_incarnation(
+                &state,
+                entrant,
+                &lki,
+                &filter,
+                &ctx,
+                Some(4),
+            ),
+            "a later incarnation at the same storage id is another object"
+        );
+
+        let departed = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Later object".into(),
+            Zone::Graveyard,
+        );
+        let mut original_lki = lki.clone();
+        original_lki.name = "Original Entrant".into();
+        let mut later_lki = lki.clone();
+        later_lki.name = "Later Entrant".into();
+        state
+            .lki_by_incarnation
+            .entry(departed)
+            .or_default()
+            .insert(3, original_lki);
+        state.lki_cache.insert(departed, later_lki);
+
+        let event = GameEvent::ZoneChanged {
+            object_id: departed,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                entered_incarnation: Some(3),
+                name: "Original Entrant".into(),
+                ..ZoneChangeRecord::test_minimal(departed, Some(Zone::Hand), Zone::Battlefield)
+            }),
+        };
+        let named_original =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Named {
+                name: "Original Entrant".into(),
+            }]));
+        assert!(
+            matches_zone_change_event_object_filter(
+                &state,
+                &event,
+                None,
+                Zone::Battlefield,
+                &named_original,
+                &FilterContext::from_source(&state, source),
+            ),
+            "an original trigger must select its own LKI, not a later cache entry"
+        );
+
+        let legacy_departed = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Legacy object".into(),
+            Zone::Graveyard,
+        );
+        state.lki_cache.insert(legacy_departed, lki);
+        let legacy_event = GameEvent::ZoneChanged {
+            object_id: legacy_departed,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                legacy_departed,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        };
+        assert!(
+            matches_zone_change_event_object_filter(
+                &state,
+                &legacy_event,
+                None,
+                Zone::Battlefield,
+                &named_original,
+                &FilterContext::from_source(&state, source),
+            ),
+            "legacy records without an incarnation retain their existing LKI fallback"
+        );
     }
 
     #[test]
