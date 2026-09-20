@@ -27,7 +27,7 @@ Skip checks CI already enforces:
 
 ## Engine-Implementer Checkpoint Mode
 
-Default review output is findings-only. Exception: when `/engine-implementer` invokes this skill against a checkpointed candidate, it supplies `BASE_SHA`, `CANDIDATE_SHA`, the in-scope paths, the named `START_SHA`, what the completion checks were and how they came out, and the existing maintainer-simulation matrix. Confirm the first round has `START_SHA == BASE_SHA` and each fix round starts from the prior reviewed candidate.
+Default review output is findings-only. Exception: when `/engine-implementer` invokes this skill against a checkpointed candidate, it supplies `BASE_SHA`, `CANDIDATE_SHA`, the in-scope paths, the named `START_SHA`, what the completion checks were and how they came out, the existing maintainer-simulation matrix, and the original task with shared scope/attempt history. Confirm the first round has `START_SHA == BASE_SHA` and each fix round starts from the prior reviewed candidate.
 
 In this mode, emit these lines before findings:
 
@@ -39,7 +39,7 @@ Maintainer-Simulation Gate: PASS|FAIL
 
 `Review Head` must be the supplied `CANDIDATE_SHA`, and the reviewed diff must reproduce from exactly `BASE_SHA..CANDIDATE_SHA`; otherwise report a blocking finding.
 
-`Completion Gate` passes when every check the changed surface calls for was run against the committed candidate and passed: formatting for implementation changes, the Rust/engine/parser block for Rust paths, the frontend block for frontend paths, the parser gate for parser paths. Check the set against the candidate diff rather than against the plan, and re-run anything you doubt — you have the candidate SHA and a shell. A check run against uncommitted edits, or against a different tree, does not count. Markdown-only policy work needs scope and diff checks only.
+`Completion Gate` passes when every check the changed surface calls for was run against the committed candidate and passed: formatting for implementation changes, the Rust/engine/parser block for Rust paths, the frontend block for frontend paths, the parser gate for parser paths. Check the set against the candidate diff rather than against the plan, and re-run anything you doubt — you have the candidate SHA and a shell. A check run against uncommitted edits, or against a different tree, does not count. Markdown-only policy work needs scope and diff checks only. In all engine-implementer review modes, additional checks must address a concrete unresolved claim within the original task. Follow the orchestrator's [task scope](../engine-implementer/SKILL.md#task-scope-and-verification-work) and [run limits](../engine-implementer/SKILL.md#run-limits); do not independently construct or repair verification machinery. Return missing evidence to the orchestrator without claiming completion, including when a proposed probe needs redesign before it can run. This does not waive required checks or current-candidate evidence.
 
 ## Phase Mode (chartered runs)
 
