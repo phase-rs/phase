@@ -881,7 +881,8 @@ Rules that hold for every bump above:
 ## 5. Frontend — display only
 
 - **Types:** hand-written in `client/src/adapter/types.ts`. Update:
-  - the `StackEntryKind` union (`:1855`) and `StackEntry.controller` (3a);
+  - the `StackEntryKind` union (`:1855`) (3a);
+  - `StackEntry.controller` and `StackEntryDisplay.controller` (3a-II);
   - the damage-event mirrors whose source shape changes (3b). These are consumed
     by animation components (`AnimationOverlay`, `CardSlamAnimation`), which
     must read the id from the new shape and derive nothing.
