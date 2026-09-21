@@ -2281,8 +2281,9 @@ fn try_parse_can_attack_with_defender(
     // single `all_consuming_defender_tail`, the same policy 8a applies. At
     // PHASE_BASE_SHA (c) likewise carries no policy of its own — it shares 8a's
     // predicate (M-23) — so this preserves base's topology rather than adding a
-    // second spelling. This also REPLACES base's `tp.find(" can attack")`, a
-    // non-combinator dispatch, with a word-boundary combinator scan.
+    // second spelling. This also REPLACES base's `TextPair` lookup of
+    // `" can attack"`, a non-combinator dispatch, with a word-boundary
+    // combinator scan.
     let (subject_lower, segment) =
         defender_exception::split_defender_exception_predicate_all_consuming(&lower)?;
     // ASCII lowercasing preserves byte lengths, so the LOWER prefix's length
